@@ -1,0 +1,12 @@
+[package]
+name = "team-agent-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "team_agent_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "team-agent-core"
+path = "src/main.rs"

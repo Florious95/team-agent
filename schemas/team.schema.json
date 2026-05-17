@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamspec.local/schemas/team.schema.json",
+  "title": "TeamSpec Agent Mode team.spec.yaml",
+  "type": "object",
+  "required": ["version", "team", "leader", "agents", "routing", "communication", "runtime", "context", "tasks"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "team": {
+      "type": "object",
+      "required": ["name", "mode", "objective", "workspace"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "mode": { "enum": ["supervisor_worker", "swarm_limited"] },
+        "objective": { "type": "string", "minLength": 1 },
+        "workspace": { "type": "string", "minLength": 1 }
+      }
+    },
+    "leader": { "$ref": "#/$defs/leader" },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/agent" }
+    },
+    "routing": {
+      "type": "object",
+      "required": ["default_assignee", "rules"],
+      "additionalProperties": false,
+      "properties": {
+        "default_assignee": { "type": "string" },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routingRule" }
+        }
+      }
+    },
+    "communication": {
+      "type": "object",
+      "required": ["protocol", "topology", "worker_to_worker", "ack_timeout_sec", "result_format", "message_store"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol": { "enum": ["mcp_inbox", "file_bus"] },
+        "topology": { "enum": ["leader_centered"] },
+        "worker_to_worker": { "type": "boolean" },
+        "ack_timeout_sec": { "type": "integer", "minimum": 1 },
+        "result_format": { "const": "result_envelope_v1" },
+        "message_store": {
+          "type": "object",
+          "required": ["sqlite", "mirror_files"],
+          "additionalProperties": false,
+          "properties": {
+            "sqlite": { "type": "string" },
+            "mirror_files": { "type": "string" }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["backend", "display_backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["tmux", "pty"] },
+        "display_backend": { "enum": ["none", "tmux_attach", "iterm", "ghostty"] },
+        "session_name": { "type": "string", "minLength": 1 },
+        "auto_launch": { "type": "boolean" },
+        "require_user_approval_before_launch": { "type": "boolean" },
+        "dangerous_auto_approve": { "type": "boolean" },
+        "max_active_agents": { "type": "integer", "minimum": 1 },
+        "startup_order": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": ["state_file", "artifact_dir", "log_dir", "summarization"],
+      "additionalProperties": false,
+      "properties": {
+        "state_file": { "type": "string" },
+        "artifact_dir": { "type": "string" },
+        "log_dir": { "type": "string" },
+        "summarization": {
+          "type": "object",
+          "required": ["worker_full_logs", "state_update"],
+          "additionalProperties": false,
+          "properties": {
+            "worker_full_logs": { "enum": ["retain_outside_leader_context"] },
+            "state_update": { "enum": ["after_each_result", "manual"] }
+          }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/task" }
+    }
+  },
+  "$defs": {
+    "leader": {
+      "type": "object",
+      "required": ["id", "role", "provider", "model", "tools", "context_policy"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] },
+        "tools": { "$ref": "#/$defs/tools" },
+        "context_policy": {
+          "type": "object",
+          "required": ["keep_user_thread", "receive_worker_outputs", "max_worker_result_tokens"],
+          "additionalProperties": false,
+          "properties": {
+            "keep_user_thread": { "type": "boolean" },
+            "receive_worker_outputs": { "enum": ["summary_only", "structured_only", "full_on_request"] },
+            "max_worker_result_tokens": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "required": ["id", "role", "provider", "model", "working_directory", "system_prompt", "tools", "permission_mode", "preferred_for", "avoid_for", "output_contract"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] },
+        "auth_mode": { "enum": ["subscription", "official_api", "compatible_api"] },
+        "profile": { "type": "string", "minLength": 1 },
+        "credential_ref": { "type": "string", "minLength": 1 },
+        "working_directory": { "type": "string", "minLength": 1 },
+        "paused": { "type": "boolean" },
+        "system_prompt": {
+          "type": "object",
+          "required": ["inline", "file"],
+          "additionalProperties": false,
+          "properties": {
+            "inline": { "type": ["string", "null"] },
+            "file": { "type": ["string", "null"] }
+          }
+        },
+        "tools": { "$ref": "#/$defs/tools" },
+        "permission_mode": { "enum": ["restricted", "ask", "trusted"] },
+        "preferred_for": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "avoid_for": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "output_contract": {
+          "type": "object",
+          "required": ["format", "required_fields"],
+          "additionalProperties": false,
+          "properties": {
+            "format": { "const": "result_envelope_v1" },
+            "required_fields": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "routingRule": {
+      "type": "object",
+      "required": ["id", "assign_to", "priority"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "when": { "type": "string" },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": { "$ref": "#/$defs/stringOrList" },
+            "files": { "$ref": "#/$defs/stringOrList" },
+            "risk": { "$ref": "#/$defs/stringOrList" },
+            "requires_tools": { "$ref": "#/$defs/stringOrList" }
+          }
+        },
+        "assign_to": { "type": "string" },
+        "priority": { "type": "integer" }
+      },
+      "anyOf": [
+        { "required": ["when"] },
+        { "required": ["match"] }
+      ]
+    },
+    "task": {
+      "type": "object",
+      "required": ["id", "title", "type", "assignee", "deps", "acceptance", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "type": { "type": "string", "minLength": 1 },
+        "assignee": { "type": ["string", "null"] },
+        "deps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "acceptance": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "status": { "enum": ["pending", "ready", "running", "blocked", "needs_retry", "done", "failed", "cancelled"] },
+        "requires_tools": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "risk": { "enum": ["low", "medium", "high"] },
+        "retry_limit": { "type": "integer", "minimum": 0 },
+        "human_confirmation": { "type": "boolean" }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "stringOrList": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    }
+  }
+}

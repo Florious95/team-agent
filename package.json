@@ -1,0 +1,51 @@
+{
+  "name": "@team-agent/installer",
+  "version": "0.1.3",
+  "description": "npx installer for Team Agent",
+  "keywords": [
+    "codex",
+    "claude",
+    "tmux",
+    "multi-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Florious95/team-agent.git"
+  },
+  "homepage": "https://github.com/Florious95/team-agent#readme",
+  "bugs": {
+    "url": "https://github.com/Florious95/team-agent/issues"
+  },
+  "bin": {
+    "team-agent-installer": "npm/install.mjs"
+  },
+  "scripts": {
+    "test": "PYTHONPATH=src python3 tests/run_tests.py",
+    "test:regression": "PYTHONPATH=src python3 scripts/run_regression_tests.py --iterations 3",
+    "test:rust": "cargo test --manifest-path crates/team-agent-core/Cargo.toml",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "files": [
+    "npm",
+    "scripts",
+    "src",
+    "skills",
+    "templates",
+    "examples",
+    "schemas",
+    "docs/team-agent-foundation-and-boundaries.md",
+    "crates/team-agent-core/Cargo.toml",
+    "crates/team-agent-core/src",
+    "pyproject.toml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/target/**"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0-or-later"
+}

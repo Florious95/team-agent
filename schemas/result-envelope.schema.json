@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://teamspec.local/schemas/result-envelope.schema.json",
+  "title": "TeamSpec result_envelope_v1",
+  "type": "object",
+  "required": ["schema_version", "task_id", "agent_id", "status", "summary", "changes", "tests", "risks", "artifacts", "next_actions"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "result_envelope_v1" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["success", "blocked", "failed", "partial"] },
+    "summary": { "type": "string" },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "kind", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "kind": { "enum": ["created", "modified", "deleted", "observed"] },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "not_run", "skipped"] },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "enum": ["low", "medium", "high"] },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["description"],
+        "additionalProperties": false,
+        "properties": {
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}

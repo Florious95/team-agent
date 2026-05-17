@@ -1,0 +1,18 @@
+[project]
+name = "teamspec-agent-mode"
+version = "0.1.0"
+description = "Spec-first CLI-native team agent runtime for Claude Code, Codex CLI, and Gemini CLI workers."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = []
+
+[project.scripts]
+team-agent = "team_agent.cli:main"
+team_orchestrator = "team_agent.mcp_server:main"
+team-agent-coordinator = "team_agent.coordinator:main"
+
+[tool.team-agent]
+run = "PYTHONPATH=src python3 -m team_agent"
