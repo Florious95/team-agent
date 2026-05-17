@@ -10,6 +10,9 @@ from pathlib import Path
 
 REGRESSION_TESTS = [
     "tests.run_tests.RuntimeTests.test_send_default_timeout_reports_submitted_unverified",
+    "tests.run_tests.RuntimeTests.test_message_fragment_matching_ignores_generic_header",
+    "tests.run_tests.RuntimeTests.test_wait_for_message_ready_does_not_accept_old_header",
+    "tests.run_tests.RuntimeTests.test_wait_for_message_ready_accepts_only_new_pasted_prompt",
     "tests.run_tests.RuntimeTests.test_worker_delivery_retries_paste_until_message_ready",
     "tests.run_tests.RuntimeTests.test_worker_pasted_content_prompt_retries_enter_until_submitted",
     "tests.run_tests.RuntimeTests.test_worker_pasted_content_prompt_reports_unverified_when_enter_does_not_submit",
@@ -26,6 +29,7 @@ REGRESSION_TESTS = [
     "tests.run_tests.RuntimeTests.test_start_agent_falls_back_to_fresh_when_resume_window_exits",
     "tests.run_tests.RuntimeTests.test_broadcast_sends_only_to_current_team_and_excludes_sender",
     "tests.run_tests.RuntimeTests.test_status_and_collect_expose_uncollected_report_result",
+    "tests.run_tests.RuntimeTests.test_collect_accepts_message_scoped_report_result",
     "tests.run_tests.RuntimeTests.test_report_result_queues_leader_notification_without_blocking_mcp",
     "tests.run_tests.RuntimeTests.test_mcp_send_message_accepts_thin_args_and_returns_compact_result",
     "tests.run_tests.RuntimeTests.test_mcp_send_message_accepts_broadcast_target",

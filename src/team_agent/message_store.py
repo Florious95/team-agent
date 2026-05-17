@@ -475,6 +475,29 @@ class MessageStore:
                 )
         return ids
 
+    def acknowledge_message(self, message_id: str, agent_id: str) -> list[str]:
+        now = utcnow()
+        with closing(self.connect()) as conn:
+            with conn:
+                row = conn.execute(
+                    """
+                    select message_id from messages
+                    where message_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    """,
+                    (message_id, agent_id),
+                ).fetchone()
+                if not row:
+                    return []
+                conn.execute(
+                    """
+                    update messages
+                    set status = 'acknowledged', acknowledged_at = ?, updated_at = ?
+                    where message_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    """,
+                    (now, now, message_id, agent_id),
+                )
+        return [message_id]
+
     def results(self, uncollected_only: bool = False) -> list[dict[str, Any]]:
         query = "select * from results order by created_at"
         if uncollected_only:

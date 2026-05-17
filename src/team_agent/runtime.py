@@ -1290,13 +1290,15 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
             store.add_result(envelope)
 
     rows = store.results(uncollected_only=True)
-    valid_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    valid_rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = []
     for row in rows:
         envelope: Any = None
         try:
             envelope = json.loads(row["envelope"])
             validate_result_envelope(envelope)
-            _find_task(state["tasks"], envelope["task_id"])
+            task = _find_task_or_none(state["tasks"], envelope["task_id"])
+            if task is None and not _is_message_scoped_result(store, envelope):
+                raise RuntimeError(f"unknown task id: {envelope['task_id']}")
         except (json.JSONDecodeError, ValidationError, RuntimeError) as exc:
             invalid_results.append(
                 _record_invalid_result(
@@ -1308,7 +1310,7 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
             )
             store.mark_result_invalid(row["result_id"], str(exc))
         else:
-            valid_rows.append((row, envelope))
+            valid_rows.append((row, envelope, task))
 
     if invalid_results:
         save_runtime_state(workspace, state)
@@ -1326,17 +1328,20 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
     collected: list[dict[str, Any]] = []
     collected_results: list[dict[str, Any]] = []
     next_state = copy.deepcopy(state)
-    for row, envelope in valid_rows:
-        task = _find_task(next_state["tasks"], envelope["task_id"])
-        task_status = _result_status_to_task_status(task, envelope["status"])
-        update_task_status(
-            next_state["tasks"],
-            envelope["task_id"],
-            task_status,
-            envelope.get("summary"),
-            envelope.get("artifacts", []),
-        )
-        task["accepted_result_id"] = row["result_id"]
+    for row, envelope, task in valid_rows:
+        if task is not None:
+            next_task = _find_task(next_state["tasks"], envelope["task_id"])
+            task_status = _result_status_to_task_status(next_task, envelope["status"])
+            update_task_status(
+                next_state["tasks"],
+                envelope["task_id"],
+                task_status,
+                envelope.get("summary"),
+                envelope.get("artifacts", []),
+            )
+            next_task["accepted_result_id"] = row["result_id"]
+        else:
+            task_status = "message_scoped"
         collected.append(envelope)
         collected_results.append(
             {
@@ -1346,6 +1351,7 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
                 "status": envelope["status"],
                 "summary": envelope.get("summary"),
                 "tests": envelope.get("tests", []),
+                "scope": "task" if task is not None else "message",
             }
         )
         event_log.write(
@@ -1354,12 +1360,13 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
             task_id=envelope["task_id"],
             status=envelope["status"],
             task_status=task_status,
-            retry_count=task.get("retry_count"),
-            retry_limit=task.get("retry_limit"),
+            retry_count=task.get("retry_count") if task else None,
+            retry_limit=task.get("retry_limit") if task else None,
+            scope="task" if task is not None else "message",
         )
     state_path = write_team_state(workspace, spec, next_state, [{"envelope": env} for env in collected])
     save_runtime_state(workspace, next_state)
-    for row, _ in valid_rows:
+    for row, _, _ in valid_rows:
         store.mark_result_collected(row["result_id"])
     return {
         "ok": not invalid_results,
@@ -1377,6 +1384,8 @@ def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
     store = MessageStore(workspace)
     result_id = store.add_result(envelope)
     acknowledged = store.acknowledge_task_messages(envelope["task_id"], envelope["agent_id"])
+    if not acknowledged:
+        acknowledged = store.acknowledge_message(envelope["task_id"], envelope["agent_id"])
     event_log = EventLog(workspace)
     notification = _notify_leader_of_report_result(workspace, envelope, result_id, event_log)
     leader_notified = bool(notification.get("ok")) and notification.get("status") in {"submitted", "visible", "delivered", "acknowledged"}
@@ -4018,8 +4027,24 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
                 "attempts": attempt_log,
                 "verification": prepared["verification"],
             }
+        baseline = _capture_tmux_pane_text(target)
+        if not baseline["ok"]:
+            return {
+                "ok": False,
+                "stage": "pre-paste-capture",
+                "error": baseline.get("error"),
+                "attempts": attempt_log,
+                "verification": "pre_paste_capture_failed",
+            }
+        baseline_capture = baseline["capture"]
         if token:
-            pre_visible, pre_verification, pre_capture = _wait_for_message_ready(target, token, 0.0, expected_text=text)
+            pre_visible, pre_verification, pre_capture = _wait_for_message_ready(
+                target,
+                token,
+                0.0,
+                expected_text=text,
+                allow_pasted_prompt=False,
+            )
             if pre_visible:
                 attempt_entry = {
                     "attempt": attempt,
@@ -4060,6 +4085,23 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
                     "attempts": attempt_log,
                     "submit_attempts": submit.get("attempts"),
                 }
+            if _capture_has_pasted_content_prompt(baseline_capture):
+                attempt_log.append(
+                    {
+                        "attempt": attempt,
+                        "visible": False,
+                        "verification": "preexisting_unverified_pasted_content_prompt",
+                        "text_bytes": text_bytes,
+                        "ready_timeout_sec": 0.0,
+                    }
+                )
+                return {
+                    "ok": False,
+                    "stage": "preexisting-input",
+                    "error": "target pane already has an unverified pasted-content prompt; refusing to paste again to avoid duplicate messages",
+                    "attempts": attempt_log,
+                    "verification": "preexisting_unverified_pasted_content_prompt",
+                }
         buffered = _tmux_set_buffer_text(buffer_name, text)
         if not buffered["ok"]:
             return {"ok": False, "stage": buffered["stage"], "error": buffered.get("error"), "attempts": attempt_log}
@@ -4068,7 +4110,13 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
             return {"ok": False, "stage": "paste-buffer", "error": proc.stderr.strip(), "attempts": attempt_log}
         time.sleep(0.25)
         if token:
-            visible, verification, capture_text = _wait_for_message_ready(target, token, ready_timeout, expected_text=text)
+            visible, verification, capture_text = _wait_for_message_ready(
+                target,
+                token,
+                ready_timeout,
+                expected_text=text,
+                baseline_capture=baseline_capture,
+            )
         else:
             visible, verification, capture_text = True, "no_token", ""
         last_verification = verification
@@ -4237,35 +4285,51 @@ def _wait_for_visible_token(target: str, token: str, timeout: float) -> tuple[bo
     deadline = time.monotonic() + max(timeout, 0.0)
     last = "not_checked"
     while True:
-        capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{DELIVERY_CAPTURE_LINES}", "-t", target], timeout=5)
-        if capture.returncode == 0:
-            if token in capture.stdout or f"[team-agent-token:{token}]" in capture.stdout:
+        capture = _capture_tmux_pane_text(target)
+        if capture["ok"]:
+            if token in capture["capture"] or f"[team-agent-token:{token}]" in capture["capture"]:
                 return True, "capture_contains_token"
             last = "capture_missing_token"
         else:
-            last = f"capture_failed: {capture.stderr.strip()}"
+            last = f"capture_failed: {capture.get('error')}"
         if time.monotonic() >= deadline:
             return False, last
         time.sleep(0.1)
 
 
-def _wait_for_message_ready(target: str, message_id: str, timeout: float, expected_text: str = "") -> tuple[bool, str, str]:
+def _capture_tmux_pane_text(target: str) -> dict[str, Any]:
+    capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{DELIVERY_CAPTURE_LINES}", "-t", target], timeout=5)
+    if capture.returncode != 0:
+        return {"ok": False, "capture": "", "error": capture.stderr.strip() or "tmux capture-pane failed"}
+    return {"ok": True, "capture": capture.stdout}
+
+
+def _wait_for_message_ready(
+    target: str,
+    message_id: str,
+    timeout: float,
+    expected_text: str = "",
+    allow_pasted_prompt: bool = True,
+    baseline_capture: str = "",
+) -> tuple[bool, str, str]:
     deadline = time.monotonic() + max(timeout, 0.0)
     last = "not_checked"
     last_capture = ""
+    baseline_had_pasted_prompt = _capture_has_pasted_content_prompt(baseline_capture)
     while True:
-        capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{DELIVERY_CAPTURE_LINES}", "-t", target], timeout=5)
-        if capture.returncode == 0:
-            last_capture = capture.stdout
-            if message_id in capture.stdout or f"[team-agent-token:{message_id}]" in capture.stdout:
-                return True, "capture_contains_token", capture.stdout
-            if _capture_has_pasted_content_prompt(capture.stdout):
-                return True, "capture_contains_pasted_content_prompt", capture.stdout
-            if expected_text and _capture_contains_message_fragment(capture.stdout, expected_text):
-                return True, "capture_contains_message_fragment", capture.stdout
+        capture = _capture_tmux_pane_text(target)
+        if capture["ok"]:
+            capture_text = capture["capture"]
+            last_capture = capture_text
+            if message_id in capture_text or f"[team-agent-token:{message_id}]" in capture_text:
+                return True, "capture_contains_token", capture_text
+            if expected_text and _capture_contains_message_fragment(capture_text, expected_text):
+                return True, "capture_contains_message_fragment", capture_text
+            if allow_pasted_prompt and _capture_has_pasted_content_prompt(capture_text) and not baseline_had_pasted_prompt:
+                return True, "capture_contains_new_pasted_content_prompt", capture_text
             last = "capture_missing_token"
         else:
-            last = f"capture_failed: {capture.stderr.strip()}"
+            last = f"capture_failed: {capture.get('error')}"
         if time.monotonic() >= deadline:
             return False, last, last_capture
         time.sleep(0.1)
@@ -4299,15 +4363,18 @@ def _capture_contains_message_fragment(capture_text: str, expected_text: str) ->
     haystack = _compact_visible_text(capture_text)
     if not haystack:
         return False
-    return any(fragment in haystack for fragment in _message_fragment_candidates(expected_text))
+    fragments = _message_fragment_candidates(expected_text)
+    if not fragments:
+        return False
+    return any(fragment in haystack for fragment in fragments)
 
 
 def _message_fragment_candidates(text: str) -> list[str]:
     sanitized = re.sub(r"\[team-agent-token:[^\]]+\]", "", text)
     fragments: list[str] = []
-    for line in sanitized.splitlines():
+    for line in _message_content_lines(sanitized):
         compact = _compact_visible_text(line)
-        if len(compact) < 18:
+        if not _is_strong_message_fragment(compact):
             continue
         if len(compact) <= 72:
             fragments.append(compact)
@@ -4328,6 +4395,35 @@ def _message_fragment_candidates(text: str) -> list[str]:
         seen.add(fragment)
         unique.append(fragment)
     return unique
+
+
+def _message_content_lines(text: str) -> list[str]:
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("Team Agent message from "):
+        lines = lines[1:]
+    return [line for line in lines if line.strip()]
+
+
+def _is_strong_message_fragment(compact: str) -> bool:
+    if not compact:
+        return False
+    generic_prefixes = (
+        "TeamAgentmessagefrom",
+        "TeamAgentpeermessagefrom",
+        "TeamAgentstoredthisresult",
+        "TeamAgenthascollectedthisresult",
+        "Nomanualpolling",
+    )
+    if compact.startswith(generic_prefixes):
+        return False
+    if re.fullmatch(r"[-:：>›❯]+", compact):
+        return False
+    if re.search(r"(msg|res)_[0-9A-Fa-f]{8,}", compact):
+        return True
+    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", compact))
+    if cjk_count >= 4 and len(compact) >= 6:
+        return True
+    return len(compact) >= 18
 
 
 def _compact_visible_text(text: str) -> str:
@@ -4668,7 +4764,12 @@ def _deliver_pending_message(
             if ready:
                 status = (
                     "submitted"
-                    if verification in {"capture_contains_pasted_content_prompt", "capture_contains_message_fragment"}
+                    if verification
+                    in {
+                        "capture_contains_pasted_content_prompt",
+                        "capture_contains_new_pasted_content_prompt",
+                        "capture_contains_message_fragment",
+                    }
                     else "visible"
                 )
                 store.mark(message_id, status)
@@ -5198,6 +5299,22 @@ def _find_task(tasks: list[dict[str, Any]], task_id: str) -> dict[str, Any]:
         if task.get("id") == task_id:
             return task
     raise RuntimeError(f"unknown task id: {task_id}")
+
+
+def _find_task_or_none(tasks: list[dict[str, Any]], task_id: str) -> dict[str, Any] | None:
+    for task in tasks:
+        if task.get("id") == task_id:
+            return task
+    return None
+
+
+def _is_message_scoped_result(store: MessageStore, envelope: dict[str, Any]) -> bool:
+    task_id = str(envelope.get("task_id") or "")
+    agent_id = str(envelope.get("agent_id") or "")
+    if not task_id.startswith("msg_"):
+        return False
+    message = _message_by_id(store, task_id)
+    return bool(message and message.get("recipient") == agent_id)
 
 
 def _find_agent(spec: dict[str, Any], agent_id: str | None) -> dict[str, Any] | None:
