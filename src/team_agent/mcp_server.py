@@ -505,7 +505,7 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
             "result": {
                 "protocolVersion": request.get("params", {}).get("protocolVersion", "2024-11-05"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "team_orchestrator", "version": "0.1.3"},
+                "serverInfo": {"name": "team_orchestrator", "version": "0.1.4"},
             },
         }
     if method == "tools/list":

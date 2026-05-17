@@ -1,6 +1,6 @@
 [project]
 name = "teamspec-agent-mode"
-version = "0.1.0"
+version = "0.1.4"
 description = "Spec-first CLI-native team agent runtime for Claude Code, Codex CLI, and Gemini CLI workers."
 readme = "README.md"
 requires-python = ">=3.10"
