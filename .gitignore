@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+docs/
+.claude/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -14,6 +16,9 @@ node_modules/
 crates/**/target/
 
 .team/
+team.spec.yaml
+team_state.md
+*.transcript
 !examples/
 !examples/**
 
