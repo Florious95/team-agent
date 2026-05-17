@@ -33,7 +33,6 @@
     "templates",
     "examples",
     "schemas",
-    "docs/team-agent-foundation-and-boundaries.md",
     "crates/team-agent-core/Cargo.toml",
     "crates/team-agent-core/src",
     "pyproject.toml",

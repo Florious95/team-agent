@@ -83,8 +83,6 @@ Three design choices make this possible:
 
 **3. Standards over inventions.** MCP for tool calls, Skill files for role definitions. Anything the broader ecosystem ships, this picks up automatically.
 
-For the full design philosophy and boundaries, see [`docs/team-agent-foundation-and-boundaries.md`](./docs/team-agent-foundation-and-boundaries.md).
-
 ---
 
 ## Quick start

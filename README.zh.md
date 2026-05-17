@@ -82,8 +82,6 @@ Lead 自己想清楚:
 
 **3. 用标准协议,不发明协议。** 用 MCP 做工具调用,用 Skill 文件做角色定义。生态发什么,本项目自动获得什么。
 
-完整设计哲学和边界,见 [`docs/team-agent-foundation-and-boundaries.md`](./docs/team-agent-foundation-and-boundaries.md)。
-
 ---
 
 ## 快速开始
