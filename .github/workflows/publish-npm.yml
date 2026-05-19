@@ -25,11 +25,11 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Use npm with trusted publishing support
-        run: npm install -g npm@latest
+      - name: Verify npm trusted publishing support
+        run: npm --version
 
       - name: Check tag matches package version
         run: |
