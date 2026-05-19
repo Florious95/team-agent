@@ -196,7 +196,7 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         return
     if runtime.get("backend") not in {"tmux", "pty"}:
         errors.append("/runtime/backend: invalid backend")
-    if runtime.get("display_backend") not in {"none", "tmux_attach", "iterm", "ghostty", "ghostty_window"}:
+    if runtime.get("display_backend") not in {"none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace"}:
         errors.append("/runtime/display_backend: invalid display backend")
     if "dangerous_auto_approve" in runtime and not isinstance(runtime["dangerous_auto_approve"], bool):
         errors.append("/runtime/dangerous_auto_approve: must be a boolean")
