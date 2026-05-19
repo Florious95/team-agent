@@ -10,12 +10,15 @@ from team_agent.paths import runtime_dir
 from team_agent.simple_yaml import dumps
 
 
-SESSION_STATE_FIELDS = [
+SESSION_CAPTURE_FIELDS = [
     "session_id",
     "rollout_path",
     "captured_at",
     "captured_via",
     "attribution_confidence",
+]
+SESSION_STATE_FIELDS = [
+    *SESSION_CAPTURE_FIELDS,
     "spawn_cwd",
 ]
 
@@ -24,15 +27,22 @@ def runtime_state_path(workspace: Path) -> Path:
     return runtime_dir(workspace) / "state.json"
 
 
+def normalize_agent_session_state(state: dict[str, Any]) -> None:
+    agents = state.get("agents", {})
+    if not isinstance(agents, dict):
+        return
+    for agent_state in agents.values():
+        if isinstance(agent_state, dict):
+            for field in SESSION_STATE_FIELDS:
+                agent_state.setdefault(field, None)
+
+
 def load_runtime_state(workspace: Path) -> dict[str, Any]:
     path = runtime_state_path(workspace)
     if not path.exists():
         return {"agents": {}, "tasks": [], "session_name": None}
     state = json.loads(path.read_text(encoding="utf-8"))
-    for agent_state in state.get("agents", {}).values():
-        if isinstance(agent_state, dict):
-            for field in SESSION_STATE_FIELDS:
-                agent_state.setdefault(field, None)
+    normalize_agent_session_state(state)
     return state
 
 

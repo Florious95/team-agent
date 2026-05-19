@@ -35,7 +35,15 @@ from team_agent.providers import ResumeUnavailable, get_adapter, shell_command_f
 from team_agent.routing import route_task
 from team_agent.simple_yaml import dumps
 from team_agent.spec import load_spec, validate_result_envelope, workspace_from_spec
-from team_agent.state import load_runtime_state, runtime_state_path, save_runtime_state, write_team_state
+from team_agent.state import (
+    SESSION_CAPTURE_FIELDS,
+    SESSION_STATE_FIELDS,
+    load_runtime_state,
+    normalize_agent_session_state,
+    runtime_state_path,
+    save_runtime_state,
+    write_team_state,
+)
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -520,10 +528,7 @@ def _load_snapshot_state(path: Path) -> dict[str, Any] | None:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    for agent_state in state.get("agents", {}).values():
-        if isinstance(agent_state, dict):
-            for field in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence", "spawn_cwd"]:
-                agent_state.setdefault(field, None)
+    normalize_agent_session_state(state)
     return state
 
 
@@ -1570,8 +1575,7 @@ def _capture_agent_session(
     result = adapter.capture_session_id(agent_id, spawn_context, timeout_s=timeout_s)
     if not isinstance(result, dict) or not result.get("session_id"):
         return None
-    for key in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence", "spawn_cwd"]:
-        agent_state[key] = result.get(key)
+    _copy_session_metadata(agent_state, result)
     agent_state.pop("_pending_session_id", None)
     event_log.write(
         "session.captured",
@@ -1583,6 +1587,16 @@ def _capture_agent_session(
         attribution_confidence=agent_state.get("attribution_confidence"),
     )
     return result
+
+
+def _copy_session_metadata(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key in SESSION_STATE_FIELDS:
+        target[key] = source.get(key)
+
+
+def _clear_session_capture_fields(target: dict[str, Any]) -> None:
+    for key in SESSION_CAPTURE_FIELDS:
+        target[key] = None
 
 
 def _attach_profile_resume_root(workspace: Path, command_agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
@@ -1631,8 +1645,7 @@ def _prepare_resume_state(
     if not repaired:
         repaired = adapter.recover_session_id(agent_id, prepared, workspace, exclude_session_ids or set())
     if repaired:
-        for key in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence", "spawn_cwd"]:
-            prepared[key] = repaired.get(key)
+        _copy_session_metadata(prepared, repaired)
         event_log.write(
             "resume.session_repaired",
             agent_id=agent_id,
@@ -1657,8 +1670,7 @@ def _prepare_resume_state(
             f"Cannot resume agent {agent_id}: stored session {session_id} is not available. "
             "Use --allow-fresh only if losing that worker context is acceptable."
         )
-    for key in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence"]:
-        prepared[key] = None
+    _clear_session_capture_fields(prepared)
     event_log.write(
         "resume.session_unavailable",
         agent_id=agent_id,
@@ -1972,8 +1984,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         if profile_launch.get("claude_projects_root"):
             agent_state["claude_projects_root"] = profile_launch["claude_projects_root"]
         if restart_mode == "fresh":
-            for key in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence"]:
-                agent_state[key] = None
+            _clear_session_capture_fields(agent_state)
             if command_agent.get("_session_id"):
                 agent_state["_pending_session_id"] = command_agent["_session_id"]
             _capture_agent_session(
@@ -2231,8 +2242,7 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
     if profile_launch.get("claude_projects_root"):
         agent_state["claude_projects_root"] = profile_launch["claude_projects_root"]
     if start_mode == "fresh":
-        for key in ["session_id", "rollout_path", "captured_at", "captured_via", "attribution_confidence"]:
-            agent_state[key] = None
+        _clear_session_capture_fields(agent_state)
         if command_agent.get("_session_id"):
             agent_state["_pending_session_id"] = command_agent["_session_id"]
         _capture_agent_session(workspace, agent_id, agent_state, event_log, timeout_s=1.5, exclude_session_ids=known_session_ids)

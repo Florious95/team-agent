@@ -1,0 +1,53 @@
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Use npm with trusted publishing support
+        run: npm install -g npm@latest
+
+      - name: Check tag matches package version
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$package_version" != "$tag_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${package_version}"
+            exit 1
+          fi
+
+      - name: Run Python tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: npm run test:rust
+
+      - name: Verify package contents
+        run: npm run pack:dry-run
+
+      - name: Publish package
+        run: npm publish --access public --provenance
