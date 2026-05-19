@@ -701,6 +701,7 @@ class RuntimeTests(unittest.TestCase):
             spec_path.write_text(dumps(spec), encoding="utf-8")
             with (
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                patch("team_agent.providers.shutil.which", return_value="/usr/bin/codex"),
                 patch("team_agent.runtime._tmux_session_exists", return_value=False),
                 patch("team_agent.runtime._tmux_current_client_pane_info", return_value=None),
                 patch("team_agent.runtime._tmux_list_panes", return_value=[]),
@@ -708,6 +709,21 @@ class RuntimeTests(unittest.TestCase):
             ):
                 runtime.launch(spec_path, auto_approve=True)
             self.assertIn("could not locate a tmux-managed leader pane", str(ctx.exception))
+
+    def test_launch_blocks_missing_provider_command(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-provider-missing-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            spec["agents"][0]["provider"] = "codex"
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            with (
+                patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                patch("team_agent.providers.shutil.which", return_value=None),
+                self.assertRaises(TeamAgentRuntimeError) as ctx,
+            ):
+                runtime.launch(spec_path, auto_approve=True)
+            self.assertIn("Provider codex command 'codex' not found", str(ctx.exception))
 
     def test_worker_to_leader_direct_injection_uses_standard_payload_and_does_not_route_task(self) -> None:
         if not shutil.which("tmux"):
@@ -1310,7 +1326,8 @@ Implement bounded tasks and report result_envelope_v1.
             )
             compiled = compile_team(team, workspace / "team.spec.yaml")["spec"]
             self.assertIsNone(compiled["agents"][0]["model"])
-            preflight = runtime.preflight(team)
+            with patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"):
+                preflight = runtime.preflight(team)
             self.assertTrue(preflight["ok"])
             profiles = next(check for check in preflight["checks"] if check["name"] == "profiles")
             implementer = next(item for item in profiles["checks"] if item["agent_id"] == "implementer")
@@ -3126,7 +3143,11 @@ Handle fake tasks.
             cwd = os.getcwd()
             os.chdir(workspace)
             try:
-                with self.assertRaises(runtime.RuntimeError) as ctx:
+                with (
+                    patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                    patch("team_agent.runtime._model_checks_for_agents", return_value=[]),
+                    self.assertRaises(runtime.RuntimeError) as ctx,
+                ):
                     runtime.quick_start(team)
             finally:
                 os.chdir(cwd)
