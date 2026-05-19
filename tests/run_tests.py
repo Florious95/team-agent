@@ -4268,6 +4268,7 @@ Handle fake tasks.
                 return proc
 
             with (
+                patch("team_agent.runtime._ghostty_app_exists", return_value=True),
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
                 patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 333, "status": "started"}),
             ):
