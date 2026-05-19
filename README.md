@@ -128,7 +128,12 @@ Lead:  [proposes a team — refactor architect (Claude), code mover (Codex),
 You:   Go.
 ```
 
-That's it. Teammates appear in separate windows. The lead reports progress, raises decisions when needed, and shuts everything down when you say so.
+That's it. With the default display, teammates appear in separate Ghostty
+windows. If `display_backend: ghostty_workspace` is set, teammates appear in one
+Ghostty window with tmux tabs/windows, up to three side-by-side panes per tab
+(`4` workers => `3 + 1`, `8` workers => `3 + 3 + 2`). The lead reports
+progress, raises decisions when needed, and shuts everything down when you say
+so.
 
 ### Stop / resume
 

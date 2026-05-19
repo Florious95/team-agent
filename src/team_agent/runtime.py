@@ -55,6 +55,7 @@ TMUX_PANE_FORMAT = (
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
 GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
+GHOSTTY_WORKSPACE_PANES_PER_WINDOW = 3
 PEEK_MAX_LINES = 80
 PEEK_SEARCH_SCAN_LINES = 300
 PEEK_MAX_MATCHES = 5
@@ -225,6 +226,22 @@ def _spec_team_dir(spec_path: Path, workspace: Path) -> Path:
     if spec_dir.parent.name == ".team":
         return spec_dir
     return workspace.resolve() / ".team" / "current"
+
+
+def _is_team_doc_dir(team_dir: Path) -> bool:
+    return (team_dir / "TEAM.md").exists() and (team_dir / "agents").is_dir()
+
+
+def _compile_team_dir_spec(team_dir: Path, workspace: Path) -> dict[str, Any]:
+    from team_agent.compiler import compile_team
+
+    spec_path = team_dir / "team.spec.yaml"
+    compiled = compile_team(team_dir, spec_path)
+    if compiled["spec"].get("context", {}).get("state_file") == "team_state.md":
+        state_file = str(team_dir.relative_to(workspace) / "team_state.md") if team_dir.is_relative_to(workspace) else "team_state.md"
+        compiled["spec"]["context"]["state_file"] = state_file
+        spec_path.write_text(dumps(compiled["spec"]), encoding="utf-8")
+    return compiled
 
 
 def _attach_team_profile_dirs(spec: dict[str, Any], spec_path: Path, workspace: Path | None = None, team_dir: Path | None = None) -> None:
@@ -1766,8 +1783,12 @@ def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
             closed_displays.add(agent_id)
         proc = run_cmd(["tmux", "kill-session", "-t", session_name], timeout=10)
         if proc.returncode != 0:
-            raise RuntimeError(f"tmux kill-session failed: {proc.stderr.strip()}")
-        event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
+            if "can't find session" in proc.stderr:
+                event_log.write("shutdown.idempotent", session=session_name, reason="session disappeared before kill")
+            else:
+                raise RuntimeError(f"tmux kill-session failed: {proc.stderr.strip()}")
+        else:
+            event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
     else:
         event_log.write("shutdown.idempotent", session=session_name, reason="session missing")
         _close_ghostty_workspace(state, event_log)
@@ -1801,10 +1822,16 @@ def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
 def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None) -> dict[str, Any]:
     state = _select_restart_state(workspace, team)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    if not spec_path.exists():
-        raise RuntimeError(f"missing spec for restart: {spec_path}")
-    spec = load_spec(spec_path)
     team_dir = Path(str(state.get("team_dir"))) if state.get("team_dir") else _spec_team_dir(spec_path, workspace)
+    if _is_team_doc_dir(team_dir):
+        compiled = _compile_team_dir_spec(team_dir, workspace)
+        spec = compiled["spec"]
+        spec_path = team_dir / "team.spec.yaml"
+        state["spec_path"] = str(spec_path)
+    else:
+        if not spec_path.exists():
+            raise RuntimeError(f"missing spec for restart: {spec_path}")
+        spec = load_spec(spec_path)
     _attach_team_profile_dirs(spec, spec_path, workspace, team_dir)
     ensure_workspace_dirs(workspace)
     event_log = EventLog(workspace)
@@ -1819,6 +1846,9 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         raise RuntimeError(_tmux_session_conflict_error(session_name))
     runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
     display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
+    _close_ghostty_workspace(state, event_log)
+    for agent_id, agent_state in state.get("agents", {}).items():
+        _close_ghostty_display(agent_id, agent_state, event_log)
     state["display_backend"] = display_backend
     restart_agents = [
         agent
@@ -3126,18 +3156,12 @@ def quick_start(
     fresh: bool = False,
     team_id: str | None = None,
 ) -> dict[str, Any]:
-    from team_agent.compiler import compile_team
-
     team_dir = _prepare_quick_start_team(agents_dir.resolve(), Path.cwd().resolve(), name, team_id=team_id)
     workspace = team_workspace(team_dir)
     ensure_workspace_dirs(workspace)
     _ensure_profiles_for_roles(team_dir)
+    compiled = _compile_team_dir_spec(team_dir, workspace)
     spec_path = team_dir / "team.spec.yaml"
-    compiled = compile_team(team_dir, spec_path)
-    if compiled["spec"].get("context", {}).get("state_file") == "team_state.md":
-        state_file = str(team_dir.relative_to(workspace) / "team_state.md") if team_dir.is_relative_to(workspace) else "team_state.md"
-        compiled["spec"]["context"]["state_file"] = state_file
-        spec_path.write_text(dumps(compiled["spec"]), encoding="utf-8")
     existing = _quick_start_existing_context(workspace, compiled["spec"]["runtime"]["session_name"])
     if existing and not fresh:
         return {
@@ -4715,6 +4739,7 @@ def _open_ghostty_workspace(
             "linked_session": linked_session,
             "aggregator_session": aggregator_session,
             "display_session": aggregator_session,
+            "workspace_window": pane.get("window_name"),
             "pane_id": pane.get("pane_id"),
             "launch_args": launch_args,
             "pid": pids[0] if pids else None,
@@ -4790,6 +4815,10 @@ def _ghostty_workspace_aggregator_name(session_name: str) -> str:
     return f"{safe_session}__display__workspace__{digest}"
 
 
+def _ghostty_workspace_window_name(index: int) -> str:
+    return "overview" if index == 0 else f"overview-{index + 1}"
+
+
 def _ghostty_workspace_pane_command(linked_session: str) -> str:
     return f"TMUX= tmux attach-session -t {shlex.quote(linked_session)}"
 
@@ -4833,75 +4862,121 @@ def _prepare_ghostty_workspace_aggregator(
     aggregator_session: str,
     linked_jobs: list[tuple[str, dict[str, Any], str]],
 ) -> dict[str, Any]:
-    window_name = "overview"
     if _tmux_session_exists(aggregator_session):
         proc = run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
         if proc.returncode != 0:
             return {"ok": False, "reason": "display_session_cleanup_failed", "error": proc.stderr.strip()}
 
+    def fail(reason: str, proc: Any | None = None, target: str | None = None) -> dict[str, Any]:
+        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
+        result = {"ok": False, "reason": reason}
+        if proc is not None:
+            result["error"] = proc.stderr.strip()
+        if target:
+            result["target"] = target
+        return result
+
     panes: list[dict[str, Any]] = []
-    first_agent_id, first_agent, first_linked_session = linked_jobs[0]
-    proc = run_cmd(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-s",
-            aggregator_session,
-            "-n",
-            window_name,
-            _ghostty_workspace_pane_command(first_linked_session),
-        ],
-        timeout=10,
-    )
-    if proc.returncode != 0:
-        return {"ok": False, "reason": "display_session_create_failed", "error": proc.stderr.strip()}
-    first_pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.0"
-    first_title = _ghostty_workspace_pane_title(first_agent)
-    title_result = _set_ghostty_workspace_pane_title(first_pane_id, first_title)
-    if not title_result["ok"]:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        return title_result
-    panes.append({"agent_id": first_agent_id, "pane_id": first_pane_id, "title": first_title, "linked_session": first_linked_session})
-
-    proc = run_cmd(["tmux", "set-window-option", "-t", f"{aggregator_session}:{window_name}", "remain-on-exit", "on"], timeout=10)
-    if proc.returncode != 0:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        return {"ok": False, "reason": "display_session_remain_on_exit_failed", "error": proc.stderr.strip()}
-
-    for index, (agent_id, agent, linked_session) in enumerate(linked_jobs[1:], start=1):
-        proc = run_cmd(
-            [
-                "tmux",
-                "split-window",
-                "-t",
-                f"{aggregator_session}:{window_name}",
-                "-h",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                _ghostty_workspace_pane_command(linked_session),
-            ],
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-            return {"ok": False, "reason": "display_session_split_failed", "error": proc.stderr.strip(), "target": linked_session}
-        pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.{index}"
-        title = _ghostty_workspace_pane_title(agent)
-        title_result = _set_ghostty_workspace_pane_title(pane_id, title)
+    for window_index, start in enumerate(range(0, len(linked_jobs), GHOSTTY_WORKSPACE_PANES_PER_WINDOW)):
+        window_name = _ghostty_workspace_window_name(window_index)
+        window_jobs = linked_jobs[start : start + GHOSTTY_WORKSPACE_PANES_PER_WINDOW]
+        first_agent_id, first_agent, first_linked_session = window_jobs[0]
+        if window_index == 0:
+            proc = run_cmd(
+                [
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "-s",
+                    aggregator_session,
+                    "-n",
+                    window_name,
+                    _ghostty_workspace_pane_command(first_linked_session),
+                ],
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                return {"ok": False, "reason": "display_session_create_failed", "error": proc.stderr.strip()}
+        else:
+            proc = run_cmd(
+                [
+                    "tmux",
+                    "new-window",
+                    "-t",
+                    aggregator_session,
+                    "-n",
+                    window_name,
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    _ghostty_workspace_pane_command(first_linked_session),
+                ],
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                return fail("display_session_window_create_failed", proc, first_linked_session)
+        first_pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.0"
+        first_title = _ghostty_workspace_pane_title(first_agent)
+        title_result = _set_ghostty_workspace_pane_title(first_pane_id, first_title)
         if not title_result["ok"]:
-            run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-            return title_result
-        panes.append({"agent_id": agent_id, "pane_id": pane_id, "title": title, "linked_session": linked_session})
+            return fail(title_result["reason"], target=first_pane_id)
+        panes.append(
+            {
+                "agent_id": first_agent_id,
+                "pane_id": first_pane_id,
+                "title": first_title,
+                "linked_session": first_linked_session,
+                "window_name": window_name,
+            }
+        )
 
-    proc = run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{window_name}", "even-horizontal"], timeout=10)
+        proc = run_cmd(["tmux", "set-window-option", "-t", f"{aggregator_session}:{window_name}", "remain-on-exit", "on"], timeout=10)
+        if proc.returncode != 0:
+            return fail("display_session_remain_on_exit_failed", proc)
+
+        for index, (agent_id, agent, linked_session) in enumerate(window_jobs[1:], start=1):
+            proc = run_cmd(
+                [
+                    "tmux",
+                    "split-window",
+                    "-t",
+                    f"{aggregator_session}:{window_name}",
+                    "-h",
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    _ghostty_workspace_pane_command(linked_session),
+                ],
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                return fail("display_session_split_failed", proc, linked_session)
+            pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.{index}"
+            title = _ghostty_workspace_pane_title(agent)
+            title_result = _set_ghostty_workspace_pane_title(pane_id, title)
+            if not title_result["ok"]:
+                return fail(title_result["reason"], target=pane_id)
+            panes.append(
+                {
+                    "agent_id": agent_id,
+                    "pane_id": pane_id,
+                    "title": title,
+                    "linked_session": linked_session,
+                    "window_name": window_name,
+                }
+            )
+
+        proc = run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{window_name}", "even-horizontal"], timeout=10)
+        if proc.returncode != 0:
+            return fail("display_session_layout_failed", proc)
+
+    proc = run_cmd(["tmux", "set-option", "-t", aggregator_session, "mouse", "on"], timeout=10)
     if proc.returncode != 0:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        return {"ok": False, "reason": "display_session_layout_failed", "error": proc.stderr.strip()}
+        return fail("display_session_mouse_failed", proc)
+    run_cmd(["tmux", "select-window", "-t", f"{aggregator_session}:{_ghostty_workspace_window_name(0)}"], timeout=10)
     return {"ok": True, "aggregator_session": aggregator_session, "panes": panes}
 
 
@@ -4963,6 +5038,7 @@ def _open_ghostty_workspace_agent_display(
     pane_title = _ghostty_workspace_pane_title(agent)
     command = _ghostty_workspace_pane_command(linked_session)
     pane_id = str(previous_display.get("pane_id") or "")
+    workspace_window = str(previous_display.get("workspace_window") or _ghostty_workspace_window_name(0))
     refreshed = False
     if pane_id:
         proc = run_cmd(["tmux", "respawn-pane", "-k", "-t", pane_id, command], timeout=10)
@@ -4973,7 +5049,7 @@ def _open_ghostty_workspace_agent_display(
                 "tmux",
                 "split-window",
                 "-t",
-                f"{aggregator_session}:overview",
+                f"{aggregator_session}:{workspace_window}",
                 "-h",
                 "-P",
                 "-F",
@@ -5002,7 +5078,7 @@ def _open_ghostty_workspace_agent_display(
             reason=title_result["reason"],
             note=title_result.get("error") or "pane refresh requires full team restart",
         )
-    run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:overview", "even-horizontal"], timeout=10)
+    run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{workspace_window}", "even-horizontal"], timeout=10)
     title = str(previous_display.get("title") or f"team-agent:{session_name}:workspace")
     pids = [int(pid) for pid in previous_display.get("pids", []) if str(pid).isdigit()]
     display = {
@@ -5014,6 +5090,7 @@ def _open_ghostty_workspace_agent_display(
         "linked_session": linked_session,
         "aggregator_session": aggregator_session,
         "display_session": aggregator_session,
+        "workspace_window": workspace_window,
         "pane_id": pane_id,
         "pid": pids[0] if pids else None,
         "pids": pids,

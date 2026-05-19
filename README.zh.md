@@ -124,7 +124,10 @@ Lead:  [提议一个 team:重构架构师 (Claude)、代码搬运工 (Codex)、
 你:    开始。
 ```
 
-完事。队员窗口出现,lead 推进工作、需要决策时停下来问你,你说"关掉"就关掉。
+完事。默认显示模式下,队员会分别出现在独立 Ghostty 窗口。设置
+`display_backend: ghostty_workspace` 时,队员会出现在同一个 Ghostty 窗口里,
+用 tmux tab/window 分页,每个 tab 最多三列 pane:4 个队员是 `3 + 1`,8 个队员是
+`3 + 3 + 2`。lead 推进工作、需要决策时停下来问你,你说"关掉"就关掉。
 
 ### 关闭 / 恢复
 

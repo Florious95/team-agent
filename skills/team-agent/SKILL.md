@@ -27,7 +27,7 @@ cat > .team/current/TEAM.md <<'EOF'
 name: demo-team
 objective: One worker handles bounded tasks and reports through Team Agent MCP.
 dangerous_auto_approve: false
-display_backend: ghostty_window
+display_backend: ghostty_workspace
 fast: false
 provider_models:
   codex: gpt-5.5
@@ -59,7 +59,13 @@ team-agent quick-start .team/current
 ```
 
 YAML lists must be block style. Use `tools:\n  - fs_read`; do not use `tools: [fs_read, mcp_team]`.
-Omitting `display_backend` defaults to `ghostty_window`; set `display_backend: none` only for headless/CI runs.
+
+Display choices:
+- `ghostty_workspace`: one Ghostty window. Workers are shown in tmux tabs/windows, up to 3 side-by-side panes per tab. Four workers become `3 + 1`; eight become `3 + 3 + 2`.
+- `ghostty_window`: one Ghostty window per worker.
+- `none`: headless/CI.
+
+Omitting `display_backend` defaults to `ghostty_window`.
 
 ## Provider Prep
 

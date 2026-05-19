@@ -437,8 +437,8 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(len(display_snapshots), 2)
             self.assertTrue(all(snapshot == {"fake_impl", "fake_peer"} for snapshot in display_snapshots))
 
-    def test_launch_opens_single_ghostty_workspace_with_even_horizontal_panes(self) -> None:
-        for worker_count in [2, 3, 4]:
+    def test_launch_opens_single_ghostty_workspace_with_three_panes_per_tmux_window(self) -> None:
+        for worker_count in [2, 3, 4, 8]:
             with self.subTest(worker_count=worker_count):
                 with tempfile.TemporaryDirectory(prefix="team-agent-launch-workspace-") as tmp:
                     workspace = Path(tmp)
@@ -466,17 +466,28 @@ class RuntimeTests(unittest.TestCase):
                         for call in calls
                         if call[:3] == ["tmux", "new-session", "-d"] and "-P" in call
                     ]
+                    workspace_windows = [
+                        call
+                        for call in calls
+                        if call[:2] == ["tmux", "new-window"] and "-P" in call
+                    ]
                     linked_sessions = [
                         call
                         for call in calls
                         if call[:3] == ["tmux", "new-session", "-d"] and "-t" in call and "-P" not in call
                     ]
+                    workspace_window_count = (worker_count + runtime.GHOSTTY_WORKSPACE_PANES_PER_WINDOW - 1) // runtime.GHOSTTY_WORKSPACE_PANES_PER_WINDOW
                     self.assertEqual(len(workspace_sessions), 1)
+                    self.assertEqual(len(workspace_windows), workspace_window_count - 1)
                     self.assertEqual(len(linked_sessions), worker_count)
-                    self.assertEqual(len([call for call in calls if call[:2] == ["tmux", "split-window"]]), worker_count - 1)
-                    self.assertEqual(len([call for call in calls if call[:3] == ["tmux", "select-layout", "-t"] and call[-1] == "even-horizontal"]), 1)
+                    self.assertEqual(len([call for call in calls if call[:2] == ["tmux", "split-window"]]), worker_count - workspace_window_count)
+                    self.assertEqual(
+                        len([call for call in calls if call[:3] == ["tmux", "select-layout", "-t"] and call[-1] == "even-horizontal"]),
+                        workspace_window_count,
+                    )
                     self.assertEqual(len([call for call in calls if call[:3] == ["open", "-na", "Ghostty.app"]]), 1)
                     self.assertTrue(any(call[:2] == ["tmux", "set-window-option"] and call[-2:] == ["remain-on-exit", "on"] for call in calls))
+                    self.assertTrue(any(call[:2] == ["tmux", "set-option"] and call[-2:] == ["mouse", "on"] for call in calls))
                     for call in calls:
                         if call[:2] in (["tmux", "send-keys"], ["tmux", "capture-pane"]) or call[:3] == ["tmux", "list-windows", "-t"]:
                             self.assertFalse(any(f"{spec['runtime']['session_name']}:" in arg and "." in arg for arg in call))
@@ -487,8 +498,22 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual(len({display["linked_session"] for display in displays}), worker_count)
                     self.assertEqual(len({display["pane_id"] for display in displays}), worker_count)
                     self.assertEqual(len({display["pane_title"] for display in displays}), worker_count)
+                    window_sizes = sorted(
+                        len([display for display in displays if display.get("workspace_window") == window])
+                        for window in {display.get("workspace_window") for display in displays}
+                    )
+                    self.assertLessEqual(max(window_sizes), runtime.GHOSTTY_WORKSPACE_PANES_PER_WINDOW)
+                    if worker_count == 4:
+                        self.assertEqual(window_sizes, [1, 3])
+                    if worker_count == 8:
+                        self.assertEqual(window_sizes, [2, 3, 3])
                     self.assertEqual({tuple(display["pids"]) for display in displays}, {(4321,)})
-                    pane_commands = [call[-1] for call in workspace_sessions + [call for call in calls if call[:2] == ["tmux", "split-window"]]]
+                    pane_commands = [
+                        call[-1]
+                        for call in workspace_sessions
+                        + workspace_windows
+                        + [call for call in calls if call[:2] == ["tmux", "split-window"]]
+                    ]
                     self.assertEqual(len(set(pane_commands)), worker_count)
                     for display in displays:
                         self.assertIn(display["linked_session"], " ".join(pane_commands))
@@ -4059,6 +4084,89 @@ Handle fake tasks.
                 self.assertEqual(state["agents"][agent["id"]]["display"]["aggregator_session"], aggregator_session)
             self.assertEqual(len({state["agents"][agent["id"]]["display"]["linked_session"] for agent in spec["agents"]}), 2)
 
+    def test_restart_recompiles_team_docs_and_closes_stale_ghostty_window_display(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-restart-doc-display-") as tmp:
+            workspace = Path(tmp)
+            team = workspace / ".team" / "current"
+            (team / "agents").mkdir(parents=True)
+            (team / "TEAM.md").write_text(
+                """---
+name: doc-restart
+objective: Restart from docs.
+provider: fake
+display_backend: ghostty_window
+---
+
+Restart test team.
+""",
+                encoding="utf-8",
+            )
+            (team / "agents" / "fake_impl.md").write_text(
+                """---
+name: fake_impl
+role: Fake Worker
+provider: fake
+tools:
+  - mcp_team
+---
+
+Fake worker.
+""",
+                encoding="utf-8",
+            )
+            spec_path = team / "team.spec.yaml"
+            spec = compile_team(team, spec_path)["spec"]
+            stale_display_session = runtime._ghostty_display_session_name(spec["runtime"]["session_name"], "fake_impl")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "workspace": str(workspace),
+                    "team_dir": str(team),
+                    "session_name": spec["runtime"]["session_name"],
+                    "leader": spec["leader"],
+                    "agents": {
+                        "fake_impl": {
+                            "status": "stopped",
+                            "provider": "fake",
+                            "window": "fake_impl",
+                            "session_id": "fake-session-1",
+                            "display": {
+                                "backend": "ghostty_window",
+                                "display_session": stale_display_session,
+                                "pids": [1234],
+                            },
+                        }
+                    },
+                    "tasks": spec["tasks"],
+                    "display_backend": "ghostty_window",
+                },
+            )
+            team_doc = team / "TEAM.md"
+            team_doc.write_text(team_doc.read_text(encoding="utf-8").replace("ghostty_window", "ghostty_workspace"), encoding="utf-8")
+            started_windows: set[str] = set()
+            calls: list[list[str]] = []
+            fake_run_cmd = _make_fake_ghostty_workspace_run_cmd(
+                started_windows,
+                calls,
+                existing_sessions={stale_display_session},
+            )
+
+            with (
+                patch("team_agent.runtime._ghostty_app_exists", return_value=True),
+                patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+                patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 333, "status": "started"}),
+            ):
+                result = runtime.restart(workspace)
+
+            self.assertTrue(result["ok"])
+            state = load_runtime_state(workspace)
+            self.assertEqual(load_spec(spec_path)["runtime"]["display_backend"], "ghostty_workspace")
+            self.assertEqual(state["display_backend"], "ghostty_workspace")
+            self.assertEqual(state["agents"]["fake_impl"]["display"]["backend"], "ghostty_workspace")
+            self.assertIn(["kill", "1234"], calls)
+            self.assertIn(["tmux", "kill-session", "-t", stale_display_session], calls)
+
     def test_restart_first_resume_exit_fallback_recreates_session_and_opens_display(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-restart-first-fallback-") as tmp:
             workspace = Path(tmp)
@@ -4474,6 +4582,48 @@ Handle fake tasks.
             self.assertLess(kill_targets.index(peer_linked), kill_targets.index(session_name))
             self.assertLess(calls.index(["tmux", "kill-session", "-t", peer_linked]), calls.index(["kill", "12345"]))
             self.assertEqual(len([e for e in _events(workspace) if e["event"] == "display.ghostty_workspace_closed"]), 1)
+
+    def test_shutdown_is_idempotent_when_tmux_session_disappears_during_kill(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-shutdown-race-") as tmp:
+            workspace = Path(tmp)
+            session_name = "team-shutdown-race"
+            save_runtime_state(
+                workspace,
+                {
+                    "session_name": session_name,
+                    "agents": {
+                        "fake_impl": {
+                            "status": "running",
+                            "provider": "fake",
+                            "window": "fake_impl",
+                            "session_id": "session-impl",
+                            "mcp_config": str(workspace / ".team" / "runtime" / "mcp" / "fake_impl.json"),
+                        }
+                    },
+                    "tasks": [],
+                },
+            )
+            calls: list[list[str]] = []
+
+            def fake_run_cmd(args: list[str], timeout: int = 20):
+                calls.append(args)
+                proc = Mock(returncode=0, stdout="", stderr="")
+                if args[:3] == ["tmux", "kill-session", "-t"] and args[-1] == session_name:
+                    proc.returncode = 1
+                    proc.stderr = f"can't find session: {session_name}"
+                return proc
+
+            with (
+                patch("team_agent.runtime._capture_missing_sessions", return_value=[]),
+                patch("team_agent.runtime._tmux_session_exists", return_value=True),
+                patch("team_agent.runtime._tmux_window_exists", return_value=True),
+                patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+            ):
+                result = runtime.shutdown(workspace)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(load_runtime_state(workspace)["agents"]["fake_impl"]["status"], "stopped")
+            self.assertTrue(any(e["event"] == "shutdown.idempotent" and e["reason"] == "session disappeared before kill" for e in _events(workspace)))
 
     def test_send_lock_reports_busy_instead_of_parallel_write(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-send-lock-") as tmp:
@@ -5817,7 +5967,7 @@ def _fake_spec(workspace: Path) -> dict:
 def _fake_spec_with_agents(workspace: Path, count: int) -> dict:
     spec = _fake_spec(workspace)
     base = copy.deepcopy(spec["agents"][0])
-    ids = ["fake_impl", "fake_peer", "fake_review", "fake_test"]
+    ids = ["fake_impl", "fake_peer", "fake_review", "fake_test", "fake_ops", "fake_docs", "fake_qa", "fake_design"]
     agents = []
     for index, agent_id in enumerate(ids[:count]):
         agent = copy.deepcopy(base)
@@ -5872,7 +6022,12 @@ def _make_fake_ghostty_workspace_run_cmd(
                 sessions.add(args[4])
                 started_windows.add(args[6])
         elif args[:2] == ["tmux", "new-window"]:
-            started_windows.add(args[5])
+            if "-P" in args:
+                pane_id = f"%{len(pane_ids) + 1}"
+                pane_ids.append(pane_id)
+                proc.stdout = pane_id + "\n"
+            else:
+                started_windows.add(args[5])
         elif args[:3] == ["tmux", "list-windows", "-t"]:
             proc.returncode = 0 if args[3] in sessions else 1
             proc.stdout = "\n".join(sorted(started_windows)) if proc.returncode == 0 else ""
