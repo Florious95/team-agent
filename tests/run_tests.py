@@ -2520,6 +2520,72 @@ Work.
             self.assertIn("leader -> fake_impl", inbox)
             self.assertIn("final results are not in inbox", inbox)
 
+    def test_status_json_defaults_to_compact_context_safe_shape(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-status-compact-") as tmp:
+            workspace = Path(tmp)
+            save_runtime_state(
+                workspace,
+                {
+                    "session_name": None,
+                    "leader": {"id": "leader"},
+                    "agents": {
+                        "fake_impl": {
+                            "status": "running",
+                            "provider": "fake",
+                            "model": "fake-model",
+                            "profile": "fake-profile",
+                            "window": "fake_impl",
+                            "session_id": "session-123",
+                            "permissions": {"resolved_tools": [{"tool": "fs_read", "enforcement": "prompt_only"}]},
+                            "display": {
+                                "backend": "ghostty_workspace",
+                                "status": "opened",
+                                "workspace_window": "overview",
+                                "pane_id": "%1",
+                                "launch_args": ["open", "-na", "Ghostty.app", "--args", "--title=long"],
+                            },
+                        }
+                    },
+                    "tasks": [
+                        {
+                            "id": "task_impl",
+                            "title": "Implement",
+                            "assignee": "fake_impl",
+                            "status": "done",
+                            "last_result_summary": "x" * 1000,
+                        }
+                    ],
+                },
+            )
+            runtime.EventLog(workspace).write(
+                "restart.agent_start",
+                agent_id="fake_impl",
+                command="codex resume " + "x" * 2000,
+                payload={"content": "y" * 2000},
+                agents=[{"agent_id": "fake_impl", "restart_mode": "resumed", "session_id": "session-123", "display_target": {"launch_args": ["x"]}}],
+            )
+
+            compact = runtime.status(workspace, as_json=True, compact=True)
+            full = runtime.status(workspace, as_json=True)
+            cli_compact = cli.cmd_status(Mock(workspace=str(workspace), json=True, detail=False))
+            cli_detail = cli.cmd_status(Mock(workspace=str(workspace), json=True, detail=True))
+
+            compact_text = json.dumps(compact, ensure_ascii=False, indent=2)
+            full_text = json.dumps(full, ensure_ascii=False)
+            self.assertLess(len(compact_text), len(full_text))
+            self.assertLess(len(compact_text.splitlines()), 80)
+            self.assertNotIn("codex resume", compact_text)
+            self.assertNotIn('"payload"', compact_text)
+            self.assertNotIn('"launch_args"', compact_text)
+            self.assertNotIn('"permissions"', compact_text)
+            self.assertEqual(compact["agents"]["fake_impl"]["display"]["workspace_window"], "overview")
+            self.assertIn("command", full["last_events"][-1])
+            cli_compact_text = json.dumps(cli_compact, ensure_ascii=False, indent=2)
+            self.assertNotIn("codex resume", cli_compact_text)
+            self.assertNotIn('"payload"', cli_compact_text)
+            self.assertNotIn('"launch_args"', cli_compact_text)
+            self.assertIn("command", cli_detail["last_events"][-1])
+
     def test_approvals_returns_structured_prompt_without_terminal_page(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-approvals-") as tmp:
             workspace = Path(tmp)

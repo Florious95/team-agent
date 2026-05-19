@@ -118,7 +118,7 @@ For diagnosis, run `team-agent profile show deepseek --workspace . --json`; neve
 - `team-agent send --watch-result coder "Do the bounded task"` sends a direct worker message, returns after delivery, and lets the coordinator collect/report completion asynchronously.
 - After `send --watch-result` succeeds, do not run `sleep`, `status`, `inbox`, or `collect` polling loops unless the user explicitly asks for diagnosis; the coordinator will notify the leader when the result arrives.
 - `team-agent send --task task_initial "Start"` routes by task.
-- `team-agent status` shows team, worker health, result-store counts, `session_id`, `captured_via`, and attribution confidence.
+- `team-agent status` shows team, worker health, result-store counts, `session_id`, `captured_via`, and attribution confidence. `team-agent status --json` is compact and context-safe by default; use `team-agent status --detail --json` only for raw runtime-state diagnostics.
 - `team-agent status coder` shows one worker.
 - `team-agent approvals [coder]` shows structured pending approval prompts without copying worker terminal pages.
 - `team-agent inbox coder` shows message history only. Final results are not in inbox.

@@ -170,7 +170,7 @@ class TeamOrchestratorTools:
         return {"ok": True, "state_file": str(path)}
 
     def get_team_status(self) -> dict[str, Any]:
-        return runtime.status(self.workspace, as_json=True)
+        return runtime.status(self.workspace, as_json=True, compact=True)
 
     def request_human(self, question: str, task_id: str | None = None, agent_id: str | None = None) -> dict[str, Any]:
         store = MessageStore(self.workspace)

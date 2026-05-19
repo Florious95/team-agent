@@ -135,6 +135,7 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("status", help="Show team runtime status")
     p.add_argument("agent", nargs="?")
     p.add_argument("--workspace", default=".")
+    p.add_argument("--detail", action="store_true", help="Include full raw runtime state in --json output")
     add_json(p)
     p.set_defaults(func=cmd_status)
 
@@ -504,7 +505,7 @@ def cmd_settle(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     if args.json:
-        return runtime.status(Path(args.workspace).resolve(), as_json=True)
+        return runtime.status(Path(args.workspace).resolve(), as_json=True, compact=not args.detail)
     return runtime.format_status(Path(args.workspace).resolve(), args.agent)
 
 
