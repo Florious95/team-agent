@@ -8,99 +8,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import agent_health as _agent_health
+from . import result_watchers as _result_watchers
+from .schema import SCHEMA_VERSION, initialize_schema, utcnow
 from team_agent.paths import runtime_dir
 from team_agent.spec import validate_result_envelope
 
 
-MESSAGE_COLUMNS = {
-    "message_id",
-    "task_id",
-    "sender",
-    "recipient",
-    "reply_to",
-    "requires_ack",
-    "status",
-    "content",
-    "artifact_refs",
-    "created_at",
-    "updated_at",
-    "delivered_at",
-    "acknowledged_at",
-    "error",
-    "delivery_attempts",
-}
-RESULT_COLUMNS = {"result_id", "task_id", "agent_id", "envelope", "status", "created_at"}
-SCHEDULED_EVENT_COLUMNS = {
-    "id",
-    "due_at",
-    "target",
-    "kind",
-    "payload_json",
-    "status",
-    "created_at",
-    "fired_at",
-    "result_json",
-}
-DELIVERY_TOKEN_COLUMNS = {
-    "message_id",
-    "unique_token",
-    "injected_at",
-    "visible_at",
-    "consumed_at",
-    "failed_at",
-    "failure_reason",
-}
-AGENT_HEALTH_COLUMNS = {
-    "agent_id",
-    "status",
-    "last_output_at",
-    "context_usage_pct",
-    "current_task_id",
-    "updated_at",
-}
-PEER_ALLOWLIST_COLUMNS = {"a", "b", "created_at"}
-RESULT_WATCHER_COLUMNS = {
-    "watcher_id",
-    "task_id",
-    "agent_id",
-    "message_id",
-    "leader_id",
-    "status",
-    "created_at",
-    "completed_at",
-    "result_id",
-    "notified_message_id",
-    "error",
-}
-
-
-def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"pragma table_info({table})").fetchall()}
-
-
-def _ensure_table_columns(
-    conn: sqlite3.Connection,
-    table: str,
-    required: set[str],
-    migrations: dict[str, str] | None = None,
-) -> None:
-    columns = _table_columns(conn, table)
-    missing = required - columns
-    migrations = migrations or {}
-    unsupported = missing - set(migrations)
-    if unsupported:
-        names = ", ".join(sorted(unsupported))
-        raise RuntimeError(f"team.db table {table} is missing required column(s): {names}")
-    for name in sorted(missing):
-        conn.execute(migrations[name])
-
-
 class MessageStore:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = SCHEMA_VERSION
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -115,124 +31,7 @@ class MessageStore:
 
     def _init(self) -> None:
         with closing(self.connect()) as conn:
-            with conn:
-                conn.execute(
-                    """
-                    create table if not exists messages (
-                      message_id text primary key,
-                      task_id text,
-                      sender text,
-                      recipient text,
-                      reply_to text,
-                      requires_ack integer,
-                      status text,
-                      content text,
-                      artifact_refs text,
-                      created_at text,
-                      updated_at text,
-                      delivered_at text,
-                      acknowledged_at text,
-                      error text,
-                      delivery_attempts integer not null default 0
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists results (
-                      result_id text primary key,
-                      task_id text not null,
-                      agent_id text not null,
-                      envelope text not null,
-                      status text not null,
-                      created_at text not null
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists scheduled_events (
-                      id integer primary key,
-                      due_at text not null,
-                      target text not null,
-                      kind text not null,
-                      payload_json text not null,
-                      status text not null,
-                      created_at text not null,
-                      fired_at text,
-                      result_json text
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists delivery_tokens (
-                      message_id text primary key,
-                      unique_token text not null,
-                      injected_at text not null,
-                      visible_at text,
-                      consumed_at text,
-                      failed_at text,
-                      failure_reason text
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists agent_health (
-                      agent_id text primary key,
-                      status text not null,
-                      last_output_at text,
-                      context_usage_pct integer,
-                      current_task_id text,
-                      updated_at text not null
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists peer_allowlist (
-                      a text not null,
-                      b text not null,
-                      created_at text not null,
-                      primary key (a, b)
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    create table if not exists result_watchers (
-                      watcher_id text primary key,
-                      task_id text,
-                      agent_id text,
-                      message_id text,
-                      leader_id text not null,
-                      status text not null,
-                      created_at text not null,
-                      completed_at text,
-                      result_id text,
-                      notified_message_id text,
-                      error text
-                    )
-                    """
-                )
-                _ensure_table_columns(
-                    conn,
-                    "messages",
-                    MESSAGE_COLUMNS,
-                    {
-                        "delivery_attempts": (
-                            "alter table messages add column delivery_attempts integer not null default 0"
-                        )
-                    },
-                )
-                _ensure_table_columns(conn, "results", RESULT_COLUMNS)
-                _ensure_table_columns(conn, "scheduled_events", SCHEDULED_EVENT_COLUMNS)
-                _ensure_table_columns(conn, "delivery_tokens", DELIVERY_TOKEN_COLUMNS)
-                _ensure_table_columns(conn, "agent_health", AGENT_HEALTH_COLUMNS)
-                _ensure_table_columns(conn, "peer_allowlist", PEER_ALLOWLIST_COLUMNS)
-                _ensure_table_columns(conn, "result_watchers", RESULT_WATCHER_COLUMNS)
-                conn.execute(f"pragma user_version = {self.SCHEMA_VERSION}")
+            initialize_schema(conn)
 
     def create_message(
         self,
@@ -410,74 +209,6 @@ class MessageStore:
             rows = conn.execute("select * from delivery_tokens order by injected_at").fetchall()
         return [dict(row) for row in rows]
 
-    def upsert_agent_health(
-        self,
-        agent_id: str,
-        status: str,
-        last_output_at: str | None = None,
-        context_usage_pct: int | None = None,
-        current_task_id: str | None = None,
-    ) -> None:
-        now = utcnow()
-        with closing(self.connect()) as conn:
-            with conn:
-                conn.execute(
-                    """
-                    insert into agent_health(agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
-                    values (?, ?, ?, ?, ?, ?)
-                    on conflict(agent_id) do update set
-                      status = excluded.status,
-                      last_output_at = coalesce(excluded.last_output_at, agent_health.last_output_at),
-                      context_usage_pct = excluded.context_usage_pct,
-                      current_task_id = excluded.current_task_id,
-                      updated_at = excluded.updated_at
-                    """,
-                    (agent_id, status, last_output_at, context_usage_pct, current_task_id, now),
-                )
-
-    def agent_health(self) -> dict[str, dict[str, Any]]:
-        with closing(self.connect()) as conn:
-            rows = conn.execute("select * from agent_health order by agent_id").fetchall()
-        return {row["agent_id"]: dict(row) for row in rows}
-
-    def delete_agent_health(self, agent_id: str) -> bool:
-        with closing(self.connect()) as conn:
-            with conn:
-                cur = conn.execute(
-                    "delete from agent_health where agent_id = ?",
-                    (agent_id,),
-                )
-        return cur.rowcount > 0
-
-    def gc_agent_health(self, valid_agent_ids: Any) -> list[str]:
-        # Caller must pass the workspace-wide set of live agent_ids across every
-        # team sharing this team.db. Rows whose agent_id is not in the set are
-        # deleted. If two teams share a workspace, the caller is responsible for
-        # computing the union before invoking this helper; otherwise live agents
-        # from a sibling team will be swept. Input is validated before any DB
-        # mutation so a derivation bug that silently produces None or non-str
-        # entries cannot delete sibling-team rows by accident.
-        valid: set[str] = set()
-        for entry in valid_agent_ids:
-            if not isinstance(entry, str):
-                raise TypeError(
-                    f"gc_agent_health requires str agent_ids; got {type(entry).__name__}"
-                )
-            if not entry:
-                raise ValueError("gc_agent_health does not accept empty agent_ids")
-            valid.add(entry)
-        with closing(self.connect()) as conn:
-            with conn:
-                rows = conn.execute("select agent_id from agent_health").fetchall()
-                stale = [row["agent_id"] for row in rows if row["agent_id"] not in valid]
-                if stale:
-                    placeholders = ",".join("?" for _ in stale)
-                    conn.execute(
-                        f"delete from agent_health where agent_id in ({placeholders})",
-                        stale,
-                    )
-        return stale
-
     def add_scheduled_event(self, due_at: str, target: str, kind: str, payload: dict[str, Any]) -> int:
         with closing(self.connect()) as conn:
             with conn:
@@ -553,69 +284,6 @@ class MessageStore:
                 counts["uncollected"] += n
                 counts["by_status"][status] = n
         return counts
-
-    def create_result_watcher(
-        self,
-        task_id: str | None,
-        agent_id: str | None,
-        message_id: str | None,
-        leader_id: str = "leader",
-    ) -> str:
-        watcher_id = f"watch_{uuid.uuid4().hex[:12]}"
-        with closing(self.connect()) as conn:
-            with conn:
-                conn.execute(
-                    """
-                    insert into result_watchers(
-                      watcher_id, task_id, agent_id, message_id, leader_id, status, created_at
-                    )
-                    values (?, ?, ?, ?, ?, 'pending', ?)
-                    """,
-                    (watcher_id, task_id, agent_id, message_id, leader_id, utcnow()),
-                )
-        return watcher_id
-
-    def pending_result_watchers(self) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn:
-            rows = conn.execute(
-                "select * from result_watchers where status = 'pending' order by created_at"
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def retryable_result_watchers(self) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn:
-            rows = conn.execute(
-                "select * from result_watchers where status in ('pending', 'notify_failed') order by created_at"
-            ).fetchall()
-        return [dict(row) for row in rows]
-
-    def result_watchers(self) -> list[dict[str, Any]]:
-        with closing(self.connect()) as conn:
-            rows = conn.execute("select * from result_watchers order by created_at").fetchall()
-        return [dict(row) for row in rows]
-
-    def mark_result_watcher(
-        self,
-        watcher_id: str,
-        status: str,
-        result_id: str | None = None,
-        notified_message_id: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        with closing(self.connect()) as conn:
-            with conn:
-                conn.execute(
-                    """
-                    update result_watchers
-                    set status = ?,
-                        completed_at = ?,
-                        result_id = coalesce(?, result_id),
-                        notified_message_id = coalesce(?, notified_message_id),
-                        error = coalesce(?, error)
-                    where watcher_id = ?
-                    """,
-                    (status, utcnow(), result_id, notified_message_id, error, watcher_id),
-                )
 
     def add_result(self, envelope: dict[str, Any]) -> str:
         validate_result_envelope(envelope)
@@ -721,3 +389,15 @@ class MessageStore:
                     "update results set status = 'invalid' where result_id = ?",
                     (result_id,),
                 )
+
+
+
+MessageStore.upsert_agent_health = _agent_health.upsert_agent_health
+MessageStore.agent_health = _agent_health.agent_health
+MessageStore.delete_agent_health = _agent_health.delete_agent_health
+MessageStore.gc_agent_health = _agent_health.gc_agent_health
+MessageStore.create_result_watcher = _result_watchers.create_result_watcher
+MessageStore.pending_result_watchers = _result_watchers.pending_result_watchers
+MessageStore.retryable_result_watchers = _result_watchers.retryable_result_watchers
+MessageStore.result_watchers = _result_watchers.result_watchers
+MessageStore.mark_result_watcher = _result_watchers.mark_result_watcher
