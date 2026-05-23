@@ -63,11 +63,21 @@ PEEK_SEARCH_SCAN_LINES = 300
 PEEK_MAX_MATCHES = 5
 APPROVAL_SCAN_LINES = 120
 DELIVERY_CAPTURE_LINES = 40
+PENDING_DELIVERY_STATUSES = {
+    "pending",
+    "accepted",
+    "queued_until_idle",
+    "queued_until_start",
+    "queued_stopped",
+    "queued_pane_missing",
+}
+SUBMITTED_DELIVERY_STATUSES = {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
 STARTUP_PROMPT_RUNTIME_CHECK_LIMIT = 3
 TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024
 TMUX_PASTE_MIN_READY_TIMEOUT = 1.5
 TMUX_PASTE_MAX_READY_TIMEOUT = 30.0
 TMUX_PASTE_BYTES_PER_SECOND = 25_000
+COORDINATOR_PROTOCOL_VERSION = 2
 TMUX_SUBMIT_MIN_SETTLE_TIMEOUT = 0.35
 TMUX_SUBMIT_MAX_SETTLE_TIMEOUT = 15.0
 TMUX_SUBMIT_BYTES_PER_SECOND = 50_000
@@ -657,7 +667,10 @@ def status(workspace: Path, as_json: bool = False, *, compact: bool = False) -> 
         "agent_health": store.agent_health(),
         "tasks": state.get("tasks", []),
         "messages": store.message_counts(),
+        "queued_messages": _queued_message_statuses(store.messages()),
         "results": store.result_counts(),
+        "latest_results": _latest_result_summaries(store),
+        "coordinator": coordinator_health(workspace),
         "last_events": EventLog(workspace).tail(10),
     }
     return _compact_status(result) if compact else result
@@ -687,9 +700,41 @@ def _compact_status(data: dict[str, Any]) -> dict[str, Any]:
         "agent_health": data.get("agent_health", {}),
         "tasks": [_compact_task(task) for task in data.get("tasks", [])],
         "messages": data.get("messages", {}),
+        "queued_messages": data.get("queued_messages", [])[:8],
         "results": data.get("results", {}),
+        "latest_results": data.get("latest_results", [])[:5],
+        "coordinator": _compact_mapping(data.get("coordinator", {}), {"status", "pid", "metadata_ok", "schema_ok"}),
         "last_events": [_compact_event(event) for event in data.get("last_events", [])[-STATUS_EVENT_LIMIT:]],
     }
+
+
+def _latest_result_summaries(store: MessageStore, limit: int = 5) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for row in store.latest_results(limit=limit):
+        summary = _result_summary_from_row(row)
+        if summary:
+            summaries.append(summary)
+    return summaries
+
+
+def _queued_message_statuses(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visible_statuses = PENDING_DELIVERY_STATUSES | {"target_resolved", "delivery_blocked", "injected_unverified"}
+    queued: list[dict[str, Any]] = []
+    for row in messages:
+        if row.get("status") not in visible_statuses:
+            continue
+        queued.append(
+            {
+                "message_id": row.get("message_id"),
+                "recipient": row.get("recipient"),
+                "sender": row.get("sender"),
+                "status": row.get("status"),
+                "reason": row.get("error"),
+                "age": _age_text(row.get("created_at")),
+                "attempts": row.get("delivery_attempts") or 0,
+            }
+        )
+    return queued
 
 
 def _compact_agent_state(agent_id: str, agent: dict[str, Any]) -> dict[str, Any]:
@@ -861,6 +906,15 @@ def format_status(workspace: Path, agent_id: str | None = None) -> str:
     ]
     if results.get("uncollected", 0):
         lines.append("  final result pending in result store; run team-agent collect")
+    queued_messages = data.get("queued_messages") or []
+    if queued_messages:
+        lines.append("queued messages")
+        for item in queued_messages[:8]:
+            reason = item.get("reason") or "-"
+            lines.append(
+                f"  {item.get('message_id')} -> {item.get('recipient')} "
+                f"{item.get('status')} age {item.get('age')} attempts {item.get('attempts')} reason {reason}"
+            )
     for aid in sorted(agents):
         agent = agents[aid]
         row = health.get(aid, {})
@@ -1339,7 +1393,13 @@ def _send_single_message_unlocked(
     delivered_result = _deliver_pending_message(workspace, state, message_id, wait_visible=wait_visible, timeout=timeout)
     row = _message_by_id(store, message_id)
     message_status = row["status"] if row else delivered_result.get("status", "accepted")
-    if mirror_peer and not _is_leader_sender(sender, leader_id) and not _is_leader_target(target, leader_id) and delivered_result.get("ok"):
+    if (
+        mirror_peer
+        and not _is_leader_sender(sender, leader_id)
+        and not _is_leader_target(target, leader_id)
+        and delivered_result.get("ok")
+        and not delivered_result.get("queued")
+    ):
         _mirror_peer_message_to_leader(workspace, state, sender, target, content, task_id, event_log)
     watch: dict[str, Any] | None = None
     if watch_result and delivered_result.get("ok"):
@@ -1350,7 +1410,12 @@ def _send_single_message_unlocked(
             "watcher_id": watcher_id,
             "task_id": watch_task_id,
             "agent_id": target,
-            "notice": "Team Agent will collect the result and notify the leader when this task reports completion.",
+            "notice": (
+                "Team Agent will deliver this message when the worker is available, "
+                "then collect the result and notify the leader when this task reports completion."
+                if delivered_result.get("queued")
+                else "Team Agent will collect the result and notify the leader when this task reports completion."
+            ),
         }
         event_log.write(
             "result_watcher.created",
@@ -1371,6 +1436,9 @@ def _send_single_message_unlocked(
         "verification": delivered_result.get("verification"),
         "submit_verification": delivered_result.get("submit_verification"),
     }
+    if delivered_result.get("queued"):
+        result["queued"] = True
+        result["reason"] = delivered_result.get("reason")
     if delivered_result.get("warning"):
         result["warning"] = delivered_result["warning"]
     for key in ("paste_attempts", "submit_attempts"):
@@ -1441,7 +1509,7 @@ def _broadcast_message_unlocked(
     }
 
 
-def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
+def collect(workspace: Path, result_file: Path | None = None, *, ensure_coordinator: bool = True) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
@@ -1496,7 +1564,8 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
 
     if invalid_results:
         save_runtime_state(workspace, state)
-        state_path = write_team_state(workspace, spec, state)
+        state_path = write_team_state(workspace, spec, state, _team_state_result_entries(store, []))
+        coordinator = _ensure_coordinator_after_collect(workspace, state, event_log) if ensure_coordinator else {"ok": False, "status": "not_required"}
         return {
             "ok": False,
             "collected": [],
@@ -1505,6 +1574,7 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
             "invalid_results": invalid_results,
             "results": store.result_counts(),
             "state_file": str(state_path),
+            "coordinator": coordinator,
         }
 
     collected: list[dict[str, Any]] = []
@@ -1533,6 +1603,7 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
                 "status": envelope["status"],
                 "summary": envelope.get("summary"),
                 "tests": envelope.get("tests", []),
+                "created_at": row.get("created_at"),
                 "scope": "task" if task is not None else "message",
             }
         )
@@ -1546,10 +1617,11 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
             retry_limit=task.get("retry_limit") if task else None,
             scope="task" if task is not None else "message",
         )
-    state_path = write_team_state(workspace, spec, next_state, [{"envelope": env} for env in collected])
+    state_path = write_team_state(workspace, spec, next_state, _team_state_result_entries(store, collected))
     save_runtime_state(workspace, next_state)
     for row, _, _ in valid_rows:
         store.mark_result_collected(row["result_id"])
+    coordinator = _ensure_coordinator_after_collect(workspace, next_state, event_log) if ensure_coordinator else {"ok": False, "status": "not_required"}
     return {
         "ok": not invalid_results,
         "collected": collected,
@@ -1558,7 +1630,29 @@ def collect(workspace: Path, result_file: Path | None = None) -> dict[str, Any]:
         "invalid_results": invalid_results,
         "results": store.result_counts(),
         "state_file": str(state_path),
+        "coordinator": coordinator,
     }
+
+
+def _team_state_result_entries(store: MessageStore, collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if collected:
+        return [{"envelope": env} for env in collected]
+    return [{"envelope": row["envelope"]} for row in store.latest_results(limit=5)]
+
+
+def _ensure_coordinator_after_collect(workspace: Path, state: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
+    if not _coordinator_should_run(state):
+        return {"ok": False, "status": "not_required"}
+    try:
+        coordinator = start_coordinator(workspace)
+    except Exception as exc:
+        coordinator = {"ok": False, "status": "start_failed", "error": str(exc)}
+    event_log.write("collect.coordinator_checked", coordinator=coordinator)
+    return coordinator
+
+
+def _coordinator_should_run(state: dict[str, Any]) -> bool:
+    return bool(state.get("session_name") or _leader_receiver_is_direct(state.get("leader_receiver", {})))
 
 
 def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
@@ -2540,6 +2634,10 @@ def coordinator_pid_path(workspace: Path) -> Path:
     return runtime_dir(workspace) / "coordinator.pid"
 
 
+def coordinator_meta_path(workspace: Path) -> Path:
+    return runtime_dir(workspace) / "coordinator.json"
+
+
 def coordinator_log_path(workspace: Path) -> Path:
     return runtime_dir(workspace) / "coordinator.log"
 
@@ -2555,15 +2653,63 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
+def _read_coordinator_metadata(workspace: Path) -> dict[str, Any] | None:
+    path = coordinator_meta_path(workspace)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _coordinator_metadata_ok(metadata: dict[str, Any] | None, pid: int) -> bool:
+    return bool(
+        metadata
+        and metadata.get("pid") == pid
+        and metadata.get("protocol_version") == COORDINATOR_PROTOCOL_VERSION
+        and metadata.get("message_store_schema_version") == MessageStore.SCHEMA_VERSION
+    )
+
+
+def write_coordinator_metadata(workspace: Path, pid: int, source: str) -> None:
+    path = coordinator_meta_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "pid": pid,
+                "protocol_version": COORDINATOR_PROTOCOL_VERSION,
+                "message_store_schema_version": MessageStore.SCHEMA_VERSION,
+                "source": source,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def coordinator_health(workspace: Path) -> dict[str, Any]:
+    schema = _message_store_schema_health(workspace)
     pid_path = coordinator_pid_path(workspace)
     if not pid_path.exists():
-        return {"ok": False, "status": "missing", "pid": None}
+        return {"ok": False, "status": "missing", "pid": None, "metadata": None, "metadata_ok": False, **schema}
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except ValueError:
-        return {"ok": False, "status": "invalid_pid", "pid": None}
-    return {"ok": _pid_is_running(pid), "status": "running" if _pid_is_running(pid) else "stale", "pid": pid}
+        return {"ok": False, "status": "invalid_pid", "pid": None, "metadata": None, "metadata_ok": False, **schema}
+    running = _pid_is_running(pid)
+    metadata = _read_coordinator_metadata(workspace)
+    metadata_ok = _coordinator_metadata_ok(metadata, pid)
+    ok = running and metadata_ok and bool(schema.get("schema_ok"))
+    return {
+        "ok": ok,
+        "status": "running" if running else "stale",
+        "pid": pid,
+        "metadata": metadata,
+        "metadata_ok": metadata_ok,
+        **schema,
+    }
 
 
 def start_coordinator(workspace: Path) -> dict[str, Any]:
@@ -2571,8 +2717,31 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
     health = coordinator_health(workspace)
     if health["ok"]:
         return {"ok": True, "pid": health["pid"], "status": "already_running", "log": str(coordinator_log_path(workspace))}
+    if health["status"] == "running" and not health.get("metadata_ok"):
+        EventLog(workspace).write(
+            "coordinator.restart_incompatible",
+            pid=health.get("pid"),
+            metadata=health.get("metadata"),
+            expected_protocol=COORDINATOR_PROTOCOL_VERSION,
+            expected_schema=MessageStore.SCHEMA_VERSION,
+        )
+        stop_coordinator(workspace)
+    if not health.get("schema_ok", False):
+        EventLog(workspace).write(
+            "coordinator.schema_incompatible",
+            error=health.get("schema_error"),
+            schema=health.get("schema"),
+        )
+        return {
+            "ok": False,
+            "pid": None,
+            "status": "schema_incompatible",
+            "error": health.get("schema_error"),
+            "schema": health.get("schema"),
+        }
     if health["status"] in {"stale", "invalid_pid"}:
         coordinator_pid_path(workspace).unlink(missing_ok=True)
+        coordinator_meta_path(workspace).unlink(missing_ok=True)
     log_path = coordinator_log_path(workspace)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
@@ -2590,8 +2759,27 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
     )
     log.close()
     coordinator_pid_path(workspace).write_text(str(proc.pid), encoding="utf-8")
+    write_coordinator_metadata(workspace, proc.pid, source="start")
     EventLog(workspace).write("coordinator.started", pid=proc.pid, log=str(log_path))
     return {"ok": True, "pid": proc.pid, "status": "started", "log": str(log_path)}
+
+
+def _message_store_schema_health(workspace: Path) -> dict[str, Any]:
+    try:
+        MessageStore(workspace)
+    except Exception as exc:
+        return {
+            "schema_ok": False,
+            "schema_error": str(exc),
+            "schema": {"message_store_schema_version": MessageStore.SCHEMA_VERSION},
+        }
+    return {
+        "schema_ok": True,
+        "schema_error": None,
+        "schema": {
+            "message_store_schema_version": MessageStore.SCHEMA_VERSION,
+        },
+    }
 
 
 def stop_coordinator(workspace: Path) -> dict[str, Any]:
@@ -2602,6 +2790,7 @@ def stop_coordinator(workspace: Path) -> dict[str, Any]:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except ValueError:
         pid_path.unlink(missing_ok=True)
+        coordinator_meta_path(workspace).unlink(missing_ok=True)
         return {"ok": True, "status": "invalid_pid_removed"}
     if _pid_is_running(pid):
         try:
@@ -2609,6 +2798,7 @@ def stop_coordinator(workspace: Path) -> dict[str, Any]:
         except OSError as exc:
             return {"ok": False, "status": "kill_failed", "pid": pid, "error": str(exc)}
     pid_path.unlink(missing_ok=True)
+    coordinator_meta_path(workspace).unlink(missing_ok=True)
     EventLog(workspace).write("coordinator.stopped", pid=pid)
     return {"ok": True, "status": "stopped", "pid": pid}
 

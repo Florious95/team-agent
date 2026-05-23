@@ -12,11 +12,96 @@ from team_agent.paths import runtime_dir
 from team_agent.spec import validate_result_envelope
 
 
+MESSAGE_COLUMNS = {
+    "message_id",
+    "task_id",
+    "sender",
+    "recipient",
+    "reply_to",
+    "requires_ack",
+    "status",
+    "content",
+    "artifact_refs",
+    "created_at",
+    "updated_at",
+    "delivered_at",
+    "acknowledged_at",
+    "error",
+    "delivery_attempts",
+}
+RESULT_COLUMNS = {"result_id", "task_id", "agent_id", "envelope", "status", "created_at"}
+SCHEDULED_EVENT_COLUMNS = {
+    "id",
+    "due_at",
+    "target",
+    "kind",
+    "payload_json",
+    "status",
+    "created_at",
+    "fired_at",
+    "result_json",
+}
+DELIVERY_TOKEN_COLUMNS = {
+    "message_id",
+    "unique_token",
+    "injected_at",
+    "visible_at",
+    "consumed_at",
+    "failed_at",
+    "failure_reason",
+}
+AGENT_HEALTH_COLUMNS = {
+    "agent_id",
+    "status",
+    "last_output_at",
+    "context_usage_pct",
+    "current_task_id",
+    "updated_at",
+}
+PEER_ALLOWLIST_COLUMNS = {"a", "b", "created_at"}
+RESULT_WATCHER_COLUMNS = {
+    "watcher_id",
+    "task_id",
+    "agent_id",
+    "message_id",
+    "leader_id",
+    "status",
+    "created_at",
+    "completed_at",
+    "result_id",
+    "notified_message_id",
+    "error",
+}
+
+
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"pragma table_info({table})").fetchall()}
+
+
+def _ensure_table_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    required: set[str],
+    migrations: dict[str, str] | None = None,
+) -> None:
+    columns = _table_columns(conn, table)
+    missing = required - columns
+    migrations = migrations or {}
+    unsupported = missing - set(migrations)
+    if unsupported:
+        names = ", ".join(sorted(unsupported))
+        raise RuntimeError(f"team.db table {table} is missing required column(s): {names}")
+    for name in sorted(missing):
+        conn.execute(migrations[name])
+
+
 class MessageStore:
+    SCHEMA_VERSION = 2
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.path = runtime_dir(workspace) / "team.db"
@@ -47,7 +132,8 @@ class MessageStore:
                       updated_at text,
                       delivered_at text,
                       acknowledged_at text,
-                      error text
+                      error text,
+                      delivery_attempts integer not null default 0
                     )
                     """
                 )
@@ -130,6 +216,23 @@ class MessageStore:
                     )
                     """
                 )
+                _ensure_table_columns(
+                    conn,
+                    "messages",
+                    MESSAGE_COLUMNS,
+                    {
+                        "delivery_attempts": (
+                            "alter table messages add column delivery_attempts integer not null default 0"
+                        )
+                    },
+                )
+                _ensure_table_columns(conn, "results", RESULT_COLUMNS)
+                _ensure_table_columns(conn, "scheduled_events", SCHEDULED_EVENT_COLUMNS)
+                _ensure_table_columns(conn, "delivery_tokens", DELIVERY_TOKEN_COLUMNS)
+                _ensure_table_columns(conn, "agent_health", AGENT_HEALTH_COLUMNS)
+                _ensure_table_columns(conn, "peer_allowlist", PEER_ALLOWLIST_COLUMNS)
+                _ensure_table_columns(conn, "result_watchers", RESULT_WATCHER_COLUMNS)
+                conn.execute(f"pragma user_version = {self.SCHEMA_VERSION}")
 
     def create_message(
         self,
@@ -147,7 +250,12 @@ class MessageStore:
             with conn:
                 conn.execute(
                     """
-                    insert into messages values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    insert into messages(
+                      message_id, task_id, sender, recipient, reply_to, requires_ack,
+                      status, content, artifact_refs, created_at, updated_at,
+                      delivered_at, acknowledged_at, error, delivery_attempts
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_id,
@@ -164,6 +272,7 @@ class MessageStore:
                         None,
                         None,
                         None,
+                        0,
                     ),
                 )
         return message_id
@@ -186,7 +295,15 @@ class MessageStore:
                     """,
                     (status, now, delivered_at, acknowledged_at, error, message_id),
                 )
-                if status in {"injected", "visible", "submitted", "submitted_unverified", "injected_unverified", "failed"}:
+                if status in {
+                    "injected",
+                    "visible",
+                    "submitted",
+                    "submitted_unverified",
+                    "injected_unverified",
+                    "delivery_blocked",
+                    "failed",
+                }:
                     conn.execute(
                         """
                         insert into delivery_tokens(
@@ -203,8 +320,8 @@ class MessageStore:
                             message_id,
                             now,
                             now if status in {"visible", "submitted"} else None,
-                            now if status in {"failed", "injected_unverified"} else None,
-                            error if status in {"failed", "injected_unverified"} else None,
+                            now if status in {"failed", "injected_unverified", "delivery_blocked"} else None,
+                            error if status in {"failed", "injected_unverified", "delivery_blocked"} else None,
                         ),
                     )
                 if status == "acknowledged":
@@ -212,6 +329,22 @@ class MessageStore:
                         "update delivery_tokens set consumed_at = coalesce(consumed_at, ?) where message_id = ?",
                         (now, message_id),
                     )
+
+    def defer_delivery(self, message_id: str, status: str, reason: str) -> None:
+        now = utcnow()
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    update messages
+                    set status = ?,
+                        updated_at = ?,
+                        error = ?,
+                        delivery_attempts = delivery_attempts + 1
+                    where message_id = ?
+                    """,
+                    (status, now, reason, message_id),
+                )
 
     def claim_for_delivery(self, message_id: str) -> bool:
         now = utcnow()
@@ -221,23 +354,27 @@ class MessageStore:
                     """
                     update messages
                     set status = 'target_resolved',
-                        updated_at = ?
+                        updated_at = ?,
+                        delivery_attempts = delivery_attempts + 1
                     where message_id = ?
-                      and status in ('pending', 'accepted')
+                      and status in ('pending', 'accepted', 'queued_until_idle', 'queued_until_start', 'queued_stopped', 'queued_pane_missing')
                     """,
                     (now, message_id),
                 )
         return result.rowcount == 1
 
-    def fail_timeouts(self, timeout_sec: int) -> list[str]:
+    def fail_timeouts(self, timeout_sec: int, exclude_recipients: set[str] | None = None) -> list[str]:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_sec)
         failed: list[str] = []
+        exclude_recipients = exclude_recipients or set()
         with closing(self.connect()) as conn:
             with conn:
                 rows = conn.execute(
-                    "select message_id, updated_at from messages where requires_ack = 1 and status in ('pending','accepted','target_resolved','injected','visible','submitted','delivered')"
+                    "select message_id, recipient, updated_at from messages where requires_ack = 1 and status in ('pending','accepted','target_resolved','injected','visible','submitted','delivered')"
                 ).fetchall()
                 for row in rows:
+                    if row["recipient"] in exclude_recipients:
+                        continue
                     try:
                         updated = datetime.fromisoformat(row["updated_at"])
                     except ValueError:
@@ -407,6 +544,13 @@ class MessageStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def retryable_result_watchers(self) -> list[dict[str, Any]]:
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                "select * from result_watchers where status in ('pending', 'notify_failed') order by created_at"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def result_watchers(self) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
             rows = conn.execute("select * from result_watchers order by created_at").fetchall()
@@ -441,7 +585,10 @@ class MessageStore:
         with closing(self.connect()) as conn:
             with conn:
                 conn.execute(
-                    "insert into results values (?, ?, ?, ?, ?, ?)",
+                    """
+                    insert into results(result_id, task_id, agent_id, envelope, status, created_at)
+                    values (?, ?, ?, ?, ?, ?)
+                    """,
                     (
                         result_id,
                         envelope["task_id"],
@@ -505,6 +652,24 @@ class MessageStore:
         with closing(self.connect()) as conn:
             rows = conn.execute(query).fetchall()
         return [dict(row) for row in rows]
+
+    def result_by_id(self, result_id: str) -> dict[str, Any] | None:
+        with closing(self.connect()) as conn:
+            row = conn.execute("select * from results where result_id = ?", (result_id,)).fetchone()
+        return dict(row) if row else None
+
+    def latest_results(self, limit: int = 5) -> list[dict[str, Any]]:
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                """
+                select * from results
+                where status != 'invalid'
+                order by created_at desc
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in reversed(rows)]
 
     def mark_result_collected(self, result_id: str) -> None:
         with closing(self.connect()) as conn:

@@ -30,6 +30,7 @@ def main(argv: list[str] | None = None) -> None:
     workspace = Path(args.workspace).resolve()
     runtime.ensure_workspace_dirs(workspace)
     runtime.coordinator_pid_path(workspace).write_text(str(__import__("os").getpid()), encoding="utf-8")
+    runtime.write_coordinator_metadata(workspace, __import__("os").getpid(), source="boot")
     event_log = EventLog(workspace)
     event_log.write("coordinator.boot", workspace=str(workspace), once=args.once)
     signal.signal(signal.SIGTERM, _stop)

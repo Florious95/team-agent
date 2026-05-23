@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,9 +50,12 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
     path = runtime_state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, path)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def write_team_state(workspace: Path, spec: dict[str, Any], runtime: dict[str, Any], results: list[dict[str, Any]] | None = None) -> Path:
@@ -119,4 +123,7 @@ def write_team_state(workspace: Path, spec: dict[str, Any], runtime: dict[str, A
 
 
 def write_spec(path: Path, spec: dict[str, Any]) -> None:
-    path.write_text(dumps(spec), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(dumps(spec), encoding="utf-8")
+    os.replace(tmp_path, path)
