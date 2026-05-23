@@ -2999,7 +2999,20 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
             expected_protocol=COORDINATOR_PROTOCOL_VERSION,
             expected_schema=MessageStore.SCHEMA_VERSION,
         )
-        stop_coordinator(workspace)
+        stopped = stop_coordinator(workspace)
+        if not stopped.get("ok"):
+            EventLog(workspace).write(
+                "coordinator.restart_incompatible_stop_failed",
+                pid=health.get("pid"),
+                stop_result=stopped,
+            )
+            return {
+                "ok": False,
+                "pid": health.get("pid"),
+                "status": "restart_incompatible_stop_failed",
+                "error": stopped.get("error") or stopped.get("status"),
+                "stop_result": stopped,
+            }
     if not health.get("schema_ok", False):
         EventLog(workspace).write(
             "coordinator.schema_incompatible",
