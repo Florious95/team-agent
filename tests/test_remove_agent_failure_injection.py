@@ -175,6 +175,26 @@ class AgentHealthGcHelperTests(unittest.TestCase):
                 store.gc_agent_health(["alpha", ""])
             self.assertIn("alpha", store.agent_health())
 
+    @unittest.skip(
+        "schema lacks agent_health.team_id; full cross-team isolation pending Gap 1/10 schema migration"
+    )
+    def test_gc_agent_health_isolates_same_agent_id_across_teams(self) -> None:
+        # Placeholder for Gap 1/10. Today agent_health.agent_id is a text PK
+        # with no team_id column, so two same-workspace teams sharing an
+        # agent_id collapse into one row on upsert and gc cannot tell them
+        # apart. Once the migration adds agent_health.team_id and the helpers
+        # accept a team scope, removing this skip should fail loudly (because
+        # the current code path swept the collapsed row), prompting the
+        # team-scoped helper rewrite that the migration unlocks.
+        with tempfile.TemporaryDirectory(prefix="team-agent-gc-team-collision-") as tmp:
+            store = MessageStore(Path(tmp))
+            store.upsert_agent_health("worker", "IDLE", current_task_id="team_a_task")
+            store.upsert_agent_health("worker", "RUNNING", current_task_id="team_b_task")
+            store.gc_agent_health(set())
+            remaining = store.agent_health()
+            self.assertIn("worker", remaining)
+            self.assertEqual(remaining["worker"]["current_task_id"], "team_b_task")
+
     def test_gc_agent_health_broken_derivation_excluding_sibling_team_is_rejected(self) -> None:
         # Simulate a sync-path derivation that silently maps a sibling team's
         # agent id to None (e.g. dict lookup with default=None). Without
