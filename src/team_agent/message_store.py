@@ -440,6 +440,34 @@ class MessageStore:
             rows = conn.execute("select * from agent_health order by agent_id").fetchall()
         return {row["agent_id"]: dict(row) for row in rows}
 
+    def delete_agent_health(self, agent_id: str) -> bool:
+        with closing(self.connect()) as conn:
+            with conn:
+                cur = conn.execute(
+                    "delete from agent_health where agent_id = ?",
+                    (agent_id,),
+                )
+        return cur.rowcount > 0
+
+    def gc_agent_health(self, valid_agent_ids: Any) -> list[str]:
+        # Caller must pass the workspace-wide set of live agent_ids across every
+        # team sharing this team.db. Rows whose agent_id is not in the set are
+        # deleted. If two teams share a workspace, the caller is responsible for
+        # computing the union before invoking this helper; otherwise live agents
+        # from a sibling team will be swept.
+        valid = {str(agent_id) for agent_id in valid_agent_ids}
+        with closing(self.connect()) as conn:
+            with conn:
+                rows = conn.execute("select agent_id from agent_health").fetchall()
+                stale = [row["agent_id"] for row in rows if row["agent_id"] not in valid]
+                if stale:
+                    placeholders = ",".join("?" for _ in stale)
+                    conn.execute(
+                        f"delete from agent_health where agent_id in ({placeholders})",
+                        stale,
+                    )
+        return stale
+
     def add_scheduled_event(self, due_at: str, target: str, kind: str, payload: dict[str, Any]) -> int:
         with closing(self.connect()) as conn:
             with conn:
