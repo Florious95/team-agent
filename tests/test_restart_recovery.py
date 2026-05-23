@@ -45,7 +45,7 @@ class RestartRecoveryTests(unittest.TestCase):
                 return Mock(returncode=0, stdout="", stderr="")
             raise AssertionError(f"unexpected command: {args}")
 
-        with patch("team_agent.providers.subprocess.run", side_effect=fake_run), patch("team_agent.providers.time.sleep", return_value=None):
+        with patch("team_agent.provider_cli.codex.subprocess.run", side_effect=fake_run), patch("team_agent.provider_cli.codex.time.sleep", return_value=None):
             handled = adapter.handle_startup_prompts("team-trust", "worker", checks=3, sleep_s=0.1)
 
         self.assertEqual(handled, [{"prompt": "codex_workspace_trust", "action": "sent_enter"}])
@@ -76,7 +76,7 @@ class RestartRecoveryTests(unittest.TestCase):
                 return Mock(returncode=0, stdout="", stderr="")
             raise AssertionError(f"unexpected command: {args}")
 
-        with patch("team_agent.providers.subprocess.run", side_effect=fake_run), patch("team_agent.providers.time.sleep", return_value=None):
+        with patch("team_agent.provider_cli.codex.subprocess.run", side_effect=fake_run), patch("team_agent.provider_cli.codex.time.sleep", return_value=None):
             handled = adapter.handle_startup_prompts("team-update", "worker", checks=3, sleep_s=0.1)
 
         self.assertEqual(handled, [{"prompt": "codex_update_available", "action": "sent_skip"}])
@@ -91,7 +91,7 @@ class RestartRecoveryTests(unittest.TestCase):
                 return capture
             raise AssertionError(f"unexpected command: {args}")
 
-        with patch("team_agent.providers.subprocess.run", side_effect=fake_run), patch("team_agent.providers.time.sleep", return_value=None):
+        with patch("team_agent.provider_cli.codex.subprocess.run", side_effect=fake_run), patch("team_agent.provider_cli.codex.time.sleep", return_value=None):
             handled = adapter.handle_startup_prompts("team-generic", "worker", checks=1, sleep_s=0.1)
 
         self.assertEqual(handled, [])

@@ -106,7 +106,7 @@ class RuntimeTests07(unittest.TestCase):
             stderr="",
         )
         try:
-            with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.providers.subprocess.run", return_value=proc):
+            with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.provider_cli.codex.subprocess.run", return_value=proc):
                 invalid = adapter.validate_model("GPT-5.3-Codex-Spark")
                 valid = adapter.validate_model("gpt-5.3-codex-spark")
         finally:
@@ -122,7 +122,7 @@ class RuntimeTests07(unittest.TestCase):
         adapter._model_catalog_cache = None
         proc = Mock(returncode=1, stdout="", stderr="catalog unavailable")
         try:
-            with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.providers.subprocess.run", return_value=proc):
+            with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.provider_cli.codex.subprocess.run", return_value=proc):
                 result = adapter.validate_model("gpt-5.5")
         finally:
             adapter._model_catalog_cache = old_cache
@@ -148,7 +148,7 @@ class RuntimeTests07(unittest.TestCase):
                 return capture
             raise AssertionError(f"unexpected command: {args}")
 
-        with patch("team_agent.providers.subprocess.run", side_effect=fake_run):
+        with patch("team_agent.provider_cli.codex.subprocess.run", side_effect=fake_run):
             handled = adapter.handle_startup_prompts("team-stale", "worker", checks=1, sleep_s=0.0)
 
         self.assertEqual(handled, [])

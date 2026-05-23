@@ -124,7 +124,7 @@ class RuntimeTests09(unittest.TestCase):
     def test_claude_auth_hint_uses_cli_status(self) -> None:
         adapter = get_adapter("claude_code")
         proc = Mock(returncode=1, stdout='{"loggedIn": false, "authMethod": "none"}', stderr="")
-        with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.providers.subprocess.run", return_value=proc):
+        with patch.object(adapter, "is_installed", return_value=True), patch("team_agent.provider_cli.claude.subprocess.run", return_value=proc):
             result = adapter.auth_hint()
         self.assertEqual(result["status"], "missing")
         self.assertIn("loggedIn", result["detail"])
@@ -218,7 +218,7 @@ class RuntimeTests09(unittest.TestCase):
             )
             adapter = get_adapter("gemini_cli")
             config = adapter.mcp_config(workspace, "gemini_researcher")
-            with patch("team_agent.providers.Path.home", return_value=home):
+            with patch("team_agent.provider_cli.gemini.Path.home", return_value=home):
                 mcp_path = adapter.install_mcp(workspace, "gemini_researcher", config)
                 settings = json.loads(settings_path.read_text(encoding="utf-8"))
                 self.assertEqual(settings["mcpServers"]["team_orchestrator"]["args"][:2], ["-m", "team_agent.mcp_server"])
@@ -237,7 +237,7 @@ class RuntimeTests09(unittest.TestCase):
             settings_path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
             adapter = get_adapter("gemini_cli")
             config = adapter.mcp_config(workspace, "gemini_researcher")
-            with patch("team_agent.providers.Path.home", return_value=home):
+            with patch("team_agent.provider_cli.gemini.Path.home", return_value=home):
                 mcp_path = adapter.install_mcp(workspace, "gemini_researcher", config)
                 save_runtime_state(
                     workspace,
