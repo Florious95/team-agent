@@ -6,9 +6,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from team_agent import runtime
 from team_agent.cli import _fake_spec, main
+from team_agent.errors import RuntimeError as TeamAgentRuntimeError
 from team_agent.message_store import MessageStore
 from team_agent.spec import load_spec
 from team_agent.state import load_runtime_state, save_runtime_state, write_spec, write_team_state
@@ -104,6 +106,50 @@ class RemoveAgentTests(unittest.TestCase):
                 for line in (workspace / ".team" / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
             ]
             self.assertTrue(any(event["event"] == "remove_agent.complete" for event in events))
+
+    def test_force_remove_stop_failure_does_not_restore_never_stopped_worker(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-remove-stop-fails-") as tmp:
+            workspace = Path(tmp)
+            spec_path, role_file = _workspace_with_dynamic_agent(workspace)
+            state = load_runtime_state(workspace)
+            state["agents"]["temp_worker"]["status"] = "running"
+            save_runtime_state(workspace, state)
+            before_spec = spec_path.read_text(encoding="utf-8")
+            before_state = load_runtime_state(workspace)
+            before_team_state = (workspace / "team_state.md").read_text(encoding="utf-8")
+
+            with (
+                patch("team_agent.runtime.stop_agent", side_effect=RuntimeError("stop failed")),
+                patch("team_agent.runtime.start_agent") as start_agent,
+            ):
+                with self.assertRaises(TeamAgentRuntimeError):
+                    runtime.remove_agent(workspace, "temp_worker", force=True)
+
+            start_agent.assert_not_called()
+            self.assertEqual(spec_path.read_text(encoding="utf-8"), before_spec)
+            self.assertEqual(load_runtime_state(workspace), before_state)
+            self.assertEqual((workspace / "team_state.md").read_text(encoding="utf-8"), before_team_state)
+            self.assertTrue(role_file.exists())
+            self.assertIn("temp_worker", MessageStore(workspace).agent_health())
+
+    def test_success_event_log_failure_returns_warning_after_storage_commit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-remove-event-fails-") as tmp:
+            workspace = Path(tmp)
+            spec_path, role_file = _workspace_with_dynamic_agent(workspace)
+
+            def fake_write(_self, event: str, **_fields: object) -> None:
+                if event == "remove_agent.complete":
+                    raise OSError("event log unavailable")
+
+            with patch("team_agent.events.EventLog.write", new=fake_write):
+                result = runtime.remove_agent(workspace, "temp_worker")
+
+            self.assertTrue(result["ok"])
+            self.assertIn("success event logging failed", result["warning"])
+            self.assertNotIn("temp_worker", {agent["id"] for agent in load_spec(spec_path)["agents"]})
+            self.assertNotIn("temp_worker", load_runtime_state(workspace)["agents"])
+            self.assertFalse(role_file.exists())
+            self.assertNotIn("temp_worker", MessageStore(workspace).agent_health())
 
 
 if __name__ == "__main__":

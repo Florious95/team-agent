@@ -41,11 +41,12 @@ def remove_agent(
     if running and not force:
         return {"ok": False, "agent_id": agent_id, "status": "refused", "reason": "force_required"}
 
-    rollback = _RemoveRollback(workspace, spec_path, spec, state, dynamic_role_file, store, agent_id, running and force)
+    rollback = _RemoveRollback(workspace, spec_path, spec, state, dynamic_role_file, store, agent_id, False)
     stopped: dict[str, Any] | None = None
     try:
         if running and force:
             stopped = runtime.stop_agent(workspace, agent_id)
+            rollback.restore_running = True
             state = load_runtime_state(workspace)
         removed_state = copy.deepcopy(state)
         removed_state.get("agents", {}).pop(agent_id, None)
@@ -68,14 +69,19 @@ def remove_agent(
         raise RuntimeError(f"remove-agent failed for {agent_id}: {exc}; rollback_ok={rollback_result['ok']}") from exc
 
     runtime._save_team_runtime_snapshot(workspace, removed_state)
-    event_log.write(
-        "remove_agent.complete",
-        agent_id=agent_id,
-        from_spec=from_spec,
-        force=force,
-        stopped=stopped,
-        role_file_removed=role_file_removed,
-    )
+    warning = None
+    try:
+        # Storage commit is authoritative; final success event logging is best-effort.
+        event_log.write(
+            "remove_agent.complete",
+            agent_id=agent_id,
+            from_spec=from_spec,
+            force=force,
+            stopped=stopped,
+            role_file_removed=role_file_removed,
+        )
+    except Exception as exc:
+        warning = f"remove-agent completed but success event logging failed: {exc}"
     return {
         "ok": True,
         "agent_id": agent_id,
@@ -85,6 +91,7 @@ def remove_agent(
         "stopped": stopped,
         "state_file": str(team_state_path),
         "role_file_removed": role_file_removed,
+        **({"warning": warning} if warning else {}),
     }
 
 
@@ -189,13 +196,7 @@ def _remove_dynamic_role_file(path: Path, required: bool) -> bool:
 
 
 def _delete_agent_health(store: MessageStore, agent_id: str) -> None:
-    delete = getattr(store, "delete_agent_health", None)
-    if callable(delete):
-        delete(agent_id)
-        return
-    with store.connect() as conn:
-        with conn:
-            conn.execute("delete from agent_health where agent_id = ?", (agent_id,))
+    store.delete_agent_health(agent_id)
 
 
 def _restore_agent_health(store: MessageStore, agent_id: str, row: dict[str, Any] | None) -> None:
