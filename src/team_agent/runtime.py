@@ -2582,6 +2582,20 @@ def start_agent(
         return _start_agent_unlocked(workspace, agent_id, force=force, open_display=open_display, allow_fresh=allow_fresh)
 
 
+def remove_agent(
+    workspace: Path,
+    agent_id: str,
+    *,
+    from_spec: bool = False,
+    confirm: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    from team_agent.lifecycle.agents import remove_agent as lifecycle_remove_agent
+
+    with _runtime_lock(workspace, "remove-agent"):
+        return lifecycle_remove_agent(workspace, agent_id, from_spec=from_spec, confirm=confirm, force=force)
+
+
 def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_display: bool, allow_fresh: bool) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))

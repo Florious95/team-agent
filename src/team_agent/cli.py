@@ -292,6 +292,15 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_fork_agent)
 
+    p = sub.add_parser("remove-agent", help="Remove one worker from runtime state and team spec")
+    p.add_argument("agent")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--from-spec", action="store_true", help="Allow removing a spec-native worker")
+    p.add_argument("--confirm", action="store_true", help="Required with --from-spec")
+    p.add_argument("--force", action="store_true", help="Stop a running worker before removing it")
+    add_json(p)
+    p.set_defaults(func=cmd_remove_agent)
+
     p = sub.add_parser("install-skill", help=argparse.SUPPRESS)
     p.add_argument("--target", choices=["codex", "claude", "all"], default="codex")
     p.add_argument("--dest", help="Explicit destination directory; overrides --target")
@@ -328,7 +337,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:
@@ -719,6 +728,16 @@ def cmd_fork_agent(args: argparse.Namespace) -> dict[str, Any]:
         as_agent_id=args.as_agent,
         label=args.label,
         open_display=not args.no_display,
+    )
+
+
+def cmd_remove_agent(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.remove_agent(
+        Path(args.workspace).resolve(),
+        args.agent,
+        from_spec=args.from_spec,
+        confirm=args.confirm,
+        force=args.force,
     )
 
 
