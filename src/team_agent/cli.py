@@ -261,6 +261,37 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_start_agent)
 
+    p = sub.add_parser("stop-agent", help="Hard-stop one running worker while preserving its session for start-agent")
+    p.add_argument("agent")
+    p.add_argument("--workspace", default=".")
+    add_json(p)
+    p.set_defaults(func=cmd_stop_agent)
+
+    p = sub.add_parser("reset-agent", help="Reset one worker to a fresh session after explicit confirmation")
+    p.add_argument("agent")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--discard-session", action="store_true", help="Required: discard this worker's prior provider session")
+    p.add_argument("--no-display", action="store_true", help="Do not update a Ghostty display window")
+    add_json(p)
+    p.set_defaults(func=cmd_reset_agent)
+
+    p = sub.add_parser("add-agent", help="Add a first-class worker from an explicit workspace-relative role file")
+    p.add_argument("agent")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--role-file", required=True, help="Workspace-relative YAML/Markdown agent entry")
+    p.add_argument("--no-display", action="store_true", help="Do not open a Ghostty display window")
+    add_json(p)
+    p.set_defaults(func=cmd_add_agent)
+
+    p = sub.add_parser("fork-agent", help="Fork a running worker using the provider's native branch/fork support")
+    p.add_argument("source_agent")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--as", dest="as_agent", required=True, help="New worker agent id")
+    p.add_argument("--label", help="Optional audit label")
+    p.add_argument("--no-display", action="store_true", help="Do not open a Ghostty display window")
+    add_json(p)
+    p.set_defaults(func=cmd_fork_agent)
+
     p = sub.add_parser("install-skill", help=argparse.SUPPRESS)
     p.add_argument("--target", choices=["codex", "claude", "all"], default="codex")
     p.add_argument("--dest", help="Explicit destination directory; overrides --target")
@@ -297,7 +328,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:
@@ -319,15 +350,24 @@ def add_json(parser: argparse.ArgumentParser) -> None:
 
 def _run_leader_passthrough(command: str, provider_args: list[str]) -> None:
     if provider_args in (["-h"], ["--help"]):
-        print(f"usage: team-agent {command} [args passed to {command}]")
+        print(f"usage: team-agent {command} [--attach --confirm | --attach-session SESSION --confirm] [args passed to {command}]")
         print()
         print(f"Start a tmux-managed {command} leader in the current directory.")
+        print("Default starts a new independent leader session; explicit attach requires --confirm.")
         print(f"Use `team-agent {command} -- --help` to pass --help to the provider CLI.")
         return
     args = argparse.Namespace(command=command, workspace=".")
     try:
         provider = "codex" if command == "codex" else "claude_code"
-        runtime.start_leader(provider, _provider_args(provider_args), Path.cwd().resolve())
+        launcher_args = _leader_launcher_args(provider_args)
+        runtime.start_leader(
+            provider,
+            _provider_args(launcher_args["provider_args"]),
+            Path.cwd().resolve(),
+            attach_existing=launcher_args["attach_existing"],
+            confirm_attach=launcher_args["confirm_attach"],
+            attach_session=launcher_args["attach_session"],
+        )
     except TeamAgentError as exc:
         _emit_cli_error(exc, args)
         raise SystemExit(1)
@@ -444,6 +484,39 @@ def _provider_args(values: list[str]) -> list[str]:
     if values and values[0] == "--":
         return values[1:]
     return values
+
+
+def _leader_launcher_args(values: list[str]) -> dict[str, Any]:
+    provider_args: list[str] = []
+    attach_existing = False
+    confirm_attach = False
+    attach_session: str | None = None
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value == "--":
+            provider_args.extend(values[index:])
+            break
+        if value in {"--attach", "--attach-existing"}:
+            attach_existing = True
+        elif value == "--confirm":
+            confirm_attach = True
+        elif value == "--attach-session":
+            index += 1
+            if index >= len(values):
+                raise RuntimeError("--attach-session requires a tmux session name")
+            attach_session = values[index]
+        elif value.startswith("--attach-session="):
+            attach_session = value.split("=", 1)[1]
+        else:
+            provider_args.append(value)
+        index += 1
+    return {
+        "provider_args": provider_args,
+        "attach_existing": attach_existing,
+        "confirm_attach": confirm_attach,
+        "attach_session": attach_session,
+    }
 
 
 def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
@@ -614,6 +687,38 @@ def cmd_start_agent(args: argparse.Namespace) -> dict[str, Any]:
         force=args.force,
         open_display=not args.no_display,
         allow_fresh=args.allow_fresh,
+    )
+
+
+def cmd_stop_agent(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.stop_agent(Path(args.workspace).resolve(), args.agent)
+
+
+def cmd_reset_agent(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.reset_agent(
+        Path(args.workspace).resolve(),
+        args.agent,
+        discard_session=args.discard_session,
+        open_display=not args.no_display,
+    )
+
+
+def cmd_add_agent(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.add_agent(
+        Path(args.workspace).resolve(),
+        args.agent,
+        role_file_path=args.role_file,
+        open_display=not args.no_display,
+    )
+
+
+def cmd_fork_agent(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.fork_agent(
+        Path(args.workspace).resolve(),
+        args.source_agent,
+        as_agent_id=args.as_agent,
+        label=args.label,
+        open_display=not args.no_display,
     )
 
 

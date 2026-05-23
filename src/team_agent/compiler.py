@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -39,40 +40,19 @@ def compile_team(team_dir: Path, out_path: Path | None = None) -> dict[str, Any]
     routing_rules = []
     startup_order = []
     for role_doc in sorted(agents_dir.glob("*.md")):
-        meta, body = _read_front_matter(role_doc)
-        if "auth_mode" not in meta and default_auth_mode is not None:
-            meta["auth_mode"] = default_auth_mode
-        if "profile" not in meta and default_profile is not None:
-            meta["profile"] = default_profile
-        profile_model = _profile_model(workspace, meta.get("profile"), team_dir / "profiles")
-        if (
-            "model" not in meta
-            and not (meta.get("auth_mode") == "compatible_api" and profile_model)
-        ):
-            meta["model"] = _default_model_for_provider(meta.get("provider"), provider_models, default_model)
-        _validate_role_doc(role_doc, meta, body, profile_names, profile_model)
+        meta, body = _role_doc_meta_for_team(
+            role_doc,
+            team_meta,
+            workspace,
+            team_dir,
+            profile_names,
+            default_auth_mode,
+            default_profile,
+            provider_models,
+            default_model,
+        )
         agent_id = str(meta["name"])
-        tools = _normalize_tools(list(meta["tools"] or []))
-        agent = {
-            "id": agent_id,
-            "role": str(meta["role"]),
-            "provider": str(meta["provider"]),
-            "model": str(meta["model"]) if meta.get("model") is not None else None,
-            "auth_mode": str(meta["auth_mode"]),
-            "working_directory": str(workspace),
-            "system_prompt": {"inline": body.strip() or str(meta["role"]), "file": None},
-            "tools": tools,
-            "permission_mode": "restricted",
-            "preferred_for": [agent_id, str(meta["role"])],
-            "avoid_for": [],
-            "output_contract": {
-                "format": "result_envelope_v1",
-                "required_fields": ["task_id", "status", "summary", "artifacts"],
-            },
-        }
-        if meta.get("profile"):
-            agent["profile"] = str(meta["profile"])
-            agent["credential_ref"] = f"profile:{meta['profile']}"
+        agent = _agent_from_role_doc(meta, body, workspace, agent_id)
         agents.append(agent)
         routing_rules.append({"id": f"route-{agent_id}", "match": {"assignee": [agent_id]}, "assign_to": agent_id, "priority": 10})
         startup_order.append(agent_id)
@@ -155,6 +135,41 @@ def compile_team(team_dir: Path, out_path: Path | None = None) -> dict[str, Any]
     return {"ok": True, "team_dir": str(team_dir), "out": str(out_path) if out_path else None, "spec": spec}
 
 
+def compile_role_doc_agent(role_doc: Path, team_dir: Path, agent_id: str | None = None) -> dict[str, Any]:
+    meta, body = _read_front_matter(role_doc.resolve())
+    return compile_role_entry_agent(role_doc.resolve(), team_dir, meta, body, agent_id)
+
+
+def compile_role_entry_agent(
+    role_doc: Path,
+    team_dir: Path,
+    meta: dict[str, Any],
+    body: str,
+    agent_id: str | None = None,
+) -> dict[str, Any]:
+    team_dir = team_dir.resolve()
+    workspace = team_workspace(team_dir)
+    team_doc = team_dir / "TEAM.md"
+    if not team_doc.exists():
+        raise ValidationError(f"{team_doc}: missing TEAM.md")
+    profile_names = known_profiles(team_dir)
+    team_meta, _team_body = _read_front_matter(team_doc)
+    meta, body = _role_doc_meta_for_team(
+        role_doc,
+        team_meta,
+        workspace,
+        team_dir,
+        profile_names,
+        team_meta.get("default_auth_mode") or "subscription",
+        team_meta.get("default_profile"),
+        _provider_model_defaults(team_meta),
+        team_meta.get("default_model") or team_meta.get("model"),
+        role_meta=meta,
+        role_body=body,
+    )
+    return _agent_from_role_doc(meta, body, workspace, str(agent_id or meta["name"]))
+
+
 def _read_front_matter(path: Path) -> tuple[dict[str, Any], str]:
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
@@ -168,6 +183,56 @@ def _read_front_matter(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(data, dict):
         raise ValidationError(f"{path}: front matter must be a YAML object")
     return data, body
+
+
+def _role_doc_meta_for_team(
+    role_doc: Path,
+    team_meta: dict[str, Any],
+    workspace: Path,
+    team_dir: Path,
+    profile_names: set[str],
+    default_auth_mode: Any,
+    default_profile: Any,
+    provider_models: dict[str, str],
+    default_model: Any,
+    role_meta: dict[str, Any] | None = None,
+    role_body: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    meta, body = (role_meta, role_body) if role_meta is not None and role_body is not None else _read_front_matter(role_doc)
+    meta = copy.deepcopy(meta)
+    if "auth_mode" not in meta and default_auth_mode is not None:
+        meta["auth_mode"] = default_auth_mode
+    if "profile" not in meta and default_profile is not None:
+        meta["profile"] = default_profile
+    profile_model = _profile_model(workspace, meta.get("profile"), team_dir / "profiles")
+    if "model" not in meta and not (meta.get("auth_mode") == "compatible_api" and profile_model):
+        meta["model"] = _default_model_for_provider(meta.get("provider"), provider_models, default_model)
+    _validate_role_doc(role_doc, meta, body, profile_names, profile_model)
+    return meta, body
+
+
+def _agent_from_role_doc(meta: dict[str, Any], body: str, workspace: Path, agent_id: str) -> dict[str, Any]:
+    agent = {
+        "id": agent_id,
+        "role": str(meta["role"]),
+        "provider": str(meta["provider"]),
+        "model": str(meta["model"]) if meta.get("model") is not None else None,
+        "auth_mode": str(meta["auth_mode"]),
+        "working_directory": str(workspace),
+        "system_prompt": {"inline": body.strip() or str(meta["role"]), "file": None},
+        "tools": _normalize_tools(list(meta["tools"] or [])),
+        "permission_mode": "restricted",
+        "preferred_for": [agent_id, str(meta["role"])],
+        "avoid_for": [],
+        "output_contract": {
+            "format": "result_envelope_v1",
+            "required_fields": ["task_id", "status", "summary", "artifacts"],
+        },
+    }
+    if meta.get("profile"):
+        agent["profile"] = str(meta["profile"])
+        agent["credential_ref"] = f"profile:{meta['profile']}"
+    return agent
 
 
 def _validate_role_doc(

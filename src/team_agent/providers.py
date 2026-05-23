@@ -15,6 +15,7 @@ from typing import Any
 
 from team_agent.permissions import resolve_permissions
 from team_agent.paths import repo_root
+from team_agent.provider_cli.prompt import TEAMMATE_SYSTEM_PROMPT, compile_system_prompt
 from team_agent.profiles import ensure_compatible_claude_mcp_config, prepare_agent_profile_launch
 
 
@@ -68,6 +69,20 @@ class ProviderAdapter:
         if not session_id:
             raise ResumeUnavailable("session_id is required to resume")
         raise ResumeUnavailable(f"{self.provider} does not support resume")
+
+    def supports_session_fork(self, agent: dict[str, Any] | None = None) -> bool:
+        _ = agent
+        return False
+
+    def build_fork_command(
+        self,
+        agent: dict[str, Any],
+        source_session_id: str,
+        workspace: Path,
+        mcp_config: dict[str, Any],
+    ) -> list[str]:
+        _ = agent, source_session_id, workspace, mcp_config
+        raise ResumeUnavailable(f"{self.provider} does not support native session fork")
 
     def session_is_resumable(self, agent_state: dict[str, Any], workspace: Path) -> bool:
         _ = workspace
@@ -149,10 +164,33 @@ class ClaudeCodeAdapter(ProviderAdapter):
         if not session_id:
             raise ResumeUnavailable("claude resume requires session_id")
         if not self.session_is_resumable(agent_state, workspace):
-            raise ResumeUnavailable(f"claude resume transcript not found for session_id {session_id}")
+            diagnostics = self.session_lookup_diagnostics(agent_state, workspace)
+            raise ResumeUnavailable(
+                "claude resume transcript not found "
+                f"for session_id {session_id}; diagnostics={json.dumps(diagnostics, sort_keys=True)}"
+            )
         agent = dict(agent_state.get("_agent_spec") or agent_state)
         cmd = self._base_command(agent, mcp_config or {})
         cmd.extend(["--resume", str(session_id)])
+        return cmd
+
+    def supports_session_fork(self, agent: dict[str, Any] | None = None) -> bool:
+        return not agent or agent.get("auth_mode") != "compatible_api"
+
+    def build_fork_command(
+        self,
+        agent: dict[str, Any],
+        source_session_id: str,
+        workspace: Path,
+        mcp_config: dict[str, Any],
+    ) -> list[str]:
+        _ = workspace
+        if not source_session_id:
+            raise ResumeUnavailable("claude fork requires source session_id")
+        session_id = agent.get("_session_id") or str(uuid.uuid4())
+        agent["_session_id"] = session_id
+        cmd = self._base_command(agent, mcp_config)
+        cmd.extend(["--session-id", session_id, "--resume", str(source_session_id), "--fork-session"])
         return cmd
 
     def capture_session_id(
@@ -199,9 +237,27 @@ class ClaudeCodeAdapter(ProviderAdapter):
             return False
         cwd = Path(str(agent_state.get("spawn_cwd") or workspace))
         root = Path(agent_state.get("claude_projects_root") or Path.home() / ".claude" / "projects")
-        path = _claude_transcript_path(root, cwd, str(session_id))
-        meta = _read_claude_transcript_meta(path, cwd)
-        return bool(meta and meta.get("same_cwd") and meta.get("has_user_message"))
+        for path in _claude_transcript_paths(root, cwd, str(session_id)):
+            meta = _read_claude_transcript_meta(path, cwd)
+            if meta and meta.get("same_cwd") and meta.get("has_user_message"):
+                return True
+        return False
+
+    def session_lookup_diagnostics(self, agent_state: dict[str, Any], workspace: Path) -> dict[str, Any]:
+        session_id = str(agent_state.get("session_id") or "")
+        cwd = Path(str(agent_state.get("spawn_cwd") or workspace))
+        root = Path(agent_state.get("claude_projects_root") or Path.home() / ".claude" / "projects")
+        paths = _claude_transcript_paths(root, cwd, session_id) if session_id else []
+        return {
+            "provider": self.provider,
+            "expected_session_id": session_id,
+            "spawn_cwd": str(cwd),
+            "claude_projects_root": str(root),
+            "encoded_dir_claude_actual": _claude_project_dir(root, cwd).name,
+            "encoded_dir_team_agent_legacy": _claude_legacy_project_dir(root, cwd).name,
+            "transcript_paths_checked": [str(path) for path in paths],
+            "path_exists": {str(path): path.exists() for path in paths},
+        }
 
     def recover_session_id(
         self,
@@ -222,6 +278,7 @@ class ClaudeCodeAdapter(ProviderAdapter):
             exclude_session_ids=exclude_session_ids or set(),
             allow_older=True,
             require_agent_match=True,
+            require_cwd=True,
         )
         if not match:
             return None
@@ -339,6 +396,23 @@ class CodexAdapter(ProviderAdapter):
         cmd.append(str(session_id))
         return cmd
 
+    def supports_session_fork(self, agent: dict[str, Any] | None = None) -> bool:
+        return not agent or agent.get("auth_mode") != "compatible_api"
+
+    def build_fork_command(
+        self,
+        agent: dict[str, Any],
+        source_session_id: str,
+        workspace: Path,
+        mcp_config: dict[str, Any],
+    ) -> list[str]:
+        _ = workspace
+        if not source_session_id:
+            raise ResumeUnavailable("codex fork requires source session_id")
+        cmd = self._base_command(agent, mcp_config, resume=False, fork=True)
+        cmd.append(str(source_session_id))
+        return cmd
+
     def capture_session_id(
         self,
         agent_id: str,
@@ -368,11 +442,19 @@ class CodexAdapter(ProviderAdapter):
                 return None
             time.sleep(0.2)
 
-    def _base_command(self, agent: dict[str, Any], mcp_config: dict[str, Any], resume: bool) -> list[str]:
+    def _base_command(
+        self,
+        agent: dict[str, Any],
+        mcp_config: dict[str, Any],
+        resume: bool,
+        fork: bool = False,
+    ) -> list[str]:
         prompt = compile_system_prompt(agent)
         cmd = ["codex"]
         if resume:
             cmd.append("resume")
+        elif fork:
+            cmd.append("fork")
         cmd.extend(["--no-alt-screen", "--disable", "shell_snapshot", "--disable", "apps"])
         profile_overrides = agent.get("_provider_profile", {}).get("command_overrides", {})
         if profile_overrides.get("codex_profile"):
@@ -431,13 +513,23 @@ class CodexAdapter(ProviderAdapter):
             output = proc.stdout if proc.returncode == 0 else ""
             trust_pos = max(
                 output.rfind("Do you trust the contents of this directory?"),
-                output.rfind("Press enter to continue"),
+                output.rfind("Do you trust the files in this folder?"),
+                output.rfind("Do you trust this folder?"),
             )
+            update_pos = max(output.rfind("Update available!"), output.rfind("Update now"))
             ready_pos = max(output.rfind("OpenAI Codex"), output.rfind("›"), output.rfind("codex>"))
+            if update_pos >= 0 and update_pos > ready_pos:
+                subprocess.run(["tmux", "send-keys", "-t", target, "Down", "Enter"], check=False)
+                handled.append({"prompt": "codex_update_available", "action": "sent_skip"})
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                continue
             if trust_pos >= 0 and trust_pos > ready_pos:
                 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=False)
                 handled.append({"prompt": "codex_workspace_trust", "action": "sent_enter"})
-                break
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                continue
             if ready_pos >= 0:
                 break
             if sleep_s > 0:
@@ -632,67 +724,11 @@ ADAPTERS: dict[str, ProviderAdapter] = {
     "fake": FakeAdapter(),
 }
 
-TEAMMATE_SYSTEM_PROMPT = """# Team Agent Teammate Runtime Contract
-
-You are a teammate in a Team Agent runtime, not the user's primary assistant.
-The user normally talks to the team lead. Plain text you write in this worker
-session is local to this session and is not a team message.
-
-Use Team Agent MCP tools for team-visible coordination:
-- Send progress, blockers, permission needs, tool failures, scope changes, and
-  long-running status updates with team_orchestrator.send_message(to='leader',
-  content='<short message>').
-- Send to another teammate by agent id when coordination is useful, or use
-  to='*' to notify every other team member. The runtime resolves only this team
-  and excludes your own worker.
-- When the task is complete, call team_orchestrator.report_result exactly once.
-- Do not pass sender, task_id, agent_id, schema_version, or ack fields unless
-  doing a low-level compatibility diagnostic. The MCP runtime fills protocol
-  fields from the current worker and task state.
-
-If you are blocked or cannot continue, message the leader promptly instead of
-waiting silently. If work takes several minutes, send a short progress update.
-"""
-
-
 def get_adapter(provider: str) -> ProviderAdapter:
     try:
         return ADAPTERS[provider]
     except KeyError as exc:
         raise KeyError(f"Unsupported provider: {provider}") from exc
-
-
-def compile_system_prompt(agent: dict[str, Any]) -> str:
-    prompt_cfg = agent.get("system_prompt", {})
-    identity = (
-        f"You are Team Agent worker `{agent.get('id')}` with role `{agent.get('role')}`. "
-        "When asked about your role or identity, answer with this Team Agent worker identity first, "
-        "not only the generic provider product identity."
-    )
-    chunks: list[str] = [identity, TEAMMATE_SYSTEM_PROMPT]
-    if prompt_cfg.get("inline"):
-        chunks.append(str(prompt_cfg["inline"]))
-    if prompt_cfg.get("file"):
-        chunks.append(Path(prompt_cfg["file"]).read_text(encoding="utf-8"))
-    contract = agent.get("output_contract", {})
-    if contract.get("format") == "result_envelope_v1":
-        chunks.append(
-            "For progress or blockers, call team_orchestrator.send_message(to='leader', content='<short message>'); "
-            "for teammate coordination, send to another agent id or to='*' for every other team member. "
-            "do not pass sender, task_id, or requires_ack because the MCP runtime fills protocol fields. "
-            "the runtime injects it into the attached Codex leader pane when the leader has run attach-leader. "
-            "If no leader is attached, the tool returns a fallback/failed result instead of completion. "
-            "Final completion must call team_orchestrator.report_result exactly once with a short summary "
-            "and optional status/changes/tests; MCP fills schema_version, task_id, and agent_id."
-        )
-    perms = resolve_permissions(agent)
-    if perms["has_prompt_only"]:
-        prompt_only = [e["tool"] for e in perms["resolved_tools"] if e["enforcement"] == "prompt_only"]
-        chunks.append(
-            "Permission note: these tools are prompt-only for this provider and not hard-enforced: "
-            + ", ".join(prompt_only)
-        )
-    return "\n\n".join(chunk for chunk in chunks if chunk)
 
 
 def shell_command_for_agent(agent: dict[str, Any], workspace: Path, mcp_config: dict[str, Any]) -> str:
@@ -737,6 +773,31 @@ def shell_resume_command_for_agent(
     resume_state = dict(agent_state)
     resume_state["_agent_spec"] = command_agent
     cmd = adapter.build_resume_command(resume_state, workspace, mcp_config)
+    return shell_command(cmd, agent["id"], workspace, profile_launch)
+
+
+def shell_fork_command_for_agent(
+    agent: dict[str, Any],
+    source_session_id: str,
+    workspace: Path,
+    mcp_config: dict[str, Any],
+) -> str:
+    adapter = get_adapter(agent["provider"])
+    command_agent = dict(agent)
+    profile_launch = command_agent.get("_provider_profile") or prepare_agent_profile_launch(workspace, command_agent)
+    if profile_launch:
+        command_agent["_provider_profile"] = profile_launch
+        agent["_provider_profile"] = profile_launch
+    if (
+        agent.get("provider") in {"claude", "claude_code"}
+        and profile_launch
+        and profile_launch.get("auth_mode") == "compatible_api"
+        and profile_launch.get("claude_projects_root")
+    ):
+        ensure_compatible_claude_mcp_config(workspace, agent["id"], mcp_config)
+    cmd = adapter.build_fork_command(command_agent, source_session_id, workspace, mcp_config)
+    if command_agent.get("_session_id"):
+        agent["_session_id"] = command_agent["_session_id"]
     return shell_command(cmd, agent["id"], workspace, profile_launch)
 
 
@@ -810,28 +871,31 @@ def _find_claude_transcript(
     exclude_session_ids: set[str] | None = None,
     allow_older: bool = False,
     require_agent_match: bool = False,
+    require_cwd: bool = True,
 ) -> dict[str, Any] | None:
     if not root.exists():
         return None
     exclude_session_ids = exclude_session_ids or set()
     if predetermined_session_id and predetermined_session_id not in exclude_session_ids:
-        path = _claude_transcript_path(root, cwd, predetermined_session_id)
-        meta = _read_claude_transcript_meta(path, cwd)
-        if meta and meta.get("same_cwd") and meta.get("has_user_message"):
-            return {
-                "session_id": str(predetermined_session_id),
-                "rollout_path": str(path),
-                "timestamp": meta.get("timestamp") or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
-                "captured_via": "fs_watch",
-                "confidence": "high",
-            }
+        for path in _claude_transcript_paths(root, cwd, predetermined_session_id):
+            meta = _read_claude_transcript_meta(path, cwd)
+            if meta and (not require_cwd or meta.get("same_cwd")) and meta.get("has_user_message"):
+                return {
+                    "session_id": str(predetermined_session_id),
+                    "rollout_path": str(path),
+                    "timestamp": meta.get("timestamp") or datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
+                    "captured_via": "fs_watch",
+                    "confidence": "high",
+                }
     lower_bound = spawn_time - timedelta(seconds=2)
     upper_bound = datetime.now(timezone.utc) + timedelta(seconds=5)
     candidates: list[dict[str, Any]] = []
     for directory in _claude_project_dirs(root, cwd):
         for path in sorted(directory.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:300]:
             meta = _read_claude_transcript_meta(path, cwd)
-            if not meta or not meta.get("same_cwd") or not meta.get("has_user_message"):
+            if not meta or not meta.get("has_user_message"):
+                continue
+            if require_cwd and not meta.get("same_cwd"):
                 continue
             session_id = str(meta.get("session_id") or path.stem)
             if session_id in exclude_session_ids:
@@ -841,7 +905,9 @@ def _find_claude_transcript(
                 continue
             text = str(meta.get("text") or "")
             score = _claude_agent_match_score(agent_id, text)
-            if score <= 0 and (not allow_older or require_agent_match):
+            if require_agent_match and score < 2:
+                continue
+            if score <= 0 and not allow_older:
                 continue
             candidates.append(
                 {
@@ -860,16 +926,18 @@ def _find_claude_transcript(
 
 
 def _claude_project_dirs(root: Path, cwd: Path) -> list[Path]:
-    direct = _claude_project_dir(root, cwd)
-    if direct.exists():
-        return [direct]
-    try:
-        return [path for path in root.iterdir() if path.is_dir()]
-    except OSError:
-        return []
+    return [directory for directory in _unique_paths([_claude_project_dir(root, cwd), _claude_legacy_project_dir(root, cwd)]) if directory.exists()]
 
 
 def _claude_project_dir(root: Path, cwd: Path) -> Path:
+    try:
+        cwd_text = str(cwd.resolve())
+    except OSError:
+        cwd_text = str(cwd)
+    return root / re.sub(r"[^A-Za-z0-9.-]", "-", cwd_text)
+
+
+def _claude_legacy_project_dir(root: Path, cwd: Path) -> Path:
     try:
         cwd_text = str(cwd.resolve())
     except OSError:
@@ -879,6 +947,29 @@ def _claude_project_dir(root: Path, cwd: Path) -> Path:
 
 def _claude_transcript_path(root: Path, cwd: Path, session_id: str) -> Path:
     return _claude_project_dir(root, cwd) / f"{session_id}.jsonl"
+
+
+def _claude_transcript_paths(root: Path, cwd: Path, session_id: str) -> list[Path]:
+    if not session_id:
+        return []
+    return _unique_paths(
+        [
+            _claude_project_dir(root, cwd) / f"{session_id}.jsonl",
+            _claude_legacy_project_dir(root, cwd) / f"{session_id}.jsonl",
+        ]
+    )
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
 
 
 def _read_claude_transcript_meta(path: Path, cwd: Path | None = None) -> dict[str, Any] | None:
@@ -945,10 +1036,12 @@ def _claude_agent_match_score(agent_id: str, text: str) -> int:
     agent = agent_id.lower()
     score = 0
     if f"agents/{agent}.md" in lowered or f"agents\\/{agent}.md" in lowered:
-        score += 3
+        score += 1
     if f"team_agent_id={agent}" in lowered or f"team_agent_id={agent_id}" in text:
         score += 2
     if f"your agent id: {agent}" in lowered:
+        score += 2
+    if f"team agent worker {agent}" in lowered or f"worker `{agent}`" in lowered:
         score += 2
     return score
 

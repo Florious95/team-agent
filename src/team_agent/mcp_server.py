@@ -172,6 +172,18 @@ class TeamOrchestratorTools:
     def get_team_status(self) -> dict[str, Any]:
         return runtime.status(self.workspace, as_json=True, compact=True)
 
+    def stop_agent(self, agent_id: str) -> dict[str, Any]:
+        return _compact_tool_result(runtime.stop_agent(self.workspace, agent_id))
+
+    def reset_agent(self, agent_id: str, discard_session: bool = False) -> dict[str, Any]:
+        return _compact_tool_result(runtime.reset_agent(self.workspace, agent_id, discard_session=discard_session))
+
+    def add_agent(self, new_agent_id: str, role_file_path: str) -> dict[str, Any]:
+        return _compact_tool_result(runtime.add_agent(self.workspace, new_agent_id, role_file_path=role_file_path))
+
+    def fork_agent(self, source_agent_id: str, as_agent_id: str, label: str | None = None) -> dict[str, Any]:
+        return _compact_tool_result(runtime.fork_agent(self.workspace, source_agent_id, as_agent_id=as_agent_id, label=label))
+
     def request_human(self, question: str, task_id: str | None = None, agent_id: str | None = None) -> dict[str, Any]:
         store = MessageStore(self.workspace)
         sender = agent_id or self._infer_agent_id(task_id=task_id, target="leader") or "unknown"
@@ -238,6 +250,56 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "stop_agent",
+        "description": "Hard-stop one running worker while preserving its session for start_agent resume.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["agent_id"],
+            "properties": {"agent_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reset_agent",
+        "description": "Reset one worker to a fresh session. discard_session must be true.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["agent_id", "discard_session"],
+            "properties": {
+                "agent_id": {"type": "string"},
+                "discard_session": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "add_agent",
+        "description": "Add a first-class worker from a workspace-relative role file.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["new_agent_id", "role_file_path"],
+            "properties": {
+                "new_agent_id": {"type": "string"},
+                "role_file_path": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fork_agent",
+        "description": "Fork a running worker using the provider's native branch/fork support.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["source_agent_id", "as_agent_id"],
+            "properties": {
+                "source_agent_id": {"type": "string"},
+                "as_agent_id": {"type": "string"},
+                "label": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "request_human",
         "description": "Ask the leader/user for human input.",
         "inputSchema": {
@@ -266,6 +328,14 @@ def dispatch(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str,
         return tools.update_state(**args)
     if tool == "get_team_status":
         return tools.get_team_status()
+    if tool == "stop_agent":
+        return tools.stop_agent(**args)
+    if tool == "reset_agent":
+        return tools.reset_agent(**args)
+    if tool == "add_agent":
+        return tools.add_agent(**args)
+    if tool == "fork_agent":
+        return tools.fork_agent(**args)
     if tool == "request_human":
         return tools.request_human(**args)
     return {"ok": False, "error": f"unknown tool {tool!r}"}
@@ -273,7 +343,24 @@ def dispatch(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str,
 
 def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("ok") is False:
-        keys = ["ok", "status", "reason", "error", "message_id", "to", "targets", "delivered_count", "failed_count", "fallback_path", "suggestion"]
+        keys = [
+            "ok",
+            "status",
+            "reason",
+            "error",
+            "message_id",
+            "agent_id",
+            "new_agent_id",
+            "source_agent_id",
+            "role_file_sha",
+            "session_id",
+            "to",
+            "targets",
+            "delivered_count",
+            "failed_count",
+            "fallback_path",
+            "suggestion",
+        ]
         return {key: result[key] for key in keys if key in result}
     keys = [
         "ok",
@@ -288,6 +375,10 @@ def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         "result_id",
         "task_id",
         "agent_id",
+        "new_agent_id",
+        "source_agent_id",
+        "role_file_sha",
+        "session_id",
         "leader_notified",
         "notification_message_id",
         "notification_status",

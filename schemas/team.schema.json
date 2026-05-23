@@ -134,6 +134,7 @@
         "auth_mode": { "enum": ["subscription", "official_api", "compatible_api"] },
         "profile": { "type": "string", "minLength": 1 },
         "credential_ref": { "type": "string", "minLength": 1 },
+        "forked_from": { "type": "string", "minLength": 1 },
         "working_directory": { "type": "string", "minLength": 1 },
         "paused": { "type": "boolean" },
         "system_prompt": {
