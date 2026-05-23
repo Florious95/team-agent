@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import sys
 from pathlib import Path
 
@@ -16,14 +17,35 @@ def _iter_matching_files(root: Path, pattern: str) -> list[Path]:
     return sorted(
         path
         for path in root.rglob("*")
-        if path.is_file() and fnmatch.fnmatch(path.name, pattern)
+        if path.is_file()
+        and (
+            fnmatch.fnmatch(path.name, pattern)
+            or fnmatch.fnmatch(path.relative_to(root).as_posix(), pattern)
+        )
     )
 
 
-def _allowlist_has_entries(path: Path | None) -> bool:
-    if path is None or not path.exists():
+def _json_payload_has_entries(payload: object) -> bool:
+    if payload is None:
         return False
-    return bool(path.read_text(encoding="utf-8").strip())
+    if isinstance(payload, (list, tuple, set, dict)):
+        return bool(payload)
+    return True
+
+
+def _allowlist_has_entries(path: Path | None) -> tuple[bool, str | None]:
+    if path is None or not path.exists():
+        return False, None
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return False, None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return True, f"invalid JSON in line-count allowlist: {exc}"
+    if isinstance(payload, dict) and "temporary_allowlist" in payload:
+        return _json_payload_has_entries(payload.get("temporary_allowlist")), None
+    return _json_payload_has_entries(payload), None
 
 
 def check_gate(
@@ -48,9 +70,13 @@ def check_gate(
     for path, count in over_limit:
         print(f"{path}: {count} lines > {max_lines}")
 
-    allowlist_failed = require_empty_allowlist and _allowlist_has_entries(allowlist)
+    allowlist_has_entries, allowlist_error = _allowlist_has_entries(allowlist)
+    allowlist_failed = require_empty_allowlist and allowlist_has_entries
     if allowlist_failed:
-        print(f"line-count gate: allowlist must be empty for completion: {allowlist}", file=sys.stderr)
+        if allowlist_error:
+            print(f"line-count gate: {allowlist_error}: {allowlist}", file=sys.stderr)
+        else:
+            print(f"line-count gate: allowlist must be empty for completion: {allowlist}", file=sys.stderr)
 
     if allowlist_failed:
         return 1

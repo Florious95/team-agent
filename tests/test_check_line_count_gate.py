@@ -91,6 +91,31 @@ class CheckLineCountGateTests(unittest.TestCase):
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
+            allowlist.write_text('{"temporary_allowlist": {}}\n', encoding="utf-8")
+            (root / "ok.py").write_text("a\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--allowlist",
+                str(allowlist),
+                "--require-empty-allowlist",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_blank_allowlist_passes_when_files_are_under_limit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-blank-allow-") as tmp:
+            root = Path(tmp) / "src"
+            root.mkdir()
+            allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
+            allowlist.parent.mkdir()
             allowlist.write_text("", encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
@@ -116,7 +141,7 @@ class CheckLineCountGateTests(unittest.TestCase):
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
-            allowlist.write_text("[]\n", encoding="utf-8")
+            allowlist.write_text('["src/legacy.py"]\n', encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
             proc = _run_gate(
@@ -136,13 +161,39 @@ class CheckLineCountGateTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertIn("allowlist must be empty", proc.stderr)
 
+    def test_invalid_allowlist_json_fails_fast_when_empty_allowlist_required(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-invalid-allow-") as tmp:
+            root = Path(tmp) / "src"
+            root.mkdir()
+            allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
+            allowlist.parent.mkdir()
+            allowlist.write_text("{not-json", encoding="utf-8")
+            (root / "ok.py").write_text("a\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--allowlist",
+                str(allowlist),
+                "--require-empty-allowlist",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("invalid JSON", proc.stderr)
+
     def test_non_empty_allowlist_is_diagnostic_when_empty_allowlist_not_required(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-allow-diag-") as tmp:
             root = Path(tmp) / "src"
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
-            allowlist.write_text("[]\n", encoding="utf-8")
+            allowlist.write_text('["src/legacy.py"]\n', encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
             proc = _run_gate(
@@ -184,6 +235,66 @@ class CheckLineCountGateTests(unittest.TestCase):
             self.assertIn("too_long.py", proc.stdout)
             self.assertNotIn("ignored.txt", proc.stdout)
             self.assertNotIn("outside.py", proc.stdout)
+
+    def test_path_separator_glob_matches_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-path-glob-") as tmp:
+            root = Path(tmp) / "src"
+            nested = root / "pkg"
+            nested.mkdir(parents=True)
+            (nested / "too_long.py").write_text("a\nb\nc\n", encoding="utf-8")
+            (root / "top.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "pkg/*.py",
+                "--max-lines",
+                "2",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("too_long.py", proc.stdout)
+            self.assertNotIn("top.py", proc.stdout)
+
+    def test_count_equal_to_max_lines_passes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-boundary-") as tmp:
+            root = Path(tmp) / "src"
+            root.mkdir()
+            (root / "exact.py").write_text("a\nb\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_empty_root_passes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-empty-root-") as tmp:
+            root = Path(tmp) / "src"
+            root.mkdir()
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 if __name__ == "__main__":
