@@ -4,9 +4,6 @@ import sqlite3
 from datetime import datetime, timezone
 
 
-from team_agent.spec import validate_result_envelope
-
-
 MESSAGE_COLUMNS = {
     "message_id",
     "task_id",

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "lanes": {
+    "lifecycle-state-spec": [
+      "src/team_agent/lifecycle/**",
+      "src/team_agent/state.py",
+      "src/team_agent/spec.py",
+      "src/team_agent/compiler.py"
+    ],
+    "messaging-delivery-leader-receiver": [
+      "src/team_agent/messaging/**",
+      "src/team_agent/message_store/**"
+    ],
+    "provider-session-display": [
+      "src/team_agent/provider_cli/**",
+      "src/team_agent/providers.py",
+      "src/team_agent/profiles.py",
+      "src/team_agent/sessions/**",
+      "src/team_agent/display/**",
+      "src/team_agent/terminal.py"
+    ]
+  },
+  "integration_owner_only": [
+    "src/team_agent/runtime.py",
+    "src/team_agent/cli.py",
+    "src/team_agent/mcp_server.py",
+    "tests/run_tests.py",
+    "tests/path_ownership.json"
+  ]
+}
