@@ -370,9 +370,12 @@ class RuntimeTests01(unittest.TestCase):
             spec["runtime"]["session_name"] = "team-agent-provider-missing-" + workspace.name[-6:]
             spec_path = workspace / "team.spec.yaml"
             spec_path.write_text(dumps(spec), encoding="utf-8")
+            adapter = Mock()
+            adapter.command_name = "codex"
+            adapter.is_installed.return_value = False
             with (
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
-                patch("team_agent.providers.shutil.which", return_value=None),
+                patch("team_agent.runtime.get_adapter", return_value=adapter),
                 self.assertRaises(TeamAgentRuntimeError) as ctx,
             ):
                 runtime.launch(spec_path, auto_approve=True)

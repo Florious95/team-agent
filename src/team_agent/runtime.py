@@ -1252,76 +1252,76 @@ def _attach_leader_to_state(
     return receiver, validation
 
 
-def send_message(*args: Any, **kwargs: Any) -> Any:
+def send_message(workspace: Path, target: str | None, content: str, task_id: str | None = None, sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False, wait_visible: bool = True, timeout: float = 30.0, lock_timeout: float = 5.0, watch_result: bool = False) -> dict[str, Any]:
     from team_agent.messaging.send import send_message as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, target, content, task_id, sender, requires_ack, confirm_human, wait_visible, timeout, lock_timeout, watch_result)
 
 
-def _send_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+def _send_message_unlocked(workspace: Path, target: str | None, content: str, task_id: str | None = None, sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False, wait_visible: bool = True, timeout: float = 30.0, watch_result: bool = False) -> dict[str, Any]:
     from team_agent.messaging.send import _send_message_unlocked as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, target, content, task_id, sender, requires_ack, confirm_human, wait_visible, timeout, watch_result)
 
 
-def _send_single_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+def _send_single_message_unlocked(workspace: Path, state: dict[str, Any], spec: dict[str, Any], event_log: EventLog, target: str | None, content: str, *, task_id: str | None = None, sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False, wait_visible: bool = True, timeout: float = 30.0, watch_result: bool = False, mirror_peer: bool = True, route_task_id: bool = True) -> dict[str, Any]:
     from team_agent.messaging.send import _send_single_message_unlocked as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, spec, event_log, target, content, task_id=task_id, sender=sender, requires_ack=requires_ack, confirm_human=confirm_human, wait_visible=wait_visible, timeout=timeout, watch_result=watch_result, mirror_peer=mirror_peer, route_task_id=route_task_id)
 
 
-def _broadcast_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+def _broadcast_message_unlocked(workspace: Path, state: dict[str, Any], spec: dict[str, Any], event_log: EventLog, content: str, *, task_id: str | None, sender: str, requires_ack: bool, wait_visible: bool, timeout: float) -> dict[str, Any]:
     from team_agent.messaging.send import _broadcast_message_unlocked as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, spec, event_log, content, task_id=task_id, sender=sender, requires_ack=requires_ack, wait_visible=wait_visible, timeout=timeout)
 
 
-def collect(*args: Any, **kwargs: Any) -> Any:
+def collect(workspace: Path, result_file: Path | None = None, *, ensure_coordinator: bool = True) -> dict[str, Any]:
     from team_agent.messaging.results import collect as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, result_file, ensure_coordinator=ensure_coordinator)
 
 
-def _team_state_result_entries(*args: Any, **kwargs: Any) -> Any:
+def _team_state_result_entries(store: MessageStore, collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from team_agent.messaging.results import _team_state_result_entries as impl
 
-    return impl(*args, **kwargs)
+    return impl(store, collected)
 
 
-def _ensure_coordinator_after_collect(*args: Any, **kwargs: Any) -> Any:
+def _ensure_coordinator_after_collect(workspace: Path, state: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
     from team_agent.messaging.results import _ensure_coordinator_after_collect as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, event_log)
 
 
-def _coordinator_should_run(*args: Any, **kwargs: Any) -> Any:
+def _coordinator_should_run(state: dict[str, Any]) -> bool:
     from team_agent.messaging.results import _coordinator_should_run as impl
 
-    return impl(*args, **kwargs)
+    return impl(state)
 
 
-def report_result(*args: Any, **kwargs: Any) -> Any:
+def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
     from team_agent.messaging.results import report_result as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, envelope)
 
 
-def _notify_leader_of_report_result(*args: Any, **kwargs: Any) -> Any:
+def _notify_leader_of_report_result(workspace: Path, envelope: dict[str, Any], result_id: str, event_log: EventLog) -> dict[str, Any]:
     from team_agent.messaging.results import _notify_leader_of_report_result as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, envelope, result_id, event_log)
 
 
-def _format_report_result_notification(*args: Any, **kwargs: Any) -> Any:
+def _format_report_result_notification(envelope: dict[str, Any], result_id: str) -> str:
     from team_agent.messaging.results import _format_report_result_notification as impl
 
-    return impl(*args, **kwargs)
+    return impl(envelope, result_id)
 
 
-def _record_invalid_result(*args: Any, **kwargs: Any) -> Any:
+def _record_invalid_result(event_log: EventLog, error: str, result_file: Path | None = None, result_id: str | None = None, envelope: Any = None) -> dict[str, Any]:
     from team_agent.messaging.results import _record_invalid_result as impl
 
-    return impl(*args, **kwargs)
+    return impl(event_log, error, result_file, result_id, envelope)
 
 
 def _capture_missing_sessions(
@@ -2191,28 +2191,28 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     return {"ok": True, "stop": False, "delivered": delivered, "scheduled": fired, "stuck": stuck, "results": results}
 
 
-def _collect_results_and_notify_watchers(*args: Any, **kwargs: Any) -> Any:
+def _collect_results_and_notify_watchers(workspace: Path, event_log: EventLog) -> dict[str, Any]:
     from team_agent.messaging.results import _collect_results_and_notify_watchers as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, event_log)
 
 
-def _notify_result_watchers(*args: Any, **kwargs: Any) -> Any:
+def _notify_result_watchers(workspace: Path, result: dict[str, Any], event_log: EventLog) -> list[dict[str, Any]]:
     from team_agent.messaging.results import _notify_result_watchers as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, result, event_log)
 
 
-def _watcher_matches_result(*args: Any, **kwargs: Any) -> Any:
+def _watcher_matches_result(watcher: dict[str, Any], result: dict[str, Any]) -> bool:
     from team_agent.messaging.results import _watcher_matches_result as impl
 
-    return impl(*args, **kwargs)
+    return impl(watcher, result)
 
 
-def _format_result_watcher_notification(*args: Any, **kwargs: Any) -> Any:
+def _format_result_watcher_notification(result: dict[str, Any]) -> str:
     from team_agent.messaging.results import _format_result_watcher_notification as impl
 
-    return impl(*args, **kwargs)
+    return impl(result)
 
 
 def _ensure_agent_start_requirements(
@@ -2349,22 +2349,22 @@ def _format_profile_smoke_failures(failures: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _fire_due_scheduled_events(*args: Any, **kwargs: Any) -> Any:
+def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
     from team_agent.messaging.scheduler import _fire_due_scheduled_events as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, store, event_log)
 
 
-def _schedule_send_retry(*args: Any, **kwargs: Any) -> Any:
+def _schedule_send_retry(store: MessageStore, row: dict[str, Any], payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
     from team_agent.messaging.scheduler import _schedule_send_retry as impl
 
-    return impl(*args, **kwargs)
+    return impl(store, row, payload, result)
 
 
-def _detect_stuck_agents(*args: Any, **kwargs: Any) -> Any:
+def _detect_stuck_agents(workspace: Path, state: dict[str, Any], store: MessageStore, event_log: EventLog) -> list[str]:
     from team_agent.messaging.scheduler import _detect_stuck_agents as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, store, event_log)
 
 
 def diagnose(workspace: Path) -> dict[str, Any]:
@@ -3041,316 +3041,316 @@ def _is_runtime_team_agent(agent_id: str, state: dict[str, Any], spec: dict[str,
     return agent_id in set(_runtime_team_agent_ids(state, spec))
 
 
-def _broadcast_targets(*args: Any, **kwargs: Any) -> Any:
+def _broadcast_targets(state: dict[str, Any], spec: dict[str, Any], sender: str) -> list[str]:
     from team_agent.messaging.send import _broadcast_targets as impl
 
-    return impl(*args, **kwargs)
+    return impl(state, spec, sender)
 
 
-def _compact_broadcast_delivery(*args: Any, **kwargs: Any) -> Any:
+def _compact_broadcast_delivery(result: dict[str, Any]) -> dict[str, Any]:
     from team_agent.messaging.send import _compact_broadcast_delivery as impl
 
-    return impl(*args, **kwargs)
+    return impl(result)
 
 
-def allow_peer_talk(*args: Any, **kwargs: Any) -> Any:
+def allow_peer_talk(workspace: Path, agent_a: str, agent_b: str) -> dict[str, Any]:
     from team_agent.messaging.leader import allow_peer_talk as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, agent_a, agent_b)
 
 
-def _mirror_peer_message_to_leader(*args: Any, **kwargs: Any) -> Any:
+def _mirror_peer_message_to_leader(workspace: Path, state: dict[str, Any], sender: str, target: str, content: str, task_id: str | None, event_log: EventLog) -> None:
     from team_agent.messaging.leader import _mirror_peer_message_to_leader as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, sender, target, content, task_id, event_log)
 
 
-def _leader_inbox_path(*args: Any, **kwargs: Any) -> Any:
+def _leader_inbox_path(workspace: Path) -> Path:
     from team_agent.messaging.leader import _leader_inbox_path as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace)
 
 
-def _send_to_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+def _send_to_leader_receiver(workspace: Path, state: dict[str, Any], leader_id: str, content: str, task_id: str | None, sender: str, requires_ack: bool, event_log: EventLog) -> dict[str, Any]:
     from team_agent.messaging.leader import _send_to_leader_receiver as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, leader_id, content, task_id, sender, requires_ack, event_log)
 
 
-def _fail_leader_delivery(*args: Any, **kwargs: Any) -> Any:
+def _fail_leader_delivery(workspace: Path, state: dict[str, Any], store: MessageStore, message_id: str, payload: dict[str, Any], event_log: EventLog, reason: str, error: str | None = None, stage: str | None = None, message_status: str = "failed", attempts: list[dict[str, Any]] | None = None, submit_attempts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     from team_agent.messaging.leader import _fail_leader_delivery as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, store, message_id, payload, event_log, reason, error, stage, message_status, attempts, submit_attempts)
 
 
-def _write_leader_fallback_audit(*args: Any, **kwargs: Any) -> Any:
+def _write_leader_fallback_audit(workspace: Path, payload: dict[str, Any], reason: str, error: str | None) -> Path:
     from team_agent.messaging.leader import _write_leader_fallback_audit as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, payload, reason, error)
 
 
-def _leader_receiver_is_direct(*args: Any, **kwargs: Any) -> Any:
+def _leader_receiver_is_direct(receiver: dict[str, Any] | None) -> bool:
     from team_agent.messaging.leader import _leader_receiver_is_direct as impl
 
-    return impl(*args, **kwargs)
+    return impl(receiver)
 
 
-def _message_by_id(*args: Any, **kwargs: Any) -> Any:
+def _message_by_id(store: MessageStore, message_id: str) -> dict[str, Any] | None:
     from team_agent.messaging.leader import _message_by_id as impl
 
-    return impl(*args, **kwargs)
+    return impl(store, message_id)
 
 
-def _message_payload(*args: Any, **kwargs: Any) -> Any:
+def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
     from team_agent.messaging.leader import _message_payload as impl
 
-    return impl(*args, **kwargs)
+    return impl(row)
 
 
-def _format_team_agent_message(*args: Any, **kwargs: Any) -> Any:
+def _format_team_agent_message(payload: dict[str, Any]) -> str:
     from team_agent.messaging.leader import _format_team_agent_message as impl
 
-    return impl(*args, **kwargs)
+    return impl(payload)
 
 
-def _resolve_leader_pane(*args: Any, **kwargs: Any) -> Any:
+def _resolve_leader_pane(pane: str | None, provider: str, workspace: Path | None = None, require_current: bool = False) -> tuple[dict[str, str], str]:
     from team_agent.messaging.leader_panes import _resolve_leader_pane as impl
 
-    return impl(*args, **kwargs)
+    return impl(pane, provider, workspace, require_current)
 
 
-def _tmux_current_client_pane_info(*args: Any, **kwargs: Any) -> Any:
+def _tmux_current_client_pane_info() -> dict[str, str] | None:
     from team_agent.messaging.leader_panes import _tmux_current_client_pane_info as impl
 
-    return impl(*args, **kwargs)
+    return impl()
 
 
-def _tmux_list_panes(*args: Any, **kwargs: Any) -> Any:
+def _tmux_list_panes() -> list[dict[str, str]]:
     from team_agent.messaging.leader_panes import _tmux_list_panes as impl
 
-    return impl(*args, **kwargs)
+    return impl()
 
 
-def _infer_active_tmux_pane(*args: Any, **kwargs: Any) -> Any:
+def _infer_active_tmux_pane(provider: str) -> dict[str, str] | None:
     from team_agent.messaging.leader_panes import _infer_active_tmux_pane as impl
 
-    return impl(*args, **kwargs)
+    return impl(provider)
 
 
-def _tmux_pane_info(*args: Any, **kwargs: Any) -> Any:
+def _tmux_pane_info(target: str | None) -> dict[str, str] | None:
     from team_agent.messaging.leader_panes import _tmux_pane_info as impl
 
-    return impl(*args, **kwargs)
+    return impl(target)
 
 
-def _parse_tmux_pane_info(*args: Any, **kwargs: Any) -> Any:
+def _parse_tmux_pane_info(line: str) -> dict[str, str] | None:
     from team_agent.messaging.leader_panes import _parse_tmux_pane_info as impl
 
-    return impl(*args, **kwargs)
+    return impl(line)
 
 
-def _infer_workspace_tmux_pane(*args: Any, **kwargs: Any) -> Any:
+def _infer_workspace_tmux_pane(provider: str, workspace: Path) -> dict[str, Any]:
     from team_agent.messaging.leader_panes import _infer_workspace_tmux_pane as impl
 
-    return impl(*args, **kwargs)
+    return impl(provider, workspace)
 
 
-def _pane_is_usable_leader(*args: Any, **kwargs: Any) -> Any:
+def _pane_is_usable_leader(pane: dict[str, str], provider: str, workspace: Path | None) -> bool:
     from team_agent.messaging.leader_panes import _pane_is_usable_leader as impl
 
-    return impl(*args, **kwargs)
+    return impl(pane, provider, workspace)
 
 
-def _pane_path_matches_workspace(*args: Any, **kwargs: Any) -> Any:
+def _pane_path_matches_workspace(pane: dict[str, str], workspace: Path) -> bool:
     from team_agent.messaging.leader_panes import _pane_path_matches_workspace as impl
 
-    return impl(*args, **kwargs)
+    return impl(pane, workspace)
 
 
-def _leader_pane_rank(*args: Any, **kwargs: Any) -> Any:
+def _leader_pane_rank(pane: dict[str, str], provider: str) -> tuple[int, int, int]:
     from team_agent.messaging.leader_panes import _leader_pane_rank as impl
 
-    return impl(*args, **kwargs)
+    return impl(pane, provider)
 
 
-def _tmux_truthy(*args: Any, **kwargs: Any) -> Any:
+def _tmux_truthy(value: str) -> int:
     from team_agent.messaging.leader_panes import _tmux_truthy as impl
 
-    return impl(*args, **kwargs)
+    return impl(value)
 
 
-def _leader_command_is_exact(*args: Any, **kwargs: Any) -> Any:
+def _leader_command_is_exact(command: str, provider: str) -> bool:
     from team_agent.messaging.leader_panes import _leader_command_is_exact as impl
 
-    return impl(*args, **kwargs)
+    return impl(command, provider)
 
 
-def _leader_command_provider(*args: Any, **kwargs: Any) -> Any:
+def _leader_command_provider(command: str) -> str | None:
     from team_agent.messaging.leader_panes import _leader_command_provider as impl
 
-    return impl(*args, **kwargs)
+    return impl(command)
 
 
-def _format_leader_pane_candidates(*args: Any, **kwargs: Any) -> Any:
+def _format_leader_pane_candidates(candidates: list[dict[str, str]]) -> str:
     from team_agent.messaging.leader_panes import _format_leader_pane_candidates as impl
 
-    return impl(*args, **kwargs)
+    return impl(candidates)
 
 
-def _target_fingerprint(*args: Any, **kwargs: Any) -> Any:
+def _target_fingerprint(pane_info: dict[str, Any]) -> str:
     from team_agent.messaging.leader_panes import _target_fingerprint as impl
 
-    return impl(*args, **kwargs)
+    return impl(pane_info)
 
 
-def _rediscover_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+def _rediscover_leader_receiver(receiver: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
     from team_agent.messaging.leader_panes import _rediscover_leader_receiver as impl
 
-    return impl(*args, **kwargs)
+    return impl(receiver, event_log)
 
 
-def _validate_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
     from team_agent.messaging.leader_panes import _validate_leader_receiver as impl
 
-    return impl(*args, **kwargs)
+    return impl(receiver)
 
 
-def _leader_command_looks_usable(*args: Any, **kwargs: Any) -> Any:
+def _leader_command_looks_usable(command: str, provider: str) -> bool:
     from team_agent.messaging.leader_panes import _leader_command_looks_usable as impl
 
-    return impl(*args, **kwargs)
+    return impl(command, provider)
 
 
-def _choose_leader_submit_key(*args: Any, **kwargs: Any) -> Any:
+def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, str]:
     from team_agent.messaging.leader_panes import _choose_leader_submit_key as impl
 
-    return impl(*args, **kwargs)
+    return impl(provider, capture_text)
 
 
-def _tmux_inject_text(*args: Any, **kwargs: Any) -> Any:
+def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str, attempts: int = 3) -> dict[str, Any]:
     from team_agent.messaging.tmux_io import _tmux_inject_text as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, text, submit_key, buffer_name, attempts)
 
 
-def _leader_submit_verification(*args: Any, **kwargs: Any) -> Any:
+def _leader_submit_verification(submit_verification: str | None, verification: str, submit_key: str) -> str | None:
     from team_agent.messaging.tmux_io import _leader_submit_verification as impl
 
-    return impl(*args, **kwargs)
+    return impl(submit_verification, verification, submit_key)
 
 
-def _tmux_text_size(*args: Any, **kwargs: Any) -> Any:
+def _tmux_text_size(text: str) -> int:
     from team_agent.messaging.tmux_io import _tmux_text_size as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _tmux_paste_ready_timeout(*args: Any, **kwargs: Any) -> Any:
+def _tmux_paste_ready_timeout(text: str) -> float:
     from team_agent.messaging.tmux_io import _tmux_paste_ready_timeout as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _tmux_submit_settle_timeout(*args: Any, **kwargs: Any) -> Any:
+def _tmux_submit_settle_timeout(text: str) -> float:
     from team_agent.messaging.tmux_io import _tmux_submit_settle_timeout as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _tmux_set_buffer_text(*args: Any, **kwargs: Any) -> Any:
+def _tmux_set_buffer_text(buffer_name: str, text: str) -> dict[str, Any]:
     from team_agent.messaging.tmux_io import _tmux_set_buffer_text as impl
 
-    return impl(*args, **kwargs)
+    return impl(buffer_name, text)
 
 
-def _tmux_load_buffer_stdin(*args: Any, **kwargs: Any) -> Any:
+def _tmux_load_buffer_stdin(buffer_name: str, text: str) -> subprocess.CompletedProcess[str]:
     from team_agent.messaging.tmux_io import _tmux_load_buffer_stdin as impl
 
-    return impl(*args, **kwargs)
+    return impl(buffer_name, text)
 
 
-def _prepare_tmux_pane_for_input(*args: Any, **kwargs: Any) -> Any:
+def _prepare_tmux_pane_for_input(target: str) -> dict[str, Any]:
     from team_agent.messaging.tmux_io import _prepare_tmux_pane_for_input as impl
 
-    return impl(*args, **kwargs)
+    return impl(target)
 
 
-def _enable_codex_fast_mode(*args: Any, **kwargs: Any) -> Any:
+def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
     from team_agent.messaging.tmux_prompt import _enable_codex_fast_mode as impl
 
-    return impl(*args, **kwargs)
+    return impl(session_name, window_name)
 
 
-def _wait_for_visible_token(*args: Any, **kwargs: Any) -> Any:
+def _wait_for_visible_token(target: str, token: str, timeout: float) -> tuple[bool, str]:
     from team_agent.messaging.tmux_prompt import _wait_for_visible_token as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, token, timeout)
 
 
-def _capture_tmux_pane_text(*args: Any, **kwargs: Any) -> Any:
+def _capture_tmux_pane_text(target: str) -> dict[str, Any]:
     from team_agent.messaging.tmux_prompt import _capture_tmux_pane_text as impl
 
-    return impl(*args, **kwargs)
+    return impl(target)
 
 
-def _wait_for_message_ready(*args: Any, **kwargs: Any) -> Any:
+def _wait_for_message_ready(target: str, message_id: str, timeout: float, expected_text: str = "", allow_pasted_prompt: bool = True, baseline_capture: str = "") -> tuple[bool, str, str]:
     from team_agent.messaging.tmux_prompt import _wait_for_message_ready as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, message_id, timeout, expected_text, allow_pasted_prompt, baseline_capture)
 
 
-def _wait_for_worker_message_ready(*args: Any, **kwargs: Any) -> Any:
+def _wait_for_worker_message_ready(target: str, message_id: str, timeout: float, expected_text: str = "") -> tuple[bool, str, str]:
     from team_agent.messaging.tmux_prompt import _wait_for_worker_message_ready as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, message_id, timeout, expected_text)
 
 
-def _capture_has_pasted_content_prompt(*args: Any, **kwargs: Any) -> Any:
+def _capture_has_pasted_content_prompt(text: str) -> bool:
     from team_agent.messaging.tmux_prompt import _capture_has_pasted_content_prompt as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _capture_contains_message_fragment(*args: Any, **kwargs: Any) -> Any:
+def _capture_contains_message_fragment(capture_text: str, expected_text: str) -> bool:
     from team_agent.messaging.tmux_prompt import _capture_contains_message_fragment as impl
 
-    return impl(*args, **kwargs)
+    return impl(capture_text, expected_text)
 
 
-def _message_fragment_candidates(*args: Any, **kwargs: Any) -> Any:
+def _message_fragment_candidates(text: str) -> list[str]:
     from team_agent.messaging.tmux_prompt import _message_fragment_candidates as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _message_content_lines(*args: Any, **kwargs: Any) -> Any:
+def _message_content_lines(text: str) -> list[str]:
     from team_agent.messaging.tmux_prompt import _message_content_lines as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _is_strong_message_fragment(*args: Any, **kwargs: Any) -> Any:
+def _is_strong_message_fragment(compact: str) -> bool:
     from team_agent.messaging.tmux_prompt import _is_strong_message_fragment as impl
 
-    return impl(*args, **kwargs)
+    return impl(compact)
 
 
-def _compact_visible_text(*args: Any, **kwargs: Any) -> Any:
+def _compact_visible_text(text: str) -> str:
     from team_agent.messaging.tmux_prompt import _compact_visible_text as impl
 
-    return impl(*args, **kwargs)
+    return impl(text)
 
 
-def _submit_worker_prompt(*args: Any, **kwargs: Any) -> Any:
+def _submit_worker_prompt(target: str, before_capture: str, submit_key: str = "Enter", attempts: int = 3, settle_timeout: float = 0.35) -> dict[str, Any]:
     from team_agent.messaging.tmux_prompt import _submit_worker_prompt as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, before_capture, submit_key, attempts, settle_timeout)
 
 
-def _wait_for_pasted_prompt_cleared(*args: Any, **kwargs: Any) -> Any:
+def _wait_for_pasted_prompt_cleared(target: str, timeout: float) -> tuple[bool, str]:
     from team_agent.messaging.tmux_prompt import _wait_for_pasted_prompt_cleared as impl
 
-    return impl(*args, **kwargs)
+    return impl(target, timeout)
 
 
 def _ghostty_command() -> str | None:
@@ -4060,16 +4060,16 @@ def get_adapter_or_raise(name: str) -> str:
     return name
 
 
-def _deliver_pending_message(*args: Any, **kwargs: Any) -> Any:
+def _deliver_pending_message(workspace: Path, state: dict[str, Any], message_id: str, wait_visible: bool = True, timeout: float = 30.0) -> dict[str, Any]:
     from team_agent.messaging.delivery import _deliver_pending_message as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, message_id, wait_visible, timeout)
 
 
-def _deliver_pending_messages(*args: Any, **kwargs: Any) -> Any:
+def _deliver_pending_messages(workspace: Path, state: dict[str, Any], event_log: EventLog) -> list[str]:
     from team_agent.messaging.delivery import _deliver_pending_messages as impl
 
-    return impl(*args, **kwargs)
+    return impl(workspace, state, event_log)
 
 
 def _refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:

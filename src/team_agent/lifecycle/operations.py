@@ -1,19 +1,61 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from team_agent import runtime as _runtime
+from team_agent.errors import RuntimeError
+from team_agent.events import EventLog
+from team_agent.spec import load_spec, validate_spec
+from team_agent.state import (
+    SESSION_CAPTURE_FIELDS,
+    load_runtime_state,
+    save_runtime_state,
+    write_spec,
+    write_team_state,
+)
 
 
-def _sync_runtime_globals() -> None:
-    for name, value in vars(_runtime).items():
-        if name not in _LOCAL_NAMES:
-            globals()[name] = value
+_RUNTIME_SYMBOLS = (
+    "_capture_agent_session",
+    "_close_ghostty_display",
+    "_effective_runtime_config",
+    "_find_agent",
+    "_handle_startup_prompts_and_verify_window",
+    "_open_ghostty_worker_window",
+    "_open_ghostty_workspace_agent_display",
+    "_running_agent_state",
+    "_runtime_lock",
+    "_save_team_runtime_snapshot",
+    "_spec_team_dir",
+    "_tmux_start_command_for_agent_window",
+    "_tmux_window_exists",
+    "ensure_workspace_dirs",
+    "get_adapter",
+    "run_cmd",
+    "shell_fork_command_for_agent",
+    "start_agent",
+    "start_coordinator",
+)
+for _name in _RUNTIME_SYMBOLS:
+    if not hasattr(_runtime, _name):
+        raise ImportError(f"team_agent.runtime missing lifecycle operation dependency: {_name}")
+
+
+def _runtime_proxy(name: str):
+    def proxy(*args: Any, **kwargs: Any) -> Any:
+        return getattr(_runtime, name)(*args, **kwargs)
+
+    return proxy
+
+
+globals().update({_name: _runtime_proxy(_name) for _name in _RUNTIME_SYMBOLS})
 
 
 def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
-    _sync_runtime_globals()
     with _runtime_lock(workspace, "stop-agent"):
         state = load_runtime_state(workspace)
         spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
@@ -45,7 +87,6 @@ def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
 
 
 def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False, open_display: bool = True) -> dict[str, Any]:
-    _sync_runtime_globals()
     if not discard_session:
         return {"ok": False, "agent_id": agent_id, "status": "refused", "reason": "discard_session_required"}
     stopped = stop_agent(workspace, agent_id)
@@ -65,7 +106,6 @@ def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False
 
 
 def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_display: bool = True) -> dict[str, Any]:
-    _sync_runtime_globals()
     from team_agent.compiler import compile_role_doc_agent
 
     state = load_runtime_state(workspace)
@@ -132,7 +172,6 @@ def fork_agent(
     label: str | None = None,
     open_display: bool = True,
 ) -> dict[str, Any]:
-    _sync_runtime_globals()
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
@@ -246,6 +285,3 @@ def fork_agent(
         "state_file": str(state_path),
         "coordinator": coordinator,
     }
-
-
-_LOCAL_NAMES = set(globals())

@@ -1,15 +1,58 @@
 from __future__ import annotations
 
+import copy
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from team_agent import runtime as _runtime
+from team_agent.errors import RuntimeError
+from team_agent.events import EventLog
+from team_agent.message_store import MessageStore
+from team_agent.providers import ResumeUnavailable
+from team_agent.spec import load_spec
+from team_agent.state import load_runtime_state, save_runtime_state, write_team_state
 
 
-def _sync_runtime_globals() -> None:
-    for name, value in vars(_runtime).items():
-        if name not in _LOCAL_NAMES:
-            globals()[name] = value
+_RUNTIME_SYMBOLS = (
+    "_attach_profile_resume_root",
+    "_attach_team_profile_dirs",
+    "_capture_agent_session",
+    "_clear_session_capture_fields",
+    "_deliver_pending_message",
+    "_effective_runtime_config",
+    "_enable_codex_fast_mode",
+    "_ensure_agent_start_requirements",
+    "_find_agent",
+    "_handle_startup_prompts_and_verify_window",
+    "_open_ghostty_worker_window",
+    "_open_ghostty_workspace_agent_display",
+    "_prepare_resume_state",
+    "_running_agent_state",
+    "_runtime_lock",
+    "_spec_team_dir",
+    "_tmux_start_command_for_agent_window",
+    "_tmux_window_exists",
+    "ensure_workspace_dirs",
+    "get_adapter",
+    "run_cmd",
+    "shell_command_for_agent",
+    "shell_resume_command_for_agent",
+    "start_coordinator",
+)
+for _name in _RUNTIME_SYMBOLS:
+    if not hasattr(_runtime, _name):
+        raise ImportError(f"team_agent.runtime missing lifecycle start dependency: {_name}")
+
+
+def _runtime_proxy(name: str):
+    def proxy(*args: Any, **kwargs: Any) -> Any:
+        return getattr(_runtime, name)(*args, **kwargs)
+
+    return proxy
+
+
+globals().update({_name: _runtime_proxy(_name) for _name in _RUNTIME_SYMBOLS})
 
 
 def start_agent(
@@ -19,13 +62,11 @@ def start_agent(
     open_display: bool = True,
     allow_fresh: bool = False,
 ) -> dict[str, Any]:
-    _sync_runtime_globals()
     with _runtime_lock(workspace, "start-agent"):
         return _start_agent_unlocked(workspace, agent_id, force=force, open_display=open_display, allow_fresh=allow_fresh)
 
 
 def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_display: bool, allow_fresh: bool) -> dict[str, Any]:
-    _sync_runtime_globals()
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     if not spec_path.exists():
@@ -280,6 +321,3 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
         "delivered_messages": delivered_messages,
         "coordinator": coordinator,
     }
-
-
-_LOCAL_NAMES = set(globals())
