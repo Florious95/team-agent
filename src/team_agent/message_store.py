@@ -454,8 +454,18 @@ class MessageStore:
         # team sharing this team.db. Rows whose agent_id is not in the set are
         # deleted. If two teams share a workspace, the caller is responsible for
         # computing the union before invoking this helper; otherwise live agents
-        # from a sibling team will be swept.
-        valid = {str(agent_id) for agent_id in valid_agent_ids}
+        # from a sibling team will be swept. Input is validated before any DB
+        # mutation so a derivation bug that silently produces None or non-str
+        # entries cannot delete sibling-team rows by accident.
+        valid: set[str] = set()
+        for entry in valid_agent_ids:
+            if not isinstance(entry, str):
+                raise TypeError(
+                    f"gc_agent_health requires str agent_ids; got {type(entry).__name__}"
+                )
+            if not entry:
+                raise ValueError("gc_agent_health does not accept empty agent_ids")
+            valid.add(entry)
         with closing(self.connect()) as conn:
             with conn:
                 rows = conn.execute("select agent_id from agent_health").fetchall()

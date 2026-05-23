@@ -156,6 +156,47 @@ class AgentHealthGcHelperTests(unittest.TestCase):
             store = MessageStore(Path(tmp))
             self.assertEqual(store.gc_agent_health({"alpha"}), [])
 
+    def test_gc_agent_health_rejects_non_string_entry_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-gc-validation-") as tmp:
+            store = MessageStore(Path(tmp))
+            store.upsert_agent_health("alpha", "IDLE")
+            store.upsert_agent_health("beta", "RUNNING")
+            with self.assertRaises(TypeError):
+                store.gc_agent_health(["alpha", None])
+            remaining = store.agent_health()
+            self.assertIn("alpha", remaining)
+            self.assertIn("beta", remaining)
+
+    def test_gc_agent_health_rejects_empty_entry_without_deleting(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-gc-emptyentry-") as tmp:
+            store = MessageStore(Path(tmp))
+            store.upsert_agent_health("alpha", "IDLE")
+            with self.assertRaises(ValueError):
+                store.gc_agent_health(["alpha", ""])
+            self.assertIn("alpha", store.agent_health())
+
+    def test_gc_agent_health_broken_derivation_excluding_sibling_team_is_rejected(self) -> None:
+        # Simulate a sync-path derivation that silently maps a sibling team's
+        # agent id to None (e.g. dict lookup with default=None). Without
+        # input validation the helper would treat None as "not in valid set"
+        # and delete the sibling team's row. Validation must halt before any
+        # DB mutation so sibling-team rows survive the buggy derivation.
+        with tempfile.TemporaryDirectory(prefix="team-agent-gc-broken-derive-") as tmp:
+            store = MessageStore(Path(tmp))
+            for agent_id in ("alpha", "beta", "gamma"):
+                store.upsert_agent_health(agent_id, "IDLE")
+
+            team_a_live = ["alpha", "beta"]
+            sibling_lookup = {"gamma": None}
+            derived = team_a_live + [sibling_lookup["gamma"]]
+
+            with self.assertRaises(TypeError):
+                store.gc_agent_health(derived)
+
+            remaining = store.agent_health()
+            for agent_id in ("alpha", "beta", "gamma"):
+                self.assertIn(agent_id, remaining)
+
 
 class RemoveAgentRefusalTests(unittest.TestCase):
     def test_unknown_worker_raises(self) -> None:
