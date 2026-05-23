@@ -724,6 +724,23 @@ def _latest_result_summaries(store: MessageStore, limit: int = 5) -> list[dict[s
     return summaries
 
 
+def _result_summary_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        envelope = json.loads(row["envelope"]) if isinstance(row.get("envelope"), str) else row.get("envelope")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    return {
+        "result_id": row.get("result_id"),
+        "task_id": envelope.get("task_id") or row.get("task_id"),
+        "agent_id": envelope.get("agent_id") or row.get("agent_id"),
+        "status": envelope.get("status") or row.get("status"),
+        "summary": envelope.get("summary"),
+        "created_at": row.get("created_at"),
+    }
+
+
 def _queued_message_statuses(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     visible_statuses = PENDING_DELIVERY_STATUSES | {"target_resolved", "delivery_blocked", "injected_unverified"}
     queued: list[dict[str, Any]] = []
@@ -1235,562 +1252,76 @@ def _attach_leader_to_state(
     return receiver, validation
 
 
-def send_message(
-    workspace: Path,
-    target: str | None,
-    content: str,
-    task_id: str | None = None,
-    sender: str = "leader",
-    requires_ack: bool = True,
-    confirm_human: bool = False,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-    lock_timeout: float = 5.0,
-    watch_result: bool = False,
-) -> dict[str, Any]:
-    with _runtime_lock(workspace, "send", timeout=lock_timeout):
-        return _send_message_unlocked(
-            workspace,
-            target,
-            content,
-            task_id=task_id,
-            sender=sender,
-            requires_ack=requires_ack,
-            confirm_human=confirm_human,
-            wait_visible=wait_visible,
-            timeout=timeout,
-            watch_result=watch_result,
-        )
+def send_message(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import send_message as impl
+
+    return impl(*args, **kwargs)
 
 
-def _send_message_unlocked(
-    workspace: Path,
-    target: str | None,
-    content: str,
-    task_id: str | None = None,
-    sender: str = "leader",
-    requires_ack: bool = True,
-    confirm_human: bool = False,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-    watch_result: bool = False,
-) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path)
-    event_log = EventLog(workspace)
-    leader_id = _leader_id(state, spec)
+def _send_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import _send_message_unlocked as impl
 
-    if target == "*":
-        if watch_result:
-            return {"ok": False, "status": "failed", "reason": "watch_result_not_supported_for_broadcast", "to": target}
-        return _broadcast_message_unlocked(
-            workspace,
-            state,
-            spec,
-            event_log,
-            content,
-            task_id=task_id,
-            sender=sender,
-            requires_ack=requires_ack,
-            wait_visible=wait_visible,
-            timeout=timeout,
-        )
-
-    return _send_single_message_unlocked(
-        workspace,
-        state,
-        spec,
-        event_log,
-        target,
-        content,
-        task_id=task_id,
-        sender=sender,
-        requires_ack=requires_ack,
-        confirm_human=confirm_human,
-        wait_visible=wait_visible,
-        timeout=timeout,
-        watch_result=watch_result,
-    )
+    return impl(*args, **kwargs)
 
 
-def _send_single_message_unlocked(
-    workspace: Path,
-    state: dict[str, Any],
-    spec: dict[str, Any],
-    event_log: EventLog,
-    target: str | None,
-    content: str,
-    *,
-    task_id: str | None = None,
-    sender: str = "leader",
-    requires_ack: bool = True,
-    confirm_human: bool = False,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-    watch_result: bool = False,
-    mirror_peer: bool = True,
-    route_task_id: bool = True,
-) -> dict[str, Any]:
-    leader_id = _leader_id(state, spec)
+def _send_single_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import _send_single_message_unlocked as impl
 
-    if _is_leader_target(target, leader_id) and not _is_leader_sender(sender, leader_id):
-        return _send_to_leader_receiver(workspace, state, leader_id, content, task_id, sender, requires_ack, event_log)
-
-    if task_id and route_task_id:
-        task = _find_task(state.get("tasks", []), task_id)
-        if task.get("human_confirmation") and not task.get("human_confirmed"):
-            if not confirm_human:
-                update_task_status(state["tasks"], task_id, "blocked", "human confirmation required before dispatch")
-                save_runtime_state(workspace, state)
-                event_log.write(
-                    "send.human_confirmation_required",
-                    task_id=task_id,
-                    requested_target=target,
-                )
-                return {
-                    "ok": False,
-                    "status": "blocked",
-                    "reason": "human_confirmation_required",
-                    "task_id": task_id,
-                }
-            task["human_confirmed"] = True
-            event_log.write("send.human_confirmation_granted", task_id=task_id, confirmed_by=sender)
-        route = route_task(spec, task)
-        routed_target = route["agent_id"]
-        requested_target = target
-        target = target or routed_target
-        task["assignee"] = target
-        event_log.write(
-            "routing.decision",
-            source="send",
-            task_id=task_id,
-            route_agent=routed_target,
-            selected_agent=target,
-            reason=route["reason"],
-            manual_override=bool(requested_target and requested_target != routed_target),
-        )
-        agent = _find_agent(spec, target)
-        if agent:
-            missing = missing_tools(agent, task)
-            if missing:
-                update_task_status(state["tasks"], task_id, "blocked", f"missing permissions: {', '.join(missing)}")
-                save_runtime_state(workspace, state)
-                event_log.write(
-                    "send.blocked_missing_permissions",
-                    task_id=task_id,
-                    agent_id=target,
-                    missing_tools=missing,
-                )
-                return {
-                    "ok": False,
-                    "status": "blocked",
-                    "task_id": task_id,
-                    "agent_id": target,
-                    "missing_tools": missing,
-                }
-
-    if not target:
-        raise RuntimeError("send requires target or --task")
-    if not _is_leader_target(target, leader_id) and not _is_runtime_team_agent(target, state, spec):
-        event_log.write("send.target_rejected", sender=sender, target=target, reason="target_not_in_team")
-        return {"ok": False, "status": "failed", "reason": "target_not_in_team", "from": sender, "to": target}
-    store = MessageStore(workspace)
-    message_id = store.create_message(task_id, sender, target, content, requires_ack=requires_ack)
-    delivered_result = _deliver_pending_message(workspace, state, message_id, wait_visible=wait_visible, timeout=timeout)
-    row = _message_by_id(store, message_id)
-    message_status = row["status"] if row else delivered_result.get("status", "accepted")
-    if (
-        mirror_peer
-        and not _is_leader_sender(sender, leader_id)
-        and not _is_leader_target(target, leader_id)
-        and delivered_result.get("ok")
-        and not delivered_result.get("queued")
-    ):
-        _mirror_peer_message_to_leader(workspace, state, sender, target, content, task_id, event_log)
-    watch: dict[str, Any] | None = None
-    if watch_result and delivered_result.get("ok"):
-        watch_task_id = task_id or _current_task_for_agent(state.get("tasks", []), str(target))
-        watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id)
-        watch = {
-            "status": "registered",
-            "watcher_id": watcher_id,
-            "task_id": watch_task_id,
-            "agent_id": target,
-            "notice": (
-                "Team Agent will deliver this message when the worker is available, "
-                "then collect the result and notify the leader when this task reports completion."
-                if delivered_result.get("queued")
-                else "Team Agent will collect the result and notify the leader when this task reports completion."
-            ),
-        }
-        event_log.write(
-            "result_watcher.created",
-            watcher_id=watcher_id,
-            task_id=watch_task_id,
-            agent_id=target,
-            message_id=message_id,
-        )
-    _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
-    save_runtime_state(workspace, state)
-    result = {
-        "ok": bool(delivered_result.get("ok")),
-        "message_id": message_id,
-        "status": message_status,
-        "to": target,
-        "visible": message_status == "visible",
-        "submitted": message_status in {"visible", "submitted", "submitted_unverified", "delivered", "acknowledged"},
-        "verification": delivered_result.get("verification"),
-        "submit_verification": delivered_result.get("submit_verification"),
-    }
-    if delivered_result.get("queued"):
-        result["queued"] = True
-        result["reason"] = delivered_result.get("reason")
-    if delivered_result.get("warning"):
-        result["warning"] = delivered_result["warning"]
-    for key in ("paste_attempts", "submit_attempts"):
-        if key in delivered_result:
-            result[key] = delivered_result[key]
-    if watch is not None:
-        result["watch_result"] = True
-        result["watch"] = watch
-    return result
+    return impl(*args, **kwargs)
 
 
-def _broadcast_message_unlocked(
-    workspace: Path,
-    state: dict[str, Any],
-    spec: dict[str, Any],
-    event_log: EventLog,
-    content: str,
-    *,
-    task_id: str | None,
-    sender: str,
-    requires_ack: bool,
-    wait_visible: bool,
-    timeout: float,
-) -> dict[str, Any]:
-    targets = _broadcast_targets(state, spec, sender)
-    if not targets:
-        event_log.write("send.broadcast_skipped", sender=sender, reason="no_team_recipients")
-        return {"ok": False, "status": "failed", "reason": "no_team_recipients", "to": "*", "targets": []}
-    event_log.write("send.broadcast_start", sender=sender, targets=targets, task_id=task_id)
-    deliveries: list[dict[str, Any]] = []
-    for recipient in targets:
-        result = _send_single_message_unlocked(
-            workspace,
-            state,
-            spec,
-            event_log,
-            recipient,
-            content,
-            task_id=task_id,
-            sender=sender,
-            requires_ack=requires_ack,
-            confirm_human=False,
-            wait_visible=wait_visible,
-            timeout=timeout,
-            watch_result=False,
-            mirror_peer=False,
-            route_task_id=False,
-        )
-        deliveries.append(_compact_broadcast_delivery(result))
-    failed = [item for item in deliveries if not item.get("ok")]
-    status = "broadcast_delivered" if not failed else "broadcast_partial"
-    event_log.write(
-        "send.broadcast_complete",
-        sender=sender,
-        targets=targets,
-        status=status,
-        delivered_count=len(deliveries) - len(failed),
-        failed_count=len(failed),
-    )
-    return {
-        "ok": not failed,
-        "status": status,
-        "to": "*",
-        "targets": targets,
-        "delivered_count": len(deliveries) - len(failed),
-        "failed_count": len(failed),
-        "deliveries": deliveries,
-    }
+def _broadcast_message_unlocked(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import _broadcast_message_unlocked as impl
+
+    return impl(*args, **kwargs)
 
 
-def collect(workspace: Path, result_file: Path | None = None, *, ensure_coordinator: bool = True) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path)
-    store = MessageStore(workspace)
-    event_log = EventLog(workspace)
-    _refresh_agent_runtime_statuses(workspace, state, event_log)
-    _handle_provider_startup_prompts(workspace, state, event_log)
-    _handle_provider_runtime_prompts(workspace, state, event_log)
-    delivered_messages = _deliver_pending_messages(workspace, state, event_log)
-    _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
+def collect(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import collect as impl
 
-    invalid_results: list[dict[str, Any]] = []
-    if result_file:
-        envelope: Any = None
-        try:
-            envelope = json.loads(result_file.read_text(encoding="utf-8"))
-            validate_result_envelope(envelope)
-        except (json.JSONDecodeError, ValidationError) as exc:
-            invalid_results.append(
-                _record_invalid_result(
-                    event_log,
-                    error=str(exc),
-                    result_file=result_file,
-                    envelope=envelope,
-                )
-            )
-        else:
-            store.add_result(envelope)
-
-    rows = store.results(uncollected_only=True)
-    valid_rows: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]] = []
-    for row in rows:
-        envelope: Any = None
-        try:
-            envelope = json.loads(row["envelope"])
-            validate_result_envelope(envelope)
-            task = _find_task_or_none(state["tasks"], envelope["task_id"])
-            if task is None and not _is_message_scoped_result(store, envelope):
-                raise RuntimeError(f"unknown task id: {envelope['task_id']}")
-        except (json.JSONDecodeError, ValidationError, RuntimeError) as exc:
-            invalid_results.append(
-                _record_invalid_result(
-                    event_log,
-                    error=str(exc),
-                    result_id=row["result_id"],
-                    envelope=envelope,
-                )
-            )
-            store.mark_result_invalid(row["result_id"], str(exc))
-        else:
-            valid_rows.append((row, envelope, task))
-
-    if invalid_results:
-        save_runtime_state(workspace, state)
-        state_path = write_team_state(workspace, spec, state, _team_state_result_entries(store, []))
-        coordinator = _ensure_coordinator_after_collect(workspace, state, event_log) if ensure_coordinator else {"ok": False, "status": "not_required"}
-        return {
-            "ok": False,
-            "collected": [],
-            "collected_results": [],
-            "delivered_messages": delivered_messages,
-            "invalid_results": invalid_results,
-            "results": store.result_counts(),
-            "state_file": str(state_path),
-            "coordinator": coordinator,
-        }
-
-    collected: list[dict[str, Any]] = []
-    collected_results: list[dict[str, Any]] = []
-    next_state = copy.deepcopy(state)
-    for row, envelope, task in valid_rows:
-        if task is not None:
-            next_task = _find_task(next_state["tasks"], envelope["task_id"])
-            task_status = _result_status_to_task_status(next_task, envelope["status"])
-            update_task_status(
-                next_state["tasks"],
-                envelope["task_id"],
-                task_status,
-                envelope.get("summary"),
-                envelope.get("artifacts", []),
-            )
-            next_task["accepted_result_id"] = row["result_id"]
-        else:
-            task_status = "message_scoped"
-        collected.append(envelope)
-        collected_results.append(
-            {
-                "result_id": row["result_id"],
-                "task_id": envelope["task_id"],
-                "agent_id": envelope["agent_id"],
-                "status": envelope["status"],
-                "summary": envelope.get("summary"),
-                "tests": envelope.get("tests", []),
-                "created_at": row.get("created_at"),
-                "scope": "task" if task is not None else "message",
-            }
-        )
-        event_log.write(
-            "collect.result",
-            result_id=row["result_id"],
-            task_id=envelope["task_id"],
-            status=envelope["status"],
-            task_status=task_status,
-            retry_count=task.get("retry_count") if task else None,
-            retry_limit=task.get("retry_limit") if task else None,
-            scope="task" if task is not None else "message",
-        )
-    state_path = write_team_state(workspace, spec, next_state, _team_state_result_entries(store, collected))
-    save_runtime_state(workspace, next_state)
-    for row, _, _ in valid_rows:
-        store.mark_result_collected(row["result_id"])
-    coordinator = _ensure_coordinator_after_collect(workspace, next_state, event_log) if ensure_coordinator else {"ok": False, "status": "not_required"}
-    return {
-        "ok": not invalid_results,
-        "collected": collected,
-        "collected_results": collected_results,
-        "delivered_messages": delivered_messages,
-        "invalid_results": invalid_results,
-        "results": store.result_counts(),
-        "state_file": str(state_path),
-        "coordinator": coordinator,
-    }
+    return impl(*args, **kwargs)
 
 
-def _team_state_result_entries(store: MessageStore, collected: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if collected:
-        return [{"envelope": env} for env in collected]
-    return [{"envelope": row["envelope"]} for row in store.latest_results(limit=5)]
+def _team_state_result_entries(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _team_state_result_entries as impl
+
+    return impl(*args, **kwargs)
 
 
-def _ensure_coordinator_after_collect(workspace: Path, state: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
-    if not _coordinator_should_run(state):
-        return {"ok": False, "status": "not_required"}
-    try:
-        coordinator = start_coordinator(workspace)
-    except Exception as exc:
-        coordinator = {"ok": False, "status": "start_failed", "error": str(exc)}
-    event_log.write("collect.coordinator_checked", coordinator=coordinator)
-    return coordinator
+def _ensure_coordinator_after_collect(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _ensure_coordinator_after_collect as impl
+
+    return impl(*args, **kwargs)
 
 
-def _coordinator_should_run(state: dict[str, Any]) -> bool:
-    return bool(state.get("session_name") or _leader_receiver_is_direct(state.get("leader_receiver", {})))
+def _coordinator_should_run(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _coordinator_should_run as impl
+
+    return impl(*args, **kwargs)
 
 
-def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
-    validate_result_envelope(envelope)
-    store = MessageStore(workspace)
-    result_id = store.add_result(envelope)
-    acknowledged = store.acknowledge_task_messages(envelope["task_id"], envelope["agent_id"])
-    if not acknowledged:
-        acknowledged = store.acknowledge_message(envelope["task_id"], envelope["agent_id"])
-    event_log = EventLog(workspace)
-    notification = _notify_leader_of_report_result(workspace, envelope, result_id, event_log)
-    leader_notified = bool(notification.get("ok")) and notification.get("status") in {"submitted", "visible", "delivered", "acknowledged"}
-    event_log.write(
-        "mcp.report_result",
-        result_id=result_id,
-        task_id=envelope["task_id"],
-        agent_id=envelope["agent_id"],
-        acknowledged_messages=acknowledged,
-        leader_notified=leader_notified,
-        notification_message_id=notification.get("message_id"),
-        notification_status=notification.get("status"),
-        notification_channel=notification.get("channel"),
-        notification_event_id=notification.get("event_id"),
-    )
-    return {
-        "ok": True,
-        "result_id": result_id,
-        "task_id": envelope["task_id"],
-        "agent_id": envelope["agent_id"],
-        "acknowledged_messages": acknowledged,
-        "leader_notified": leader_notified,
-        "notification_message_id": notification.get("message_id"),
-        "notification_status": notification.get("status"),
-        "notification_channel": notification.get("channel"),
-        "notification_event_id": notification.get("event_id"),
-    }
+def report_result(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import report_result as impl
+
+    return impl(*args, **kwargs)
 
 
-def _notify_leader_of_report_result(
-    workspace: Path,
-    envelope: dict[str, Any],
-    result_id: str,
-    event_log: EventLog,
-) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path) if spec_path.exists() else {}
-    leader_id = _leader_id(state, spec)
-    content = _format_report_result_notification(envelope, result_id)
-    store = MessageStore(workspace)
-    event_id = store.add_scheduled_event(
-        datetime.now(timezone.utc).isoformat(),
-        leader_id,
-        "send",
-        {
-            "content": content,
-            "task_id": envelope["task_id"],
-            "sender": envelope["agent_id"],
-            "requires_ack": False,
-            "wait_visible": True,
-            "timeout": 30.0,
-            "max_attempts": 3,
-        },
-    )
-    coordinator = {"ok": False, "status": "not_started"}
-    if state.get("session_name") or _leader_receiver_is_direct(state.get("leader_receiver", {})):
-        try:
-            coordinator = start_coordinator(workspace)
-        except Exception as exc:
-            coordinator = {"ok": False, "status": "start_failed", "error": str(exc)}
-    notification = {
-        "ok": True,
-        "status": "queued",
-        "channel": "coordinator",
-        "event_id": event_id,
-        "coordinator": coordinator,
-    }
-    event_log.write(
-        "mcp.report_result_notify_queued",
-        result_id=result_id,
-        task_id=envelope["task_id"],
-        agent_id=envelope["agent_id"],
-        event_id=event_id,
-        target=leader_id,
-        coordinator=coordinator,
-    )
-    return notification
+def _notify_leader_of_report_result(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _notify_leader_of_report_result as impl
+
+    return impl(*args, **kwargs)
 
 
-def _format_report_result_notification(envelope: dict[str, Any], result_id: str) -> str:
-    lines = [
-        f"Task {envelope['task_id']} reported {envelope['status']} from {envelope['agent_id']}: {envelope.get('summary') or 'completed'}",
-        f"Result id: {result_id}",
-        "Team Agent stored this result. The coordinator/collect path will update team_state.md; no manual polling loop is needed.",
-    ]
-    tests = envelope.get("tests") or []
-    rendered_tests: list[str] = []
-    for test in tests[:3]:
-        if isinstance(test, dict):
-            command = test.get("command") or "test"
-            status = test.get("status") or "unknown"
-            rendered_tests.append(f"{command}={status}")
-    if rendered_tests:
-        lines.insert(1, "Tests: " + "; ".join(rendered_tests))
-    return "\n".join(lines)
+def _format_report_result_notification(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _format_report_result_notification as impl
+
+    return impl(*args, **kwargs)
 
 
-def _record_invalid_result(
-    event_log: EventLog,
-    error: str,
-    result_file: Path | None = None,
-    result_id: str | None = None,
-    envelope: Any = None,
-) -> dict[str, Any]:
-    task_id = envelope.get("task_id") if isinstance(envelope, dict) else None
-    agent_id = envelope.get("agent_id") if isinstance(envelope, dict) else None
-    event_log.write(
-        "collect.invalid_result",
-        result_id=result_id,
-        result_file=str(result_file) if result_file else None,
-        task_id=task_id,
-        agent_id=agent_id,
-        error=error,
-    )
-    return {
-        "result_id": result_id,
-        "path": str(result_file) if result_file else None,
-        "task_id": task_id,
-        "agent_id": agent_id,
-        "error": error,
-    }
+def _record_invalid_result(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _record_invalid_result as impl
+
+    return impl(*args, **kwargs)
 
 
 def _capture_missing_sessions(
@@ -2660,111 +2191,28 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     return {"ok": True, "stop": False, "delivered": delivered, "scheduled": fired, "stuck": stuck, "results": results}
 
 
-def _collect_results_and_notify_watchers(workspace: Path, event_log: EventLog) -> dict[str, Any]:
-    store = MessageStore(workspace)
-    if not store.results(uncollected_only=True):
-        return {"ok": True, "collected": 0, "notified": []}
-    result = collect(workspace)
-    if not result.get("ok"):
-        event_log.write("coordinator.result_collect_failed", invalid_results=result.get("invalid_results", []))
-        return {"ok": False, "collected": 0, "notified": [], "error": "collect_failed"}
-    notified: list[dict[str, Any]] = []
-    for item in result.get("collected_results", []):
-        notified.extend(_notify_result_watchers(workspace, item, event_log))
-    event_log.write(
-        "coordinator.result_collect",
-        collected=len(result.get("collected_results", [])),
-        notified=len(notified),
-    )
-    return {"ok": True, "collected": len(result.get("collected_results", [])), "notified": notified}
+def _collect_results_and_notify_watchers(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _collect_results_and_notify_watchers as impl
+
+    return impl(*args, **kwargs)
 
 
-def _notify_result_watchers(workspace: Path, result: dict[str, Any], event_log: EventLog) -> list[dict[str, Any]]:
-    store = MessageStore(workspace)
-    notified: list[dict[str, Any]] = []
-    for watcher in store.pending_result_watchers():
-        if not _watcher_matches_result(watcher, result):
-            continue
-        content = _format_result_watcher_notification(result)
-        try:
-            delivery = send_message(
-                workspace,
-                watcher.get("leader_id") or "leader",
-                content,
-                task_id=result.get("task_id"),
-                sender="coordinator",
-                requires_ack=False,
-                wait_visible=False,
-            )
-        except Exception as exc:
-            store.mark_result_watcher(
-                watcher["watcher_id"],
-                "notify_failed",
-                result_id=result.get("result_id"),
-                error=str(exc),
-            )
-            event_log.write("result_watcher.notify_failed", watcher_id=watcher["watcher_id"], error=str(exc))
-            notified.append({"watcher_id": watcher["watcher_id"], "ok": False, "error": str(exc)})
-            continue
-        status = "notified" if delivery.get("ok") else "notify_failed"
-        error = delivery.get("reason") or delivery.get("error")
-        store.mark_result_watcher(
-            watcher["watcher_id"],
-            status,
-            result_id=result.get("result_id"),
-            notified_message_id=delivery.get("message_id"),
-            error=error,
-        )
-        event_log.write(
-            "result_watcher.notified",
-            watcher_id=watcher["watcher_id"],
-            result_id=result.get("result_id"),
-            task_id=result.get("task_id"),
-            agent_id=result.get("agent_id"),
-            ok=bool(delivery.get("ok")),
-            delivery_status=delivery.get("status"),
-            message_id=delivery.get("message_id"),
-            error=error,
-        )
-        notified.append(
-            {
-                "watcher_id": watcher["watcher_id"],
-                "result_id": result.get("result_id"),
-                "ok": bool(delivery.get("ok")),
-                "message_id": delivery.get("message_id"),
-            }
-        )
-    return notified
+def _notify_result_watchers(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _notify_result_watchers as impl
+
+    return impl(*args, **kwargs)
 
 
-def _watcher_matches_result(watcher: dict[str, Any], result: dict[str, Any]) -> bool:
-    task_id = watcher.get("task_id")
-    agent_id = watcher.get("agent_id")
-    task_matches = not task_id or task_id == result.get("task_id")
-    agent_matches = not agent_id or agent_id == result.get("agent_id")
-    return task_matches and agent_matches
+def _watcher_matches_result(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _watcher_matches_result as impl
+
+    return impl(*args, **kwargs)
 
 
-def _format_result_watcher_notification(result: dict[str, Any]) -> str:
-    task_id = result.get("task_id") or "unknown task"
-    agent_id = result.get("agent_id") or "unknown agent"
-    status = result.get("status") or "unknown"
-    summary = result.get("summary") or "completed"
-    lines = [
-        f"Task {task_id} reported {status} from {agent_id}: {summary}",
-        "Team Agent has collected this result and updated team_state.md. No manual polling is needed.",
-    ]
-    tests = result.get("tests") or []
-    if tests:
-        rendered_tests = []
-        for test in tests[:3]:
-            if isinstance(test, dict):
-                command = test.get("command") or "test"
-                test_status = test.get("status") or "unknown"
-                rendered_tests.append(f"{command}={test_status}")
-        if rendered_tests:
-            lines.insert(1, "Tests: " + "; ".join(rendered_tests))
-    return "\n".join(lines)
+def _format_result_watcher_notification(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.results import _format_result_watcher_notification as impl
+
+    return impl(*args, **kwargs)
 
 
 def _ensure_agent_start_requirements(
@@ -2901,125 +2349,22 @@ def _format_profile_smoke_failures(failures: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
-    fired: list[int] = []
-    for row in store.due_scheduled_events():
-        payload = json.loads(row["payload_json"] or "{}")
-        try:
-            if row["kind"] == "send":
-                result = send_message(
-                    workspace,
-                    row["target"],
-                    str(payload.get("content") or ""),
-                    task_id=payload.get("task_id"),
-                    sender=payload.get("sender", "coordinator"),
-                    requires_ack=bool(payload.get("requires_ack", True)),
-                    wait_visible=bool(payload.get("wait_visible", True)),
-                    timeout=float(payload.get("timeout", 30)),
-                )
-            elif row["kind"] == "health_ping":
-                result = {"ok": True, "status": "logged"}
-                event_log.write("coordinator.health_ping", target=row["target"], payload=payload)
-            else:
-                result = {"ok": False, "error": f"unknown scheduled event kind: {row['kind']}"}
-            if not result.get("ok") and row["kind"] == "send":
-                retry = _schedule_send_retry(store, row, payload, result)
-                if retry:
-                    result = {**result, **retry}
-                    store.mark_scheduled_event(int(row["id"]), "retry_scheduled", result)
-                    event_log.write(
-                        "coordinator.scheduled_retry",
-                        id=row["id"],
-                        retry_event_id=retry["retry_event_id"],
-                        target=row["target"],
-                        attempt=retry["next_attempt"],
-                    )
-                    fired.append(int(row["id"]))
-                    continue
-            store.mark_scheduled_event(int(row["id"]), "done" if result.get("ok") else "failed", result)
-            fired.append(int(row["id"]))
-        except Exception as exc:
-            result = {"ok": False, "error": str(exc)}
-            store.mark_scheduled_event(int(row["id"]), "failed", result)
-            event_log.write("coordinator.scheduled_failed", id=row["id"], error=str(exc))
-    return fired
+def _fire_due_scheduled_events(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.scheduler import _fire_due_scheduled_events as impl
+
+    return impl(*args, **kwargs)
 
 
-def _schedule_send_retry(
-    store: MessageStore,
-    row: dict[str, Any],
-    payload: dict[str, Any],
-    result: dict[str, Any],
-) -> dict[str, Any] | None:
-    attempt = int(payload.get("attempt") or 1)
-    max_attempts = int(payload.get("max_attempts") or 1)
-    if attempt >= max_attempts:
-        return None
-    retry_payload = dict(payload)
-    retry_payload["attempt"] = attempt + 1
-    due_at = datetime.now(timezone.utc) + timedelta(seconds=min(2 * attempt, 5))
-    retry_id = store.add_scheduled_event(due_at.isoformat(), row["target"], row["kind"], retry_payload)
-    return {
-        "retry_event_id": retry_id,
-        "next_attempt": attempt + 1,
-        "max_attempts": max_attempts,
-        "retry_reason": result.get("reason") or result.get("error"),
-    }
+def _schedule_send_retry(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.scheduler import _schedule_send_retry as impl
+
+    return impl(*args, **kwargs)
 
 
-def _detect_stuck_agents(
-    workspace: Path,
-    state: dict[str, Any],
-    store: MessageStore,
-    event_log: EventLog,
-) -> list[str]:
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path) if spec_path.exists() else {}
-    runtime_cfg = spec.get("runtime", {})
-    stuck_timeout = int(runtime_cfg.get("stuck_timeout_sec", 300))
-    push_min_interval = int(runtime_cfg.get("push_min_interval_sec", 60))
-    health = store.agent_health()
-    stuck: list[str] = []
-    now = datetime.now(timezone.utc)
-    for agent_id, row in health.items():
-        if row.get("status") not in {"RUNNING"} or not row.get("last_output_at"):
-            continue
-        try:
-            last = datetime.fromisoformat(row["last_output_at"])
-        except ValueError:
-            continue
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        if (now - last).total_seconds() < stuck_timeout:
-            continue
-        stuck.append(agent_id)
-        state.setdefault("coordinator", {})
-        push_key = f"last_stuck_push_at:{agent_id}"
-        last_push_raw = state["coordinator"].get(push_key)
-        should_push = True
-        if last_push_raw:
-            try:
-                last_push = datetime.fromisoformat(last_push_raw)
-                if last_push.tzinfo is None:
-                    last_push = last_push.replace(tzinfo=timezone.utc)
-                should_push = (now - last_push).total_seconds() >= push_min_interval
-            except ValueError:
-                should_push = True
-        event_log.write("coordinator.agent_stuck", agent_id=agent_id, last_output_at=row["last_output_at"])
-        if should_push:
-            state["coordinator"][push_key] = now.isoformat()
-            try:
-                send_message(
-                    workspace,
-                    "leader",
-                    f"agent {agent_id} appears stuck: no output for {stuck_timeout}s",
-                    sender="coordinator",
-                    requires_ack=False,
-                    wait_visible=False,
-                )
-            except Exception as exc:
-                event_log.write("coordinator.stuck_push_failed", agent_id=agent_id, error=str(exc))
-    return stuck
+def _detect_stuck_agents(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.scheduler import _detect_stuck_agents as impl
+
+    return impl(*args, **kwargs)
 
 
 def diagnose(workspace: Path) -> dict[str, Any]:
@@ -3696,1032 +3041,316 @@ def _is_runtime_team_agent(agent_id: str, state: dict[str, Any], spec: dict[str,
     return agent_id in set(_runtime_team_agent_ids(state, spec))
 
 
-def _broadcast_targets(state: dict[str, Any], spec: dict[str, Any], sender: str) -> list[str]:
-    leader_id = _leader_id(state, spec)
-    targets = [leader_id, *_runtime_team_agent_ids(state, spec)]
-    if _is_leader_sender(sender, leader_id):
-        excluded = {leader_id}
-    else:
-        excluded = {sender}
-    return [target for target in targets if target not in excluded]
-
-
-def _compact_broadcast_delivery(result: dict[str, Any]) -> dict[str, Any]:
-    keys = ["ok", "status", "message_id", "to", "reason", "channel"]
-    return {key: result[key] for key in keys if key in result}
-
-
-def allow_peer_talk(workspace: Path, agent_a: str, agent_b: str) -> dict[str, Any]:
-    MessageStore(workspace).allow_peer(agent_a, agent_b)
-    EventLog(workspace).write("communication.peer_allowed", a=agent_a, b=agent_b)
-    return {"ok": True, "a": agent_a, "b": agent_b, "status": "compat_noop", "reason": "team_scoped_peer_messages_enabled"}
-
-
-def _mirror_peer_message_to_leader(
-    workspace: Path,
-    state: dict[str, Any],
-    sender: str,
-    target: str,
-    content: str,
-    task_id: str | None,
-    event_log: EventLog,
-) -> None:
-    leader_id = _leader_id(state, {})
-    mirror = f"Team Agent peer message from {sender} to {target}"
-    if task_id:
-        mirror += f" for {task_id}"
-    mirror += f":\n\n{content}"
-    try:
-        result = _send_to_leader_receiver(workspace, state, leader_id, mirror, task_id, sender, False, event_log)
-        event_log.write("communication.peer_mirrored", sender=sender, target=target, ok=result.get("ok"))
-    except Exception as exc:
-        event_log.write("communication.peer_mirror_failed", sender=sender, target=target, error=str(exc))
-
-
-def _leader_inbox_path(workspace: Path) -> Path:
-    return runtime_dir(workspace) / "leader-inbox.log"
-
-
-def _send_to_leader_receiver(
-    workspace: Path,
-    state: dict[str, Any],
-    leader_id: str,
-    content: str,
-    task_id: str | None,
-    sender: str,
-    requires_ack: bool,
-    event_log: EventLog,
-) -> dict[str, Any]:
-    store = MessageStore(workspace)
-    message_id = store.create_message(task_id, sender, leader_id, content, requires_ack=False)
-    if requires_ack:
-        event_log.write("leader_receiver.no_ack_forced", message_id=message_id, requested_requires_ack=True)
-    row = _message_by_id(store, message_id)
-    if not row:
-        return {"ok": False, "message_id": message_id, "status": "failed", "to": leader_id, "reason": "message_missing"}
-    if not store.claim_for_delivery(message_id):
-        current = _message_by_id(store, message_id)
-        status = current["status"] if current else "missing"
-        event_log.write("leader_receiver.delivery_claim_skipped", message_id=message_id, status=status)
-        return {
-            "ok": status in {"submitted", "visible", "delivered", "acknowledged"},
-            "message_id": message_id,
-            "status": status,
-            "to": leader_id,
-            "channel": "direct_tmux",
-            "reason": "message_already_claimed",
-        }
-    payload = _message_payload(row)
-    rendered = core_render_message(payload)
-    text = rendered["text"]
-    receiver = state.get("leader_receiver", {})
-    if not _leader_receiver_is_direct(receiver):
-        return _fail_leader_delivery(
-            workspace,
-            state,
-            store,
-            message_id,
-            payload,
-            event_log,
-            reason="leader_not_attached",
-            error="No direct leader tmux pane is attached. Run team-agent attach-leader.",
-        )
-
-    validation = _validate_leader_receiver(receiver)
-    if not validation["ok"]:
-        rediscovery = _rediscover_leader_receiver(receiver, event_log)
-        if rediscovery.get("status") == "updated":
-            state["leader_receiver"].update(rediscovery["receiver"])
-            receiver = state["leader_receiver"]
-            validation = _validate_leader_receiver(receiver)
-        elif rediscovery.get("status") == "ambiguous":
-            return _fail_leader_delivery(
-                workspace,
-                state,
-                store,
-                message_id,
-                payload,
-                event_log,
-                reason="ambiguous",
-                error="multiple possible leader panes found; rerun team-agent attach-leader --pane <pane_id>",
-                message_status="ambiguous",
-            )
-    if not validation["ok"]:
-        return _fail_leader_delivery(
-            workspace,
-            state,
-            store,
-            message_id,
-            payload,
-            event_log,
-            reason=validation["reason"],
-            error=validation.get("error"),
-        )
-    state["leader_receiver"].update(validation["pane"])
-    submit_key, submit_reason = _choose_leader_submit_key(receiver.get("provider", "codex"), validation.get("capture", ""))
-    target = receiver["pane_id"]
-    event_log.write(
-        "leader_receiver.deliver_attempt",
-        message_id=message_id,
-        target=target,
-        provider=receiver.get("provider"),
-        submit_key=submit_key,
-        submit_reason=submit_reason,
-        render_engine=rendered.get("engine"),
-        visible_token=rendered.get("token"),
-        payload=payload,
-        warning=validation.get("warning"),
-    )
-    injection = _tmux_inject_text(target, text, submit_key, f"team-agent-leader-{message_id}")
-    if injection["ok"]:
-        store.mark(message_id, "submitted")
-        event_log.write(
-            "leader_receiver.submitted",
-            message_id=message_id,
-            sender=sender,
-            task_id=task_id,
-            target=target,
-            provider=receiver.get("provider"),
-            submit_key=submit_key,
-            submit_reason=submit_reason,
-            visible=True,
-            submitted=True,
-            visible_token=rendered.get("token"),
-            verification=injection.get("verification"),
-            submit_verification=injection.get("submit_verification"),
-            attempts=injection.get("attempts"),
-            submit_attempts=injection.get("submit_attempts"),
-        )
-        save_runtime_state(workspace, state)
-        return {
-            "ok": True,
-            "message_id": message_id,
-            "status": "submitted",
-            "to": leader_id,
-            "channel": "direct_tmux",
-            "leader_receiver": state["leader_receiver"],
-            "submit_key": submit_key,
-            "visible": True,
-            "submitted": True,
-            "visible_token": rendered.get("token"),
-            "verification": injection.get("verification"),
-            "submit_verification": injection.get("submit_verification"),
-            "attempts": injection.get("attempts"),
-            "submit_attempts": injection.get("submit_attempts"),
-            "warning": "leader messages are no-ack; requires_ack was forced false" if requires_ack else None,
-        }
-    return _fail_leader_delivery(
-        workspace,
-        state,
-        store,
-        message_id,
-        payload,
-        event_log,
-        reason="tmux_injection_failed",
-        error=injection.get("error"),
-        stage=injection.get("stage"),
-        attempts=injection.get("attempts"),
-        submit_attempts=injection.get("submit_attempts"),
-    )
-
-
-def _fail_leader_delivery(
-    workspace: Path,
-    state: dict[str, Any],
-    store: MessageStore,
-    message_id: str,
-    payload: dict[str, Any],
-    event_log: EventLog,
-    reason: str,
-    error: str | None = None,
-    stage: str | None = None,
-    message_status: str = "failed",
-    attempts: list[dict[str, Any]] | None = None,
-    submit_attempts: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    store.mark(message_id, message_status, error or reason)
-    fallback_path = _write_leader_fallback_audit(workspace, payload, reason, error)
-    event_log.write(
-        "leader_receiver.delivery_failed",
-        message_id=message_id,
-        target=state.get("leader_receiver", {}).get("pane_id"),
-        reason=reason,
-        error=error,
-        stage=stage,
-        attempts=attempts,
-        submit_attempts=submit_attempts,
-        fallback_path=str(fallback_path),
-        suggestion="Run team-agent attach-leader --workspace . --provider codex, or pass --pane <pane_id>.",
-    )
-    save_runtime_state(workspace, state)
-    return {
-        "ok": False,
-        "message_id": message_id,
-        "status": "fallback",
-        "message_status": message_status,
-        "to": payload["to"],
-        "channel": "fallback_inbox",
-        "reason": reason,
-        "error": error,
-        "attempts": attempts,
-        "submit_attempts": submit_attempts,
-        "fallback_path": str(fallback_path),
-        "suggestion": "Run team-agent attach-leader --workspace . --provider codex, or pass --pane <pane_id>.",
-    }
-
-
-def _write_leader_fallback_audit(workspace: Path, payload: dict[str, Any], reason: str, error: str | None) -> Path:
-    inbox_path = _leader_inbox_path(workspace)
-    inbox_path.parent.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    text = core_render_message(payload)["text"]
-    with inbox_path.open("a", encoding="utf-8") as inbox:
-        inbox.write(f"\n[{stamp}] fallback reason={reason} error={error or '-'}\n{text}\n")
-    return inbox_path
-
-
-def _leader_receiver_is_direct(receiver: dict[str, Any] | None) -> bool:
-    return bool(receiver and receiver.get("mode") == "direct_tmux" and receiver.get("pane_id"))
-
-
-def _message_by_id(store: MessageStore, message_id: str) -> dict[str, Any] | None:
-    return next((m for m in store.messages() if m["message_id"] == message_id), None)
-
-
-def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "message_id": row["message_id"],
-        "task_id": row["task_id"],
-        "from": row["sender"],
-        "to": row["recipient"],
-        "reply_to": row["reply_to"],
-        "requires_ack": bool(row["requires_ack"]),
-        "artifact_refs": json.loads(row["artifact_refs"] or "[]"),
-        "content": row["content"],
-    }
-
-
-def _format_team_agent_message(payload: dict[str, Any]) -> str:
-    return core_render_message(payload)["text"]
-
-
-def _resolve_leader_pane(
-    pane: str | None,
-    provider: str,
-    workspace: Path | None = None,
-    require_current: bool = False,
-) -> tuple[dict[str, str], str]:
-    if pane:
-        pane_info = _tmux_pane_info(pane)
-        if not pane_info:
-            raise RuntimeError(f"tmux pane not found: {pane}")
-        return pane_info, "explicit_pane"
-    pane_info = _tmux_current_client_pane_info()
-    if pane_info and _pane_is_usable_leader(pane_info, provider, workspace):
-        return pane_info, "current_client"
-    if workspace is not None:
-        workspace_match = _infer_workspace_tmux_pane(provider, workspace)
-        if workspace_match["status"] == "ok":
-            return workspace_match["pane"], "workspace_pane_scan"
-        if workspace_match["status"] == "ambiguous":
-            raise RuntimeError(
-                "multiple tmux leader panes match this workspace; pass --pane explicitly. "
-                + _format_leader_pane_candidates(workspace_match["candidates"])
-            )
-    if require_current:
-        details = ""
-        if pane_info:
-            details = (
-                f" Current tmux client points at pane {pane_info.get('pane_id')} "
-                f"command={pane_info.get('pane_current_command')!r} "
-                f"cwd={pane_info.get('pane_current_path')!r}, not a usable pane for this workspace."
-            )
-        raise RuntimeError(
-            "Team Agent could not locate a tmux-managed leader pane for this workspace. "
-            "Run quick-start from the visible tmux-managed leader pane, pass --pane explicitly, "
-            "or use `team-agent codex`/`team-agent claude` as a convenience fallback."
-            + details
-        )
-    if pane_info and workspace is None:
-        return pane_info, "current_client"
-    pane_info = _infer_active_tmux_pane(provider)
-    if pane_info:
-        return pane_info, "active_pane_scan"
-    raise RuntimeError("could not infer a tmux leader pane; pass --pane <pane_id>")
-
-
-def _tmux_current_client_pane_info() -> dict[str, str] | None:
-    proc = run_cmd(["tmux", "display-message", "-p", "-F", TMUX_PANE_FORMAT], timeout=5)
-    if proc.returncode != 0:
-        return None
-    return _parse_tmux_pane_info(proc.stdout.strip())
-
-
-def _tmux_list_panes() -> list[dict[str, str]]:
-    proc = run_cmd(["tmux", "list-panes", "-a", "-F", TMUX_PANE_FORMAT], timeout=5)
-    if proc.returncode != 0:
-        return []
-    return [pane for line in proc.stdout.splitlines() if (pane := _parse_tmux_pane_info(line))]
-
-
-def _infer_active_tmux_pane(provider: str) -> dict[str, str] | None:
-    panes = _tmux_list_panes()
-    active = [pane for pane in panes if pane.get("pane_active") == "1"]
-    preferred = [pane for pane in active if _leader_command_looks_usable(pane.get("pane_current_command", ""), provider)]
-    if len(preferred) == 1:
-        return preferred[0]
-    if len(active) == 1:
-        return active[0]
-    if preferred:
-        return preferred[0]
-    return active[0] if active else None
-
-
-def _tmux_pane_info(target: str | None) -> dict[str, str] | None:
-    if not target:
-        return None
-    proc = run_cmd(["tmux", "display-message", "-p", "-t", target, "-F", TMUX_PANE_FORMAT], timeout=5)
-    if proc.returncode != 0:
-        return None
-    return _parse_tmux_pane_info(proc.stdout.strip())
-
-
-def _parse_tmux_pane_info(line: str) -> dict[str, str] | None:
-    parts = line.split("\t")
-    if len(parts) not in {8, 10}:
-        return None
-    keys = [
-        "pane_id",
-        "session_name",
-        "window_index",
-        "window_name",
-        "pane_index",
-        "pane_tty",
-        "pane_current_command",
-        "pane_active",
-    ]
-    if len(parts) == 10:
-        keys.extend(["pane_current_path", "session_attached"])
-    return dict(zip(keys, parts))
-
-
-def _infer_workspace_tmux_pane(provider: str, workspace: Path) -> dict[str, Any]:
-    panes = _tmux_list_panes()
-    workspace_panes = [pane for pane in panes if _pane_path_matches_workspace(pane, workspace)]
-    candidates = [
-        pane
-        for pane in workspace_panes
-        if _leader_command_looks_usable(pane.get("pane_current_command", ""), provider)
-        or _leader_command_provider(pane.get("pane_current_command", "")) is not None
-    ]
-    if not candidates:
-        return {"status": "missing", "workspace_panes": workspace_panes}
-    ranked = sorted(candidates, key=lambda item: _leader_pane_rank(item, provider), reverse=True)
-    best_rank = _leader_pane_rank(ranked[0], provider)
-    best = [pane for pane in ranked if _leader_pane_rank(pane, provider) == best_rank]
-    if len(best) == 1:
-        return {"status": "ok", "pane": best[0], "candidates": candidates}
-    return {"status": "ambiguous", "candidates": best}
-
-
-def _pane_is_usable_leader(pane: dict[str, str], provider: str, workspace: Path | None) -> bool:
-    command = pane.get("pane_current_command", "")
-    if not _leader_command_looks_usable(command, provider) and _leader_command_provider(command) is None:
-        return False
-    if workspace is not None and not _pane_path_matches_workspace(pane, workspace):
-        return False
-    return True
-
-
-def _pane_path_matches_workspace(pane: dict[str, str], workspace: Path) -> bool:
-    current_path = pane.get("pane_current_path")
-    if not current_path:
-        return False
-    return os.path.realpath(current_path) == os.path.realpath(str(workspace.resolve()))
-
-
-def _leader_pane_rank(pane: dict[str, str], provider: str) -> tuple[int, int, int]:
-    return (
-        _tmux_truthy(pane.get("session_attached", "")),
-        1 if pane.get("pane_active") == "1" else 0,
-        1 if _leader_command_is_exact(pane.get("pane_current_command", ""), provider) else 0,
-    )
-
-
-def _tmux_truthy(value: str) -> int:
-    try:
-        return 1 if int(value) > 0 else 0
-    except (TypeError, ValueError):
-        return 1 if value and value != "0" else 0
-
-
-def _leader_command_is_exact(command: str, provider: str) -> bool:
-    command_name = Path(command).name
-    if provider == "codex":
-        return command_name == "codex"
-    if provider in {"claude", "claude_code"}:
-        return command_name in {"claude", "claude.exe"}
-    return provider == "fake"
-
-
-def _leader_command_provider(command: str) -> str | None:
-    command_name = Path(command).name
-    if command_name in {"codex", "node", "nodejs"}:
-        return "codex"
-    if command_name in {"claude", "claude.exe"}:
-        return "claude_code"
-    return None
-
-
-def _format_leader_pane_candidates(candidates: list[dict[str, str]]) -> str:
-    compact = []
-    for pane in candidates[:5]:
-        compact.append(
-            "{pane_id} session={session_name} pane={window_index}.{pane_index} "
-            "cmd={pane_current_command} cwd={pane_current_path} active={pane_active}".format(**pane)
-        )
-    suffix = "" if len(candidates) <= 5 else f" ... +{len(candidates) - 5} more"
-    return "candidates: " + "; ".join(compact) + suffix
-
-
-def _target_fingerprint(pane_info: dict[str, Any]) -> str:
-    return "|".join(
-        str(pane_info.get(key, ""))
-        for key in ["session_name", "window_index", "pane_index", "pane_tty"]
-    )
-
-
-def _rediscover_leader_receiver(receiver: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
-    provider = str(receiver.get("provider") or "codex")
-    if provider != "codex":
-        return {"status": "missing", "reason": "rediscovery_only_for_codex"}
-    targets = core_list_targets()
-    if not targets.get("ok"):
-        event_log.write("leader_receiver.rediscover_failed", provider=provider, error=targets.get("error"))
-        return {"status": "failed", "error": targets.get("error")}
-    candidates = [
-        target
-        for target in targets.get("targets", [])
-        if _leader_command_looks_usable(str(target.get("pane_current_command", "")), provider)
-    ]
-    if len(candidates) == 1:
-        target = candidates[0]
-        updated = {
-            "mode": "direct_tmux",
-            "status": "attached",
-            "provider": provider,
-            "pane_id": target["pane_id"],
-            "session_name": target["session_name"],
-            "window_index": str(target["window_index"]),
-            "window_name": target["window_name"],
-            "pane_index": str(target["pane_index"]),
-            "pane_tty": target["pane_tty"],
-            "pane_current_command": target["pane_current_command"],
-            "fingerprint": target.get("fingerprint") or _target_fingerprint(target),
-            "attached_at": datetime.now(timezone.utc).isoformat(),
-            "discovery": "stale_rediscovery_unique_candidate",
-        }
-        event_log.write(
-            "leader_receiver.rediscovered",
-            provider=provider,
-            old_target=receiver.get("pane_id"),
-            new_target=updated["pane_id"],
-            candidate_count=1,
-        )
-        return {"status": "updated", "receiver": updated}
-    if len(candidates) > 1:
-        event_log.write(
-            "leader_receiver.rediscover_ambiguous",
-            provider=provider,
-            old_target=receiver.get("pane_id"),
-            candidates=[target.get("pane_id") for target in candidates],
-        )
-        return {"status": "ambiguous", "candidates": candidates}
-    event_log.write("leader_receiver.rediscover_missing", provider=provider, old_target=receiver.get("pane_id"))
-    return {"status": "missing"}
-
-
-def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
-    pane_info = _tmux_pane_info(receiver.get("pane_id"))
-    if not pane_info:
-        return {"ok": False, "reason": "leader_pane_missing", "error": "tmux pane does not exist"}
-    capture = run_cmd(["tmux", "capture-pane", "-p", "-S", "-40", "-t", pane_info["pane_id"]], timeout=5)
-    if capture.returncode != 0:
-        return {
-            "ok": False,
-            "reason": "leader_capture_failed",
-            "error": capture.stderr.strip() or "tmux capture-pane failed",
-            "pane": pane_info,
-        }
-    warning = None
-    provider = str(receiver.get("provider") or "codex")
-    if not _leader_command_looks_usable(pane_info.get("pane_current_command", ""), provider):
-        warning = (
-            f"pane command {pane_info.get('pane_current_command')!r} is not a typical {provider} host; "
-            "continuing because tmux capture works"
-        )
-    return {"ok": True, "pane": pane_info, "capture": capture.stdout, "warning": warning}
-
-
-def _leader_command_looks_usable(command: str, provider: str) -> bool:
-    if provider == "fake":
-        return True
-    command_name = Path(command).name
-    if provider == "codex":
-        return command_name in {"codex", "node", "nodejs"}
-    return bool(command_name)
-
-
-def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, str]:
-    if provider != "codex":
-        return "Enter", "non_codex_provider"
-    if re.search(r"esc to interrupt|working|running", capture_text, re.IGNORECASE):
-        return "Enter", "codex_busy_submit_followup"
-    if re.search(r"(›|❯|codex>)", capture_text):
-        return "Enter", "codex_idle_prompt"
-    return "Enter", "codex_state_unknown_submit"
-
-
-def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str, attempts: int = 3) -> dict[str, Any]:
-    token_match = re.search(r"\[team-agent-token:([^\]]+)\]", text)
-    token = token_match.group(1) if token_match else ""
-    attempt_log: list[dict[str, Any]] = []
-    last_verification = "not_checked"
-    ready_timeout = _tmux_paste_ready_timeout(text)
-    submit_settle_timeout = _tmux_submit_settle_timeout(text)
-    text_bytes = _tmux_text_size(text)
-    for attempt in range(1, max(attempts, 1) + 1):
-        prepared = _prepare_tmux_pane_for_input(target)
-        if not prepared["ok"]:
-            attempt_log.append({"attempt": attempt, "visible": False, "verification": prepared["verification"]})
-            return {
-                "ok": False,
-                "stage": prepared["stage"],
-                "error": prepared.get("error"),
-                "attempts": attempt_log,
-                "verification": prepared["verification"],
-            }
-        baseline = _capture_tmux_pane_text(target)
-        if not baseline["ok"]:
-            return {
-                "ok": False,
-                "stage": "pre-paste-capture",
-                "error": baseline.get("error"),
-                "attempts": attempt_log,
-                "verification": "pre_paste_capture_failed",
-            }
-        baseline_capture = baseline["capture"]
-        if token:
-            pre_visible, pre_verification, pre_capture = _wait_for_message_ready(
-                target,
-                token,
-                0.0,
-                expected_text=text,
-                allow_pasted_prompt=False,
-            )
-            if pre_visible:
-                attempt_entry = {
-                    "attempt": attempt,
-                    "visible": True,
-                    "verification": pre_verification,
-                    "buffer_method": "preexisting_prompt",
-                    "text_bytes": text_bytes,
-                    "ready_timeout_sec": 0.0,
-                    "preexisting_prompt": True,
-                }
-                if prepared.get("recovered_from_mode"):
-                    attempt_entry["recovered_from_mode"] = True
-                attempt_log.append(attempt_entry)
-                submit = _submit_worker_prompt(
-                    target,
-                    pre_capture,
-                    submit_key=submit_key,
-                    settle_timeout=submit_settle_timeout,
-                )
-                if not submit["ok"]:
-                    return {
-                        "ok": False,
-                        "stage": submit.get("stage", "submit"),
-                        "error": submit.get("error"),
-                        "attempts": attempt_log,
-                        "verification": pre_verification,
-                        "submit_verification": submit.get("verification"),
-                        "submit_attempts": submit.get("attempts"),
-                    }
-                submit_verification = _leader_submit_verification(submit.get("verification"), pre_verification, submit_key)
-                return {
-                    "ok": True,
-                    "stage": "submitted",
-                    "visible": True,
-                    "submitted": True,
-                    "verification": pre_verification,
-                    "submit_verification": submit_verification,
-                    "attempts": attempt_log,
-                    "submit_attempts": submit.get("attempts"),
-                }
-            if _capture_has_pasted_content_prompt(baseline_capture):
-                attempt_log.append(
-                    {
-                        "attempt": attempt,
-                        "visible": False,
-                        "verification": "preexisting_unverified_pasted_content_prompt",
-                        "text_bytes": text_bytes,
-                        "ready_timeout_sec": 0.0,
-                    }
-                )
-                return {
-                    "ok": False,
-                    "stage": "preexisting-input",
-                    "error": "target pane already has an unverified pasted-content prompt; refusing to paste again to avoid duplicate messages",
-                    "attempts": attempt_log,
-                    "verification": "preexisting_unverified_pasted_content_prompt",
-                }
-        buffered = _tmux_set_buffer_text(buffer_name, text)
-        if not buffered["ok"]:
-            return {"ok": False, "stage": buffered["stage"], "error": buffered.get("error"), "attempts": attempt_log}
-        proc = run_cmd(["tmux", "paste-buffer", "-t", target, "-b", buffer_name, "-p"], timeout=10)
-        if proc.returncode != 0:
-            return {"ok": False, "stage": "paste-buffer", "error": proc.stderr.strip(), "attempts": attempt_log}
-        time.sleep(0.25)
-        if token:
-            visible, verification, capture_text = _wait_for_message_ready(
-                target,
-                token,
-                ready_timeout,
-                expected_text=text,
-                baseline_capture=baseline_capture,
-            )
-        else:
-            visible, verification, capture_text = True, "no_token", ""
-        last_verification = verification
-        attempt_entry = {
-            "attempt": attempt,
-            "visible": visible,
-            "verification": verification,
-            "buffer_method": buffered.get("method"),
-            "text_bytes": buffered.get("text_bytes"),
-            "ready_timeout_sec": ready_timeout,
-        }
-        if prepared.get("recovered_from_mode"):
-            attempt_entry["recovered_from_mode"] = True
-        attempt_log.append(attempt_entry)
-        if not visible:
-            time.sleep(0.2)
-            continue
-        submit = _submit_worker_prompt(
-            target,
-            capture_text,
-            submit_key=submit_key,
-            settle_timeout=submit_settle_timeout,
-        )
-        if not submit["ok"]:
-            return {
-                "ok": False,
-                "stage": submit.get("stage", "submit"),
-                "error": submit.get("error"),
-                "attempts": attempt_log,
-                "verification": verification,
-                "submit_verification": submit.get("verification"),
-                "submit_attempts": submit.get("attempts"),
-            }
-        submit_verification = _leader_submit_verification(submit.get("verification"), verification, submit_key)
-        return {
-            "ok": True,
-            "stage": "submitted",
-            "visible": True,
-            "submitted": True,
-            "verification": verification,
-            "submit_verification": submit_verification,
-            "attempts": attempt_log,
-            "submit_attempts": submit.get("attempts"),
-        }
-    return {
-        "ok": False,
-        "stage": "visible-check",
-        "error": f"visible token not found after {max(attempts, 1)} attempts: {last_verification}",
-        "attempts": attempt_log,
-        "verification": last_verification,
-    }
-
-
-def _leader_submit_verification(submit_verification: str | None, verification: str, submit_key: str) -> str | None:
-    if submit_verification != "enter_sent_without_placeholder_check":
-        return submit_verification
-    if verification == "capture_contains_token":
-        return f"{submit_key}_sent_after_visible_token"
-    if verification == "capture_contains_message_fragment":
-        return f"{submit_key}_sent_after_visible_fragment"
-    return submit_verification
-
-
-def _tmux_text_size(text: str) -> int:
-    return len(text.encode("utf-8"))
-
-
-def _tmux_paste_ready_timeout(text: str) -> float:
-    size = _tmux_text_size(text)
-    return min(
-        TMUX_PASTE_MAX_READY_TIMEOUT,
-        max(TMUX_PASTE_MIN_READY_TIMEOUT, size / TMUX_PASTE_BYTES_PER_SECOND),
-    )
-
-
-def _tmux_submit_settle_timeout(text: str) -> float:
-    size = _tmux_text_size(text)
-    return min(
-        TMUX_SUBMIT_MAX_SETTLE_TIMEOUT,
-        max(TMUX_SUBMIT_MIN_SETTLE_TIMEOUT, size / TMUX_SUBMIT_BYTES_PER_SECOND),
-    )
-
-
-def _tmux_set_buffer_text(buffer_name: str, text: str) -> dict[str, Any]:
-    size = _tmux_text_size(text)
-    if size >= TMUX_STDIN_BUFFER_THRESHOLD:
-        proc = _tmux_load_buffer_stdin(buffer_name, text)
-        return {
-            "ok": proc.returncode == 0,
-            "stage": "load-buffer",
-            "method": "stdin_load_buffer",
-            "text_bytes": size,
-            "error": proc.stderr.strip() if proc.returncode != 0 else None,
-        }
-    proc = run_cmd(["tmux", "set-buffer", "-b", buffer_name, text], timeout=10)
-    return {
-        "ok": proc.returncode == 0,
-        "stage": "set-buffer",
-        "method": "set_buffer_arg",
-        "text_bytes": size,
-        "error": proc.stderr.strip() if proc.returncode != 0 else None,
-    }
-
-
-def _tmux_load_buffer_stdin(buffer_name: str, text: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["tmux", "load-buffer", "-b", buffer_name, "-"],
-        input=text,
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-
-
-def _prepare_tmux_pane_for_input(target: str) -> dict[str, Any]:
-    mode = run_cmd(["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=5)
-    if mode.returncode != 0:
-        return {
-            "ok": False,
-            "stage": "pane-mode-check",
-            "verification": "pane_mode_check_failed",
-            "error": mode.stderr.strip() or "tmux pane mode check failed",
-        }
-    if mode.stdout.strip() != "1":
-        return {"ok": True, "verification": "pane_input_ready"}
-    cancel = run_cmd(["tmux", "send-keys", "-t", target, "-X", "cancel"], timeout=10)
-    if cancel.returncode != 0:
-        return {
-            "ok": False,
-            "stage": "pane-mode-cancel",
-            "verification": "pane_mode_cancel_failed",
-            "error": cancel.stderr.strip() or "tmux copy-mode cancel failed",
-        }
-    deadline = time.monotonic() + 1.5
-    while True:
-        check = run_cmd(["tmux", "display-message", "-p", "-t", target, "#{pane_in_mode}"], timeout=5)
-        if check.returncode != 0:
-            return {
-                "ok": False,
-                "stage": "pane-mode-check",
-                "verification": "pane_mode_recheck_failed",
-                "error": check.stderr.strip() or "tmux pane mode recheck failed",
-            }
-        if check.stdout.strip() != "1":
-            return {"ok": True, "verification": "pane_input_ready_after_mode_cancel", "recovered_from_mode": True}
-        if time.monotonic() >= deadline:
-            return {
-                "ok": False,
-                "stage": "pane-mode-cancel",
-                "verification": "pane_mode_still_active_after_cancel",
-                "error": "tmux pane stayed in copy-mode after cancel",
-            }
-        time.sleep(0.1)
-
-
-def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
-    target = f"{session_name}:{window_name}"
-    proc = run_cmd(["tmux", "send-keys", "-t", target, "/fast", "Enter"], timeout=10)
-    if proc.returncode != 0:
-        return {"ok": False, "error": proc.stderr.strip() or "tmux send-keys failed"}
-    return {"ok": True, "target": target}
-
-
-def _wait_for_visible_token(target: str, token: str, timeout: float) -> tuple[bool, str]:
-    deadline = time.monotonic() + max(timeout, 0.0)
-    last = "not_checked"
-    while True:
-        capture = _capture_tmux_pane_text(target)
-        if capture["ok"]:
-            if token in capture["capture"] or f"[team-agent-token:{token}]" in capture["capture"]:
-                return True, "capture_contains_token"
-            last = "capture_missing_token"
-        else:
-            last = f"capture_failed: {capture.get('error')}"
-        if time.monotonic() >= deadline:
-            return False, last
-        time.sleep(0.1)
-
-
-def _capture_tmux_pane_text(target: str) -> dict[str, Any]:
-    capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{DELIVERY_CAPTURE_LINES}", "-t", target], timeout=5)
-    if capture.returncode != 0:
-        return {"ok": False, "capture": "", "error": capture.stderr.strip() or "tmux capture-pane failed"}
-    return {"ok": True, "capture": capture.stdout}
-
-
-def _wait_for_message_ready(
-    target: str,
-    message_id: str,
-    timeout: float,
-    expected_text: str = "",
-    allow_pasted_prompt: bool = True,
-    baseline_capture: str = "",
-) -> tuple[bool, str, str]:
-    deadline = time.monotonic() + max(timeout, 0.0)
-    last = "not_checked"
-    last_capture = ""
-    baseline_had_pasted_prompt = _capture_has_pasted_content_prompt(baseline_capture)
-    while True:
-        capture = _capture_tmux_pane_text(target)
-        if capture["ok"]:
-            capture_text = capture["capture"]
-            last_capture = capture_text
-            if message_id in capture_text or f"[team-agent-token:{message_id}]" in capture_text:
-                return True, "capture_contains_token", capture_text
-            if expected_text and _capture_contains_message_fragment(capture_text, expected_text):
-                return True, "capture_contains_message_fragment", capture_text
-            if allow_pasted_prompt and _capture_has_pasted_content_prompt(capture_text) and not baseline_had_pasted_prompt:
-                return True, "capture_contains_new_pasted_content_prompt", capture_text
-            last = "capture_missing_token"
-        else:
-            last = f"capture_failed: {capture.get('error')}"
-        if time.monotonic() >= deadline:
-            return False, last, last_capture
-        time.sleep(0.1)
-
-
-def _wait_for_worker_message_ready(target: str, message_id: str, timeout: float, expected_text: str = "") -> tuple[bool, str, str]:
-    return _wait_for_message_ready(target, message_id, timeout, expected_text=expected_text)
-
-
-def _capture_has_pasted_content_prompt(text: str) -> bool:
-    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return False
-    tail = [line.strip() for line in lines[-12:]]
-    tail_text = " ".join(tail)
-    if not PASTED_CONTENT_PROMPT_RE.search(tail_text):
-        return False
-    prompt_markers = ("›", "❯", ">")
-    if PASTED_CONTENT_PROMPT_RE.search(tail[-1]):
-        return True
-    if tail[-1].endswith(("chars]", "line]", "lines]")):
-        return True
-    if any(line.startswith(prompt_markers) for line in tail):
-        return True
-    if re.search(r"\b(codex|claude)\s*[>›❯]", tail_text, re.IGNORECASE):
-        return True
-    return False
-
-
-def _capture_contains_message_fragment(capture_text: str, expected_text: str) -> bool:
-    haystack = _compact_visible_text(capture_text)
-    if not haystack:
-        return False
-    fragments = _message_fragment_candidates(expected_text)
-    if not fragments:
-        return False
-    return any(fragment in haystack for fragment in fragments)
-
-
-def _message_fragment_candidates(text: str) -> list[str]:
-    sanitized = re.sub(r"\[team-agent-token:[^\]]+\]", "", text)
-    fragments: list[str] = []
-    for line in _message_content_lines(sanitized):
-        compact = _compact_visible_text(line)
-        if not _is_strong_message_fragment(compact):
-            continue
-        if len(compact) <= 72:
-            fragments.append(compact)
-            continue
-        midpoint = len(compact) // 2
-        fragments.extend(
-            [
-                compact[:36],
-                compact[max(0, midpoint - 18) : midpoint + 18],
-                compact[-36:],
-            ]
-        )
-    unique: list[str] = []
-    seen: set[str] = set()
-    for fragment in fragments:
-        if fragment in seen:
-            continue
-        seen.add(fragment)
-        unique.append(fragment)
-    return unique
-
-
-def _message_content_lines(text: str) -> list[str]:
-    lines = text.splitlines()
-    if lines and lines[0].strip().startswith("Team Agent message from "):
-        lines = lines[1:]
-    return [line for line in lines if line.strip()]
-
-
-def _is_strong_message_fragment(compact: str) -> bool:
-    if not compact:
-        return False
-    generic_prefixes = (
-        "TeamAgentmessagefrom",
-        "TeamAgentpeermessagefrom",
-        "TeamAgentstoredthisresult",
-        "TeamAgenthascollectedthisresult",
-        "Nomanualpolling",
-    )
-    if compact.startswith(generic_prefixes):
-        return False
-    if re.fullmatch(r"[-:：>›❯]+", compact):
-        return False
-    if re.search(r"(msg|res)_[0-9A-Fa-f]{8,}", compact):
-        return True
-    cjk_count = len(re.findall(r"[\u4e00-\u9fff]", compact))
-    if cjk_count >= 4 and len(compact) >= 6:
-        return True
-    return len(compact) >= 18
-
-
-def _compact_visible_text(text: str) -> str:
-    return re.sub(r"\s+", "", text)
-
-
-def _submit_worker_prompt(
-    target: str,
-    before_capture: str,
-    submit_key: str = "Enter",
-    attempts: int = 3,
-    settle_timeout: float = TMUX_SUBMIT_MIN_SETTLE_TIMEOUT,
-) -> dict[str, Any]:
-    verify_pasted_prompt = _capture_has_pasted_content_prompt(before_capture)
-    attempt_log: list[dict[str, Any]] = []
-    for attempt in range(1, max(attempts, 1) + 1):
-        proc = run_cmd(["tmux", "send-keys", "-t", target, submit_key], timeout=10)
-        if proc.returncode != 0:
-            return {
-                "ok": False,
-                "stage": "send-keys",
-                "verification": "send_keys_failed",
-                "error": proc.stderr.strip(),
-                "attempts": attempt_log,
-            }
-        if not verify_pasted_prompt:
-            return {
-                "ok": True,
-                "stage": "submitted",
-                "verification": "enter_sent_without_placeholder_check",
-                "attempts": attempt_log + [{"attempt": attempt, "submitted": True, "verification": "not_required"}],
-            }
-        cleared, verification = _wait_for_pasted_prompt_cleared(target, settle_timeout)
-        attempt_log.append({"attempt": attempt, "submitted": True, "verification": verification})
-        if cleared:
-            return {
-                "ok": True,
-                "stage": "submitted",
-                "verification": "pasted_content_prompt_absent_after_submit",
-                "attempts": attempt_log,
-            }
-    return {
-        "ok": False,
-        "stage": "submit-verification",
-        "verification": "pasted_content_prompt_still_present_after_retries",
-        "error": "pasted content prompt still present after Enter retries",
-        "attempts": attempt_log,
-    }
-
-
-def _wait_for_pasted_prompt_cleared(target: str, timeout: float) -> tuple[bool, str]:
-    polls = max(1, int(max(timeout, 0.0) / 0.1) + 1)
-    last = "pasted_content_prompt_still_present"
-    for poll in range(polls):
-        capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{DELIVERY_CAPTURE_LINES}", "-t", target], timeout=5)
-        if capture.returncode != 0:
-            last = "capture_failed"
-        elif not _capture_has_pasted_content_prompt(capture.stdout):
-            return True, "pasted_content_prompt_absent"
-        else:
-            last = "pasted_content_prompt_still_present"
-        if poll < polls - 1:
-            time.sleep(0.1)
-    return False, last
+def _broadcast_targets(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import _broadcast_targets as impl
+
+    return impl(*args, **kwargs)
+
+
+def _compact_broadcast_delivery(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.send import _compact_broadcast_delivery as impl
+
+    return impl(*args, **kwargs)
+
+
+def allow_peer_talk(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import allow_peer_talk as impl
+
+    return impl(*args, **kwargs)
+
+
+def _mirror_peer_message_to_leader(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _mirror_peer_message_to_leader as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_inbox_path(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _leader_inbox_path as impl
+
+    return impl(*args, **kwargs)
+
+
+def _send_to_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _send_to_leader_receiver as impl
+
+    return impl(*args, **kwargs)
+
+
+def _fail_leader_delivery(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _fail_leader_delivery as impl
+
+    return impl(*args, **kwargs)
+
+
+def _write_leader_fallback_audit(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _write_leader_fallback_audit as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_receiver_is_direct(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _leader_receiver_is_direct as impl
+
+    return impl(*args, **kwargs)
+
+
+def _message_by_id(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _message_by_id as impl
+
+    return impl(*args, **kwargs)
+
+
+def _message_payload(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _message_payload as impl
+
+    return impl(*args, **kwargs)
+
+
+def _format_team_agent_message(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader import _format_team_agent_message as impl
+
+    return impl(*args, **kwargs)
+
+
+def _resolve_leader_pane(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _resolve_leader_pane as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_current_client_pane_info(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _tmux_current_client_pane_info as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_list_panes(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _tmux_list_panes as impl
+
+    return impl(*args, **kwargs)
+
+
+def _infer_active_tmux_pane(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _infer_active_tmux_pane as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_pane_info(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _tmux_pane_info as impl
+
+    return impl(*args, **kwargs)
+
+
+def _parse_tmux_pane_info(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _parse_tmux_pane_info as impl
+
+    return impl(*args, **kwargs)
+
+
+def _infer_workspace_tmux_pane(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _infer_workspace_tmux_pane as impl
+
+    return impl(*args, **kwargs)
+
+
+def _pane_is_usable_leader(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _pane_is_usable_leader as impl
+
+    return impl(*args, **kwargs)
+
+
+def _pane_path_matches_workspace(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _pane_path_matches_workspace as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_pane_rank(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _leader_pane_rank as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_truthy(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _tmux_truthy as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_command_is_exact(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _leader_command_is_exact as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_command_provider(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _leader_command_provider as impl
+
+    return impl(*args, **kwargs)
+
+
+def _format_leader_pane_candidates(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _format_leader_pane_candidates as impl
+
+    return impl(*args, **kwargs)
+
+
+def _target_fingerprint(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _target_fingerprint as impl
+
+    return impl(*args, **kwargs)
+
+
+def _rediscover_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _rediscover_leader_receiver as impl
+
+    return impl(*args, **kwargs)
+
+
+def _validate_leader_receiver(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _validate_leader_receiver as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_command_looks_usable(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _leader_command_looks_usable as impl
+
+    return impl(*args, **kwargs)
+
+
+def _choose_leader_submit_key(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.leader_panes import _choose_leader_submit_key as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_inject_text(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_inject_text as impl
+
+    return impl(*args, **kwargs)
+
+
+def _leader_submit_verification(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _leader_submit_verification as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_text_size(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_text_size as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_paste_ready_timeout(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_paste_ready_timeout as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_submit_settle_timeout(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_submit_settle_timeout as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_set_buffer_text(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_set_buffer_text as impl
+
+    return impl(*args, **kwargs)
+
+
+def _tmux_load_buffer_stdin(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _tmux_load_buffer_stdin as impl
+
+    return impl(*args, **kwargs)
+
+
+def _prepare_tmux_pane_for_input(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_io import _prepare_tmux_pane_for_input as impl
+
+    return impl(*args, **kwargs)
+
+
+def _enable_codex_fast_mode(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _enable_codex_fast_mode as impl
+
+    return impl(*args, **kwargs)
+
+
+def _wait_for_visible_token(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _wait_for_visible_token as impl
+
+    return impl(*args, **kwargs)
+
+
+def _capture_tmux_pane_text(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _capture_tmux_pane_text as impl
+
+    return impl(*args, **kwargs)
+
+
+def _wait_for_message_ready(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _wait_for_message_ready as impl
+
+    return impl(*args, **kwargs)
+
+
+def _wait_for_worker_message_ready(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _wait_for_worker_message_ready as impl
+
+    return impl(*args, **kwargs)
+
+
+def _capture_has_pasted_content_prompt(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _capture_has_pasted_content_prompt as impl
+
+    return impl(*args, **kwargs)
+
+
+def _capture_contains_message_fragment(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _capture_contains_message_fragment as impl
+
+    return impl(*args, **kwargs)
+
+
+def _message_fragment_candidates(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _message_fragment_candidates as impl
+
+    return impl(*args, **kwargs)
+
+
+def _message_content_lines(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _message_content_lines as impl
+
+    return impl(*args, **kwargs)
+
+
+def _is_strong_message_fragment(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _is_strong_message_fragment as impl
+
+    return impl(*args, **kwargs)
+
+
+def _compact_visible_text(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _compact_visible_text as impl
+
+    return impl(*args, **kwargs)
+
+
+def _submit_worker_prompt(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _submit_worker_prompt as impl
+
+    return impl(*args, **kwargs)
+
+
+def _wait_for_pasted_prompt_cleared(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.tmux_prompt import _wait_for_pasted_prompt_cleared as impl
+
+    return impl(*args, **kwargs)
 
 
 def _ghostty_command() -> str | None:
@@ -5431,175 +4060,16 @@ def get_adapter_or_raise(name: str) -> str:
     return name
 
 
-def _deliver_pending_message(
-    workspace: Path,
-    state: dict[str, Any],
-    message_id: str,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-) -> dict[str, Any]:
-    store = MessageStore(workspace)
-    row = next((m for m in store.messages() if m["message_id"] == message_id), None)
-    if not row:
-        return {"ok": False, "status": "failed", "reason": "message_missing"}
-    agent_state = state.get("agents", {}).get(row["recipient"])
-    if not agent_state:
-        store.mark(message_id, "failed", "unknown recipient")
-        return {"ok": False, "status": "failed", "reason": "unknown_recipient"}
-    if agent_state.get("status") == "busy":
-        EventLog(workspace).write("send.queued_busy", message_id=message_id, agent_id=row["recipient"])
-        return {"ok": False, "status": row["status"], "reason": "agent_busy"}
-    session_name = state.get("session_name")
-    window = agent_state.get("window", row["recipient"])
-    payload = _message_payload(row)
-    text = _format_team_agent_message(payload)
-    if not session_name or not _tmux_window_exists(session_name, window):
-        store.mark(message_id, "failed", "tmux target missing")
-        EventLog(workspace).write("send.failed", message_id=message_id, reason="tmux target missing", target=f"{session_name}:{window}")
-        return {"ok": False, "status": "failed", "reason": "tmux_target_missing"}
-    target = f"{session_name}:{window}"
-    if not store.claim_for_delivery(message_id):
-        current = _message_by_id(store, message_id)
-        status = current["status"] if current else "missing"
-        EventLog(workspace).write("send.delivery_claim_skipped", message_id=message_id, target=target, status=status)
-        return {
-            "ok": status in {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"},
-            "status": status,
-            "reason": "message_already_claimed",
-        }
-    EventLog(workspace).write("send.deliver_attempt", message_id=message_id, target=target, payload=payload)
-    buffered = _tmux_set_buffer_text("team-agent-message", text)
-    if not buffered["ok"]:
-        store.mark(message_id, "failed", buffered.get("error"))
-        return {"ok": False, "status": "failed", "reason": buffered.get("error"), "stage": buffered["stage"]}
-    paste_attempts: list[dict[str, Any]] = []
-    max_paste_attempts = 3 if wait_visible else 1
-    ready_timeout = _tmux_paste_ready_timeout(text) if wait_visible else 0.1
-    submit_settle_timeout = _tmux_submit_settle_timeout(text)
-    for paste_attempt in range(1, max_paste_attempts + 1):
-        proc = run_cmd(["tmux", "paste-buffer", "-t", target, "-b", "team-agent-message", "-p"], timeout=10)
-        if proc.returncode != 0:
-            store.mark(message_id, "failed", proc.stderr.strip())
-            return {"ok": False, "status": "failed", "reason": proc.stderr.strip()}
-        # tmux paste-buffer can return before TUI frameworks finish ingesting
-        # bracketed paste. A short delay prevents submitting an empty prompt
-        # and leaving the real payload sitting in the input box.
-        time.sleep(0.25)
-        ready, verification, capture_text = _wait_for_worker_message_ready(target, message_id, ready_timeout, text)
-        paste_attempts.append(
-            {
-                "attempt": paste_attempt,
-                "ready": ready,
-                "verification": verification,
-                "buffer_method": buffered.get("method"),
-                "text_bytes": buffered.get("text_bytes"),
-                "ready_timeout_sec": ready_timeout,
-            }
-        )
-        if ready or not wait_visible or paste_attempt == max_paste_attempts:
-            submit = _submit_worker_prompt(target, capture_text, settle_timeout=submit_settle_timeout)
-            if not submit["ok"]:
-                if submit.get("stage") == "send-keys":
-                    store.mark(message_id, "failed", submit.get("error"))
-                    return {"ok": False, "status": "failed", "reason": submit.get("error"), "submit_verification": submit.get("verification")}
-                reason = f"{verification}; {submit.get('verification')}"
-                store.mark(message_id, "injected_unverified", reason)
-                EventLog(workspace).write(
-                    "send.unverified",
-                    message_id=message_id,
-                    target=target,
-                    timeout_sec=timeout,
-                    verification=verification,
-                    submit_verification=submit.get("verification"),
-                    paste_attempts=paste_attempts,
-                    submit_attempts=submit.get("attempts"),
-                )
-                return {
-                    "ok": False,
-                    "status": "injected_unverified",
-                    "verification": verification,
-                    "submit_verification": submit.get("verification"),
-                    "paste_attempts": paste_attempts,
-                    "submit_attempts": submit.get("attempts"),
-                }
-            if ready:
-                status = (
-                    "submitted"
-                    if verification
-                    in {
-                        "capture_contains_pasted_content_prompt",
-                        "capture_contains_new_pasted_content_prompt",
-                        "capture_contains_message_fragment",
-                    }
-                    else "visible"
-                )
-                store.mark(message_id, status)
-                EventLog(workspace).write(
-                    "send.submitted",
-                    message_id=message_id,
-                    target=target,
-                    status=status,
-                    verification=verification,
-                    submit_verification=submit.get("verification"),
-                    paste_attempts=paste_attempts,
-                    submit_attempts=submit.get("attempts"),
-                )
-                return {
-                    "ok": True,
-                    "status": status,
-                    "verification": verification,
-                    "submit_verification": submit.get("verification"),
-                    "paste_attempts": paste_attempts,
-                    "submit_attempts": submit.get("attempts"),
-                }
-            if wait_visible:
-                reason = f"visible token or pasted prompt not found after {timeout:g}s"
-                warning = "submitted but visible-token capture did not confirm delivery"
-                store.mark(message_id, "submitted_unverified", reason)
-                EventLog(workspace).write(
-                    "send.submitted_unverified",
-                    message_id=message_id,
-                    target=target,
-                    timeout_sec=timeout,
-                    verification=verification,
-                    submit_verification=submit.get("verification"),
-                    paste_attempts=paste_attempts,
-                    submit_attempts=submit.get("attempts"),
-                    warning=warning,
-                )
-                return {
-                    "ok": True,
-                    "status": "submitted_unverified",
-                    "verification": verification,
-                    "submit_verification": submit.get("verification"),
-                    "warning": warning,
-                    "paste_attempts": paste_attempts,
-                    "submit_attempts": submit.get("attempts"),
-                }
-            store.mark(message_id, "injected")
-            return {
-                "ok": True,
-                "status": "injected",
-                "verification": verification,
-                "submit_verification": submit.get("verification"),
-                "paste_attempts": paste_attempts,
-                "submit_attempts": submit.get("attempts"),
-            }
-    store.mark(message_id, "injected_unverified", "delivery loop exhausted")
-    return {"ok": False, "status": "injected_unverified", "verification": "delivery_loop_exhausted", "paste_attempts": paste_attempts}
+def _deliver_pending_message(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.delivery import _deliver_pending_message as impl
+
+    return impl(*args, **kwargs)
 
 
-def _deliver_pending_messages(workspace: Path, state: dict[str, Any], event_log: EventLog) -> list[str]:
-    store = MessageStore(workspace)
-    delivered: list[str] = []
-    for row in store.messages():
-        if row["status"] not in {"pending", "accepted"}:
-            continue
-        result = _deliver_pending_message(workspace, state, row["message_id"], wait_visible=True, timeout=30.0)
-        if result.get("ok"):
-            delivered.append(row["message_id"])
-            event_log.write("send.pending_delivered", message_id=row["message_id"], agent_id=row["recipient"])
-    return delivered
+def _deliver_pending_messages(*args: Any, **kwargs: Any) -> Any:
+    from team_agent.messaging.delivery import _deliver_pending_messages as impl
+
+    return impl(*args, **kwargs)
 
 
 def _refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:
