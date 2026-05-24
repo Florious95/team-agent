@@ -7,6 +7,7 @@ from typing import Any
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.messaging.deps import send_message
+from team_agent.messaging.internal_delivery import deliver_stored_message
 
 _RESULT_DELIVERY_MAX_ATTEMPTS = 5
 
@@ -52,7 +53,8 @@ def _deliver_result_to_watcher(
     attempts: int,
 ) -> dict[str, Any]:
     try:
-        delivery = send_message(
+        deliver = deliver_stored_message if watcher.get("owner_team_id") else send_message
+        delivery = deliver(
             workspace,
             watcher.get("leader_id") or "leader",
             format_result_watcher_notification(result),
@@ -60,6 +62,7 @@ def _deliver_result_to_watcher(
             sender="coordinator",
             requires_ack=False,
             wait_visible=False,
+            team=watcher.get("owner_team_id"),
         )
     except Exception as exc:
         return _mark_delivery_failed(store, event_log, watcher, result, attempts, str(exc))

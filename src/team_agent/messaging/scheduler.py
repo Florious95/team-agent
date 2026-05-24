@@ -14,6 +14,7 @@ from team_agent.messaging.deps import (
     timedelta,
     timezone,
 )
+from team_agent.messaging.internal_delivery import deliver_stored_message
 from team_agent.state import team_state_candidates
 
 from pathlib import Path
@@ -40,7 +41,8 @@ def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: 
         payload = json.loads(row["payload_json"] or "{}")
         try:
             if row["kind"] == "send":
-                result = send_message(
+                deliver = deliver_stored_message if row.get("owner_team_id") else send_message
+                result = deliver(
                     workspace,
                     row["target"],
                     str(payload.get("content") or ""),
