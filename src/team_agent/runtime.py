@@ -63,6 +63,34 @@ from team_agent.display import (
     prepare_ghostty_workspace_linked_sessions as _prepare_ghostty_workspace_linked_sessions,
     set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
 )
+from team_agent.approvals import (
+    APPROVAL_CHOICE_RE as _APPROVAL_CHOICE_RE,
+    INTERNAL_MCP_APPROVAL_CHOICE,
+    INTERNAL_MCP_AUTO_APPROVE_TOOLS,
+    STARTUP_PROMPT_RUNTIME_CHECK_LIMIT,
+    active_approval_choice_index as _active_approval_choice_index,
+    active_approval_control_index as _active_approval_control_index,
+    age_text as _age_text,
+    agent_health_status as _agent_health_status,
+    approval_choice_keys as _approval_choice_keys,
+    approval_prompt_fingerprint as _approval_prompt_fingerprint,
+    capture_has_approval_prompt as _capture_has_approval_prompt,
+    capture_has_team_orchestrator_mcp_prompt as _capture_has_team_orchestrator_mcp_prompt,
+    choose_internal_mcp_approval_choice as _choose_internal_mcp_approval_choice,
+    current_task_for_agent as _current_task_for_agent,
+    detect_provider_status as _detect_provider_status,
+    extract_approval_choices as _extract_approval_choices,
+    extract_approval_prompt as _extract_approval_prompt,
+    extract_command_approval_subject as _extract_command_approval_subject,
+    handle_internal_mcp_approval_prompt as _handle_internal_mcp_approval_prompt,
+    handle_provider_runtime_prompts as _handle_provider_runtime_prompts,
+    handle_provider_startup_prompts as _handle_provider_startup_prompts,
+    is_approval_control_line as _is_approval_control_line,
+    line_is_approval_choice as _line_is_approval_choice,
+    refresh_agent_runtime_statuses as _refresh_agent_runtime_statuses,
+    submit_internal_mcp_approval as _submit_internal_mcp_approval,
+    sync_agent_health as _sync_agent_health,
+)
 from team_agent.diagnose import (
     compact_model_checks as _compact_model_checks,
     diagnose,
@@ -313,6 +341,44 @@ for _name in (
 ):
     assert hasattr(_diagnose_pkg, _name), f"team_agent.diagnose missing {_name}"
 del _diagnose_pkg, _name
+
+# Approvals lane re-exports keep runtime.<symbol> resolving for the
+# coordinator-tick + status-refresh + prompt-detection helpers that
+# messaging/lifecycle/tests look up via the runtime alias surface. Same
+# calibrated convention as coordinator and diagnose: one identity smoke
+# + one lightweight loop over the full public name set.
+import team_agent.approvals as _approvals_pkg
+assert _refresh_agent_runtime_statuses is _approvals_pkg.refresh_agent_runtime_statuses
+for _name in (
+    "APPROVAL_CHOICE_RE",
+    "INTERNAL_MCP_APPROVAL_CHOICE",
+    "INTERNAL_MCP_AUTO_APPROVE_TOOLS",
+    "STARTUP_PROMPT_RUNTIME_CHECK_LIMIT",
+    "active_approval_choice_index",
+    "active_approval_control_index",
+    "age_text",
+    "agent_health_status",
+    "approval_choice_keys",
+    "approval_prompt_fingerprint",
+    "capture_has_approval_prompt",
+    "capture_has_team_orchestrator_mcp_prompt",
+    "choose_internal_mcp_approval_choice",
+    "current_task_for_agent",
+    "detect_provider_status",
+    "extract_approval_choices",
+    "extract_approval_prompt",
+    "extract_command_approval_subject",
+    "handle_internal_mcp_approval_prompt",
+    "handle_provider_runtime_prompts",
+    "handle_provider_startup_prompts",
+    "is_approval_control_line",
+    "line_is_approval_choice",
+    "refresh_agent_runtime_statuses",
+    "submit_internal_mcp_approval",
+    "sync_agent_health",
+):
+    assert hasattr(_approvals_pkg, _name), f"team_agent.approvals missing {_name}"
+del _approvals_pkg, _name
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -344,7 +410,6 @@ HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "
 GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
 DELIVERY_CAPTURE_LINES = 40
 SUBMITTED_DELIVERY_STATUSES = {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
-STARTUP_PROMPT_RUNTIME_CHECK_LIMIT = 3
 TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024
 TMUX_PASTE_MIN_READY_TIMEOUT = 1.5
 TMUX_PASTE_MAX_READY_TIMEOUT = 30.0
@@ -356,8 +421,6 @@ PASTED_CONTENT_PROMPT_RE = re.compile(
     r"\[\s*Pasted\s+(?:Content\s+\d+\s+chars?|text\s+#\d+\s+\+\s*\d+\s+lines?)\s*\]",
     re.IGNORECASE,
 )
-INTERNAL_MCP_AUTO_APPROVE_TOOLS = {"send_message", "report_result", "get_team_status", "request_human"}
-INTERNAL_MCP_APPROVAL_CHOICE = "Allow for this session"
 DANGEROUS_LEADER_FLAGS = (
     ("claude", "--dangerously-skip-permissions"),
     ("claude", "--dangerously-skip-permission"),
@@ -1632,435 +1695,6 @@ def _deliver_pending_messages(workspace: Path, state: dict[str, Any], event_log:
     return impl(workspace, state, event_log)
 
 
-def _refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:
-    session_name = state.get("session_name")
-    tmux_exists = _tmux_session_exists(session_name) if session_name else False
-    for agent_id, agent_state in state.get("agents", {}).items():
-        if agent_state.get("status") in {"paused", "stopped"}:
-            continue
-        old_status = agent_state.get("status")
-        window = agent_state.get("window", agent_id)
-        window_present = _tmux_window_exists(session_name, window) if tmux_exists else False
-        agent_state["tmux_window_present"] = window_present
-        if not window_present:
-            if session_name:
-                agent_state["status"] = "missing"
-        else:
-            detected = _detect_provider_status(agent_state["provider"], session_name, window)
-            if detected:
-                agent_state["status"] = detected
-            else:
-                agent_state.setdefault("status", "running")
-        if old_status != agent_state.get("status"):
-            event_log.write(
-                "runtime.status_detected",
-                agent_id=agent_id,
-                provider=agent_state.get("provider"),
-                old_status=old_status,
-                status=agent_state.get("status"),
-            )
-
-
-def _sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStore | None = None) -> None:
-    store = store or MessageStore(workspace)
-    session_name = state.get("session_name")
-    for agent_id, agent_state in state.get("agents", {}).items():
-        health_status = _agent_health_status(agent_state)
-        last_output_at = agent_state.get("last_output_at")
-        window = agent_state.get("window", agent_id)
-        if session_name and _tmux_window_exists(session_name, window):
-            proc = run_cmd(["tmux", "capture-pane", "-p", "-S", "-40", "-t", f"{session_name}:{window}"], timeout=5)
-            if proc.returncode == 0:
-                digest = hashlib.sha256(proc.stdout.encode("utf-8", errors="ignore")).hexdigest()
-                if digest != agent_state.get("last_output_hash"):
-                    last_output_at = datetime.now(timezone.utc).isoformat()
-                    agent_state["last_output_hash"] = digest
-                    agent_state["last_output_at"] = last_output_at
-                if _capture_has_approval_prompt(proc.stdout):
-                    health_status = "AWAITING_APPROVAL"
-        current_task = _current_task_for_agent(state.get("tasks", []), agent_id)
-        store.upsert_agent_health(
-            agent_id,
-            health_status,
-            last_output_at=last_output_at,
-            context_usage_pct=agent_state.get("context_usage_pct"),
-            current_task_id=current_task,
-        )
-
-
-def _agent_health_status(agent_state: dict[str, Any]) -> str:
-    raw = str(agent_state.get("status") or "").lower()
-    if raw in {"busy", "running"}:
-        return "RUNNING" if raw == "busy" else "IDLE"
-    if raw in {"paused", "blocked"}:
-        return "BLOCKED"
-    if raw in {"error", "missing", "interrupted"}:
-        return "ERROR"
-    if raw in {"stopped", "done"}:
-        return "DONE"
-    return "IDLE"
-
-
-def _current_task_for_agent(tasks: list[dict[str, Any]], agent_id: str) -> str | None:
-    active = {"pending", "ready", "running", "blocked", "needs_retry"}
-    for task in reversed(tasks):
-        if task.get("assignee") == agent_id and task.get("status", "pending") in active:
-            return task.get("id")
-    return None
-
-
-def _capture_has_approval_prompt(text: str) -> bool:
-    return _extract_approval_prompt("_", text) is not None
-
-
-def _extract_approval_prompt(agent_id: str, text: str) -> dict[str, Any] | None:
-    lines = text.splitlines()
-    control_index = _active_approval_control_index(lines)
-    if control_index is None:
-        return None
-    for index in range(control_index, -1, -1):
-        line = lines[index]
-        if "Allow the team_orchestrator MCP server to run tool" not in line:
-            continue
-        tool_match = re.search(r'run tool "([^"]+)"', line)
-        return {
-            "agent_id": agent_id,
-            "state": "waiting_approval",
-            "kind": "mcp_tool",
-            "tool": tool_match.group(1) if tool_match else None,
-            "prompt": line.strip(),
-            "choices": _extract_approval_choices(lines[index : control_index + 1]),
-        }
-    for index in range(control_index, -1, -1):
-        line = lines[index]
-        if _line_is_approval_choice(line):
-            continue
-        tool_match = re.search(r"\bteam_orchestrator\s*[-.]\s*([A-Za-z_][A-Za-z0-9_]*)\b", line)
-        if not tool_match:
-            continue
-        return {
-            "agent_id": agent_id,
-            "state": "waiting_approval",
-            "kind": "mcp_tool",
-            "tool": tool_match.group(1),
-            "prompt": f"team_orchestrator - {tool_match.group(1)}",
-            "choices": _extract_approval_choices(lines[index : control_index + 1]),
-        }
-    for index in range(control_index, -1, -1):
-        line = lines[index]
-        if "Would you like to run the following command" not in line:
-            continue
-        return {
-            "agent_id": agent_id,
-            "state": "waiting_approval",
-            "kind": "command",
-            "command": _extract_command_approval_subject(lines[: control_index + 1], index),
-            "prompt": line.strip(),
-            "choices": _extract_approval_choices(lines[index : control_index + 1]),
-        }
-    return {
-        "agent_id": agent_id,
-        "state": "waiting_approval",
-        "kind": "unknown",
-        "prompt": "approval prompt detected",
-        "choices": _extract_approval_choices(lines[: control_index + 1]),
-    }
-
-
-def _active_approval_control_index(lines: list[str]) -> int | None:
-    control_indices = [
-        index
-        for index, line in enumerate(lines)
-        if _is_approval_control_line(line)
-    ]
-    if not control_indices:
-        return None
-    control_index = control_indices[-1]
-    if any(line.strip() for line in lines[control_index + 1 :]):
-        return None
-    return control_index
-
-
-def _is_approval_control_line(line: str) -> bool:
-    normalized = line.lower()
-    return "enter to submit | esc to cancel" in normalized or ("esc to cancel" in normalized and "tab to amend" in normalized)
-
-
-def _extract_approval_choices(lines: list[str]) -> list[str]:
-    choices: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        match = _APPROVAL_CHOICE_RE.match(stripped)
-        if not match:
-            continue
-        label = match.group(2).strip()
-        if label and label not in choices:
-            choices.append(label)
-    return choices
-
-
-_APPROVAL_CHOICE_RE = re.compile(r"(?:[›❯>]\s*)?(\d+)\.\s+(.+?)(?:\s{2,}.+)?$")
-
-
-def _line_is_approval_choice(line: str) -> bool:
-    return _APPROVAL_CHOICE_RE.match(line.strip()) is not None
-
-
-def _extract_command_approval_subject(lines: list[str], prompt_index: int) -> str | None:
-    for line in reversed(lines[:prompt_index]):
-        stripped = line.strip()
-        if stripped.startswith("Bash(") or stripped.startswith("Shell("):
-            return stripped[:200]
-    for line in lines[prompt_index + 1 : prompt_index + 8]:
-        stripped = line.strip()
-        if stripped.startswith("Bash(") or stripped.startswith("Shell("):
-            return stripped[:200]
-    return None
-
-
-def _age_text(iso_text: str | None) -> str:
-    if not iso_text:
-        return "-"
-    try:
-        dt = datetime.fromisoformat(iso_text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
-    except ValueError:
-        return "-"
-    if seconds < 60:
-        return f"{seconds}s ago"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m ago"
-    return f"{minutes // 60}h ago"
-
-
-def _detect_provider_status(provider: str, session_name: str, window: str) -> str | None:
-    proc = run_cmd(["tmux", "capture-pane", "-p", "-t", f"{session_name}:{window}"], timeout=5)
-    if proc.returncode != 0:
-        return None
-    patterns = get_adapter(provider).status_patterns()
-    positions: dict[str, int] = {}
-    for status_name, pattern in patterns.items():
-        if not pattern:
-            continue
-        try:
-            matches = list(re.finditer(pattern, proc.stdout, re.MULTILINE))
-        except re.error:
-            continue
-        if matches:
-            positions[status_name] = matches[-1].start()
-    if not positions:
-        return None
-    latest = max(positions, key=positions.get)
-    return {"idle": "running", "processing": "busy", "error": "error"}.get(latest)
-
-
-def _handle_provider_runtime_prompts(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:
-    session_name = state.get("session_name")
-    if not session_name or not _tmux_session_exists(session_name):
-        return
-    for agent_id, agent_state in state.get("agents", {}).items():
-        if agent_state.get("status") in {"paused", "stopped", "missing"}:
-            continue
-        window = agent_state.get("window", agent_id)
-        if not _tmux_window_exists(session_name, window):
-            continue
-        internal_mcp = _handle_internal_mcp_approval_prompt(agent_id, session_name, window, event_log)
-        if internal_mcp is not None:
-            continue
-        adapter = get_adapter(agent_state["provider"])
-        for prompt_event in adapter.handle_runtime_prompts(session_name, window):
-            event_log.write(
-                "runtime.prompt_handled",
-                agent_id=agent_id,
-                provider=agent_state["provider"],
-                **prompt_event,
-            )
-
-
-def _handle_provider_startup_prompts(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:
-    session_name = state.get("session_name")
-    if not session_name or not _tmux_session_exists(session_name):
-        return
-    for agent_id, agent_state in state.get("agents", {}).items():
-        if agent_state.get("status") in {"paused", "stopped", "missing"}:
-            continue
-        window = agent_state.get("window", agent_id)
-        if not _tmux_window_exists(session_name, window):
-            continue
-        spawned_at = str(agent_state.get("spawned_at") or "")
-        if agent_state.get("startup_prompt_check_spawned_at") != spawned_at:
-            agent_state["startup_prompt_check_spawned_at"] = spawned_at
-            agent_state["startup_prompt_check_count"] = 0
-        check_count = int(agent_state.get("startup_prompt_check_count") or 0)
-        if check_count >= STARTUP_PROMPT_RUNTIME_CHECK_LIMIT:
-            continue
-        agent_state["startup_prompt_check_count"] = check_count + 1
-        adapter = get_adapter(agent_state["provider"])
-        for prompt_event in adapter.handle_startup_prompts(session_name, window, checks=1, sleep_s=0.0):
-            event_log.write(
-                "runtime.startup_prompt_handled",
-                agent_id=agent_id,
-                provider=agent_state["provider"],
-                **prompt_event,
-            )
-
-
-def _handle_internal_mcp_approval_prompt(
-    agent_id: str,
-    session_name: str,
-    window: str,
-    event_log: EventLog,
-) -> dict[str, Any] | None:
-    target = f"{session_name}:{window}"
-    proc = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{APPROVAL_SCAN_LINES}", "-t", target], timeout=5)
-    if proc.returncode != 0:
-        return None
-    prompt = _extract_approval_prompt(agent_id, proc.stdout)
-    if not prompt or prompt.get("kind") != "mcp_tool":
-        return None
-    tool = str(prompt.get("tool") or "")
-    fingerprint = _approval_prompt_fingerprint(prompt)
-    if tool not in INTERNAL_MCP_AUTO_APPROVE_TOOLS:
-        result = {
-            "ok": False,
-            "action": "skipped",
-            "reason": "tool_not_allowlisted",
-            "tool": tool,
-            "fingerprint": fingerprint,
-        }
-        event_log.write("runtime.internal_mcp_approval.skipped", agent_id=agent_id, **result)
-        return result
-    result = _submit_internal_mcp_approval(agent_id, target, tool, prompt, proc.stdout)
-    event_log.write("runtime.internal_mcp_approval.auto", agent_id=agent_id, **result)
-    return result
-
-
-def _submit_internal_mcp_approval(
-    agent_id: str,
-    target: str,
-    tool: str,
-    prompt: dict[str, Any],
-    capture_text: str,
-    attempts: int = 3,
-) -> dict[str, Any]:
-    choice = _choose_internal_mcp_approval_choice(prompt)
-    fingerprint = _approval_prompt_fingerprint(prompt)
-    attempt_log: list[dict[str, Any]] = []
-    current_prompt = prompt
-    current_capture = capture_text
-    for attempt in range(1, attempts + 1):
-        keys = _approval_choice_keys(current_prompt, current_capture, choice)
-        proc = run_cmd(["tmux", "send-keys", "-t", target, *keys], timeout=10)
-        if proc.returncode != 0:
-            return {
-                "ok": False,
-                "action": "auto_approve",
-                "tool": tool,
-                "choice": choice,
-                "fingerprint": fingerprint,
-                "attempts": attempt_log + [{"attempt": attempt, "submitted": False, "error": proc.stderr.strip()}],
-                "verification": "send_keys_failed",
-            }
-        time.sleep(0.35)
-        verify = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{APPROVAL_SCAN_LINES}", "-t", target], timeout=5)
-        if verify.returncode != 0:
-            attempt_log.append({"attempt": attempt, "submitted": True, "keys": keys, "verification": "capture_failed"})
-            continue
-        after_prompt = _extract_approval_prompt(agent_id, verify.stdout)
-        if not after_prompt:
-            return {
-                "ok": True,
-                "action": "auto_approved",
-                "tool": tool,
-                "choice": choice,
-                "fingerprint": fingerprint,
-                "attempts": attempt_log + [{"attempt": attempt, "submitted": True, "keys": keys, "verification": "prompt_absent"}],
-                "verification": "prompt_absent_after_submit",
-            }
-        if after_prompt.get("kind") != "mcp_tool" or after_prompt.get("tool") != tool:
-            return {
-                "ok": True,
-                "action": "auto_approved",
-                "tool": tool,
-                "choice": choice,
-                "fingerprint": fingerprint,
-                "attempts": attempt_log + [{"attempt": attempt, "submitted": True, "keys": keys, "verification": "different_prompt_present"}],
-                "verification": "original_prompt_replaced",
-            }
-        attempt_log.append({"attempt": attempt, "submitted": True, "keys": keys, "verification": "prompt_still_present"})
-        current_prompt = after_prompt
-        current_capture = verify.stdout
-    return {
-        "ok": False,
-        "action": "auto_approve",
-        "tool": tool,
-        "choice": choice,
-        "fingerprint": fingerprint,
-        "attempts": attempt_log,
-        "verification": "prompt_still_present_after_retries",
-    }
-
-
-def _choose_internal_mcp_approval_choice(prompt: dict[str, Any]) -> str:
-    choices = prompt.get("choices") or []
-    if INTERNAL_MCP_APPROVAL_CHOICE in choices:
-        return INTERNAL_MCP_APPROVAL_CHOICE
-    for choice in choices:
-        if str(choice).startswith("Yes, and don't ask again"):
-            return str(choice)
-    if "Allow" in choices:
-        return "Allow"
-    if "Yes" in choices:
-        return "Yes"
-    return INTERNAL_MCP_APPROVAL_CHOICE
-
-
-def _approval_choice_keys(prompt: dict[str, Any], capture_text: str, choice: str) -> list[str]:
-    choices = prompt.get("choices") or []
-    try:
-        target_index = choices.index(choice)
-    except ValueError:
-        return ["Down", "Enter"]
-    active_index = _active_approval_choice_index(capture_text)
-    if active_index is None:
-        return [str(target_index + 1), "Enter"]
-    delta = target_index - active_index
-    if delta > 0:
-        return ["Down"] * delta + ["Enter"]
-    if delta < 0:
-        return ["Up"] * abs(delta) + ["Enter"]
-    return ["Enter"]
-
-
-def _active_approval_choice_index(text: str) -> int | None:
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not (stripped.startswith("›") or stripped.startswith("❯") or stripped.startswith(">")):
-            continue
-        match = re.match(r"[›❯>]\s*(\d+)\.", stripped)
-        if match:
-            return int(match.group(1)) - 1
-    return None
-
-
-def _capture_has_team_orchestrator_mcp_prompt(text: str) -> bool:
-    return (
-        "Allow the team_orchestrator MCP server to run tool" in text
-        or re.search(r"\bteam_orchestrator\s*[-.]\s*[A-Za-z_][A-Za-z0-9_]*\b", text) is not None
-    )
-
-
-def _approval_prompt_fingerprint(prompt: dict[str, Any]) -> str:
-    data = {
-        "kind": prompt.get("kind"),
-        "tool": prompt.get("tool"),
-        "prompt": prompt.get("prompt"),
-        "choices": prompt.get("choices") or [],
-    }
-    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
 def _tmux_session_exists(session_name: str | None) -> bool:
