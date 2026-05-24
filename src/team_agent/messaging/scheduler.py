@@ -14,12 +14,12 @@ from team_agent.messaging.deps import (
     timedelta,
     timezone,
 )
+from team_agent.messaging.activity_detector import classify_agent_activity, detect_compaction_degradation
 from team_agent.messaging.internal_delivery import deliver_stored_message
 from team_agent.messaging.result_delivery import delivered_result_message, result_id_from_text
 from team_agent.state import team_state_candidates
 
 from pathlib import Path
-import re
 from typing import Any
 
 _ACTIVE_TASK_STATUSES = {"pending", "assigned", "in_progress", "ready", "running", "needs_retry"}
@@ -36,82 +36,7 @@ _PROGRESS_EVENTS = {
 }
 _RESTART_RESET_EVENTS = {"restart.agent_start", "restart.complete", "reset_agent.complete", "start_agent.complete"}
 _ALERT_TYPES = {"stuck", "idle_fallback", "cross_worker_deadlock"}
-_PROVIDER_COMMANDS = {"claude", "claude-code", "codex", "node", "node.exe", "claude.exe"}
-_IDLE_PROMPT_PATTERNS = (
-    re.compile(r"›\s*Find and fix a bug in @filename"),
-    re.compile(r"─\s*for agents"),
-)
-_WORKING_PATTERNS = (
-    re.compile(r"\bWorking(?:\s*\((?P<working_seconds>\d+)s\))?", re.IGNORECASE),
-    re.compile(r"\bReticulating\b", re.IGNORECASE),
-    re.compile(r"\bBaked for (?P<baked_seconds>\d+)s\b", re.IGNORECASE),
-    re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"),
-)
 
-
-def classify_agent_activity(
-    agent_id: str,
-    provider: str,
-    last_output_at: str | None,
-    pane: dict[str, Any] | None,
-    scrollback: str,
-    *,
-    now: datetime | None = None,
-    stuck_timeout_sec: int = 300,
-) -> dict[str, Any]:
-    _ = agent_id, provider
-    now = now or datetime.now(timezone.utc)
-    pane = pane or {}
-    pane_in_mode = str(pane.get("pane_in_mode") or "0")
-    if pane_in_mode != "0":
-        return {"status": "uncertain", "confidence": 0.9, "rationale": f"pane_in_mode={pane_in_mode}"}
-
-    command = str(pane.get("pane_current_command") or "").split("/")[-1]
-    if command and command not in _PROVIDER_COMMANDS:
-        return {"status": "uncertain", "confidence": 0.75, "rationale": f"unexpected pane current_command={command}"}
-
-    working = _latest_working_match(scrollback)
-    if working:
-        label, elapsed = working
-        if elapsed is not None and elapsed >= stuck_timeout_sec:
-            return {"status": "stuck", "confidence": 0.85, "rationale": f"stale {label} indicator for {elapsed}s"}
-        return {"status": "working", "confidence": 0.9, "rationale": f"{label} indicator in scrollback"}
-
-    if any(pattern.search(scrollback) for pattern in _IDLE_PROMPT_PATTERNS):
-        return {"status": "idle", "confidence": 0.9, "rationale": "provider idle prompt observed"}
-
-    age = _last_output_age_seconds(last_output_at, now)
-    if age is not None and age >= stuck_timeout_sec:
-        return {"status": "stuck", "confidence": 0.85, "rationale": "last_output_at exceeded timeout with no idle prompt"}
-    if age is not None and age <= 120 and (not command or command in _PROVIDER_COMMANDS):
-        return {"status": "working", "confidence": 0.7, "rationale": "recent output from provider command"}
-    return {"status": "uncertain", "confidence": 0.5, "rationale": "no decisive prompt or working signal"}
-
-
-def _latest_working_match(scrollback: str) -> tuple[str, int | None] | None:
-    best: tuple[int, str, int | None] | None = None
-    for pattern in _WORKING_PATTERNS:
-        for match in pattern.finditer(scrollback):
-            elapsed_raw = match.groupdict().get("working_seconds") or match.groupdict().get("baked_seconds")
-            elapsed = int(elapsed_raw) if elapsed_raw else None
-            label = match.group(0)
-            if best is None or match.start() > best[0]:
-                best = (match.start(), label, elapsed)
-    if best is None:
-        return None
-    return best[1], best[2]
-
-
-def _last_output_age_seconds(last_output_at: str | None, now: datetime) -> float | None:
-    if not last_output_at:
-        return None
-    try:
-        last = datetime.fromisoformat(last_output_at)
-    except ValueError:
-        return None
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=timezone.utc)
-    return max(0.0, (now - last).total_seconds())
 
 def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
     fired: list[int] = []
