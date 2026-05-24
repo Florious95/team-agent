@@ -42,6 +42,7 @@ from team_agent.display import (
     GHOSTTY_WORKSPACE_PANES_PER_WINDOW,
     close_ghostty_display as _close_ghostty_display,
     close_ghostty_workspace as _close_ghostty_workspace,
+    close_ghostty_workspace_slot as _close_ghostty_workspace_slot,
     ghostty_app_exists as _ghostty_app_exists,
     ghostty_attach_args as _ghostty_attach_args,
     ghostty_command as _ghostty_command,
@@ -237,6 +238,7 @@ assert callable(sessions)
 # 0a36ad9-style "imports in HEAD, body missing on disk" hazard.
 assert callable(_close_ghostty_display)
 assert callable(_close_ghostty_workspace)
+assert callable(_close_ghostty_workspace_slot)
 assert callable(_ghostty_app_exists)
 assert callable(_ghostty_attach_args)
 assert callable(_ghostty_command)

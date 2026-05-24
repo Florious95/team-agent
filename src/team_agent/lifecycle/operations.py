@@ -22,6 +22,7 @@ from team_agent.state import (
 _RUNTIME_SYMBOLS = (
     "_capture_agent_session",
     "_close_ghostty_display",
+    "_close_ghostty_workspace_slot",
     "_effective_runtime_config",
     "_find_agent",
     "_handle_startup_prompts_and_verify_window",
@@ -77,6 +78,10 @@ def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
                 raise RuntimeError(f"failed to stop agent {agent_id}: {proc.stderr.strip()}")
             stopped = True
         _close_ghostty_display(agent_id, agent_state, event_log)
+        display = agent_state.get("display") or {}
+        if display.get("backend") == "ghostty_workspace":
+            _close_ghostty_workspace_slot(agent_id, display, event_log)
+            agent_state["display"] = display
         agent_state.update({"status": "stopped", "provider": agent["provider"], "agent_id": agent_id, "window": window})
         state.setdefault("agents", {})[agent_id] = agent_state
         save_runtime_state(workspace, state)

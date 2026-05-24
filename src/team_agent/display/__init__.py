@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from team_agent.display.close import close_ghostty_display, close_ghostty_workspace
+from team_agent.display.close import (
+    close_ghostty_display,
+    close_ghostty_workspace,
+    close_ghostty_workspace_slot,
+)
 from team_agent.display.ghostty import (
     ghostty_app_exists,
     ghostty_attach_args,
@@ -33,6 +37,7 @@ __all__ = [
     "GHOSTTY_WORKSPACE_PANES_PER_WINDOW",
     "close_ghostty_display",
     "close_ghostty_workspace",
+    "close_ghostty_workspace_slot",
     "ghostty_app_exists",
     "ghostty_attach_args",
     "ghostty_command",

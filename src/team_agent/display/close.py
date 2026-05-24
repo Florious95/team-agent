@@ -41,6 +41,51 @@ def close_ghostty_display(
             )
 
 
+def close_ghostty_workspace_slot(
+    agent_id: str,
+    display: dict[str, Any],
+    event_log: EventLog,
+) -> None:
+    from team_agent.runtime import _tmux_session_exists, run_cmd
+    pane_id = display.get("pane_id")
+    linked_session = display.get("linked_session")
+    stopped_title = f"stopped: {agent_id}"
+    relabeled = False
+    if pane_id:
+        proc = run_cmd(["tmux", "select-pane", "-t", str(pane_id), "-T", stopped_title], timeout=10)
+        if proc.returncode == 0:
+            relabeled = True
+        else:
+            event_log.write(
+                "display.ghostty_workspace_slot_relabel_failed",
+                agent_id=agent_id,
+                pane_id=pane_id,
+                error=proc.stderr.strip(),
+            )
+    linked_session_closed = False
+    if linked_session and _tmux_session_exists(str(linked_session)):
+        proc = run_cmd(["tmux", "kill-session", "-t", str(linked_session)], timeout=10)
+        if proc.returncode == 0:
+            linked_session_closed = True
+        else:
+            event_log.write(
+                "display.ghostty_workspace_slot_linked_session_close_failed",
+                agent_id=agent_id,
+                linked_session=linked_session,
+                error=proc.stderr.strip(),
+            )
+    display["status"] = "stopped"
+    display["pane_title"] = stopped_title
+    event_log.write(
+        "display.ghostty_workspace_slot_closed",
+        agent_id=agent_id,
+        pane_id=pane_id,
+        linked_session=linked_session,
+        relabeled=relabeled,
+        linked_session_closed=linked_session_closed,
+    )
+
+
 def close_ghostty_workspace(state: dict[str, Any], event_log: EventLog) -> None:
     from team_agent.runtime import _tmux_session_exists, run_cmd
     displays = [
