@@ -159,5 +159,46 @@ class LaunchEndToEndProbeTests(unittest.TestCase):
         self.assertFalse(out["safety"]["dangerous_auto_approve"])
 
 
+class RuntimeDelegateCacheTests(unittest.TestCase):
+    """spark-review-2edc5a0 LOW: runtime.__getattr__ resolved delegated
+    symbols via a fresh proxy on every access, breaking identity stability,
+    signature inspection, and functools.wraps metadata. Lookups must now
+    cache the real callable on first access."""
+
+    def test_delegated_symbol_identity_is_stable_across_lookups(self) -> None:
+        # _broadcast_targets lives in team_agent.messaging.send and resolves
+        # via _DELEGATE_MAP; two accesses must return the same callable.
+        first = runtime._broadcast_targets
+        second = runtime._broadcast_targets
+        self.assertIs(first, second, "delegated symbol must be identity-stable after first access")
+
+    def test_delegated_symbol_matches_real_target_identity(self) -> None:
+        from team_agent.messaging import send as send_mod
+        self.assertIs(runtime._broadcast_targets, send_mod._broadcast_targets)
+        self.assertIs(runtime.allow_peer_talk, __import__("team_agent.messaging.leader", fromlist=["allow_peer_talk"]).allow_peer_talk)
+
+    def test_delegated_signature_matches_real_target(self) -> None:
+        from team_agent.messaging import send as send_mod
+        self.assertEqual(
+            inspect.signature(runtime._broadcast_targets),
+            inspect.signature(send_mod._broadcast_targets),
+        )
+
+    def test_delegated_metadata_matches_real_target(self) -> None:
+        from team_agent.messaging import send as send_mod
+        # __module__ must point at the real module so introspection tools and
+        # functools.wraps see the actual implementation, not a runtime proxy.
+        self.assertEqual(runtime._broadcast_targets.__module__, send_mod._broadcast_targets.__module__)
+
+    def test_mock_patch_composes_with_cache(self) -> None:
+        # mock.patch must still set/restore the symbol cleanly; after exit,
+        # the cached real callable is restored.
+        from team_agent.messaging import send as send_mod
+        from unittest.mock import patch as _patch
+        with _patch("team_agent.runtime._broadcast_targets", return_value=["mocked"]):
+            self.assertEqual(runtime._broadcast_targets({}, {}, "leader"), ["mocked"])
+        self.assertIs(runtime._broadcast_targets, send_mod._broadcast_targets)
+
+
 if __name__ == "__main__":
     unittest.main()

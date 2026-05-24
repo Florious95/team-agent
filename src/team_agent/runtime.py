@@ -889,19 +889,28 @@ def __getattr__(name: str) -> Any:
     if target is None:
         raise AttributeError(f"module 'team_agent.runtime' has no attribute {name!r}")
     module_path, _, attr = target.rpartition('.')
+    import importlib
+    try:
+        # Eager import + cache so subsequent runtime.<name> lookups return
+        # the same object (stable identity), preserve the real callable's
+        # signature/docstring/qualname for inspect.signature and
+        # functools.wraps, and skip __getattr__ entirely on the hot path.
+        real = getattr(importlib.import_module(module_path), attr)
+    except Exception:
+        # Partial-load fallback: messaging/deps.py runs a top-level
+        # hasattr(_runtime, _name) sweep while the messaging package is
+        # still loading, so eager import of a messaging.* target would
+        # cycle. Return a deferred proxy that retries at call time and
+        # self-installs the real callable on first successful call so
+        # subsequent calls hit the cache.
+        def _proxy(*args: Any, **kwargs: Any) -> Any:
+            real_callable = getattr(importlib.import_module(module_path), attr)
+            globals()[name] = real_callable
+            return real_callable(*args, **kwargs)
 
-    # Return a thin call-time proxy rather than eagerly importing the target
-    # module here. The eager import would deadlock messaging/deps.py during
-    # its top-level `hasattr(_runtime, _name)` existence checks (the target
-    # module re-imports runtime which re-enters __getattr__ during a partial
-    # load). The proxy defers importlib until the caller actually invokes the
-    # symbol, by which time every package has finished its module-level work.
-    def _proxy(*args: Any, **kwargs: Any) -> Any:
-        import importlib
-        module = importlib.import_module(module_path)
-        return getattr(module, attr)(*args, **kwargs)
-
-    _proxy.__name__ = name
-    _proxy.__qualname__ = name
-    _proxy.__module__ = "team_agent.runtime"
-    return _proxy
+        _proxy.__name__ = name
+        _proxy.__qualname__ = name
+        _proxy.__module__ = "team_agent.runtime"
+        return _proxy
+    globals()[name] = real
+    return real
