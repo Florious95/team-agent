@@ -74,6 +74,10 @@ class StopAgentDisplayTests(unittest.TestCase):
                     proc.stdout = "\n".join(sorted(windows))
                 elif args[:3] == ["tmux", "kill-window", "-t"]:
                     windows.discard(args[3].split(":", 1)[1])
+                elif args[:3] == ["tmux", "kill-pane", "-t"]:
+                    pane_titles.pop(args[3], None)
+                elif args[:2] == ["tmux", "select-pane"] and "-t" in args and "-T" in args:
+                    pane_titles[args[args.index("-t") + 1]] = args[args.index("-T") + 1]
                 elif args[:3] == ["tmux", "list-panes", "-t"]:
                     proc.stdout = "\n".join(
                         f"{pane_id}\t{title}" for pane_id, title in sorted(pane_titles.items())
