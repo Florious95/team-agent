@@ -27,7 +27,7 @@ class DeepDecouplingContractTests(unittest.TestCase):
             empty_allowlist_path = root / "line_count_allowlist.json"
             empty_allowlist_path.write_text('{"approved_exceptions": {}, "temporary_debt": {}}', encoding="utf-8")
             allowlist = load_line_count_allowlist(empty_allowlist_path)
-            self.assertEqual(allowlist, {}, "quality gate fallback must treat empty temporary_debt as no debt")
+            self.assertEqual(allowlist["temporary_debt"], {}, "quality gate fallback must treat empty temporary_debt as no debt")
             results = check_python_file_line_counts(root, allowlist_path=empty_allowlist_path)
         failures = line_count_failures(results)
         self.assertEqual(

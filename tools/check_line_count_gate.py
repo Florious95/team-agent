@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import json
 import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from team_agent.quality_gates import load_line_count_allowlist
 
 
 def _line_count(path: Path) -> int:
@@ -28,22 +34,10 @@ def _iter_matching_files(root: Path, pattern: str) -> list[Path]:
 def _load_allowlist(path: Path | None) -> tuple[dict[str, object], str | None]:
     if path is None or not path.exists():
         return {"approved_exceptions": {}, "temporary_debt": {}}, None
-    text = path.read_text(encoding="utf-8").strip()
-    if not text:
-        return {"approved_exceptions": {}, "temporary_debt": {}}, None
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return {}, f"invalid JSON in line-count allowlist: {exc}"
-    if not isinstance(payload, dict):
-        return {}, "line-count allowlist must be a JSON object"
-    approved = payload.get("approved_exceptions", {})
-    temporary = payload.get("temporary_debt", {})
-    if not isinstance(approved, dict):
-        return {}, "approved_exceptions must be an object"
-    if not isinstance(temporary, dict):
-        return {}, "temporary_debt must be an object"
-    return {"approved_exceptions": approved, "temporary_debt": temporary}, None
+        return load_line_count_allowlist(path), None
+    except ValueError as exc:
+        return {}, str(exc)
 
 
 def _approved_ceiling(entry: object, path: str) -> tuple[int | None, str | None]:
