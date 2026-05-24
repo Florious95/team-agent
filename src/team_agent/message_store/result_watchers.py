@@ -95,6 +95,8 @@ def requeue_delivery_exhausted_watchers(self) -> list[str]:
             watcher_ids = [row[0] for row in rows]
             if watcher_ids:
                 conn.execute(
-                    "update result_watchers set status = 'notify_failed', error = null where status = 'delivery_exhausted'"
+                    "update result_watchers "
+                    "set status = 'notify_failed', error = null, notified_message_id = null, completed_at = null "
+                    "where status = 'delivery_exhausted'"
                 )
     return watcher_ids

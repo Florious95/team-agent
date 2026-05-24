@@ -175,9 +175,16 @@ class ResultDeliveryContractTests(unittest.TestCase):
             watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_sent", "leader")
             result_id = store.add_result(_result_envelope("success"))
             store.mark_result_collected(result_id)
-            store.mark_result_watcher(watcher_id, "delivery_exhausted", result_id=result_id, error="retry budget exhausted")
+            store.mark_result_watcher(
+                watcher_id,
+                "delivery_exhausted",
+                result_id=result_id,
+                notified_message_id="msg_dead",
+                error="retry budget exhausted",
+            )
             before = MessageStore(workspace).result_watchers()[0]
             self.assertEqual(before["status"], "delivery_exhausted")
+            self.assertEqual(before["notified_message_id"], "msg_dead")
 
             with patch("team_agent.runtime._attach_leader_to_state", return_value=({"mode": "direct_tmux", "status": "attached", "provider": "codex", "pane_id": "%new"}, {"ok": True})):
                 attached = runtime.attach_leader(workspace, pane="%new", provider="codex")
@@ -187,6 +194,83 @@ class ResultDeliveryContractTests(unittest.TestCase):
             after = MessageStore(workspace).result_watchers()[0]
             self.assertEqual(after["status"], "notify_failed")
             self.assertIsNone(after["error"])
+            self.assertIsNone(after["notified_message_id"])
+            requeued_events = [e for e in _events(workspace) if e.get("event") == "result_watcher.requeued"]
+            self.assertEqual(len(requeued_events), 1)
+            self.assertEqual(requeued_events[0]["watcher_id"], watcher_id)
+            self.assertEqual(requeued_events[0]["new_pane_id"], "%new")
+
+    def test_exhausted_watcher_redelivers_after_attach_leader_to_new_pane(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-f1-fullcycle-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            task = {**spec["tasks"][0], "assignee": "fake_impl", "status": "running"}
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "session_name": "f1-team",
+                    "leader": spec["leader"],
+                    "leader_receiver": {"mode": "direct_tmux", "status": "attached", "provider": "codex", "pane_id": "%dead"},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
+                    "tasks": [task],
+                },
+            )
+            store = MessageStore(workspace)
+            watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_originally_sent", "leader")
+            result_id = store.add_result(_result_envelope("success"))
+            store.mark_result_collected(result_id)
+            store.mark_result_watcher(
+                watcher_id,
+                "delivery_exhausted",
+                result_id=result_id,
+                notified_message_id="msg_dead_pane",
+                error="leader_pane_missing",
+            )
+            event_log = EventLog(workspace)
+            for attempt in range(1, 6):
+                event_log.write(
+                    "result_watcher.notified",
+                    watcher_id=watcher_id,
+                    result_id=result_id,
+                    task_id="task_impl",
+                    agent_id="fake_impl",
+                    ok=False,
+                    delivery_status="fallback",
+                    error="leader_pane_missing",
+                    attempt=attempt,
+                )
+
+            from team_agent.messaging.result_delivery import result_delivery_attempts
+            self.assertEqual(result_delivery_attempts(event_log, watcher_id, result_id), 5)
+
+            def fake_attach(_workspace, state, *, pane, provider, event_log, source):
+                receiver = {"mode": "direct_tmux", "status": "attached", "provider": provider, "pane_id": pane}
+                state["leader_receiver"] = receiver
+                return receiver, {"ok": True}
+
+            with patch("team_agent.runtime._attach_leader_to_state", side_effect=fake_attach):
+                runtime.attach_leader(workspace, pane="%alive", provider="codex")
+
+            self.assertEqual(result_delivery_attempts(event_log, watcher_id, result_id), 0, "result_watcher.requeued event must reset the attempts counter")
+
+            delivered_to_pane: list[str] = []
+
+            def fake_leader_delivery(_workspace, state, _leader_id, content, *_args, **_kwargs):
+                delivered_to_pane.append(state.get("leader_receiver", {}).get("pane_id"))
+                return {"ok": True, "message_id": "msg_fresh", "status": "submitted"}
+
+            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_leader_delivery):
+                tick = runtime._collect_results_and_notify_watchers(workspace, event_log)
+
+            self.assertTrue(tick["ok"])
+            self.assertEqual(delivered_to_pane, ["%alive"], "retry must dispatch against the freshly-attached leader pane, not the dead one")
+            after = MessageStore(workspace).result_watchers()[0]
+            self.assertEqual(after["watcher_id"], watcher_id)
+            self.assertEqual(after["status"], "notified")
+            self.assertEqual(after["notified_message_id"], "msg_fresh")
 
     def test_multiple_watcher_rows_for_same_result_dedupe_to_one_delivery(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-watcher-dedupe-") as tmp:

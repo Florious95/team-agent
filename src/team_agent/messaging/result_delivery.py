@@ -233,9 +233,15 @@ def _result_entry_from_row(row: dict[str, Any]) -> dict[str, Any]:
 def result_delivery_attempts(event_log: EventLog, watcher_id: str, result_id: str) -> int:
     attempts = 0
     for event in event_log.tail(500):
-        if event.get("watcher_id") == watcher_id and event.get("result_id") == result_id:
-            if event.get("event") in {"result_watcher.notified", "result_watcher.notify_failed"}:
-                attempts += 1
+        if event.get("watcher_id") != watcher_id:
+            continue
+        if event.get("event") == "result_watcher.requeued":
+            attempts = 0
+            continue
+        if event.get("result_id") != result_id:
+            continue
+        if event.get("event") in {"result_watcher.notified", "result_watcher.notify_failed"}:
+            attempts += 1
     return attempts
 
 

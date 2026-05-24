@@ -39,6 +39,13 @@ def attach_leader(workspace: Path, pane: str | None = None, provider: str = "cod
             count=len(requeued),
             trigger="attach_leader",
         )
+        for watcher_id in requeued:
+            event_log.write(
+                "result_watcher.requeued",
+                watcher_id=watcher_id,
+                trigger="attach_leader",
+                new_pane_id=receiver.get("pane_id"),
+            )
     return {
         "ok": True,
         "leader_receiver": receiver,
