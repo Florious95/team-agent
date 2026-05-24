@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import copy
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from team_agent.events import EventLog
+from team_agent.message_store import MessageStore
+from team_agent.permissions import resolve_permissions
+from team_agent.restart.selection import select_restart_state
+from team_agent.restart.snapshot import save_team_runtime_snapshot
+from team_agent.spec import load_spec
+from team_agent.state import save_runtime_state, write_team_state
+
+
+def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None) -> dict[str, Any]:
+    # Lazy-import everything from team_agent.runtime so existing tests that
+    # patch runtime.shell_resume_command_for_agent / runtime.run_cmd /
+    # runtime.start_coordinator / runtime.get_adapter continue to take effect
+    # at call time. Runtime re-exports the provider helpers, so this also
+    # routes through the providers module without binding it directly.
+    from team_agent.runtime import (
+        GHOSTTY_DISPLAY_BACKENDS,
+        ResumeUnavailable,
+        RuntimeError,
+        _attach_profile_resume_root,
+        _attach_team_profile_dirs,
+        _capture_agent_session,
+        _clear_session_capture_fields,
+        _close_ghostty_display,
+        _close_ghostty_workspace,
+        _compile_team_dir_spec,
+        _effective_runtime_config,
+        _ensure_agent_start_requirements,
+        _handle_startup_prompts_and_verify_window,
+        _is_team_doc_dir,
+        _open_worker_displays,
+        _prepare_resume_state,
+        _spec_team_dir,
+        _tmux_session_conflict_error,
+        _tmux_session_exists,
+        _tmux_start_command_for_agent_window,
+        _tmux_window_exists,
+        ensure_workspace_dirs,
+        get_adapter,
+        run_cmd,
+        shell_command_for_agent,
+        shell_resume_command_for_agent,
+        start_coordinator,
+    )
+    state = select_restart_state(workspace, team)
+    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
+    team_dir = Path(str(state.get("team_dir"))) if state.get("team_dir") else _spec_team_dir(spec_path, workspace)
+    if _is_team_doc_dir(team_dir):
+        compiled = _compile_team_dir_spec(team_dir, workspace)
+        spec = compiled["spec"]
+        spec_path = team_dir / "team.spec.yaml"
+        state["spec_path"] = str(spec_path)
+    else:
+        if not spec_path.exists():
+            raise RuntimeError(f"missing spec for restart: {spec_path}")
+        spec = load_spec(spec_path)
+    _attach_team_profile_dirs(spec, spec_path, workspace, team_dir)
+    ensure_workspace_dirs(workspace)
+    event_log = EventLog(workspace)
+    session_name = state.get("session_name") or spec.get("runtime", {}).get("session_name") or f"team-{spec['team']['name']}"
+    state.setdefault("team_dir", str(team_dir))
+    if _tmux_session_exists(session_name):
+        event_log.write(
+            "restart.session_conflict",
+            session=session_name,
+            action="use a different team name or runtime.session_name; do not terminate existing tmux sessions from restart",
+        )
+        raise RuntimeError(_tmux_session_conflict_error(session_name))
+    runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
+    display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
+    _close_ghostty_workspace(state, event_log)
+    for agent_id, agent_state in state.get("agents", {}).items():
+        _close_ghostty_display(agent_id, agent_state, event_log)
+    state["display_backend"] = display_backend
+    restart_agents = [
+        agent
+        for agent in spec.get("agents", [])
+        if state.get("agents", {}).get(agent["id"], {}).get("status") != "paused" and not agent.get("paused")
+    ]
+    _ensure_agent_start_requirements(workspace, restart_agents, event_log, "restart")
+    first = True
+    restarted: list[dict[str, Any]] = []
+    new_agents: dict[str, Any] = {}
+    display_jobs: list[tuple[str, dict[str, Any]]] = []
+    for agent in spec.get("agents", []):
+        previous = state.get("agents", {}).get(agent["id"], {})
+        if previous.get("status") == "paused" or agent.get("paused"):
+            new_agents[agent["id"]] = dict(previous or {"status": "paused", "provider": agent["provider"]})
+            new_agents[agent["id"]]["status"] = "paused"
+            continue
+        adapter = get_adapter(agent["provider"])
+        if not adapter.is_installed():
+            event_log.write(
+                "restart.provider_missing",
+                agent_id=agent["id"],
+                provider=agent["provider"],
+                command=adapter.command_name,
+            )
+            raise RuntimeError(
+                f"Provider {agent['provider']} command {adapter.command_name!r} not found for agent {agent['id']}"
+            )
+        mcp_config = adapter.mcp_config(workspace, agent["id"])
+        mcp_path = adapter.install_mcp(workspace, agent["id"], mcp_config)
+        command_agent = copy.deepcopy(agent)
+        command_agent["_runtime"] = runtime_cfg
+        previous = _attach_profile_resume_root(workspace, command_agent, previous)
+        known_session_ids = {
+            str(item.get("session_id"))
+            for aid, item in {**state.get("agents", {}), **new_agents}.items()
+            if aid != agent["id"] and item.get("session_id")
+        }
+        try:
+            previous = _prepare_resume_state(
+                workspace,
+                agent["id"],
+                previous,
+                adapter,
+                event_log,
+                known_session_ids,
+                allow_fresh_on_resume_failure=allow_fresh,
+            )
+        except ResumeUnavailable as exc:
+            try:
+                adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
+            except Exception as cleanup_exc:
+                event_log.write(
+                    "restart.mcp_cleanup_failed",
+                    agent_id=agent["id"],
+                    provider=agent["provider"],
+                    mcp_config=str(mcp_path),
+                    error=str(cleanup_exc),
+                )
+            raise RuntimeError(str(exc)) from exc
+        restart_mode = "resumed" if previous.get("session_id") else "fresh"
+        if restart_mode == "resumed":
+            try:
+                command = shell_resume_command_for_agent(command_agent, previous, workspace, mcp_config)
+            except ResumeUnavailable as exc:
+                event_log.write("restart.resume_unavailable", agent_id=agent["id"], error=str(exc))
+                if not allow_fresh:
+                    try:
+                        adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
+                    except Exception as cleanup_exc:
+                        event_log.write(
+                            "restart.mcp_cleanup_failed",
+                            agent_id=agent["id"],
+                            provider=agent["provider"],
+                            mcp_config=str(mcp_path),
+                            error=str(cleanup_exc),
+                        )
+                    raise RuntimeError(
+                        f"Cannot resume agent {agent['id']}: {exc}. "
+                        "Use team-agent restart --allow-fresh only if losing that worker context is acceptable."
+                    ) from exc
+                command = shell_command_for_agent(command_agent, workspace, mcp_config)
+                restart_mode = "fresh"
+        else:
+            command = shell_command_for_agent(command_agent, workspace, mcp_config)
+            event_log.write("restart.fresh_spawn", agent_id=agent["id"], provider=agent["provider"], reason="session_id_missing")
+        event_log.write(
+            "restart.agent_start",
+            agent_id=agent["id"],
+            provider=agent["provider"],
+            restart_mode=restart_mode,
+            session_id=previous.get("session_id"),
+            session=session_name,
+            window=agent["id"],
+            tmux_start_mode="new-session" if first else "new-window",
+            command=command,
+            mcp_config=str(mcp_path),
+        )
+        if first:
+            proc = run_cmd(["tmux", "new-session", "-d", "-s", session_name, "-n", agent["id"], "sh", "-lc", command])
+            first = False
+        else:
+            proc = run_cmd(["tmux", "new-window", "-t", session_name, "-n", agent["id"], "sh", "-lc", command])
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to restart agent {agent['id']}: {proc.stderr.strip()}")
+        if not _handle_startup_prompts_and_verify_window(
+            adapter, event_log, "restart", agent["id"], agent["provider"], session_name, restart_mode
+        ):
+            if restart_mode != "resumed":
+                raise RuntimeError(f"Failed to restart agent {agent['id']}: tmux window exited after start")
+            if not allow_fresh:
+                try:
+                    adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
+                except Exception as cleanup_exc:
+                    event_log.write(
+                        "restart.mcp_cleanup_failed",
+                        agent_id=agent["id"],
+                        provider=agent["provider"],
+                        mcp_config=str(mcp_path),
+                        error=str(cleanup_exc),
+                    )
+                raise RuntimeError(
+                    f"Cannot resume agent {agent['id']}: resume window exited or did not become visible. "
+                    "Use team-agent restart --allow-fresh only if losing that worker context is acceptable."
+                )
+            event_log.write(
+                "restart.resume_window_missing_fallback_fresh",
+                agent_id=agent["id"],
+                provider=agent["provider"],
+                session_id=previous.get("session_id"),
+            )
+            command = shell_command_for_agent(command_agent, workspace, mcp_config)
+            restart_mode = "fresh"
+            tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent["id"], command)
+            event_log.write(
+                "restart.agent_start",
+                agent_id=agent["id"],
+                provider=agent["provider"],
+                restart_mode=restart_mode,
+                session_id=None,
+                session=session_name,
+                window=agent["id"],
+                tmux_start_mode=tmux_start_mode,
+                command=command,
+                mcp_config=str(mcp_path),
+            )
+            proc = run_cmd(tmux_cmd)
+            if proc.returncode != 0:
+                raise RuntimeError(f"Failed to restart agent {agent['id']} fresh after resume exit: {proc.stderr.strip()}")
+            if not _handle_startup_prompts_and_verify_window(
+                adapter, event_log, "restart", agent["id"], agent["provider"], session_name, restart_mode
+            ):
+                raise RuntimeError(f"Failed to restart agent {agent['id']} fresh: tmux window exited after start")
+        spawn_time = datetime.now(timezone.utc)
+        agent_state = dict(previous)
+        agent_state.update(
+            {
+                "status": "running",
+                "provider": agent["provider"],
+                "agent_id": agent["id"],
+                "model": agent.get("model"),
+                "auth_mode": agent.get("auth_mode"),
+                "profile": agent.get("profile"),
+                "window": agent["id"],
+                "mcp_config": str(mcp_path),
+                "permissions": resolve_permissions(agent),
+                "spawn_cwd": str(workspace),
+                "spawned_at": spawn_time.isoformat(),
+            }
+        )
+        profile_launch = command_agent.get("_provider_profile") or {}
+        if profile_launch.get("claude_projects_root"):
+            agent_state["claude_projects_root"] = profile_launch["claude_projects_root"]
+        if restart_mode == "fresh":
+            _clear_session_capture_fields(agent_state)
+            if command_agent.get("_session_id"):
+                agent_state["_pending_session_id"] = command_agent["_session_id"]
+            _capture_agent_session(
+                workspace,
+                agent["id"],
+                agent_state,
+                event_log,
+                timeout_s=1.5,
+                exclude_session_ids=known_session_ids,
+            )
+        if display_backend in GHOSTTY_DISPLAY_BACKENDS:
+            display_jobs.append((agent["id"], agent))
+        new_agents[agent["id"]] = agent_state
+        restarted.append(
+            {
+                "agent_id": agent["id"],
+                "restart_mode": restart_mode,
+                "session_id": agent_state.get("session_id"),
+                "display_target": None,
+            }
+        )
+    display_results = _open_worker_displays(workspace, session_name, display_jobs, event_log, display_backend)
+    for agent_id, display in display_results.items():
+        if agent_id in new_agents:
+            new_agents[agent_id]["display"] = display
+    for item in restarted:
+        agent_id = item["agent_id"]
+        if agent_id in display_results:
+            item["display_target"] = display_results[agent_id]
+    missing_after_start = [item["agent_id"] for item in restarted if not _tmux_window_exists(session_name, item["agent_id"])]
+    if missing_after_start:
+        for agent_id in missing_after_start:
+            event_log.write("restart.agent_missing_after_start", agent_id=agent_id, target=f"{session_name}:{agent_id}")
+        rollback = rollback_restart_session(session_name, event_log)
+        raise RuntimeError(
+            f"Failed to restart agent {missing_after_start[0]}: tmux window exited after start; "
+            f"rollback_session_ok={rollback.get('ok')}"
+        )
+    state["session_name"] = session_name
+    state["agents"] = new_agents
+    save_runtime_state(workspace, state)
+    save_team_runtime_snapshot(workspace, state)
+    MessageStore(workspace)
+    write_team_state(workspace, spec, state)
+    coordinator = start_coordinator(workspace)
+    event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
+    return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
+
+
+def rollback_restart_session(session_name: str, event_log: EventLog) -> dict[str, Any]:
+    from team_agent.runtime import run_cmd
+    proc = run_cmd(["tmux", "kill-session", "-t", session_name], timeout=10)
+    result = {
+        "ok": proc.returncode == 0,
+        "session": session_name,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+    event_log.write("restart.rollback_session", **result)
+    return result

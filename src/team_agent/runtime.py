@@ -63,6 +63,21 @@ from team_agent.display import (
     prepare_ghostty_workspace_linked_sessions as _prepare_ghostty_workspace_linked_sessions,
     set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
 )
+from team_agent.restart import (
+    format_restart_candidates as _format_restart_candidates,
+    quick_start_existing_context as _quick_start_existing_context,
+    restart,
+    restart_candidate_from_state as _restart_candidate_from_state,
+    restart_candidates as _restart_candidates,
+    rollback_restart_session as _rollback_restart_session,
+    safe_snapshot_name as _safe_snapshot_name,
+    save_team_runtime_snapshot as _save_team_runtime_snapshot,
+    select_restart_state as _select_restart_state,
+    state_has_restart_context as _state_has_restart_context,
+    state_team_name as _state_team_name,
+    team_runtime_snapshot_dir as _team_runtime_snapshot_dir,
+    load_snapshot_state as _load_snapshot_state,
+)
 from team_agent.routing import route_task
 from team_agent.sessions import (
     attach_profile_resume_root as _attach_profile_resume_root,
@@ -185,6 +200,25 @@ assert isinstance(PEEK_SEARCH_SCAN_LINES, int)
 assert isinstance(STATUS_EVENT_LIMIT, int)
 assert isinstance(STATUS_TEXT_LIMIT, int)
 assert isinstance(PENDING_DELIVERY_STATUSES, set)
+
+# Restart lane re-exports: lifecycle/agents.py + lifecycle/operations.py
+# call runtime._save_team_runtime_snapshot, existing tests target
+# runtime.restart, runtime._select_restart_state, runtime._rollback_restart_session,
+# runtime._safe_snapshot_name, etc. The aliases above plus these assertions
+# catch any rename or removal in team_agent.restart at import time.
+assert callable(restart)
+assert callable(_rollback_restart_session)
+assert callable(_save_team_runtime_snapshot)
+assert callable(_restart_candidates)
+assert callable(_restart_candidate_from_state)
+assert callable(_state_has_restart_context)
+assert callable(_select_restart_state)
+assert callable(_format_restart_candidates)
+assert callable(_quick_start_existing_context)
+assert callable(_safe_snapshot_name)
+assert callable(_state_team_name)
+assert callable(_team_runtime_snapshot_dir)
+assert callable(_load_snapshot_state)
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -639,141 +673,6 @@ def launch(
     }
 
 
-def _save_team_runtime_snapshot(workspace: Path, state: dict[str, Any]) -> Path | None:
-    session_name = state.get("session_name")
-    if not session_name:
-        return None
-    snapshot_dir = _team_runtime_snapshot_dir(workspace, str(session_name))
-    snapshot_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_state = copy.deepcopy(state)
-    spec_path = Path(str(state.get("spec_path") or ""))
-    if spec_path.is_file():
-        if not snapshot_state.get("team_dir"):
-            snapshot_state["team_dir"] = str(_spec_team_dir(spec_path, workspace))
-        snapshot_spec = snapshot_dir / "team.spec.yaml"
-        if spec_path.resolve() != snapshot_spec.resolve():
-            shutil.copy2(spec_path, snapshot_spec)
-        snapshot_state["spec_path"] = str(snapshot_spec)
-    snapshot_state["team_snapshot"] = {
-        "session_name": session_name,
-        "team_name": _state_team_name(snapshot_state),
-        "snapshot_dir": str(snapshot_dir),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    state_path = snapshot_dir / "state.json"
-    tmp_path = state_path.with_suffix(".json.tmp")
-    tmp_path.write_text(json.dumps(snapshot_state, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp_path, state_path)
-    return state_path
-
-
-def _team_runtime_snapshot_dir(workspace: Path, session_name: str) -> Path:
-    return runtime_dir(workspace) / "teams" / _safe_snapshot_name(session_name)
-
-
-def _safe_snapshot_name(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", value).strip("._-") or "team"
-
-
-def _state_team_name(state: dict[str, Any]) -> str | None:
-    spec_path = state.get("spec_path")
-    if not spec_path:
-        return None
-    try:
-        return str(load_spec(Path(str(spec_path))).get("team", {}).get("name") or "")
-    except Exception:
-        return None
-
-
-def _load_snapshot_state(path: Path) -> dict[str, Any] | None:
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    normalize_agent_session_state(state)
-    return state
-
-
-def _restart_candidates(workspace: Path) -> list[dict[str, Any]]:
-    by_session: dict[str, dict[str, Any]] = {}
-    snapshots_root = runtime_dir(workspace) / "teams"
-    for path in sorted(snapshots_root.glob("*/state.json")) if snapshots_root.exists() else []:
-        state = _load_snapshot_state(path)
-        if not state or not state.get("session_name"):
-            continue
-        session_name = str(state["session_name"])
-        by_session[session_name] = _restart_candidate_from_state(state, path)
-    active = load_runtime_state(workspace)
-    if active.get("session_name"):
-        by_session[str(active["session_name"])] = _restart_candidate_from_state(active, runtime_state_path(workspace))
-    return sorted(by_session.values(), key=lambda item: item.get("session_name") or "")
-
-
-def _restart_candidate_from_state(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
-    session_name = str(state.get("session_name") or "")
-    return {
-        "session_name": session_name,
-        "team_name": _state_team_name(state),
-        "state_path": str(state_path),
-        "spec_path": state.get("spec_path"),
-        "agents": sorted(state.get("agents", {}).keys()),
-        "has_context": _state_has_restart_context(state),
-        "state": state,
-    }
-
-
-def _state_has_restart_context(state: dict[str, Any]) -> bool:
-    for agent_state in state.get("agents", {}).values():
-        if not isinstance(agent_state, dict):
-            continue
-        if agent_state.get("session_id") or agent_state.get("rollout_path") or agent_state.get("captured_at"):
-            return True
-    return bool(state.get("agents"))
-
-
-def _select_restart_state(workspace: Path, team: str | None = None) -> dict[str, Any]:
-    candidates = [item for item in _restart_candidates(workspace) if item.get("has_context")]
-    if team:
-        matches = [
-            item
-            for item in candidates
-            if team in {item.get("session_name"), item.get("team_name"), Path(str(item.get("state_path"))).parent.name}
-        ]
-        if len(matches) == 1:
-            return copy.deepcopy(matches[0]["state"])
-        if len(matches) > 1:
-            raise RuntimeError("restart team selector is ambiguous. " + _format_restart_candidates(matches))
-        raise RuntimeError(f"restart team {team!r} not found. " + _format_restart_candidates(candidates))
-    if len(candidates) == 1:
-        return copy.deepcopy(candidates[0]["state"])
-    if len(candidates) > 1:
-        raise RuntimeError(
-            "multiple restartable teams found in this workspace; pass --team <session_name> to choose. "
-            + _format_restart_candidates(candidates)
-        )
-    return load_runtime_state(workspace)
-
-
-def _format_restart_candidates(candidates: list[dict[str, Any]]) -> str:
-    if not candidates:
-        return "No restartable team state was found."
-    parts = []
-    for item in candidates:
-        parts.append(
-            f"{item.get('session_name')} team={item.get('team_name') or '-'} "
-            f"agents={','.join(item.get('agents') or []) or '-'}"
-        )
-    return "Candidates: " + "; ".join(parts)
-
-
-def _quick_start_existing_context(workspace: Path, session_name: str) -> dict[str, Any] | None:
-    for item in _restart_candidates(workspace):
-        if item.get("session_name") == session_name and item.get("has_context"):
-            return item
-    return None
-
-
-
 def attach_leader(workspace: Path, pane: str | None = None, provider: str = "codex") -> dict[str, Any]:
     ensure_workspace_dirs(workspace)
     state = load_runtime_state(workspace)
@@ -1050,271 +949,6 @@ def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
     _save_team_runtime_snapshot(workspace, state)
     return {"ok": True, "session_name": session_name, "logs": captured, "coordinator": coordinator}
 
-
-def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None) -> dict[str, Any]:
-    state = _select_restart_state(workspace, team)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    team_dir = Path(str(state.get("team_dir"))) if state.get("team_dir") else _spec_team_dir(spec_path, workspace)
-    if _is_team_doc_dir(team_dir):
-        compiled = _compile_team_dir_spec(team_dir, workspace)
-        spec = compiled["spec"]
-        spec_path = team_dir / "team.spec.yaml"
-        state["spec_path"] = str(spec_path)
-    else:
-        if not spec_path.exists():
-            raise RuntimeError(f"missing spec for restart: {spec_path}")
-        spec = load_spec(spec_path)
-    _attach_team_profile_dirs(spec, spec_path, workspace, team_dir)
-    ensure_workspace_dirs(workspace)
-    event_log = EventLog(workspace)
-    session_name = state.get("session_name") or spec.get("runtime", {}).get("session_name") or f"team-{spec['team']['name']}"
-    state.setdefault("team_dir", str(team_dir))
-    if _tmux_session_exists(session_name):
-        event_log.write(
-            "restart.session_conflict",
-            session=session_name,
-            action="use a different team name or runtime.session_name; do not terminate existing tmux sessions from restart",
-        )
-        raise RuntimeError(_tmux_session_conflict_error(session_name))
-    runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
-    display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
-    _close_ghostty_workspace(state, event_log)
-    for agent_id, agent_state in state.get("agents", {}).items():
-        _close_ghostty_display(agent_id, agent_state, event_log)
-    state["display_backend"] = display_backend
-    restart_agents = [
-        agent
-        for agent in spec.get("agents", [])
-        if state.get("agents", {}).get(agent["id"], {}).get("status") != "paused" and not agent.get("paused")
-    ]
-    _ensure_agent_start_requirements(workspace, restart_agents, event_log, "restart")
-    first = True
-    restarted: list[dict[str, Any]] = []
-    new_agents: dict[str, Any] = {}
-    display_jobs: list[tuple[str, dict[str, Any]]] = []
-    for agent in spec.get("agents", []):
-        previous = state.get("agents", {}).get(agent["id"], {})
-        if previous.get("status") == "paused" or agent.get("paused"):
-            new_agents[agent["id"]] = dict(previous or {"status": "paused", "provider": agent["provider"]})
-            new_agents[agent["id"]]["status"] = "paused"
-            continue
-        adapter = get_adapter(agent["provider"])
-        if not adapter.is_installed():
-            event_log.write(
-                "restart.provider_missing",
-                agent_id=agent["id"],
-                provider=agent["provider"],
-                command=adapter.command_name,
-            )
-            raise RuntimeError(
-                f"Provider {agent['provider']} command {adapter.command_name!r} not found for agent {agent['id']}"
-            )
-        mcp_config = adapter.mcp_config(workspace, agent["id"])
-        mcp_path = adapter.install_mcp(workspace, agent["id"], mcp_config)
-        command_agent = copy.deepcopy(agent)
-        command_agent["_runtime"] = runtime_cfg
-        previous = _attach_profile_resume_root(workspace, command_agent, previous)
-        known_session_ids = {
-            str(item.get("session_id"))
-            for aid, item in {**state.get("agents", {}), **new_agents}.items()
-            if aid != agent["id"] and item.get("session_id")
-        }
-        try:
-            previous = _prepare_resume_state(
-                workspace,
-                agent["id"],
-                previous,
-                adapter,
-                event_log,
-                known_session_ids,
-                allow_fresh_on_resume_failure=allow_fresh,
-            )
-        except ResumeUnavailable as exc:
-            try:
-                adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
-            except Exception as cleanup_exc:
-                event_log.write(
-                    "restart.mcp_cleanup_failed",
-                    agent_id=agent["id"],
-                    provider=agent["provider"],
-                    mcp_config=str(mcp_path),
-                    error=str(cleanup_exc),
-                )
-            raise RuntimeError(str(exc)) from exc
-        restart_mode = "resumed" if previous.get("session_id") else "fresh"
-        if restart_mode == "resumed":
-            try:
-                command = shell_resume_command_for_agent(command_agent, previous, workspace, mcp_config)
-            except ResumeUnavailable as exc:
-                event_log.write("restart.resume_unavailable", agent_id=agent["id"], error=str(exc))
-                if not allow_fresh:
-                    try:
-                        adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
-                    except Exception as cleanup_exc:
-                        event_log.write(
-                            "restart.mcp_cleanup_failed",
-                            agent_id=agent["id"],
-                            provider=agent["provider"],
-                            mcp_config=str(mcp_path),
-                            error=str(cleanup_exc),
-                        )
-                    raise RuntimeError(
-                        f"Cannot resume agent {agent['id']}: {exc}. "
-                        "Use team-agent restart --allow-fresh only if losing that worker context is acceptable."
-                    ) from exc
-                command = shell_command_for_agent(command_agent, workspace, mcp_config)
-                restart_mode = "fresh"
-        else:
-            command = shell_command_for_agent(command_agent, workspace, mcp_config)
-            event_log.write("restart.fresh_spawn", agent_id=agent["id"], provider=agent["provider"], reason="session_id_missing")
-        event_log.write(
-            "restart.agent_start",
-            agent_id=agent["id"],
-            provider=agent["provider"],
-            restart_mode=restart_mode,
-            session_id=previous.get("session_id"),
-            session=session_name,
-            window=agent["id"],
-            tmux_start_mode="new-session" if first else "new-window",
-            command=command,
-            mcp_config=str(mcp_path),
-        )
-        if first:
-            proc = run_cmd(["tmux", "new-session", "-d", "-s", session_name, "-n", agent["id"], "sh", "-lc", command])
-            first = False
-        else:
-            proc = run_cmd(["tmux", "new-window", "-t", session_name, "-n", agent["id"], "sh", "-lc", command])
-        if proc.returncode != 0:
-            raise RuntimeError(f"Failed to restart agent {agent['id']}: {proc.stderr.strip()}")
-        if not _handle_startup_prompts_and_verify_window(
-            adapter, event_log, "restart", agent["id"], agent["provider"], session_name, restart_mode
-        ):
-            if restart_mode != "resumed":
-                raise RuntimeError(f"Failed to restart agent {agent['id']}: tmux window exited after start")
-            if not allow_fresh:
-                try:
-                    adapter.cleanup_mcp(workspace, agent["id"], mcp_path)
-                except Exception as cleanup_exc:
-                    event_log.write(
-                        "restart.mcp_cleanup_failed",
-                        agent_id=agent["id"],
-                        provider=agent["provider"],
-                        mcp_config=str(mcp_path),
-                        error=str(cleanup_exc),
-                    )
-                raise RuntimeError(
-                    f"Cannot resume agent {agent['id']}: resume window exited or did not become visible. "
-                    "Use team-agent restart --allow-fresh only if losing that worker context is acceptable."
-                )
-            event_log.write(
-                "restart.resume_window_missing_fallback_fresh",
-                agent_id=agent["id"],
-                provider=agent["provider"],
-                session_id=previous.get("session_id"),
-            )
-            command = shell_command_for_agent(command_agent, workspace, mcp_config)
-            restart_mode = "fresh"
-            tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent["id"], command)
-            event_log.write(
-                "restart.agent_start",
-                agent_id=agent["id"],
-                provider=agent["provider"],
-                restart_mode=restart_mode,
-                session_id=None,
-                session=session_name,
-                window=agent["id"],
-                tmux_start_mode=tmux_start_mode,
-                command=command,
-                mcp_config=str(mcp_path),
-            )
-            proc = run_cmd(tmux_cmd)
-            if proc.returncode != 0:
-                raise RuntimeError(f"Failed to restart agent {agent['id']} fresh after resume exit: {proc.stderr.strip()}")
-            if not _handle_startup_prompts_and_verify_window(
-                adapter, event_log, "restart", agent["id"], agent["provider"], session_name, restart_mode
-            ):
-                raise RuntimeError(f"Failed to restart agent {agent['id']} fresh: tmux window exited after start")
-        spawn_time = datetime.now(timezone.utc)
-        agent_state = dict(previous)
-        agent_state.update(
-            {
-                "status": "running",
-                "provider": agent["provider"],
-                "agent_id": agent["id"],
-                "model": agent.get("model"),
-                "auth_mode": agent.get("auth_mode"),
-                "profile": agent.get("profile"),
-                "window": agent["id"],
-                "mcp_config": str(mcp_path),
-                "permissions": resolve_permissions(agent),
-                "spawn_cwd": str(workspace),
-                "spawned_at": spawn_time.isoformat(),
-            }
-        )
-        profile_launch = command_agent.get("_provider_profile") or {}
-        if profile_launch.get("claude_projects_root"):
-            agent_state["claude_projects_root"] = profile_launch["claude_projects_root"]
-        if restart_mode == "fresh":
-            _clear_session_capture_fields(agent_state)
-            if command_agent.get("_session_id"):
-                agent_state["_pending_session_id"] = command_agent["_session_id"]
-            _capture_agent_session(
-                workspace,
-                agent["id"],
-                agent_state,
-                event_log,
-                timeout_s=1.5,
-                exclude_session_ids=known_session_ids,
-            )
-        if display_backend in GHOSTTY_DISPLAY_BACKENDS:
-            display_jobs.append((agent["id"], agent))
-        new_agents[agent["id"]] = agent_state
-        restarted.append(
-            {
-                "agent_id": agent["id"],
-                "restart_mode": restart_mode,
-                "session_id": agent_state.get("session_id"),
-                "display_target": None,
-            }
-        )
-    display_results = _open_worker_displays(workspace, session_name, display_jobs, event_log, display_backend)
-    for agent_id, display in display_results.items():
-        if agent_id in new_agents:
-            new_agents[agent_id]["display"] = display
-    for item in restarted:
-        agent_id = item["agent_id"]
-        if agent_id in display_results:
-            item["display_target"] = display_results[agent_id]
-    missing_after_start = [item["agent_id"] for item in restarted if not _tmux_window_exists(session_name, item["agent_id"])]
-    if missing_after_start:
-        for agent_id in missing_after_start:
-            event_log.write("restart.agent_missing_after_start", agent_id=agent_id, target=f"{session_name}:{agent_id}")
-        rollback = _rollback_restart_session(session_name, event_log)
-        raise RuntimeError(
-            f"Failed to restart agent {missing_after_start[0]}: tmux window exited after start; "
-            f"rollback_session_ok={rollback.get('ok')}"
-        )
-    state["session_name"] = session_name
-    state["agents"] = new_agents
-    save_runtime_state(workspace, state)
-    _save_team_runtime_snapshot(workspace, state)
-    MessageStore(workspace)
-    write_team_state(workspace, spec, state)
-    coordinator = start_coordinator(workspace)
-    event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
-    return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
-
-
-def _rollback_restart_session(session_name: str, event_log: EventLog) -> dict[str, Any]:
-    proc = run_cmd(["tmux", "kill-session", "-t", session_name], timeout=10)
-    result = {
-        "ok": proc.returncode == 0,
-        "session": session_name,
-        "stdout": proc.stdout.strip(),
-        "stderr": proc.stderr.strip(),
-    }
-    event_log.write("restart.rollback_session", **result)
-    return result
 
 
 def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
