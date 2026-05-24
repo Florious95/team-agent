@@ -17,6 +17,7 @@ from team_agent.state import load_runtime_state, save_runtime_state
 
 
 def attach_leader(workspace: Path, pane: str | None = None, provider: str = "codex") -> dict[str, Any]:
+    from team_agent.message_store import MessageStore
     from team_agent.runtime import _attach_leader_to_state, ensure_workspace_dirs
     ensure_workspace_dirs(workspace)
     state = load_runtime_state(workspace)
@@ -30,7 +31,20 @@ def attach_leader(workspace: Path, pane: str | None = None, provider: str = "cod
         source="manual",
     )
     save_runtime_state(workspace, state)
-    return {"ok": True, "leader_receiver": receiver, "validation": validation}
+    requeued = MessageStore(workspace).requeue_delivery_exhausted_watchers()
+    if requeued:
+        event_log.write(
+            "leader_receiver.requeued_exhausted_watchers",
+            watcher_ids=requeued,
+            count=len(requeued),
+            trigger="attach_leader",
+        )
+    return {
+        "ok": True,
+        "leader_receiver": receiver,
+        "validation": validation,
+        "requeued_exhausted_watchers": requeued,
+    }
 
 
 def start_leader(

@@ -84,3 +84,17 @@ def mark_result_watcher(
                 """,
                 (status, utcnow(), result_id, notified_message_id, error, watcher_id),
             )
+
+
+def requeue_delivery_exhausted_watchers(self) -> list[str]:
+    with closing(self.connect()) as conn:
+        with conn:
+            rows = conn.execute(
+                "select watcher_id from result_watchers where status = 'delivery_exhausted'"
+            ).fetchall()
+            watcher_ids = [row[0] for row in rows]
+            if watcher_ids:
+                conn.execute(
+                    "update result_watchers set status = 'notify_failed', error = null where status = 'delivery_exhausted'"
+                )
+    return watcher_ids

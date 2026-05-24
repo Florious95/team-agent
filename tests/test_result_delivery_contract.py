@@ -115,6 +115,188 @@ class ResultDeliveryContractTests(unittest.TestCase):
             self.assertEqual(watcher["watcher_id"], watcher_id)
             self.assertEqual(watcher["status"], "notified")
 
+    def test_result_watcher_does_not_duplicate_report_result_leader_notification(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-result-delivery-dedup-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            task = {**spec["tasks"][0], "assignee": "fake_impl", "status": "running"}
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "session_name": None,
+                    "leader": spec["leader"],
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
+                    "tasks": [task],
+                },
+            )
+            store = MessageStore(workspace)
+            watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_sent", "leader")
+            result_id = store.add_result(_result_envelope("success"))
+            message_id = store.create_message(
+                "task_impl",
+                "fake_impl",
+                "leader",
+                f"Task task_impl reported success from fake_impl: done\nResult id: {result_id}",
+                requires_ack=False,
+            )
+            store.mark(message_id, "submitted")
+
+            with patch("team_agent.runtime.send_message", side_effect=AssertionError("duplicate result notification")):
+                tick = runtime._collect_results_and_notify_watchers(workspace, EventLog(workspace))
+
+            self.assertTrue(tick["ok"])
+            watcher = MessageStore(workspace).result_watchers()[0]
+            self.assertEqual(watcher["watcher_id"], watcher_id)
+            self.assertEqual(watcher["status"], "notified")
+            self.assertEqual(watcher["notified_message_id"], message_id)
+
+
+    def test_attach_leader_requeues_delivery_exhausted_watchers(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-attach-requeue-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            task = {**spec["tasks"][0], "assignee": "fake_impl", "status": "running"}
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "session_name": "exhausted-team",
+                    "leader": spec["leader"],
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
+                    "tasks": [task],
+                },
+            )
+            store = MessageStore(workspace)
+            watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_sent", "leader")
+            result_id = store.add_result(_result_envelope("success"))
+            store.mark_result_collected(result_id)
+            store.mark_result_watcher(watcher_id, "delivery_exhausted", result_id=result_id, error="retry budget exhausted")
+            before = MessageStore(workspace).result_watchers()[0]
+            self.assertEqual(before["status"], "delivery_exhausted")
+
+            with patch("team_agent.runtime._attach_leader_to_state", return_value=({"mode": "direct_tmux", "status": "attached", "provider": "codex", "pane_id": "%new"}, {"ok": True})):
+                attached = runtime.attach_leader(workspace, pane="%new", provider="codex")
+
+            self.assertTrue(attached.get("ok"))
+            self.assertEqual(attached.get("requeued_exhausted_watchers"), [watcher_id])
+            after = MessageStore(workspace).result_watchers()[0]
+            self.assertEqual(after["status"], "notify_failed")
+            self.assertIsNone(after["error"])
+
+    def test_multiple_watcher_rows_for_same_result_dedupe_to_one_delivery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-watcher-dedupe-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            task = {**spec["tasks"][0], "assignee": "fake_impl", "status": "running"}
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "session_name": "dedupe-team",
+                    "leader": spec["leader"],
+                    "leader_receiver": {"mode": "direct_tmux", "status": "attached", "provider": "codex", "pane_id": "%owner"},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
+                    "tasks": [task],
+                },
+            )
+            store = MessageStore(workspace)
+            primary_id = store.create_result_watcher("task_impl", "fake_impl", "msg_a", "leader")
+            extra_id_1 = store.create_result_watcher("task_impl", "fake_impl", "msg_b", "leader")
+            extra_id_2 = store.create_result_watcher("task_impl", "fake_impl", "msg_c", "leader")
+            result_id = store.add_result(_result_envelope("success"))
+            delivered: list[str] = []
+
+            def fake_leader_delivery(_workspace, _state, _leader_id, content, *_args, **_kwargs):
+                delivered.append(content)
+                return {"ok": True, "message_id": "msg_notice", "status": "submitted"}
+
+            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_leader_delivery):
+                tick = runtime._collect_results_and_notify_watchers(workspace, EventLog(workspace))
+
+            self.assertTrue(tick["ok"])
+            self.assertEqual(len(delivered), 1, "only one watcher should deliver per result; others must be superseded")
+            watchers = {w["watcher_id"]: w for w in MessageStore(workspace).result_watchers()}
+            self.assertEqual(watchers[primary_id]["status"], "notified")
+            self.assertEqual(watchers[extra_id_1]["status"], "superseded")
+            self.assertEqual(watchers[extra_id_2]["status"], "superseded")
+
+
+class SchemaPreflightMigrationTests(unittest.TestCase):
+    def test_preflight_does_not_block_migratable_owner_team_id_column(self) -> None:
+        import sqlite3
+        from team_agent import coordinator
+        with tempfile.TemporaryDirectory(prefix="team-agent-preflight-migratable-") as tmp:
+            workspace = Path(tmp)
+            db_path = workspace / ".team" / "runtime" / "team.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    create table messages (
+                      message_id text primary key,
+                      task_id text,
+                      sender text,
+                      recipient text,
+                      reply_to text,
+                      requires_ack integer,
+                      status text,
+                      content text,
+                      artifact_refs text,
+                      created_at text,
+                      updated_at text,
+                      delivered_at text,
+                      acknowledged_at text,
+                      error text
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            health = coordinator.message_store_schema_health(workspace)
+
+        self.assertTrue(health["schema_ok"], health)
+        self.assertNotIn("reason", health)
+
+    def test_schema_incompatible_envelope_includes_action_hint(self) -> None:
+        import sqlite3
+        from team_agent import coordinator
+        with tempfile.TemporaryDirectory(prefix="team-agent-action-hint-") as tmp:
+            workspace = Path(tmp)
+            db_path = workspace / ".team" / "runtime" / "team.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    """
+                    create table results (
+                      result_id text primary key,
+                      task_id text not null,
+                      agent_id text not null,
+                      envelope text not null,
+                      created_at text not null
+                    )
+                    """
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            health = coordinator.message_store_schema_health(workspace)
+
+        self.assertFalse(health["schema_ok"])
+        self.assertIn("action", health)
+        self.assertIn("repair-state --schema", health["action"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

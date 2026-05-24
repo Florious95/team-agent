@@ -460,3 +460,4 @@ MessageStore.pending_result_watchers = _result_watchers.pending_result_watchers
 MessageStore.retryable_result_watchers = _result_watchers.retryable_result_watchers
 MessageStore.result_watchers = _result_watchers.result_watchers
 MessageStore.mark_result_watcher = _result_watchers.mark_result_watcher
+MessageStore.requeue_delivery_exhausted_watchers = _result_watchers.requeue_delivery_exhausted_watchers

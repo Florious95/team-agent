@@ -79,6 +79,9 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
             "coordinator.schema_incompatible",
             error=health.get("schema_error"),
             schema=health.get("schema"),
+            reason=health.get("reason"),
+            table=health.get("table"),
+            missing_columns=health.get("missing_columns"),
         )
         return {
             "ok": False,
@@ -86,6 +89,12 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
             "status": "schema_incompatible",
             "error": health.get("schema_error"),
             "schema": health.get("schema"),
+            "action": health.get("action", _SCHEMA_ACTION_HINT),
+            "reason": health.get("reason"),
+            "table": health.get("table"),
+            "expected_columns": health.get("expected_columns"),
+            "actual_columns": health.get("actual_columns"),
+            "missing_columns": health.get("missing_columns"),
         }
     if health["status"] in {"stale", "invalid_pid"}:
         coordinator_pid_path(workspace).unlink(missing_ok=True)
@@ -113,6 +122,17 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
 
 
 _SCHEMA_EXPECTED_COLUMNS: dict[str, set[str]] = {}
+_SCHEMA_MIGRATABLE_COLUMNS: dict[str, set[str]] = {
+    "messages": {"delivery_attempts", "owner_team_id"},
+    "scheduled_events": {"owner_team_id"},
+    "agent_health": {"owner_team_id"},
+    "result_watchers": {"owner_team_id"},
+}
+_SCHEMA_ACTION_HINT = (
+    "use team-agent advanced repair-state --schema to re-run column migrations; "
+    "if that fails, back up .team/runtime/team.db, then delete it and rerun team-agent launch "
+    "(in-flight messages will be lost)"
+)
 
 
 def _load_expected_schema_columns() -> dict[str, set[str]]:
@@ -141,7 +161,7 @@ def _load_expected_schema_columns() -> dict[str, set[str]]:
     return _SCHEMA_EXPECTED_COLUMNS
 
 
-def _diagnose_schema_mismatch(workspace: Path) -> dict[str, Any] | None:
+def _diagnose_schema_mismatch(workspace: Path, *, ignore_migratable: bool = False) -> dict[str, Any] | None:
     import sqlite3
     from team_agent.paths import runtime_dir
     db_path = runtime_dir(workspace) / "team.db"
@@ -158,6 +178,9 @@ def _diagnose_schema_mismatch(workspace: Path) -> dict[str, Any] | None:
                 continue
             actual = {row[1] for row in conn.execute(f"pragma table_info({table})").fetchall()}
             missing = expected - actual
+            if ignore_migratable:
+                migratable = _SCHEMA_MIGRATABLE_COLUMNS.get(table, set())
+                missing = missing - migratable
             if missing:
                 return {
                     "reason": "schema_mismatch",
@@ -173,16 +196,17 @@ def _diagnose_schema_mismatch(workspace: Path) -> dict[str, Any] | None:
 
 def message_store_schema_health(workspace: Path) -> dict[str, Any]:
     schema_version = {"message_store_schema_version": MessageStore.SCHEMA_VERSION}
-    mismatch = _diagnose_schema_mismatch(workspace)
-    if mismatch is not None:
+    pre_mismatch = _diagnose_schema_mismatch(workspace, ignore_migratable=True)
+    if pre_mismatch is not None:
         return {
             "schema_ok": False,
             "schema_error": (
-                f"team.db table {mismatch['table']} is missing required column(s): "
-                + ", ".join(mismatch["missing_columns"])
+                f"team.db table {pre_mismatch['table']} is missing required column(s): "
+                + ", ".join(pre_mismatch["missing_columns"])
             ),
             "schema": schema_version,
-            **mismatch,
+            "action": _SCHEMA_ACTION_HINT,
+            **pre_mismatch,
         }
     try:
         MessageStore(workspace)
@@ -192,6 +216,7 @@ def message_store_schema_health(workspace: Path) -> dict[str, Any]:
             "schema_ok": False,
             "schema_error": str(exc),
             "schema": schema_version,
+            "action": _SCHEMA_ACTION_HINT,
             **post_init_mismatch,
         }
     return {
