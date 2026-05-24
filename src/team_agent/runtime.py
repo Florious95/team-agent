@@ -238,10 +238,29 @@ assert callable(_load_snapshot_state)
 # Coordinator lane re-exports keep runtime.coordinator_health,
 # runtime.start_coordinator, runtime.coordinator_pid_path, etc. resolving
 # for the daemon entry (team_agent.coordinator.__main__) and the existing
-# tests. The single import-time assertion below smoke-checks two
-# representative symbols; per-helper behavior is verified by
-# tests/test_coordinator_boundary.py and the broader suite.
-assert callable(start_coordinator) and callable(coordinator_pid_path)
+# tests. One representative identity smoke + one lightweight loop catch
+# any rename or drop in team_agent.coordinator at import time without the
+# over-coupled per-symbol assertIs sweep. Per-helper behavior is verified
+# by tests/test_coordinator_boundary.py and the broader suite.
+import team_agent.coordinator as _coordinator_pkg
+assert start_coordinator is _coordinator_pkg.start_coordinator
+for _name in (
+    "COORDINATOR_PROTOCOL_VERSION",
+    "coordinator_health",
+    "coordinator_log_path",
+    "coordinator_meta_path",
+    "coordinator_metadata_ok",
+    "coordinator_pid_path",
+    "coordinator_tick",
+    "message_store_schema_health",
+    "pid_is_running",
+    "read_coordinator_metadata",
+    "start_coordinator",
+    "stop_coordinator",
+    "write_coordinator_metadata",
+):
+    assert hasattr(_coordinator_pkg, _name), f"team_agent.coordinator missing {_name}"
+del _coordinator_pkg, _name
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 

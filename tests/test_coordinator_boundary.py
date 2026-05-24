@@ -302,5 +302,131 @@ class StartCoordinatorEndToEndProbeTests(unittest.TestCase):
         self.assertEqual(out["error"], "schema mismatch")
 
 
+class StopCoordinatorEndToEndProbeTests(unittest.TestCase):
+    """End-to-end probes for stop_coordinator mirroring the start_coordinator
+    e2e style: stop-race partial cleanup, dead-process cleanup, SIGTERM
+    failure path, and event log emission."""
+
+    def test_dead_process_still_clears_pid_and_meta_files(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-coord-stop-dead-") as tmp:
+            workspace = Path(tmp)
+            pid_path = coordinator.coordinator_pid_path(workspace)
+            meta_path = coordinator.coordinator_meta_path(workspace)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("99999", encoding="utf-8")
+            coordinator.write_coordinator_metadata(workspace, 99999, source="test")
+            self.assertTrue(meta_path.exists())
+            with patch("os.kill", side_effect=OSError), \
+                 patch("team_agent.runtime.run_cmd", return_value=Mock(returncode=1, stdout="", stderr="")):
+                out = coordinator.stop_coordinator(workspace)
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["status"], "stopped")
+            self.assertEqual(out["pid"], 99999)
+            self.assertFalse(pid_path.exists())
+            self.assertFalse(meta_path.exists())
+
+    def test_sigterm_failure_returns_kill_failed_and_leaves_pid_file(self) -> None:
+        import signal as signal_module
+        with tempfile.TemporaryDirectory(prefix="team-agent-coord-stop-kill-fail-") as tmp:
+            workspace = Path(tmp)
+            pid_path = coordinator.coordinator_pid_path(workspace)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("12345", encoding="utf-8")
+
+            def fake_kill(pid: int, sig: int) -> None:
+                if int(sig) == int(signal_module.SIGTERM):
+                    raise PermissionError("not your process")
+
+            with patch("os.kill", side_effect=fake_kill), \
+                 patch("team_agent.runtime.run_cmd", return_value=Mock(returncode=0, stdout="R", stderr="")):
+                out = coordinator.stop_coordinator(workspace)
+            self.assertFalse(out["ok"])
+            self.assertEqual(out["status"], "kill_failed")
+            self.assertEqual(out["pid"], 12345)
+            # pid file deliberately left untouched so the operator can retry / inspect
+            self.assertTrue(pid_path.exists())
+
+    def test_stop_writes_event_log_on_success(self) -> None:
+        import json as _json
+        import signal as signal_module
+        with tempfile.TemporaryDirectory(prefix="team-agent-coord-stop-event-") as tmp:
+            workspace = Path(tmp)
+            pid_path = coordinator.coordinator_pid_path(workspace)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("55555", encoding="utf-8")
+            kill_calls: list[tuple[int, int]] = []
+
+            def fake_kill(pid: int, sig: int) -> None:
+                kill_calls.append((pid, int(sig)))
+
+            with patch("os.kill", side_effect=fake_kill), \
+                 patch("team_agent.runtime.run_cmd", return_value=Mock(returncode=0, stdout="R", stderr="")):
+                out = coordinator.stop_coordinator(workspace)
+            self.assertTrue(out["ok"])
+            self.assertIn((55555, int(signal_module.SIGTERM)), kill_calls)
+            log_path = workspace / ".team" / "logs" / "events.jsonl"
+            self.assertTrue(log_path.exists())
+            events = [_json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+            stopped = [evt for evt in events if evt.get("event") == "coordinator.stopped"]
+            self.assertEqual(len(stopped), 1)
+            self.assertEqual(stopped[0]["pid"], 55555)
+
+
+class CoordinatorTickEndToEndProbeTests(unittest.TestCase):
+    """End-to-end probes for coordinator_tick covering the stop-loop
+    termination path (tmux session missing -> ok=False with stop=True)
+    plus a clean tick (every runtime side effect routed through patches)."""
+
+    def _seed_workspace(self, workspace: Path) -> None:
+        from team_agent.state import save_runtime_state
+        save_runtime_state(
+            workspace,
+            {
+                "session_name": "team-tick",
+                "leader": {"id": "leader"},
+                "agents": {},
+                "tasks": [],
+            },
+        )
+
+    def test_missing_tmux_session_signals_stop(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-coord-tick-stop-") as tmp:
+            workspace = Path(tmp)
+            self._seed_workspace(workspace)
+            with patch("team_agent.runtime._tmux_session_exists", return_value=False):
+                out = coordinator.coordinator_tick(workspace)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["stop"])
+        self.assertEqual(out["reason"], "tmux_session_missing")
+        # Event log records the session-missing reason
+        events_path = workspace / ".team" / "logs" / "events.jsonl"
+        if events_path.exists():
+            import json as _json
+            events = [_json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line]
+            self.assertTrue(any(evt.get("event") == "coordinator.session_missing" for evt in events))
+
+    def test_clean_tick_returns_ok_and_does_not_signal_stop(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-coord-tick-ok-") as tmp:
+            workspace = Path(tmp)
+            self._seed_workspace(workspace)
+            with patch("team_agent.runtime._tmux_session_exists", return_value=True), \
+                 patch("team_agent.runtime._capture_missing_sessions", return_value=[]), \
+                 patch("team_agent.runtime._refresh_agent_runtime_statuses"), \
+                 patch("team_agent.runtime._handle_provider_startup_prompts"), \
+                 patch("team_agent.runtime._handle_provider_runtime_prompts"), \
+                 patch("team_agent.runtime._sync_agent_health"), \
+                 patch("team_agent.runtime._deliver_pending_messages", return_value=[]), \
+                 patch("team_agent.runtime._fire_due_scheduled_events", return_value=[]), \
+                 patch("team_agent.runtime._detect_stuck_agents", return_value=[]), \
+                 patch("team_agent.runtime._collect_results_and_notify_watchers", return_value={"collected": 0}):
+                out = coordinator.coordinator_tick(workspace)
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["stop"])
+        self.assertEqual(out["delivered"], [])
+        self.assertEqual(out["scheduled"], [])
+        self.assertEqual(out["stuck"], [])
+        self.assertEqual(out["results"], {"collected": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
