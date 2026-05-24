@@ -22,9 +22,9 @@ class CoordinatorAtomicityTests(unittest.TestCase):
             }
             stop_result = {"ok": False, "status": "kill_failed", "pid": 12345, "error": "permission denied"}
             with (
-                patch("team_agent.runtime.coordinator_health", return_value=health),
-                patch("team_agent.runtime.stop_coordinator", return_value=stop_result),
-                patch("team_agent.runtime.subprocess.Popen") as popen,
+                patch("team_agent.coordinator.lifecycle.coordinator_health", return_value=health),
+                patch("team_agent.coordinator.lifecycle.stop_coordinator", return_value=stop_result),
+                patch("team_agent.coordinator.lifecycle.subprocess.Popen") as popen,
             ):
                 result = runtime.start_coordinator(workspace)
 
