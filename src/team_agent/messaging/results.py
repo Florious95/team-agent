@@ -25,6 +25,7 @@ from team_agent.messaging.deps import (
     load_runtime_state,
     load_spec,
     save_runtime_state,
+    save_team_scoped_state,
     start_coordinator,
     team_state_key,
     timezone,
@@ -322,17 +323,21 @@ def _refresh_leader_receiver_or_flag_rebind(
     validation = _validate_leader_receiver(receiver)
     if validation.get("ok"):
         return state
-    rediscovered = _rediscover_leader_receiver(receiver, event_log)
+    owner_identity = state.get("team_owner") or None
+    rediscovered = _rediscover_leader_receiver(receiver, event_log, owner_identity)
     if rediscovered.get("status") == "updated":
         state["leader_receiver"] = rediscovered["receiver"]
         if persist:
             save_runtime_state(workspace, state)
+        else:
+            save_team_scoped_state(workspace, state)
         event_log.write(
             "leader_receiver.rebind_applied",
             old_pane_id=receiver.get("pane_id"),
             new_pane_id=rediscovered["receiver"].get("pane_id"),
             reason=validation.get("reason"),
             source="report_result_notify",
+            owner_identity=owner_identity,
         )
         return state
     event_log.write(
@@ -343,6 +348,7 @@ def _refresh_leader_receiver_or_flag_rebind(
         rediscovery_status=rediscovered.get("status"),
         provider=receiver.get("provider"),
         source="report_result_notify",
+        owner_identity=owner_identity,
     )
     return state
 

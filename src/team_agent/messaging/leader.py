@@ -96,7 +96,8 @@ def _send_to_leader_receiver(
 
     validation = _validate_leader_receiver(receiver)
     if not validation["ok"]:
-        rediscovery = _rediscover_leader_receiver(receiver, event_log)
+        owner_identity = state.get("team_owner") or None
+        rediscovery = _rediscover_leader_receiver(receiver, event_log, owner_identity)
         if rediscovery.get("status") == "updated":
             state["leader_receiver"].update(rediscovery["receiver"])
             receiver = state["leader_receiver"]
@@ -278,7 +279,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
 
 
 

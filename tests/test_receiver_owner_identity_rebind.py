@@ -18,6 +18,8 @@ globals().update({
     if not name.startswith("__") and not (isinstance(value, type) and issubclass(value, unittest.TestCase))
 })
 
+from team_agent.events import EventLog
+
 
 OWNER = {"pane_id": "%owner-old", "provider": "codex", "machine_fingerprint": "machine-a"}
 

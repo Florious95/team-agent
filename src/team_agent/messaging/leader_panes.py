@@ -206,7 +206,11 @@ def _target_fingerprint(pane_info: dict[str, Any]) -> str:
     )
 
 
-def _rediscover_leader_receiver(receiver: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
+def _rediscover_leader_receiver(
+    receiver: dict[str, Any],
+    event_log: EventLog,
+    owner_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     provider = str(receiver.get("provider") or "codex")
     if provider != "codex":
         return {"status": "missing", "reason": "rediscovery_only_for_codex"}
@@ -219,31 +223,29 @@ def _rediscover_leader_receiver(receiver: dict[str, Any], event_log: EventLog) -
         for target in targets.get("targets", [])
         if _leader_command_looks_usable(str(target.get("pane_current_command", "")), provider)
     ]
-    if len(candidates) == 1:
-        target = candidates[0]
-        updated = {
-            "mode": "direct_tmux",
-            "status": "attached",
-            "provider": provider,
-            "pane_id": target["pane_id"],
-            "session_name": target["session_name"],
-            "window_index": str(target["window_index"]),
-            "window_name": target["window_name"],
-            "pane_index": str(target["pane_index"]),
-            "pane_tty": target["pane_tty"],
-            "pane_current_command": target["pane_current_command"],
-            "fingerprint": target.get("fingerprint") or _target_fingerprint(target),
-            "attached_at": datetime.now(timezone.utc).isoformat(),
-            "discovery": "stale_rediscovery_unique_candidate",
-        }
+    if owner_identity:
+        owner_candidates = [target for target in candidates if _target_matches_owner_identity(target, owner_identity)]
+        if len(owner_candidates) == 1:
+            return _rediscovered_receiver(receiver, provider, owner_candidates[0], event_log, owner_identity)
+        if len(owner_candidates) > 1:
+            event_log.write(
+                "leader_receiver.rediscover_ambiguous",
+                provider=provider,
+                old_target=receiver.get("pane_id"),
+                candidates=[target.get("pane_id") for target in owner_candidates],
+                owner_identity=owner_identity,
+            )
+            return {"status": "ambiguous", "candidates": owner_candidates, "owner_identity": owner_identity}
         event_log.write(
-            "leader_receiver.rediscovered",
+            "leader_receiver.rediscover_missing",
             provider=provider,
             old_target=receiver.get("pane_id"),
-            new_target=updated["pane_id"],
-            candidate_count=1,
+            owner_identity=owner_identity,
+            candidate_count=len(candidates),
         )
-        return {"status": "updated", "receiver": updated}
+        return {"status": "missing", "owner_identity": owner_identity}
+    if len(candidates) == 1:
+        return _rediscovered_receiver(receiver, provider, candidates[0], event_log, None)
     if len(candidates) > 1:
         event_log.write(
             "leader_receiver.rediscover_ambiguous",
@@ -254,6 +256,48 @@ def _rediscover_leader_receiver(receiver: dict[str, Any], event_log: EventLog) -
         return {"status": "ambiguous", "candidates": candidates}
     event_log.write("leader_receiver.rediscover_missing", provider=provider, old_target=receiver.get("pane_id"))
     return {"status": "missing"}
+
+
+def _target_matches_owner_identity(target: dict[str, Any], owner_identity: dict[str, Any]) -> bool:
+    env = target.get("leader_env") if isinstance(target.get("leader_env"), dict) else {}
+    return (
+        env.get("TEAM_AGENT_LEADER_PANE_ID") == (owner_identity.get("pane_id") or "")
+        and env.get("TEAM_AGENT_LEADER_PROVIDER") == (owner_identity.get("provider") or "")
+        and env.get("TEAM_AGENT_MACHINE_FINGERPRINT") == (owner_identity.get("machine_fingerprint") or "")
+    )
+
+
+def _rediscovered_receiver(
+    receiver: dict[str, Any],
+    provider: str,
+    target: dict[str, Any],
+    event_log: EventLog,
+    owner_identity: dict[str, Any] | None,
+) -> dict[str, Any]:
+    updated = {
+        "mode": "direct_tmux",
+        "status": "attached",
+        "provider": provider,
+        "pane_id": target["pane_id"],
+        "session_name": target["session_name"],
+        "window_index": str(target["window_index"]),
+        "window_name": target["window_name"],
+        "pane_index": str(target["pane_index"]),
+        "pane_tty": target["pane_tty"],
+        "pane_current_command": target["pane_current_command"],
+        "fingerprint": target.get("fingerprint") or _target_fingerprint(target),
+        "attached_at": datetime.now(timezone.utc).isoformat(),
+        "discovery": "stale_rediscovery_owner_identity" if owner_identity else "stale_rediscovery_unique_candidate",
+    }
+    event_log.write(
+        "leader_receiver.rediscovered",
+        provider=provider,
+        old_target=receiver.get("pane_id"),
+        new_target=updated["pane_id"],
+        candidate_count=1,
+        owner_identity=owner_identity,
+    )
+    return {"status": "updated", "receiver": updated, "owner_identity": owner_identity}
 
 
 def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
