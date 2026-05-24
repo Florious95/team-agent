@@ -348,7 +348,7 @@ class RuntimeTests07(unittest.TestCase):
 
             with (
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
-                patch("team_agent.runtime._open_ghostty_worker_window", side_effect=fake_open_display),
+                patch("team_agent.display.worker_window.open_ghostty_worker_window", side_effect=fake_open_display),
                 patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 333, "status": "started"}),
             ):
                 result = runtime.restart(workspace, allow_fresh=True)
@@ -396,7 +396,7 @@ class RuntimeTests07(unittest.TestCase):
             )
 
             with (
-                patch("team_agent.runtime._ghostty_app_exists", return_value=True),
+                patch("team_agent.runtime._ghostty_app_exists", return_value=True), patch("team_agent.display.workspace.ghostty_app_exists", return_value=True), patch("team_agent.display.worker_window.ghostty_app_exists", return_value=True),
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
                 patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 333, "status": "started"}),
             ):

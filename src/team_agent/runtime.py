@@ -38,6 +38,31 @@ from team_agent.providers import (
     shell_fork_command_for_agent,
     shell_resume_command_for_agent,
 )
+from team_agent.display import (
+    GHOSTTY_WORKSPACE_PANES_PER_WINDOW,
+    close_ghostty_display as _close_ghostty_display,
+    close_ghostty_workspace as _close_ghostty_workspace,
+    ghostty_app_exists as _ghostty_app_exists,
+    ghostty_attach_args as _ghostty_attach_args,
+    ghostty_command as _ghostty_command,
+    ghostty_display_session_name as _ghostty_display_session_name,
+    ghostty_pids_by_title as _ghostty_pids_by_title,
+    ghostty_workspace_aggregator_name as _ghostty_workspace_aggregator_name,
+    ghostty_workspace_blocked as _ghostty_workspace_blocked,
+    ghostty_workspace_pane_command as _ghostty_workspace_pane_command,
+    ghostty_workspace_pane_title as _ghostty_workspace_pane_title,
+    ghostty_workspace_partial_update_display as _ghostty_workspace_partial_update_display,
+    ghostty_workspace_window_name as _ghostty_workspace_window_name,
+    kill_ghostty_workspace_linked_sessions as _kill_ghostty_workspace_linked_sessions,
+    open_ghostty_worker_window as _open_ghostty_worker_window,
+    open_ghostty_workspace as _open_ghostty_workspace,
+    open_ghostty_workspace_agent_display as _open_ghostty_workspace_agent_display,
+    open_worker_displays as _open_worker_displays,
+    prepare_ghostty_display_session as _prepare_ghostty_display_session,
+    prepare_ghostty_workspace_aggregator as _prepare_ghostty_workspace_aggregator,
+    prepare_ghostty_workspace_linked_sessions as _prepare_ghostty_workspace_linked_sessions,
+    set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
+)
 from team_agent.routing import route_task
 from team_agent.sessions import (
     attach_profile_resume_root as _attach_profile_resume_root,
@@ -73,6 +98,34 @@ assert callable(_copy_session_metadata)
 assert callable(_prepare_resume_state)
 assert callable(_recover_resume_session_from_events)
 assert callable(sessions)
+
+# Display lane re-exports: lifecycle/start.py + lifecycle/operations.py +
+# existing tests assume team_agent.runtime exposes these names. Each alias
+# fails at import if team_agent.display drops the symbol, preventing the
+# 0a36ad9-style "imports in HEAD, body missing on disk" hazard.
+assert callable(_close_ghostty_display)
+assert callable(_close_ghostty_workspace)
+assert callable(_ghostty_app_exists)
+assert callable(_ghostty_attach_args)
+assert callable(_ghostty_command)
+assert callable(_ghostty_display_session_name)
+assert callable(_ghostty_pids_by_title)
+assert callable(_ghostty_workspace_aggregator_name)
+assert callable(_ghostty_workspace_blocked)
+assert callable(_ghostty_workspace_pane_command)
+assert callable(_ghostty_workspace_pane_title)
+assert callable(_ghostty_workspace_partial_update_display)
+assert callable(_ghostty_workspace_window_name)
+assert callable(_kill_ghostty_workspace_linked_sessions)
+assert callable(_open_ghostty_worker_window)
+assert callable(_open_ghostty_workspace)
+assert callable(_open_ghostty_workspace_agent_display)
+assert callable(_open_worker_displays)
+assert callable(_prepare_ghostty_display_session)
+assert callable(_prepare_ghostty_workspace_aggregator)
+assert callable(_prepare_ghostty_workspace_linked_sessions)
+assert callable(_set_ghostty_workspace_pane_title)
+assert isinstance(GHOSTTY_WORKSPACE_PANES_PER_WINDOW, int)
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -84,7 +137,6 @@ TMUX_PANE_FORMAT = (
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
 GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
-GHOSTTY_WORKSPACE_PANES_PER_WINDOW = 3
 STATUS_TEXT_LIMIT = 240
 STATUS_EVENT_LIMIT = 3
 PEEK_MAX_LINES = 80
@@ -3133,706 +3185,6 @@ def _wait_for_pasted_prompt_cleared(target: str, timeout: float) -> tuple[bool, 
 
     return impl(target, timeout)
 
-
-def _ghostty_command() -> str | None:
-    return shutil_which("ghostty") or (
-        "/Applications/Ghostty.app/Contents/MacOS/ghostty"
-        if Path("/Applications/Ghostty.app/Contents/MacOS/ghostty").exists()
-        else None
-    )
-
-
-def _ghostty_app_exists() -> bool:
-    return Path("/Applications/Ghostty.app").exists()
-
-
-def _ghostty_pids_by_title(title: str, wait_s: float = 0.0) -> list[int]:
-    deadline = time.monotonic() + max(wait_s, 0.0)
-    while True:
-        pgrep = run_cmd(["pgrep", "-f", f"--title={title}"], timeout=5)
-        if pgrep.returncode == 0:
-            pids = [int(pid) for pid in pgrep.stdout.split() if pid.isdigit()]
-            if pids:
-                return pids
-        if time.monotonic() >= deadline:
-            return []
-        time.sleep(0.2)
-
-
-def _open_worker_displays(
-    workspace: Path,
-    session_name: str,
-    jobs: list[tuple[str, dict[str, Any]]],
-    event_log: EventLog,
-    display_backend: str = "ghostty_window",
-) -> dict[str, dict[str, Any]]:
-    if not jobs:
-        return {}
-    if display_backend == "ghostty_workspace":
-        return _open_ghostty_workspace(workspace, session_name, jobs, event_log)
-    if len(jobs) == 1:
-        agent_id, agent = jobs[0]
-        return {agent_id: _open_ghostty_worker_window(workspace, session_name, agent_id, agent, event_log)}
-    results: dict[str, dict[str, Any]] = {}
-    max_workers = min(4, len(jobs))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_open_ghostty_worker_window, workspace, session_name, agent_id, agent, event_log): agent_id
-            for agent_id, agent in jobs
-        }
-        for future in as_completed(futures):
-            agent_id = futures[future]
-            try:
-                results[agent_id] = future.result()
-            except Exception as exc:
-                display = {
-                    "backend": "ghostty_window",
-                    "status": "blocked",
-                    "reason": "display_open_exception",
-                    "error": str(exc),
-                    "fallback": "tmux_headless",
-                }
-                event_log.write("display.ghostty_blocked", agent_id=agent_id, **display)
-                results[agent_id] = display
-    return results
-
-
-def _open_ghostty_worker_window(
-    workspace: Path,
-    session_name: str,
-    window_name: str,
-    agent: dict[str, Any],
-    event_log: EventLog,
-) -> dict[str, Any]:
-    if not _ghostty_app_exists():
-        blocker = {
-            "backend": "ghostty_window",
-            "status": "blocked",
-            "reason": "ghostty_app_missing",
-            "fallback": "tmux_headless",
-        }
-        event_log.write("display.ghostty_blocked", agent_id=agent["id"], **blocker)
-        return blocker
-    title = f"team-agent:{agent['id']}:{agent.get('role', '')}"
-    display_session = _ghostty_display_session_name(session_name, window_name)
-    prepared = _prepare_ghostty_display_session(session_name, window_name, display_session)
-    if not prepared["ok"]:
-        blocker = {
-            "backend": "ghostty_window",
-            "status": "blocked",
-            "reason": prepared["reason"],
-            "error": prepared.get("error"),
-            "target": f"{session_name}:{window_name}",
-            "display_session": display_session,
-            "fallback": "tmux_headless",
-        }
-        event_log.write("display.ghostty_blocked", agent_id=agent["id"], **blocker)
-        return blocker
-    launch_args = _ghostty_attach_args(display_session, title)
-    proc = run_cmd(launch_args, timeout=10)
-    display = {
-        "backend": "ghostty_window",
-        "status": "opened" if proc.returncode == 0 else "blocked",
-        "title": title,
-        "target": f"{session_name}:{window_name}",
-        "display_session": display_session,
-        "launch_args": launch_args,
-        "pid": None,
-        "pids": [],
-        "tty": None,
-        "fallback": "tmux_headless",
-        "note": "Ghostty opens a dedicated linked tmux session per worker so each display has an independent active window; runtime injection remains tmux-backed.",
-    }
-    if proc.returncode != 0:
-        display["reason"] = proc.stderr.strip() or proc.stdout.strip() or "open Ghostty.app failed"
-    else:
-        display["pids"] = _ghostty_pids_by_title(title, wait_s=3.0)
-        display["pid"] = display["pids"][0] if display["pids"] else None
-    event_log.write("display.ghostty_window", agent_id=agent["id"], **display)
-    return display
-
-
-def _open_ghostty_workspace(
-    workspace: Path,
-    session_name: str,
-    jobs: list[tuple[str, dict[str, Any]]],
-    event_log: EventLog,
-) -> dict[str, dict[str, Any]]:
-    if not _ghostty_app_exists():
-        return _ghostty_workspace_blocked(jobs, event_log, "ghostty_app_missing")
-    aggregator_session = _ghostty_workspace_aggregator_name(session_name)
-    linked_results = _prepare_ghostty_workspace_linked_sessions(session_name, jobs)
-    displays: dict[str, dict[str, Any]] = {}
-    linked_jobs: list[tuple[str, dict[str, Any], str]] = []
-    for agent_id, agent in jobs:
-        linked = linked_results.get(agent_id, {})
-        linked_session = linked.get("linked_session") or _ghostty_display_session_name(session_name, agent_id)
-        if linked.get("ok"):
-            linked_jobs.append((agent_id, agent, linked_session))
-            continue
-        displays.update(
-            _ghostty_workspace_blocked(
-                [(agent_id, agent)],
-                event_log,
-                linked.get("reason", "display_session_create_failed"),
-                aggregator_session=aggregator_session,
-                linked_sessions={agent_id: linked_session},
-                error=linked.get("error"),
-                target=f"{session_name}:{agent_id}",
-            )
-        )
-    if not linked_jobs:
-        return displays
-    prepared = _prepare_ghostty_workspace_aggregator(aggregator_session, linked_jobs)
-    if not prepared["ok"]:
-        _kill_ghostty_workspace_linked_sessions([linked_session for _agent_id, _agent, linked_session in linked_jobs])
-        displays.update(
-            _ghostty_workspace_blocked(
-                [(agent_id, agent) for agent_id, agent, _linked_session in linked_jobs],
-                event_log,
-                prepared["reason"],
-                aggregator_session=aggregator_session,
-                linked_sessions={agent_id: linked_session for agent_id, _agent, linked_session in linked_jobs},
-                error=prepared.get("error"),
-                target=prepared.get("target"),
-            )
-        )
-        return displays
-    title = f"team-agent:{session_name}:workspace"
-    launch_args = _ghostty_attach_args(aggregator_session, title)
-    proc = run_cmd(launch_args, timeout=10)
-    if proc.returncode != 0:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        _kill_ghostty_workspace_linked_sessions([linked_session for _agent_id, _agent, linked_session in linked_jobs])
-        displays.update(
-            _ghostty_workspace_blocked(
-                [(agent_id, agent) for agent_id, agent, _linked_session in linked_jobs],
-                event_log,
-                "open Ghostty.app failed",
-                aggregator_session=aggregator_session,
-                linked_sessions={agent_id: linked_session for agent_id, _agent, linked_session in linked_jobs},
-                error=proc.stderr.strip() or proc.stdout.strip(),
-            )
-        )
-        return displays
-    pids = _ghostty_pids_by_title(title, wait_s=3.0)
-    panes = {pane["agent_id"]: pane for pane in prepared["panes"]}
-    for agent_id, agent, linked_session in linked_jobs:
-        pane = panes.get(agent_id, {})
-        display = {
-            "backend": "ghostty_workspace",
-            "status": "opened",
-            "title": title,
-            "pane_title": pane.get("title") or _ghostty_workspace_pane_title(agent),
-            "target": f"{session_name}:{agent_id}",
-            "linked_session": linked_session,
-            "aggregator_session": aggregator_session,
-            "display_session": aggregator_session,
-            "workspace_window": pane.get("window_name"),
-            "pane_id": pane.get("pane_id"),
-            "launch_args": launch_args,
-            "pid": pids[0] if pids else None,
-            "pids": pids,
-            "tty": None,
-            "fallback": "tmux_headless",
-            "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed.",
-        }
-        event_log.write("display.ghostty_workspace", agent_id=agent_id, **display)
-        displays[agent_id] = display
-    return displays
-
-
-def _ghostty_workspace_blocked(
-    jobs: list[tuple[str, dict[str, Any]]],
-    event_log: EventLog,
-    reason: str,
-    aggregator_session: str | None = None,
-    linked_sessions: dict[str, str] | None = None,
-    error: str | None = None,
-    target: str | None = None,
-) -> dict[str, dict[str, Any]]:
-    displays: dict[str, dict[str, Any]] = {}
-    for agent_id, _agent in jobs:
-        linked_session = (linked_sessions or {}).get(agent_id)
-        display = {
-            "backend": "ghostty_workspace",
-            "status": "blocked",
-            "reason": reason,
-            "error": error,
-            "target": target or f"{agent_id}",
-            "linked_session": linked_session,
-            "aggregator_session": aggregator_session,
-            "display_session": aggregator_session,
-            "fallback": "tmux_headless",
-        }
-        event_log.write("display.ghostty_workspace_blocked", agent_id=agent_id, **display)
-        displays[agent_id] = display
-    return displays
-
-
-def _ghostty_display_session_name(session_name: str, window_name: str) -> str:
-    raw = f"{session_name}:{window_name}"
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
-    safe_session = re.sub(r"[^A-Za-z0-9_.-]", "_", session_name)[:80].strip("._-") or "team"
-    safe_window = re.sub(r"[^A-Za-z0-9_.-]", "_", window_name)[:40].strip("._-") or "agent"
-    return f"{safe_session}__display__{safe_window}__{digest}"
-
-
-def _prepare_ghostty_display_session(session_name: str, window_name: str, display_session: str) -> dict[str, Any]:
-    if not _tmux_window_exists(session_name, window_name):
-        return {"ok": False, "reason": "tmux_target_missing"}
-    if display_session == session_name:
-        return {"ok": False, "reason": "display_session_conflicts_with_base_session"}
-    if _tmux_session_exists(display_session):
-        proc = run_cmd(["tmux", "kill-session", "-t", display_session], timeout=10)
-        if proc.returncode != 0:
-            return {"ok": False, "reason": "display_session_cleanup_failed", "error": proc.stderr.strip()}
-    proc = run_cmd(["tmux", "new-session", "-d", "-t", session_name, "-s", display_session], timeout=10)
-    if proc.returncode != 0:
-        return {"ok": False, "reason": "display_session_create_failed", "error": proc.stderr.strip()}
-    proc = run_cmd(["tmux", "select-window", "-t", f"{display_session}:{window_name}"], timeout=10)
-    if proc.returncode != 0:
-        run_cmd(["tmux", "kill-session", "-t", display_session], timeout=10)
-        return {"ok": False, "reason": "display_session_select_window_failed", "error": proc.stderr.strip()}
-    return {"ok": True, "display_session": display_session}
-
-
-def _ghostty_workspace_aggregator_name(session_name: str) -> str:
-    raw = f"{session_name}:workspace"
-    digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
-    safe_session = re.sub(r"[^A-Za-z0-9_.-]", "_", session_name)[:80].strip("._-") or "team"
-    return f"{safe_session}__display__workspace__{digest}"
-
-
-def _ghostty_workspace_window_name(index: int) -> str:
-    return "overview" if index == 0 else f"overview-{index + 1}"
-
-
-def _ghostty_workspace_pane_command(linked_session: str) -> str:
-    return f"TMUX= tmux attach-session -t {shlex.quote(linked_session)}"
-
-
-def _ghostty_workspace_pane_title(agent: dict[str, Any]) -> str:
-    return f"team-agent:{agent['id']}:{agent.get('role', '')}"
-
-
-def _prepare_ghostty_workspace_linked_sessions(
-    session_name: str,
-    jobs: list[tuple[str, dict[str, Any]]],
-) -> dict[str, dict[str, Any]]:
-    def prepare(agent_id: str) -> dict[str, Any]:
-        linked_session = _ghostty_display_session_name(session_name, agent_id)
-        result = _prepare_ghostty_display_session(session_name, agent_id, linked_session)
-        result["linked_session"] = linked_session
-        return result
-
-    if len(jobs) == 1:
-        agent_id, _agent = jobs[0]
-        return {agent_id: prepare(agent_id)}
-    results: dict[str, dict[str, Any]] = {}
-    max_workers = min(4, len(jobs))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(prepare, agent_id): agent_id for agent_id, _agent in jobs}
-        for future in as_completed(futures):
-            agent_id = futures[future]
-            try:
-                results[agent_id] = future.result()
-            except Exception as exc:
-                results[agent_id] = {
-                    "ok": False,
-                    "reason": "display_session_create_exception",
-                    "error": str(exc),
-                    "linked_session": _ghostty_display_session_name(session_name, agent_id),
-                }
-    return results
-
-
-def _prepare_ghostty_workspace_aggregator(
-    aggregator_session: str,
-    linked_jobs: list[tuple[str, dict[str, Any], str]],
-) -> dict[str, Any]:
-    if _tmux_session_exists(aggregator_session):
-        proc = run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        if proc.returncode != 0:
-            return {"ok": False, "reason": "display_session_cleanup_failed", "error": proc.stderr.strip()}
-
-    def fail(reason: str, proc: Any | None = None, target: str | None = None) -> dict[str, Any]:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        result = {"ok": False, "reason": reason}
-        if proc is not None:
-            result["error"] = proc.stderr.strip()
-        if target:
-            result["target"] = target
-        return result
-
-    panes: list[dict[str, Any]] = []
-    for window_index, start in enumerate(range(0, len(linked_jobs), GHOSTTY_WORKSPACE_PANES_PER_WINDOW)):
-        window_name = _ghostty_workspace_window_name(window_index)
-        window_jobs = linked_jobs[start : start + GHOSTTY_WORKSPACE_PANES_PER_WINDOW]
-        first_agent_id, first_agent, first_linked_session = window_jobs[0]
-        if window_index == 0:
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "new-session",
-                    "-d",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    "-s",
-                    aggregator_session,
-                    "-n",
-                    window_name,
-                    _ghostty_workspace_pane_command(first_linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return {"ok": False, "reason": "display_session_create_failed", "error": proc.stderr.strip()}
-        else:
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "new-window",
-                    "-t",
-                    aggregator_session,
-                    "-n",
-                    window_name,
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    _ghostty_workspace_pane_command(first_linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return fail("display_session_window_create_failed", proc, first_linked_session)
-        first_pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.0"
-        first_title = _ghostty_workspace_pane_title(first_agent)
-        title_result = _set_ghostty_workspace_pane_title(first_pane_id, first_title)
-        if not title_result["ok"]:
-            return fail(title_result["reason"], target=first_pane_id)
-        panes.append(
-            {
-                "agent_id": first_agent_id,
-                "pane_id": first_pane_id,
-                "title": first_title,
-                "linked_session": first_linked_session,
-                "window_name": window_name,
-            }
-        )
-
-        proc = run_cmd(["tmux", "set-window-option", "-t", f"{aggregator_session}:{window_name}", "remain-on-exit", "on"], timeout=10)
-        if proc.returncode != 0:
-            return fail("display_session_remain_on_exit_failed", proc)
-
-        for index, (agent_id, agent, linked_session) in enumerate(window_jobs[1:], start=1):
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "split-window",
-                    "-t",
-                    f"{aggregator_session}:{window_name}",
-                    "-h",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    _ghostty_workspace_pane_command(linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return fail("display_session_split_failed", proc, linked_session)
-            pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.{index}"
-            title = _ghostty_workspace_pane_title(agent)
-            title_result = _set_ghostty_workspace_pane_title(pane_id, title)
-            if not title_result["ok"]:
-                return fail(title_result["reason"], target=pane_id)
-            panes.append(
-                {
-                    "agent_id": agent_id,
-                    "pane_id": pane_id,
-                    "title": title,
-                    "linked_session": linked_session,
-                    "window_name": window_name,
-                }
-            )
-
-        proc = run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{window_name}", "even-horizontal"], timeout=10)
-        if proc.returncode != 0:
-            return fail("display_session_layout_failed", proc)
-
-    proc = run_cmd(["tmux", "set-option", "-t", aggregator_session, "mouse", "on"], timeout=10)
-    if proc.returncode != 0:
-        return fail("display_session_mouse_failed", proc)
-    run_cmd(["tmux", "select-window", "-t", f"{aggregator_session}:{_ghostty_workspace_window_name(0)}"], timeout=10)
-    return {"ok": True, "aggregator_session": aggregator_session, "panes": panes}
-
-
-def _set_ghostty_workspace_pane_title(pane_id: str, title: str) -> dict[str, Any]:
-    proc = run_cmd(["tmux", "select-pane", "-t", pane_id, "-T", title], timeout=10)
-    if proc.returncode != 0:
-        return {"ok": False, "reason": "display_session_pane_title_failed", "error": proc.stderr.strip()}
-    return {"ok": True}
-
-
-def _tmux_stdout_last_line(stdout: str) -> str | None:
-    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    return lines[-1] if lines else None
-
-
-def _open_ghostty_workspace_agent_display(
-    session_name: str,
-    agent_id: str,
-    agent: dict[str, Any],
-    previous_display: dict[str, Any],
-    event_log: EventLog,
-) -> dict[str, Any]:
-    if not _ghostty_app_exists():
-        return _ghostty_workspace_blocked(
-            [(agent_id, agent)],
-            event_log,
-            "ghostty_app_missing",
-            aggregator_session=_ghostty_workspace_aggregator_name(session_name),
-            linked_sessions={agent_id: _ghostty_display_session_name(session_name, agent_id)},
-            target=f"{session_name}:{agent_id}",
-        )[agent_id]
-    aggregator_session = str(
-        previous_display.get("aggregator_session")
-        or previous_display.get("display_session")
-        or _ghostty_workspace_aggregator_name(session_name)
-    )
-    linked_session = _ghostty_display_session_name(session_name, agent_id)
-    prepared = _prepare_ghostty_display_session(session_name, agent_id, linked_session)
-    if not prepared["ok"]:
-        return _ghostty_workspace_blocked(
-            [(agent_id, agent)],
-            event_log,
-            prepared["reason"],
-            aggregator_session=aggregator_session,
-            linked_sessions={agent_id: linked_session},
-            error=prepared.get("error"),
-            target=f"{session_name}:{agent_id}",
-        )[agent_id]
-    if not _tmux_session_exists(aggregator_session):
-        return _ghostty_workspace_partial_update_display(
-            session_name,
-            agent_id,
-            agent,
-            event_log,
-            reason="aggregator_session_missing",
-            note="pane refresh requires full team restart",
-        )
-
-    pane_title = _ghostty_workspace_pane_title(agent)
-    command = _ghostty_workspace_pane_command(linked_session)
-    pane_id = str(previous_display.get("pane_id") or "")
-    workspace_window = str(previous_display.get("workspace_window") or _ghostty_workspace_window_name(0))
-    refreshed = False
-    if pane_id:
-        proc = run_cmd(["tmux", "respawn-pane", "-k", "-t", pane_id, command], timeout=10)
-        refreshed = proc.returncode == 0
-    if not refreshed:
-        proc = run_cmd(
-            [
-                "tmux",
-                "split-window",
-                "-t",
-                f"{aggregator_session}:{workspace_window}",
-                "-h",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                command,
-            ],
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            return _ghostty_workspace_partial_update_display(
-                session_name,
-                agent_id,
-                agent,
-                event_log,
-                reason="aggregator_pane_refresh_failed",
-                note=proc.stderr.strip() or "pane refresh requires full team restart",
-            )
-        pane_id = _tmux_stdout_last_line(proc.stdout) or pane_id
-    title_result = _set_ghostty_workspace_pane_title(pane_id, pane_title)
-    if not title_result["ok"]:
-        return _ghostty_workspace_partial_update_display(
-            session_name,
-            agent_id,
-            agent,
-            event_log,
-            reason=title_result["reason"],
-            note=title_result.get("error") or "pane refresh requires full team restart",
-        )
-    run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{workspace_window}", "even-horizontal"], timeout=10)
-    title = str(previous_display.get("title") or f"team-agent:{session_name}:workspace")
-    pids = [int(pid) for pid in previous_display.get("pids", []) if str(pid).isdigit()]
-    display = {
-        "backend": "ghostty_workspace",
-        "status": "opened",
-        "title": title,
-        "pane_title": pane_title,
-        "target": f"{session_name}:{agent_id}",
-        "linked_session": linked_session,
-        "aggregator_session": aggregator_session,
-        "display_session": aggregator_session,
-        "workspace_window": workspace_window,
-        "pane_id": pane_id,
-        "pid": pids[0] if pids else None,
-        "pids": pids,
-        "tty": None,
-        "fallback": "tmux_headless",
-        "note": "Refreshed this worker's Ghostty workspace pane by respawning it against a distinct linked session.",
-    }
-    event_log.write("display.ghostty_workspace", agent_id=agent_id, **display)
-    return display
-
-
-def _ghostty_workspace_partial_update_display(
-    session_name: str,
-    agent_id: str,
-    agent: dict[str, Any],
-    event_log: EventLog,
-    reason: str = "partial_update_requires_team_restart",
-    note: str = "pane refresh requires full team restart",
-) -> dict[str, Any]:
-    aggregator_session = _ghostty_workspace_aggregator_name(session_name)
-    display = {
-        "backend": "ghostty_workspace",
-        "status": "blocked",
-        "reason": reason,
-        "target": f"{session_name}:{agent_id}",
-        "linked_session": _ghostty_display_session_name(session_name, agent_id),
-        "aggregator_session": aggregator_session,
-        "display_session": aggregator_session,
-        "pane_title": _ghostty_workspace_pane_title(agent),
-        "fallback": "tmux_headless",
-        "note": note,
-        "action": "restart the team to rebuild the Ghostty workspace layout",
-    }
-    event_log.write("display.ghostty_workspace_partial_update", agent_id=agent_id, **display)
-    return display
-
-
-def _kill_ghostty_workspace_linked_sessions(linked_sessions: list[str]) -> list[str]:
-    killed: list[str] = []
-    for linked_session in dict.fromkeys(linked_sessions):
-        if _tmux_session_exists(linked_session):
-            proc = run_cmd(["tmux", "kill-session", "-t", linked_session], timeout=10)
-            if proc.returncode == 0:
-                killed.append(linked_session)
-    return killed
-
-
-def _ghostty_attach_args(display_session: str, title: str) -> list[str]:
-    return [
-        "open",
-        "-na",
-        "Ghostty.app",
-        "--args",
-        f"--title={title}",
-        "-e",
-        "tmux",
-        "attach-session",
-        "-t",
-        display_session,
-    ]
-
-
-def _close_ghostty_display(
-    agent_id: str,
-    agent_state: dict[str, Any],
-    event_log: EventLog,
-) -> None:
-    display = agent_state.get("display") or {}
-    if display.get("backend") != "ghostty_window":
-        return
-    display_session = display.get("display_session")
-    pids = [str(pid) for pid in display.get("pids", []) if str(pid).isdigit()]
-    title = display.get("title")
-    if not pids and title:
-        pids = [str(pid) for pid in _ghostty_pids_by_title(str(title))]
-    killed: list[str] = []
-    for pid in pids:
-        proc = run_cmd(["kill", pid], timeout=5)
-        if proc.returncode == 0:
-            killed.append(pid)
-    if killed:
-        event_log.write("display.ghostty_closed", agent_id=agent_id, pids=killed, title=title)
-    if display_session and _tmux_session_exists(str(display_session)):
-        proc = run_cmd(["tmux", "kill-session", "-t", str(display_session)], timeout=10)
-        if proc.returncode == 0:
-            event_log.write("display.ghostty_display_session_closed", agent_id=agent_id, display_session=display_session)
-        else:
-            event_log.write(
-                "display.ghostty_display_session_close_failed",
-                agent_id=agent_id,
-                display_session=display_session,
-                error=proc.stderr.strip(),
-            )
-
-
-def _close_ghostty_workspace(state: dict[str, Any], event_log: EventLog) -> None:
-    displays = [
-        (agent_id, agent_state.get("display") or {})
-        for agent_id, agent_state in state.get("agents", {}).items()
-        if (agent_state.get("display") or {}).get("backend") == "ghostty_workspace"
-    ]
-    if not displays:
-        return
-    aggregator_session = next(
-        (
-            str(display.get("aggregator_session") or display.get("display_session"))
-            for _agent_id, display in displays
-            if display.get("aggregator_session") or display.get("display_session")
-        ),
-        None,
-    )
-    title = next((str(display.get("title")) for _agent_id, display in displays if display.get("title")), None)
-    pids = {
-        str(pid)
-        for _agent_id, display in displays
-        for pid in display.get("pids", [])
-        if str(pid).isdigit()
-    }
-    if not pids and title:
-        pids = {str(pid) for pid in _ghostty_pids_by_title(str(title))}
-
-    aggregator_closed = False
-    if aggregator_session and _tmux_session_exists(aggregator_session):
-        proc = run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        if proc.returncode == 0:
-            aggregator_closed = True
-        else:
-            event_log.write(
-                "display.ghostty_workspace_close_failed",
-                aggregator_session=aggregator_session,
-                error=proc.stderr.strip(),
-            )
-
-    linked_sessions = [
-        str(display.get("linked_session"))
-        for _agent_id, display in displays
-        if display.get("linked_session")
-    ]
-    linked_closed = _kill_ghostty_workspace_linked_sessions(linked_sessions)
-
-    killed: list[str] = []
-    for pid in sorted(pids):
-        proc = run_cmd(["kill", pid], timeout=5)
-        if proc.returncode == 0:
-            killed.append(pid)
-    event_log.write(
-        "display.ghostty_workspace_closed",
-        pids=killed,
-        title=title,
-        aggregator_session=aggregator_session,
-        linked_sessions=linked_closed,
-        aggregator_closed=aggregator_closed,
-    )
 
 
 def get_adapter_or_raise(name: str) -> str:

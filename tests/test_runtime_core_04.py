@@ -74,7 +74,7 @@ class RuntimeTests04(unittest.TestCase):
                 ("fake_impl", {"id": "fake_impl", "role": "Implementation Worker"}),
                 ("fake_peer", {"id": "fake_peer", "role": "Peer Worker"}),
             ]
-            with patch("team_agent.runtime._ghostty_app_exists", return_value=False), patch("team_agent.runtime.run_cmd") as run_cmd_mock:
+            with patch("team_agent.runtime._ghostty_app_exists", return_value=False), patch("team_agent.display.workspace.ghostty_app_exists", return_value=False), patch("team_agent.display.worker_window.ghostty_app_exists", return_value=False), patch("team_agent.runtime.run_cmd") as run_cmd_mock:
                 displays = runtime._open_worker_displays(
                     workspace,
                     "team-workspace-blocked",

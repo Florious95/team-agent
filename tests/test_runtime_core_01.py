@@ -120,7 +120,7 @@ class RuntimeTests01(unittest.TestCase):
                 patch("team_agent.runtime._tmux_session_exists", return_value=False),
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
-                patch("team_agent.runtime._open_ghostty_worker_window", side_effect=fake_open_display),
+                patch("team_agent.display.worker_window.open_ghostty_worker_window", side_effect=fake_open_display),
             ):
                 launched = runtime.launch(spec_path, auto_approve=True)
 
@@ -144,7 +144,7 @@ class RuntimeTests01(unittest.TestCase):
                     fake_run_cmd = _make_fake_ghostty_workspace_run_cmd(started_windows, calls)
 
                     with (
-                        patch("team_agent.runtime._ghostty_app_exists", return_value=True),
+                        patch("team_agent.runtime._ghostty_app_exists", return_value=True), patch("team_agent.display.workspace.ghostty_app_exists", return_value=True), patch("team_agent.display.worker_window.ghostty_app_exists", return_value=True),
                         patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
                         patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
                     ):
@@ -229,7 +229,7 @@ class RuntimeTests01(unittest.TestCase):
             )
 
             with (
-                patch("team_agent.runtime._ghostty_app_exists", return_value=True),
+                patch("team_agent.runtime._ghostty_app_exists", return_value=True), patch("team_agent.display.workspace.ghostty_app_exists", return_value=True), patch("team_agent.display.worker_window.ghostty_app_exists", return_value=True),
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
             ):

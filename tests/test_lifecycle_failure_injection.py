@@ -157,8 +157,8 @@ class LifecycleFailureInjectionTests(unittest.TestCase):
             linked = runtime._ghostty_display_session_name(session_name, "fake_a")
 
             with (
-                patch("team_agent.runtime._ghostty_app_exists", return_value=True),
-                patch("team_agent.runtime._ghostty_pids_by_title", return_value=[]),
+                patch("team_agent.runtime._ghostty_app_exists", return_value=True), patch("team_agent.display.workspace.ghostty_app_exists", return_value=True), patch("team_agent.display.worker_window.ghostty_app_exists", return_value=True),
+                patch("team_agent.display.worker_window.ghostty_pids_by_title", return_value=[]),
                 patch("team_agent.runtime.run_cmd", side_effect=tmux.run_cmd),
             ):
                 displays = runtime._open_worker_displays(
