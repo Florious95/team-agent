@@ -63,6 +63,27 @@ from team_agent.display import (
     prepare_ghostty_workspace_linked_sessions as _prepare_ghostty_workspace_linked_sessions,
     set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
 )
+from team_agent.diagnose import (
+    compact_model_checks as _compact_model_checks,
+    diagnose,
+    doctor,
+    ensure_profiles_for_roles as _ensure_profiles_for_roles,
+    format_model_check_failures as _format_model_check_failures,
+    format_profile_check_failures as _format_profile_check_failures,
+    format_profile_smoke_failures as _format_profile_smoke_failures,
+    model_checks_for_agents as _model_checks_for_agents,
+    prepare_quick_start_team as _prepare_quick_start_team,
+    preflight,
+    preflight_blockers as _preflight_blockers,
+    preflight_next_actions as _preflight_next_actions,
+    profile_checks_for_agents as _profile_checks_for_agents,
+    profile_smoke_checks_for_agents as _profile_smoke_checks_for_agents,
+    quick_start,
+    repair_state,
+    settle,
+    start,
+    wait_ready,
+)
 from team_agent.coordinator import (
     COORDINATOR_PROTOCOL_VERSION,
     coordinator_health,
@@ -261,8 +282,57 @@ for _name in (
 ):
     assert hasattr(_coordinator_pkg, _name), f"team_agent.coordinator missing {_name}"
 del _coordinator_pkg, _name
+
+# Diagnose lane re-exports keep runtime.diagnose, runtime.doctor,
+# runtime.preflight, runtime.start, runtime.quick_start, runtime.wait_ready,
+# runtime.settle, runtime.repair_state plus the private helper aliases
+# resolving for CLI handlers and existing tests. Same identity-smoke +
+# lightweight-loop convention as coordinator.
+import team_agent.diagnose as _diagnose_pkg
+assert diagnose is _diagnose_pkg.diagnose
+for _name in (
+    "compact_model_checks",
+    "diagnose",
+    "doctor",
+    "ensure_profiles_for_roles",
+    "format_model_check_failures",
+    "format_profile_check_failures",
+    "format_profile_smoke_failures",
+    "model_checks_for_agents",
+    "prepare_quick_start_team",
+    "preflight",
+    "preflight_blockers",
+    "preflight_next_actions",
+    "profile_checks_for_agents",
+    "profile_smoke_checks_for_agents",
+    "quick_start",
+    "repair_state",
+    "settle",
+    "start",
+    "wait_ready",
+):
+    assert hasattr(_diagnose_pkg, _name), f"team_agent.diagnose missing {_name}"
+del _diagnose_pkg, _name
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
+
+
+def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
+    from team_agent.messaging.scheduler import _fire_due_scheduled_events as impl
+
+    return impl(workspace, store, event_log)
+
+
+def _schedule_send_retry(store: MessageStore, row: dict[str, Any], payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
+    from team_agent.messaging.scheduler import _schedule_send_retry as impl
+
+    return impl(store, row, payload, result)
+
+
+def _detect_stuck_agents(workspace: Path, state: dict[str, Any], store: MessageStore, event_log: EventLog) -> list[str]:
+    from team_agent.messaging.scheduler import _detect_stuck_agents as impl
+
+    return impl(workspace, state, store, event_log)
 
 
 TMUX_PANE_FORMAT = (
@@ -1171,696 +1241,6 @@ def _ensure_agent_start_requirements(
     if failures:
         raise RuntimeError(_format_model_check_failures(failures))
 
-
-def _profile_checks_for_agents(workspace: Path, agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [validate_agent_profile(workspace, agent) for agent in agents if not agent.get("paused")]
-
-
-def _profile_smoke_checks_for_agents(workspace: Path, agents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [smoke_check_agent_profile(workspace, agent) for agent in agents if not agent.get("paused")]
-
-
-def _model_checks_for_agents(agents: list[dict[str, Any]], workspace: Path | None = None) -> list[dict[str, Any]]:
-    checks: list[dict[str, Any]] = []
-    for agent in agents:
-        if agent.get("paused"):
-            continue
-        if agent.get("auth_mode") == "compatible_api" and agent.get("provider") == "codex":
-            checks.append(
-                {
-                    "ok": True,
-                    "status": "profile_model_deferred_to_smoke",
-                    "provider": agent["provider"],
-                    "model": effective_model(agent, workspace),
-                    "agent_id": agent["id"],
-                }
-            )
-            continue
-        adapter = get_adapter(agent["provider"])
-        validator = getattr(adapter, "validate_model", None)
-        model = effective_model(agent, workspace)
-        if not callable(validator):
-            result = {"ok": True, "status": "not_checked", "provider": agent["provider"], "model": model}
-        else:
-            result = validator(model)
-            if not isinstance(result, dict):
-                result = {"ok": True, "status": "not_checked", "provider": agent["provider"], "model": model}
-        result = dict(result)
-        result.setdefault("provider", agent["provider"])
-        result.setdefault("model", model)
-        result["agent_id"] = agent["id"]
-        checks.append(result)
-    return checks
-
-
-def _compact_model_checks(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    compact: list[dict[str, Any]] = []
-    for item in checks:
-        compact.append(
-            {
-                key: item.get(key)
-                for key in ["agent_id", "provider", "model", "ok", "status", "reason", "suggested_model", "command"]
-                if key in item
-            }
-        )
-    return compact
-
-
-def _format_model_check_failures(failures: list[dict[str, Any]]) -> str:
-    lines = ["model validation failed before starting worker windows:"]
-    for item in failures:
-        message = f"{item.get('agent_id')}: provider={item.get('provider')} model={item.get('model')!r}"
-        if item.get("suggested_model"):
-            message += f" is not an exact model id; use {item['suggested_model']!r}"
-        else:
-            message += f" is unsupported ({item.get('reason') or item.get('status')})"
-        lines.append(message)
-    return "\n".join(lines)
-
-
-def _format_profile_check_failures(failures: list[dict[str, Any]]) -> str:
-    lines = ["profile validation failed before starting worker windows:"]
-    for item in failures:
-        message = f"{item.get('agent_id')}: profile={item.get('profile')!r} auth_mode={item.get('auth_mode')}"
-        if item.get("missing_required"):
-            message += f" missing {', '.join(item['missing_required'])}"
-        else:
-            message += f" failed ({item.get('reason') or item.get('status')})"
-        if item.get("suggestion"):
-            message += f"; {item['suggestion']}"
-        lines.append(message)
-    return "\n".join(lines)
-
-
-def _format_profile_smoke_failures(failures: list[dict[str, Any]]) -> str:
-    lines = ["provider profile smoke check failed before starting worker windows:"]
-    for item in failures:
-        message = f"{item.get('agent_id')}: provider={item.get('provider')} profile={item.get('profile')!r}"
-        message += f" status={item.get('status')} reason={item.get('reason') or 'unknown'}"
-        if item.get("http_status"):
-            message += f" http_status={item['http_status']}"
-        if item.get("error"):
-            message += f"; {item['error']}"
-        message += "; fix the local profile file or model id, then start again"
-        lines.append(message)
-    return "\n".join(lines)
-
-
-def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
-    from team_agent.messaging.scheduler import _fire_due_scheduled_events as impl
-
-    return impl(workspace, store, event_log)
-
-
-def _schedule_send_retry(store: MessageStore, row: dict[str, Any], payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
-    from team_agent.messaging.scheduler import _schedule_send_retry as impl
-
-    return impl(store, row, payload, result)
-
-
-def _detect_stuck_agents(workspace: Path, state: dict[str, Any], store: MessageStore, event_log: EventLog) -> list[str]:
-    from team_agent.messaging.scheduler import _detect_stuck_agents as impl
-
-    return impl(workspace, state, store, event_log)
-
-
-def diagnose(workspace: Path) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path) if spec_path.exists() else {}
-    store = MessageStore(workspace)
-    issues: list[dict[str, Any]] = []
-    suggested_repairs: list[dict[str, Any]] = [
-        {
-            "kind": "mcp_approval_prompt",
-            "action": "If a worker pane asks to allow team_orchestrator, select Allow for this session; then run team-agent collect.",
-        },
-        {
-            "kind": "codex_command_approval_prompt",
-            "action": "If a worker pane asks to run a shell command, approve only after checking the command; long servers should use pid/log/health-check protocol.",
-        },
-        {
-            "kind": "interrupted_worker",
-            "action": "Send: Continue from the current interrupted prompt. Do not redo completed work. Do the next bounded step, then report result_envelope_v1.",
-        },
-        {
-            "kind": "leader_receiver",
-            "action": "Worker-to-leader status requires a direct tmux leader receiver. Run team-agent attach-leader --workspace . --provider codex, or pass --pane <pane_id>.",
-        },
-        {
-            "kind": "process_list_unavailable",
-            "action": "If pgrep/lsof fail, use pid files, logs, and health-check URLs; record the environment blocker instead of retrying process-list commands.",
-        },
-    ]
-    session_name = state.get("session_name")
-    if session_name and not _tmux_session_exists(session_name):
-        issues.append(
-            {
-                "kind": "tmux_session_missing",
-                "session": session_name,
-                "reason": "tmux has no matching session",
-                "suggestion": "Run team-agent launch again or inspect .team/logs/events.jsonl for the shutdown/failure event.",
-            }
-        )
-    leader_receiver = state.get("leader_receiver", {})
-    if not _leader_receiver_is_direct(leader_receiver):
-        issues.append(
-            {
-                "kind": "leader_not_attached",
-                "mode": leader_receiver.get("mode", "fallback_inbox" if leader_receiver else "none"),
-                "suggestion": "Run team-agent attach-leader --workspace . --provider codex, or pass --pane <pane_id> for the existing Codex leader pane.",
-            }
-        )
-    else:
-        validation = _validate_leader_receiver(leader_receiver)
-        if not validation["ok"]:
-            issues.append(
-                {
-                    "kind": validation["reason"],
-                    "target": leader_receiver.get("pane_id"),
-                    "provider": leader_receiver.get("provider"),
-                    "error": validation.get("error"),
-                    "suggestion": "Run team-agent attach-leader --workspace . --provider codex again with a live Codex pane.",
-                }
-            )
-        elif validation.get("warning"):
-            issues.append(
-                {
-                    "kind": "leader_command_unexpected",
-                    "target": leader_receiver.get("pane_id"),
-                    "provider": leader_receiver.get("provider"),
-                    "command": validation.get("pane", {}).get("pane_current_command"),
-                    "warning": validation["warning"],
-                    "suggestion": "If this is not the real Codex leader pane, rerun attach-leader with --pane <pane_id>.",
-                }
-            )
-    for agent in spec.get("agents", []):
-        adapter = get_adapter(agent["provider"])
-        if not adapter.is_installed():
-            issues.append(
-                {
-                    "kind": "provider_missing",
-                    "agent_id": agent["id"],
-                    "provider": agent["provider"],
-                    "command": adapter.command_name,
-                    "suggestion": f"Install {adapter.command_name} and authenticate it before launch.",
-                }
-            )
-        mcp_path = runtime_dir(workspace) / "mcp" / f"{agent['id']}.json"
-        if not mcp_path.exists():
-            issues.append(
-                {
-                    "kind": "mcp_not_installed",
-                    "agent_id": agent["id"],
-                    "provider": agent["provider"],
-                    "path": str(mcp_path),
-                    "suggestion": "Run team-agent launch to regenerate provider MCP config.",
-                }
-            )
-        agent_state = state.get("agents", {}).get(agent["id"], {})
-        if agent_state.get("status") == "interrupted":
-            issues.append(
-                {
-                    "kind": "worker_interrupted",
-                    "agent_id": agent["id"],
-                    "suggestion": "Send the standard recovery prompt instead of redispatching the full task.",
-                }
-            )
-        window = agent_state.get("window", agent["id"])
-        if session_name and _tmux_window_exists(session_name, window):
-            proc = run_cmd(["tmux", "capture-pane", "-p", "-S", "-80", "-t", f"{session_name}:{window}"], timeout=5)
-            output = proc.stdout if proc.returncode == 0 else ""
-            if _capture_has_team_orchestrator_mcp_prompt(output):
-                issues.append(
-                    {
-                        "kind": "mcp_approval_prompt",
-                        "agent_id": agent["id"],
-                        "suggestion": "Team Agent will auto-approve allowlisted internal MCP prompts; if still blocked, inspect team-agent approvals.",
-                    }
-                )
-            if "Would you like to run the following command" in output:
-                issues.append(
-                    {
-                        "kind": "codex_command_approval_prompt",
-                        "agent_id": agent["id"],
-                        "suggestion": "Review and approve or reject the command in the worker pane; do not keep waiting silently.",
-                    }
-                )
-            if "Conversation interrupted" in output:
-                issues.append(
-                    {
-                        "kind": "worker_interrupted",
-                        "agent_id": agent["id"],
-                        "suggestion": "Send the standard recovery prompt instead of redispatching the full task.",
-                    }
-                )
-    timeout_sec = int(spec.get("communication", {}).get("ack_timeout_sec", 60)) if spec else 60
-    failed_messages = store.fail_timeouts(timeout_sec)
-    for message_id in failed_messages:
-        issues.append(
-            {
-                "kind": "message_ack_timeout",
-                "message_id": message_id,
-                "suggestion": "Check target worker status and scrollback; message stayed unacknowledged past timeout.",
-            }
-        )
-    return {
-        "ok": not issues,
-        "issues": issues,
-        "suggested_repairs": suggested_repairs,
-        "runtime": status(workspace, as_json=True),
-        "event_log": str(logs_dir(workspace) / "events.jsonl"),
-    }
-
-
-def doctor(spec_path: Path | None = None) -> dict[str, Any]:
-    providers = ["codex"]
-    spec = None
-    workspace = Path.cwd()
-    if spec_path:
-        spec = load_spec(spec_path)
-        workspace = workspace_from_spec(spec, spec_path)
-        _attach_team_profile_dirs(spec, spec_path, workspace)
-        providers = sorted({a["provider"] for a in spec.get("agents", []) if a["provider"] != "fake"})
-    checks: dict[str, Any] = {
-        "tmux": {
-            "installed": bool(shutil_which("tmux")),
-            "path": shutil_which("tmux"),
-        },
-        "workspace": str(workspace),
-        "workspace_is_git_repo": (workspace / ".git").exists(),
-        "providers": {},
-        "mcp": {
-            "server_command": shutil_which("team_orchestrator"),
-            "local_module": True,
-        },
-        "coordinator": coordinator_health(workspace),
-    }
-    for provider in providers:
-        adapter = get_adapter(provider)
-        checks["providers"][provider] = {
-            "command": adapter.command_name,
-            "installed": adapter.is_installed(),
-            "version": adapter.version(),
-            "auth": adapter.auth_hint(),
-        }
-    model_checks = _model_checks_for_agents(spec.get("agents", []), workspace) if spec else []
-    if spec:
-        checks["models"] = _compact_model_checks(model_checks)
-        profile_checks = _profile_checks_for_agents(workspace, spec.get("agents", []))
-        checks["profiles"] = [compact_profile_check(item) for item in profile_checks]
-    missing_required = [
-        provider for provider, result in checks["providers"].items() if not result["installed"] and spec_path
-    ]
-    missing_auth = [
-        provider
-        for provider, result in checks["providers"].items()
-        if spec_path and result.get("auth", {}).get("status") == "missing"
-    ]
-    invalid_models = [item for item in model_checks if item.get("ok") is False]
-    invalid_profiles = [item for item in checks.get("profiles", []) if item.get("ok") is False]
-    checks["ok"] = (
-        checks["tmux"]["installed"]
-        and not missing_required
-        and not missing_auth
-        and not invalid_models
-        and not invalid_profiles
-    )
-    if missing_required:
-        checks["missing_required_providers"] = missing_required
-    if missing_auth:
-        checks["missing_provider_auth"] = missing_auth
-    if invalid_models:
-        checks["invalid_models"] = _compact_model_checks(invalid_models)
-    if invalid_profiles:
-        checks["invalid_profiles"] = invalid_profiles
-    return checks
-
-
-def preflight(team_dir: Path) -> dict[str, Any]:
-    from team_agent.compiler import compile_team
-    from team_agent.profiles import profile_dir
-
-    team_dir = team_dir.resolve()
-    workspace = team_workspace(team_dir)
-    ensure_workspace_dirs(workspace)
-    _ensure_profiles_for_roles(team_dir)
-    event_log = EventLog(workspace)
-    checks: list[dict[str, Any]] = []
-    ok = True
-    spec = None
-    try:
-        compiled = compile_team(team_dir)
-        spec = compiled["spec"]
-        _attach_team_profile_dirs(spec, team_dir / "team.spec.yaml", workspace, team_dir)
-        checks.append({"name": "compile", "ok": True, "agents": [a["id"] for a in spec.get("agents", [])]})
-    except Exception as exc:
-        ok = False
-        checks.append({"name": "compile", "ok": False, "error": str(exc)})
-    tmux_path = shutil_which("tmux")
-    checks.append({"name": "tmux", "ok": bool(tmux_path), "path": tmux_path})
-    ok = ok and bool(tmux_path)
-    ghostty = _ghostty_command()
-    ghostty_check = {"name": "ghostty", "ok": bool(ghostty), "path": ghostty, "required": False}
-    if spec and spec.get("runtime", {}).get("display_backend") in GHOSTTY_DISPLAY_BACKENDS:
-        ghostty_check["required"] = True
-        ok = ok and bool(ghostty)
-    checks.append(ghostty_check)
-    if spec:
-        profile_checks = _profile_checks_for_agents(workspace, spec.get("agents", []))
-        profile_failures = [item for item in profile_checks if item.get("ok") is False]
-        checks.append({"name": "profiles", "ok": not profile_failures, "checks": [compact_profile_check(item) for item in profile_checks]})
-        ok = ok and not profile_failures
-        smoke_checks = _profile_smoke_checks_for_agents(workspace, spec.get("agents", []))
-        smoke_failures = [item for item in smoke_checks if item.get("ok") is False]
-        checks.append({"name": "profile_smoke", "ok": not smoke_failures, "checks": [compact_profile_check(item) for item in smoke_checks]})
-        ok = ok and not smoke_failures
-        model_checks = _model_checks_for_agents(spec.get("agents", []), workspace)
-        model_failures = [item for item in model_checks if item.get("ok") is False]
-        checks.append({"name": "models", "ok": not model_failures, "checks": _compact_model_checks(model_checks)})
-        ok = ok and not model_failures
-    core = core_binary()
-    checks.append(
-        {
-            "name": "rust_core",
-            "ok": True,
-            "required": False,
-            "available": bool(core),
-            "path": str(core) if core else None,
-            "status": "available" if core else "python_fallback",
-        }
-    )
-    checks.append({"name": "profile_dir", "ok": profile_dir(workspace).exists() or (team_dir / "profiles").exists()})
-    details_log = logs_dir(workspace) / f"preflight-{int(time.time())}.json"
-    details = {"team_dir": str(team_dir), "checks": checks}
-    details_log.write_text(json.dumps(details, indent=2, ensure_ascii=False), encoding="utf-8")
-    event_log.write("preflight.complete", ok=ok, details_log=str(details_log), checks=checks)
-    blockers = [] if ok else _preflight_blockers(checks)
-    return {
-        "ok": ok,
-        "summary": "preflight passed" if ok else "preflight found blockers: " + "; ".join(blockers[:3]),
-        "next_actions": [f"team-agent start --team {team_dir} --yes --json"] if ok else _preflight_next_actions(blockers),
-        "details_log": str(details_log),
-        "checks": checks,
-        "blockers": blockers,
-    }
-
-
-def start(team_dir: Path, yes: bool = False) -> dict[str, Any]:
-    from team_agent.compiler import compile_team
-
-    team_dir = team_dir.resolve()
-    workspace = team_workspace(team_dir)
-    spec_path = team_dir / "team.spec.yaml"
-    compiled = compile_team(team_dir, spec_path)
-    if compiled["spec"].get("context", {}).get("state_file") == "team_state.md":
-        state_file = str(team_dir.relative_to(workspace) / "team_state.md") if team_dir.is_relative_to(workspace) else "team_state.md"
-        compiled["spec"]["context"]["state_file"] = state_file
-        spec_path.write_text(dumps(compiled["spec"]), encoding="utf-8")
-    launched = launch(spec_path, auto_approve=yes)
-    details_log = logs_dir(workspace) / f"start-{int(time.time())}.json"
-    details_log.write_text(json.dumps({"compile": compiled, "launch": launched}, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {
-        "ok": bool(launched.get("ok")),
-        "summary": f"compiled {team_dir} and launched {len(launched.get('agents', []))} agents",
-        "next_actions": ["team-agent wait-ready --workspace . --timeout 120 --json"],
-        "details_log": str(details_log),
-        "spec": str(spec_path),
-        "launch": launched,
-    }
-
-
-def quick_start(
-    agents_dir: Path,
-    name: str | None = None,
-    yes: bool = False,
-    fresh: bool = False,
-    team_id: str | None = None,
-) -> dict[str, Any]:
-    team_dir = _prepare_quick_start_team(agents_dir.resolve(), Path.cwd().resolve(), name, team_id=team_id)
-    workspace = team_workspace(team_dir)
-    ensure_workspace_dirs(workspace)
-    _ensure_profiles_for_roles(team_dir)
-    compiled = _compile_team_dir_spec(team_dir, workspace)
-    spec_path = team_dir / "team.spec.yaml"
-    existing = _quick_start_existing_context(workspace, compiled["spec"]["runtime"]["session_name"])
-    if existing and not fresh:
-        return {
-            "ok": False,
-            "step": "existing_runtime_state",
-            "summary": (
-                "quick-start would start fresh workers from role docs for an existing team. "
-                "Use restart to continue the previous worker context, or pass --fresh to intentionally start new workers."
-            ),
-            "team": existing.get("team_name"),
-            "session_name": existing.get("session_name"),
-            "state_path": existing.get("state_path"),
-            "next_actions": [
-                f"team-agent restart {workspace} --team {existing.get('session_name')}",
-                f"team-agent quick-start {team_dir} --fresh",
-            ],
-        }
-    preflight_result = preflight(team_dir)
-    if not preflight_result.get("ok"):
-        return {
-            "ok": False,
-            "step": "preflight",
-            "summary": preflight_result.get("summary"),
-            "details_log": preflight_result.get("details_log"),
-            "blockers": preflight_result.get("blockers", []),
-            "next_actions": preflight_result.get("next_actions", []),
-            "checks": preflight_result.get("checks", []),
-        }
-    dangerous = bool(compiled["spec"].get("runtime", {}).get("dangerous_auto_approve"))
-    if dangerous and not yes:
-        raise RuntimeError("quick-start requires --yes when dangerous_auto_approve is true")
-    launched = launch(spec_path, auto_approve=True, skip_profile_smoke=True)
-    coordinator = start_coordinator(workspace)
-    ready = wait_ready(workspace, timeout=120)
-    summary = (
-        f"team {compiled['spec']['team']['name']} ready: "
-        f"{len(launched.get('agents', []))} agent"
-        f"{'' if len(launched.get('agents', [])) == 1 else 's'} "
-        f"in session {launched.get('session_name')} (coordinator pid {coordinator.get('pid')})"
-    )
-    ready_signal = (
-        "quick-start completed; workers are ready. "
-        "Do not wait, sleep, or poll status after this success line unless diagnosing a failure."
-    )
-    details_log = logs_dir(workspace) / f"quick-start-{int(time.time())}.json"
-    details_log.write_text(
-        json.dumps(
-            {
-                "team_dir": str(team_dir),
-                "preflight": preflight_result,
-                "compile": compiled,
-                "launch": launched,
-                "ready": ready,
-                "coordinator": coordinator,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    return {
-        "ok": bool(launched.get("ok") and ready.get("ok") and coordinator.get("ok")),
-        "summary": summary,
-        "ready_signal": ready_signal,
-        "next_actions": ["Dispatch work with team-agent send, or return control to the user."],
-        "team_dir": str(team_dir),
-        "spec": str(spec_path),
-        "session_name": launched.get("session_name"),
-        "coordinator": coordinator,
-        "details_log": str(details_log),
-    }
-
-
-def _prepare_quick_start_team(agents_dir: Path, workspace: Path, name: str | None, team_id: str | None = None) -> Path:
-    if (agents_dir / "TEAM.md").exists() and (agents_dir / "agents").is_dir():
-        return agents_dir
-    team_source = agents_dir / "TEAM.md"
-    role_docs = [path for path in sorted(agents_dir.glob("*.md")) if path.name != "TEAM.md"] if agents_dir.is_dir() else []
-    if not role_docs:
-        raise RuntimeError(f"{agents_dir}: expected .team/current or a directory of role .md files")
-    team_dir = workspace / ".team" / (_safe_snapshot_name(team_id) if team_id else "current")
-    target_agents = team_dir / "agents"
-    target_profiles = team_dir / "profiles"
-    target_agents.mkdir(parents=True, exist_ok=True)
-    target_profiles.mkdir(parents=True, exist_ok=True)
-    for role_doc in role_docs:
-        shutil.copy2(role_doc, target_agents / role_doc.name)
-    team_doc = team_dir / "TEAM.md"
-    if team_source.exists():
-        shutil.copy2(team_source, team_doc)
-        if name:
-            EventLog(workspace).write("quick_start.name_ignored_existing_team_doc", name=name, team_doc=str(team_doc))
-    elif not team_doc.exists():
-        team_name = name or agents_dir.name.replace(" ", "-") or "team-agent-team"
-        team_doc.write_text(
-            f"---\nname: {team_name}\nobjective: Quick-start Team Agent team.\n---\n\nQuick-start team.\n",
-            encoding="utf-8",
-        )
-    elif name:
-        # Keep the existing body; name override is only for fresh TEAM.md to avoid hand-editing user docs.
-        EventLog(workspace).write("quick_start.name_ignored_existing_team_doc", name=name, team_doc=str(team_doc))
-    return team_dir
-
-
-def _preflight_blockers(checks: list[dict[str, Any]]) -> list[str]:
-    blockers: list[str] = []
-    for check in checks:
-        if check.get("ok", True):
-            continue
-        name = check.get("name") or "check"
-        if name == "compile":
-            blockers.append(f"compile: {check.get('error')}")
-            continue
-        for item in check.get("checks", []) or []:
-            agent = item.get("agent_id") or item.get("profile") or "-"
-            reason = item.get("reason") or item.get("status") or "failed"
-            detail = f"{name}: {agent} {reason}"
-            if item.get("endpoint"):
-                detail += f" endpoint={item['endpoint']}"
-            if item.get("proxy_configured"):
-                detail += f" proxy={item.get('proxy_url') or item.get('proxy_scheme')}"
-            if item.get("proxy_source"):
-                detail += f" proxy_source={item['proxy_source']}"
-            if item.get("proxy_mode"):
-                detail += f" proxy_mode={item['proxy_mode']}"
-            if item.get("missing_required"):
-                detail += " missing=" + ",".join(item["missing_required"])
-            if item.get("effective_model"):
-                detail += f" model={item['effective_model']}"
-            if item.get("suggestion"):
-                detail += f" suggestion={item['suggestion']}"
-            blockers.append(detail)
-        if not check.get("checks"):
-            blockers.append(f"{name}: failed")
-    return blockers or ["unknown preflight blocker"]
-
-
-def _preflight_next_actions(blockers: list[str]) -> list[str]:
-    actions = ["Fix failed checks, then rerun preflight."]
-    if any("proxy_connectivity_failed" in item for item in blockers):
-        actions.insert(0, "Allow the profile BASE_URL through the configured proxy, or disable the proxy for Team Agent startup.")
-    if any("proxy_source=ambient" in item for item in blockers):
-        actions.insert(0, "Current environment proxy is being used for this compatible_api worker; either fix that proxy for BASE_URL, set HTTPS_PROXY/HTTP_PROXY in the profile, or set PROXY_MODE=direct in the profile to bypass proxy for this worker.")
-    if any("missing=" in item or "profile_required_values_missing" in item for item in blockers):
-        actions.insert(
-            0,
-            "Ask the human user to fill the local profile file; agents must inspect only with `team-agent profile show <name> --workspace . --json` or the returned --team variant and must not read .team/*/profiles/*.env.",
-        )
-    if any("model_mismatch" in item or "does not match profile MODEL" in item for item in blockers):
-        actions.insert(0, "Keep the model in the profile MODEL field or make the role model exactly match it.")
-    return actions
-
-
-def _ensure_profiles_for_roles(team_dir: Path) -> None:
-    from team_agent.compiler import _read_front_matter
-    from team_agent.profiles import ensure_profile_secret_boundary, ensure_profile_secret_boundary_dir, init_profile
-
-    workspace = team_workspace(team_dir)
-    profiles_dir = team_dir / "profiles"
-    profiles_dir.mkdir(parents=True, exist_ok=True)
-    ensure_profile_secret_boundary(workspace)
-    ensure_profile_secret_boundary_dir(profiles_dir)
-    for role_doc in sorted((team_dir / "agents").glob("*.md")):
-        meta, _ = _read_front_matter(role_doc)
-        profile = meta.get("profile")
-        auth_mode = meta.get("auth_mode") or "subscription"
-        if not profile:
-            continue
-        if not (profiles_dir / f"{profile}.env").exists() and not (profiles_dir / f"{profile}.example.env").exists():
-            init_profile(workspace, str(profile), str(auth_mode))
-            if auth_mode == "subscription":
-                body = f"AUTH_MODE=subscription\nPROFILE_NAME={profile}\n"
-            elif auth_mode == "official_api":
-                body = f"AUTH_MODE=official_api\nPROFILE_NAME={profile}\nAPI_KEY=\nMODEL=\n"
-            else:
-                body = f"AUTH_MODE={auth_mode}\nPROFILE_NAME={profile}\nBASE_URL=\nAPI_KEY=\nMODEL=\n"
-            (profiles_dir / f"{profile}.example.env").write_text(body, encoding="utf-8")
-
-
-def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
-    start_time = time.monotonic()
-    last = {}
-    while time.monotonic() - start_time <= timeout:
-        last = status(workspace, as_json=True)
-        agents = last.get("agents", {})
-        if agents and all(agent.get("tmux_window_present") and agent.get("status") in {"running", "busy"} for agent in agents.values()):
-            break
-        time.sleep(1.0)
-    readiness = {
-        "process_started": bool(last.get("tmux_session_present")),
-        "cli_prompt_ready": all(agent.get("status") in {"running", "busy"} for agent in last.get("agents", {}).values()) if last.get("agents") else False,
-        "mcp_ready": all(Path(agent.get("mcp_config", "")).exists() for agent in last.get("agents", {}).values()) if last.get("agents") else False,
-        "task_prompt_delivered": bool(MessageStore(workspace).message_counts()),
-    }
-    ok = readiness["process_started"] and readiness["cli_prompt_ready"] and readiness["mcp_ready"]
-    details_log = logs_dir(workspace) / f"wait-ready-{int(time.time())}.json"
-    details_log.write_text(json.dumps({"readiness": readiness, "status": last}, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {
-        "ok": ok,
-        "summary": "workers ready" if ok else "workers not fully ready before timeout",
-        "next_actions": ["Dispatch a task with team-agent send."] if ok else ["Run team-agent diagnose --json."],
-        "details_log": str(details_log),
-        "readiness": readiness,
-    }
-
-
-def settle(workspace: Path) -> dict[str, Any]:
-    collected = collect(workspace)
-    current = status(workspace, as_json=True)
-    details_log = logs_dir(workspace) / f"settle-{int(time.time())}.json"
-    details_log.write_text(json.dumps({"collect": collected, "status": current}, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {
-        "ok": collected.get("ok", False),
-        "summary": f"collected {len(collected.get('collected', []))} result(s)",
-        "next_actions": ["Review team_state.md and decide whether to continue or shutdown."],
-        "details_log": str(details_log),
-        "collect": collected,
-    }
-
-
-def repair_state(
-    workspace: Path,
-    task_id: str,
-    assignee: str | None = None,
-    status_value: str | None = None,
-    summary: str | None = None,
-) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path)
-    task = _find_task(state.get("tasks", []), task_id)
-    if assignee is not None:
-        valid_agents = {agent["id"] for agent in spec.get("agents", [])}
-        valid_agents.add(_leader_id(state, spec))
-        if assignee not in valid_agents:
-            raise RuntimeError(f"unknown agent id for repair: {assignee}")
-    if status_value is not None and status_value not in TASK_STATUSES:
-        raise RuntimeError(f"unknown task status for repair: {status_value}")
-    before = {
-        "assignee": task.get("assignee"),
-        "status": task.get("status"),
-        "last_result_summary": task.get("last_result_summary"),
-    }
-    if assignee is not None:
-        task["assignee"] = assignee
-    if status_value is not None:
-        task["status"] = status_value
-    if summary is not None:
-        task["last_result_summary"] = summary
-    after = {
-        "assignee": task.get("assignee"),
-        "status": task.get("status"),
-        "last_result_summary": task.get("last_result_summary"),
-    }
-    save_runtime_state(workspace, state)
-    state_path = write_team_state(workspace, spec, state)
-    EventLog(workspace).write("repair_state.task", task_id=task_id, before=before, after=after)
-    return {"ok": True, "task_id": task_id, "before": before, "after": after, "state_file": str(state_path)}
 
 
 def shutil_which(command: str) -> str | None:
