@@ -214,13 +214,17 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertTrue(response["result"]["isError"])
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["reason"], "invalid_tool_arguments")
-        self.assertIn("content", payload["error"])
+        self.assertEqual(payload["error_code"], "invalid_tool_arguments")
+        self.assertEqual(payload["exc_type"], "TypeError")
+        self.assertIn("content", payload["message"])
 
         response, payload = self._call_tool(tools, "assign_task", {})
         self.assertTrue(response["result"]["isError"])
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["reason"], "invalid_tool_arguments")
-        self.assertIn("task", payload["error"])
+        self.assertEqual(payload["error_code"], "invalid_tool_arguments")
+        self.assertEqual(payload["exc_type"], "TypeError")
+        self.assertIn("task", payload["message"])
 
     def test_tools_call_unknown_tool_returns_structured_error(self) -> None:
         from team_agent import mcp_server
@@ -240,6 +244,39 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "unknown tool 'missing_tool'")
 
+    def test_tools_call_validation_subclass_is_reported_as_bad_arguments(self) -> None:
+        from team_agent import mcp_server
+
+        class ProfileValidationError(ValueError):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-validation-error-") as tmp:
+            workspace = Path(tmp)
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result", side_effect=ProfileValidationError("bad envelope")):
+                response, payload = self._call_tool(tools, "report_result", {"summary": "done"})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertEqual(payload["error_code"], "invalid_tool_arguments")
+        self.assertEqual(payload["exc_type"], "ProfileValidationError")
+        self.assertEqual(payload["message"], "bad envelope")
+
+    def test_tools_call_key_error_is_reported_as_bad_arguments(self) -> None:
+        from team_agent import mcp_server
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-key-error-") as tmp:
+            workspace = Path(tmp)
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result", side_effect=KeyError("missing_field")):
+                response, payload = self._call_tool(tools, "report_result", {"summary": "done"})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertEqual(payload["error_code"], "invalid_tool_arguments")
+        self.assertEqual(payload["exc_type"], "KeyError")
+        self.assertIn("missing_field", payload["message"])
+
     def test_tools_call_runtime_failure_is_not_reported_as_bad_arguments(self) -> None:
         from team_agent import mcp_server
 
@@ -251,8 +288,25 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertTrue(response["result"]["isError"])
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["reason"], "internal_runtime_error")
+        self.assertEqual(payload["error_code"], "internal_runtime_error")
+        self.assertEqual(payload["exc_type"], "RuntimeError")
         self.assertNotEqual(payload["reason"], "invalid_tool_arguments")
-        self.assertIn("storage unavailable", payload["error"])
+        self.assertEqual(payload["message"], "storage unavailable")
+
+    def test_tools_call_internal_error_message_is_public_safe_and_bounded(self) -> None:
+        from team_agent import mcp_server
+
+        noisy_message = "secret-ish context\n" + ("x" * 300)
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-runtime-error-") as tmp:
+            workspace = Path(tmp)
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result", side_effect=RuntimeError(noisy_message)):
+                _, payload = self._call_tool(tools, "report_result", {"summary": "done"})
+        self.assertEqual(payload["reason"], "internal_runtime_error")
+        self.assertEqual(payload["error_code"], "internal_runtime_error")
+        self.assertEqual(payload["exc_type"], "RuntimeError")
+        self.assertNotIn("\n", payload["message"])
+        self.assertLessEqual(len(payload["message"]), 200)
 
     def test_compact_and_normalize_helpers_preserve_documented_shapes(self) -> None:
         from team_agent import mcp_server

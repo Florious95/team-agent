@@ -10,6 +10,9 @@ from team_agent.mcp_server.contracts import TOOLS
 from team_agent.mcp_server.tools import TeamOrchestratorTools
 
 
+ARGUMENT_ERROR_TYPES = (TypeError, ValueError, KeyError, AttributeError)
+
+
 def dispatch(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str, Any]:
     tool = request.get("tool") or request.get("method")
     args = request.get("arguments") or request.get("params") or {}
@@ -59,10 +62,10 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
         arguments = params.get("arguments") or {}
         try:
             result = dispatch(tools, {"tool": name, "arguments": arguments})
-        except (TypeError, ValueError) as exc:
-            result = {"ok": False, "reason": "invalid_tool_arguments", "error": str(exc)}
+        except ARGUMENT_ERROR_TYPES as exc:
+            result = _tool_exception_result(exc, "invalid_tool_arguments")
         except Exception as exc:
-            result = {"ok": False, "reason": "internal_runtime_error", "error": str(exc)}
+            result = _tool_exception_result(exc, "internal_runtime_error")
         is_error = result.get("ok") is False
         return {
             "jsonrpc": "2.0",
@@ -82,6 +85,21 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
         "id": msg_id,
         "error": {"code": -32601, "message": f"unknown method {method!r}"},
     }
+
+
+def _tool_exception_result(exc: Exception, reason: str) -> dict[str, str | bool]:
+    return {
+        "ok": False,
+        "reason": reason,
+        "error_code": reason,
+        "exc_type": type(exc).__name__,
+        "message": _public_exception_message(exc),
+    }
+
+
+def _public_exception_message(exc: Exception) -> str:
+    message = str(exc).replace("\n", " ").strip()
+    return message[:200] if message else type(exc).__name__
 
 
 def main(argv: list[str] | None = None) -> None:
