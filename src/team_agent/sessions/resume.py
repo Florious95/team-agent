@@ -111,7 +111,11 @@ def recover_resume_session_from_events(
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("event") != "session.captured" or event.get("agent_id") != agent_id:
+        if event.get("agent_id") != agent_id:
+            continue
+        if event.get("event") == "discard.session_tombstone":
+            return None
+        if event.get("event") != "session.captured":
             continue
         session_id = str(event.get("session_id") or "")
         if not session_id or session_id == current_session_id or session_id in exclude_session_ids:

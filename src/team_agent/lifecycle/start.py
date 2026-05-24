@@ -55,6 +55,13 @@ def _runtime_proxy(name: str):
 globals().update({_name: _runtime_proxy(_name) for _name in _RUNTIME_SYMBOLS})
 
 
+def _resume_rollout_missing(agent: dict[str, Any], previous: dict[str, Any]) -> bool:
+    if agent.get("provider") != "codex" or not previous.get("session_id"):
+        return False
+    rollout_path = previous.get("rollout_path")
+    return not rollout_path or not Path(str(rollout_path)).exists()
+
+
 def start_agent(
     workspace: Path,
     agent_id: str,
@@ -155,7 +162,19 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
                 error=str(cleanup_exc),
             )
         raise RuntimeError(str(exc)) from exc
+    missing_resume_rollout = _resume_rollout_missing(agent, previous)
     start_mode = "resumed" if previous.get("session_id") else "fresh"
+    if missing_resume_rollout and allow_fresh:
+        event_log.write(
+            "start_agent.resume_window_missing_fallback_fresh",
+            agent_id=agent_id,
+            provider=agent["provider"],
+            session_id=previous.get("session_id"),
+            reason="rollout_missing",
+        )
+        start_mode = "fresh_after_missing_rollout"
+        previous = dict(previous)
+        previous["session_id"] = None
     if start_mode == "resumed":
         try:
             command = shell_resume_command_for_agent(command_agent, previous, workspace, mcp_config)
@@ -180,7 +199,12 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
             start_mode = "fresh"
     else:
         command = shell_command_for_agent(command_agent, workspace, mcp_config)
-        event_log.write("start_agent.fresh_spawn", agent_id=agent_id, provider=agent["provider"], reason="session_id_missing")
+        event_log.write(
+            "start_agent.fresh_spawn",
+            agent_id=agent_id,
+            provider=agent["provider"],
+            reason="rollout_missing" if start_mode == "fresh_after_missing_rollout" else "session_id_missing",
+        )
 
     tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent_id, command)
     event_log.write(
@@ -235,7 +259,7 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
             session_id=previous.get("session_id"),
         )
         command = shell_command_for_agent(command_agent, workspace, mcp_config)
-        start_mode = "fresh"
+        start_mode = "fresh_after_missing_rollout" if missing_resume_rollout else "fresh"
         tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent_id, command)
         event_log.write(
             "start_agent.agent_start",
@@ -275,7 +299,7 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
     profile_launch = command_agent.get("_provider_profile") or {}
     if profile_launch.get("claude_projects_root"):
         agent_state["claude_projects_root"] = profile_launch["claude_projects_root"]
-    if start_mode == "fresh":
+    if start_mode in {"fresh", "fresh_after_missing_rollout"}:
         _clear_session_capture_fields(agent_state)
         if command_agent.get("_session_id"):
             agent_state["_pending_session_id"] = command_agent["_session_id"]

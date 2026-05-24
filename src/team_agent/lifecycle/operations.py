@@ -94,10 +94,12 @@ def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     agent_state = dict(state.get("agents", {}).get(agent_id) or {})
+    discarded_session_id = agent_state.get("session_id")
     for key in [*SESSION_CAPTURE_FIELDS, "_pending_session_id"]:
         agent_state.pop(key, None)
     agent_state["status"] = "stopped"
     state.setdefault("agents", {})[agent_id] = agent_state
+    EventLog(workspace).write("discard.session_tombstone", agent_id=agent_id, discarded_session_id=discarded_session_id)
     save_runtime_state(workspace, state)
     write_team_state(workspace, spec, state)
     started = start_agent(workspace, agent_id, force=True, open_display=open_display, allow_fresh=True)
