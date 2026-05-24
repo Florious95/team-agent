@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 _ACTIVE_TASK_STATUSES = {"pending", "assigned", "in_progress", "ready", "running", "needs_retry"}
-_INBOUND_WORK_STATUSES = {"pending", "accepted", "target_resolved", "injected", "visible", "submitted", "delivered"}
+_INBOUND_WORK_STATUSES = {"pending", "accepted", "target_resolved", "injected"}
 _PROGRESS_EVENTS = {
     "mcp.report_result",
     "report_result.accepted",

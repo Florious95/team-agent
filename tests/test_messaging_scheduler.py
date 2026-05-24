@@ -83,6 +83,45 @@ class MessagingSchedulerTests(unittest.TestCase):
             stuck_event = next(e for e in _events(workspace) if e["event"] == "coordinator.agent_stuck")
             self.assertEqual(stuck_event["work_reason"], "inbound_message")
 
+    def test_delivered_message_history_does_not_count_as_inbound_work(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-stuck-delivered-history-") as tmp:
+            workspace = Path(tmp)
+            state = self._workspace_state(workspace, task_status="done")
+            store = MessageStore(workspace)
+            event_log = EventLog(workspace)
+            old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+            store.upsert_agent_health("fake_impl", "RUNNING", last_output_at=old)
+            for index, status in enumerate(("submitted", "visible", "delivered")):
+                message_id = store.create_message(None, f"sender-{index}", "fake_impl", f"cycle probe {index}")
+                store.mark(message_id, status)
+
+            with patch("team_agent.runtime.send_message") as send:
+                stuck = _detect_stuck_agents(workspace, state, store, event_log)
+
+            self.assertEqual(stuck, [])
+            send.assert_not_called()
+            events = _events(workspace)
+            self.assertFalse(any(e["event"] == "coordinator.agent_stuck" for e in events))
+            self.assertTrue(any(e["event"] == "coordinator.agent_stuck_suppressed" and e["reason"] == "idle_no_work" for e in events))
+
+    def test_accepted_message_still_counts_as_pre_delivery_work(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-stuck-accepted-message-") as tmp:
+            workspace = Path(tmp)
+            state = self._workspace_state(workspace, task_status="done")
+            store = MessageStore(workspace)
+            event_log = EventLog(workspace)
+            old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+            store.upsert_agent_health("fake_impl", "RUNNING", last_output_at=old)
+            store.create_message(None, "leader", "fake_impl", "not delivered yet")
+
+            with patch("team_agent.runtime.send_message", return_value={"ok": True}) as send:
+                stuck = _detect_stuck_agents(workspace, state, store, event_log)
+
+            self.assertEqual(stuck, ["fake_impl"])
+            send.assert_called_once()
+            stuck_event = next(e for e in _events(workspace) if e["event"] == "coordinator.agent_stuck")
+            self.assertEqual(stuck_event["work_reason"], "inbound_message")
+
     def test_recent_progress_suppresses_stuck_alert_even_with_active_task(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-stuck-progress-") as tmp:
             workspace = Path(tmp)
