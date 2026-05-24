@@ -27,6 +27,7 @@ from team_agent.messaging.deps import (
     save_runtime_state,
     send_message,
     start_coordinator,
+    team_state_key,
     timezone,
     update_task_status,
     validate_result_envelope,
@@ -185,12 +186,13 @@ def _coordinator_should_run(state: dict[str, Any]) -> bool:
 def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
     validate_result_envelope(envelope)
     store = MessageStore(workspace)
-    result_id = store.add_result(envelope)
-    acknowledged = store.acknowledge_task_messages(envelope["task_id"], envelope["agent_id"])
+    owner_team_id = _owner_team_id_for_report(store, envelope)
+    result_id = store.add_result(envelope, owner_team_id=owner_team_id)
+    acknowledged = store.acknowledge_task_messages(envelope["task_id"], envelope["agent_id"], owner_team_id=owner_team_id)
     if not acknowledged:
-        acknowledged = store.acknowledge_message(envelope["task_id"], envelope["agent_id"])
+        acknowledged = store.acknowledge_message(envelope["task_id"], envelope["agent_id"], owner_team_id=owner_team_id)
     event_log = EventLog(workspace)
-    notification = _runtime_notify_leader_of_report_result(workspace, envelope, result_id, event_log)
+    notification = _runtime_notify_leader_of_report_result(workspace, envelope, result_id, event_log, owner_team_id=owner_team_id)
     leader_notified = bool(notification.get("ok")) and notification.get("status") in {"submitted", "visible", "delivered", "acknowledged"}
     event_log.write(
         "mcp.report_result",
@@ -203,6 +205,7 @@ def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
         notification_status=notification.get("status"),
         notification_channel=notification.get("channel"),
         notification_event_id=notification.get("event_id"),
+        owner_team_id=owner_team_id,
     )
     return {
         "ok": True,
@@ -223,12 +226,15 @@ def _notify_leader_of_report_result(
     envelope: dict[str, Any],
     result_id: str,
     event_log: EventLog,
+    owner_team_id: str | None = None,
 ) -> dict[str, Any]:
     state = load_runtime_state(workspace)
+    if owner_team_id:
+        state = _team_state_by_owner_id(state, owner_team_id) or state
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path) if spec_path.exists() else {}
     leader_id = _leader_id(state, spec)
-    state = _refresh_leader_receiver_or_flag_rebind(workspace, state, event_log)
+    state = _refresh_leader_receiver_or_flag_rebind(workspace, state, event_log, persist=owner_team_id is None)
     content = _format_report_result_notification(envelope, result_id)
     store = MessageStore(workspace)
     event_id = store.add_scheduled_event(
@@ -244,6 +250,7 @@ def _notify_leader_of_report_result(
             "timeout": 30.0,
             "max_attempts": 3,
         },
+        owner_team_id=owner_team_id or team_state_key(state),
     )
     coordinator = {"ok": False, "status": "not_started"}
     if state.get("session_name") or _leader_receiver_is_direct(state.get("leader_receiver", {})):
@@ -266,14 +273,37 @@ def _notify_leader_of_report_result(
         event_id=event_id,
         target=leader_id,
         coordinator=coordinator,
+        owner_team_id=owner_team_id or team_state_key(state),
     )
     return notification
+
+
+def _owner_team_id_for_report(store: MessageStore, envelope: dict[str, Any]) -> str | None:
+    for row in reversed(store.messages()):
+        if row.get("recipient") != envelope["agent_id"]:
+            continue
+        if row.get("task_id") not in {envelope["task_id"], None} and row.get("message_id") != envelope["task_id"]:
+            continue
+        if row.get("owner_team_id"):
+            return str(row["owner_team_id"])
+    return None
+
+
+def _team_state_by_owner_id(workspace_state: dict[str, Any], owner_team_id: str) -> dict[str, Any] | None:
+    if team_state_key(workspace_state) == owner_team_id:
+        return workspace_state
+    teams = workspace_state.get("teams")
+    if not isinstance(teams, dict):
+        return None
+    state = teams.get(owner_team_id)
+    return state if isinstance(state, dict) else None
 
 
 def _refresh_leader_receiver_or_flag_rebind(
     workspace: Path,
     state: dict[str, Any],
     event_log: EventLog,
+    persist: bool = True,
 ) -> dict[str, Any]:
     receiver = state.get("leader_receiver") or {}
     if receiver.get("mode") != "direct_tmux":
@@ -284,7 +314,8 @@ def _refresh_leader_receiver_or_flag_rebind(
     rediscovered = _rediscover_leader_receiver(receiver, event_log)
     if rediscovered.get("status") == "updated":
         state["leader_receiver"] = rediscovered["receiver"]
-        save_runtime_state(workspace, state)
+        if persist:
+            save_runtime_state(workspace, state)
         event_log.write(
             "leader_receiver.rebind_applied",
             old_pane_id=receiver.get("pane_id"),
@@ -454,7 +485,5 @@ def _format_result_watcher_notification(result: dict[str, Any]) -> str:
         if rendered_tests:
             lines.insert(1, "Tests: " + "; ".join(rendered_tests))
     return "\n".join(lines)
-
-
 
 

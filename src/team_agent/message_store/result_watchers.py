@@ -13,6 +13,7 @@ def create_result_watcher(
     agent_id: str | None,
     message_id: str | None,
     leader_id: str = "leader",
+    owner_team_id: str | None = None,
 ) -> str:
     watcher_id = f"watch_{uuid.uuid4().hex[:12]}"
     with closing(self.connect()) as conn:
@@ -20,19 +21,27 @@ def create_result_watcher(
             conn.execute(
                 """
                 insert into result_watchers(
-                  watcher_id, task_id, agent_id, message_id, leader_id, status, created_at
+                  watcher_id, owner_team_id, task_id, agent_id, message_id, leader_id, status, created_at
                 )
-                values (?, ?, ?, ?, ?, 'pending', ?)
+                values (?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
-                (watcher_id, task_id, agent_id, message_id, leader_id, utcnow()),
+                (watcher_id, owner_team_id, task_id, agent_id, message_id, leader_id, utcnow()),
             )
     return watcher_id
 
-def pending_result_watchers(self) -> list[dict[str, Any]]:
+def pending_result_watchers(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
     with closing(self.connect()) as conn:
-        rows = conn.execute(
-            "select * from result_watchers where status = 'pending' order by created_at"
-        ).fetchall()
+        if owner_team_id is None:
+            rows = conn.execute("select * from result_watchers where status = 'pending' order by created_at").fetchall()
+        else:
+            rows = conn.execute(
+                """
+                select * from result_watchers
+                where status = 'pending' and (owner_team_id = ? or owner_team_id is null)
+                order by created_at
+                """,
+                (owner_team_id,),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 def retryable_result_watchers(self) -> list[dict[str, Any]]:
@@ -42,9 +51,15 @@ def retryable_result_watchers(self) -> list[dict[str, Any]]:
         ).fetchall()
     return [dict(row) for row in rows]
 
-def result_watchers(self) -> list[dict[str, Any]]:
+def result_watchers(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
     with closing(self.connect()) as conn:
-        rows = conn.execute("select * from result_watchers order by created_at").fetchall()
+        if owner_team_id is None:
+            rows = conn.execute("select * from result_watchers order by created_at").fetchall()
+        else:
+            rows = conn.execute(
+                "select * from result_watchers where owner_team_id = ? or owner_team_id is null order by created_at",
+                (owner_team_id,),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 def mark_result_watcher(

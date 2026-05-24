@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 
 MESSAGE_COLUMNS = {
+    "owner_team_id",
     "message_id",
     "task_id",
     "sender",
@@ -24,6 +25,7 @@ MESSAGE_COLUMNS = {
 RESULT_COLUMNS = {"result_id", "task_id", "agent_id", "envelope", "status", "created_at"}
 SCHEDULED_EVENT_COLUMNS = {
     "id",
+    "owner_team_id",
     "due_at",
     "target",
     "kind",
@@ -43,6 +45,7 @@ DELIVERY_TOKEN_COLUMNS = {
     "failure_reason",
 }
 AGENT_HEALTH_COLUMNS = {
+    "owner_team_id",
     "agent_id",
     "status",
     "last_output_at",
@@ -52,6 +55,7 @@ AGENT_HEALTH_COLUMNS = {
 }
 PEER_ALLOWLIST_COLUMNS = {"a", "b", "created_at"}
 RESULT_WATCHER_COLUMNS = {
+    "owner_team_id",
     "watcher_id",
     "task_id",
     "agent_id",
@@ -69,7 +73,7 @@ RESULT_WATCHER_COLUMNS = {
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -99,6 +103,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             """
             create table if not exists messages (
               message_id text primary key,
+              owner_team_id text,
               task_id text,
               sender text,
               recipient text,
@@ -132,6 +137,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             """
             create table if not exists scheduled_events (
               id integer primary key,
+              owner_team_id text,
               due_at text not null,
               target text not null,
               kind text not null,
@@ -159,12 +165,14 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             create table if not exists agent_health (
-              agent_id text primary key,
+              owner_team_id text,
+              agent_id text not null,
               status text not null,
               last_output_at text,
               context_usage_pct integer,
               current_task_id text,
-              updated_at text not null
+              updated_at text not null,
+              unique(owner_team_id, agent_id)
             )
             """
         )
@@ -182,6 +190,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             """
             create table if not exists result_watchers (
               watcher_id text primary key,
+              owner_team_id text,
               task_id text,
               agent_id text,
               message_id text,
@@ -202,13 +211,56 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             {
                 "delivery_attempts": (
                     "alter table messages add column delivery_attempts integer not null default 0"
-                )
+                ),
+                "owner_team_id": "alter table messages add column owner_team_id text",
             },
         )
         _ensure_table_columns(conn, "results", RESULT_COLUMNS)
-        _ensure_table_columns(conn, "scheduled_events", SCHEDULED_EVENT_COLUMNS)
+        _ensure_table_columns(
+            conn,
+            "scheduled_events",
+            SCHEDULED_EVENT_COLUMNS,
+            {"owner_team_id": "alter table scheduled_events add column owner_team_id text"},
+        )
         _ensure_table_columns(conn, "delivery_tokens", DELIVERY_TOKEN_COLUMNS)
-        _ensure_table_columns(conn, "agent_health", AGENT_HEALTH_COLUMNS)
+        _migrate_agent_health_owner_team_id(conn)
         _ensure_table_columns(conn, "peer_allowlist", PEER_ALLOWLIST_COLUMNS)
-        _ensure_table_columns(conn, "result_watchers", RESULT_WATCHER_COLUMNS)
+        _ensure_table_columns(
+            conn,
+            "result_watchers",
+            RESULT_WATCHER_COLUMNS,
+            {"owner_team_id": "alter table result_watchers add column owner_team_id text"},
+        )
+        conn.execute("create index if not exists idx_messages_owner_team_id on messages(owner_team_id)")
+        conn.execute("create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)")
+        conn.execute("create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)")
+        conn.execute("create index if not exists idx_result_watchers_owner_team_id on result_watchers(owner_team_id)")
         conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
+
+
+def _migrate_agent_health_owner_team_id(conn: sqlite3.Connection) -> None:
+    columns = _table_columns(conn, "agent_health")
+    if "owner_team_id" not in columns:
+        conn.execute(
+            """
+            create table agent_health_new (
+              owner_team_id text,
+              agent_id text not null,
+              status text not null,
+              last_output_at text,
+              context_usage_pct integer,
+              current_task_id text,
+              updated_at text not null,
+              unique(owner_team_id, agent_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into agent_health_new(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
+            select null, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at from agent_health
+            """
+        )
+        conn.execute("drop table agent_health")
+        conn.execute("alter table agent_health_new rename to agent_health")
+    _ensure_table_columns(conn, "agent_health", AGENT_HEALTH_COLUMNS)

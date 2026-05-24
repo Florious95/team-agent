@@ -26,6 +26,7 @@ from team_agent.messaging.deps import (
     save_runtime_state,
     select_runtime_state,
     ambiguous_team_target_result,
+    team_state_key,
     update_task_status,
 )
 
@@ -89,6 +90,7 @@ def _send_message_unlocked(
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     event_log = EventLog(workspace)
+    owner_team_id = team_state_key(state)
     leader_id = _leader_id(state, spec)
 
     if target == "*":
@@ -106,6 +108,7 @@ def _send_message_unlocked(
             wait_visible=wait_visible,
             timeout=timeout,
             block_until_delivered=block_until_delivered,
+            owner_team_id=owner_team_id,
         )
 
     return _send_single_message_unlocked(
@@ -123,6 +126,7 @@ def _send_message_unlocked(
         timeout=timeout,
         watch_result=watch_result,
         block_until_delivered=block_until_delivered,
+        owner_team_id=owner_team_id,
     )
 
 
@@ -144,6 +148,7 @@ def _send_single_message_unlocked(
     mirror_peer: bool = True,
     route_task_id: bool = True,
     block_until_delivered: bool = True,
+    owner_team_id: str | None = None,
 ) -> dict[str, Any]:
     leader_id = _leader_id(state, spec)
 
@@ -209,12 +214,12 @@ def _send_single_message_unlocked(
         event_log.write("send.target_rejected", sender=sender, target=target, reason="target_not_in_team")
         return {"ok": False, "status": "refused", "reason": "target_not_in_team", "from": sender, "to": target}
     store = MessageStore(workspace)
-    message_id = store.create_message(task_id, sender, target, content, requires_ack=requires_ack)
+    message_id = store.create_message(task_id, sender, target, content, requires_ack=requires_ack, owner_team_id=owner_team_id)
     if not block_until_delivered:
         watch: dict[str, Any] | None = None
         if watch_result:
             watch_task_id = task_id or _current_task_for_agent(state.get("tasks", []), str(target))
-            watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id)
+            watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id, owner_team_id=owner_team_id)
             watch = {
                 "status": "registered",
                 "watcher_id": watcher_id,
@@ -271,7 +276,7 @@ def _send_single_message_unlocked(
     watch: dict[str, Any] | None = None
     if watch_result and delivered_result.get("ok"):
         watch_task_id = task_id or _current_task_for_agent(state.get("tasks", []), str(target))
-        watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id)
+        watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id, owner_team_id=owner_team_id)
         watch = {
             "status": "registered",
             "watcher_id": watcher_id,
@@ -332,6 +337,7 @@ def _broadcast_message_unlocked(
     wait_visible: bool,
     timeout: float,
     block_until_delivered: bool = True,
+    owner_team_id: str | None = None,
 ) -> dict[str, Any]:
     targets = _broadcast_targets(state, spec, sender)
     if not targets:
@@ -357,6 +363,7 @@ def _broadcast_message_unlocked(
             mirror_peer=False,
             route_task_id=False,
             block_until_delivered=block_until_delivered,
+            owner_team_id=owner_team_id,
         )
         deliveries.append(_compact_broadcast_delivery(result))
     failed = [item for item in deliveries if not item.get("ok")]

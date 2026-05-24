@@ -44,6 +44,7 @@ class MessageStore:
         reply_to: str | None = None,
         requires_ack: bool = True,
         artifact_refs: list[dict[str, Any]] | None = None,
+        owner_team_id: str | None = None,
     ) -> str:
         message_id = f"msg_{uuid.uuid4().hex[:12]}"
         now = utcnow()
@@ -52,14 +53,15 @@ class MessageStore:
                 conn.execute(
                     """
                     insert into messages(
-                      message_id, task_id, sender, recipient, reply_to, requires_ack,
+                      message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
                       status, content, artifact_refs, created_at, updated_at,
                       delivered_at, acknowledged_at, error, delivery_attempts
                     )
-                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         message_id,
+                        owner_team_id,
                         task_id,
                         sender,
                         recipient,
@@ -193,22 +195,40 @@ class MessageStore:
                         )
         return failed
 
-    def messages(self) -> list[dict[str, Any]]:
+    def messages(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
-            rows = conn.execute("select * from messages order by created_at").fetchall()
+            if owner_team_id is None:
+                rows = conn.execute("select * from messages order by created_at").fetchall()
+            else:
+                rows = conn.execute(
+                    "select * from messages where owner_team_id = ? or owner_team_id is null order by created_at",
+                    (owner_team_id,),
+                ).fetchall()
         return [dict(row) for row in rows]
 
-    def inbox(self, agent_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    def inbox(self, agent_id: str, limit: int = 20, owner_team_id: str | None = None) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
-            rows = conn.execute(
-                """
-                select * from messages
-                where sender = ? or recipient = ?
-                order by created_at desc
-                limit ?
-                """,
-                (agent_id, agent_id, limit),
-            ).fetchall()
+            if owner_team_id is None:
+                rows = conn.execute(
+                    """
+                    select * from messages
+                    where sender = ? or recipient = ?
+                    order by created_at desc
+                    limit ?
+                    """,
+                    (agent_id, agent_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    select * from messages
+                    where (sender = ? or recipient = ?)
+                      and (owner_team_id = ? or owner_team_id is null)
+                    order by created_at desc
+                    limit ?
+                    """,
+                    (agent_id, agent_id, owner_team_id, limit),
+                ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
     def delivery_tokens(self) -> list[dict[str, Any]]:
@@ -216,28 +236,46 @@ class MessageStore:
             rows = conn.execute("select * from delivery_tokens order by injected_at").fetchall()
         return [dict(row) for row in rows]
 
-    def add_scheduled_event(self, due_at: str, target: str, kind: str, payload: dict[str, Any]) -> int:
+    def add_scheduled_event(
+        self,
+        due_at: str,
+        target: str,
+        kind: str,
+        payload: dict[str, Any],
+        owner_team_id: str | None = None,
+    ) -> int:
         with closing(self.connect()) as conn:
             with conn:
                 cur = conn.execute(
                     """
-                    insert into scheduled_events(due_at, target, kind, payload_json, status, created_at)
-                    values (?, ?, ?, ?, 'pending', ?)
+                    insert into scheduled_events(owner_team_id, due_at, target, kind, payload_json, status, created_at)
+                    values (?, ?, ?, ?, ?, 'pending', ?)
                     """,
-                    (due_at, target, kind, json.dumps(payload, ensure_ascii=False), utcnow()),
+                    (owner_team_id, due_at, target, kind, json.dumps(payload, ensure_ascii=False), utcnow()),
                 )
                 return int(cur.lastrowid)
 
-    def due_scheduled_events(self, now: str | None = None) -> list[dict[str, Any]]:
+    def due_scheduled_events(self, now: str | None = None, owner_team_id: str | None = None) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
-            rows = conn.execute(
-                """
-                select * from scheduled_events
-                where status = 'pending' and due_at <= ?
-                order by due_at, id
-                """,
-                (now or utcnow(),),
-            ).fetchall()
+            if owner_team_id is None:
+                rows = conn.execute(
+                    """
+                    select * from scheduled_events
+                    where status = 'pending' and due_at <= ?
+                    order by due_at, id
+                    """,
+                    (now or utcnow(),),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    select * from scheduled_events
+                    where status = 'pending' and due_at <= ?
+                      and (owner_team_id = ? or owner_team_id is null)
+                    order by due_at, id
+                    """,
+                    (now or utcnow(), owner_team_id),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def mark_scheduled_event(self, event_id: int, status: str, result: dict[str, Any]) -> None:
@@ -292,7 +330,8 @@ class MessageStore:
                 counts["by_status"][status] = n
         return counts
 
-    def add_result(self, envelope: dict[str, Any]) -> str:
+    def add_result(self, envelope: dict[str, Any], owner_team_id: str | None = None) -> str:
+        _ = owner_team_id
         validate_result_envelope(envelope)
         result_id = f"res_{uuid.uuid4().hex[:12]}"
         with closing(self.connect()) as conn:
@@ -313,57 +352,69 @@ class MessageStore:
                 )
         return result_id
 
-    def acknowledge_task_messages(self, task_id: str, agent_id: str) -> list[str]:
+    def acknowledge_task_messages(self, task_id: str, agent_id: str, owner_team_id: str | None = None) -> list[str]:
         now = utcnow()
+        owner_clause = "and (owner_team_id = ? or owner_team_id is null)" if owner_team_id else ""
+        owner_args = (owner_team_id,) if owner_team_id else ()
         with closing(self.connect()) as conn:
             with conn:
                 rows = conn.execute(
-                    """
+                    f"""
                     select message_id from messages
-                    where task_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    where task_id = ? and recipient = ? {owner_clause}
+                      and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
                     """,
-                    (task_id, agent_id),
+                    (task_id, agent_id, *owner_args),
                 ).fetchall()
                 ids = [row["message_id"] for row in rows]
                 conn.execute(
-                    """
+                    f"""
                     update messages
                     set status = 'acknowledged', acknowledged_at = ?, updated_at = ?
-                    where task_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    where task_id = ? and recipient = ? {owner_clause}
+                      and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
                     """,
-                    (now, now, task_id, agent_id),
+                    (now, now, task_id, agent_id, *owner_args),
                 )
         return ids
 
-    def acknowledge_message(self, message_id: str, agent_id: str) -> list[str]:
+    def acknowledge_message(self, message_id: str, agent_id: str, owner_team_id: str | None = None) -> list[str]:
         now = utcnow()
+        owner_clause = "and (owner_team_id = ? or owner_team_id is null)" if owner_team_id else ""
+        owner_args = (owner_team_id,) if owner_team_id else ()
         with closing(self.connect()) as conn:
             with conn:
                 row = conn.execute(
-                    """
+                    f"""
                     select message_id from messages
-                    where message_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    where message_id = ? and recipient = ? {owner_clause}
+                      and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
                     """,
-                    (message_id, agent_id),
+                    (message_id, agent_id, *owner_args),
                 ).fetchone()
                 if not row:
                     return []
                 conn.execute(
-                    """
+                    f"""
                     update messages
                     set status = 'acknowledged', acknowledged_at = ?, updated_at = ?
-                    where message_id = ? and recipient = ? and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
+                    where message_id = ? and recipient = ? {owner_clause}
+                      and status in ('pending', 'accepted', 'target_resolved', 'injected', 'visible', 'submitted', 'delivered')
                     """,
-                    (now, now, message_id, agent_id),
+                    (now, now, message_id, agent_id, *owner_args),
                 )
         return [message_id]
 
-    def results(self, uncollected_only: bool = False) -> list[dict[str, Any]]:
-        query = "select * from results order by created_at"
+    def results(self, uncollected_only: bool = False, owner_team_id: str | None = None) -> list[dict[str, Any]]:
+        _ = owner_team_id
+        clauses: list[str] = []
+        args: list[Any] = []
         if uncollected_only:
-            query = "select * from results where status not in ('collected', 'invalid') order by created_at"
+            clauses.append("status not in ('collected', 'invalid')")
+        where = " where " + " and ".join(clauses) if clauses else ""
+        query = f"select * from results{where} order by created_at"
         with closing(self.connect()) as conn:
-            rows = conn.execute(query).fetchall()
+            rows = conn.execute(query, args).fetchall()
         return [dict(row) for row in rows]
 
     def result_by_id(self, result_id: str) -> dict[str, Any] | None:
@@ -371,7 +422,8 @@ class MessageStore:
             row = conn.execute("select * from results where result_id = ?", (result_id,)).fetchone()
         return dict(row) if row else None
 
-    def latest_results(self, limit: int = 5) -> list[dict[str, Any]]:
+    def latest_results(self, limit: int = 5, owner_team_id: str | None = None) -> list[dict[str, Any]]:
+        _ = owner_team_id
         with closing(self.connect()) as conn:
             rows = conn.execute(
                 """

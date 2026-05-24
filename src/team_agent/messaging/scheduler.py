@@ -10,6 +10,7 @@ from team_agent.messaging.deps import (
     load_spec,
     save_runtime_state,
     send_message,
+    team_state_key,
     timedelta,
     timezone,
 )
@@ -47,6 +48,7 @@ def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: 
                     requires_ack=bool(payload.get("requires_ack", True)),
                     wait_visible=bool(payload.get("wait_visible", True)),
                     timeout=float(payload.get("timeout", 30)),
+                    team=row.get("owner_team_id"),
                 )
             elif row["kind"] == "health_ping":
                 result = {"ok": True, "status": "logged"}
@@ -89,7 +91,7 @@ def _schedule_send_retry(
     retry_payload = dict(payload)
     retry_payload["attempt"] = attempt + 1
     due_at = datetime.now(timezone.utc) + timedelta(seconds=min(2 * attempt, 5))
-    retry_id = store.add_scheduled_event(due_at.isoformat(), row["target"], row["kind"], retry_payload)
+    retry_id = store.add_scheduled_event(due_at.isoformat(), row["target"], row["kind"], retry_payload, owner_team_id=row.get("owner_team_id"))
     return {
         "retry_event_id": retry_id,
         "next_attempt": attempt + 1,
@@ -109,7 +111,8 @@ def _detect_stuck_agents(
     runtime_cfg = spec.get("runtime", {})
     stuck_timeout = int(runtime_cfg.get("stuck_timeout_sec", 300))
     push_min_interval = int(runtime_cfg.get("push_min_interval_sec", 60))
-    health = store.agent_health()
+    owner_team_id = team_state_key(state)
+    health = store.agent_health(owner_team_id=owner_team_id)
     stuck: list[str] = []
     now = datetime.now(timezone.utc)
     for agent_id, row in health.items():
@@ -166,6 +169,7 @@ def _detect_stuck_agents(
                     sender="coordinator",
                     requires_ack=False,
                     wait_visible=False,
+                    team=owner_team_id,
                 )
             except Exception as exc:
                 event_log.write("coordinator.stuck_push_failed", agent_id=agent_id, error=str(exc))
@@ -175,6 +179,10 @@ def _detect_stuck_agents(
 def stuck_list(workspace: Path) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    if len(suppressed) == 1 and all(isinstance(value, dict) for value in suppressed.values()):
+        only = next(iter(suppressed.values()))
+        if all(isinstance(value, dict) for value in only.values()):
+            suppressed = only
     return {"ok": True, "suppressed_idle_alerts": suppressed}
 
 
@@ -195,11 +203,13 @@ def stuck_cancel(
     if gate:
         return gate
     store = MessageStore(workspace)
+    owner_team_id = team_state_key(state)
     coordinator = state.setdefault("coordinator", {})
     suppressed = coordinator.setdefault("suppressed_idle_alerts", {})
-    agent_suppressions = suppressed.setdefault(agent_id, {})
+    team_suppressions = suppressed.setdefault(owner_team_id, {})
+    agent_suppressions = team_suppressions.setdefault(agent_id, {})
     now = datetime.now(timezone.utc).isoformat()
-    snapshot = _agent_alert_snapshot(state, store, agent_id)
+    snapshot = _agent_alert_snapshot(state, store, agent_id, owner_team_id)
     for item in alert_types:
         agent_suppressions[item] = {
             "suppressed_at": now,
@@ -218,12 +228,13 @@ def _active_alert_suppression(
     agent_id: str,
     alert_type: str,
 ) -> dict[str, Any] | None:
-    entry = state.get("coordinator", {}).get("suppressed_idle_alerts", {}).get(agent_id, {}).get(alert_type)
+    owner_team_id = team_state_key(state)
+    entry = state.get("coordinator", {}).get("suppressed_idle_alerts", {}).get(owner_team_id, {}).get(agent_id, {}).get(alert_type)
     if not isinstance(entry, dict):
         return None
     cleared = _suppression_clear_reason(state, store, event_log, agent_id, entry)
     if cleared:
-        _clear_alert_suppression(state, agent_id, alert_type)
+        _clear_alert_suppression(state, agent_id, alert_type, owner_team_id)
         event_log.write("coordinator.idle_alert_suppression_cleared", agent_id=agent_id, alert_type=alert_type, reason=cleared)
         return None
     return entry
@@ -255,19 +266,22 @@ def _suppression_clear_reason(
     return None
 
 
-def _clear_alert_suppression(state: dict[str, Any], agent_id: str, alert_type: str) -> None:
+def _clear_alert_suppression(state: dict[str, Any], agent_id: str, alert_type: str, owner_team_id: str | None = None) -> None:
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
-    agent_suppressions = suppressed.get(agent_id, {})
+    team_suppressions = suppressed.get(owner_team_id or team_state_key(state), {})
+    agent_suppressions = team_suppressions.get(agent_id, {})
     agent_suppressions.pop(alert_type, None)
     if not agent_suppressions:
-        suppressed.pop(agent_id, None)
+        team_suppressions.pop(agent_id, None)
+    if not team_suppressions:
+        suppressed.pop(owner_team_id or team_state_key(state), None)
 
 
-def _agent_alert_snapshot(state: dict[str, Any], store: MessageStore, agent_id: str) -> dict[str, Any]:
+def _agent_alert_snapshot(state: dict[str, Any], store: MessageStore, agent_id: str, owner_team_id: str | None = None) -> dict[str, Any]:
     assigned_task_ids = sorted(str(task.get("id")) for task in state.get("tasks", []) if task.get("assignee") == agent_id)
     delivered_message_ids = sorted(
         str(message.get("message_id"))
-        for message in store.messages()
+        for message in store.messages(owner_team_id=owner_team_id or team_state_key(state))
         if message.get("recipient") == agent_id and message.get("status") in _DELIVERED_MESSAGE_STATUSES
     )
     return {"assigned_task_ids": assigned_task_ids, "delivered_message_ids": delivered_message_ids}
@@ -277,7 +291,7 @@ def _agent_has_stuck_relevant_work(state: dict[str, Any], store: MessageStore, a
     for task in state.get("tasks", []):
         if task.get("assignee") == agent_id and task.get("status", "pending") in _ACTIVE_TASK_STATUSES:
             return True, "active_task"
-    for message in store.messages():
+    for message in store.messages(owner_team_id=team_state_key(state)):
         if message.get("recipient") == agent_id and message.get("status") in _INBOUND_WORK_STATUSES:
             return True, "inbound_message"
     return False, "idle_no_work"

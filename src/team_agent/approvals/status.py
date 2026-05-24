@@ -9,6 +9,7 @@ from typing import Any
 from team_agent.approvals.parsing import capture_has_approval_prompt
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
+from team_agent.state import team_state_key
 
 
 def refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event_log: EventLog) -> None:
@@ -46,6 +47,7 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
     from team_agent.runtime import _tmux_window_exists, run_cmd
     store = store or MessageStore(workspace)
     session_name = state.get("session_name")
+    owner_team_id = team_state_key(state)
     for agent_id, agent_state in state.get("agents", {}).items():
         health_status = agent_health_status(agent_state)
         last_output_at = agent_state.get("last_output_at")
@@ -67,6 +69,7 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
             last_output_at=last_output_at,
             context_usage_pct=agent_state.get("context_usage_pct"),
             current_task_id=current_task,
+            owner_team_id=owner_team_id,
         )
 
 
