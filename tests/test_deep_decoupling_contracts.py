@@ -100,7 +100,7 @@ class DeepDecouplingContractTests(unittest.TestCase):
             set(ownership["integration_owner_only"]),
             {
                 "src/team_agent/runtime.py",
-                "src/team_agent/cli.py",
+                "src/team_agent/cli/**",
                 "src/team_agent/mcp_server.py",
                 "tests/run_tests.py",
                 "tests/path_ownership.json",
