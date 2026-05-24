@@ -172,6 +172,7 @@ def _proxy_url_from_env(scheme: str, env: Any) -> str | None:
     lower = f"{scheme.lower()}_proxy"
     return env.get(upper) or env.get(lower) or env.get("ALL_PROXY") or env.get("all_proxy")
 
+@contextmanager
 def _temporary_profile_network_env(values: dict[str, str]) -> Any:
     profile_env = _compatible_api_network_exports("compatible_api", values)
     direct = _profile_proxy_mode(values) == "direct"

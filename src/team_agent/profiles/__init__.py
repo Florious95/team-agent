@@ -4,6 +4,10 @@ import urllib
 
 from team_agent.profiles.constants import *
 from team_agent.profiles.core import (
+    _agent_profile_dir,
+    _profile_lookup_dir,
+    _safe_init_command,
+    _safe_inspection_command,
     compact_profile_check,
     doctor_profile,
     effective_model,
@@ -32,6 +36,7 @@ from team_agent.profiles.helpers import (
     _strip_env_value,
 )
 from team_agent.profiles.provider_env import (
+    _claude_project_keys,
     _compatible_api_network_exports,
     _compatible_claude_config_dir,
     _ensure_compatible_claude_config,
