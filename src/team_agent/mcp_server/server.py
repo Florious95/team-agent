@@ -57,7 +57,10 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
         params = request.get("params", {})
         name = params.get("name")
         arguments = params.get("arguments") or {}
-        result = dispatch(tools, {"tool": name, "arguments": arguments})
+        try:
+            result = dispatch(tools, {"tool": name, "arguments": arguments})
+        except Exception as exc:
+            result = {"ok": False, "reason": "invalid_tool_arguments", "error": str(exc)}
         is_error = result.get("ok") is False
         return {
             "jsonrpc": "2.0",

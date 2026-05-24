@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 LEGACY_MCP_SERVER_EXPORTS = (
@@ -27,6 +30,32 @@ LEGACY_MCP_SERVER_EXPORTS = (
 
 
 class McpServerBoundaryTests(unittest.TestCase):
+    def _registered_tool_names(self) -> set[str]:
+        from team_agent import mcp_server
+
+        return {tool["name"] for tool in mcp_server.TOOLS}
+
+    def _call_tool(self, tools: object, name: str, arguments: dict[str, object], request_id: int = 1) -> tuple[dict[str, object], dict[str, object]]:
+        from team_agent import mcp_server
+
+        self.assertIn(name, self._registered_tool_names())
+        response = mcp_server.handle_mcp(
+            tools,
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            },
+        )
+        self.assertIsNotNone(response)
+        self.assertEqual(response["jsonrpc"], "2.0")
+        self.assertEqual(response["id"], request_id)
+        content = response["result"]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        payload = json.loads(content[0]["text"])
+        return response, payload
+
     def test_package_reexports_legacy_mcp_server_surface(self) -> None:
         from team_agent import mcp_server
         from team_agent.mcp_server import contracts, normalize, server, tools
@@ -49,6 +78,204 @@ class McpServerBoundaryTests(unittest.TestCase):
         tools = TeamOrchestratorTools(Path("."))
         response = handle_mcp(tools, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         self.assertEqual(response["result"]["tools"], TOOLS)
+
+    def test_report_result_tools_call_roundtrip_normalizes_and_compacts_result(self) -> None:
+        from team_agent import mcp_server
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-report-") as tmp:
+            workspace = Path(tmp)
+            with patch.dict("os.environ", {"TEAM_AGENT_ID": "fake_impl"}):
+                tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result") as report:
+                report.return_value = {
+                    "ok": True,
+                    "status": "stored",
+                    "result_id": "res_123",
+                    "task_id": "manual",
+                    "agent_id": "fake_impl",
+                    "leader_notified": True,
+                    "ignored_private_detail": "not in compact result",
+                }
+                response, payload = self._call_tool(
+                    tools,
+                    "report_result",
+                    {
+                        "summary": "done",
+                        "status": "ok",
+                        "changes": [{"file": "src/example.py", "summary": "edited"}],
+                        "tests": [{"cmd": "unit", "status": "ok"}],
+                    },
+                )
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "status": "stored",
+                "result_id": "res_123",
+                "task_id": "manual",
+                "agent_id": "fake_impl",
+                "leader_notified": True,
+            },
+        )
+        report.assert_called_once()
+        envelope = report.call_args.args[1]
+        self.assertEqual(envelope["schema_version"], "result_envelope_v1")
+        self.assertEqual(envelope["agent_id"], "fake_impl")
+        self.assertEqual(envelope["task_id"], "manual")
+        self.assertEqual(envelope["status"], "success")
+        self.assertEqual(envelope["changes"][0]["path"], "src/example.py")
+        self.assertEqual(envelope["tests"][0]["status"], "passed")
+
+    def test_assign_task_tools_call_roundtrip_persists_task_and_compacts_delivery(self) -> None:
+        from team_agent import mcp_server
+        from team_agent.state import load_runtime_state, save_runtime_state
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-assign-") as tmp:
+            workspace = Path(tmp)
+            save_runtime_state(workspace, {"agents": {"fake_impl": {}}, "tasks": [], "session_name": None})
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.send_message") as send:
+                send.return_value = {
+                    "ok": True,
+                    "status": "submitted",
+                    "message_id": "msg_assign",
+                    "to": "fake_impl",
+                    "submitted": True,
+                    "visible": True,
+                    "leader_receiver": {"pane_id": "%1"},
+                }
+                response, payload = self._call_tool(
+                    tools,
+                    "assign_task",
+                    {
+                        "task": {
+                            "id": "task_new",
+                            "title": "Build feature",
+                            "description": "Detailed task",
+                            "assignee": "fake_impl",
+                            "status": "pending",
+                        },
+                        "message": "Do the task",
+                    },
+                )
+            state = load_runtime_state(workspace)
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(payload["message_id"], "msg_assign")
+        self.assertEqual(payload["to"], "fake_impl")
+        self.assertEqual(state["tasks"][0]["id"], "task_new")
+        send.assert_called_once_with(workspace.resolve(), "fake_impl", "Do the task", task_id="task_new")
+
+    def test_send_message_tools_call_roundtrip_covers_leader_and_worker_paths(self) -> None:
+        from team_agent import mcp_server
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-send-") as tmp:
+            workspace = Path(tmp)
+            leader_tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.send_message") as send:
+                send.return_value = {"ok": True, "status": "submitted", "message_id": "msg_worker", "to": "fake_impl", "submitted": True}
+                response, payload = self._call_tool(
+                    leader_tools,
+                    "send_message",
+                    {"to": "fake_impl", "content": "hello worker", "sender": "leader", "requires_ack": True},
+                )
+            self.assertFalse(response["result"]["isError"])
+            self.assertEqual(payload, {"ok": True, "status": "submitted", "message_id": "msg_worker", "to": "fake_impl", "submitted": True})
+            send.assert_called_once_with(
+                workspace.resolve(),
+                "fake_impl",
+                "hello worker",
+                task_id=None,
+                sender="leader",
+                requires_ack=True,
+            )
+
+            with patch.dict("os.environ", {"TEAM_AGENT_ID": "fake_impl"}):
+                worker_tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.send_message") as send:
+                send.return_value = {"ok": True, "status": "submitted", "message_id": "msg_leader", "to": "leader", "visible": True}
+                response, payload = self._call_tool(worker_tools, "send_message", {"to": "leader", "content": "done"})
+            self.assertFalse(response["result"]["isError"])
+            self.assertEqual(payload, {"ok": True, "status": "submitted", "message_id": "msg_leader", "to": "leader", "visible": True})
+            send.assert_called_once_with(
+                workspace.resolve(),
+                "leader",
+                "done",
+                task_id=None,
+                sender="fake_impl",
+                requires_ack=False,
+            )
+
+    def test_tools_call_rejects_malformed_payloads_with_structured_error(self) -> None:
+        from team_agent import mcp_server
+
+        tools = mcp_server.TeamOrchestratorTools(Path("."))
+        response, payload = self._call_tool(tools, "send_message", {"to": "fake_impl"})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertIn("content", payload["error"])
+
+        response, payload = self._call_tool(tools, "assign_task", {})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertIn("task", payload["error"])
+
+    def test_tools_call_unknown_tool_returns_structured_error(self) -> None:
+        from team_agent import mcp_server
+
+        tools = mcp_server.TeamOrchestratorTools(Path("."))
+        response = mcp_server.handle_mcp(
+            tools,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "missing_tool", "arguments": {}},
+            },
+        )
+        payload = json.loads(response["result"]["content"][0]["text"])
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"], "unknown tool 'missing_tool'")
+
+    def test_compact_and_normalize_helpers_preserve_documented_shapes(self) -> None:
+        from team_agent import mcp_server
+
+        compact = mcp_server._compact_tool_result(
+            {
+                "ok": True,
+                "status": "submitted",
+                "message_id": "msg_123",
+                "to": "leader",
+                "acknowledged_messages": [{"message_id": "msg_123"}],
+                "private": "drop",
+            }
+        )
+        self.assertEqual(compact, {"ok": True, "status": "submitted", "message_id": "msg_123", "to": "leader", "acknowledged_count": 1})
+
+        envelope = mcp_server._normalize_report_envelope(
+            {
+                "task_id": "",
+                "agent_id": "",
+                "status": "done",
+                "summary": "finished",
+                "changes": [{"filepath": "a.py", "action": "added", "detail": "new file"}],
+                "tests": ["unit"],
+                "risks": ["none"],
+                "artifacts": ["artifact.txt"],
+                "next_actions": ["ship"],
+            }
+        )
+        self.assertEqual(envelope["task_id"], "manual")
+        self.assertEqual(envelope["agent_id"], "unknown")
+        self.assertEqual(envelope["status"], "success")
+        self.assertEqual(envelope["changes"], [{"path": "a.py", "kind": "created", "description": "new file"}])
+        self.assertEqual(envelope["tests"], [{"command": "unit", "status": "not_run"}])
+        self.assertEqual(envelope["risks"], [{"severity": "low", "description": "none"}])
+        self.assertEqual(envelope["artifacts"], [{"path": "artifact.txt", "description": "artifact.txt"}])
+        self.assertEqual(envelope["next_actions"], [{"description": "ship"}])
 
 
 if __name__ == "__main__":
