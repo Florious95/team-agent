@@ -79,7 +79,7 @@ class CheckLineCountGateTests(unittest.TestCase):
                 "2",
                 "--allowlist",
                 str(Path(tmp) / "tests" / "line_count_allowlist.json"),
-                "--require-empty-allowlist",
+                "--require-empty-temporary-debt",
                 "--hard",
             )
 
@@ -91,7 +91,7 @@ class CheckLineCountGateTests(unittest.TestCase):
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
-            allowlist.write_text('{"temporary_allowlist": {}}\n', encoding="utf-8")
+            allowlist.write_text('{"approved_exceptions": {}, "temporary_debt": {}}\n', encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
             proc = _run_gate(
@@ -104,7 +104,7 @@ class CheckLineCountGateTests(unittest.TestCase):
                 "2",
                 "--allowlist",
                 str(allowlist),
-                "--require-empty-allowlist",
+                "--require-empty-temporary-debt",
                 "--hard",
             )
 
@@ -129,19 +129,19 @@ class CheckLineCountGateTests(unittest.TestCase):
                 "2",
                 "--allowlist",
                 str(allowlist),
-                "--require-empty-allowlist",
+                "--require-empty-temporary-debt",
                 "--hard",
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def test_non_empty_allowlist_fails_even_when_files_are_under_limit(self) -> None:
+    def test_non_empty_temporary_debt_fails_even_when_files_are_under_limit(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-nonempty-allow-") as tmp:
             root = Path(tmp) / "src"
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
-            allowlist.write_text('["src/legacy.py"]\n', encoding="utf-8")
+            allowlist.write_text('{"approved_exceptions": {}, "temporary_debt": {"src/legacy.py": {}}}\n', encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
             proc = _run_gate(
@@ -154,12 +154,13 @@ class CheckLineCountGateTests(unittest.TestCase):
                 "2",
                 "--allowlist",
                 str(allowlist),
-                "--require-empty-allowlist",
+                "--require-empty-temporary-debt",
                 "--hard",
             )
 
             self.assertEqual(proc.returncode, 1)
-            self.assertIn("allowlist must be empty", proc.stderr)
+            self.assertIn("temporary_debt must be empty", proc.stderr)
+            self.assertIn("temporary_debt entries: 1", proc.stdout)
 
     def test_invalid_allowlist_json_fails_fast_when_empty_allowlist_required(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-invalid-allow-") as tmp:
@@ -180,20 +181,20 @@ class CheckLineCountGateTests(unittest.TestCase):
                 "2",
                 "--allowlist",
                 str(allowlist),
-                "--require-empty-allowlist",
+                "--require-empty-temporary-debt",
                 "--hard",
             )
 
             self.assertEqual(proc.returncode, 1)
             self.assertIn("invalid JSON", proc.stderr)
 
-    def test_non_empty_allowlist_is_diagnostic_when_empty_allowlist_not_required(self) -> None:
+    def test_temporary_debt_is_diagnostic_when_empty_debt_not_required(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-allow-diag-") as tmp:
             root = Path(tmp) / "src"
             root.mkdir()
             allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
             allowlist.parent.mkdir()
-            allowlist.write_text('["src/legacy.py"]\n', encoding="utf-8")
+            allowlist.write_text('{"approved_exceptions": {}, "temporary_debt": {"src/legacy.py": {}}}\n', encoding="utf-8")
             (root / "ok.py").write_text("a\n", encoding="utf-8")
 
             proc = _run_gate(
@@ -210,6 +211,7 @@ class CheckLineCountGateTests(unittest.TestCase):
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("temporary_debt entries: 1", proc.stdout)
 
     def test_root_and_glob_scope_recursive_python_files_only(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-scope-") as tmp:
@@ -295,6 +297,98 @@ class CheckLineCountGateTests(unittest.TestCase):
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_approved_exception_under_named_ceiling_passes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-approved-") as tmp:
+            root = Path(tmp) / "src"
+            nested = root / "team_agent"
+            nested.mkdir(parents=True)
+            allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
+            allowlist.parent.mkdir()
+            allowlist.write_text(
+                '{"approved_exceptions": {"src/team_agent/runtime.py": {"max_lines": 4}}, "temporary_debt": {}}\n',
+                encoding="utf-8",
+            )
+            (nested / "runtime.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--allowlist",
+                str(allowlist),
+                "--require-empty-temporary-debt",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("approved exceptions: 1 files", proc.stdout)
+
+    def test_approved_exception_over_named_ceiling_fails(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-approved-ceiling-") as tmp:
+            root = Path(tmp) / "src"
+            nested = root / "team_agent"
+            nested.mkdir(parents=True)
+            allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
+            allowlist.parent.mkdir()
+            allowlist.write_text(
+                '{"approved_exceptions": {"src/team_agent/runtime.py": {"max_lines": 2}}, "temporary_debt": {}}\n',
+                encoding="utf-8",
+            )
+            (nested / "runtime.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--allowlist",
+                str(allowlist),
+                "--require-empty-temporary-debt",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("runtime.py", proc.stdout)
+            self.assertIn("3 lines > 2", proc.stdout)
+
+    def test_unapproved_file_still_uses_global_limit(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-line-gate-unapproved-") as tmp:
+            root = Path(tmp) / "src"
+            nested = root / "team_agent"
+            nested.mkdir(parents=True)
+            allowlist = Path(tmp) / "tests" / "line_count_allowlist.json"
+            allowlist.parent.mkdir()
+            allowlist.write_text(
+                '{"approved_exceptions": {"src/team_agent/runtime.py": {"max_lines": 4}}, "temporary_debt": {}}\n',
+                encoding="utf-8",
+            )
+            (nested / "other.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+            proc = _run_gate(
+                Path(tmp),
+                "--root",
+                str(root),
+                "--glob",
+                "*.py",
+                "--max-lines",
+                "2",
+                "--allowlist",
+                str(allowlist),
+                "--require-empty-temporary-debt",
+                "--hard",
+            )
+
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("other.py", proc.stdout)
+            self.assertIn("over-limit: 1 files", proc.stdout)
 
 
 if __name__ == "__main__":

@@ -10,13 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeepDecouplingContractTests(unittest.TestCase):
-    def test_line_count_guard_enforces_500_lines_with_temporary_allowlist_metadata(self) -> None:
+    def test_line_count_guard_accepts_approved_exceptions_but_requires_empty_temporary_debt(self) -> None:
         from team_agent.quality_gates import check_python_file_line_counts, line_count_failures, load_line_count_allowlist
 
         allowlist_path = ROOT / "tests" / "line_count_allowlist.json"
         if allowlist_path.exists():
-            allowlist = load_line_count_allowlist(allowlist_path)
-            self.assertEqual(allowlist, {}, "line-count allowlist must be empty when present")
+            payload = json.loads(allowlist_path.read_text(encoding="utf-8"))
+            self.assertIsInstance(payload.get("approved_exceptions", {}), dict)
+            self.assertEqual(payload.get("temporary_debt", {}), {}, "temporary_debt must be empty for completion")
 
         with tempfile.TemporaryDirectory(prefix="team-agent-empty-allowlist-") as tmp:
             root = Path(tmp)
@@ -24,7 +25,9 @@ class DeepDecouplingContractTests(unittest.TestCase):
             src.mkdir(parents=True)
             (src / "small.py").write_text("x = 1\n", encoding="utf-8")
             empty_allowlist_path = root / "line_count_allowlist.json"
-            empty_allowlist_path.write_text('{"temporary_allowlist": {}}', encoding="utf-8")
+            empty_allowlist_path.write_text('{"approved_exceptions": {}, "temporary_debt": {}}', encoding="utf-8")
+            allowlist = load_line_count_allowlist(empty_allowlist_path)
+            self.assertEqual(allowlist, {}, "quality gate fallback must treat empty temporary_debt as no debt")
             results = check_python_file_line_counts(root, allowlist_path=empty_allowlist_path)
         failures = line_count_failures(results)
         self.assertEqual(
@@ -42,7 +45,7 @@ class DeepDecouplingContractTests(unittest.TestCase):
             src.mkdir(parents=True)
             (src / "too_long.py").write_text("\n".join("x = 1" for _ in range(501)), encoding="utf-8")
             allowlist_path = root / "allowlist.json"
-            allowlist_path.write_text('{"temporary_allowlist": {}}', encoding="utf-8")
+            allowlist_path.write_text('{"approved_exceptions": {}, "temporary_debt": {}}', encoding="utf-8")
 
             failures = line_count_failures(check_python_file_line_counts(root, allowlist_path=allowlist_path))
         self.assertEqual([(failure.path, failure.lines) for failure in failures], [("src/team_agent/too_long.py", 501)])
