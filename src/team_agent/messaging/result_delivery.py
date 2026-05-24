@@ -10,6 +10,7 @@ from team_agent.messaging.deps import send_message
 from team_agent.messaging.internal_delivery import deliver_stored_message
 
 _RESULT_DELIVERY_MAX_ATTEMPTS = 5
+_DELIVERED_RESULT_MESSAGE_STATUSES = {"visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
 
 
 def retry_result_deliveries(workspace: Path, event_log: EventLog) -> list[dict[str, Any]]:
@@ -32,16 +33,61 @@ def notify_result_watchers(
     watchers: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     store = MessageStore(workspace)
+    candidates = [
+        watcher
+        for watcher in (watchers if watchers is not None else store.pending_result_watchers())
+        if watcher_matches_result(watcher, result)
+    ]
+    if not candidates:
+        return []
+    primary, superseded = _dedupe_watchers_for_result(candidates)
     notified: list[dict[str, Any]] = []
-    for watcher in watchers if watchers is not None else store.pending_result_watchers():
-        if not watcher_matches_result(watcher, result):
-            continue
-        attempts = result_delivery_attempts(event_log, watcher["watcher_id"], str(result.get("result_id") or ""))
-        if attempts >= _RESULT_DELIVERY_MAX_ATTEMPTS:
-            notified.append(_mark_delivery_exhausted(store, event_log, watcher, result, attempts))
-            continue
-        notified.append(_deliver_result_to_watcher(workspace, store, event_log, watcher, result, attempts))
+    for stale in superseded:
+        store.mark_result_watcher(
+            stale["watcher_id"],
+            "superseded",
+            result_id=result.get("result_id"),
+            error="superseded by earlier watcher for same (task_id, agent_id, result_id)",
+        )
+        event_log.write(
+            "result_watcher.superseded",
+            watcher_id=stale["watcher_id"],
+            result_id=result.get("result_id"),
+            task_id=result.get("task_id"),
+            agent_id=result.get("agent_id"),
+            primary_watcher_id=primary["watcher_id"],
+        )
+        notified.append(
+            {
+                "watcher_id": stale["watcher_id"],
+                "result_id": result.get("result_id"),
+                "ok": False,
+                "status": "superseded",
+                "primary_watcher_id": primary["watcher_id"],
+            }
+        )
+    attempts = result_delivery_attempts(event_log, primary["watcher_id"], str(result.get("result_id") or ""))
+    existing = delivered_result_message(
+        store,
+        str(result.get("result_id") or ""),
+        task_id=result.get("task_id"),
+        owner_team_id=primary.get("owner_team_id"),
+    )
+    if existing:
+        notified.append(_mark_watcher_already_delivered(store, event_log, primary, result, attempts, existing))
+        return notified
+    if attempts >= _RESULT_DELIVERY_MAX_ATTEMPTS:
+        notified.append(_mark_delivery_exhausted(store, event_log, primary, result, attempts))
+    else:
+        notified.append(_deliver_result_to_watcher(workspace, store, event_log, primary, result, attempts))
     return notified
+
+
+def _dedupe_watchers_for_result(
+    watchers: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    ordered = sorted(watchers, key=lambda w: (str(w.get("created_at") or ""), str(w.get("watcher_id") or "")))
+    return ordered[0], ordered[1:]
 
 
 def _deliver_result_to_watcher(
@@ -114,6 +160,41 @@ def _mark_delivery_failed(
     return {"watcher_id": watcher["watcher_id"], "result_id": result.get("result_id"), "ok": False, "error": error}
 
 
+def _mark_watcher_already_delivered(
+    store: MessageStore,
+    event_log: EventLog,
+    watcher: dict[str, Any],
+    result: dict[str, Any],
+    attempts: int,
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    store.mark_result_watcher(
+        watcher["watcher_id"],
+        "notified",
+        result_id=result.get("result_id"),
+        notified_message_id=message.get("message_id"),
+    )
+    event_log.write(
+        "result_watcher.notified",
+        watcher_id=watcher["watcher_id"],
+        result_id=result.get("result_id"),
+        task_id=result.get("task_id"),
+        agent_id=result.get("agent_id"),
+        ok=True,
+        delivery_status="already_delivered",
+        message_id=message.get("message_id"),
+        deduped=True,
+        attempt=attempts,
+    )
+    return {
+        "watcher_id": watcher["watcher_id"],
+        "result_id": result.get("result_id"),
+        "ok": True,
+        "message_id": message.get("message_id"),
+        "deduped": True,
+    }
+
+
 def _mark_delivery_exhausted(
     store: MessageStore,
     event_log: EventLog,
@@ -156,6 +237,34 @@ def result_delivery_attempts(event_log: EventLog, watcher_id: str, result_id: st
             if event.get("event") in {"result_watcher.notified", "result_watcher.notify_failed"}:
                 attempts += 1
     return attempts
+
+
+def delivered_result_message(
+    store: MessageStore,
+    result_id: str,
+    *,
+    task_id: str | None = None,
+    owner_team_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not result_id:
+        return None
+    for message in reversed(store.messages(owner_team_id=owner_team_id)):
+        if message.get("recipient") != "leader":
+            continue
+        if task_id and message.get("task_id") != task_id:
+            continue
+        if message.get("status") not in _DELIVERED_RESULT_MESSAGE_STATUSES:
+            continue
+        if f"Result id: {result_id}" in str(message.get("content") or ""):
+            return message
+    return None
+
+
+def result_id_from_text(content: str) -> str | None:
+    for line in content.splitlines():
+        if line.startswith("Result id: "):
+            return line.removeprefix("Result id: ").strip() or None
+    return None
 
 
 def watcher_matches_result(watcher: dict[str, Any], result: dict[str, Any]) -> bool:

@@ -15,6 +15,7 @@ from team_agent.messaging.deps import (
     timezone,
 )
 from team_agent.messaging.internal_delivery import deliver_stored_message
+from team_agent.messaging.result_delivery import delivered_result_message, result_id_from_text
 from team_agent.state import team_state_candidates
 
 from pathlib import Path
@@ -41,11 +42,36 @@ def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: 
         payload = json.loads(row["payload_json"] or "{}")
         try:
             if row["kind"] == "send":
+                content = str(payload.get("content") or "")
+                result_id = result_id_from_text(content)
+                existing = delivered_result_message(
+                    store,
+                    result_id or "",
+                    task_id=payload.get("task_id"),
+                    owner_team_id=row.get("owner_team_id"),
+                )
+                if existing:
+                    result = {
+                        "ok": True,
+                        "status": "already_delivered",
+                        "message_id": existing.get("message_id"),
+                        "deduped": True,
+                    }
+                    event_log.write(
+                        "coordinator.scheduled_result_deduped",
+                        id=row["id"],
+                        target=row["target"],
+                        result_id=result_id,
+                        message_id=existing.get("message_id"),
+                    )
+                    store.mark_scheduled_event(int(row["id"]), "done", result)
+                    fired.append(int(row["id"]))
+                    continue
                 deliver = deliver_stored_message if row.get("owner_team_id") else send_message
                 result = deliver(
                     workspace,
                     row["target"],
-                    str(payload.get("content") or ""),
+                    content,
                     task_id=payload.get("task_id"),
                     sender=payload.get("sender", "coordinator"),
                     requires_ack=bool(payload.get("requires_ack", True)),
