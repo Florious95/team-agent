@@ -48,6 +48,7 @@ class TeamOrchestratorTools:
                 task_id=task_id,
                 sender=effective_sender,
                 requires_ack=effective_requires_ack,
+                block_until_delivered=False,
             )
         )
 

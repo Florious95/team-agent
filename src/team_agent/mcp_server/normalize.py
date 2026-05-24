@@ -34,6 +34,8 @@ def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         "failed_count",
         "submitted",
         "visible",
+        "queued",
+        "durably_stored",
         "result_id",
         "task_id",
         "agent_id",

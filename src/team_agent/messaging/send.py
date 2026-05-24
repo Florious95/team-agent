@@ -41,6 +41,7 @@ def send_message(
     timeout: float = 30.0,
     lock_timeout: float = 5.0,
     watch_result: bool = False,
+    block_until_delivered: bool = True,
 ) -> dict[str, Any]:
     with _runtime_lock(workspace, "send", timeout=lock_timeout):
         return _send_message_unlocked(
@@ -54,6 +55,7 @@ def send_message(
             wait_visible=wait_visible,
             timeout=timeout,
             watch_result=watch_result,
+            block_until_delivered=block_until_delivered,
         )
 
 
@@ -68,6 +70,7 @@ def _send_message_unlocked(
     wait_visible: bool = True,
     timeout: float = 30.0,
     watch_result: bool = False,
+    block_until_delivered: bool = True,
 ) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
@@ -89,6 +92,7 @@ def _send_message_unlocked(
             requires_ack=requires_ack,
             wait_visible=wait_visible,
             timeout=timeout,
+            block_until_delivered=block_until_delivered,
         )
 
     return _send_single_message_unlocked(
@@ -105,6 +109,7 @@ def _send_message_unlocked(
         wait_visible=wait_visible,
         timeout=timeout,
         watch_result=watch_result,
+        block_until_delivered=block_until_delivered,
     )
 
 
@@ -125,6 +130,7 @@ def _send_single_message_unlocked(
     watch_result: bool = False,
     mirror_peer: bool = True,
     route_task_id: bool = True,
+    block_until_delivered: bool = True,
 ) -> dict[str, Any]:
     leader_id = _leader_id(state, spec)
 
@@ -191,6 +197,53 @@ def _send_single_message_unlocked(
         return {"ok": False, "status": "refused", "reason": "target_not_in_team", "from": sender, "to": target}
     store = MessageStore(workspace)
     message_id = store.create_message(task_id, sender, target, content, requires_ack=requires_ack)
+    if not block_until_delivered:
+        watch: dict[str, Any] | None = None
+        if watch_result:
+            watch_task_id = task_id or _current_task_for_agent(state.get("tasks", []), str(target))
+            watcher_id = store.create_result_watcher(watch_task_id, str(target), message_id, leader_id)
+            watch = {
+                "status": "registered",
+                "watcher_id": watcher_id,
+                "task_id": watch_task_id,
+                "agent_id": target,
+                "notice": (
+                    "Team Agent will deliver this message when the worker is available, "
+                    "then collect the result and notify the leader when this task reports completion."
+                ),
+            }
+            event_log.write(
+                "result_watcher.created",
+                watcher_id=watcher_id,
+                task_id=watch_task_id,
+                agent_id=target,
+                message_id=message_id,
+            )
+        _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
+        save_runtime_state(workspace, state)
+        event_log.write(
+            "send.durably_stored",
+            message_id=message_id,
+            target=target,
+            sender=sender,
+            task_id=task_id,
+        )
+        result = {
+            "ok": True,
+            "message_id": message_id,
+            "status": "queued",
+            "message_status": "accepted",
+            "to": target,
+            "queued": True,
+            "durably_stored": True,
+            "reason": "deferred_to_coordinator",
+            "visible": False,
+            "submitted": False,
+        }
+        if watch is not None:
+            result["watch_result"] = True
+            result["watch"] = watch
+        return result
     delivered_result = _deliver_pending_message(workspace, state, message_id, wait_visible=wait_visible, timeout=timeout)
     row = _message_by_id(store, message_id)
     message_status = row["status"] if row else delivered_result.get("message_status", delivered_result.get("status", "accepted"))
@@ -265,6 +318,7 @@ def _broadcast_message_unlocked(
     requires_ack: bool,
     wait_visible: bool,
     timeout: float,
+    block_until_delivered: bool = True,
 ) -> dict[str, Any]:
     targets = _broadcast_targets(state, spec, sender)
     if not targets:
@@ -289,6 +343,7 @@ def _broadcast_message_unlocked(
             watch_result=False,
             mirror_peer=False,
             route_task_id=False,
+            block_until_delivered=block_until_delivered,
         )
         deliveries.append(_compact_broadcast_delivery(result))
     failed = [item for item in deliveries if not item.get("ok")]

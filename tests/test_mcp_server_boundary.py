@@ -188,6 +188,7 @@ class McpServerBoundaryTests(unittest.TestCase):
                 task_id=None,
                 sender="leader",
                 requires_ack=True,
+                block_until_delivered=False,
             )
 
             with patch.dict("os.environ", {"TEAM_AGENT_ID": "fake_impl"}):
@@ -204,6 +205,7 @@ class McpServerBoundaryTests(unittest.TestCase):
                 task_id=None,
                 sender="fake_impl",
                 requires_ack=False,
+                block_until_delivered=False,
             )
 
     def test_tools_call_rejects_malformed_payloads_with_structured_error(self) -> None:
