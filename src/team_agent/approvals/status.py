@@ -79,9 +79,15 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
                     pane_info,
                     scrollback,
                 )
+                agent_state["activity"] = {
+                    "status": activity.get("status"),
+                    "confidence": activity.get("confidence"),
+                    "rationale": activity.get("rationale"),
+                    "classified_at": datetime.now(timezone.utc).isoformat(),
+                }
                 if activity.get("confidence", 0) >= 0.85:
                     raw = str(activity.get("status") or "")
-                    mapping = {"idle": "IDLE", "working": "RUNNING", "stuck": "STUCK", "uncertain": "UNCERTAIN"}
+                    mapping = {"idle": "IDLE", "working": "WORKING", "stuck": "STUCK", "uncertain": "UNCERTAIN"}
                     mapped = mapping.get(raw)
                     if mapped:
                         health_status = mapped

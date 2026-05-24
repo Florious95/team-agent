@@ -41,6 +41,8 @@ _WORKING_PATTERNS = (
     re.compile(r"\bWorking(?:\s*\((?P<working_seconds>\d+)s\))?", re.IGNORECASE),
     re.compile(r"\bReticulating\b", re.IGNORECASE),
     re.compile(r"\bBaked for (?P<baked_seconds>\d+)s\b", re.IGNORECASE),
+    re.compile(r"\bThinking\b", re.IGNORECASE),
+    re.compile(r"esc to interrupt", re.IGNORECASE),
     re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"),
 )
 

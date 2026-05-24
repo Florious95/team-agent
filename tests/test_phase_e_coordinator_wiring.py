@@ -102,5 +102,77 @@ class CoordinatorTickWiresPhaseEDetectorsTests(unittest.TestCase):
             self.assertEqual(counts.get("codex_worker"), 0, "compaction count must reset after successful auto-reset to avoid loop")
 
 
+    def test_codex_working_pane_surfaces_working_status_via_status_json(self) -> None:
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory(prefix="team-agent-status-working-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            spec_path = workspace / "team.spec.yaml"
+            spec_path.write_text(dumps(spec), encoding="utf-8")
+            session_name = "team-status-working"
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(spec_path),
+                    "session_name": session_name,
+                    "leader": spec["leader"],
+                    "agents": {
+                        "worker_a": {
+                            "status": "busy",
+                            "provider": "codex",
+                            "window": "worker_a",
+                            "tmux_window_present": True,
+                        },
+                    },
+                    "tasks": [{**spec["tasks"][0], "assignee": "worker_a", "status": "running"}],
+                },
+            )
+            codex_working_scrollback = (
+                "[worker_a] doing useful things\n"
+                "✱ Working (12s) ⠋\n"
+                "  ↳ esc to interrupt\n"
+            )
+
+            def fake_run_cmd(args, timeout=5):
+                proc = Mock(returncode=0, stdout="", stderr="")
+                if args[:2] == ["tmux", "capture-pane"]:
+                    proc.stdout = codex_working_scrollback
+                return proc
+
+            fake_pane_info = {
+                "pane_id": "%42",
+                "session_name": session_name,
+                "window_index": "0",
+                "window_name": "worker_a",
+                "pane_index": "0",
+                "pane_tty": "/dev/ttys001",
+                "pane_current_command": "node",
+                "pane_active": "1",
+            }
+
+            with (
+                patch("team_agent.runtime._tmux_session_exists", return_value=True),
+                patch("team_agent.runtime._tmux_window_exists", return_value=True),
+                patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+                patch("team_agent.runtime._tmux_pane_info", return_value=fake_pane_info),
+                patch("team_agent.runtime._detect_provider_status", return_value=None),
+                patch("team_agent.runtime.coordinator_health", return_value={"ok": True, "schema_ok": True, "status": "running", "pid": 1}),
+                patch("team_agent.runtime._capture_missing_sessions", return_value=[]),
+                patch("team_agent.runtime._handle_provider_startup_prompts", return_value=None),
+            ):
+                payload = runtime.status(workspace, as_json=True)
+
+            agent_health = payload["agent_health"].get("worker_a") or {}
+            self.assertEqual(
+                agent_health.get("status"),
+                "WORKING",
+                f"Codex 'Working (Xs)' scrollback must surface as WORKING in agent_health (got {agent_health.get('status')!r}); full row: {agent_health!r}",
+            )
+            agent = payload["agents"].get("worker_a") or {}
+            activity = agent.get("activity") or {}
+            self.assertEqual(activity.get("status"), "working", f"agent_state.activity must expose lowercase classifier enum: {activity!r}")
+            self.assertGreaterEqual(activity.get("confidence", 0), 0.85, f"Codex 'Working (Xs)' should produce high-confidence classification: {activity!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
