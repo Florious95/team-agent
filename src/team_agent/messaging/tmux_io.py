@@ -8,7 +8,6 @@ from team_agent.messaging.deps import (
     TMUX_SUBMIT_BYTES_PER_SECOND,
     TMUX_SUBMIT_MAX_SETTLE_TIMEOUT,
     TMUX_SUBMIT_MIN_SETTLE_TIMEOUT,
-    _capture_has_pasted_content_prompt,
     _capture_tmux_pane_text,
     _tmux_load_buffer_stdin as _runtime_tmux_load_buffer_stdin,
     _submit_worker_prompt,
@@ -22,7 +21,14 @@ from team_agent.messaging.deps import (
 from pathlib import Path
 from typing import Any
 
-def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str, attempts: int = 3) -> dict[str, Any]:
+def _tmux_inject_text(
+    target: str,
+    text: str,
+    submit_key: str,
+    buffer_name: str,
+    attempts: int = 3,
+    provider: str = "fake",
+) -> dict[str, Any]:
     token_match = re.search(r"\[team-agent-token:([^\]]+)\]", text)
     token = token_match.group(1) if token_match else ""
     attempt_log: list[dict[str, Any]] = []
@@ -51,77 +57,20 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
                 "verification": "pre_paste_capture_failed",
             }
         baseline_capture = baseline["capture"]
-        if token:
-            pre_visible, pre_verification, pre_capture = _wait_for_message_ready(
-                target,
-                token,
-                0.0,
-                expected_text=text,
-                allow_pasted_prompt=False,
-            )
-            if pre_visible:
-                attempt_entry = {
-                    "attempt": attempt,
-                    "visible": True,
-                    "verification": pre_verification,
-                    "buffer_method": "preexisting_prompt",
-                    "text_bytes": text_bytes,
-                    "ready_timeout_sec": 0.0,
-                    "preexisting_prompt": True,
-                }
-                if prepared.get("recovered_from_mode"):
-                    attempt_entry["recovered_from_mode"] = True
-                attempt_log.append(attempt_entry)
-                submit = _submit_worker_prompt(
-                    target,
-                    pre_capture,
-                    submit_key=submit_key,
-                    settle_timeout=submit_settle_timeout,
-                )
-                if not submit["ok"]:
-                    return {
-                        "ok": False,
-                        "stage": submit.get("stage", "submit"),
-                        "error": submit.get("error"),
-                        "attempts": attempt_log,
-                        "verification": pre_verification,
-                        "submit_verification": submit.get("verification"),
-                        "submit_attempts": submit.get("attempts"),
-                    }
-                submit_verification = _leader_submit_verification(submit.get("verification"), pre_verification, submit_key)
-                return {
-                    "ok": True,
-                    "stage": "submitted",
-                    "visible": True,
-                    "submitted": True,
-                    "verification": pre_verification,
-                    "submit_verification": submit_verification,
-                    "attempts": attempt_log,
-                    "submit_attempts": submit.get("attempts"),
-                }
-            if _capture_has_pasted_content_prompt(baseline_capture):
-                attempt_log.append(
-                    {
-                        "attempt": attempt,
-                        "visible": False,
-                        "verification": "preexisting_unverified_pasted_content_prompt",
-                        "text_bytes": text_bytes,
-                        "ready_timeout_sec": 0.0,
-                    }
-                )
-                return {
-                    "ok": False,
-                    "stage": "preexisting-input",
-                    "error": "target pane already has an unverified pasted-content prompt; refusing to paste again to avoid duplicate messages",
-                    "attempts": attempt_log,
-                    "verification": "preexisting_unverified_pasted_content_prompt",
-                }
         buffered = _tmux_set_buffer_text(buffer_name, text)
         if not buffered["ok"]:
             return {"ok": False, "stage": buffered["stage"], "error": buffered.get("error"), "attempts": attempt_log}
         proc = run_cmd(["tmux", "paste-buffer", "-t", target, "-b", buffer_name, "-p"], timeout=10)
+        deleted = _tmux_delete_buffer(buffer_name)
         if proc.returncode != 0:
-            return {"ok": False, "stage": "paste-buffer", "error": proc.stderr.strip(), "attempts": attempt_log}
+            return {
+                "ok": False,
+                "stage": "paste-buffer",
+                "error": proc.stderr.strip(),
+                "attempts": attempt_log,
+                "buffer_deleted": deleted.get("ok"),
+                "buffer_delete_error": deleted.get("error"),
+            }
         time.sleep(0.25)
         if token:
             visible, verification, capture_text = _wait_for_message_ready(
@@ -139,9 +88,13 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
             "visible": visible,
             "verification": verification,
             "buffer_method": buffered.get("method"),
+            "buffer_name": buffer_name,
+            "buffer_deleted": deleted.get("ok"),
             "text_bytes": buffered.get("text_bytes"),
             "ready_timeout_sec": ready_timeout,
         }
+        if deleted.get("error"):
+            attempt_entry["buffer_delete_error"] = deleted.get("error")
         if prepared.get("recovered_from_mode"):
             attempt_entry["recovered_from_mode"] = True
         attempt_log.append(attempt_entry)
@@ -165,6 +118,24 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
                 "submit_attempts": submit.get("attempts"),
             }
         submit_verification = _leader_submit_verification(submit.get("verification"), verification, submit_key)
+        turn_visible, turn_verification, turn_capture = _wait_for_leader_new_turn(
+            target,
+            text,
+            token,
+            provider=provider,
+            timeout=2.0,
+        )
+        if not turn_visible:
+            return {
+                "ok": False,
+                "stage": "turn-boundary-verification",
+                "error": f"leader turn boundary not verified: {turn_verification}",
+                "attempts": attempt_log,
+                "verification": verification,
+                "submit_verification": submit_verification,
+                "turn_verification": turn_verification,
+                "submit_attempts": submit.get("attempts"),
+            }
         return {
             "ok": True,
             "stage": "submitted",
@@ -172,6 +143,7 @@ def _tmux_inject_text(target: str, text: str, submit_key: str, buffer_name: str,
             "submitted": True,
             "verification": verification,
             "submit_verification": submit_verification,
+            "turn_verification": turn_verification,
             "attempts": attempt_log,
             "submit_attempts": submit.get("attempts"),
         }
@@ -192,6 +164,54 @@ def _leader_submit_verification(submit_verification: str | None, verification: s
     if verification == "capture_contains_message_fragment":
         return f"{submit_key}_sent_after_visible_fragment"
     return submit_verification
+
+
+def _wait_for_leader_new_turn(
+    target: str,
+    expected_text: str,
+    token: str,
+    provider: str,
+    timeout: float,
+) -> tuple[bool, str, str]:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    last = "not_checked"
+    last_capture = ""
+    while True:
+        capture = _capture_tmux_pane_text(target)
+        if capture["ok"]:
+            capture_text = capture["capture"]
+            last_capture = capture_text
+            if _capture_has_leader_new_turn(capture_text, expected_text, token, provider):
+                return True, "leader_new_turn_boundary_verified", capture_text
+            last = "leader_new_turn_boundary_missing"
+        else:
+            last = f"capture_failed: {capture.get('error')}"
+        if time.monotonic() >= deadline:
+            return False, last, last_capture
+        time.sleep(0.1)
+
+
+def _capture_has_leader_new_turn(capture_text: str, expected_text: str, token: str, provider: str) -> bool:
+    if provider == "fake":
+        return True
+    lines = capture_text.splitlines()
+    marker_indexes = [index for index, line in enumerate(lines) if re.match(r"^\s*[❯›>]\s*", line)]
+    for index in marker_indexes:
+        window = "\n".join(lines[index : index + 12])
+        if token and token in window:
+            return True
+        if _leader_turn_contains_message_fragment(window, expected_text):
+            return True
+    return False
+
+
+def _leader_turn_contains_message_fragment(capture_text: str, expected_text: str) -> bool:
+    haystack = re.sub(r"\s+", "", capture_text)
+    for line in expected_text.splitlines():
+        compact = re.sub(r"\s+", "", re.sub(r"\[team-agent-token:[^\]]+\]", "", line))
+        if len(compact) >= 18 and compact in haystack:
+            return True
+    return False
 
 
 def _tmux_text_size(text: str) -> int:
@@ -231,6 +251,15 @@ def _tmux_set_buffer_text(buffer_name: str, text: str) -> dict[str, Any]:
         "stage": "set-buffer",
         "method": "set_buffer_arg",
         "text_bytes": size,
+        "error": proc.stderr.strip() if proc.returncode != 0 else None,
+    }
+
+
+def _tmux_delete_buffer(buffer_name: str) -> dict[str, Any]:
+    proc = run_cmd(["tmux", "delete-buffer", "-b", buffer_name], timeout=10)
+    return {
+        "ok": proc.returncode == 0,
+        "stage": "delete-buffer",
         "error": proc.stderr.strip() if proc.returncode != 0 else None,
     }
 
@@ -285,10 +314,6 @@ def _prepare_tmux_pane_for_input(target: str) -> dict[str, Any]:
                 "error": "tmux pane stayed in copy-mode after cancel",
             }
         time.sleep(0.1)
-
-
-
-
 
 
 

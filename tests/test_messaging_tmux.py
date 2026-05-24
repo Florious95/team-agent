@@ -89,8 +89,6 @@ class MessagingTmuxTests(unittest.TestCase):
             "team_agent.runtime._wait_for_message_ready",
             side_effect=[
                 (False, "capture_missing_token", ""),
-                (False, "capture_missing_token", ""),
-                (False, "capture_missing_token", ""),
                 (True, "capture_contains_token", "[team-agent-token:msg_retry]"),
             ],
         ):
@@ -106,7 +104,7 @@ class MessagingTmuxTests(unittest.TestCase):
         self.assertEqual(result["attempts"][0]["verification"], "capture_missing_token")
         self.assertEqual(result["attempts"][1]["verification"], "capture_contains_token")
         self.assertEqual(sum(1 for call in calls if call[:3] == ["tmux", "send-keys", "-t"]), 1)
-        self.assertIn("Enter", calls[-1])
+        self.assertTrue(any(call[:3] == ["tmux", "send-keys", "-t"] and call[-1] == "Enter" for call in calls))
 
     def test_leader_tmux_injection_submits_pasted_content_prompt_until_cleared(self) -> None:
         calls: list[list[str]] = []
@@ -199,7 +197,7 @@ class MessagingTmuxTests(unittest.TestCase):
         self.assertEqual(result["submit_verification"], "Enter_sent_after_visible_fragment")
         self.assertEqual([call[-1] for call in send_calls], ["Enter"])
 
-    def test_leader_tmux_injection_submits_preexisting_visible_fragment_without_repaste(self) -> None:
+    def test_leader_tmux_injection_repastes_preexisting_visible_fragment_with_unique_buffer(self) -> None:
         calls: list[list[str]] = []
         send_calls: list[list[str]] = []
         text = (
@@ -216,6 +214,8 @@ class MessagingTmuxTests(unittest.TestCase):
                 proc.stdout = "0\n"
             elif args[:3] == ["tmux", "send-keys", "-t"]:
                 send_calls.append(args)
+            elif args[:2] == ["tmux", "paste-buffer"]:
+                pass
             elif args[:3] == ["tmux", "capture-pane", "-p"]:
                 proc.stdout = "› 保留称粮段，外卖备注段可以压缩，这是截图里已经进入输入框的长结果片段。"
             return proc
@@ -225,9 +225,13 @@ class MessagingTmuxTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["verification"], "capture_contains_message_fragment")
         self.assertEqual(result["submit_verification"], "Enter_sent_after_visible_fragment")
-        self.assertEqual(result["attempts"][0]["buffer_method"], "preexisting_prompt")
+        self.assertEqual(result["attempts"][0]["buffer_method"], "set_buffer_arg")
+        self.assertEqual(result["attempts"][0]["buffer_name"], "team-agent-test")
+        self.assertTrue(result["attempts"][0]["buffer_deleted"])
         self.assertEqual([call[-1] for call in send_calls], ["Enter"])
-        self.assertFalse(any(call[:2] == ["tmux", "paste-buffer"] for call in calls))
+        self.assertTrue(any(call[:2] == ["tmux", "set-buffer"] for call in calls))
+        self.assertTrue(any(call[:2] == ["tmux", "paste-buffer"] for call in calls))
+        self.assertTrue(any(call[:2] == ["tmux", "delete-buffer"] for call in calls))
 
     def test_leader_tmux_injection_exits_copy_mode_before_paste(self) -> None:
         calls: list[list[str]] = []

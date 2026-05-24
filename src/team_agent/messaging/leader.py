@@ -139,7 +139,13 @@ def _send_to_leader_receiver(
         payload=payload,
         warning=validation.get("warning"),
     )
-    injection = _tmux_inject_text(target, text, submit_key, f"team-agent-leader-{message_id}")
+    injection = _tmux_inject_text(
+        target,
+        text,
+        submit_key,
+        f"team-agent-leader-receiver-{message_id}",
+        provider=receiver.get("provider", "codex"),
+    )
     if injection["ok"]:
         store.mark(message_id, "submitted")
         event_log.write(
@@ -156,6 +162,7 @@ def _send_to_leader_receiver(
             visible_token=rendered.get("token"),
             verification=injection.get("verification"),
             submit_verification=injection.get("submit_verification"),
+            turn_verification=injection.get("turn_verification"),
             attempts=injection.get("attempts"),
             submit_attempts=injection.get("submit_attempts"),
         )
@@ -173,6 +180,7 @@ def _send_to_leader_receiver(
             "visible_token": rendered.get("token"),
             "verification": injection.get("verification"),
             "submit_verification": injection.get("submit_verification"),
+            "turn_verification": injection.get("turn_verification"),
             "attempts": injection.get("attempts"),
             "submit_attempts": injection.get("submit_attempts"),
             "warning": "leader messages are no-ack; requires_ack was forced false" if requires_ack else None,
@@ -270,7 +278,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
 
 
 
