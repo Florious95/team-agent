@@ -39,6 +39,16 @@ from team_agent.providers import (
     shell_resume_command_for_agent,
 )
 from team_agent.routing import route_task
+from team_agent.sessions import (
+    attach_profile_resume_root as _attach_profile_resume_root,
+    capture_agent_session as _capture_agent_session,
+    capture_missing_sessions as _capture_missing_sessions,
+    clear_session_capture_fields as _clear_session_capture_fields,
+    copy_session_metadata as _copy_session_metadata,
+    prepare_resume_state as _prepare_resume_state,
+    recover_resume_session_from_events as _recover_resume_session_from_events,
+    sessions_overview as sessions,
+)
 from team_agent.simple_yaml import dumps
 from team_agent.spec import load_spec, validate_result_envelope, validate_spec, workspace_from_spec
 from team_agent.state import (
@@ -51,6 +61,18 @@ from team_agent.state import (
     write_spec,
     write_team_state,
 )
+
+# Import-time assertions: lifecycle/start.py + messaging/deps.py keep an
+# existence check on these runtime symbols. The aliases above pin them so
+# accidental rename in team_agent.sessions trips a loud ImportError here.
+assert callable(_attach_profile_resume_root)
+assert callable(_capture_agent_session)
+assert callable(_capture_missing_sessions)
+assert callable(_clear_session_capture_fields)
+assert callable(_copy_session_metadata)
+assert callable(_prepare_resume_state)
+assert callable(_recover_resume_session_from_events)
+assert callable(sessions)
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -1322,210 +1344,6 @@ def _record_invalid_result(event_log: EventLog, error: str, result_file: Path | 
     from team_agent.messaging.results import _record_invalid_result as impl
 
     return impl(event_log, error, result_file, result_id, envelope)
-
-
-def _capture_missing_sessions(
-    workspace: Path,
-    state: dict[str, Any],
-    event_log: EventLog,
-    timeout_s: float,
-    log_miss: bool = True,
-) -> list[str]:
-    captured: list[str] = []
-    for agent_id, agent_state in state.get("agents", {}).items():
-        if agent_state.get("session_id"):
-            continue
-        known_session_ids = {
-            str(item.get("session_id"))
-            for aid, item in state.get("agents", {}).items()
-            if aid != agent_id and item.get("session_id")
-        }
-        result = _capture_agent_session(
-            workspace,
-            agent_id,
-            agent_state,
-            event_log,
-            timeout_s=timeout_s,
-            exclude_session_ids=known_session_ids,
-        )
-        if result:
-            captured.append(agent_id)
-        elif log_miss:
-            event_log.write(
-                "session.capture_timeout",
-                agent_id=agent_id,
-                provider=agent_state.get("provider"),
-                timeout_s=timeout_s,
-                spawn_cwd=agent_state.get("spawn_cwd"),
-            )
-    return captured
-
-
-def _capture_agent_session(
-    workspace: Path,
-    agent_id: str,
-    agent_state: dict[str, Any],
-    event_log: EventLog,
-    timeout_s: float,
-    exclude_session_ids: set[str] | None = None,
-) -> dict[str, Any] | None:
-    if agent_state.get("session_id"):
-        return None
-    adapter = get_adapter(agent_state["provider"])
-    spawn_context = {
-        "agent_id": agent_id,
-        "cwd": agent_state.get("spawn_cwd") or str(workspace),
-        "spawn_time": agent_state.get("spawned_at") or datetime.now(timezone.utc).isoformat(),
-        "tmux_target": f"{agent_state.get('session_name', '')}:{agent_state.get('window', agent_id)}",
-        "predetermined_session_id": agent_state.get("_pending_session_id"),
-        "exclude_session_ids": sorted(exclude_session_ids or set()),
-        "claude_projects_root": agent_state.get("claude_projects_root"),
-    }
-    result = adapter.capture_session_id(agent_id, spawn_context, timeout_s=timeout_s)
-    if not isinstance(result, dict) or not result.get("session_id"):
-        return None
-    _copy_session_metadata(agent_state, result)
-    agent_state.pop("_pending_session_id", None)
-    event_log.write(
-        "session.captured",
-        agent_id=agent_id,
-        provider=agent_state.get("provider"),
-        session_id=agent_state.get("session_id"),
-        rollout_path=agent_state.get("rollout_path"),
-        captured_via=agent_state.get("captured_via"),
-        attribution_confidence=agent_state.get("attribution_confidence"),
-    )
-    return result
-
-
-def _copy_session_metadata(target: dict[str, Any], source: dict[str, Any]) -> None:
-    for key in SESSION_STATE_FIELDS:
-        target[key] = source.get(key)
-
-
-def _clear_session_capture_fields(target: dict[str, Any]) -> None:
-    for key in SESSION_CAPTURE_FIELDS:
-        target[key] = None
-
-
-def _attach_profile_resume_root(workspace: Path, command_agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
-    profile_launch = command_agent.get("_provider_profile") or prepare_agent_profile_launch(workspace, command_agent)
-    if not profile_launch:
-        return previous
-    command_agent["_provider_profile"] = profile_launch
-    root = profile_launch.get("claude_projects_root")
-    if not root:
-        return previous
-    prepared = dict(previous)
-    prepared["claude_projects_root"] = root
-    return prepared
-
-
-def _prepare_resume_state(
-    workspace: Path,
-    agent_id: str,
-    previous: dict[str, Any],
-    adapter: Any,
-    event_log: EventLog,
-    exclude_session_ids: set[str] | None = None,
-    allow_fresh_on_resume_failure: bool = False,
-) -> dict[str, Any]:
-    prepared = dict(previous)
-    session_id = prepared.get("session_id")
-    if session_id and adapter.session_is_resumable(prepared, workspace):
-        return prepared
-    if session_id:
-        event_log.write(
-            "resume.session_unverified",
-            agent_id=agent_id,
-            provider=prepared.get("provider"),
-            session_id=session_id,
-            captured_via=prepared.get("captured_via"),
-            spawn_cwd=prepared.get("spawn_cwd"),
-        )
-    else:
-        event_log.write(
-            "resume.session_missing_repair_attempt",
-            agent_id=agent_id,
-            provider=prepared.get("provider"),
-            spawn_cwd=prepared.get("spawn_cwd"),
-        )
-    repaired = _recover_resume_session_from_events(workspace, agent_id, prepared, adapter, exclude_session_ids or set())
-    if not repaired:
-        repaired = adapter.recover_session_id(agent_id, prepared, workspace, exclude_session_ids or set())
-    if repaired:
-        _copy_session_metadata(prepared, repaired)
-        event_log.write(
-            "resume.session_repaired",
-            agent_id=agent_id,
-            provider=prepared.get("provider"),
-            old_session_id=session_id,
-            session_id=prepared.get("session_id"),
-            rollout_path=prepared.get("rollout_path"),
-            captured_via=prepared.get("captured_via"),
-            attribution_confidence=prepared.get("attribution_confidence"),
-        )
-        return prepared
-    if session_id and not allow_fresh_on_resume_failure:
-        event_log.write(
-            "resume.session_required_missing",
-            agent_id=agent_id,
-            provider=prepared.get("provider"),
-            old_session_id=session_id,
-            rollout_path=prepared.get("rollout_path"),
-            reason="provider transcript not found",
-        )
-        raise ResumeUnavailable(
-            f"Cannot resume agent {agent_id}: stored session {session_id} is not available. "
-            "Use --allow-fresh only if losing that worker context is acceptable."
-        )
-    _clear_session_capture_fields(prepared)
-    event_log.write(
-        "resume.session_unavailable",
-        agent_id=agent_id,
-        provider=prepared.get("provider"),
-        old_session_id=session_id,
-        reason="provider transcript not found",
-    )
-    return prepared
-
-
-def _recover_resume_session_from_events(
-    workspace: Path,
-    agent_id: str,
-    previous: dict[str, Any],
-    adapter: Any,
-    exclude_session_ids: set[str],
-) -> dict[str, Any] | None:
-    events_path = logs_dir(workspace) / "events.jsonl"
-    try:
-        lines = events_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return None
-    current_session_id = str(previous.get("session_id") or "")
-    for line in reversed(lines):
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("event") != "session.captured" or event.get("agent_id") != agent_id:
-            continue
-        session_id = str(event.get("session_id") or "")
-        if not session_id or session_id == current_session_id or session_id in exclude_session_ids:
-            continue
-        candidate = dict(previous)
-        candidate.update(
-            {
-                "session_id": session_id,
-                "rollout_path": event.get("rollout_path"),
-                "captured_at": event.get("ts"),
-                "captured_via": "event_log_repair",
-                "attribution_confidence": event.get("attribution_confidence"),
-            }
-        )
-        if adapter.session_is_resumable(candidate, workspace):
-            return candidate
-    return None
 
 
 def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
@@ -2904,43 +2722,6 @@ def settle(workspace: Path) -> dict[str, Any]:
         "details_log": str(details_log),
         "collect": collected,
     }
-
-
-def sessions(workspace: Path) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
-    spec = load_spec(spec_path) if spec_path.exists() else {}
-    tasks = state.get("tasks", [])
-    rows = []
-    for agent in spec.get("agents", []):
-        agent_state = state.get("agents", {}).get(agent["id"], {})
-        last_task = next((task.get("id") for task in reversed(tasks) if task.get("assignee") == agent["id"]), None)
-        rows.append(
-            {
-                "agent_id": agent["id"],
-                "provider": agent.get("provider"),
-                "model": agent.get("model"),
-                "profile": agent.get("profile"),
-                "session_id": agent_state.get("session_id"),
-                "resume_id": agent_state.get("resume_id"),
-                "rollout_path": agent_state.get("rollout_path"),
-                "captured_at": agent_state.get("captured_at"),
-                "captured_via": agent_state.get("captured_via"),
-                "attribution_confidence": agent_state.get("attribution_confidence"),
-                "spawn_cwd": agent_state.get("spawn_cwd"),
-                "context_usage": agent_state.get("context_usage"),
-                "status": agent_state.get("status", "unknown"),
-                "last_task": last_task,
-                "handoff_path": agent_state.get("handoff_path"),
-                "display_target": agent_state.get("display"),
-                "terminal_target": {
-                    "session": state.get("session_name"),
-                    "window": agent_state.get("window", agent["id"]),
-                    "pane": agent_state.get("pane_id"),
-                },
-            }
-        )
-    return {"ok": True, "sessions": rows, "workspace": str(workspace)}
 
 
 def repair_state(

@@ -380,7 +380,7 @@ class RuntimeTests06(unittest.TestCase):
                 "claude_projects_root": str(projects_root),
                 "_pending_session_id": "pending-session",
             }
-            with patch("team_agent.runtime.get_adapter", return_value=adapter):
+            with patch("team_agent.sessions.capture.get_adapter", return_value=adapter):
                 result = runtime._capture_agent_session(workspace, "analyst", agent_state, runtime.EventLog(workspace), timeout_s=0)
 
             self.assertEqual(result["session_id"], "session-123")
