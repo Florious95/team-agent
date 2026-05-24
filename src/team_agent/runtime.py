@@ -74,6 +74,34 @@ from team_agent.sessions import (
     recover_resume_session_from_events as _recover_resume_session_from_events,
     sessions_overview as sessions,
 )
+from team_agent.status import (
+    APPROVAL_SCAN_LINES,
+    PEEK_MAX_LINES,
+    PEEK_MAX_MATCHES,
+    PEEK_SEARCH_SCAN_LINES,
+    PENDING_DELIVERY_STATUSES,
+    STATUS_EVENT_LIMIT,
+    STATUS_TEXT_LIMIT,
+    approvals,
+    compact_agent_state as _compact_agent_state,
+    compact_event as _compact_event,
+    compact_mapping as _compact_mapping,
+    compact_status as _compact_status,
+    compact_task as _compact_task,
+    compact_value as _compact_value,
+    format_approvals,
+    format_inbox,
+    format_search_matches as _format_search_matches,
+    format_status,
+    inbox,
+    latest_result_summaries as _latest_result_summaries,
+    peek,
+    queued_message_statuses as _queued_message_statuses,
+    result_summary_from_row as _result_summary_from_row,
+    search_lines as _search_lines,
+    status,
+    validate_line_count as _validate_line_count,
+)
 from team_agent.simple_yaml import dumps
 from team_agent.spec import load_spec, validate_result_envelope, validate_spec, workspace_from_spec
 from team_agent.state import (
@@ -126,6 +154,37 @@ assert callable(_prepare_ghostty_workspace_aggregator)
 assert callable(_prepare_ghostty_workspace_linked_sessions)
 assert callable(_set_ghostty_workspace_pane_title)
 assert isinstance(GHOSTTY_WORKSPACE_PANES_PER_WINDOW, int)
+
+# Status lane re-exports: the runtime.* alias for each status helper keeps
+# CLI handlers and existing tests stable; constants travel through runtime
+# so callers that read runtime.APPROVAL_SCAN_LINES (or the others) still
+# resolve. Drift in team_agent.status fails loudly here.
+assert callable(approvals)
+assert callable(format_approvals)
+assert callable(format_inbox)
+assert callable(format_status)
+assert callable(inbox)
+assert callable(peek)
+assert callable(status)
+assert callable(_compact_agent_state)
+assert callable(_compact_event)
+assert callable(_compact_mapping)
+assert callable(_compact_status)
+assert callable(_compact_task)
+assert callable(_compact_value)
+assert callable(_format_search_matches)
+assert callable(_latest_result_summaries)
+assert callable(_queued_message_statuses)
+assert callable(_result_summary_from_row)
+assert callable(_search_lines)
+assert callable(_validate_line_count)
+assert isinstance(APPROVAL_SCAN_LINES, int)
+assert isinstance(PEEK_MAX_LINES, int)
+assert isinstance(PEEK_MAX_MATCHES, int)
+assert isinstance(PEEK_SEARCH_SCAN_LINES, int)
+assert isinstance(STATUS_EVENT_LIMIT, int)
+assert isinstance(STATUS_TEXT_LIMIT, int)
+assert isinstance(PENDING_DELIVERY_STATUSES, set)
 from team_agent.task_graph import ready_tasks, update_task_status
 from team_agent.task_graph import TASK_STATUSES
 
@@ -137,21 +196,7 @@ TMUX_PANE_FORMAT = (
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
 GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
-STATUS_TEXT_LIMIT = 240
-STATUS_EVENT_LIMIT = 3
-PEEK_MAX_LINES = 80
-PEEK_SEARCH_SCAN_LINES = 300
-PEEK_MAX_MATCHES = 5
-APPROVAL_SCAN_LINES = 120
 DELIVERY_CAPTURE_LINES = 40
-PENDING_DELIVERY_STATUSES = {
-    "pending",
-    "accepted",
-    "queued_until_idle",
-    "queued_until_start",
-    "queued_stopped",
-    "queued_pane_missing",
-}
 SUBMITTED_DELIVERY_STATUSES = {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
 STARTUP_PROMPT_RUNTIME_CHECK_LIMIT = 3
 TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024
@@ -727,474 +772,6 @@ def _quick_start_existing_context(workspace: Path, session_name: str) -> dict[st
             return item
     return None
 
-
-def status(workspace: Path, as_json: bool = False, *, compact: bool = False) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    store = MessageStore(workspace)
-    event_log = EventLog(workspace)
-    _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
-    _refresh_agent_runtime_statuses(workspace, state, event_log)
-    _handle_provider_startup_prompts(workspace, state, event_log)
-    _sync_agent_health(workspace, state, store)
-    save_runtime_state(workspace, state)
-    session_name = state.get("session_name")
-    tmux_exists = _tmux_session_exists(session_name) if session_name else False
-    result = {
-        "team": state.get("leader", {}).get("id", "leader"),
-        "session_name": session_name,
-        "tmux_session_present": tmux_exists,
-        "leader_receiver": state.get("leader_receiver", {}),
-        "agents": state.get("agents", {}),
-        "agent_health": store.agent_health(),
-        "tasks": state.get("tasks", []),
-        "messages": store.message_counts(),
-        "queued_messages": _queued_message_statuses(store.messages()),
-        "results": store.result_counts(),
-        "latest_results": _latest_result_summaries(store),
-        "coordinator": coordinator_health(workspace),
-        "last_events": EventLog(workspace).tail(10),
-    }
-    return _compact_status(result) if compact else result
-
-
-def _compact_status(data: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "team": data.get("team"),
-        "session_name": data.get("session_name"),
-        "tmux_session_present": data.get("tmux_session_present"),
-        "leader_receiver": _compact_mapping(
-            data.get("leader_receiver", {}),
-            {
-                "status",
-                "provider",
-                "mode",
-                "session_name",
-                "window_name",
-                "pane_id",
-                "pane_current_command",
-            },
-        ),
-        "agents": {
-            agent_id: _compact_agent_state(agent_id, agent)
-            for agent_id, agent in (data.get("agents") or {}).items()
-        },
-        "agent_health": data.get("agent_health", {}),
-        "tasks": [_compact_task(task) for task in data.get("tasks", [])],
-        "messages": data.get("messages", {}),
-        "queued_messages": data.get("queued_messages", [])[:8],
-        "results": data.get("results", {}),
-        "latest_results": data.get("latest_results", [])[:5],
-        "coordinator": _compact_mapping(data.get("coordinator", {}), {"status", "pid", "metadata_ok", "schema_ok"}),
-        "last_events": [_compact_event(event) for event in data.get("last_events", [])[-STATUS_EVENT_LIMIT:]],
-    }
-
-
-def _latest_result_summaries(store: MessageStore, limit: int = 5) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = []
-    for row in store.latest_results(limit=limit):
-        summary = _result_summary_from_row(row)
-        if summary:
-            summaries.append(summary)
-    return summaries
-
-
-def _result_summary_from_row(row: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        envelope = json.loads(row["envelope"]) if isinstance(row.get("envelope"), str) else row.get("envelope")
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(envelope, dict):
-        return None
-    return {
-        "result_id": row.get("result_id"),
-        "task_id": envelope.get("task_id") or row.get("task_id"),
-        "agent_id": envelope.get("agent_id") or row.get("agent_id"),
-        "status": envelope.get("status") or row.get("status"),
-        "summary": envelope.get("summary"),
-        "created_at": row.get("created_at"),
-    }
-
-
-def _queued_message_statuses(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visible_statuses = PENDING_DELIVERY_STATUSES | {"target_resolved", "delivery_blocked", "injected_unverified"}
-    queued: list[dict[str, Any]] = []
-    for row in messages:
-        if row.get("status") not in visible_statuses:
-            continue
-        queued.append(
-            {
-                "message_id": row.get("message_id"),
-                "recipient": row.get("recipient"),
-                "sender": row.get("sender"),
-                "status": row.get("status"),
-                "reason": row.get("error"),
-                "age": _age_text(row.get("created_at")),
-                "attempts": row.get("delivery_attempts") or 0,
-            }
-        )
-    return queued
-
-
-def _compact_agent_state(agent_id: str, agent: dict[str, Any]) -> dict[str, Any]:
-    display = agent.get("display") or {}
-    result = _compact_mapping(
-        agent,
-        {
-            "agent_id",
-            "status",
-            "provider",
-            "model",
-            "tmux_window_present",
-            "session_id",
-            "captured_via",
-            "attribution_confidence",
-        },
-    )
-    result.setdefault("agent_id", agent_id)
-    if display:
-        result["display"] = _compact_mapping(
-            display,
-            {
-                "backend",
-                "status",
-                "workspace_window",
-                "pane_id",
-                "pid",
-                "pids",
-                "reason",
-            },
-        )
-    return result
-
-
-def _compact_task(task: dict[str, Any]) -> dict[str, Any]:
-    return _compact_mapping(
-        task,
-        {
-            "id",
-            "title",
-            "status",
-            "assignee",
-            "type",
-            "risk",
-            "accepted_result_id",
-            "last_result_summary",
-        },
-    )
-
-
-def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
-    skipped = {"command", "payload", "launch_args", "content", "prompt", "developer_instructions"}
-    kept = {
-        "event",
-        "ts",
-        "agent_id",
-        "task_id",
-        "message_id",
-        "result_id",
-        "status",
-        "ok",
-        "reason",
-        "error",
-        "session",
-        "window",
-        "target",
-        "backend",
-        "workspace_window",
-        "pane_id",
-        "restart_mode",
-        "provider",
-        "delivery_status",
-        "warning",
-        "collected",
-        "notified",
-        "lock",
-        "waited_sec",
-        "once",
-        "pid",
-    }
-    result: dict[str, Any] = {}
-    for key, value in event.items():
-        if key in skipped or key not in kept | {"agents", "coordinator"}:
-            continue
-        if key == "agents" and isinstance(value, list):
-            result["agent_count"] = len(value)
-            result["agents"] = [
-                _compact_mapping(item, {"agent_id", "restart_mode", "session_id"})
-                for item in value[:8]
-                if isinstance(item, dict)
-            ]
-            continue
-        result[key] = _compact_value(value)
-    return result
-
-
-def _compact_mapping(source: Any, keys: set[str]) -> dict[str, Any]:
-    if not isinstance(source, dict):
-        return {}
-    return {key: _compact_value(source[key]) for key in keys if key in source}
-
-
-def _compact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return value if len(value) <= STATUS_TEXT_LIMIT else value[: STATUS_TEXT_LIMIT - 1] + "…"
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    if isinstance(value, list):
-        if all(isinstance(item, (str, int, float, bool)) or item is None for item in value):
-            compact = [_compact_value(item) for item in value[:8]]
-            if len(value) > 8:
-                compact.append(f"... {len(value) - 8} more")
-            return compact
-        return f"{len(value)} item(s)"
-    if isinstance(value, dict):
-        return {
-            key: _compact_value(item)
-            for key, item in value.items()
-            if key not in {"command", "payload", "launch_args", "content", "prompt", "developer_instructions"}
-        }
-    return str(value)
-
-
-def format_status(workspace: Path, agent_id: str | None = None) -> str:
-    data = status(workspace, as_json=True)
-    health = data.get("agent_health", {})
-    tasks = data.get("tasks", [])
-    if agent_id:
-        if agent_id not in data.get("agents", {}) and agent_id not in health:
-            raise RuntimeError(f"unknown agent id: {agent_id}")
-        agent = data.get("agents", {}).get(agent_id, {})
-        row = health.get(agent_id, {})
-        task_id = _current_task_for_agent(tasks, agent_id) or "-"
-        inbox_rows = MessageStore(workspace).inbox(agent_id, limit=3)
-        lines = [
-            f"{agent_id}  {row.get('status', _agent_health_status(agent))}",
-            f"  provider: {agent.get('provider', '-')}",
-            f"  model: {agent.get('model', '-')}",
-            f"  profile: {agent.get('profile', '-')}",
-            f"  session_id: {agent.get('session_id') or '-'}",
-            f"  captured_via: {agent.get('captured_via') or '-'}",
-            f"  attribution_confidence: {agent.get('attribution_confidence') or '-'}",
-            f"  task: {task_id}",
-            f"  handoff: {agent.get('handoff_path', '-')}",
-            "  recent messages:",
-        ]
-        if inbox_rows:
-            for item in inbox_rows:
-                lines.append(
-                    f"    {item['created_at']} {item['sender']} -> {item['recipient']} "
-                    f"{item['status']}: {item['content'][:120]}"
-                )
-        else:
-            lines.append("    none")
-        return "\n".join(lines)
-
-    agents = data.get("agents", {})
-    state_name = "up" if data.get("tmux_session_present") else "down"
-    results = data.get("results", {})
-    lines = [
-        f"team {data.get('session_name') or '-'} ({state_name})",
-        (
-            "results "
-            f"total {results.get('total', 0)} "
-            f"uncollected {results.get('uncollected', 0)} "
-            f"collected {results.get('collected', 0)} "
-            f"invalid {results.get('invalid', 0)}"
-        ),
-    ]
-    if results.get("uncollected", 0):
-        lines.append("  final result pending in result store; run team-agent collect")
-    queued_messages = data.get("queued_messages") or []
-    if queued_messages:
-        lines.append("queued messages")
-        for item in queued_messages[:8]:
-            reason = item.get("reason") or "-"
-            lines.append(
-                f"  {item.get('message_id')} -> {item.get('recipient')} "
-                f"{item.get('status')} age {item.get('age')} attempts {item.get('attempts')} reason {reason}"
-            )
-    for aid in sorted(agents):
-        agent = agents[aid]
-        row = health.get(aid, {})
-        status_value = row.get("status") or _agent_health_status(agent)
-        task_id = _current_task_for_agent(tasks, aid) or "-"
-        context = row.get("context_usage_pct")
-        context_text = f"ctx {context}%" if context is not None else "ctx -"
-        last = _age_text(row.get("last_output_at"))
-        session_text = f"sid {agent.get('session_id') or '-'}"
-        capture_text = f"via {agent.get('captured_via') or '-'} {agent.get('attribution_confidence') or '-'}"
-        lines.append(f"  {aid}  {status_value}  {task_id}  {context_text}  last {last}  {session_text}  {capture_text}")
-    return "\n".join(lines)
-
-
-def peek(
-    workspace: Path,
-    agent_id: str,
-    *,
-    head: int | None = None,
-    tail: int | None = None,
-    search: str | None = None,
-    context: int = 3,
-) -> dict[str, Any]:
-    modes = [head is not None, tail is not None, search is not None]
-    if sum(modes) != 1:
-        raise RuntimeError("peek requires exactly one of --head, --tail, or --search")
-    if head is not None:
-        _validate_line_count("--head", head)
-    if tail is not None:
-        _validate_line_count("--tail", tail)
-    if search is not None and not search.strip():
-        raise RuntimeError("--search must not be empty")
-    if context < 0 or context > 10:
-        raise RuntimeError("--context must be between 0 and 10")
-    state = load_runtime_state(workspace)
-    agent = state.get("agents", {}).get(agent_id)
-    if not agent:
-        raise RuntimeError(f"unknown agent id: {agent_id}")
-    session_name = state.get("session_name")
-    window = agent.get("window", agent_id)
-    if not session_name or not _tmux_window_exists(session_name, window):
-        raise RuntimeError(f"agent terminal is not available: {agent_id}")
-    scan_lines = tail or PEEK_SEARCH_SCAN_LINES
-    proc = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{scan_lines}", "-t", f"{session_name}:{window}"], timeout=5)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or f"capture failed for {agent_id}")
-    captured = proc.stdout.splitlines()
-    if head is not None:
-        selected = captured[:head]
-        return {
-            "ok": True,
-            "agent_id": agent_id,
-            "mode": "head",
-            "lines": head,
-            "scanned_lines": scan_lines,
-            "text": "\n".join(selected),
-        }
-    if tail is not None:
-        return {
-            "ok": True,
-            "agent_id": agent_id,
-            "mode": "tail",
-            "lines": tail,
-            "scanned_lines": scan_lines,
-            "text": "\n".join(captured[-tail:]),
-        }
-    assert search is not None
-    matches = _search_lines(captured, search, context)
-    return {
-        "ok": True,
-        "agent_id": agent_id,
-        "mode": "search",
-        "search": search,
-        "context": context,
-        "scanned_lines": scan_lines,
-        "matches": matches,
-        "truncated": len(matches) >= PEEK_MAX_MATCHES,
-        "text": _format_search_matches(matches),
-    }
-
-
-def _validate_line_count(flag: str, value: int) -> None:
-    if value < 1 or value > PEEK_MAX_LINES:
-        raise RuntimeError(f"{flag} must be between 1 and {PEEK_MAX_LINES}")
-
-
-def _search_lines(lines: list[str], needle: str, context: int) -> list[dict[str, Any]]:
-    needle_lower = needle.lower()
-    matches: list[dict[str, Any]] = []
-    used_ranges: list[tuple[int, int]] = []
-    for index, line in enumerate(lines):
-        if needle_lower not in line.lower():
-            continue
-        start = max(0, index - context)
-        end = min(len(lines), index + context + 1)
-        if used_ranges and start <= used_ranges[-1][1]:
-            previous = matches[-1]
-            previous["lines"] = lines[previous["start_line"] - 1 : end]
-            previous["end_line"] = end
-            used_ranges[-1] = (previous["start_line"] - 1, end)
-        else:
-            matches.append({"line": index + 1, "start_line": start + 1, "end_line": end, "lines": lines[start:end]})
-            used_ranges.append((start, end))
-        if len(matches) >= PEEK_MAX_MATCHES:
-            break
-    return matches
-
-
-def _format_search_matches(matches: list[dict[str, Any]]) -> str:
-    if not matches:
-        return "no matches"
-    blocks: list[str] = []
-    for match in matches:
-        blocks.append(f"match line {match['line']} ({match['start_line']}-{match['end_line']}):")
-        blocks.extend(str(line) for line in match["lines"])
-    return "\n".join(blocks)
-
-
-def approvals(workspace: Path, agent_id: str | None = None) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
-    session_name = state.get("session_name")
-    approvals_found: list[dict[str, Any]] = []
-    agents = state.get("agents", {})
-    target_ids = [agent_id] if agent_id else sorted(agents)
-    for target_id in target_ids:
-        agent = agents.get(target_id)
-        if not agent:
-            raise RuntimeError(f"unknown agent id: {target_id}")
-        window = agent.get("window", target_id)
-        if not session_name or not _tmux_window_exists(session_name, window):
-            continue
-        proc = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{APPROVAL_SCAN_LINES}", "-t", f"{session_name}:{window}"], timeout=5)
-        if proc.returncode != 0:
-            continue
-        prompt = _extract_approval_prompt(target_id, proc.stdout)
-        if prompt:
-            approvals_found.append(prompt)
-    return {
-        "ok": True,
-        "waiting": bool(approvals_found),
-        "waiting_count": len(approvals_found),
-        "approvals": approvals_found,
-        "scan": {"mode": "tail", "lines": APPROVAL_SCAN_LINES, "raw_output": False},
-    }
-
-
-def format_approvals(workspace: Path, agent_id: str | None = None) -> str:
-    result = approvals(workspace, agent_id=agent_id)
-    if not result["approvals"]:
-        return "No pending approvals."
-    lines: list[str] = []
-    for item in result["approvals"]:
-        detail = item.get("tool") or item.get("command") or item.get("kind")
-        lines.append(f"{item['agent_id']}: {item['state']} {item['kind']} {detail}".rstrip())
-        if item.get("prompt"):
-            lines.append(f"  prompt: {item['prompt']}")
-        if item.get("choices"):
-            lines.append("  choices: " + "; ".join(item["choices"]))
-        lines.append("  raw terminal output omitted; use debug-only peek with --search/--tail/--head if the user explicitly asks.")
-    return "\n".join(lines)
-
-
-def inbox(workspace: Path, agent_id: str, limit: int = 20) -> dict[str, Any]:
-    rows = MessageStore(workspace).inbox(agent_id, limit=limit)
-    return {"ok": True, "agent_id": agent_id, "messages": rows}
-
-
-def format_inbox(workspace: Path, agent_id: str, limit: int = 20) -> str:
-    store = MessageStore(workspace)
-    rows = store.inbox(agent_id, limit=limit)
-    result_counts = store.result_counts()
-    note = "final results are not in inbox; use team-agent collect"
-    if result_counts.get("uncollected", 0):
-        note += f" ({result_counts['uncollected']} uncollected result(s) pending)"
-    if not rows:
-        return f"{agent_id}: no messages\n{note}"
-    lines = [
-        f"{row['created_at']} {row['sender']} -> {row['recipient']} {row['status']}: {row['content']}"
-        for row in rows
-    ]
-    lines.append(note)
-    return "\n".join(lines)
 
 
 def attach_leader(workspace: Path, pane: str | None = None, provider: str = "codex") -> dict[str, Any]:
