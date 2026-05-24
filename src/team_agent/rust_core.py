@@ -141,15 +141,32 @@ def list_targets() -> dict[str, Any]:
 
 
 def contains_inline_secret(value: str) -> bool:
-    lower = value.lower()
     return (
-        "api_key" in lower
-        or "apikey" in lower
-        or "token" in lower
-        or "secret" in lower
+        _contains_secret_assignment(value)
+        or _contains_bearer_secret(value)
+        or any(chunk.startswith("sk-") or _looks_base64_secret(chunk) for chunk in value.split())
         or value.startswith("sk-")
         or _looks_base64_secret(value)
     )
+
+
+def _contains_secret_assignment(value: str) -> bool:
+    for line in value.splitlines():
+        for separator in ("=", ":"):
+            if separator not in line:
+                continue
+            key, raw = line.split(separator, 1)
+            normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+            if normalized not in {"apikey", "token", "secret", "password", "credential"}:
+                continue
+            candidate = raw.strip().strip("'\"")
+            if candidate.startswith("sk-") or len(candidate) >= 8 or _looks_base64_secret(candidate):
+                return True
+    return False
+
+
+def _contains_bearer_secret(value: str) -> bool:
+    return re.search(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}", value) is not None
 
 
 def _looks_base64_secret(value: str) -> bool:

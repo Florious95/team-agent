@@ -215,13 +215,52 @@ pub fn validate_profile(profile: &Profile) -> Result<(), Vec<String>> {
 }
 
 pub fn contains_inline_secret(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.contains("api_key")
-        || lower.contains("apikey")
-        || lower.contains("token")
-        || lower.contains("secret")
+    contains_secret_assignment(value)
+        || contains_bearer_secret(value)
+        || value
+            .split_whitespace()
+            .any(|chunk| chunk.starts_with("sk-") || looks_base64_secret(chunk))
         || value.starts_with("sk-")
         || looks_base64_secret(value)
+}
+
+fn contains_secret_assignment(value: &str) -> bool {
+    for line in value.lines() {
+        for separator in ['=', ':'] {
+            let Some((key, raw)) = line.split_once(separator) else {
+                continue;
+            };
+            let normalized: String = key
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .collect();
+            if !matches!(
+                normalized.as_str(),
+                "apikey" | "token" | "secret" | "password" | "credential"
+            ) {
+                continue;
+            }
+            let candidate = raw.trim().trim_matches(|ch| ch == '"' || ch == '\'');
+            if candidate.starts_with("sk-") || candidate.len() >= 8 || looks_base64_secret(candidate) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn contains_bearer_secret(value: &str) -> bool {
+    let mut previous_was_bearer = false;
+    for chunk in value.split_whitespace() {
+        if previous_was_bearer && chunk.len() >= 16 && chunk.chars().all(|ch| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '~' | '+' | '/' | '=' | '-')
+        }) {
+            return true;
+        }
+        previous_was_bearer = chunk.eq_ignore_ascii_case("bearer");
+    }
+    false
 }
 
 pub fn json_escape(input: &str) -> String {
@@ -271,6 +310,12 @@ mod tests {
         let redacted = redact_secrets("Authorization Bearer sk-test abcdefghijklmnopqrstuvwxyz123456");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("sk-test"));
+    }
+
+    #[test]
+    fn inline_secret_scan_allows_ordinary_token_prose() {
+        assert!(!contains_inline_secret("Use the visible token in logs for delivery evidence."));
+        assert!(contains_inline_secret("API_KEY=sk-inline-secret"));
     }
 
     #[test]
