@@ -36,7 +36,7 @@ def dispatch(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str,
         return tools.fork_agent(**args)
     if tool == "request_human":
         return tools.request_human(**args)
-    return {"ok": False, "error": f"unknown tool {tool!r}"}
+    return _tool_error_result("unknown_tool", f"unknown tool {tool!r}", exc_type="UnknownTool")
 
 
 def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str, Any] | None:
@@ -88,12 +88,17 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
 
 
 def _tool_exception_result(exc: Exception, reason: str) -> dict[str, str | bool]:
+    return _tool_error_result(reason, _public_exception_message(exc), exc_type=type(exc).__name__)
+
+
+def _tool_error_result(reason: str, message: str, exc_type: str) -> dict[str, str | bool]:
     return {
         "ok": False,
         "reason": reason,
         "error_code": reason,
-        "exc_type": type(exc).__name__,
-        "message": _public_exception_message(exc),
+        "exc_type": exc_type,
+        "message": message,
+        "error": message,
     }
 
 

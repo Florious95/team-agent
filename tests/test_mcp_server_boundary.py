@@ -217,6 +217,7 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "invalid_tool_arguments")
         self.assertEqual(payload["exc_type"], "TypeError")
         self.assertIn("content", payload["message"])
+        self.assertEqual(payload["error"], payload["message"])
 
         response, payload = self._call_tool(tools, "assign_task", {})
         self.assertTrue(response["result"]["isError"])
@@ -225,6 +226,7 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "invalid_tool_arguments")
         self.assertEqual(payload["exc_type"], "TypeError")
         self.assertIn("task", payload["message"])
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_tools_call_unknown_tool_returns_structured_error(self) -> None:
         from team_agent import mcp_server
@@ -242,7 +244,11 @@ class McpServerBoundaryTests(unittest.TestCase):
         payload = json.loads(response["result"]["content"][0]["text"])
         self.assertTrue(response["result"]["isError"])
         self.assertFalse(payload["ok"])
-        self.assertEqual(payload["error"], "unknown tool 'missing_tool'")
+        self.assertEqual(payload["reason"], "unknown_tool")
+        self.assertEqual(payload["error_code"], "unknown_tool")
+        self.assertEqual(payload["exc_type"], "UnknownTool")
+        self.assertEqual(payload["message"], "unknown tool 'missing_tool'")
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_tools_call_validation_subclass_is_reported_as_bad_arguments(self) -> None:
         from team_agent import mcp_server
@@ -261,6 +267,7 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "invalid_tool_arguments")
         self.assertEqual(payload["exc_type"], "ProfileValidationError")
         self.assertEqual(payload["message"], "bad envelope")
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_tools_call_key_error_is_reported_as_bad_arguments(self) -> None:
         from team_agent import mcp_server
@@ -276,6 +283,23 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "invalid_tool_arguments")
         self.assertEqual(payload["exc_type"], "KeyError")
         self.assertIn("missing_field", payload["message"])
+        self.assertEqual(payload["error"], payload["message"])
+
+    def test_tools_call_attribute_error_is_reported_as_bad_arguments(self) -> None:
+        from team_agent import mcp_server
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-attribute-error-") as tmp:
+            workspace = Path(tmp)
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result", side_effect=AttributeError("missing attribute")):
+                response, payload = self._call_tool(tools, "report_result", {"summary": "done"})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertEqual(payload["error_code"], "invalid_tool_arguments")
+        self.assertEqual(payload["exc_type"], "AttributeError")
+        self.assertEqual(payload["message"], "missing attribute")
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_tools_call_runtime_failure_is_not_reported_as_bad_arguments(self) -> None:
         from team_agent import mcp_server
@@ -292,6 +316,7 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["exc_type"], "RuntimeError")
         self.assertNotEqual(payload["reason"], "invalid_tool_arguments")
         self.assertEqual(payload["message"], "storage unavailable")
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_tools_call_internal_error_message_is_public_safe_and_bounded(self) -> None:
         from team_agent import mcp_server
@@ -307,6 +332,7 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["exc_type"], "RuntimeError")
         self.assertNotIn("\n", payload["message"])
         self.assertLessEqual(len(payload["message"]), 200)
+        self.assertEqual(payload["error"], payload["message"])
 
     def test_compact_and_normalize_helpers_preserve_documented_shapes(self) -> None:
         from team_agent import mcp_server
