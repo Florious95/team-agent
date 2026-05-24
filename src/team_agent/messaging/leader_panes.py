@@ -103,7 +103,7 @@ def _tmux_pane_info(target: str | None) -> dict[str, str] | None:
 
 def _parse_tmux_pane_info(line: str) -> dict[str, str] | None:
     parts = line.split("\t")
-    if len(parts) not in {8, 10}:
+    if len(parts) not in {8, 10, 11}:
         return None
     keys = [
         "pane_id",
@@ -115,8 +115,10 @@ def _parse_tmux_pane_info(line: str) -> dict[str, str] | None:
         "pane_current_command",
         "pane_active",
     ]
-    if len(parts) == 10:
+    if len(parts) >= 10:
         keys.extend(["pane_current_path", "session_attached"])
+    if len(parts) == 11:
+        keys.append("pane_in_mode")
     return dict(zip(keys, parts))
 
 

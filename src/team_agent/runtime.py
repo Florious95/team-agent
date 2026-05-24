@@ -452,7 +452,7 @@ from team_agent.task_graph import TASK_STATUSES
 TMUX_PANE_FORMAT = (
     "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t"
     "#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t"
-    "#{pane_current_path}\t#{session_attached}"
+    "#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}"
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
 GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}

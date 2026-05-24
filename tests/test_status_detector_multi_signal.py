@@ -149,6 +149,36 @@ class StatusDetectorMultiSignalTests(unittest.TestCase):
         self.assertGreaterEqual(out["confidence"], 0.85, out)
         self.assertIn("latest", out["rationale"])
 
+    def test_pane_in_mode_short_circuits_to_uncertain_over_working_scrollback(self) -> None:
+        # Mac mini evidence: worker_b in tmux copy-mode (pane_in_mode='1')
+        # had Working spinner in scrollback; classifier wrongly reported WORKING.
+        # Contract: pane_in_mode != '0' wins over any scrollback signal.
+        scrollback = (
+            "✱ Working (12s) ⠋\n"
+            "   ↳ esc to interrupt\n"
+            "[some recent output]\n"
+        )
+        out = _classify(
+            last_output_age_sec=5,
+            pane={"pane_current_command": "node", "pane_in_mode": "1"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "uncertain", out)
+        self.assertIn("pane_in_mode", out["rationale"])
+
+    def test_pane_in_mode_short_circuits_to_uncertain_over_idle_scrollback(self) -> None:
+        scrollback = (
+            "› Find and fix a bug in @filename\n"
+            "  gpt-5.5 medium fast · /private/tmp/teamE-fresh\n"
+        )
+        out = _classify(
+            last_output_age_sec=5,
+            pane={"pane_current_command": "node", "pane_in_mode": "1"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "uncertain", out)
+        self.assertIn("pane_in_mode", out["rationale"])
+
     def test_old_output_without_prompt_or_spinner_is_high_confidence_stuck(self) -> None:
         out = _classify(
             last_output_age_sec=420,
