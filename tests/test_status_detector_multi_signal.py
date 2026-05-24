@@ -86,6 +86,26 @@ class StatusDetectorMultiSignalTests(unittest.TestCase):
         self.assertGreaterEqual(out["confidence"], 0.85, out)
         self.assertIn("latest", out["rationale"])
 
+    def test_codex_bare_prompt_with_status_line_is_idle(self) -> None:
+        scrollback = (
+            "[turn-1] doing useful things\n"
+            "✱ Working (12s) ⠋\n"
+            "   ↳ esc to interrupt\n"
+            "[turn-1] tool output\n"
+            "[turn-1] result completed\n"
+            "\n"
+            "› \n"
+            "gpt-5.5 xhigh · /private/tmp/teamE-20260524T230510Z\n"
+        )
+        out = _classify(
+            last_output_age_sec=30,
+            pane={"pane_current_command": "node", "pane_in_mode": "0"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "idle", out)
+        self.assertGreaterEqual(out["confidence"], 0.85, out)
+        self.assertIn("latest", out["rationale"])
+
     def test_old_output_without_prompt_or_spinner_is_high_confidence_stuck(self) -> None:
         out = _classify(
             last_output_age_sec=420,
