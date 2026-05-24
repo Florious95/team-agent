@@ -304,7 +304,7 @@ class RemoveAgentHappyPathTests(unittest.TestCase):
             workspace = _setup_workspace(tmp, dynamic=True, with_role_file=True, running=True)
             stop_calls: list[str] = []
 
-            def fake_stop(ws: Path, agent_id: str) -> dict[str, Any]:
+            def fake_stop(ws: Path, agent_id: str, **_kw: Any) -> dict[str, Any]:
                 stop_calls.append(agent_id)
                 state = load_runtime_state(ws)
                 state["agents"].get(agent_id, {})["status"] = "stopped"
@@ -360,7 +360,7 @@ class RemoveAgentRollbackTests(unittest.TestCase):
             from team_agent.lifecycle import agents as lifecycle_module
 
             calls = {"n": 0}
-            real = lifecycle_module.save_runtime_state
+            real = lifecycle_module.save_team_scoped_state
 
             def flaky(ws: Path, payload: Any) -> Any:
                 calls["n"] += 1
@@ -369,7 +369,7 @@ class RemoveAgentRollbackTests(unittest.TestCase):
                 return real(ws, payload)
 
             with patch.object(runtime, "_tmux_window_exists", return_value=False), \
-                 patch.object(lifecycle_module, "save_runtime_state", side_effect=flaky):
+                 patch.object(lifecycle_module, "save_team_scoped_state", side_effect=flaky):
                 with self.assertRaises(TeamAgentRuntimeError):
                     runtime.remove_agent(workspace, "fake_impl")
             self._assert_storage_intact(workspace, expect_running=False)
@@ -437,7 +437,7 @@ class RemoveAgentRollbackTests(unittest.TestCase):
             stop_calls: list[str] = []
             start_calls: list[str] = []
 
-            def fake_stop(ws: Path, agent_id: str) -> dict[str, Any]:
+            def fake_stop(ws: Path, agent_id: str, **_kw: Any) -> dict[str, Any]:
                 stop_calls.append(agent_id)
                 state = load_runtime_state(ws)
                 state["agents"].get(agent_id, {})["status"] = "stopped"
@@ -452,7 +452,7 @@ class RemoveAgentRollbackTests(unittest.TestCase):
                 return {"ok": True, "agent_id": agent_id, "status": "running"}
 
             calls = {"n": 0}
-            real = lifecycle_module.save_runtime_state
+            real = lifecycle_module.save_team_scoped_state
 
             def flaky_state(ws: Path, payload: Any) -> Any:
                 calls["n"] += 1
@@ -463,7 +463,7 @@ class RemoveAgentRollbackTests(unittest.TestCase):
             with patch.object(runtime, "_tmux_window_exists", return_value=False), \
                  patch.object(runtime, "stop_agent", side_effect=fake_stop), \
                  patch.object(runtime, "start_agent", side_effect=fake_start), \
-                 patch.object(lifecycle_module, "save_runtime_state", side_effect=flaky_state):
+                 patch.object(lifecycle_module, "save_team_scoped_state", side_effect=flaky_state):
                 with self.assertRaises(TeamAgentRuntimeError):
                     runtime.remove_agent(workspace, "fake_impl", force=True)
             self.assertEqual(stop_calls, ["fake_impl"])

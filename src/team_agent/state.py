@@ -142,6 +142,27 @@ def ambiguous_team_target_result(state: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def resolve_team_scoped_state(
+    workspace: Path,
+    team: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if team is None:
+        ambiguous = ambiguous_team_target_result(load_runtime_state(workspace))
+        if ambiguous:
+            return None, ambiguous
+    try:
+        from team_agent.errors import RuntimeError as _TeamAgentRuntimeError
+        return select_runtime_state(workspace, team), None
+    except _TeamAgentRuntimeError as exc:
+        return None, {
+            "ok": False,
+            "status": "refused",
+            "reason": "team_target_unresolved",
+            "team": team,
+            "error": str(exc),
+        }
+
+
 def _caller_identity_from_env() -> dict[str, str]:
     return {
         "pane_id": os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or "",
@@ -204,7 +225,20 @@ def save_team_scoped_state(workspace: Path, team_state: dict[str, Any]) -> None:
     target_key = team_state_key(team_state)
     existing = load_runtime_state(workspace)
     existing_primary_key = team_state_key(existing) if existing.get("session_name") else None
-    teams = copy.deepcopy(existing.get("teams") or {})
+    if (
+        existing_primary_key is not None
+        and existing_primary_key != target_key
+        and existing.get("session_name")
+        and existing.get("session_name") == team_state.get("session_name")
+    ):
+        existing_primary_key = target_key
+    existing_teams = existing.get("teams") or {}
+    if not existing_teams and existing_primary_key == target_key:
+        merged = copy.deepcopy(team_state)
+        merged.pop("teams", None)
+        save_runtime_state(workspace, merged)
+        return
+    teams = copy.deepcopy(existing_teams)
     teams[target_key] = compact_team_state(team_state)
     if existing_primary_key is None or existing_primary_key == target_key:
         merged = copy.deepcopy(team_state)

@@ -280,6 +280,78 @@ class MessagingSchedulerTests(unittest.TestCase):
             listed = TeamOrchestratorTools(workspace).stuck_list()
             self.assertIn("fake_impl", listed["suppressed_idle_alerts"])
 
+    def test_stuck_list_in_multi_team_workspace_is_owner_scoped(self) -> None:
+        import os
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory(prefix="team-agent-stuck-multiteam-") as tmp:
+            workspace = Path(tmp)
+            spec = _fake_spec(workspace)
+            alpha_team_dir = workspace / ".team" / "alpha"
+            beta_team_dir = workspace / ".team" / "beta"
+            alpha_team_dir.mkdir(parents=True)
+            beta_team_dir.mkdir(parents=True)
+            alpha_spec_path = alpha_team_dir / "team.spec.yaml"
+            beta_spec_path = beta_team_dir / "team.spec.yaml"
+            alpha_spec_path.write_text(dumps(spec), encoding="utf-8")
+            beta_spec_path.write_text(dumps(spec), encoding="utf-8")
+            alpha_owner = {"pane_id": "%alpha", "provider": "codex", "machine_fingerprint": "machine-a"}
+            beta_owner = {"pane_id": "%beta", "provider": "codex", "machine_fingerprint": "machine-b"}
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(alpha_spec_path),
+                    "team_dir": str(alpha_team_dir),
+                    "session_name": "team-alpha",
+                    "team_owner": alpha_owner,
+                    "agents": {},
+                    "tasks": spec["tasks"],
+                    "coordinator": {
+                        "suppressed_idle_alerts": {
+                            "alpha": {"alpha_worker": {"stuck": {"suppressed_at": "2026-05-25T00:00:00+00:00", "suppressed_by": "leader", "snapshot": {}}}},
+                            "beta": {"beta_worker": {"stuck": {"suppressed_at": "2026-05-25T00:00:00+00:00", "suppressed_by": "leader", "snapshot": {}}}},
+                        },
+                    },
+                    "teams": {
+                        "alpha": {
+                            "spec_path": str(alpha_spec_path),
+                            "team_dir": str(alpha_team_dir),
+                            "session_name": "team-alpha",
+                            "team_owner": alpha_owner,
+                        },
+                        "beta": {
+                            "spec_path": str(beta_spec_path),
+                            "team_dir": str(beta_team_dir),
+                            "session_name": "team-beta",
+                            "team_owner": beta_owner,
+                        },
+                    },
+                },
+            )
+            alpha_env = {
+                "TEAM_AGENT_LEADER_PANE_ID": "%alpha",
+                "TEAM_AGENT_LEADER_PROVIDER": "codex",
+                "TEAM_AGENT_MACHINE_FINGERPRINT": "machine-a",
+                "TEAM_AGENT_ID": "leader",
+            }
+            beta_env = {
+                "TEAM_AGENT_LEADER_PANE_ID": "%beta",
+                "TEAM_AGENT_LEADER_PROVIDER": "codex",
+                "TEAM_AGENT_MACHINE_FINGERPRINT": "machine-b",
+                "TEAM_AGENT_ID": "leader",
+            }
+            with patch.dict(os.environ, alpha_env, clear=False):
+                listed_alpha = runtime.stuck_list(workspace)
+            with patch.dict(os.environ, beta_env, clear=False):
+                listed_beta = runtime.stuck_list(workspace)
+            self.assertTrue(listed_alpha.get("ok"), listed_alpha)
+            self.assertEqual(listed_alpha.get("team"), "alpha")
+            self.assertIn("alpha_worker", listed_alpha["suppressed_idle_alerts"])
+            self.assertNotIn("beta_worker", listed_alpha["suppressed_idle_alerts"])
+            self.assertTrue(listed_beta.get("ok"), listed_beta)
+            self.assertEqual(listed_beta.get("team"), "beta")
+            self.assertIn("beta_worker", listed_beta["suppressed_idle_alerts"])
+            self.assertNotIn("alpha_worker", listed_beta["suppressed_idle_alerts"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

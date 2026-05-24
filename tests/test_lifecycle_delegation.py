@@ -18,7 +18,7 @@ class LifecycleDelegationTests(unittest.TestCase):
             calls.append(("lock", name))
             yield
 
-        def fake_unlocked(workspace: Path, agent_id: str, force: bool, open_display: bool, allow_fresh: bool) -> dict:
+        def fake_unlocked(workspace: Path, agent_id: str, force: bool, open_display: bool, allow_fresh: bool, team: str | None = None) -> dict:
             calls.append(("unlocked", (agent_id, force, open_display, allow_fresh)))
             return {"ok": True}
 

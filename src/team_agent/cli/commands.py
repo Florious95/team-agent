@@ -189,7 +189,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_shutdown(args: argparse.Namespace) -> dict[str, Any]:
-    return runtime.shutdown(Path(args.workspace).resolve(), keep_logs=args.keep_logs)
+    return runtime.shutdown(Path(args.workspace).resolve(), keep_logs=args.keep_logs, team=args.team)
 
 
 def cmd_restart(args: argparse.Namespace) -> dict[str, Any]:
@@ -203,11 +203,12 @@ def cmd_start_agent(args: argparse.Namespace) -> dict[str, Any]:
         force=args.force,
         open_display=not args.no_display,
         allow_fresh=args.allow_fresh,
+        team=args.team,
     )
 
 
 def cmd_stop_agent(args: argparse.Namespace) -> dict[str, Any]:
-    return runtime.stop_agent(Path(args.workspace).resolve(), args.agent)
+    return runtime.stop_agent(Path(args.workspace).resolve(), args.agent, team=args.team)
 
 
 def cmd_reset_agent(args: argparse.Namespace) -> dict[str, Any]:
@@ -216,6 +217,7 @@ def cmd_reset_agent(args: argparse.Namespace) -> dict[str, Any]:
         args.agent,
         discard_session=args.discard_session,
         open_display=not args.no_display,
+        team=args.team,
     )
 
 
@@ -225,6 +227,7 @@ def cmd_add_agent(args: argparse.Namespace) -> dict[str, Any]:
         args.agent,
         role_file_path=args.role_file,
         open_display=not args.no_display,
+        team=args.team,
     )
 
 
@@ -235,6 +238,7 @@ def cmd_fork_agent(args: argparse.Namespace) -> dict[str, Any]:
         as_agent_id=args.as_agent,
         label=args.label,
         open_display=not args.no_display,
+        team=args.team,
     )
 
 
@@ -245,6 +249,7 @@ def cmd_remove_agent(args: argparse.Namespace) -> dict[str, Any]:
         from_spec=args.from_spec,
         confirm=args.confirm,
         force=args.force,
+        team=args.team,
     )
 
 

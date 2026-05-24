@@ -180,6 +180,30 @@ def _detect_stuck_agents(
 def stuck_list(workspace: Path) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    if _use_team_scoped_suppressions(state):
+        from team_agent.state import _caller_identity_from_env, team_state_candidates
+        caller = _caller_identity_from_env()
+        candidates = team_state_candidates(state)
+        caller_team = None
+        if caller.get("pane_id"):
+            for key, candidate in candidates.items():
+                owner = candidate.get("team_owner") or {}
+                if (
+                    caller["pane_id"] == (owner.get("pane_id") or "")
+                    and caller["provider"] == (owner.get("provider") or "")
+                    and caller["machine_fingerprint"] == (owner.get("machine_fingerprint") or "")
+                ):
+                    caller_team = key
+                    break
+        if caller_team is None:
+            return {
+                "ok": False,
+                "status": "refused",
+                "reason": "team_owner_unresolved",
+                "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT to your team's claimed identity, or use team-agent takeover --confirm",
+                "candidates": sorted(candidates),
+            }
+        return {"ok": True, "suppressed_idle_alerts": suppressed.get(caller_team, {}), "team": caller_team}
     if (
         len(suppressed) == 1
         and all(isinstance(value, dict) for value in suppressed.values())

@@ -14,7 +14,9 @@ from team_agent.state import (
     SESSION_CAPTURE_FIELDS,
     check_team_owner,
     load_runtime_state,
+    resolve_team_scoped_state,
     save_runtime_state,
+    save_team_scoped_state,
     write_spec,
     write_team_state,
 )
@@ -57,9 +59,11 @@ def _runtime_proxy(name: str):
 globals().update({_name: _runtime_proxy(_name) for _name in _RUNTIME_SYMBOLS})
 
 
-def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
+def stop_agent(workspace: Path, agent_id: str, *, team: str | None = None) -> dict[str, Any]:
     with _runtime_lock(workspace, "stop-agent"):
-        state = load_runtime_state(workspace)
+        state, refusal = resolve_team_scoped_state(workspace, team)
+        if refusal:
+            return refusal
         gate = check_team_owner(state)
         if gate:
             return gate
@@ -88,21 +92,26 @@ def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
             agent_state["display"] = display
         agent_state.update({"status": "stopped", "provider": agent["provider"], "agent_id": agent_id, "window": window})
         state.setdefault("agents", {})[agent_id] = agent_state
-        save_runtime_state(workspace, state)
+        save_team_scoped_state(workspace, state)
         _save_team_runtime_snapshot(workspace, state)
         state_path = write_team_state(workspace, spec, state)
         event_log.write("stop_agent.complete", agent_id=agent_id, target=target, stopped=stopped)
         return {"ok": True, "agent_id": agent_id, "status": "stopped", "target": target, "stopped": stopped, "state_file": str(state_path)}
 
 
-def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False, open_display: bool = True) -> dict[str, Any]:
+def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False, open_display: bool = True, team: str | None = None) -> dict[str, Any]:
     if not discard_session:
         return {"ok": False, "agent_id": agent_id, "status": "refused", "reason": "discard_session_required"}
-    gate = check_team_owner(load_runtime_state(workspace))
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
+    gate = check_team_owner(state)
     if gate:
         return gate
-    stopped = stop_agent(workspace, agent_id)
-    state = load_runtime_state(workspace)
+    stopped = stop_agent(workspace, agent_id, team=team)
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     agent_state = dict(state.get("agents", {}).get(agent_id) or {})
@@ -112,17 +121,19 @@ def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False
     agent_state["status"] = "stopped"
     state.setdefault("agents", {})[agent_id] = agent_state
     EventLog(workspace).write("discard.session_tombstone", agent_id=agent_id, discarded_session_id=discarded_session_id)
-    save_runtime_state(workspace, state)
+    save_team_scoped_state(workspace, state)
     write_team_state(workspace, spec, state)
-    started = start_agent(workspace, agent_id, force=True, open_display=open_display, allow_fresh=True)
+    started = start_agent(workspace, agent_id, force=True, open_display=open_display, allow_fresh=True, team=team)
     EventLog(workspace).write("reset_agent.complete", agent_id=agent_id, stopped=stopped, started=started)
     return {"ok": True, "agent_id": agent_id, "status": "running", "stopped": stopped, "started": started}
 
 
-def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_display: bool = True) -> dict[str, Any]:
+def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_display: bool = True, team: str | None = None) -> dict[str, Any]:
     from team_agent.compiler import compile_role_doc_agent
 
-    state = load_runtime_state(workspace)
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
     gate = check_team_owner(state)
     if gate:
         return gate
@@ -153,15 +164,15 @@ def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_displ
         validate_spec(spec, base_dir=spec_path.parent)
         write_spec(spec_path, spec)
         write_team_state(workspace, spec, state)
-        started = start_agent(workspace, agent_id, open_display=open_display, allow_fresh=True)
-        state = load_runtime_state(workspace)
+        started = start_agent(workspace, agent_id, open_display=open_display, allow_fresh=True, team=team)
+        state, _refusal_after = resolve_team_scoped_state(workspace, team)
         state["agents"][agent_id]["dynamic_role_file"] = str(dynamic_path.relative_to(workspace))
         state["agents"][agent_id]["role_file_sha"] = role_sha
-        save_runtime_state(workspace, state)
+        save_team_scoped_state(workspace, state)
         state_path = write_team_state(workspace, spec, state)
     except Exception:
         spec_path.write_text(old_spec_text, encoding="utf-8")
-        save_runtime_state(workspace, old_state)
+        save_team_scoped_state(workspace, old_state)
         if old_dynamic is None:
             dynamic_path.unlink(missing_ok=True)
         else:
@@ -188,8 +199,11 @@ def fork_agent(
     as_agent_id: str,
     label: str | None = None,
     open_display: bool = True,
+    team: str | None = None,
 ) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
     gate = check_team_owner(state)
     if gate:
         return gate
@@ -273,7 +287,7 @@ def fork_agent(
         elif open_display and state.get("display_backend") == "ghostty_workspace":
             agent_state["display"] = _open_ghostty_workspace_agent_display(session_name, as_agent_id, new_agent, {}, event_log)
         state.setdefault("agents", {})[as_agent_id] = agent_state
-        save_runtime_state(workspace, state)
+        save_team_scoped_state(workspace, state)
         _save_team_runtime_snapshot(workspace, state)
         state_path = write_team_state(workspace, spec, state)
         coordinator = start_coordinator(workspace)
@@ -286,7 +300,7 @@ def fork_agent(
             except Exception as exc:
                 event_log.write("fork_agent.mcp_cleanup_failed", new_agent_id=as_agent_id, error=str(exc))
         spec_path.write_text(old_spec_text, encoding="utf-8")
-        save_runtime_state(workspace, old_state)
+        save_team_scoped_state(workspace, old_state)
         raise
     event_log.write(
         "fork_agent.complete",

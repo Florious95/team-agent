@@ -8,7 +8,15 @@ from team_agent.errors import RuntimeError
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.spec import load_spec, validate_spec
-from team_agent.state import check_team_owner, load_runtime_state, save_runtime_state, write_spec, write_team_state
+from team_agent.state import (
+    check_team_owner,
+    load_runtime_state,
+    resolve_team_scoped_state,
+    save_runtime_state,
+    save_team_scoped_state,
+    write_spec,
+    write_team_state,
+)
 
 
 def remove_agent(
@@ -18,11 +26,14 @@ def remove_agent(
     from_spec: bool = False,
     confirm: bool = False,
     force: bool = False,
+    team: str | None = None,
 ) -> dict[str, Any]:
     import team_agent.runtime as runtime
 
     workspace = workspace.resolve()
-    state = load_runtime_state(workspace)
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
     gate = check_team_owner(state)
     if gate:
         return gate
@@ -48,12 +59,12 @@ def remove_agent(
     stopped: dict[str, Any] | None = None
     try:
         if running and force:
-            stopped = runtime.stop_agent(workspace, agent_id)
+            stopped = runtime.stop_agent(workspace, agent_id, team=team)
             rollback.restore_running = True
-            state = load_runtime_state(workspace)
+            state, _refusal_after = resolve_team_scoped_state(workspace, team)
         removed_state = copy.deepcopy(state)
         removed_state.get("agents", {}).pop(agent_id, None)
-        save_runtime_state(workspace, removed_state)
+        save_team_scoped_state(workspace, removed_state)
 
         removed_spec = copy.deepcopy(spec)
         removed_spec["agents"] = [item for item in removed_spec.get("agents", []) if item.get("id") != agent_id]
@@ -130,7 +141,7 @@ class _RemoveRollback:
         except Exception as exc:
             errors.append(f"spec:{exc}")
         try:
-            save_runtime_state(self.workspace, self.state)
+            save_team_scoped_state(self.workspace, self.state)
         except Exception as exc:
             errors.append(f"workspace_state:{exc}")
         try:

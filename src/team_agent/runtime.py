@@ -480,8 +480,11 @@ def ensure_workspace_dirs(workspace: Path) -> None:
 
 
 
-def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
+def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -> dict[str, Any]:
+    from team_agent.state import resolve_team_scoped_state
+    state, refusal = resolve_team_scoped_state(workspace, team)
+    if refusal:
+        return refusal
     gate = check_team_owner(state)
     if gate:
         return gate
@@ -554,7 +557,7 @@ def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
             )
         if agent_state.get("status") != "paused":
             agent_state["status"] = "stopped"
-    save_runtime_state(workspace, state)
+    save_team_scoped_state(workspace, state)
     _save_team_runtime_snapshot(workspace, state)
     return {"ok": True, "session_name": session_name, "logs": captured, "coordinator": coordinator}
 
@@ -567,11 +570,12 @@ def remove_agent(
     from_spec: bool = False,
     confirm: bool = False,
     force: bool = False,
+    team: str | None = None,
 ) -> dict[str, Any]:
     from team_agent.lifecycle.agents import remove_agent as lifecycle_remove_agent
 
     with _runtime_lock(workspace, "remove-agent"):
-        return lifecycle_remove_agent(workspace, agent_id, from_spec=from_spec, confirm=confirm, force=force)
+        return lifecycle_remove_agent(workspace, agent_id, from_spec=from_spec, confirm=confirm, force=force, team=team)
 
 
 def acknowledge_idle(workspace: Path, agent_id: str) -> dict[str, Any]:
