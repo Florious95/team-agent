@@ -59,8 +59,10 @@ def handle_mcp(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[st
         arguments = params.get("arguments") or {}
         try:
             result = dispatch(tools, {"tool": name, "arguments": arguments})
-        except Exception as exc:
+        except (TypeError, ValueError) as exc:
             result = {"ok": False, "reason": "invalid_tool_arguments", "error": str(exc)}
+        except Exception as exc:
+            result = {"ok": False, "reason": "internal_runtime_error", "error": str(exc)}
         is_error = result.get("ok") is False
         return {
             "jsonrpc": "2.0",

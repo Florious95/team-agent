@@ -240,6 +240,20 @@ class McpServerBoundaryTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error"], "unknown tool 'missing_tool'")
 
+    def test_tools_call_runtime_failure_is_not_reported_as_bad_arguments(self) -> None:
+        from team_agent import mcp_server
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-mcp-runtime-error-") as tmp:
+            workspace = Path(tmp)
+            tools = mcp_server.TeamOrchestratorTools(workspace)
+            with patch("team_agent.mcp_server.runtime.report_result", side_effect=RuntimeError("storage unavailable")):
+                response, payload = self._call_tool(tools, "report_result", {"summary": "done"})
+        self.assertTrue(response["result"]["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "internal_runtime_error")
+        self.assertNotEqual(payload["reason"], "invalid_tool_arguments")
+        self.assertIn("storage unavailable", payload["error"])
+
     def test_compact_and_normalize_helpers_preserve_documented_shapes(self) -> None:
         from team_agent import mcp_server
 
