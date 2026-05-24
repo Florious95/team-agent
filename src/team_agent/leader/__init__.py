@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import signal
 import shlex
+import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,8 +33,29 @@ def attach_leader(workspace: Path, pane: str | None = None, provider: str = "cod
     return {"ok": True, "leader_receiver": receiver, "validation": validation}
 
 
-def start_leader(provider: str, provider_args: list[str], workspace: Path) -> None:
-    plan = leader_start_plan(provider, provider_args, workspace)
+def start_leader(
+    provider: str,
+    provider_args: list[str],
+    workspace: Path,
+    *,
+    attach_existing: bool = False,
+    confirm_attach: bool = False,
+    attach_session: str | None = None,
+) -> None:
+    plan = leader_start_plan(
+        provider,
+        provider_args,
+        workspace,
+        attach_existing=attach_existing,
+        confirm_attach=confirm_attach,
+        attach_session=attach_session,
+    )
+    if plan["mode"] == "new_tmux_session" and not sys.stdin.isatty():
+        plan = dict(plan)
+        argv = list(plan["argv"])
+        argv.insert(2, "-d")
+        plan["argv"] = argv
+        plan["detached"] = True
     EventLog(workspace).write(
         "leader.start",
         provider=provider,
@@ -39,12 +64,18 @@ def start_leader(provider: str, provider_args: list[str], workspace: Path) -> No
         session_name=plan.get("session_name"),
         argv=plan["argv"],
     )
-    if plan["mode"] == "exec_provider":
-        os.chdir(workspace)
-    os.execvp(plan["argv"][0], plan["argv"])
+    _run_leader_plan(plan, workspace)
 
 
-def leader_start_plan(provider: str, provider_args: list[str], workspace: Path) -> dict[str, Any]:
+def leader_start_plan(
+    provider: str,
+    provider_args: list[str],
+    workspace: Path,
+    *,
+    attach_existing: bool = False,
+    confirm_attach: bool = False,
+    attach_session: str | None = None,
+) -> dict[str, Any]:
     from team_agent.runtime import (
         RuntimeError,
         _tmux_session_exists,
@@ -58,6 +89,16 @@ def leader_start_plan(provider: str, provider_args: list[str], workspace: Path) 
     if not adapter.is_installed():
         raise RuntimeError(f"Provider {provider} command {adapter.command_name!r} not found")
     argv = [adapter.command_name, *provider_args]
+    if attach_session:
+        if not confirm_attach:
+            raise RuntimeError("--attach-session requires --confirm")
+        return {
+            "mode": "attach_existing",
+            "provider": provider,
+            "workspace": str(workspace),
+            "session_name": attach_session,
+            "argv": ["tmux", "attach-session", "-t", attach_session],
+        }
     if os.environ.get("TMUX"):
         return {"mode": "exec_provider", "provider": provider, "workspace": str(workspace), "argv": argv}
     if not shutil_which("tmux"):
@@ -71,14 +112,71 @@ def leader_start_plan(provider: str, provider_args: list[str], workspace: Path) 
             "session_name": session_name,
             "argv": ["tmux", "attach-session", "-t", session_name],
         }
-    shell = f"cd {shlex.quote(str(workspace))} && exec {shlex.join(argv)}"
+    exports = ""
+    if os.environ.get("PATH"):
+        exports = f"PATH={shlex.quote(os.environ['PATH'])} "
+    shell = f"cd {shlex.quote(str(workspace))} && {exports}exec {shlex.join(argv)}"
+    tmux_args = ["tmux", "new-session", "-s", session_name, "-n", provider, "-c", str(workspace)]
     return {
         "mode": "new_tmux_session",
         "provider": provider,
         "workspace": str(workspace),
         "session_name": session_name,
-        "argv": ["tmux", "new-session", "-s", session_name, "-n", provider, "-c", str(workspace), "sh", "-lc", shell],
+        "argv": [*tmux_args, "sh", "-lc", shell],
+        "detached": False,
     }
+
+
+def _run_leader_plan(plan: dict[str, Any], workspace: Path) -> None:
+    session_name = plan.get("session_name")
+    proc: subprocess.Popen[Any] | None = None
+    sigints = 0
+
+    def stop_process_tree() -> None:
+        if session_name and plan["mode"] == "new_tmux_session":
+            subprocess.run(["tmux", "kill-session", "-t", str(session_name)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if proc and proc.poll() is None:
+            proc.terminate()
+
+    def handle_sigint(signum: int, _frame: Any) -> None:
+        nonlocal sigints
+        sigints += 1
+        if proc and proc.poll() is None:
+            try:
+                proc.send_signal(signum)
+            except ProcessLookupError:
+                pass
+        if sigints >= 2:
+            stop_process_tree()
+
+    old_sigint = signal.signal(signal.SIGINT, handle_sigint)
+    try:
+        if plan["mode"] == "exec_provider":
+            os.chdir(workspace)
+        proc = subprocess.Popen(plan["argv"])
+        if plan.get("detached") and session_name:
+            proc.wait()
+            while _tmux_session_exists_local(str(session_name)):
+                time.sleep(0.2)
+        else:
+            proc.wait()
+    finally:
+        signal.signal(signal.SIGINT, old_sigint)
+        _print_team_running_reminder(workspace)
+    raise SystemExit(proc.returncode if proc else 1)
+
+
+def _tmux_session_exists_local(session_name: str) -> bool:
+    proc = subprocess.run(["tmux", "has-session", "-t", session_name], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return proc.returncode == 0
+
+
+def _print_team_running_reminder(workspace: Path) -> None:
+    state = load_runtime_state(workspace)
+    team_name = state.get("session_name")
+    if not team_name or not _tmux_session_exists_local(str(team_name)):
+        return
+    print(f"team {team_name} is still running; run team-agent shutdown to close it OR team-agent attach-leader to reconnect.")
 
 
 def leader_session_name(provider: str, workspace: Path) -> str:
