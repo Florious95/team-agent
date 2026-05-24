@@ -12,6 +12,7 @@ from team_agent.events import EventLog
 from team_agent.spec import load_spec, validate_spec
 from team_agent.state import (
     SESSION_CAPTURE_FIELDS,
+    check_team_owner,
     load_runtime_state,
     save_runtime_state,
     write_spec,
@@ -59,6 +60,9 @@ globals().update({_name: _runtime_proxy(_name) for _name in _RUNTIME_SYMBOLS})
 def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
     with _runtime_lock(workspace, "stop-agent"):
         state = load_runtime_state(workspace)
+        gate = check_team_owner(state)
+        if gate:
+            return gate
         spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
         spec = load_spec(spec_path)
         agent = _find_agent(spec, agent_id)
@@ -94,6 +98,9 @@ def stop_agent(workspace: Path, agent_id: str) -> dict[str, Any]:
 def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False, open_display: bool = True) -> dict[str, Any]:
     if not discard_session:
         return {"ok": False, "agent_id": agent_id, "status": "refused", "reason": "discard_session_required"}
+    gate = check_team_owner(load_runtime_state(workspace))
+    if gate:
+        return gate
     stopped = stop_agent(workspace, agent_id)
     state = load_runtime_state(workspace)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
@@ -116,6 +123,9 @@ def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_displ
     from team_agent.compiler import compile_role_doc_agent
 
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     if _find_agent(spec, agent_id):
@@ -180,6 +190,9 @@ def fork_agent(
     open_display: bool = True,
 ) -> dict[str, Any]:
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     if _find_agent(spec, as_agent_id):

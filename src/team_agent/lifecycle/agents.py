@@ -8,7 +8,7 @@ from team_agent.errors import RuntimeError
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.spec import load_spec, validate_spec
-from team_agent.state import load_runtime_state, save_runtime_state, write_spec, write_team_state
+from team_agent.state import check_team_owner, load_runtime_state, save_runtime_state, write_spec, write_team_state
 
 
 def remove_agent(
@@ -23,6 +23,9 @@ def remove_agent(
 
     workspace = workspace.resolve()
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     agent = _find_worker(spec, agent_id)

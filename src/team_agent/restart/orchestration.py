@@ -11,7 +11,13 @@ from team_agent.permissions import resolve_permissions
 from team_agent.restart.selection import select_restart_state
 from team_agent.restart.snapshot import save_team_runtime_snapshot
 from team_agent.spec import load_spec
-from team_agent.state import save_runtime_state, write_team_state
+from team_agent.state import (
+    check_team_owner,
+    load_runtime_state,
+    populate_team_owner_from_env,
+    save_runtime_state,
+    write_team_state,
+)
 
 
 def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None) -> dict[str, Any]:
@@ -50,6 +56,9 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         start_coordinator,
     )
     state = select_restart_state(workspace, team)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     team_dir = Path(str(state.get("team_dir"))) if state.get("team_dir") else _spec_team_dir(spec_path, workspace)
     if _is_team_doc_dir(team_dir):
@@ -293,6 +302,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         )
     state["session_name"] = session_name
     state["agents"] = new_agents
+    populate_team_owner_from_env(state, source="restart")
     save_runtime_state(workspace, state)
     save_team_runtime_snapshot(workspace, state)
     MessageStore(workspace)

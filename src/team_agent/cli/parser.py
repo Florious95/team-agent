@@ -29,6 +29,7 @@ from team_agent.cli.commands import (
     cmd_inbox,
     cmd_sessions,
     cmd_attach_leader,
+    cmd_takeover,
     cmd_send,
     cmd_collect,
     cmd_diagnose,
@@ -220,6 +221,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--provider", default="codex")
     add_json(p)
     p.set_defaults(func=cmd_attach_leader)
+
+    p = sub.add_parser("takeover", help="Claim ownership of an existing team (multi-leader same workspace)")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--team", help="Explicit team/session selector when a workspace has multiple teams")
+    p.add_argument("--confirm", action="store_true", help="Required: confirm you intend to overwrite the recorded team_owner")
+    add_json(p)
+    p.set_defaults(func=cmd_takeover)
 
     p = sub.add_parser(
         "send",

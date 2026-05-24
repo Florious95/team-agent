@@ -132,6 +132,10 @@ def cmd_attach_leader(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.attach_leader(Path(args.workspace).resolve(), pane=args.pane, provider=args.provider)
 
 
+def cmd_takeover(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.takeover(Path(args.workspace).resolve(), team=args.team, confirm=args.confirm)
+
+
 def cmd_send(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.send_message(
         Path(args.workspace).resolve(),

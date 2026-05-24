@@ -11,7 +11,7 @@ from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.providers import ResumeUnavailable
 from team_agent.spec import load_spec
-from team_agent.state import load_runtime_state, save_runtime_state, write_team_state
+from team_agent.state import check_team_owner, load_runtime_state, save_runtime_state, write_team_state
 
 
 _RUNTIME_SYMBOLS = (
@@ -75,6 +75,9 @@ def start_agent(
 
 def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_display: bool, allow_fresh: bool) -> dict[str, Any]:
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     if not spec_path.exists():
         raise RuntimeError(f"missing spec for start-agent: {spec_path}")

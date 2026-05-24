@@ -3,6 +3,7 @@ from __future__ import annotations
 from team_agent.messaging.deps import (
     EventLog,
     MessageStore,
+    check_team_owner,
     datetime,
     json,
     load_runtime_state,
@@ -190,6 +191,9 @@ def stuck_cancel(
     else:
         return {"ok": False, "status": "refused", "reason": "invalid_alert_type", "alert_type": alert_type}
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     store = MessageStore(workspace)
     coordinator = state.setdefault("coordinator", {})
     suppressed = coordinator.setdefault("suppressed_idle_alerts", {})

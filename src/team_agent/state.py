@@ -142,6 +142,53 @@ def ambiguous_team_target_result(state: dict[str, Any]) -> dict[str, Any] | None
     }
 
 
+def _caller_identity_from_env() -> dict[str, str]:
+    return {
+        "pane_id": os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or "",
+        "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER") or "",
+        "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT") or "",
+    }
+
+
+def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
+    owner = state.get("team_owner") or {}
+    if not owner:
+        return None
+    caller = _caller_identity_from_env()
+    if (
+        caller["pane_id"] == (owner.get("pane_id") or "")
+        and caller["provider"] == (owner.get("provider") or "")
+        and caller["machine_fingerprint"] == (owner.get("machine_fingerprint") or "")
+    ):
+        return None
+    return {
+        "ok": False,
+        "status": "refused",
+        "reason": "team_owner_mismatch",
+        "error": "not_owner",
+        "action": "use team-agent takeover --confirm",
+        "team_owner": owner,
+        "caller": caller,
+    }
+
+
+def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopulate") -> dict[str, Any] | None:
+    if state.get("team_owner"):
+        return state["team_owner"]
+    caller = _caller_identity_from_env()
+    if not caller["pane_id"]:
+        return None
+    owner = {
+        "pane_id": caller["pane_id"],
+        "provider": caller["provider"],
+        "machine_fingerprint": caller["machine_fingerprint"],
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+        "claimed_via": source,
+    }
+    state["team_owner"] = owner
+    return owner
+
+
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
     path = runtime_state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)

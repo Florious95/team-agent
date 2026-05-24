@@ -18,6 +18,7 @@ from team_agent.messaging.deps import (
     _runtime_lock,
     _runtime_team_agent_ids,
     _send_to_leader_receiver,
+    check_team_owner,
     load_runtime_state,
     load_spec,
     missing_tools,
@@ -82,6 +83,9 @@ def _send_message_unlocked(
         if ambiguous:
             return ambiguous
     state = select_runtime_state(workspace, team)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     event_log = EventLog(workspace)

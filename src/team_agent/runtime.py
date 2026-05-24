@@ -212,8 +212,10 @@ from team_agent.spec import load_spec, validate_result_envelope, validate_spec, 
 from team_agent.state import (
     SESSION_CAPTURE_FIELDS,
     SESSION_STATE_FIELDS,
+    check_team_owner,
     load_runtime_state,
     normalize_agent_session_state,
+    populate_team_owner_from_env,
     runtime_state_path,
     save_runtime_state,
     write_spec,
@@ -478,6 +480,9 @@ def ensure_workspace_dirs(workspace: Path) -> None:
 
 def shutdown(workspace: Path, keep_logs: bool = True) -> dict[str, Any]:
     state = load_runtime_state(workspace)
+    gate = check_team_owner(state)
+    if gate:
+        return gate
     session_name = state.get("session_name")
     event_log = EventLog(workspace)
     captured: list[str] = []
@@ -565,6 +570,58 @@ def remove_agent(
 
     with _runtime_lock(workspace, "remove-agent"):
         return lifecycle_remove_agent(workspace, agent_id, from_spec=from_spec, confirm=confirm, force=force)
+
+
+def acknowledge_idle(workspace: Path, agent_id: str) -> dict[str, Any]:
+    with _runtime_lock(workspace, "acknowledge-idle"):
+        state = load_runtime_state(workspace)
+        gate = check_team_owner(state)
+        if gate:
+            return gate
+        now = datetime.now(timezone.utc).isoformat()
+        coordinator = state.setdefault("coordinator", {})
+        ack = coordinator.setdefault("idle_acknowledged", {})
+        ack[agent_id] = {"acknowledged_at": now}
+        save_runtime_state(workspace, state)
+        EventLog(workspace).write("coordinator.idle_acknowledged", agent_id=agent_id, acknowledged_at=now)
+        return {"ok": True, "agent_id": agent_id, "acknowledged_at": now}
+
+
+def takeover(workspace: Path, team: str | None = None, confirm: bool = False) -> dict[str, Any]:
+    if not confirm:
+        return {
+            "ok": False,
+            "status": "refused",
+            "reason": "confirm_required",
+            "action": "rerun with --confirm to claim ownership of this team",
+        }
+    with _runtime_lock(workspace, "takeover"):
+        state = load_runtime_state(workspace)
+        pane_id = os.environ.get("TEAM_AGENT_LEADER_PANE_ID")
+        if not pane_id:
+            return {
+                "ok": False,
+                "status": "refused",
+                "reason": "no_caller_identity",
+                "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
+            }
+        previous_owner = state.get("team_owner")
+        new_owner = {
+            "pane_id": pane_id,
+            "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER", ""),
+            "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT", ""),
+            "claimed_at": datetime.now(timezone.utc).isoformat(),
+            "claimed_via": "takeover",
+        }
+        state["team_owner"] = new_owner
+        save_runtime_state(workspace, state)
+        EventLog(workspace).write(
+            "team_owner.takeover",
+            team=team,
+            previous_owner=previous_owner,
+            new_owner=new_owner,
+        )
+        return {"ok": True, "status": "claimed", "team_owner": new_owner, "previous_owner": previous_owner}
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
