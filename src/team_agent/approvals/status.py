@@ -43,18 +43,23 @@ def refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event
             )
 
 
-def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStore | None = None) -> None:
-    from team_agent.runtime import _tmux_window_exists, run_cmd
+def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStore | None = None) -> dict[str, dict[str, Any]]:
+    from team_agent.runtime import _tmux_window_exists, _tmux_pane_info, run_cmd
+    from team_agent.messaging.activity_detector import classify_agent_activity
     store = store or MessageStore(workspace)
     session_name = state.get("session_name")
     owner_team_id = team_state_key(state)
+    captures: dict[str, dict[str, Any]] = {}
     for agent_id, agent_state in state.get("agents", {}).items():
         health_status = agent_health_status(agent_state)
         last_output_at = agent_state.get("last_output_at")
         window = agent_state.get("window", agent_id)
+        scrollback = ""
+        pane_info: dict[str, Any] | None = None
         if session_name and _tmux_window_exists(session_name, window):
             proc = run_cmd(["tmux", "capture-pane", "-p", "-S", "-40", "-t", f"{session_name}:{window}"], timeout=5)
             if proc.returncode == 0:
+                scrollback = proc.stdout
                 digest = hashlib.sha256(proc.stdout.encode("utf-8", errors="ignore")).hexdigest()
                 if digest != agent_state.get("last_output_hash"):
                     last_output_at = datetime.now(timezone.utc).isoformat()
@@ -62,6 +67,24 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
                     agent_state["last_output_at"] = last_output_at
                 if capture_has_approval_prompt(proc.stdout):
                     health_status = "AWAITING_APPROVAL"
+            try:
+                pane_info = _tmux_pane_info(f"{session_name}:{window}")
+            except Exception:
+                pane_info = None
+            if scrollback and health_status != "AWAITING_APPROVAL":
+                activity = classify_agent_activity(
+                    agent_id,
+                    agent_state.get("provider") or "",
+                    last_output_at,
+                    pane_info,
+                    scrollback,
+                )
+                if activity.get("confidence", 0) >= 0.85:
+                    raw = str(activity.get("status") or "")
+                    mapping = {"idle": "IDLE", "working": "RUNNING", "stuck": "STUCK", "uncertain": "UNCERTAIN"}
+                    mapped = mapping.get(raw)
+                    if mapped:
+                        health_status = mapped
         current_task = current_task_for_agent(state.get("tasks", []), agent_id)
         store.upsert_agent_health(
             agent_id,
@@ -71,6 +94,8 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
             current_task_id=current_task,
             owner_team_id=owner_team_id,
         )
+        captures[agent_id] = {"scrollback": scrollback, "pane_info": pane_info, "health_status": health_status}
+    return captures
 
 
 def agent_health_status(agent_state: dict[str, Any]) -> str:

@@ -7,7 +7,27 @@ from typing import Any
 from team_agent.events import EventLog
 from team_agent.messaging.deps import datetime, save_runtime_state, team_state_key, timezone
 
-_COMPACTION_RESET_THRESHOLD = 3
+_COMPACTION_RESET_THRESHOLD_DEFAULT = 3
+
+
+def _compaction_reset_threshold(state: dict[str, Any]) -> int:
+    from team_agent.messaging.deps import load_spec
+    spec_path = state.get("spec_path")
+    if spec_path:
+        try:
+            spec = load_spec(spec_path)
+        except Exception:
+            spec = {}
+        runtime_cfg = spec.get("runtime", {}) if isinstance(spec, dict) else {}
+        raw = runtime_cfg.get("compaction_reset_threshold")
+        if raw is not None:
+            try:
+                value = int(raw)
+                if value > 0:
+                    return value
+            except (TypeError, ValueError):
+                pass
+    return _COMPACTION_RESET_THRESHOLD_DEFAULT
 _PROVIDER_COMMANDS = {"claude", "claude-code", "codex", "node", "node.exe", "claude.exe"}
 _COMPACTION_PATTERNS = (
     re.compile(r"context compacted", re.IGNORECASE),
@@ -90,25 +110,31 @@ def detect_compaction_degradation(
         event = "compaction_threshold_crossed.ignored_lossless_provider"
         event_log.write(event, agent_id=agent_id, provider=provider, team=owner_team_id, compaction_count=current)
         return {"ok": True, "event": event, "agent_id": agent_id, "provider": provider, "compaction_count": current}
-    if current < _COMPACTION_RESET_THRESHOLD and not (current >= 1 and stuck_loop):
-        return {"ok": True, "event": "compaction_threshold_crossed.below_threshold", "agent_id": agent_id, "compaction_count": current}
-    return _reset_or_recommend(workspace, event_log, agent_id, provider, owner_team_id, current)
+    threshold = _compaction_reset_threshold(state)
+    if current < threshold and not (current >= 1 and stuck_loop):
+        return {"ok": True, "event": "compaction_threshold_crossed.below_threshold", "agent_id": agent_id, "compaction_count": current, "threshold": threshold}
+    return _reset_or_recommend(workspace, state, event_log, agent_id, provider, owner_team_id, current, threshold)
 
 
 def _reset_or_recommend(
     workspace: Path,
+    state: dict[str, Any],
     event_log: EventLog,
     agent_id: str,
     provider: str,
     owner_team_id: str,
     compaction_count: int,
+    threshold: int,
 ) -> dict[str, Any]:
     from team_agent.runtime import reset_agent
     reset = reset_agent(workspace, agent_id, discard_session=True)
     if reset.get("ok"):
+        team_counts = state.setdefault("coordinator", {}).setdefault("compaction_counts", {}).setdefault(owner_team_id, {})
+        team_counts[agent_id] = 0
+        save_runtime_state(workspace, state)
         event = "compaction_threshold_crossed.auto_reset"
-        event_log.write(event, agent_id=agent_id, provider=provider, team=owner_team_id, compaction_count=compaction_count)
-        return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "reset": reset}
+        event_log.write(event, agent_id=agent_id, provider=provider, team=owner_team_id, compaction_count=compaction_count, threshold=threshold)
+        return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "threshold": threshold, "reset": reset}
     event = "compaction_threshold_crossed.recommend_reset"
     message = f"agent {agent_id} crossed Codex compaction threshold; run team-agent reset-agent {agent_id} --discard-session"
     event_log.write(
@@ -117,10 +143,11 @@ def _reset_or_recommend(
         provider=provider,
         team=owner_team_id,
         compaction_count=compaction_count,
+        threshold=threshold,
         leader_visible_message=message,
         reset_error=reset.get("error") or reset.get("reason"),
     )
-    return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "leader_visible_message": message, "reset": reset}
+    return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "threshold": threshold, "leader_visible_message": message, "reset": reset}
 
 
 def _latest_working_match(scrollback: str) -> tuple[str, int | None] | None:

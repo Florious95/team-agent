@@ -260,6 +260,11 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         _tmux_session_exists,
         _collect_results_and_notify_watchers,
     )
+    from team_agent.messaging.idle_alerts import (
+        detect_cross_worker_deadlocks,
+        detect_idle_fallbacks,
+    )
+    from team_agent.messaging.activity_detector import detect_compaction_degradation
     from team_agent.state import load_runtime_state, save_runtime_state
     state = load_runtime_state(workspace)
     event_log = EventLog(workspace)
@@ -272,10 +277,43 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     _refresh_agent_runtime_statuses(workspace, state, event_log)
     _handle_provider_startup_prompts(workspace, state, event_log)
     _handle_provider_runtime_prompts(workspace, state, event_log)
-    _sync_agent_health(workspace, state, store)
+    captures = _sync_agent_health(workspace, state, store) or {}
     delivered = _deliver_pending_messages(workspace, state, event_log)
     fired = _fire_due_scheduled_events(workspace, store, event_log)
     stuck = _detect_stuck_agents(workspace, state, store, event_log)
+    idle_alerts = detect_idle_fallbacks(workspace, state, store, event_log)
+    deadlock_alerts = detect_cross_worker_deadlocks(workspace, state, store, event_log)
+    compaction_results: list[dict[str, Any]] = []
+    for agent_id, agent_state in state.get("agents", {}).items():
+        provider = str(agent_state.get("provider") or "")
+        if provider != "codex":
+            continue
+        cap = captures.get(agent_id) or {}
+        scrollback = str(cap.get("scrollback") or "")
+        if not scrollback:
+            continue
+        stuck_loop = agent_id in (stuck or [])
+        result = detect_compaction_degradation(
+            workspace,
+            state,
+            event_log,
+            agent_id=agent_id,
+            provider=provider,
+            scrollback=scrollback,
+            stuck_loop=stuck_loop,
+        )
+        if result.get("event") and result.get("event") != "compaction_threshold_crossed.none":
+            compaction_results.append(result)
     save_runtime_state(workspace, state)
     results = _collect_results_and_notify_watchers(workspace, event_log)
-    return {"ok": True, "stop": False, "delivered": delivered, "scheduled": fired, "stuck": stuck, "results": results}
+    return {
+        "ok": True,
+        "stop": False,
+        "delivered": delivered,
+        "scheduled": fired,
+        "stuck": stuck,
+        "idle_alerts": idle_alerts,
+        "deadlock_alerts": deadlock_alerts,
+        "compaction": compaction_results,
+        "results": results,
+    }
