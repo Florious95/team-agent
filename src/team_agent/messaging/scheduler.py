@@ -14,6 +14,7 @@ from team_agent.messaging.deps import (
     timedelta,
     timezone,
 )
+from team_agent.state import team_state_candidates
 
 from pathlib import Path
 from typing import Any
@@ -179,7 +180,11 @@ def _detect_stuck_agents(
 def stuck_list(workspace: Path) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
-    if len(suppressed) == 1 and all(isinstance(value, dict) for value in suppressed.values()):
+    if (
+        len(suppressed) == 1
+        and all(isinstance(value, dict) for value in suppressed.values())
+        and not any(isinstance(value, dict) and set(value) & _ALERT_TYPES for value in suppressed.values())
+    ):
         only = next(iter(suppressed.values()))
         if all(isinstance(value, dict) for value in only.values()):
             suppressed = only
@@ -206,7 +211,7 @@ def stuck_cancel(
     owner_team_id = team_state_key(state)
     coordinator = state.setdefault("coordinator", {})
     suppressed = coordinator.setdefault("suppressed_idle_alerts", {})
-    team_suppressions = suppressed.setdefault(owner_team_id, {})
+    team_suppressions = suppressed.setdefault(owner_team_id, {}) if _use_team_scoped_suppressions(state) else suppressed
     agent_suppressions = team_suppressions.setdefault(agent_id, {})
     now = datetime.now(timezone.utc).isoformat()
     snapshot = _agent_alert_snapshot(state, store, agent_id, owner_team_id)
@@ -229,7 +234,10 @@ def _active_alert_suppression(
     alert_type: str,
 ) -> dict[str, Any] | None:
     owner_team_id = team_state_key(state)
-    entry = state.get("coordinator", {}).get("suppressed_idle_alerts", {}).get(owner_team_id, {}).get(agent_id, {}).get(alert_type)
+    suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    entry = suppressed.get(owner_team_id, {}).get(agent_id, {}).get(alert_type)
+    if not isinstance(entry, dict):
+        entry = suppressed.get(agent_id, {}).get(alert_type)
     if not isinstance(entry, dict):
         return None
     cleared = _suppression_clear_reason(state, store, event_log, agent_id, entry)
@@ -268,6 +276,12 @@ def _suppression_clear_reason(
 
 def _clear_alert_suppression(state: dict[str, Any], agent_id: str, alert_type: str, owner_team_id: str | None = None) -> None:
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    if agent_id in suppressed:
+        agent_suppressions = suppressed.get(agent_id, {})
+        agent_suppressions.pop(alert_type, None)
+        if not agent_suppressions:
+            suppressed.pop(agent_id, None)
+        return
     team_suppressions = suppressed.get(owner_team_id or team_state_key(state), {})
     agent_suppressions = team_suppressions.get(agent_id, {})
     agent_suppressions.pop(alert_type, None)
@@ -275,6 +289,10 @@ def _clear_alert_suppression(state: dict[str, Any], agent_id: str, alert_type: s
         team_suppressions.pop(agent_id, None)
     if not team_suppressions:
         suppressed.pop(owner_team_id or team_state_key(state), None)
+
+
+def _use_team_scoped_suppressions(state: dict[str, Any]) -> bool:
+    return len(team_state_candidates(state)) > 1
 
 
 def _agent_alert_snapshot(state: dict[str, Any], store: MessageStore, agent_id: str, owner_team_id: str | None = None) -> dict[str, Any]:

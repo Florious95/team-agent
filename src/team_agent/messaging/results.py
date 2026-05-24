@@ -237,6 +237,7 @@ def _notify_leader_of_report_result(
     state = _refresh_leader_receiver_or_flag_rebind(workspace, state, event_log, persist=owner_team_id is None)
     content = _format_report_result_notification(envelope, result_id)
     store = MessageStore(workspace)
+    event_owner_team_id = owner_team_id or _state_owner_team_id(state)
     event_id = store.add_scheduled_event(
         datetime.now(timezone.utc).isoformat(),
         leader_id,
@@ -250,7 +251,7 @@ def _notify_leader_of_report_result(
             "timeout": 30.0,
             "max_attempts": 3,
         },
-        owner_team_id=owner_team_id or team_state_key(state),
+        owner_team_id=event_owner_team_id,
     )
     coordinator = {"ok": False, "status": "not_started"}
     if state.get("session_name") or _leader_receiver_is_direct(state.get("leader_receiver", {})):
@@ -273,7 +274,7 @@ def _notify_leader_of_report_result(
         event_id=event_id,
         target=leader_id,
         coordinator=coordinator,
-        owner_team_id=owner_team_id or team_state_key(state),
+        owner_team_id=event_owner_team_id,
     )
     return notification
 
@@ -297,6 +298,12 @@ def _team_state_by_owner_id(workspace_state: dict[str, Any], owner_team_id: str)
         return None
     state = teams.get(owner_team_id)
     return state if isinstance(state, dict) else None
+
+
+def _state_owner_team_id(state: dict[str, Any]) -> str | None:
+    if state.get("session_name"):
+        return team_state_key(state)
+    return None
 
 
 def _refresh_leader_receiver_or_flag_rebind(
@@ -485,5 +492,3 @@ def _format_result_watcher_notification(result: dict[str, Any]) -> str:
         if rendered_tests:
             lines.insert(1, "Tests: " + "; ".join(rendered_tests))
     return "\n".join(lines)
-
-
