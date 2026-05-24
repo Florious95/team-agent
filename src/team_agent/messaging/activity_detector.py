@@ -67,19 +67,29 @@ def classify_agent_activity(
     if command and command not in _PROVIDER_COMMANDS:
         return {"status": "uncertain", "confidence": 0.75, "rationale": f"unexpected pane current_command={command}"}
     working = _latest_working_match(scrollback)
+    idle_pos = _latest_idle_prompt_position(scrollback)
+    if idle_pos is not None and (working is None or idle_pos > working[0]):
+        return {"status": "idle", "confidence": 0.9, "rationale": "provider idle prompt is the latest scrollback signal"}
     if working:
-        label, elapsed = working
+        _pos, label, elapsed = working
         if elapsed is not None and elapsed >= stuck_timeout_sec:
             return {"status": "stuck", "confidence": 0.85, "rationale": f"stale {label} indicator for {elapsed}s"}
-        return {"status": "working", "confidence": 0.9, "rationale": f"{label} indicator in scrollback"}
-    if any(pattern.search(scrollback) for pattern in _IDLE_PROMPT_PATTERNS):
-        return {"status": "idle", "confidence": 0.9, "rationale": "provider idle prompt observed"}
+        return {"status": "working", "confidence": 0.9, "rationale": f"{label} indicator is the latest scrollback signal"}
     age = _last_output_age_seconds(last_output_at, now)
     if age is not None and age >= stuck_timeout_sec:
         return {"status": "stuck", "confidence": 0.85, "rationale": "last_output_at exceeded timeout with no idle prompt"}
     if age is not None and age <= 120 and (not command or command in _PROVIDER_COMMANDS):
         return {"status": "working", "confidence": 0.7, "rationale": "recent output from provider command"}
     return {"status": "uncertain", "confidence": 0.5, "rationale": "no decisive prompt or working signal"}
+
+
+def _latest_idle_prompt_position(scrollback: str) -> int | None:
+    best: int | None = None
+    for pattern in _IDLE_PROMPT_PATTERNS:
+        for match in pattern.finditer(scrollback):
+            if best is None or match.start() > best:
+                best = match.start()
+    return best
 
 
 def detect_compaction_degradation(
@@ -152,7 +162,7 @@ def _reset_or_recommend(
     return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "threshold": threshold, "leader_visible_message": message, "reset": reset}
 
 
-def _latest_working_match(scrollback: str) -> tuple[str, int | None] | None:
+def _latest_working_match(scrollback: str) -> tuple[int, str, int | None] | None:
     best: tuple[int, str, int | None] | None = None
     for pattern in _WORKING_PATTERNS:
         for match in pattern.finditer(scrollback):
@@ -160,7 +170,7 @@ def _latest_working_match(scrollback: str) -> tuple[str, int | None] | None:
             elapsed = int(elapsed_raw) if elapsed_raw else None
             if best is None or match.start() > best[0]:
                 best = (match.start(), match.group(0), elapsed)
-    return None if best is None else (best[1], best[2])
+    return best
 
 
 def _last_output_age_seconds(last_output_at: str | None, now: datetime) -> float | None:
