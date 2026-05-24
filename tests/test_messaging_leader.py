@@ -76,12 +76,14 @@ class MessagingLeaderTests(unittest.TestCase):
                 save_runtime_state(workspace, state)
 
                 sent = runtime.send_message(workspace, None, "queued while busy", task_id="task_impl", requires_ack=True)
-                self.assertFalse(sent["ok"])
-                self.assertEqual(sent["status"], "accepted")
-                self.assertEqual(MessageStore(workspace).message_counts().get("accepted"), 1)
+                self.assertTrue(sent["ok"])
+                self.assertEqual(sent["status"], "delivered")
+                counts = MessageStore(workspace).message_counts()
+                self.assertEqual(counts.get("accepted"), None)
+                self.assertEqual(counts.get("submitted", 0) + counts.get("acknowledged", 0), 1)
 
                 pumped = runtime.collect(workspace)
-                self.assertIn(sent["message_id"], pumped["delivered_messages"])
+                self.assertNotIn(sent["message_id"], pumped["delivered_messages"])
 
                 collected = {"collected": []}
                 for _ in range(30):
@@ -98,7 +100,8 @@ class MessagingLeaderTests(unittest.TestCase):
                         self.assertTrue(status["tasks"][0].get("accepted_result_id"))
                 events = _events(workspace)
                 self.assertTrue(any(e["event"] == "runtime.status_detected" and e["status"] == "running" for e in events))
-                self.assertTrue(any(e["event"] == "send.pending_delivered" for e in events))
+                self.assertTrue(any(e["event"] == "send.deliver_attempt" and e.get("recipient_busy") for e in events))
+                self.assertFalse(any(e["event"] == "send.queued_busy" for e in events))
             finally:
                 runtime.shutdown(workspace)
 

@@ -69,21 +69,30 @@ class MessagingDeliveryTests(unittest.TestCase):
                 },
             )
 
+            paste_calls: list[list[str]] = []
+            send_calls: list[list[str]] = []
+
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "no visible token here"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted Content 1093 chars]" if paste_calls else "no visible token here")
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
                 sent = runtime.send_message(workspace, "fake_impl", "hello", timeout=0.01)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted_unverified")
-            self.assertFalse(sent["visible"])
+            self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["message_status"], "submitted")
+            self.assertTrue(sent["visible"])
             self.assertTrue(sent["submitted"])
-            self.assertIn("capture did not confirm", sent["warning"])
+            self.assertEqual(sent["paste_attempts"][0]["buffer_name"], f"team-agent-send-{sent['message_id']}")
+            self.assertTrue(sent["paste_attempts"][0]["buffer_deleted"])
             self.assertEqual(MessageStore(workspace).delivery_tokens()[0]["message_id"], sent["message_id"])
 
     def test_worker_delivery_retries_paste_until_message_ready(self) -> None:
@@ -97,7 +106,7 @@ class MessagingDeliveryTests(unittest.TestCase):
                 {
                     "spec_path": str(spec_path),
                     "session_name": "session",
-                    "agents": {"fake_impl": {"status": "running", "provider": "codex", "window": "fake_impl"}},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
                     "tasks": spec["tasks"],
                 },
             )
@@ -124,7 +133,8 @@ class MessagingDeliveryTests(unittest.TestCase):
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 sent = runtime.send_message(workspace, "fake_impl", "hello", timeout=0.01)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted")
+            self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["message_status"], "submitted")
             self.assertEqual(len(paste_calls), 2)
             self.assertEqual(len(send_calls), 1)
             self.assertEqual(sent["paste_attempts"][0]["verification"], "capture_missing_token")
@@ -141,7 +151,7 @@ class MessagingDeliveryTests(unittest.TestCase):
                 {
                     "spec_path": str(spec_path),
                     "session_name": "session",
-                    "agents": {"fake_impl": {"status": "running", "provider": "codex", "window": "fake_impl"}},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
                     "tasks": spec["tasks"],
                 },
             )
@@ -164,7 +174,8 @@ class MessagingDeliveryTests(unittest.TestCase):
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 sent = runtime.send_message(workspace, "fake_impl", content, timeout=30)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted")
+            self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["message_status"], "submitted")
             self.assertEqual(len(paste_calls), 1)
             self.assertEqual([call[-1] for call in send_calls], ["Enter"])
             self.assertEqual(sent["verification"], "capture_contains_message_fragment")
@@ -185,18 +196,26 @@ class MessagingDeliveryTests(unittest.TestCase):
                 },
             )
 
+            paste_calls: list[list[str]] = []
+            send_calls: list[list[str]] = []
+
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "still hidden"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted Content 1093 chars]" if paste_calls else "still hidden")
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
                 sent = runtime.send_message(workspace, "fake_impl", "hello", wait_visible=False)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "injected")
+            self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["message_status"], "submitted")
 
     def test_send_watch_result_registers_result_watcher(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-watch-result-") as tmp:
@@ -214,12 +233,19 @@ class MessagingDeliveryTests(unittest.TestCase):
                 },
             )
 
+            paste_calls: list[list[str]] = []
+            send_calls: list[list[str]] = []
+
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "still hidden"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted Content 1093 chars]" if paste_calls else "still hidden")
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
@@ -251,24 +277,32 @@ class MessagingDeliveryTests(unittest.TestCase):
                 },
             )
 
+            paste_calls: list[list[str]] = []
+            send_calls: list[list[str]] = []
+
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "streaming output without token"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted Content 1093 chars]" if paste_calls else "streaming output without token")
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 sent = runtime.send_message(workspace, "fake_impl", "hello", timeout=0.01, watch_result=True)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted_unverified")
+            self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["message_status"], "submitted")
             self.assertTrue(sent["submitted"])
             self.assertTrue(sent["watch_result"])
             watchers = MessageStore(workspace).result_watchers()
             self.assertEqual(len(watchers), 1)
             self.assertEqual(watchers[0]["message_id"], sent["message_id"])
-            self.assertTrue(any(e["event"] == "send.submitted_unverified" for e in _events(workspace)))
+            self.assertTrue(any(e["event"] == "send.submitted" for e in _events(workspace)))
 
     def test_broadcast_sends_only_to_current_team_and_excludes_sender(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-broadcast-") as tmp:
@@ -297,6 +331,7 @@ class MessagingDeliveryTests(unittest.TestCase):
                 },
             )
             worker_targets: list[str] = []
+            send_calls: list[list[str]] = []
 
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
@@ -306,8 +341,14 @@ class MessagingDeliveryTests(unittest.TestCase):
                     worker_targets.append(args[3])
                     self.assertNotIn("fake_impl", args[3])
                     self.assertNotIn("stale_outside_team", args[3])
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "prompt"
+                    proc.stdout = (
+                        "fake>"
+                        if worker_targets and len(send_calls) >= len(worker_targets)
+                        else ("› [Pasted Content 1093 chars]" if worker_targets else "prompt")
+                    )
                 return proc
 
             def fake_leader(*args, **kwargs):
@@ -330,6 +371,7 @@ class MessagingDeliveryTests(unittest.TestCase):
             self.assertEqual(complete["targets"], ["leader", "fake_peer", "fake_qa"])
             rejected = runtime.send_message(workspace, "stale_outside_team", "nope", sender="fake_impl", wait_visible=False)
             self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["status"], "refused")
             self.assertEqual(rejected["reason"], "target_not_in_team")
 
     def test_send_lock_reports_busy_instead_of_parallel_write(self) -> None:

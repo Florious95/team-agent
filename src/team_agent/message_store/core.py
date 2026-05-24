@@ -85,14 +85,19 @@ class MessageStore:
                 conn.execute(
                     """
                     update messages
-                    set status = ?,
+                    set status = case
+                            when status = 'acknowledged'
+                             and ? in ('injected', 'visible', 'submitted', 'submitted_unverified', 'delivered')
+                            then status
+                            else ?
+                        end,
                         updated_at = ?,
                         delivered_at = coalesce(?, delivered_at),
                         acknowledged_at = coalesce(?, acknowledged_at),
                         error = coalesce(?, error)
                     where message_id = ?
                     """,
-                    (status, now, delivered_at, acknowledged_at, error, message_id),
+                    (status, status, now, delivered_at, acknowledged_at, error, message_id),
                 )
                 if status in {
                     "injected",

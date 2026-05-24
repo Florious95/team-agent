@@ -188,12 +188,12 @@ def _send_single_message_unlocked(
         raise RuntimeError("send requires target or --task")
     if not _is_leader_target(target, leader_id) and not _is_runtime_team_agent(target, state, spec):
         event_log.write("send.target_rejected", sender=sender, target=target, reason="target_not_in_team")
-        return {"ok": False, "status": "failed", "reason": "target_not_in_team", "from": sender, "to": target}
+        return {"ok": False, "status": "refused", "reason": "target_not_in_team", "from": sender, "to": target}
     store = MessageStore(workspace)
     message_id = store.create_message(task_id, sender, target, content, requires_ack=requires_ack)
     delivered_result = _deliver_pending_message(workspace, state, message_id, wait_visible=wait_visible, timeout=timeout)
     row = _message_by_id(store, message_id)
-    message_status = row["status"] if row else delivered_result.get("status", "accepted")
+    message_status = row["status"] if row else delivered_result.get("message_status", delivered_result.get("status", "accepted"))
     if (
         mirror_peer
         and not _is_leader_sender(sender, leader_id)
@@ -230,12 +230,14 @@ def _send_single_message_unlocked(
     result = {
         "ok": bool(delivered_result.get("ok")),
         "message_id": message_id,
-        "status": message_status,
+        "status": delivered_result.get("status", message_status),
+        "message_status": message_status,
         "to": target,
-        "visible": message_status == "visible",
+        "visible": message_status in {"visible", "submitted"},
         "submitted": message_status in {"visible", "submitted", "submitted_unverified", "delivered", "acknowledged"},
         "verification": delivered_result.get("verification"),
         "submit_verification": delivered_result.get("submit_verification"),
+        "turn_verification": delivered_result.get("turn_verification"),
     }
     if delivered_result.get("queued"):
         result["queued"] = True

@@ -94,19 +94,25 @@ class RuntimeTests05(unittest.TestCase):
                     "tasks": spec["tasks"],
                 },
             )
+            paste_calls: list[list[str]] = []
+            send_calls: list[list[str]] = []
 
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\nfake_peer\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
+                elif args[:3] == ["tmux", "send-keys", "-t"]:
+                    send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "msg_"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted Content 1093 chars]" if paste_calls else "msg_")
                 return proc
 
-            with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
+            with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 allowed = runtime.send_message(workspace, "fake_peer", "peer hello", sender="fake_impl", wait_visible=False)
             self.assertTrue(allowed["ok"])
-            self.assertEqual(allowed["status"], "injected")
+            self.assertEqual(allowed["status"], "delivered")
             self.assertFalse([e for e in _events(workspace) if e["event"] == "send.peer_rejected"])
 
     def test_quick_start_accepts_loose_role_doc_directory(self) -> None:

@@ -233,13 +233,12 @@ Work.
                 {
                     "spec_path": str(spec_path),
                     "session_name": "session",
-                    "agents": {"fake_impl": {"status": "running", "provider": "codex", "window": "fake_impl"}},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
                     "tasks": spec["tasks"],
                 },
             )
             paste_calls: list[list[str]] = []
             send_calls: list[list[str]] = []
-            wait_timeouts: list[float] = []
 
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
@@ -250,26 +249,21 @@ Work.
                 elif args[:3] == ["tmux", "send-keys", "-t"]:
                     send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "codex>"
+                    proc.stdout = "fake>" if send_calls else ("› [Pasted text #1 +67 lines]" if paste_calls else "fake>")
                 return proc
-
-            def fake_wait(target: str, message_id: str, timeout: float, expected_text: str = ""):
-                wait_timeouts.append(timeout)
-                return True, "capture_contains_pasted_content_prompt", "› [Pasted text #1 +67 lines]"
 
             with (
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
-                patch("team_agent.runtime._wait_for_worker_message_ready", side_effect=fake_wait),
                 patch("team_agent.runtime.time.sleep", return_value=None),
             ):
                 sent = runtime.send_message(workspace, "fake_impl", "x" * 6000, timeout=30)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted")
+            self.assertEqual(sent["status"], "delivered")
             self.assertEqual(len(paste_calls), 1)
             self.assertEqual([call[-1] for call in send_calls], ["Enter"])
-            self.assertEqual(sent["paste_attempts"][0]["verification"], "capture_contains_pasted_content_prompt")
-            self.assertLess(wait_timeouts[0], 30)
-            self.assertEqual(wait_timeouts[0], runtime.TMUX_PASTE_MIN_READY_TIMEOUT)
+            self.assertEqual(sent["paste_attempts"][0]["verification"], "capture_contains_new_pasted_content_prompt")
+            self.assertLess(sent["paste_attempts"][0]["ready_timeout_sec"], 30)
+            self.assertGreaterEqual(sent["paste_attempts"][0]["ready_timeout_sec"], runtime.TMUX_PASTE_MIN_READY_TIMEOUT)
 
     def test_worker_pasted_content_prompt_retries_enter_until_submitted(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-send-enter-retry-") as tmp:
@@ -282,26 +276,30 @@ Work.
                 {
                     "spec_path": str(spec_path),
                     "session_name": "session",
-                    "agents": {"fake_impl": {"status": "running", "provider": "codex", "window": "fake_impl"}},
+                    "agents": {"fake_impl": {"status": "running", "provider": "fake", "window": "fake_impl"}},
                     "tasks": spec["tasks"],
                 },
             )
             send_calls: list[list[str]] = []
+            paste_calls: list[list[str]] = []
+            paste_calls: list[list[str]] = []
 
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
                 elif args[:3] == ["tmux", "send-keys", "-t"]:
                     send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "codex>" if len(send_calls) >= 2 else "› [Pasted Content 1093 chars]"
+                    proc.stdout = "fake>" if len(send_calls) >= 2 else ("› [Pasted Content 1093 chars]" if paste_calls else "fake>")
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 sent = runtime.send_message(workspace, "fake_impl", "long payload", timeout=0.01)
             self.assertTrue(sent["ok"])
-            self.assertEqual(sent["status"], "submitted")
+            self.assertEqual(sent["status"], "delivered")
             self.assertEqual(sent["submit_verification"], "pasted_content_prompt_absent_after_submit")
             self.assertEqual([call[-1] for call in send_calls], ["Enter", "Enter"])
             self.assertEqual(sent["submit_attempts"][0]["verification"], "pasted_content_prompt_still_present")
@@ -323,26 +321,29 @@ Work.
                 },
             )
             send_calls: list[list[str]] = []
+            paste_calls: list[list[str]] = []
 
             def fake_run_cmd(args: list[str], timeout: int = 20):
                 proc = Mock(returncode=0, stdout="", stderr="")
                 if args[:3] == ["tmux", "list-windows", "-t"]:
                     proc.stdout = "fake_impl\n"
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    paste_calls.append(args)
                 elif args[:3] == ["tmux", "send-keys", "-t"]:
                     send_calls.append(args)
                 elif args[:3] == ["tmux", "capture-pane", "-p"]:
-                    proc.stdout = "› [Pasted Content 1093 chars]"
+                    proc.stdout = "› [Pasted Content 1093 chars]" if paste_calls else "codex>"
                 return proc
 
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
                 sent = runtime.send_message(workspace, "fake_impl", "long payload", timeout=0.01)
             self.assertFalse(sent["ok"])
-            self.assertEqual(sent["status"], "injected_unverified")
+            self.assertEqual(sent["status"], "failed")
             self.assertEqual(sent["submit_verification"], "pasted_content_prompt_still_present_after_retries")
             self.assertEqual([call[-1] for call in send_calls], ["Enter", "Enter", "Enter"])
             events = _events(workspace)
-            unverified = next(e for e in events if e["event"] == "send.unverified")
-            self.assertEqual(unverified["submit_verification"], "pasted_content_prompt_still_present_after_retries")
+            failed = next(e for e in events if e["event"] == "send.failed")
+            self.assertEqual(failed["submit_verification"], "pasted_content_prompt_still_present_after_retries")
 
     def test_delivery_claim_prevents_duplicate_worker_injection(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-duplicate-delivery-") as tmp:
@@ -372,9 +373,9 @@ Work.
                 second = runtime._deliver_pending_message(workspace, state, message_id)
 
             self.assertTrue(first["ok"])
-            self.assertEqual(first["status"], "visible")
+            self.assertEqual(first["status"], "delivered")
             self.assertTrue(second["ok"])
-            self.assertEqual(second["status"], "visible")
+            self.assertEqual(second["status"], "submitted")
             self.assertEqual(second["reason"], "message_already_claimed")
             self.assertEqual(len(paste_calls), 1)
             attempts = [e for e in _events(workspace) if e["event"] == "send.deliver_attempt" and e["message_id"] == message_id]
