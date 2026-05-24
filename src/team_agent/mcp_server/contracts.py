@@ -122,4 +122,22 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "stuck_list",
+        "description": "List manually suppressed idle-triggered alerts for this team.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "stuck_cancel",
+        "description": "Suppress repeated stuck/idle alerts for one agent until meaningful agent state changes.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["agent_id"],
+            "properties": {
+                "agent_id": {"type": "string"},
+                "alert_type": {"type": "string", "enum": ["stuck", "idle_fallback", "all"]},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]

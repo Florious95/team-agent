@@ -189,3 +189,9 @@ class TeamOrchestratorTools:
         sender = agent_id or self._infer_agent_id(task_id=task_id, target="leader") or "unknown"
         message_id = store.create_message(task_id, sender, "leader", question, requires_ack=True)
         return {"ok": True, "message_id": message_id, "status": "needs_human"}
+
+    def stuck_list(self) -> dict[str, Any]:
+        return runtime.stuck_list(self.workspace)
+
+    def stuck_cancel(self, agent_id: str, alert_type: str = "stuck") -> dict[str, Any]:
+        return runtime.stuck_cancel(self.workspace, agent_id, alert_type=alert_type, suppressed_by=self.agent_id or "leader")

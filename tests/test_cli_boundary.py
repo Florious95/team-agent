@@ -53,6 +53,8 @@ LEGACY_CLI_EXPORTS = (
     "cmd_add_agent",
     "cmd_fork_agent",
     "cmd_remove_agent",
+    "cmd_stuck_list",
+    "cmd_stuck_cancel",
     "cmd_allow_peer_talk",
     "cmd_advanced",
     "cmd_install_skill",

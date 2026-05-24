@@ -36,6 +36,10 @@ def dispatch(tools: TeamOrchestratorTools, request: dict[str, Any]) -> dict[str,
         return tools.fork_agent(**args)
     if tool == "request_human":
         return tools.request_human(**args)
+    if tool == "stuck_list":
+        return tools.stuck_list()
+    if tool == "stuck_cancel":
+        return tools.stuck_cancel(**args)
     return _tool_error_result("unknown_tool", f"unknown tool {tool!r}", exc_type="UnknownTool")
 
 

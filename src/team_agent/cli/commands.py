@@ -243,6 +243,19 @@ def cmd_remove_agent(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def cmd_stuck_list(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.stuck_list(Path(args.workspace).resolve())
+
+
+def cmd_stuck_cancel(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.stuck_cancel(
+        Path(args.workspace).resolve(),
+        args.agent,
+        alert_type=args.alert_type,
+        suppressed_by="leader",
+    )
+
+
 def cmd_allow_peer_talk(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.allow_peer_talk(Path(args.workspace).resolve(), args.agent_a, args.agent_b)
 

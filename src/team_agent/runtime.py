@@ -881,6 +881,8 @@ _DELEGATE_MAP: dict[str, str] = {
     'reset_agent': 'team_agent.lifecycle.operations.reset_agent',
     'start_agent': 'team_agent.lifecycle.start.start_agent',
     'stop_agent': 'team_agent.lifecycle.operations.stop_agent',
+    'stuck_cancel': 'team_agent.messaging.scheduler.stuck_cancel',
+    'stuck_list': 'team_agent.messaging.scheduler.stuck_list',
 }
 
 

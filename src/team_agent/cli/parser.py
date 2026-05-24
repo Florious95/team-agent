@@ -43,6 +43,8 @@ from team_agent.cli.commands import (
     cmd_add_agent,
     cmd_fork_agent,
     cmd_remove_agent,
+    cmd_stuck_list,
+    cmd_stuck_cancel,
     cmd_allow_peer_talk,
     cmd_advanced,
     cmd_install_skill,
@@ -340,6 +342,18 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_remove_agent)
 
+    p = sub.add_parser("stuck-list", help="List manually suppressed idle-triggered alerts")
+    p.add_argument("--workspace", default=".")
+    add_json(p)
+    p.set_defaults(func=cmd_stuck_list)
+
+    p = sub.add_parser("stuck-cancel", help="Suppress repeated stuck/idle alerts for one agent")
+    p.add_argument("agent")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--alert-type", choices=["stuck", "idle_fallback", "all"], default="stuck")
+    add_json(p)
+    p.set_defaults(func=cmd_stuck_cancel)
+
     p = sub.add_parser("install-skill", help=argparse.SUPPRESS)
     p.add_argument("--target", choices=["codex", "claude", "all"], default="codex")
     p.add_argument("--dest", help="Explicit destination directory; overrides --target")
@@ -376,7 +390,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:

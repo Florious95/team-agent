@@ -5,7 +5,9 @@ from team_agent.messaging.deps import (
     MessageStore,
     datetime,
     json,
+    load_runtime_state,
     load_spec,
+    save_runtime_state,
     send_message,
     timedelta,
     timezone,
@@ -16,6 +18,7 @@ from typing import Any
 
 _ACTIVE_TASK_STATUSES = {"pending", "assigned", "in_progress", "ready", "running", "needs_retry"}
 _INBOUND_WORK_STATUSES = {"pending", "accepted", "target_resolved", "injected"}
+_DELIVERED_MESSAGE_STATUSES = {"visible", "submitted", "delivered", "acknowledged"}
 _PROGRESS_EVENTS = {
     "mcp.report_result",
     "report_result.accepted",
@@ -25,6 +28,8 @@ _PROGRESS_EVENTS = {
     "leader_receiver.submitted",
     "communication.peer_mirrored",
 }
+_RESTART_RESET_EVENTS = {"restart.agent_start", "restart.complete", "reset_agent.complete", "start_agent.complete"}
+_ALERT_TYPES = {"stuck", "idle_fallback"}
 
 def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
     fired: list[int] = []
@@ -117,9 +122,12 @@ def _detect_stuck_agents(
             last = last.replace(tzinfo=timezone.utc)
         if (now - last).total_seconds() < stuck_timeout:
             continue
+        suppression = _active_alert_suppression(state, store, event_log, agent_id, "stuck")
         has_work, work_reason = _agent_has_stuck_relevant_work(state, store, agent_id)
         if not has_work:
             event_log.write("coordinator.agent_stuck_suppressed", agent_id=agent_id, reason="idle_no_work", last_output_at=row["last_output_at"])
+            continue
+        if suppression:
             continue
         progress_event = _recent_agent_progress_event(event_log, agent_id, last)
         if progress_event:
@@ -163,6 +171,104 @@ def _detect_stuck_agents(
     return stuck
 
 
+def stuck_list(workspace: Path) -> dict[str, Any]:
+    state = load_runtime_state(workspace)
+    suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    return {"ok": True, "suppressed_idle_alerts": suppressed}
+
+
+def stuck_cancel(
+    workspace: Path,
+    agent_id: str,
+    alert_type: str = "stuck",
+    suppressed_by: str = "leader",
+) -> dict[str, Any]:
+    if alert_type == "all":
+        alert_types = sorted(_ALERT_TYPES)
+    elif alert_type in _ALERT_TYPES:
+        alert_types = [alert_type]
+    else:
+        return {"ok": False, "status": "refused", "reason": "invalid_alert_type", "alert_type": alert_type}
+    state = load_runtime_state(workspace)
+    store = MessageStore(workspace)
+    coordinator = state.setdefault("coordinator", {})
+    suppressed = coordinator.setdefault("suppressed_idle_alerts", {})
+    agent_suppressions = suppressed.setdefault(agent_id, {})
+    now = datetime.now(timezone.utc).isoformat()
+    snapshot = _agent_alert_snapshot(state, store, agent_id)
+    for item in alert_types:
+        agent_suppressions[item] = {
+            "suppressed_at": now,
+            "suppressed_by": suppressed_by,
+            "snapshot": snapshot,
+        }
+    save_runtime_state(workspace, state)
+    EventLog(workspace).write("coordinator.idle_alert_suppressed", agent_id=agent_id, alert_types=alert_types, suppressed_by=suppressed_by)
+    return {"ok": True, "agent_id": agent_id, "alert_types": alert_types, "suppressed": agent_suppressions}
+
+
+def _active_alert_suppression(
+    state: dict[str, Any],
+    store: MessageStore,
+    event_log: EventLog,
+    agent_id: str,
+    alert_type: str,
+) -> dict[str, Any] | None:
+    entry = state.get("coordinator", {}).get("suppressed_idle_alerts", {}).get(agent_id, {}).get(alert_type)
+    if not isinstance(entry, dict):
+        return None
+    cleared = _suppression_clear_reason(state, store, event_log, agent_id, entry)
+    if cleared:
+        _clear_alert_suppression(state, agent_id, alert_type)
+        event_log.write("coordinator.idle_alert_suppression_cleared", agent_id=agent_id, alert_type=alert_type, reason=cleared)
+        return None
+    return entry
+
+
+def _suppression_clear_reason(
+    state: dict[str, Any],
+    store: MessageStore,
+    event_log: EventLog,
+    agent_id: str,
+    entry: dict[str, Any],
+) -> str | None:
+    previous = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
+    current = _agent_alert_snapshot(state, store, agent_id)
+    if current.get("assigned_task_ids") != previous.get("assigned_task_ids"):
+        return "task_assignment_changed"
+    if current.get("delivered_message_ids") != previous.get("delivered_message_ids"):
+        return "inbound_delivery_changed"
+    try:
+        suppressed_at = datetime.fromisoformat(str(entry.get("suppressed_at")))
+    except ValueError:
+        return "invalid_suppression_timestamp"
+    if suppressed_at.tzinfo is None:
+        suppressed_at = suppressed_at.replace(tzinfo=timezone.utc)
+    if _recent_agent_progress_event(event_log, agent_id, suppressed_at):
+        return "progress_event"
+    if _recent_restart_or_reset_event(event_log, agent_id, suppressed_at):
+        return "restart_or_reset"
+    return None
+
+
+def _clear_alert_suppression(state: dict[str, Any], agent_id: str, alert_type: str) -> None:
+    suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
+    agent_suppressions = suppressed.get(agent_id, {})
+    agent_suppressions.pop(alert_type, None)
+    if not agent_suppressions:
+        suppressed.pop(agent_id, None)
+
+
+def _agent_alert_snapshot(state: dict[str, Any], store: MessageStore, agent_id: str) -> dict[str, Any]:
+    assigned_task_ids = sorted(str(task.get("id")) for task in state.get("tasks", []) if task.get("assignee") == agent_id)
+    delivered_message_ids = sorted(
+        str(message.get("message_id"))
+        for message in store.messages()
+        if message.get("recipient") == agent_id and message.get("status") in _DELIVERED_MESSAGE_STATUSES
+    )
+    return {"assigned_task_ids": assigned_task_ids, "delivered_message_ids": delivered_message_ids}
+
+
 def _agent_has_stuck_relevant_work(state: dict[str, Any], store: MessageStore, agent_id: str) -> tuple[bool, str]:
     for task in state.get("tasks", []):
         if task.get("assignee") == agent_id and task.get("status", "pending") in _ACTIVE_TASK_STATUSES:
@@ -195,3 +301,20 @@ def _event_mentions_agent(event: dict[str, Any], agent_id: str) -> bool:
         return True
     payload = event.get("payload")
     return isinstance(payload, dict) and (payload.get("from") == agent_id or payload.get("to") == agent_id)
+
+
+def _recent_restart_or_reset_event(event_log: EventLog, agent_id: str, since: datetime) -> dict[str, Any] | None:
+    for event in reversed(event_log.tail(200)):
+        if event.get("event") not in _RESTART_RESET_EVENTS:
+            continue
+        if event.get("agent_id") != agent_id and agent_id not in set(event.get("agents") or []):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(event.get("ts")))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= since:
+            return event
+    return None
