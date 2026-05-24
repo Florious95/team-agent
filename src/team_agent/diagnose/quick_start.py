@@ -69,6 +69,9 @@ def quick_start(
     if dangerous and not yes:
         raise RuntimeError("quick-start requires --yes when dangerous_auto_approve is true")
     launched = launch(spec_path, auto_approve=True, skip_profile_smoke=True)
+    from team_agent.leader import autobind_leader_receiver_from_env
+    leader_provider = str(compiled["spec"].get("leader", {}).get("provider") or "codex")
+    autobind_leader_receiver_from_env(workspace, leader_provider, source="quick_start")
     coordinator = start_coordinator(workspace)
     ready = wait_ready(workspace, timeout=120)
     summary = (

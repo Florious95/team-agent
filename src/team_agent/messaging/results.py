@@ -15,8 +15,10 @@ from team_agent.messaging.deps import (
     _leader_id,
     _leader_receiver_is_direct,
     _notify_leader_of_report_result as _runtime_notify_leader_of_report_result,
+    _rediscover_leader_receiver,
     _refresh_agent_runtime_statuses,
     _result_status_to_task_status,
+    _validate_leader_receiver,
     copy,
     datetime,
     json,
@@ -226,6 +228,7 @@ def _notify_leader_of_report_result(
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path) if spec_path.exists() else {}
     leader_id = _leader_id(state, spec)
+    state = _refresh_leader_receiver_or_flag_rebind(workspace, state, event_log)
     content = _format_report_result_notification(envelope, result_id)
     store = MessageStore(workspace)
     event_id = store.add_scheduled_event(
@@ -265,6 +268,41 @@ def _notify_leader_of_report_result(
         coordinator=coordinator,
     )
     return notification
+
+
+def _refresh_leader_receiver_or_flag_rebind(
+    workspace: Path,
+    state: dict[str, Any],
+    event_log: EventLog,
+) -> dict[str, Any]:
+    receiver = state.get("leader_receiver") or {}
+    if receiver.get("mode") != "direct_tmux":
+        return state
+    validation = _validate_leader_receiver(receiver)
+    if validation.get("ok"):
+        return state
+    rediscovered = _rediscover_leader_receiver(receiver, event_log)
+    if rediscovered.get("status") == "updated":
+        state["leader_receiver"] = rediscovered["receiver"]
+        save_runtime_state(workspace, state)
+        event_log.write(
+            "leader_receiver.rebind_applied",
+            old_pane_id=receiver.get("pane_id"),
+            new_pane_id=rediscovered["receiver"].get("pane_id"),
+            reason=validation.get("reason"),
+            source="report_result_notify",
+        )
+        return state
+    event_log.write(
+        "leader_receiver.rebind_required",
+        old_pane_id=receiver.get("pane_id"),
+        reason=validation.get("reason"),
+        validation_error=validation.get("error"),
+        rediscovery_status=rediscovered.get("status"),
+        provider=receiver.get("provider"),
+        source="report_result_notify",
+    )
+    return state
 
 
 def _format_report_result_notification(envelope: dict[str, Any], result_id: str) -> str:

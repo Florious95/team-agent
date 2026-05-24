@@ -157,9 +157,44 @@ def attach_leader_to_state(
     return receiver, validation
 
 
+def autobind_leader_receiver_from_env(
+    workspace: Path,
+    provider: str,
+    source: str,
+) -> dict[str, Any] | None:
+    tmux_pane = os.environ.get("TMUX_PANE")
+    if not tmux_pane:
+        return None
+    from team_agent.runtime import ensure_workspace_dirs
+    ensure_workspace_dirs(workspace)
+    state = load_runtime_state(workspace)
+    event_log = EventLog(workspace)
+    try:
+        receiver, _validation = attach_leader_to_state(
+            workspace,
+            state,
+            pane=tmux_pane,
+            provider=provider,
+            event_log=event_log,
+            source=source,
+        )
+    except Exception as exc:
+        event_log.write(
+            "leader_receiver.autobind_skipped",
+            pane=tmux_pane,
+            provider=provider,
+            source=source,
+            error=str(exc),
+        )
+        return None
+    save_runtime_state(workspace, state)
+    return receiver
+
+
 __all__ = [
     "attach_leader",
     "attach_leader_to_state",
+    "autobind_leader_receiver_from_env",
     "leader_session_name",
     "leader_start_plan",
     "start_leader",

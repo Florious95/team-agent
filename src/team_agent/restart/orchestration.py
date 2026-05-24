@@ -297,6 +297,9 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     save_team_runtime_snapshot(workspace, state)
     MessageStore(workspace)
     write_team_state(workspace, spec, state)
+    from team_agent.leader import autobind_leader_receiver_from_env
+    leader_provider = str(spec.get("leader", {}).get("provider") or "codex")
+    autobind_leader_receiver_from_env(workspace, leader_provider, source="restart")
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
     return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
