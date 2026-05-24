@@ -106,6 +106,49 @@ class StatusDetectorMultiSignalTests(unittest.TestCase):
         self.assertGreaterEqual(out["confidence"], 0.85, out)
         self.assertIn("latest", out["rationale"])
 
+    def test_codex_bare_prompt_with_multi_blank_gap_is_idle(self) -> None:
+        scrollback = (
+            "• PHASEE_STATUS_WORK_20260524T231517Z-phasee-e2e\n"
+            "\n"
+            "────────────────────────────────────────────────────────────────────────────────\n"
+            "\n"
+            "✱ Working (12s) ⠋\n"
+            "   ↳ esc to interrupt\n"
+            "\n"
+            "›\n"
+            "\n"
+            "\n"
+            "\n"
+            "\n"
+            "  gpt-5.5 xhigh · /private/tmp/teamE-20260524T231517Z-phasee-e2e\n"
+        )
+        out = _classify(
+            last_output_age_sec=30,
+            pane={"pane_current_command": "node", "pane_in_mode": "0"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "idle", out)
+        self.assertGreaterEqual(out["confidence"], 0.85, out)
+        self.assertIn("latest", out["rationale"])
+
+    def test_codex_placeholder_prompt_with_two_blank_gap_is_idle(self) -> None:
+        scrollback = (
+            "✱ Working (3s) ⠋\n"
+            "   ↳ esc to interrupt\n"
+            "\n"
+            "› Find and fix a bug in @filename\n"
+            "\n"
+            "  gpt-5.5 medium fast · /private/tmp/teamE-fresh\n"
+        )
+        out = _classify(
+            last_output_age_sec=30,
+            pane={"pane_current_command": "node", "pane_in_mode": "0"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "idle", out)
+        self.assertGreaterEqual(out["confidence"], 0.85, out)
+        self.assertIn("latest", out["rationale"])
+
     def test_old_output_without_prompt_or_spinner_is_high_confidence_stuck(self) -> None:
         out = _classify(
             last_output_age_sec=420,
