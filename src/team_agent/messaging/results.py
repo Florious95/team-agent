@@ -25,13 +25,17 @@ from team_agent.messaging.deps import (
     load_runtime_state,
     load_spec,
     save_runtime_state,
-    send_message,
     start_coordinator,
     team_state_key,
     timezone,
     update_task_status,
     validate_result_envelope,
     write_team_state,
+)
+from team_agent.messaging.result_delivery import (
+    format_result_watcher_notification as _format_result_watcher_notification,
+    notify_result_watchers as _notify_result_watchers,
+    retry_result_deliveries as _retry_result_deliveries,
 )
 
 from pathlib import Path
@@ -389,106 +393,19 @@ def _record_invalid_result(
 
 def _collect_results_and_notify_watchers(workspace: Path, event_log: EventLog) -> dict[str, Any]:
     store = MessageStore(workspace)
-    if not store.results(uncollected_only=True):
-        return {"ok": True, "collected": 0, "notified": []}
-    result = collect(workspace)
-    if not result.get("ok"):
-        event_log.write("coordinator.result_collect_failed", invalid_results=result.get("invalid_results", []))
-        return {"ok": False, "collected": 0, "notified": [], "error": "collect_failed"}
+    result: dict[str, Any] = {"ok": True, "collected_results": []}
+    if store.results(uncollected_only=True):
+        result = collect(workspace)
+        if not result.get("ok"):
+            event_log.write("coordinator.result_collect_failed", invalid_results=result.get("invalid_results", []))
+            return {"ok": False, "collected": 0, "notified": [], "error": "collect_failed"}
     notified: list[dict[str, Any]] = []
     for item in result.get("collected_results", []):
         notified.extend(_notify_result_watchers(workspace, item, event_log))
+    notified.extend(_retry_result_deliveries(workspace, event_log))
     event_log.write(
         "coordinator.result_collect",
         collected=len(result.get("collected_results", [])),
         notified=len(notified),
     )
     return {"ok": True, "collected": len(result.get("collected_results", [])), "notified": notified}
-
-
-def _notify_result_watchers(workspace: Path, result: dict[str, Any], event_log: EventLog) -> list[dict[str, Any]]:
-    store = MessageStore(workspace)
-    notified: list[dict[str, Any]] = []
-    for watcher in store.pending_result_watchers():
-        if not _watcher_matches_result(watcher, result):
-            continue
-        content = _format_result_watcher_notification(result)
-        try:
-            delivery = send_message(
-                workspace,
-                watcher.get("leader_id") or "leader",
-                content,
-                task_id=result.get("task_id"),
-                sender="coordinator",
-                requires_ack=False,
-                wait_visible=False,
-            )
-        except Exception as exc:
-            store.mark_result_watcher(
-                watcher["watcher_id"],
-                "notify_failed",
-                result_id=result.get("result_id"),
-                error=str(exc),
-            )
-            event_log.write("result_watcher.notify_failed", watcher_id=watcher["watcher_id"], error=str(exc))
-            notified.append({"watcher_id": watcher["watcher_id"], "ok": False, "error": str(exc)})
-            continue
-        status = "notified" if delivery.get("ok") else "notify_failed"
-        error = delivery.get("reason") or delivery.get("error")
-        store.mark_result_watcher(
-            watcher["watcher_id"],
-            status,
-            result_id=result.get("result_id"),
-            notified_message_id=delivery.get("message_id"),
-            error=error,
-        )
-        event_log.write(
-            "result_watcher.notified",
-            watcher_id=watcher["watcher_id"],
-            result_id=result.get("result_id"),
-            task_id=result.get("task_id"),
-            agent_id=result.get("agent_id"),
-            ok=bool(delivery.get("ok")),
-            delivery_status=delivery.get("status"),
-            message_id=delivery.get("message_id"),
-            error=error,
-        )
-        notified.append(
-            {
-                "watcher_id": watcher["watcher_id"],
-                "result_id": result.get("result_id"),
-                "ok": bool(delivery.get("ok")),
-                "message_id": delivery.get("message_id"),
-            }
-        )
-    return notified
-
-
-def _watcher_matches_result(watcher: dict[str, Any], result: dict[str, Any]) -> bool:
-    task_id = watcher.get("task_id")
-    agent_id = watcher.get("agent_id")
-    task_matches = not task_id or task_id == result.get("task_id")
-    agent_matches = not agent_id or agent_id == result.get("agent_id")
-    return task_matches and agent_matches
-
-
-def _format_result_watcher_notification(result: dict[str, Any]) -> str:
-    task_id = result.get("task_id") or "unknown task"
-    agent_id = result.get("agent_id") or "unknown agent"
-    status = result.get("status") or "unknown"
-    summary = result.get("summary") or "completed"
-    lines = [
-        f"Task {task_id} reported {status} from {agent_id}: {summary}",
-        "Team Agent has collected this result and updated team_state.md. No manual polling is needed.",
-    ]
-    tests = result.get("tests") or []
-    if tests:
-        rendered_tests = []
-        for test in tests[:3]:
-            if isinstance(test, dict):
-                command = test.get("command") or "test"
-                test_status = test.get("status") or "unknown"
-                rendered_tests.append(f"{command}={test_status}")
-        if rendered_tests:
-            lines.insert(1, "Tests: " + "; ".join(rendered_tests))
-    return "\n".join(lines)
