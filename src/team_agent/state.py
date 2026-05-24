@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import copy
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,100 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
     state = json.loads(path.read_text(encoding="utf-8"))
     normalize_agent_session_state(state)
     return state
+
+
+def team_state_key(state: dict[str, Any]) -> str:
+    for field in ("team_dir", "spec_path"):
+        value = state.get(field)
+        if not value:
+            continue
+        path = Path(str(value))
+        key = path.name if field == "team_dir" else path.parent.name
+        if key and key not in {".team", "runtime"}:
+            return key
+    return str(state.get("session_name") or "current")
+
+
+def compact_team_state(state: dict[str, Any]) -> dict[str, Any]:
+    compact = copy.deepcopy(state)
+    compact.pop("teams", None)
+    return compact
+
+
+def merge_workspace_team_state(existing: dict[str, Any], launched: dict[str, Any]) -> dict[str, Any]:
+    launched_key = team_state_key(launched)
+    if not existing.get("session_name"):
+        merged = copy.deepcopy(launched)
+        merged.setdefault("teams", {})[launched_key] = compact_team_state(launched)
+        return merged
+    existing_key = team_state_key(existing)
+    if existing_key == launched_key:
+        merged = copy.deepcopy(launched)
+        teams = copy.deepcopy(existing.get("teams") or {})
+        teams[launched_key] = compact_team_state(launched)
+        merged["teams"] = teams
+        return merged
+    merged = copy.deepcopy(existing)
+    teams = merged.setdefault("teams", {})
+    teams.setdefault(existing_key, compact_team_state(existing))
+    teams[launched_key] = compact_team_state(launched)
+    return merged
+
+
+def team_state_candidates(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    candidates: dict[str, dict[str, Any]] = {}
+    teams = state.get("teams")
+    if isinstance(teams, dict):
+        for key, value in teams.items():
+            if isinstance(value, dict):
+                candidates[str(key)] = value
+    if state.get("session_name"):
+        candidates.setdefault(team_state_key(state), compact_team_state(state))
+    return candidates
+
+
+def format_team_candidates(candidates: dict[str, dict[str, Any]]) -> str:
+    if not candidates:
+        return "No team state was found."
+    parts = []
+    for key, state in sorted(candidates.items()):
+        agents = ",".join(sorted(state.get("agents", {}).keys())) or "-"
+        parts.append(f"{key} session={state.get('session_name') or '-'} agents={agents}")
+    return "Candidates: " + "; ".join(parts)
+
+
+def select_runtime_state(workspace: Path, team: str | None = None) -> dict[str, Any]:
+    state = load_runtime_state(workspace)
+    candidates = team_state_candidates(state)
+    if team:
+        matches = [
+            value
+            for key, value in candidates.items()
+            if team in {key, str(value.get("session_name") or ""), str(value.get("team_dir") or "")}
+        ]
+        if len(matches) == 1:
+            return copy.deepcopy(matches[0])
+        from team_agent.errors import RuntimeError
+        if len(matches) > 1:
+            raise RuntimeError("team selector is ambiguous. " + format_team_candidates(candidates))
+        raise RuntimeError(f"team {team!r} not found. " + format_team_candidates(candidates))
+    if len(candidates) > 1:
+        from team_agent.errors import RuntimeError
+        raise RuntimeError("multiple teams found in this workspace; pass --team <team> to choose. " + format_team_candidates(candidates))
+    return copy.deepcopy(state)
+
+
+def ambiguous_team_target_result(state: dict[str, Any]) -> dict[str, Any] | None:
+    candidates = team_state_candidates(state)
+    if len(candidates) <= 1:
+        return None
+    return {
+        "ok": False,
+        "status": "refused",
+        "reason": "team_target_ambiguous",
+        "candidates": sorted(candidates),
+        "message": "multiple teams found in this workspace; pass --team <team> to choose. " + format_team_candidates(candidates),
+    }
 
 
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:

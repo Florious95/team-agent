@@ -235,6 +235,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("target", nargs="?")
     p.add_argument("message", nargs="+")
     p.add_argument("--workspace", default=".")
+    p.add_argument("--team", help="Explicit team/session target when a workspace has multiple teams")
     p.add_argument("--task")
     p.add_argument("--from", dest="sender", default="leader")
     p.add_argument("--no-ack", action="store_true")

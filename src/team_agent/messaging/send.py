@@ -23,6 +23,8 @@ from team_agent.messaging.deps import (
     missing_tools,
     route_task,
     save_runtime_state,
+    select_runtime_state,
+    ambiguous_team_target_result,
     update_task_status,
 )
 
@@ -42,6 +44,7 @@ def send_message(
     lock_timeout: float = 5.0,
     watch_result: bool = False,
     block_until_delivered: bool = True,
+    team: str | None = None,
 ) -> dict[str, Any]:
     with _runtime_lock(workspace, "send", timeout=lock_timeout):
         return _send_message_unlocked(
@@ -56,6 +59,7 @@ def send_message(
             timeout=timeout,
             watch_result=watch_result,
             block_until_delivered=block_until_delivered,
+            team=team,
         )
 
 
@@ -71,8 +75,13 @@ def _send_message_unlocked(
     timeout: float = 30.0,
     watch_result: bool = False,
     block_until_delivered: bool = True,
+    team: str | None = None,
 ) -> dict[str, Any]:
-    state = load_runtime_state(workspace)
+    if team is None:
+        ambiguous = ambiguous_team_target_result(load_runtime_state(workspace))
+        if ambiguous:
+            return ambiguous
+    state = select_runtime_state(workspace, team)
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     event_log = EventLog(workspace)

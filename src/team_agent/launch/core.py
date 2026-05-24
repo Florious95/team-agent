@@ -16,7 +16,7 @@ from team_agent.message_store import MessageStore
 from team_agent.permissions import resolve_permissions
 from team_agent.routing import route_task
 from team_agent.spec import load_spec, workspace_from_spec
-from team_agent.state import save_runtime_state, write_team_state
+from team_agent.state import load_runtime_state, merge_workspace_team_state, save_runtime_state, write_team_state
 
 
 def launch(
@@ -268,7 +268,8 @@ def launch(
     ).items():
         if agent_id in state["agents"]:
             state["agents"][agent_id]["display"] = display
-    save_runtime_state(workspace, state)
+    workspace_state = merge_workspace_team_state(load_runtime_state(workspace), state)
+    save_runtime_state(workspace, workspace_state)
     _save_team_runtime_snapshot(workspace, state)
     MessageStore(workspace)
     write_team_state(workspace, spec, state)

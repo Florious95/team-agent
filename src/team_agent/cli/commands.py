@@ -144,6 +144,7 @@ def cmd_send(args: argparse.Namespace) -> dict[str, Any]:
         wait_visible=not args.no_wait,
         timeout=args.timeout,
         watch_result=args.watch_result,
+        team=args.team,
     )
 
 

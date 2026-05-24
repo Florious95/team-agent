@@ -800,10 +800,10 @@ def collect(workspace: Path, result_file: Path | None = None, *, ensure_coordina
 
     return impl(workspace, result_file, ensure_coordinator=ensure_coordinator)
 
-def send_message(workspace: Path, target: str | None, content: str, task_id: str | None = None, sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False, wait_visible: bool = True, timeout: float = 30.0, lock_timeout: float = 5.0, watch_result: bool = False, block_until_delivered: bool = True) -> dict[str, Any]:
+def send_message(workspace: Path, target: str | None, content: str, task_id: str | None = None, sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False, wait_visible: bool = True, timeout: float = 30.0, lock_timeout: float = 5.0, watch_result: bool = False, block_until_delivered: bool = True, team: str | None = None) -> dict[str, Any]:
     from team_agent.messaging.send import send_message as impl
 
-    return impl(workspace, target, content, task_id, sender, requires_ack, confirm_human, wait_visible, timeout, lock_timeout, watch_result, block_until_delivered)
+    return impl(workspace, target, content, task_id, sender, requires_ack, confirm_human, wait_visible, timeout, lock_timeout, watch_result, block_until_delivered, team)
 
 
 # Lazy-resolved delegation surface. 77 wrappers that used to live inline in
