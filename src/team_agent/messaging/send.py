@@ -23,7 +23,7 @@ from team_agent.messaging.deps import (
     load_spec,
     missing_tools,
     route_task,
-    save_runtime_state,
+    save_team_scoped_state,
     select_runtime_state,
     ambiguous_team_target_result,
     team_state_key,
@@ -160,7 +160,7 @@ def _send_single_message_unlocked(
         if task.get("human_confirmation") and not task.get("human_confirmed"):
             if not confirm_human:
                 update_task_status(state["tasks"], task_id, "blocked", "human confirmation required before dispatch")
-                save_runtime_state(workspace, state)
+                save_team_scoped_state(workspace, state)
                 event_log.write(
                     "send.human_confirmation_required",
                     task_id=task_id,
@@ -193,7 +193,7 @@ def _send_single_message_unlocked(
             missing = missing_tools(agent, task)
             if missing:
                 update_task_status(state["tasks"], task_id, "blocked", f"missing permissions: {', '.join(missing)}")
-                save_runtime_state(workspace, state)
+                save_team_scoped_state(workspace, state)
                 event_log.write(
                     "send.blocked_missing_permissions",
                     task_id=task_id,
@@ -238,7 +238,7 @@ def _send_single_message_unlocked(
                 message_id=message_id,
             )
         _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
-        save_runtime_state(workspace, state)
+        save_team_scoped_state(workspace, state)
         event_log.write(
             "send.durably_stored",
             message_id=message_id,
@@ -297,7 +297,7 @@ def _send_single_message_unlocked(
             message_id=message_id,
         )
     _capture_missing_sessions(workspace, state, event_log, timeout_s=0.0, log_miss=False)
-    save_runtime_state(workspace, state)
+    save_team_scoped_state(workspace, state)
     result = {
         "ok": bool(delivered_result.get("ok")),
         "message_id": message_id,

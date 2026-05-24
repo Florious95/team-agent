@@ -200,6 +200,23 @@ def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
+def save_team_scoped_state(workspace: Path, team_state: dict[str, Any]) -> None:
+    target_key = team_state_key(team_state)
+    existing = load_runtime_state(workspace)
+    existing_primary_key = team_state_key(existing) if existing.get("session_name") else None
+    teams = copy.deepcopy(existing.get("teams") or {})
+    teams[target_key] = compact_team_state(team_state)
+    if existing_primary_key is None or existing_primary_key == target_key:
+        merged = copy.deepcopy(team_state)
+        merged["teams"] = teams
+    else:
+        merged = copy.deepcopy(existing)
+        merged["teams"] = teams
+    if not merged.get("teams"):
+        merged.pop("teams", None)
+    save_runtime_state(workspace, merged)
+
+
 def write_team_state(workspace: Path, spec: dict[str, Any], runtime: dict[str, Any], results: list[dict[str, Any]] | None = None) -> Path:
     path = workspace / spec.get("context", {}).get("state_file", "team_state.md")
     path.parent.mkdir(parents=True, exist_ok=True)

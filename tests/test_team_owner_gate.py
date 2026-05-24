@@ -81,6 +81,116 @@ class TeamOwnerGateTests(unittest.TestCase):
                 result = TeamOrchestratorTools(workspace).send_message("fake_impl", "owner send", sender="leader")
             self.assertNotEqual(result.get("reason"), "team_owner_mismatch")
 
+    def test_takeover_with_team_targets_team_level_state_and_preserves_siblings(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-takeover-team-") as tmp:
+            workspace = Path(tmp)
+            alpha_owner = {"pane_id": "%alpha", "provider": "codex", "machine_fingerprint": "machine-a"}
+            beta_owner = {"pane_id": "%beta", "provider": "codex", "machine_fingerprint": "machine-b"}
+            spec = _fake_spec(workspace)
+            alpha_team_dir = workspace / ".team" / "alpha"
+            beta_team_dir = workspace / ".team" / "beta"
+            alpha_team_dir.mkdir(parents=True)
+            beta_team_dir.mkdir(parents=True)
+            alpha_spec_path = alpha_team_dir / "team.spec.yaml"
+            beta_spec_path = beta_team_dir / "team.spec.yaml"
+            alpha_spec_path.write_text(dumps(spec), encoding="utf-8")
+            beta_spec_path.write_text(dumps(spec), encoding="utf-8")
+            save_runtime_state(
+                workspace,
+                {
+                    "spec_path": str(alpha_spec_path),
+                    "team_dir": str(alpha_team_dir),
+                    "workspace": str(workspace),
+                    "session_name": "team-alpha",
+                    "team_owner": alpha_owner,
+                    "agents": {"alpha_worker": {"status": "running", "provider": "fake", "window": "alpha_worker"}},
+                    "tasks": spec["tasks"],
+                    "teams": {
+                        "alpha": {
+                            "spec_path": str(alpha_spec_path),
+                            "team_dir": str(alpha_team_dir),
+                            "session_name": "team-alpha",
+                            "team_owner": alpha_owner,
+                            "agents": {"alpha_worker": {"status": "running", "provider": "fake", "window": "alpha_worker"}},
+                        },
+                        "beta": {
+                            "spec_path": str(beta_spec_path),
+                            "team_dir": str(beta_team_dir),
+                            "session_name": "team-beta",
+                            "team_owner": beta_owner,
+                            "agents": {"beta_worker": {"status": "running", "provider": "fake", "window": "beta_worker"}},
+                        },
+                    },
+                },
+            )
+            claimant_env = {
+                "TEAM_AGENT_LEADER_PANE_ID": "%claimant",
+                "TEAM_AGENT_LEADER_PROVIDER": "codex",
+                "TEAM_AGENT_MACHINE_FINGERPRINT": "machine-c",
+                "TEAM_AGENT_ID": "leader",
+            }
+            with patch.dict(os.environ, claimant_env, clear=False):
+                result = runtime.takeover(workspace, team="beta", confirm=True)
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result.get("team"), "beta")
+            self.assertEqual(result["team_owner"]["pane_id"], "%claimant")
+            state = load_runtime_state(workspace)
+            self.assertEqual(
+                state["teams"]["beta"]["team_owner"]["pane_id"],
+                "%claimant",
+                "takeover --team beta must update beta's team_owner at team level",
+            )
+            self.assertEqual(
+                state["teams"]["alpha"]["team_owner"],
+                alpha_owner,
+                "takeover --team beta must not touch alpha's team_owner",
+            )
+            self.assertEqual(
+                state.get("team_owner"),
+                alpha_owner,
+                "takeover --team beta must not touch the workspace-primary team_owner (alpha)",
+            )
+
+    def test_takeover_acquires_same_lock_namespace_as_send_mutator(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-takeover-lock-") as tmp:
+            workspace = _owner_workspace(Path(tmp))
+            owner_env = {
+                "TEAM_AGENT_LEADER_PANE_ID": OWNER["pane_id"],
+                "TEAM_AGENT_LEADER_PROVIDER": OWNER["provider"],
+                "TEAM_AGENT_MACHINE_FINGERPRINT": OWNER["machine_fingerprint"],
+                "TEAM_AGENT_ID": "leader",
+            }
+            acquired_locks: list[str] = []
+            real_runtime_lock = runtime._runtime_lock
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def tracking_runtime_lock(workspace_arg, name, timeout=5.0):
+                acquired_locks.append(name)
+                with real_runtime_lock(workspace_arg, name, timeout=timeout):
+                    yield
+
+            with (
+                patch.dict(os.environ, owner_env, clear=False),
+                patch("team_agent.runtime._runtime_lock", side_effect=tracking_runtime_lock),
+                patch("team_agent.runtime._deliver_pending_message", return_value={"ok": True, "status": "queued", "queued": True}),
+            ):
+                send_result = TeamOrchestratorTools(workspace).send_message("fake_impl", "first", sender="leader")
+                takeover_result = runtime.takeover(workspace, team=None, confirm=True)
+            self.assertTrue(send_result.get("ok"), send_result)
+            self.assertTrue(takeover_result.get("ok"), takeover_result)
+            self.assertIn(
+                "send",
+                acquired_locks,
+                f"send_message must acquire the standard mutator lock; acquired={acquired_locks}",
+            )
+            takeover_locks = [name for name in acquired_locks if name in {"send", "takeover"}]
+            self.assertTrue(
+                "send" in takeover_locks,
+                f"takeover must acquire the same lock namespace as send (got {acquired_locks}); otherwise ownership-transfer can race with a concurrent send by the old owner",
+            )
+
 
 def _owner_workspace(workspace: Path) -> Path:
     spec = _fake_spec(workspace)

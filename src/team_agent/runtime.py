@@ -218,6 +218,8 @@ from team_agent.state import (
     populate_team_owner_from_env,
     runtime_state_path,
     save_runtime_state,
+    save_team_scoped_state,
+    select_runtime_state,
     write_spec,
     write_team_state,
 )
@@ -595,17 +597,26 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             "reason": "confirm_required",
             "action": "rerun with --confirm to claim ownership of this team",
         }
-    with _runtime_lock(workspace, "takeover"):
-        state = load_runtime_state(workspace)
-        pane_id = os.environ.get("TEAM_AGENT_LEADER_PANE_ID")
-        if not pane_id:
+    pane_id = os.environ.get("TEAM_AGENT_LEADER_PANE_ID")
+    if not pane_id:
+        return {
+            "ok": False,
+            "status": "refused",
+            "reason": "no_caller_identity",
+            "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
+        }
+    with _runtime_lock(workspace, "send"):
+        try:
+            team_state = select_runtime_state(workspace, team)
+        except RuntimeError as exc:
             return {
                 "ok": False,
                 "status": "refused",
-                "reason": "no_caller_identity",
-                "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
+                "reason": "team_target_unresolved",
+                "team": team,
+                "error": str(exc),
             }
-        previous_owner = state.get("team_owner")
+        previous_owner = team_state.get("team_owner")
         new_owner = {
             "pane_id": pane_id,
             "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER", ""),
@@ -613,15 +624,15 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             "claimed_at": datetime.now(timezone.utc).isoformat(),
             "claimed_via": "takeover",
         }
-        state["team_owner"] = new_owner
-        save_runtime_state(workspace, state)
+        team_state["team_owner"] = new_owner
+        save_team_scoped_state(workspace, team_state)
         EventLog(workspace).write(
             "team_owner.takeover",
             team=team,
             previous_owner=previous_owner,
             new_owner=new_owner,
         )
-        return {"ok": True, "status": "claimed", "team_owner": new_owner, "previous_owner": previous_owner}
+        return {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner}
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:

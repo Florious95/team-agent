@@ -82,6 +82,50 @@ class WorkspaceStateOverlapTests(unittest.TestCase):
             self.assertFalse(ambiguous["ok"])
             self.assertEqual(ambiguous.get("reason"), "team_target_ambiguous")
 
+    def test_send_with_explicit_team_preserves_sibling_team_state(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-send-sibling-") as tmp:
+            workspace = Path(tmp)
+            _alpha, alpha_spec_path = _team_spec(workspace, "alpha", "alpha_worker")
+            _beta, beta_spec_path = _team_spec(workspace, "beta", "beta_worker")
+            launched_sessions: set[str] = set()
+
+            def fake_run_cmd(args: list[str], timeout: int = 20):
+                proc = Mock(returncode=0, stdout="", stderr="")
+                if args[:2] == ["tmux", "has-session"]:
+                    proc.returncode = 0 if args[-1] in launched_sessions else 1
+                elif args[:3] == ["tmux", "new-session", "-d"]:
+                    launched_sessions.add(args[args.index("-s") + 1])
+                elif args[:3] == ["tmux", "list-windows", "-t"]:
+                    proc.stdout = ""
+                return proc
+
+            with (
+                patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+                patch("team_agent.runtime._capture_agent_session", return_value=None),
+            ):
+                runtime.launch(alpha_spec_path, auto_approve=True, skip_profile_smoke=True)
+                runtime.launch(beta_spec_path, auto_approve=True, skip_profile_smoke=True)
+                before = load_runtime_state(workspace)
+                beta_before = copy.deepcopy(before.get("teams", {}).get("beta"))
+                self.assertIsNotNone(beta_before, "precondition: beta should exist before send")
+                with patch("team_agent.runtime._deliver_pending_message", return_value={"ok": True, "status": "queued", "queued": True}):
+                    sent = runtime.send_message(workspace, "alpha_worker", "hi alpha", team="alpha")
+
+            self.assertTrue(sent.get("ok"), sent)
+            after = load_runtime_state(workspace)
+            self.assertIn("beta", after.get("teams", {}), "send --team alpha must not drop sibling team beta from workspace state")
+            self.assertEqual(
+                after["teams"]["beta"].get("agents"),
+                beta_before.get("agents"),
+                "send --team alpha must not mutate beta's agent state",
+            )
+            self.assertEqual(
+                after["teams"]["beta"].get("session_name"),
+                beta_before.get("session_name"),
+                "send --team alpha must not mutate beta's session_name",
+            )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
