@@ -112,21 +112,92 @@ def start_coordinator(workspace: Path) -> dict[str, Any]:
     return {"ok": True, "pid": proc.pid, "status": "started", "log": str(log_path)}
 
 
+_SCHEMA_EXPECTED_COLUMNS: dict[str, set[str]] = {}
+
+
+def _load_expected_schema_columns() -> dict[str, set[str]]:
+    if _SCHEMA_EXPECTED_COLUMNS:
+        return _SCHEMA_EXPECTED_COLUMNS
+    from team_agent.message_store.schema import (
+        AGENT_HEALTH_COLUMNS,
+        DELIVERY_TOKEN_COLUMNS,
+        MESSAGE_COLUMNS,
+        PEER_ALLOWLIST_COLUMNS,
+        RESULT_COLUMNS,
+        RESULT_WATCHER_COLUMNS,
+        SCHEDULED_EVENT_COLUMNS,
+    )
+    _SCHEMA_EXPECTED_COLUMNS.update(
+        {
+            "messages": set(MESSAGE_COLUMNS),
+            "results": set(RESULT_COLUMNS),
+            "scheduled_events": set(SCHEDULED_EVENT_COLUMNS),
+            "delivery_tokens": set(DELIVERY_TOKEN_COLUMNS),
+            "agent_health": set(AGENT_HEALTH_COLUMNS),
+            "peer_allowlist": set(PEER_ALLOWLIST_COLUMNS),
+            "result_watchers": set(RESULT_WATCHER_COLUMNS),
+        }
+    )
+    return _SCHEMA_EXPECTED_COLUMNS
+
+
+def _diagnose_schema_mismatch(workspace: Path) -> dict[str, Any] | None:
+    import sqlite3
+    from team_agent.paths import runtime_dir
+    db_path = runtime_dir(workspace) / "team.db"
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        for table, expected in _load_expected_schema_columns().items():
+            present = conn.execute(
+                "select name from sqlite_master where type='table' and name=?",
+                (table,),
+            ).fetchone()
+            if present is None:
+                continue
+            actual = {row[1] for row in conn.execute(f"pragma table_info({table})").fetchall()}
+            missing = expected - actual
+            if missing:
+                return {
+                    "reason": "schema_mismatch",
+                    "table": table,
+                    "expected_columns": sorted(expected),
+                    "actual_columns": sorted(actual),
+                    "missing_columns": sorted(missing),
+                }
+    finally:
+        conn.close()
+    return None
+
+
 def message_store_schema_health(workspace: Path) -> dict[str, Any]:
+    schema_version = {"message_store_schema_version": MessageStore.SCHEMA_VERSION}
+    mismatch = _diagnose_schema_mismatch(workspace)
+    if mismatch is not None:
+        return {
+            "schema_ok": False,
+            "schema_error": (
+                f"team.db table {mismatch['table']} is missing required column(s): "
+                + ", ".join(mismatch["missing_columns"])
+            ),
+            "schema": schema_version,
+            **mismatch,
+        }
     try:
         MessageStore(workspace)
     except Exception as exc:
+        post_init_mismatch = _diagnose_schema_mismatch(workspace) or {}
         return {
             "schema_ok": False,
             "schema_error": str(exc),
-            "schema": {"message_store_schema_version": MessageStore.SCHEMA_VERSION},
+            "schema": schema_version,
+            **post_init_mismatch,
         }
     return {
         "schema_ok": True,
         "schema_error": None,
-        "schema": {
-            "message_store_schema_version": MessageStore.SCHEMA_VERSION,
-        },
+        "schema": schema_version,
     }
 
 
