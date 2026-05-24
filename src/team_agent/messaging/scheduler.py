@@ -14,6 +14,18 @@ from team_agent.messaging.deps import (
 from pathlib import Path
 from typing import Any
 
+_ACTIVE_TASK_STATUSES = {"pending", "assigned", "in_progress", "ready", "running", "needs_retry"}
+_INBOUND_WORK_STATUSES = {"pending", "accepted", "target_resolved", "injected", "visible", "submitted", "delivered"}
+_PROGRESS_EVENTS = {
+    "mcp.report_result",
+    "report_result.accepted",
+    "send.deliver_attempt",
+    "send.submitted",
+    "leader_receiver.deliver_attempt",
+    "leader_receiver.submitted",
+    "communication.peer_mirrored",
+}
+
 def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: EventLog) -> list[int]:
     fired: list[int] = []
     for row in store.due_scheduled_events():
@@ -105,6 +117,22 @@ def _detect_stuck_agents(
             last = last.replace(tzinfo=timezone.utc)
         if (now - last).total_seconds() < stuck_timeout:
             continue
+        has_work, work_reason = _agent_has_stuck_relevant_work(state, store, agent_id)
+        if not has_work:
+            event_log.write("coordinator.agent_stuck_suppressed", agent_id=agent_id, reason="idle_no_work", last_output_at=row["last_output_at"])
+            continue
+        progress_event = _recent_agent_progress_event(event_log, agent_id, last)
+        if progress_event:
+            event_log.write(
+                "coordinator.agent_stuck_suppressed",
+                agent_id=agent_id,
+                reason="recent_progress_event",
+                progress_event=progress_event.get("event"),
+                progress_ts=progress_event.get("ts"),
+                last_output_at=row["last_output_at"],
+                work_reason=work_reason,
+            )
+            continue
         stuck.append(agent_id)
         state.setdefault("coordinator", {})
         push_key = f"last_stuck_push_at:{agent_id}"
@@ -118,7 +146,7 @@ def _detect_stuck_agents(
                 should_push = (now - last_push).total_seconds() >= push_min_interval
             except ValueError:
                 should_push = True
-        event_log.write("coordinator.agent_stuck", agent_id=agent_id, last_output_at=row["last_output_at"])
+        event_log.write("coordinator.agent_stuck", agent_id=agent_id, last_output_at=row["last_output_at"], work_reason=work_reason)
         if should_push:
             state["coordinator"][push_key] = now.isoformat()
             try:
@@ -133,3 +161,37 @@ def _detect_stuck_agents(
             except Exception as exc:
                 event_log.write("coordinator.stuck_push_failed", agent_id=agent_id, error=str(exc))
     return stuck
+
+
+def _agent_has_stuck_relevant_work(state: dict[str, Any], store: MessageStore, agent_id: str) -> tuple[bool, str]:
+    for task in state.get("tasks", []):
+        if task.get("assignee") == agent_id and task.get("status", "pending") in _ACTIVE_TASK_STATUSES:
+            return True, "active_task"
+    for message in store.messages():
+        if message.get("recipient") == agent_id and message.get("status") in _INBOUND_WORK_STATUSES:
+            return True, "inbound_message"
+    return False, "idle_no_work"
+
+
+def _recent_agent_progress_event(event_log: EventLog, agent_id: str, since: datetime) -> dict[str, Any] | None:
+    for event in reversed(event_log.tail(200)):
+        if event.get("event") not in _PROGRESS_EVENTS:
+            continue
+        if not _event_mentions_agent(event, agent_id):
+            continue
+        try:
+            ts = datetime.fromisoformat(str(event.get("ts")))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= since:
+            return event
+    return None
+
+
+def _event_mentions_agent(event: dict[str, Any], agent_id: str) -> bool:
+    if event.get("agent_id") == agent_id or event.get("sender") == agent_id or event.get("target") == agent_id:
+        return True
+    payload = event.get("payload")
+    return isinstance(payload, dict) and (payload.get("from") == agent_id or payload.get("to") == agent_id)
