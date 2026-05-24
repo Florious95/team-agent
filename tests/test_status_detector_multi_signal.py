@@ -131,6 +131,31 @@ class StatusDetectorMultiSignalTests(unittest.TestCase):
         self.assertGreaterEqual(out["confidence"], 0.85, out)
         self.assertIn("latest", out["rationale"])
 
+    def test_codex_skills_hint_prompt_is_idle(self) -> None:
+        # Mac mini evidence: a new Codex placeholder variant where the bottom
+        # of the pane shows '› Use /skills to list available skills' as the
+        # input-hint text, then the gpt-X status line below. hotfix-5's regex
+        # only matched a whitespace-only '›' line so this variant slipped
+        # through and the classifier picked an older Working signal.
+        scrollback = (
+            "✱ Working (8s) ⠋\n"
+            "   ↳ esc to interrupt\n"
+            "[turn-1] tool output\n"
+            "[turn-1] result completed\n"
+            "\n"
+            "› Use /skills to list available skills\n"
+            "\n"
+            "  gpt-5.5 xhigh · /private/tmp/teamE-skills\n"
+        )
+        out = _classify(
+            last_output_age_sec=30,
+            pane={"pane_current_command": "node", "pane_in_mode": "0"},
+            scrollback=scrollback,
+        )
+        self.assertEqual(out["status"], "idle", out)
+        self.assertGreaterEqual(out["confidence"], 0.85, out)
+        self.assertIn("latest", out["rationale"])
+
     def test_codex_placeholder_prompt_with_two_blank_gap_is_idle(self) -> None:
         scrollback = (
             "✱ Working (3s) ⠋\n"

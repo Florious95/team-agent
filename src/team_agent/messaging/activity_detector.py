@@ -36,7 +36,7 @@ _COMPACTION_PATTERNS = (
 _IDLE_PROMPT_PATTERNS = (
     re.compile(r"›\s*Find and fix a bug in @filename"),
     re.compile(r"─\s*for agents"),
-    re.compile(r"^›\s*\n(?:\s*\n){0,8}\s*gpt-[\w.-]+\s+\S+\s+·", re.MULTILINE),
+    re.compile(r"^›[^\n]*\n(?:\s*\n){0,8}\s*gpt-[\w.-]+\s+\S+\s+·", re.MULTILINE),
 )
 _WORKING_PATTERNS = (
     re.compile(r"\bWorking(?:\s*\((?P<working_seconds>\d+)s\))?", re.IGNORECASE),
