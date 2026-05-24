@@ -35,7 +35,7 @@ _PROGRESS_EVENTS = {
     "communication.peer_mirrored",
 }
 _RESTART_RESET_EVENTS = {"restart.agent_start", "restart.complete", "reset_agent.complete", "start_agent.complete"}
-_ALERT_TYPES = {"stuck", "idle_fallback"}
+_ALERT_TYPES = {"stuck", "idle_fallback", "cross_worker_deadlock"}
 _PROVIDER_COMMANDS = {"claude", "claude-code", "codex", "node", "node.exe", "claude.exe"}
 _IDLE_PROMPT_PATTERNS = (
     re.compile(r"›\s*Find and fix a bug in @filename"),
@@ -286,7 +286,7 @@ def stuck_list(workspace: Path) -> dict[str, Any]:
     state = load_runtime_state(workspace)
     suppressed = state.get("coordinator", {}).get("suppressed_idle_alerts", {})
     if _use_team_scoped_suppressions(state):
-        from team_agent.state import _caller_identity_from_env, team_state_candidates
+        from team_agent.state import _caller_identity_from_env
         caller = _caller_identity_from_env()
         candidates = team_state_candidates(state)
         caller_team = None
@@ -309,7 +309,9 @@ def stuck_list(workspace: Path) -> dict[str, Any]:
                 "candidates": sorted(candidates),
             }
         return {"ok": True, "suppressed_idle_alerts": suppressed.get(caller_team, {}), "team": caller_team}
-    if (
+    known_team_keys = set(team_state_candidates(state).keys())
+    has_team_keys = bool(known_team_keys & set(suppressed.keys()))
+    if not has_team_keys and (
         len(suppressed) == 1
         and all(isinstance(value, dict) for value in suppressed.values())
         and not any(isinstance(value, dict) and set(value) & _ALERT_TYPES for value in suppressed.values())
@@ -483,3 +485,9 @@ def _recent_restart_or_reset_event(event_log: EventLog, agent_id: str, since: da
         if ts >= since:
             return event
     return None
+
+
+from team_agent.messaging.idle_alerts import (
+    detect_cross_worker_deadlocks,
+    detect_idle_fallbacks,
+)
