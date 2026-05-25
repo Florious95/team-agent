@@ -409,8 +409,18 @@ def _recent_restart_or_reset_event(event_log: EventLog, agent_id: str, since: da
     for event in reversed(event_log.tail(200)):
         if event.get("event") not in _RESTART_RESET_EVENTS:
             continue
-        if event.get("agent_id") != agent_id and agent_id not in set(event.get("agents") or []):
-            continue
+        if event.get("agent_id") != agent_id:
+            agents_field = event.get("agents") or []
+            agent_ids: set[str] = set()
+            for entry in agents_field:
+                if isinstance(entry, str):
+                    agent_ids.add(entry)
+                elif isinstance(entry, dict):
+                    aid = entry.get("agent_id")
+                    if isinstance(aid, str):
+                        agent_ids.add(aid)
+            if agent_id not in agent_ids:
+                continue
         try:
             ts = datetime.fromisoformat(str(event.get("ts")))
         except ValueError:
