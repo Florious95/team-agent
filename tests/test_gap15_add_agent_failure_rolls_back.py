@@ -59,7 +59,7 @@ class Gap15AddAgentRollbackTests(unittest.TestCase):
             self.assertFalse(any(event.get("event") == "add_agent.complete" for event in events))
 
             rolled_back = [e for e in events if e.get("event") == "lifecycle.add_step_rolled_back"]
-            self.assertEqual({e.get("step") for e in rolled_back}, {"spec_yaml", "workspace_state", "role_file"},
+            self.assertEqual({e.get("step") for e in rolled_back}, {"spec_yaml", "workspace_state", "team_state_md", "role_file"},
                              f"expected per-step rollback events; got {rolled_back}")
             for evt in rolled_back:
                 self.assertEqual(evt.get("agent_id"), "extra_helper")
@@ -73,7 +73,7 @@ class Gap15AddAgentRollbackTests(unittest.TestCase):
                              f"failed_step must point at start_agent (where the injection landed); got {evt}")
             self.assertEqual(evt.get("failed_resource"), "extra_helper")
             self.assertIn("injected add-agent startup failure", evt.get("reason", ""))
-            self.assertEqual(set(evt.get("rolled_back") or []), {"spec_yaml", "workspace_state", "role_file"})
+            self.assertEqual(set(evt.get("rolled_back") or []), {"spec_yaml", "workspace_state", "team_state_md", "role_file"})
             self.assertEqual(evt.get("rollback_errors") or [], [])
             # cleared_locations captures the steps that DID succeed before the failure landed.
             self.assertEqual(set(evt.get("cleared_locations") or []),
@@ -119,12 +119,57 @@ class Gap15AddAgentRollbackTests(unittest.TestCase):
             self.assertIn("role_file", evt.get("rolled_back") or [])
             # Per-step rolled-back events must also be present, one per cleared storage path.
             per_step = [e for e in events if e.get("event") == "lifecycle.add_step_rolled_back"]
-            self.assertEqual({e.get("step") for e in per_step}, {"spec_yaml", "workspace_state", "role_file"})
+            self.assertEqual({e.get("step") for e in per_step}, {"spec_yaml", "workspace_state", "team_state_md", "role_file"})
             # Step events must carry the actual resource id (file path or state key), not just a label.
             spec_evt = next(e for e in per_step if e.get("step") == "spec_yaml")
             self.assertTrue(spec_evt.get("resource", "").endswith("team.spec.yaml"))
             role_evt = next(e for e in per_step if e.get("step") == "role_file")
             self.assertTrue(role_evt.get("resource", "").endswith("broken_helper.md"))
+
+    def test_team_state_md_rolled_back_on_add_agent_failure(self) -> None:
+        # Stage 11.11 (Gap 15 follow-up): Mac mini Scenario 6 (run res_05b2592c011f) showed
+        # rollback handler restored spec.yaml / state.json / dynamic-role-file but left
+        # .team/current/team_state.md with the orphan entry. Pre-Stage-11.11 rollback path
+        # never snapshotted or restored team_state.md.
+        with tempfile.TemporaryDirectory(prefix="team-agent-gap15-team-state-rollback-") as tmp:
+            workspace = Path(tmp)
+            spec, role_file = _write_add_agent_workspace(workspace)
+            team_state_path = workspace / "team_state.md"
+            # Seed a known pre-state so byte-equality is meaningful.
+            seed_text = "# Pre-add canonical content\nseed-line-A\nseed-line-B\n"
+            team_state_path.write_text(seed_text, encoding="utf-8")
+            seed_bytes = team_state_path.read_bytes()
+
+            def fake_compile(_path: Path, _team_dir: Path, agent_id: str) -> dict:
+                agent = copy.deepcopy(spec["agents"][0])
+                agent["id"] = agent_id
+                agent["role"] = "Extra helper"
+                return agent
+
+            def failing_start(_ws: Path, agent_id: str, **_kwargs: object) -> dict:
+                raise TeamAgentRuntimeError("injected post-team-state failure")
+
+            with (
+                patch("team_agent.compiler.compile_role_doc_agent", side_effect=fake_compile),
+                patch("team_agent.runtime.start_agent", side_effect=failing_start),
+            ):
+                with self.assertRaises(TeamAgentRuntimeError):
+                    runtime.add_agent(workspace, "extra_helper", role_file_path=str(role_file), open_display=False)
+
+            # After failure the markdown MUST be byte-equal to the seeded pre-state.
+            self.assertEqual(team_state_path.read_bytes(), seed_bytes,
+                             "team_state.md must be restored byte-equal after rollback")
+            events = _events(workspace)
+            rolled_back_steps = [e for e in events
+                                 if e.get("event") == "lifecycle.add_step_rolled_back"
+                                 and e.get("step") == "team_state_md"]
+            self.assertEqual(len(rolled_back_steps), 1,
+                             f"expected lifecycle.add_step_rolled_back step=team_state_md; got events={rolled_back_steps}")
+            self.assertEqual(rolled_back_steps[0].get("agent_id"), "extra_helper")
+            self.assertTrue(str(rolled_back_steps[0].get("resource") or "").endswith("team_state.md"))
+            # The terminal failure event must list team_state_md among rolled_back locations.
+            failed = next(e for e in events if e.get("event") == "lifecycle.add_failed")
+            self.assertIn("team_state_md", failed.get("rolled_back") or [])
 
 
 def _write_add_agent_workspace(workspace: Path) -> tuple[dict, Path]:

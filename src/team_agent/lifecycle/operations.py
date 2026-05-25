@@ -154,6 +154,11 @@ def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_displ
     old_spec_text = spec_path.read_text(encoding="utf-8")
     old_state = copy.deepcopy(state)
     old_dynamic = dynamic_path.read_bytes() if dynamic_path.exists() else None
+    # Stage 11.11 (Gap 15 follow-up): snapshot team_state.md BEFORE any write so the rollback
+    # path can restore it byte-equal. Pre-Stage-11.11 the rollback handler omitted this file
+    # and Mac mini Scenario 6 left orphan entries after induced add-agent failures.
+    team_state_path = workspace / spec.get("context", {}).get("state_file", "team_state.md")
+    old_team_state = team_state_path.read_bytes() if team_state_path.exists() else None
     event_log = EventLog(workspace)
     cleared_locations: list[str] = []
     current_step = "init"
@@ -218,6 +223,17 @@ def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_displ
                             step="workspace_state", resource="state.json:agents")
         except Exception as restore_exc:
             rollback_errors.append(f"workspace_state:{restore_exc}")
+        try:
+            if old_team_state is None:
+                team_state_path.unlink(missing_ok=True)
+            else:
+                team_state_path.parent.mkdir(parents=True, exist_ok=True)
+                team_state_path.write_bytes(old_team_state)
+            rolled_back.append("team_state_md")
+            event_log.write("lifecycle.add_step_rolled_back", agent_id=agent_id,
+                            step="team_state_md", resource=str(team_state_path))
+        except Exception as restore_exc:
+            rollback_errors.append(f"team_state_md:{restore_exc}")
         try:
             if old_dynamic is None:
                 dynamic_path.unlink(missing_ok=True)
