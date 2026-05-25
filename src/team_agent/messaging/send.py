@@ -85,11 +85,13 @@ def _send_message_unlocked(
             return ambiguous
     state = select_runtime_state(workspace, team)
     gate = check_team_owner(state)
-    if gate:
-        return gate
     spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
     spec = load_spec(spec_path)
     event_log = EventLog(workspace)
+    if gate:
+        from team_agent.messaging.owner_bypass import apply_worker_sender_bypass
+        if not apply_worker_sender_bypass(state, sender, target, task_id, event_log):
+            return gate
     owner_team_id = team_state_key(state)
     leader_id = _leader_id(state, spec)
 

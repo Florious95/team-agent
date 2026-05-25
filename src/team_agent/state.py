@@ -193,6 +193,20 @@ def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def worker_sender_bypasses_owner_gate(state: dict[str, Any], sender: str | None) -> str | None:
+    if not sender:
+        return None
+    leader_id = (state.get("leader") or {}).get("id") or "leader"
+    if sender == leader_id or sender in {"leader", "Leader"}:
+        return None
+    if sender not in (state.get("agents") or {}):
+        return None
+    env_agent_id = os.environ.get("TEAM_AGENT_ID") or ""
+    if env_agent_id and env_agent_id != sender:
+        return None
+    return env_agent_id or sender
+
+
 def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopulate") -> dict[str, Any] | None:
     if state.get("team_owner"):
         return state["team_owner"]
