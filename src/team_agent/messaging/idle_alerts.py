@@ -27,6 +27,21 @@ STABLE_IDLE_SECONDS = 120
 FIRE_DEBOUNCE_SECONDS = 300
 OBLIGATION_PENDING_MIN_AGE_SECONDS = 60
 
+# Event-log progress signal (Gap 32 §"Idle-Detector False Positive Continues Post Phase G hotfix-3"):
+# the team_last_progress_at calculation must also count leader-side sends and worker MCP calls
+# as recent team activity, not only agent_health.last_output_at. Without this, a worker that has
+# called MCP but not yet emitted a visible turn shows up as idle and the idle reminder fires
+# spuriously inside the stable-idle window.
+_PROGRESS_EVENT_TYPES = frozenset({
+    "send.deliver_attempt",
+    "leader_receiver.deliver_attempt",
+    "mcp.report_result",
+    "mcp.send_message",
+})
+_PROGRESS_EVENT_PREFIXES = ("mcp.read_",)
+_PROGRESS_EVENT_WINDOW_SECONDS = 300
+_PROGRESS_EVENT_TAIL_LIMIT = 1000
+
 
 def _parse_iso(text: Any) -> datetime | None:
     if not isinstance(text, str) or not text:
@@ -62,24 +77,59 @@ def _team_last_progress_at(
     state: dict[str, Any],
     store: MessageStore,
     owner_team_id: str,
-) -> datetime | None:
-    candidates: list[datetime] = []
+    event_log: EventLog | None = None,
+    now: datetime | None = None,
+) -> tuple[datetime | None, str | None]:
+    sources: list[tuple[datetime, str]] = []
     coordinator = state.get("coordinator") or {}
     explicit = (coordinator.get("team_last_progress_at") or {}).get(owner_team_id)
     if isinstance(explicit, dict):
         ts = _parse_iso(explicit.get("at"))
         if ts:
-            candidates.append(ts)
+            sources.append((ts, "explicit_marker"))
     elif isinstance(explicit, str):
         ts = _parse_iso(explicit)
         if ts:
-            candidates.append(ts)
+            sources.append((ts, "explicit_marker"))
     health = store.agent_health(owner_team_id=owner_team_id)
     for row in health.values():
         ts = _parse_iso(row.get("last_output_at"))
         if ts:
-            candidates.append(ts)
-    return max(candidates) if candidates else None
+            sources.append((ts, "agent_health.last_output_at"))
+    if event_log is not None:
+        event_ts = _scan_event_progress_signals(
+            event_log, owner_team_id, now or datetime.now(timezone.utc),
+        )
+        if event_ts:
+            sources.append((event_ts, "event_log"))
+    if not sources:
+        return None, None
+    sources.sort(key=lambda item: item[0], reverse=True)
+    return sources[0]
+
+
+def _scan_event_progress_signals(
+    event_log: EventLog,
+    owner_team_id: str,
+    now: datetime,
+) -> datetime | None:
+    window_start = now - timedelta(seconds=_PROGRESS_EVENT_WINDOW_SECONDS)
+    latest: datetime | None = None
+    for event in event_log.tail(_PROGRESS_EVENT_TAIL_LIMIT):
+        event_type = str(event.get("event") or "")
+        if event_type not in _PROGRESS_EVENT_TYPES and not any(
+            event_type.startswith(prefix) for prefix in _PROGRESS_EVENT_PREFIXES
+        ):
+            continue
+        event_team = event.get("team") or event.get("owner_team_id")
+        if event_team is not None and event_team != owner_team_id:
+            continue
+        ts = _parse_iso(event.get("ts"))
+        if not ts or ts < window_start:
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
 
 
 def _team_last_idle_fallback_fire_at(state: dict[str, Any], owner_team_id: str) -> datetime | None:
@@ -209,14 +259,18 @@ def detect_idle_fallbacks(
         record_team_progress(state, now, source="all_workers_idle:false", owner_team_id=owner_team_id)
         save_runtime_state(workspace, state)
         return []
-    last_progress = _team_last_progress_at(state, store, owner_team_id)
+    last_progress, progress_source = _team_last_progress_at(
+        state, store, owner_team_id, event_log=event_log, now=now,
+    )
     if last_progress and (now - last_progress) < timedelta(seconds=STABLE_IDLE_SECONDS):
+        reason = "recent_team_progress" if progress_source == "event_log" else "stable_idle_window"
         event_log.write(
             "coordinator.idle_fallback_skipped",
-            reason="stable_idle_window",
+            reason=reason,
             team=owner_team_id,
             stable_idle_seconds=STABLE_IDLE_SECONDS,
             elapsed_seconds=int((now - last_progress).total_seconds()),
+            progress_source=progress_source,
         )
         return []
     last_fire = _team_last_idle_fallback_fire_at(state, owner_team_id)
