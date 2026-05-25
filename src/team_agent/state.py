@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import copy
@@ -23,6 +24,14 @@ SESSION_STATE_FIELDS = [
     *SESSION_CAPTURE_FIELDS,
     "spawn_cwd",
 ]
+_UUID_SEPARATOR = "\0"
+
+
+def derive_leader_session_uuid(machine_fingerprint: str, workspace_abspath: str, os_user: str, team_id: str) -> str:
+    parts = [machine_fingerprint, workspace_abspath, os_user, team_id]
+    if any(_UUID_SEPARATOR in part for part in parts):
+        raise ValueError("leader_session_uuid inputs must not contain NUL")
+    return hashlib.sha256(_UUID_SEPARATOR.join(parts).encode("utf-8")).hexdigest()[:32]
 
 
 def runtime_state_path(workspace: Path) -> Path:
@@ -45,6 +54,8 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
         return {"agents": {}, "tasks": [], "session_name": None}
     state = json.loads(path.read_text(encoding="utf-8"))
     normalize_agent_session_state(state)
+    if _migrate_state_identity(state, workspace):
+        save_runtime_state(workspace, state)
     return state
 
 
@@ -163,11 +174,75 @@ def resolve_team_scoped_state(
         }
 
 
-def _caller_identity_from_env() -> dict[str, str]:
+def _identity_workspace_abspath(state: dict[str, Any], workspace: Path | None = None) -> str:
+    if state.get("workspace"):
+        return str(Path(str(state["workspace"])).resolve())
+    if state.get("team_dir"):
+        return str(Path(str(state["team_dir"])).resolve().parent.parent)
+    if state.get("spec_path"):
+        spec_path = Path(str(state["spec_path"])).resolve()
+        return str(spec_path.parent.parent.parent if spec_path.parent.parent.name == ".team" else spec_path.parent)
+    return str((workspace or Path(os.environ.get("TEAM_AGENT_WORKSPACE") or os.getcwd())).resolve())
+
+
+def _identity_os_user() -> str:
+    return os.environ.get("USER") or os.environ.get("USERNAME") or ""
+
+
+def _identity_machine_fingerprint(state: dict[str, Any]) -> str:
+    for record in (state.get("team_owner"), state.get("leader_receiver")):
+        if isinstance(record, dict) and record.get("machine_fingerprint"):
+            return str(record["machine_fingerprint"])
+    return os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT") or ""
+
+
+def _leader_session_uuid_for_state(state: dict[str, Any], workspace: Path | None = None, team_id: str | None = None) -> str:
+    return derive_leader_session_uuid(
+        _identity_machine_fingerprint(state),
+        _identity_workspace_abspath(state, workspace),
+        _identity_os_user(),
+        team_id or team_state_key(state),
+    )
+
+
+def _migrate_team_identity(state: dict[str, Any], workspace: Path, team_id: str | None = None) -> bool:
+    leader_uuid = _leader_session_uuid_for_state(state, workspace, team_id)
+    changed = False
+    for key in ("team_owner", "leader_receiver"):
+        record = state.get(key)
+        if isinstance(record, dict) and not record.get("leader_session_uuid"):
+            record["leader_session_uuid"] = leader_uuid
+            changed = True
+    return changed
+
+
+def _migrate_state_identity(state: dict[str, Any], workspace: Path) -> bool:
+    changed = _migrate_team_identity(state, workspace) if state.get("session_name") else False
+    teams = state.get("teams")
+    if isinstance(teams, dict):
+        for team_id, team_state in teams.items():
+            if isinstance(team_state, dict):
+                changed = _migrate_team_identity(team_state, workspace, str(team_id)) or changed
+    return changed
+
+
+def _caller_identity_from_env(state: dict[str, Any] | None = None, team_id: str | None = None, workspace: Path | None = None) -> dict[str, str]:
+    state = state or {}
+    machine_fingerprint = os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT") or ""
+    override = os.environ.get("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE") or ""
+    env_uuid = os.environ.get("TEAM_AGENT_LEADER_SESSION_UUID") or ""
+    leader_uuid = override or env_uuid or derive_leader_session_uuid(
+        machine_fingerprint,
+        _identity_workspace_abspath(state, workspace),
+        _identity_os_user(),
+        team_id or os.environ.get("TEAM_AGENT_TEAM_ID") or team_state_key(state),
+    )
     return {
         "pane_id": os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or "",
         "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER") or "",
-        "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT") or "",
+        "machine_fingerprint": machine_fingerprint,
+        "leader_session_uuid": leader_uuid,
+        "leader_session_uuid_source": "explicit-override" if override else ("env" if env_uuid else "derived"),
     }
 
 
@@ -175,12 +250,9 @@ def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
     owner = state.get("team_owner") or {}
     if not owner:
         return None
-    caller = _caller_identity_from_env()
-    if (
-        caller["pane_id"] == (owner.get("pane_id") or "")
-        and caller["provider"] == (owner.get("provider") or "")
-        and caller["machine_fingerprint"] == (owner.get("machine_fingerprint") or "")
-    ):
+    _migrate_team_identity(state, Path(_identity_workspace_abspath(state)), team_state_key(state))
+    caller = _caller_identity_from_env(state, team_state_key(state))
+    if caller["leader_session_uuid"] == (owner.get("leader_session_uuid") or ""):
         return None
     return {
         "ok": False,
@@ -209,14 +281,16 @@ def worker_sender_bypasses_owner_gate(state: dict[str, Any], sender: str | None)
 
 def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopulate") -> dict[str, Any] | None:
     if state.get("team_owner"):
+        _migrate_team_identity(state, Path(_identity_workspace_abspath(state)), team_state_key(state))
         return state["team_owner"]
-    caller = _caller_identity_from_env()
+    caller = _caller_identity_from_env(state, team_state_key(state))
     if not caller["pane_id"]:
         return None
     owner = {
         "pane_id": caller["pane_id"],
         "provider": caller["provider"],
         "machine_fingerprint": caller["machine_fingerprint"],
+        "leader_session_uuid": caller["leader_session_uuid"],
         "claimed_at": datetime.now(timezone.utc).isoformat(),
         "claimed_via": source,
     }
@@ -225,6 +299,7 @@ def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopul
 
 
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
+    _migrate_state_identity(state, workspace)
     path = runtime_state_path(workspace)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
