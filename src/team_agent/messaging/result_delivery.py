@@ -6,6 +6,7 @@ from typing import Any
 
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
+from team_agent.message_store.result_watchers import leader_notified_message_id_for_result
 from team_agent.messaging.deps import send_message
 from team_agent.messaging.internal_delivery import deliver_stored_message
 
@@ -22,7 +23,13 @@ def retry_result_deliveries(workspace: Path, event_log: EventLog) -> list[dict[s
         row = store.result_by_id(str(watcher["result_id"]))
         if not row:
             continue
-        notified.extend(notify_result_watchers(workspace, _result_entry_from_row(row), event_log, watchers=[watcher]))
+        notified.extend(notify_result_watchers(
+            workspace,
+            _result_entry_from_row(row),
+            event_log,
+            watchers=[watcher],
+            dedupe_reason="rebind_retry",
+        ))
     return notified
 
 
@@ -31,6 +38,7 @@ def notify_result_watchers(
     result: dict[str, Any],
     event_log: EventLog,
     watchers: list[dict[str, Any]] | None = None,
+    dedupe_reason: str | None = None,
 ) -> list[dict[str, Any]]:
     store = MessageStore(workspace)
     candidates = [
@@ -67,6 +75,15 @@ def notify_result_watchers(
             }
         )
     attempts = result_delivery_attempts(event_log, primary["watcher_id"], str(result.get("result_id") or ""))
+    canonical_message_id = leader_notified_message_id_for_result(
+        store, primary.get("owner_team_id"), str(result.get("result_id") or "") or None,
+    )
+    if canonical_message_id:
+        reason = dedupe_reason or _infer_dedupe_reason(primary, store)
+        notified.append(_mark_watcher_dedupe_skip(
+            store, event_log, primary, result, attempts, canonical_message_id, reason,
+        ))
+        return notified
     existing = delivered_result_message(
         store,
         str(result.get("result_id") or ""),
@@ -81,6 +98,50 @@ def notify_result_watchers(
     else:
         notified.append(_deliver_result_to_watcher(workspace, store, event_log, primary, result, attempts))
     return notified
+
+
+def _infer_dedupe_reason(primary: dict[str, Any], store: MessageStore) -> str:
+    if primary.get("notified_message_id"):
+        return "rebind_retry"
+    return "watcher_duplicate"
+
+
+def _mark_watcher_dedupe_skip(
+    store: MessageStore,
+    event_log: EventLog,
+    watcher: dict[str, Any],
+    result: dict[str, Any],
+    attempts: int,
+    canonical_message_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    original_message_id = watcher.get("notified_message_id")
+    store.mark_result_watcher(
+        watcher["watcher_id"],
+        "notified",
+        result_id=result.get("result_id"),
+        notified_message_id=canonical_message_id,
+    )
+    event_log.write(
+        "leader_receiver.notification_dedupe_skip",
+        result_id=result.get("result_id"),
+        original_message_id=original_message_id,
+        suppressed_message_id=canonical_message_id,
+        reason=reason,
+        team_id=watcher.get("owner_team_id"),
+        watcher_id=watcher["watcher_id"],
+        task_id=result.get("task_id"),
+        agent_id=result.get("agent_id"),
+        attempt=attempts + 1,
+    )
+    return {
+        "watcher_id": watcher["watcher_id"],
+        "result_id": result.get("result_id"),
+        "ok": True,
+        "message_id": canonical_message_id,
+        "deduped": True,
+        "dedupe_reason": reason,
+    }
 
 
 def _dedupe_watchers_for_result(
@@ -114,11 +175,16 @@ def _deliver_result_to_watcher(
         return _mark_delivery_failed(store, event_log, watcher, result, attempts, str(exc))
     status = "notified" if delivery.get("ok") else "notify_failed"
     error = delivery.get("reason") or delivery.get("error")
+    # Gap 32: only persist notified_message_id when delivery actually succeeded. Setting it on a
+    # failed attempt (Phase D pre-hotfix-3 behavior) made downstream dedupe lie about prior
+    # visibility, which 78055bc tried to paper over by nulling-on-requeue. Both bugs go away if
+    # we never write the id for a failed injection in the first place.
+    persisted_message_id = delivery.get("message_id") if delivery.get("ok") else None
     store.mark_result_watcher(
         watcher["watcher_id"],
         status,
         result_id=result.get("result_id"),
-        notified_message_id=delivery.get("message_id"),
+        notified_message_id=persisted_message_id,
         error=error,
     )
     event_log.write(

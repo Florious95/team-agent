@@ -94,9 +94,38 @@ def requeue_delivery_exhausted_watchers(self) -> list[str]:
             ).fetchall()
             watcher_ids = [row[0] for row in rows]
             if watcher_ids:
+                # Phase D hotfix-3 (78055bc) cleared notified_message_id here; Gap 32 dedupe
+                # reverses that — preserve notified_message_id so the retry path can re-confirm
+                # (or skip if the same result_id was already injected on a different pane_id).
                 conn.execute(
                     "update result_watchers "
-                    "set status = 'notify_failed', error = null, notified_message_id = null, completed_at = null "
+                    "set status = 'notify_failed', error = null, completed_at = null "
                     "where status = 'delivery_exhausted'"
                 )
     return watcher_ids
+
+
+def leader_notified_message_id_for_result(
+    store: Any,
+    owner_team_id: str | None,
+    result_id: str | None,
+) -> str | None:
+    if not result_id:
+        return None
+    with closing(store.connect()) as conn:
+        if owner_team_id is None:
+            row = conn.execute(
+                "select notified_message_id from result_watchers "
+                "where result_id = ? and notified_message_id is not null "
+                "order by coalesce(completed_at, created_at) limit 1",
+                (result_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select notified_message_id from result_watchers "
+                "where result_id = ? and notified_message_id is not null "
+                "and (owner_team_id = ? or owner_team_id is null) "
+                "order by coalesce(completed_at, created_at) limit 1",
+                (result_id, owner_team_id),
+            ).fetchone()
+    return row[0] if row else None
