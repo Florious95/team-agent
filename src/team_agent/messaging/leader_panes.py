@@ -401,8 +401,8 @@ def _broadcast_ambiguous_candidates(
 
 def _ambiguous_debounce_bucket() -> str:
     now = datetime.now(timezone.utc)
-    second = now.second - (now.second % _AMBIGUOUS_DEBOUNCE_SECONDS)
-    return now.replace(second=second, microsecond=0).isoformat()
+    epoch = int(now.timestamp() // _AMBIGUOUS_DEBOUNCE_SECONDS) * _AMBIGUOUS_DEBOUNCE_SECONDS
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
 
 
 def _ambiguous_candidate_prompt(team_id: str | None, candidate_count: int) -> str:

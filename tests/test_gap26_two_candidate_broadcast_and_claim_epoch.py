@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from team_agent.events import EventLog
@@ -48,6 +49,30 @@ def test_gap26_two_candidate_broadcast_and_claim_epoch(tmp_path) -> None:
     assert refused["reason"] == "owner_epoch_advanced"
     assert refused["bound_pane_id"] == "%D"
     assert refused["owner_epoch"] == 8
+
+
+def test_gap26_ambiguous_debounce_bucket_does_not_dedupe_same_second_across_hours(tmp_path) -> None:
+    state = _state()
+    event_log = EventLog(tmp_path)
+    candidates = [_target("%D"), _target("%E")]
+    start = datetime(2026, 5, 25, 10, 5, 30, tzinfo=timezone.utc)
+
+    with (
+        patch("team_agent.messaging.leader_panes.core_list_targets", return_value={"ok": True, "targets": candidates}),
+        patch("team_agent.runtime._tmux_inject_text", return_value={"ok": True}),
+        patch("team_agent.messaging.leader_panes.datetime") as fake_datetime,
+    ):
+        fake_datetime.now.side_effect = [start, start + timedelta(hours=1)]
+        fake_datetime.fromtimestamp.side_effect = datetime.fromtimestamp
+        first = _rediscover(state["leader_receiver"], event_log, state["team_owner"])
+        second = _rediscover(state["leader_receiver"], event_log, state["team_owner"])
+
+    assert first["status"] == "ambiguous"
+    assert second["status"] == "ambiguous"
+    assert first["incident_id"] != second["incident_id"]
+    incidents = [event for event in _events(tmp_path) if event.get("event") == "leader_receiver.ambiguous_candidates"]
+    assert len(incidents) == 2
+    assert incidents[0]["incident_id"] != incidents[1]["incident_id"]
 
 
 def _rediscover(receiver, event_log, owner):
