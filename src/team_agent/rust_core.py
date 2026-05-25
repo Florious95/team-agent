@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -8,6 +9,18 @@ from pathlib import Path
 from typing import Any
 
 from team_agent.paths import repo_root
+
+
+_LEADER_ENV_KEYS = (
+    "TEAM_AGENT_LEADER_SESSION_UUID",
+    "TEAM_AGENT_LEADER_PANE_ID",
+    "TEAM_AGENT_LEADER_PROVIDER",
+    "TEAM_AGENT_MACHINE_FINGERPRINT",
+    "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+)
+_LEADER_SHAPED_COMMANDS = {"codex", "claude", "claude.exe", "node", "nodejs"}
+_PANE_ENV_SCAN_TIMEOUT_SECONDS = 2.0
+_run_subprocess = subprocess.run  # test-injectable indirection
 
 
 def core_binary() -> Path | None:
@@ -105,13 +118,13 @@ def list_targets() -> dict[str, Any]:
     result = call_core("list-targets")
     if result.get("ok"):
         return result
-    proc = subprocess.run(
+    proc = _run_subprocess(
         [
             "tmux",
             "list-panes",
             "-a",
             "-F",
-            "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}",
+            "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_pid}",
         ],
         text=True,
         capture_output=True,
@@ -123,7 +136,7 @@ def list_targets() -> dict[str, Any]:
     targets = []
     for line in proc.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 8:
+        if len(parts) not in {8, 9}:
             continue
         target = {
             "pane_id": parts[0],
@@ -135,9 +148,147 @@ def list_targets() -> dict[str, Any]:
             "pane_current_command": parts[6],
             "pane_active": parts[7] == "1",
         }
+        pane_pid = parts[8].strip() if len(parts) == 9 else ""
+        if pane_pid:
+            target["pane_pid"] = pane_pid
         target["fingerprint"] = f"{target['session_name']}|{target['window_index']}|{target['pane_index']}|{target['pane_tty']}"
+        _attach_leader_env(target)
         targets.append(target)
     return {"ok": True, "targets": targets, "engine": "python_fallback", "fallback_reason": result.get("error")}
+
+
+def _attach_leader_env(target: dict[str, Any]) -> None:
+    pane_pid = str(target.get("pane_pid") or "").strip()
+    if not pane_pid:
+        target["leader_env"] = None
+        return
+    env = _read_process_env(pane_pid)
+    if env is None:
+        target["leader_env"] = None
+        return
+    leader_env = {key: env[key] for key in _LEADER_ENV_KEYS if key in env}
+    if "TEAM_AGENT_LEADER_SESSION_UUID" not in leader_env:
+        for child_pid in _walk_leader_shaped_children(pane_pid):
+            child_env = _read_process_env(child_pid)
+            if child_env is None:
+                continue
+            for key in _LEADER_ENV_KEYS:
+                if key not in leader_env and key in child_env:
+                    leader_env[key] = child_env[key]
+            if "TEAM_AGENT_LEADER_SESSION_UUID" in leader_env:
+                break
+    target["leader_env"] = leader_env
+    uuid_value = leader_env.get("TEAM_AGENT_LEADER_SESSION_UUID")
+    if uuid_value:
+        target["leader_session_uuid"] = uuid_value
+
+
+def _read_process_env(pid: str) -> dict[str, str] | None:
+    if platform.system() == "Linux":
+        return _read_proc_environ(pid)
+    return _read_ps_eww_env(pid)
+
+
+def _read_proc_environ(pid: str) -> dict[str, str] | None:
+    path = Path(f"/proc/{pid}/environ")
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    env: dict[str, str] = {}
+    for token in raw.split(b"\x00"):
+        if not token or b"=" not in token:
+            continue
+        try:
+            text = token.decode("utf-8", errors="replace")
+        except Exception:
+            continue
+        key, _, value = text.partition("=")
+        env[key] = value
+    return env
+
+
+def _read_ps_eww_env(pid: str) -> dict[str, str] | None:
+    try:
+        proc = _run_subprocess(
+            ["ps", "-E", "-ww", "-p", str(pid)],
+            text=True,
+            capture_output=True,
+            timeout=_PANE_ENV_SCAN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    return _parse_ps_eww_output(proc.stdout, pid)
+
+
+def _parse_ps_eww_output(text: str, pid: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return env
+    target_row = None
+    for line in lines[1:]:
+        stripped = line.lstrip()
+        if stripped.split(" ", 1)[0] == str(pid):
+            target_row = stripped
+            break
+    if target_row is None:
+        target_row = lines[1].lstrip()
+    for token in target_row.split():
+        if "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        if not key or " " in key:
+            continue
+        if not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(ch.isalnum() or ch == "_" for ch in key):
+            continue
+        env[key] = value
+    return env
+
+
+def _walk_leader_shaped_children(parent_pid: str) -> list[str]:
+    try:
+        proc = _run_subprocess(
+            ["ps", "-o", "pid=,ppid=,comm="],
+            text=True,
+            capture_output=True,
+            timeout=_PANE_ENV_SCAN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+    if proc.returncode != 0 or not proc.stdout:
+        return []
+    return _select_leader_shaped_descendants(proc.stdout, parent_pid)
+
+
+def _select_leader_shaped_descendants(ps_output: str, parent_pid: str) -> list[str]:
+    rows: list[tuple[str, str, str]] = []
+    for line in ps_output.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        pid, ppid, command = parts[0], parts[1], " ".join(parts[2:])
+        rows.append((pid, ppid, Path(command).name))
+    descendants: set[str] = set()
+    frontier = {str(parent_pid)}
+    while frontier:
+        next_frontier: set[str] = set()
+        for pid, ppid, _ in rows:
+            if ppid in frontier and pid not in descendants:
+                descendants.add(pid)
+                next_frontier.add(pid)
+        frontier = next_frontier
+    return [
+        pid
+        for pid, _, command in rows
+        if pid in descendants and command in _LEADER_SHAPED_COMMANDS
+    ]
 
 
 def contains_inline_secret(value: str) -> bool:
