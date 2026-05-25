@@ -10,8 +10,10 @@ from team_agent.messaging.deps import (
     _validate_leader_receiver,
     core_render_message,
     json,
+    os,
     runtime_dir,
     save_runtime_state,
+    team_state_key,
     time,
 )
 
@@ -94,10 +96,30 @@ def _send_to_leader_receiver(
             error="No direct leader tmux pane is attached. Run team-agent attach-leader.",
         )
 
-    validation = _validate_leader_receiver(receiver)
+    owner_identity = state.get("team_owner") or None
+    side_pane_refusal = _side_pane_owner_refusal(state, owner_identity)
+    if side_pane_refusal:
+        event_log.write("leader_receiver.side_pane_refused", **side_pane_refusal)
+        return {
+            "ok": False,
+            "message_id": message_id,
+            "status": "refused",
+            "to": leader_id,
+            "channel": "direct_tmux",
+            **side_pane_refusal,
+        }
+    receiver_for_validation = dict(receiver)
+    if owner_identity and owner_identity.get("leader_session_uuid") and not receiver_for_validation.get("leader_session_uuid"):
+        receiver_for_validation["leader_session_uuid"] = owner_identity["leader_session_uuid"]
+    validation = _validate_leader_receiver(receiver_for_validation)
     if not validation["ok"]:
-        owner_identity = state.get("team_owner") or None
-        rediscovery = _rediscover_leader_receiver(receiver, event_log, owner_identity)
+        rediscovery = _rediscover_leader_receiver(
+            receiver_for_validation,
+            event_log,
+            owner_identity,
+            invalidation_reason=validation.get("reason"),
+            team_id=team_state_key(state),
+        )
         if rediscovery.get("status") == "updated":
             state["leader_receiver"].update(rediscovery["receiver"])
             receiver = state["leader_receiver"]
@@ -111,7 +133,7 @@ def _send_to_leader_receiver(
                 payload,
                 event_log,
                 reason="ambiguous",
-                error="multiple possible leader panes found; rerun team-agent attach-leader --pane <pane_id>",
+                error="multiple possible leader panes found; run team-agent claim-leader --confirm from the intended pane",
                 message_status="ambiguous",
             )
     if not validation["ok"]:
@@ -201,6 +223,64 @@ def _send_to_leader_receiver(
     )
 
 
+def _side_pane_owner_refusal(state: dict[str, Any], owner_identity: dict[str, Any] | None) -> dict[str, Any] | None:
+    owner_uuid = str((owner_identity or {}).get("leader_session_uuid") or "")
+    caller_uuid = os.environ.get("TEAM_AGENT_LEADER_SESSION_UUID") or os.environ.get("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE") or ""
+    if not owner_uuid or not caller_uuid or caller_uuid == owner_uuid:
+        return None
+    bound_pane = (state.get("leader_receiver") or {}).get("pane_id") or (owner_identity or {}).get("pane_id")
+    team_id = team_state_key(state)
+    return {
+        "reason": "team_owner_mismatch",
+        "error": (
+            f"This workspace's team `{team_id}` is already bound to pane `{bound_pane}`. "
+            "To work in this window either start a new team with a different team_id, operate through the bound pane, "
+            "or run `team-agent claim-leader --confirm` only if you intend to forcibly take over."
+        ),
+        "bound_pane_id": bound_pane,
+        "caller_uuid_prefix": caller_uuid[:8],
+        "uuid_prefix": owner_uuid[:8],
+        "action": "team-agent claim-leader --confirm",
+    }
+
+
+def claim_leader_receiver(
+    workspace: Path,
+    state: dict[str, Any],
+    candidate: dict[str, Any],
+    event_log: EventLog,
+    *,
+    confirm: bool,
+    expected_epoch: int | None = None,
+) -> dict[str, Any]:
+    from team_agent.messaging.leader_panes import _leader_command_looks_usable, _receiver_from_target, _target_matches_owner_identity, _uuid_prefix
+    if not confirm:
+        return {"ok": False, "status": "refused", "reason": "confirm_required", "action": "team-agent claim-leader --confirm"}
+    owner = state.setdefault("team_owner", {})
+    receiver = state.get("leader_receiver") or {}
+    current_epoch = int(owner.get("owner_epoch") or receiver.get("owner_epoch") or 0)
+    if expected_epoch is not None and current_epoch != expected_epoch:
+        event_log.write("leader_receiver.claim_refused", reason="owner_epoch_advanced", owner_epoch=current_epoch, bound_pane_id=receiver.get("pane_id"))
+        return {"ok": False, "status": "refused", "reason": "owner_epoch_advanced", "owner_epoch": current_epoch, "bound_pane_id": receiver.get("pane_id")}
+    if receiver.get("pane_id") == candidate.get("pane_id"):
+        return {"ok": True, "status": "already_bound", "leader_receiver": receiver, "owner_epoch": current_epoch}
+    if not _target_matches_owner_identity(candidate, owner):
+        event_log.write("leader_receiver.claim_refused", reason="uuid_mismatch", candidate_pane_id=candidate.get("pane_id"))
+        return {"ok": False, "status": "refused", "reason": "uuid_mismatch"}
+    provider = str(candidate.get("provider") or receiver.get("provider") or "codex")
+    if not _leader_command_looks_usable(str(candidate.get("pane_current_command", "")), provider):
+        return {"ok": False, "status": "refused", "reason": "wrong_command", "candidate_pane_id": candidate.get("pane_id")}
+    next_epoch = current_epoch + 1
+    new_receiver = _receiver_from_target(candidate, provider, owner.get("leader_session_uuid"), next_epoch)
+    owner["owner_epoch"] = next_epoch
+    state["leader_receiver"] = new_receiver
+    from team_agent.runtime import _runtime_lock, save_runtime_state
+    with _runtime_lock(workspace, "leader_receiver"):
+        save_runtime_state(workspace, state)
+    event_log.write("leader_receiver.claimed", pane_id=new_receiver["pane_id"], owner_epoch=next_epoch, uuid_prefix=_uuid_prefix(owner))
+    return {"ok": True, "status": "claimed", "leader_receiver": new_receiver, "owner_epoch": next_epoch}
+
+
 def _fail_leader_delivery(
     workspace: Path,
     state: dict[str, Any],
@@ -279,8 +359,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
-
 
 
 

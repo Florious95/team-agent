@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from team_agent.messaging.deps import (
     EventLog,
     RuntimeError,
@@ -9,6 +11,7 @@ from team_agent.messaging.deps import (
     _tmux_current_client_pane_info as _runtime_tmux_current_client_pane_info,
     _tmux_list_panes as _runtime_tmux_list_panes,
     _tmux_pane_info as _runtime_tmux_pane_info,
+    _tmux_inject_text,
     core_list_targets,
     datetime,
     os,
@@ -19,6 +22,8 @@ from team_agent.messaging.deps import (
 
 from pathlib import Path
 from typing import Any
+
+_AMBIGUOUS_DEBOUNCE_SECONDS = 60
 
 def _resolve_leader_pane(
     pane: str | None,
@@ -208,14 +213,24 @@ def _target_fingerprint(pane_info: dict[str, Any]) -> str:
     )
 
 
+def is_bound_pane_still_valid(state: dict[str, Any], store: Any | None = None) -> dict[str, Any]:
+    receiver = dict(state.get("leader_receiver") or {})
+    owner = state.get("team_owner") if isinstance(state.get("team_owner"), dict) else {}
+    if owner and owner.get("leader_session_uuid") and not receiver.get("leader_session_uuid"):
+        receiver["leader_session_uuid"] = owner["leader_session_uuid"]
+    return _validate_leader_receiver(receiver)
+
+
 def _rediscover_leader_receiver(
     receiver: dict[str, Any],
     event_log: EventLog,
     owner_identity: dict[str, Any] | None = None,
+    invalidation_reason: str | None = None,
+    team_id: str | None = None,
 ) -> dict[str, Any]:
     provider = str(receiver.get("provider") or "codex")
-    if provider != "codex":
-        return {"status": "missing", "reason": "rediscovery_only_for_codex"}
+    if provider == "fake":
+        return {"status": "missing", "reason": "rediscovery_not_supported_for_fake"}
     targets = core_list_targets()
     if not targets.get("ok"):
         event_log.write("leader_receiver.rediscover_failed", provider=provider, error=targets.get("error"))
@@ -228,16 +243,26 @@ def _rediscover_leader_receiver(
     if owner_identity:
         owner_candidates = [target for target in candidates if _target_matches_owner_identity(target, owner_identity)]
         if len(owner_candidates) == 1:
-            return _rediscovered_receiver(receiver, provider, owner_candidates[0], event_log, owner_identity)
+            return _rediscovered_receiver(receiver, provider, owner_candidates[0], event_log, owner_identity, invalidation_reason)
         if len(owner_candidates) > 1:
+            incident = _broadcast_ambiguous_candidates(
+                receiver,
+                provider,
+                owner_candidates,
+                event_log,
+                owner_identity,
+                team_id,
+            )
             event_log.write(
                 "leader_receiver.rediscover_ambiguous",
                 provider=provider,
                 old_target=receiver.get("pane_id"),
                 candidates=[target.get("pane_id") for target in owner_candidates],
                 owner_identity=owner_identity,
+                incident_id=incident.get("incident_id"),
+                deduped=incident.get("deduped"),
             )
-            return {"status": "ambiguous", "candidates": owner_candidates, "owner_identity": owner_identity}
+            return {"status": "ambiguous", "candidates": owner_candidates, "owner_identity": owner_identity, **incident}
         event_log.write(
             "leader_receiver.rediscover_missing",
             provider=provider,
@@ -245,9 +270,19 @@ def _rediscover_leader_receiver(
             owner_identity=owner_identity,
             candidate_count=len(candidates),
         )
+        event_log.write(
+            "leader_receiver.rebind_required",
+            old_pane_id=receiver.get("pane_id"),
+            reason=invalidation_reason,
+            provider=provider,
+            team_id=team_id,
+            uuid_prefix=_uuid_prefix(owner_identity),
+            owner_identity=owner_identity,
+            recovery_action="open the owning leader pane or run team-agent claim-leader --confirm from a matching pane",
+        )
         return {"status": "missing", "owner_identity": owner_identity}
     if len(candidates) == 1:
-        return _rediscovered_receiver(receiver, provider, candidates[0], event_log, None)
+        return _rediscovered_receiver(receiver, provider, candidates[0], event_log, None, invalidation_reason)
     if len(candidates) > 1:
         event_log.write(
             "leader_receiver.rediscover_ambiguous",
@@ -255,12 +290,19 @@ def _rediscover_leader_receiver(
             old_target=receiver.get("pane_id"),
             candidates=[target.get("pane_id") for target in candidates],
         )
+        event_log.write("leader_receiver.rebind_required", old_pane_id=receiver.get("pane_id"), reason=invalidation_reason, provider=provider, team_id=team_id, rediscovery_status="ambiguous")
         return {"status": "ambiguous", "candidates": candidates}
     event_log.write("leader_receiver.rediscover_missing", provider=provider, old_target=receiver.get("pane_id"))
+    event_log.write("leader_receiver.rebind_required", old_pane_id=receiver.get("pane_id"), reason=invalidation_reason, provider=provider, team_id=team_id, rediscovery_status="missing")
     return {"status": "missing"}
 
 
 def _target_matches_owner_identity(target: dict[str, Any], owner_identity: dict[str, Any]) -> bool:
+    expected_uuid = owner_identity.get("leader_session_uuid")
+    if expected_uuid:
+        actual_uuid = _target_leader_session_uuid(target)
+        if actual_uuid:
+            return actual_uuid == expected_uuid
     env = target.get("leader_env") if isinstance(target.get("leader_env"), dict) else {}
     return (
         env.get("TEAM_AGENT_LEADER_PANE_ID") == (owner_identity.get("pane_id") or "")
@@ -269,14 +311,31 @@ def _target_matches_owner_identity(target: dict[str, Any], owner_identity: dict[
     )
 
 
-def _rediscovered_receiver(
-    receiver: dict[str, Any],
-    provider: str,
-    target: dict[str, Any],
-    event_log: EventLog,
-    owner_identity: dict[str, Any] | None,
-) -> dict[str, Any]:
-    updated = {
+def _target_leader_session_uuid(target: dict[str, Any]) -> str:
+    env = target.get("leader_env") if isinstance(target.get("leader_env"), dict) else {}
+    return str(target.get("leader_session_uuid") or env.get("TEAM_AGENT_LEADER_SESSION_UUID") or "")
+
+
+def _leader_uuid_for_bound_pane(receiver: dict[str, Any], pane_info: dict[str, Any]) -> str:
+    direct = _target_leader_session_uuid(pane_info) or _target_leader_session_uuid(receiver)
+    if direct:
+        return direct
+    targets = core_list_targets()
+    if not targets.get("ok"):
+        return ""
+    pane_id = pane_info.get("pane_id")
+    for target in targets.get("targets", []):
+        if target.get("pane_id") == pane_id:
+            return _target_leader_session_uuid(target)
+    return ""
+
+
+def _uuid_prefix(owner_identity: dict[str, Any] | None) -> str:
+    return str((owner_identity or {}).get("leader_session_uuid") or "")[:8]
+
+
+def _receiver_from_target(target: dict[str, Any], provider: str, leader_uuid: str | None, owner_epoch: int | None = None) -> dict[str, Any]:
+    receiver = {
         "mode": "direct_tmux",
         "status": "attached",
         "provider": provider,
@@ -289,8 +348,83 @@ def _rediscovered_receiver(
         "pane_current_command": target["pane_current_command"],
         "fingerprint": target.get("fingerprint") or _target_fingerprint(target),
         "attached_at": datetime.now(timezone.utc).isoformat(),
-        "discovery": "stale_rediscovery_owner_identity" if owner_identity else "stale_rediscovery_unique_candidate",
     }
+    if leader_uuid:
+        receiver["leader_session_uuid"] = leader_uuid
+    if owner_epoch is not None:
+        receiver["owner_epoch"] = owner_epoch
+    return receiver
+
+
+def _broadcast_ambiguous_candidates(
+    receiver: dict[str, Any],
+    provider: str,
+    candidates: list[dict[str, Any]],
+    event_log: EventLog,
+    owner_identity: dict[str, Any],
+    team_id: str | None,
+) -> dict[str, Any]:
+    candidate_ids = sorted(str(candidate.get("pane_id")) for candidate in candidates)
+    bucket = _ambiguous_debounce_bucket()
+    incident_id = hashlib.sha256("\0".join([str(team_id or ""), *candidate_ids, bucket]).encode("utf-8")).hexdigest()[:16]
+    if any(event.get("event") == "leader_receiver.ambiguous_candidates" and event.get("incident_id") == incident_id for event in event_log.tail(200)):
+        return {"incident_id": incident_id, "deduped": True}
+    prompt = _ambiguous_candidate_prompt(team_id, len(candidates))
+    event_log.write(
+        "leader_receiver.ambiguous_candidates",
+        incident_id=incident_id,
+        old_pane_id=receiver.get("pane_id"),
+        candidates=candidate_ids,
+        provider=provider,
+        team_id=team_id,
+        uuid_prefix=_uuid_prefix(owner_identity),
+        debounce_bucket=bucket,
+    )
+    for candidate in candidates:
+        pane_id = str(candidate.get("pane_id") or "")
+        injected = _tmux_inject_text(
+            pane_id,
+            prompt,
+            "Enter",
+            f"team-agent-leader-ambiguous-{incident_id}-{pane_id.strip('%')}",
+            provider=provider,
+        )
+        event_log.write(
+            "leader_receiver.ambiguous_candidate_queued",
+            incident_id=incident_id,
+            pane_id=pane_id,
+            ok=bool(injected.get("ok")),
+            error=injected.get("error"),
+        )
+    return {"incident_id": incident_id, "deduped": False}
+
+
+def _ambiguous_debounce_bucket() -> str:
+    now = datetime.now(timezone.utc)
+    second = now.second - (now.second % _AMBIGUOUS_DEBOUNCE_SECONDS)
+    return now.replace(second=second, microsecond=0).isoformat()
+
+
+def _ambiguous_candidate_prompt(team_id: str | None, candidate_count: int) -> str:
+    others = max(candidate_count - 1, 0)
+    return (
+        f"Team `{team_id or 'current'}` has no bound leader. This window and {others} other window(s) all qualify. "
+        "To claim this window as the team leader, run: `team-agent claim-leader --confirm`. "
+        "Only the first such call wins; subsequent calls from other windows will be refused."
+    )
+
+
+def _rediscovered_receiver(
+    receiver: dict[str, Any],
+    provider: str,
+    target: dict[str, Any],
+    event_log: EventLog,
+    owner_identity: dict[str, Any] | None,
+    invalidation_reason: str | None = None,
+) -> dict[str, Any]:
+    leader_uuid = _target_leader_session_uuid(target) or (owner_identity or {}).get("leader_session_uuid") or receiver.get("leader_session_uuid")
+    updated = _receiver_from_target(target, provider, leader_uuid)
+    updated["discovery"] = "stale_rediscovery_owner_identity" if owner_identity else "stale_rediscovery_unique_candidate"
     event_log.write(
         "leader_receiver.rediscovered",
         provider=provider,
@@ -299,6 +433,14 @@ def _rediscovered_receiver(
         candidate_count=1,
         owner_identity=owner_identity,
     )
+    event_log.write(
+        "leader_receiver.rebind_applied",
+        old_pane_id=receiver.get("pane_id"),
+        new_pane_id=updated["pane_id"],
+        reason=invalidation_reason,
+        owner_identity=owner_identity,
+        uuid_prefix=_uuid_prefix(owner_identity),
+    )
     return {"status": "updated", "receiver": updated, "owner_identity": owner_identity}
 
 
@@ -306,6 +448,26 @@ def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
     pane_info = _runtime_tmux_pane_info(receiver.get("pane_id"))
     if not pane_info:
         return {"ok": False, "reason": "leader_pane_missing", "error": "tmux pane does not exist"}
+    provider = str(receiver.get("provider") or "codex")
+    if not _leader_command_looks_usable(pane_info.get("pane_current_command", ""), provider):
+        return {
+            "ok": False,
+            "reason": "leader_pane_wrong_command",
+            "error": f"pane command {pane_info.get('pane_current_command')!r} is not a leader host",
+            "pane": pane_info,
+        }
+    expected_uuid = receiver.get("leader_session_uuid")
+    if expected_uuid:
+        actual_uuid = _leader_uuid_for_bound_pane(receiver, pane_info)
+        if not actual_uuid:
+            return {"ok": False, "reason": "leader_uuid_missing", "error": "bound pane has no TEAM_AGENT_LEADER_SESSION_UUID", "pane": pane_info}
+        if actual_uuid != expected_uuid:
+            return {
+                "ok": False,
+                "reason": "leader_uuid_mismatch",
+                "error": "bound pane TEAM_AGENT_LEADER_SESSION_UUID does not match stored team owner",
+                "pane": pane_info,
+            }
     capture = run_cmd(["tmux", "capture-pane", "-p", "-S", "-40", "-t", pane_info["pane_id"]], timeout=5)
     if capture.returncode != 0:
         return {
@@ -314,14 +476,7 @@ def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
             "error": capture.stderr.strip() or "tmux capture-pane failed",
             "pane": pane_info,
         }
-    warning = None
-    provider = str(receiver.get("provider") or "codex")
-    if not _leader_command_looks_usable(pane_info.get("pane_current_command", ""), provider):
-        warning = (
-            f"pane command {pane_info.get('pane_current_command')!r} is not a typical {provider} host; "
-            "continuing because tmux capture works"
-        )
-    return {"ok": True, "pane": pane_info, "capture": capture.stdout, "warning": warning}
+    return {"ok": True, "pane": pane_info, "capture": capture.stdout, "warning": None}
 
 
 def _leader_command_looks_usable(command: str, provider: str) -> bool:
@@ -330,7 +485,9 @@ def _leader_command_looks_usable(command: str, provider: str) -> bool:
     command_name = Path(command).name
     if provider == "codex":
         return command_name in {"codex", "node", "nodejs"}
-    return bool(command_name)
+    if provider in {"claude", "claude_code"}:
+        return command_name in {"claude", "claude.exe"}
+    return command_name in {"codex", "node", "nodejs", "claude", "claude.exe"}
 
 
 def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, str]:

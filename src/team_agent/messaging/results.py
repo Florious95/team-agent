@@ -359,36 +359,27 @@ def _refresh_leader_receiver_or_flag_rebind(
     receiver = state.get("leader_receiver") or {}
     if receiver.get("mode") != "direct_tmux":
         return state
-    validation = _validate_leader_receiver(receiver)
+    owner_identity = state.get("team_owner") or None
+    receiver_for_validation = dict(receiver)
+    if owner_identity and owner_identity.get("leader_session_uuid") and not receiver_for_validation.get("leader_session_uuid"):
+        receiver_for_validation["leader_session_uuid"] = owner_identity["leader_session_uuid"]
+    validation = _validate_leader_receiver(receiver_for_validation)
     if validation.get("ok"):
         return state
-    owner_identity = state.get("team_owner") or None
-    rediscovered = _rediscover_leader_receiver(receiver, event_log, owner_identity)
+    rediscovered = _rediscover_leader_receiver(
+        receiver_for_validation,
+        event_log,
+        owner_identity,
+        invalidation_reason=validation.get("reason"),
+        team_id=team_state_key(state),
+    )
     if rediscovered.get("status") == "updated":
         state["leader_receiver"] = rediscovered["receiver"]
         if persist:
             save_runtime_state(workspace, state)
         else:
             save_team_scoped_state(workspace, state)
-        event_log.write(
-            "leader_receiver.rebind_applied",
-            old_pane_id=receiver.get("pane_id"),
-            new_pane_id=rediscovered["receiver"].get("pane_id"),
-            reason=validation.get("reason"),
-            source="report_result_notify",
-            owner_identity=owner_identity,
-        )
         return state
-    event_log.write(
-        "leader_receiver.rebind_required",
-        old_pane_id=receiver.get("pane_id"),
-        reason=validation.get("reason"),
-        validation_error=validation.get("error"),
-        rediscovery_status=rediscovered.get("status"),
-        provider=receiver.get("provider"),
-        source="report_result_notify",
-        owner_identity=owner_identity,
-    )
     return state
 
 
