@@ -422,9 +422,14 @@ def _fanout_message_unlocked(
     block_until_delivered: bool = True,
     owner_team_id: str | None = None,
 ) -> dict[str, Any]:
-    recipients = [target for target in targets if target]
+    raw_recipients = [target for target in targets if target]
+    recipients = list(dict.fromkeys(raw_recipients))
     if not recipients:
         return {"ok": False, "status": "failed", "reason": "no_fanout_recipients", "to": targets, "targets": []}
+    if len(raw_recipients) != len(recipients):
+        event_log.write("send.fanout_dedupe", sender=sender, task_id=task_id,
+            raw_targets=raw_recipients, deduped_targets=recipients,
+            duplicate_count=len(raw_recipients) - len(recipients))
     event_log.write("send.fanout_start", sender=sender, targets=recipients, task_id=task_id)
     deliveries: list[dict[str, Any]] = []
     by_recipient: dict[str, dict[str, Any]] = {}

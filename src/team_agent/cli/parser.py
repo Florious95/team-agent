@@ -399,7 +399,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--workspace", default=".")
     p.add_argument("--plan", help="Path to plan YAML (required unless --status without --plan-id)")
-    p.add_argument("--start", action="store_true", help="Start the plan and dispatch stage 1")
+    p.add_argument("--no-start", action="store_true", help="Persist plan state without dispatching stage 1 (default: dispatch)")
     p.add_argument("--status", action="store_true", help="Show plan status instead of starting")
     p.add_argument("--halt", action="store_true", help="Halt the plan named by --plan-id")
     p.add_argument("--plan-id", help="Plan id for --status or --halt")

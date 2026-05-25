@@ -288,7 +288,7 @@ def cmd_run_overnight(args: argparse.Namespace) -> dict[str, Any]:
         return orchestrator.halt_plan(workspace, args.plan_id, reason=args.reason)
     if not args.plan:
         raise TeamAgentError("--plan PATH is required unless --status or --halt is used")
-    return orchestrator.start_plan(workspace, Path(args.plan).resolve(), start=args.start or True)
+    return orchestrator.start_plan(workspace, Path(args.plan).resolve(), start=not args.no_start)
 
 
 def cmd_advanced(args: argparse.Namespace) -> str:
