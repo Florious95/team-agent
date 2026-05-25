@@ -228,6 +228,62 @@ class Gap32ResultDedupeTests(unittest.TestCase):
             for forbidden in ("envelope", "content", "tests", "next_actions"):
                 self.assertNotIn(forbidden, evt, f"event must not include {forbidden}")
 
+    def test_upsert_atomic_under_thread_race(self) -> None:
+        # Stage 11.12: N concurrent notify_result_watchers calls against the same
+        # (team_id, result_id) must collapse to exactly one deliver_attempt via the
+        # claim_leader_notification atomic UPSERT (BEGIN IMMEDIATE serialises). N-1
+        # callers must observe 'already_notified_by' and emit notification_dedupe_skip.
+        import threading
+        with tempfile.TemporaryDirectory(prefix="team-agent-gap32-upsert-race-") as tmp:
+            workspace = Path(tmp)
+            store, _ = _bootstrap_workspace(workspace)
+            event_log = EventLog(workspace)
+            N = 4
+            watcher_ids = [
+                store.create_result_watcher("task_impl", "fake_impl", f"msg_{i}", "leader", owner_team_id=_TEAM)
+                for i in range(N)
+            ]
+            result_id = store.add_result(_result_envelope("success"), owner_team_id=_TEAM)
+            watchers_by_id = {w["watcher_id"]: w for w in store.result_watchers(owner_team_id=_TEAM)}
+
+            send_lock = threading.Lock()
+            sends: list[str] = []
+            def fake_send(*_a, **kwargs):
+                with send_lock:
+                    sends.append(kwargs.get("team") or "unknown")
+                return {"ok": True, "status": "submitted", "message_id": f"msg_real_{len(sends)}"}
+
+            barrier = threading.Barrier(N)
+
+            def worker(wid):
+                barrier.wait()  # release all N threads at once
+                result_delivery.notify_result_watchers(
+                    workspace, _result(result_id), event_log,
+                    watchers=[watchers_by_id[wid]],
+                )
+
+            # Patch the module-level deliver hooks ONCE in the main thread; concurrent
+            # patch.object inside per-thread workers would race the restore step and
+            # leave the module-level attribute pointing at one thread's fake after exit,
+            # contaminating subsequent tests.
+            with patch.object(result_delivery, "deliver_stored_message", side_effect=fake_send), \
+                 patch.object(result_delivery, "send_message", side_effect=fake_send):
+                threads = [threading.Thread(target=worker, args=(wid,)) for wid in watcher_ids]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+            self.assertEqual(len(sends), 1,
+                f"exactly one deliver_attempt under N={N} concurrent UPSERT race; got {len(sends)}: {sends}")
+            dedupe_skips = [e for e in _events(workspace) if e.get("event") == "leader_receiver.notification_dedupe_skip"]
+            self.assertEqual(len(dedupe_skips), N - 1,
+                f"N-1 callers must dedupe-skip; got {len(dedupe_skips)} events")
+            rows = store.result_watchers(owner_team_id=_TEAM)
+            notified_ids = {row.get("notified_message_id") for row in rows if row.get("notified_message_id")}
+            self.assertEqual(len(notified_ids), 1,
+                f"all watchers must converge on a single canonical notified_message_id; got {notified_ids}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

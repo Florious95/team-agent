@@ -105,6 +105,117 @@ def requeue_delivery_exhausted_watchers(self) -> list[str]:
     return watcher_ids
 
 
+def claim_leader_notification(
+    store: Any,
+    owner_team_id: str | None,
+    result_id: str | None,
+    watcher_id: str,
+    proposed_token: str,
+) -> dict[str, Any]:
+    """Stage 11.12 Gap 32 atomic UPSERT (replaces the check-then-write race that recurred in
+    edac6b3 / 9f52048). Single transaction:
+      - BEGIN IMMEDIATE acquires SQLite's RESERVED lock so concurrent transactions serialize.
+      - If any sibling watcher for the same (team, result_id) already has notified_message_id
+        set, return {'status': 'already_notified_by', 'canonical_message_id': <that id>}.
+      - Else CAS this watcher row's notified_message_id from NULL to the proposed_token.
+        rowcount == 1 means we won the claim; return {'status': 'claimed_by_you',
+        'canonical_message_id': proposed_token}.
+      - rowcount == 0 means a concurrent claim landed on the same watcher_id between our
+        sibling-check and our UPDATE; re-read this row to discover the canonical and
+        return already_notified_by.
+
+    The caller that receives 'claimed_by_you' fires the actual deliver_attempt and then
+    either promotes the sentinel via promote_leader_notification_id (on success) or
+    releases it via release_leader_notification_claim (on failure). Every other concurrent
+    caller for the same (team, result_id) sees the claim and skips with dedupe_skip.
+    """
+    if not result_id:
+        return {"status": "no_result_id", "canonical_message_id": None}
+    with closing(store.connect()) as conn:
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if owner_team_id is None:
+                sibling = conn.execute(
+                    "select notified_message_id from result_watchers "
+                    "where result_id = ? and notified_message_id is not null "
+                    "order by coalesce(completed_at, created_at) limit 1",
+                    (result_id,),
+                ).fetchone()
+            else:
+                sibling = conn.execute(
+                    "select notified_message_id from result_watchers "
+                    "where result_id = ? and notified_message_id is not null "
+                    "and (owner_team_id = ? or owner_team_id is null) "
+                    "order by coalesce(completed_at, created_at) limit 1",
+                    (result_id, owner_team_id),
+                ).fetchone()
+            if sibling and sibling[0]:
+                conn.execute("COMMIT")
+                return {"status": "already_notified_by", "canonical_message_id": sibling[0]}
+            cur = conn.execute(
+                "update result_watchers "
+                "set notified_message_id = ?, result_id = coalesce(result_id, ?) "
+                "where watcher_id = ? and notified_message_id is null",
+                (proposed_token, result_id, watcher_id),
+            )
+            if cur.rowcount == 1:
+                conn.execute("COMMIT")
+                return {"status": "claimed_by_you", "canonical_message_id": proposed_token}
+            row = conn.execute(
+                "select notified_message_id from result_watchers where watcher_id = ?",
+                (watcher_id,),
+            ).fetchone()
+            conn.execute("COMMIT")
+            return {
+                "status": "already_notified_by",
+                "canonical_message_id": (row[0] if row else None) or None,
+            }
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = ""  # restore default
+
+
+def release_leader_notification_claim(
+    store: Any,
+    watcher_id: str,
+    expected_token: str,
+) -> bool:
+    """Release a sentinel claim after delivery failure so the next retry can re-claim.
+    Returns True iff we released the claim we owned (rowcount == 1)."""
+    with closing(store.connect()) as conn:
+        with conn:
+            cur = conn.execute(
+                "update result_watchers set notified_message_id = null "
+                "where watcher_id = ? and notified_message_id = ?",
+                (watcher_id, expected_token),
+            )
+            return cur.rowcount == 1
+
+
+def promote_leader_notification_id(
+    store: Any,
+    watcher_id: str,
+    sentinel_token: str,
+    real_message_id: str,
+) -> bool:
+    """After successful delivery, replace the sentinel claim with the real message_id.
+    Returns True iff the promotion succeeded (rowcount == 1)."""
+    with closing(store.connect()) as conn:
+        with conn:
+            cur = conn.execute(
+                "update result_watchers set notified_message_id = ? "
+                "where watcher_id = ? and notified_message_id = ?",
+                (real_message_id, watcher_id, sentinel_token),
+            )
+            return cur.rowcount == 1
+
+
 def leader_notified_message_id_for_result(
     store: Any,
     owner_team_id: str | None,
