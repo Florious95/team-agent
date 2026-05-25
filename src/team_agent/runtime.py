@@ -67,6 +67,8 @@ from team_agent.display import (
 from team_agent.leader import (
     attach_leader,
     attach_leader_to_state as _attach_leader_to_state,
+    claim_leader,
+    leader_identity,
     leader_session_name as _leader_session_name,
     leader_start_plan,
     start_leader,
@@ -438,12 +440,10 @@ for _name in (
     assert hasattr(_launch_pkg, _name), f"team_agent.launch missing {_name}"
 del _launch_pkg, _name
 
-# Leader lane re-exports keep runtime.attach_leader, runtime.start_leader,
-# runtime.leader_start_plan, runtime._attach_leader_to_state,
-# runtime._leader_session_name resolving for CLI handlers and tests.
+# Leader lane re-exports keep runtime leader helpers resolving for CLI handlers and tests.
 import team_agent.leader as _leader_pkg
 assert attach_leader is _leader_pkg.attach_leader
-for _name in ("attach_leader", "attach_leader_to_state", "leader_session_name", "leader_start_plan", "start_leader"):
+for _name in ("attach_leader", "attach_leader_to_state", "claim_leader", "leader_identity", "leader_session_name", "leader_start_plan", "start_leader"):
     assert hasattr(_leader_pkg, _name), f"team_agent.leader missing {_name}"
 del _leader_pkg, _name
 from team_agent.task_graph import ready_tasks, update_task_status

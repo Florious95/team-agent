@@ -136,6 +136,14 @@ def cmd_takeover(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.takeover(Path(args.workspace).resolve(), team=args.team, confirm=args.confirm)
 
 
+def cmd_claim_leader(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.claim_leader(Path(args.workspace).resolve(), team=args.team, confirm=args.confirm)
+
+
+def cmd_identity(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.leader_identity(Path(args.workspace).resolve(), team=args.team)
+
+
 def cmd_send(args: argparse.Namespace) -> dict[str, Any]:
     target = _send_target(args)
     return runtime.send_message(

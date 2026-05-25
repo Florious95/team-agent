@@ -30,6 +30,8 @@ from team_agent.cli.commands import (
     cmd_sessions,
     cmd_attach_leader,
     cmd_takeover,
+    cmd_claim_leader,
+    cmd_identity,
     cmd_send,
     cmd_collect,
     cmd_diagnose,
@@ -231,6 +233,19 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_takeover)
 
+    p = sub.add_parser("claim-leader", help="Claim this pane as leader after ambiguous leader recovery")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--team", help="Explicit team/session selector when a workspace has multiple teams")
+    p.add_argument("--confirm", action="store_true", help="Apply the claim; without this, show a dry-run summary")
+    add_json(p)
+    p.set_defaults(func=cmd_claim_leader)
+
+    p = sub.add_parser("identity", help="Show leader identity diagnostics")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--team", help="Explicit team/session selector when a workspace has multiple teams")
+    add_json(p)
+    p.set_defaults(func=cmd_identity)
+
     p = sub.add_parser(
         "send",
         help="Send a message to an agent, task assignee, or attached leader",
@@ -429,7 +444,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,acknowledge-idle,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,takeover,claim-leader,identity,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,acknowledge-idle,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:
