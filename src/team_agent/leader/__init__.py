@@ -405,7 +405,27 @@ def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False
             owner_epoch=epoch,
             uuid_prefix=expected_uuid[:12],
         )
-        return {"ok": True, "status": "claimed", "leader_receiver": state["leader_receiver"], "owner_epoch": epoch, "losers": losers}
+        # Stage 11.9 (Gap 26 Mac mini Scenario 3): result watchers that stalled while the
+        # broadcast was waiting for a human claim need fresh budget against the newly bound
+        # pane. Per-watcher leader_receiver.claim_requeue events + immediate retry.
+        from team_agent.message_store import MessageStore
+        from team_agent.messaging.result_delivery import requeue_after_claim_leader
+        requeued = requeue_after_claim_leader(
+            workspace,
+            MessageStore(workspace),
+            event_log,
+            team_state_key(state),
+            current_pane,
+            incident_ts=incident.get("ts"),
+        )
+        return {
+            "ok": True,
+            "status": "claimed",
+            "leader_receiver": state["leader_receiver"],
+            "owner_epoch": epoch,
+            "losers": losers,
+            "requeued_watchers": [item["watcher_id"] for item in requeued],
+        }
 
 
 def _latest_ambiguous_incident(event_log: EventLog, team_id: str) -> dict[str, Any] | None:

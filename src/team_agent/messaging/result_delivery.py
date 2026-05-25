@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -343,6 +344,83 @@ def watcher_matches_result(watcher: dict[str, Any], result: dict[str, Any]) -> b
     task_id = watcher.get("task_id")
     agent_id = watcher.get("agent_id")
     return (not task_id or task_id == result.get("task_id")) and (not agent_id or agent_id == result.get("agent_id"))
+
+
+def requeue_after_claim_leader(
+    workspace: Path,
+    store: MessageStore,
+    event_log: EventLog,
+    owner_team_id: str,
+    claimed_pane_id: str,
+    *,
+    incident_ts: str | None = None,
+) -> list[dict[str, Any]]:
+    """Post-claim hook (Gap 26 / Mac mini Stage 11 Scenario 3): re-eligibilize watchers that
+    stalled due to ambiguous-candidate state, then trigger an immediate delivery attempt
+    against the newly claimed pane. Returns the list of requeued watcher records (may be
+    empty).
+
+    Selection rules:
+      - watcher is scoped to this team (owner_team_id match)
+      - watcher status is delivery_exhausted or notify_failed
+      - watcher has no notified_message_id (would otherwise be a Gap 32 dedupe target)
+      - watcher's stall timestamp (completed_at fallback created_at) is at-or-after the
+        incident timestamp when provided; without an incident_ts every eligible stalled
+        watcher is requeued.
+    """
+    incident_dt = _parse_iso(incident_ts)
+    requeued: list[dict[str, Any]] = []
+    for watcher in store.result_watchers(owner_team_id=owner_team_id):
+        status = str(watcher.get("status") or "").lower()
+        if status not in {"delivery_exhausted", "notify_failed"}:
+            continue
+        if watcher.get("notified_message_id"):
+            continue
+        stall_ts = _parse_iso(watcher.get("completed_at")) or _parse_iso(watcher.get("created_at"))
+        if incident_dt and stall_ts and stall_ts < incident_dt:
+            continue
+        store.mark_result_watcher(
+            watcher["watcher_id"], "notify_failed",
+            result_id=watcher.get("result_id"),
+        )
+        event_log.write(
+            "leader_receiver.claim_requeue",
+            result_id=watcher.get("result_id"),
+            watcher_id=watcher["watcher_id"],
+            prior_state=status,
+            requeued_at=datetime.now(timezone.utc).isoformat(),
+            claimed_pane_id=claimed_pane_id,
+            team_id=owner_team_id,
+        )
+        requeued.append({
+            "watcher_id": watcher["watcher_id"],
+            "result_id": watcher.get("result_id"),
+            "prior_state": status,
+        })
+    if requeued:
+        try:
+            retry_result_deliveries(workspace, event_log)
+        except Exception as exc:
+            event_log.write(
+                "leader_receiver.claim_requeue_delivery_failed",
+                error=str(exc),
+                watcher_ids=[r["watcher_id"] for r in requeued],
+                team_id=owner_team_id,
+                claimed_pane_id=claimed_pane_id,
+            )
+    return requeued
+
+
+def _parse_iso(text: Any) -> datetime | None:
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def format_result_watcher_notification(result: dict[str, Any]) -> str:
