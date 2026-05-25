@@ -76,12 +76,32 @@ class CliContractTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn(
-            "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,"
-            "stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,"
-            "acknowledge-idle,doctor}",
-            proc.stdout,
-        )
+        public_commands = [
+            "codex",
+            "claude",
+            "quick-start",
+            "send",
+            "status",
+            "approvals",
+            "inbox",
+            "takeover",
+            "claim-leader",
+            "identity",
+            "shutdown",
+            "restart",
+            "start-agent",
+            "stop-agent",
+            "reset-agent",
+            "add-agent",
+            "fork-agent",
+            "remove-agent",
+            "stuck-list",
+            "stuck-cancel",
+            "acknowledge-idle",
+            "doctor",
+        ]
+        for command in public_commands:
+            self.assertIn(command, proc.stdout)
         self.assertNotIn("peek", proc.stdout)
         self.assertNotIn("compile", proc.stdout)
         self.assertNotIn("launch", proc.stdout)
