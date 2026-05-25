@@ -131,7 +131,7 @@ def _result_schema_errors(envelope: Any) -> list[str]:
 
 def _check_agent(agent: Any, path: str, errors: list[str]) -> None:
     required = {"id", "role", "provider", "model", "working_directory", "system_prompt", "tools", "permission_mode", "preferred_for", "avoid_for", "output_contract"}
-    allowed = required | {"paused", "auth_mode", "profile", "credential_ref"}
+    allowed = required | {"paused", "auth_mode", "profile", "credential_ref", "forked_from"}
     _check_keys(agent, path, required, allowed, errors)
     if not isinstance(agent, dict):
         return
@@ -245,6 +245,8 @@ def _semantic_errors(spec: dict[str, Any], base_dir: Path) -> list[str]:
     agents = spec.get("agents", [])
     agent_ids = {a.get("id") for a in agents if isinstance(a, dict)}
     all_ids = set(agent_ids)
+    if len(agent_ids) != len([a for a in agents if isinstance(a, dict)]):
+        errors.append("/agents: duplicate agent id")
     if leader.get("id"):
         all_ids.add(leader["id"])
 
