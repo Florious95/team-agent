@@ -155,31 +155,92 @@ def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_displ
     old_state = copy.deepcopy(state)
     old_dynamic = dynamic_path.read_bytes() if dynamic_path.exists() else None
     event_log = EventLog(workspace)
+    cleared_locations: list[str] = []
+    current_step = "init"
+    current_resource: str | None = None
+
+    def _step_done(name: str, resource: str | None = None, **extra: Any) -> None:
+        cleared_locations.append(name)
+        event_log.write(
+            "lifecycle.add_step_completed",
+            agent_id=agent_id,
+            step=name,
+            resource=resource,
+            **extra,
+        )
+
     try:
+        current_step, current_resource = "role_file", str(dynamic_path)
         dynamic_dir.mkdir(parents=True, exist_ok=True)
         dynamic_path.write_bytes(role_bytes)
+        _step_done("role_file", resource=str(dynamic_path))
+
+        current_step, current_resource = "compile_role_doc", str(dynamic_path)
         agent = compile_role_doc_agent(dynamic_path, team_dir, agent_id)
+        _step_done("compile_role_doc", resource=str(dynamic_path))
+
+        current_step, current_resource = "spec_yaml", str(spec_path)
         spec.setdefault("agents", []).append(agent)
         spec.setdefault("runtime", {}).setdefault("startup_order", []).append(agent_id)
         validate_spec(spec, base_dir=spec_path.parent)
         write_spec(spec_path, spec)
+        _step_done("spec_yaml", resource=str(spec_path))
+
+        current_step, current_resource = "team_state_md", "team_state.md"
         write_team_state(workspace, spec, state)
+        _step_done("team_state_md", resource="team_state.md")
+
+        current_step, current_resource = "start_agent", agent_id
         started = start_agent(workspace, agent_id, open_display=open_display, allow_fresh=True, team=team)
+        _step_done("start_agent", resource=agent_id, started=started)
+
+        current_step, current_resource = "workspace_state", "state.json:agents"
         state, _refusal_after = resolve_team_scoped_state(workspace, team)
         state["agents"][agent_id]["dynamic_role_file"] = str(dynamic_path.relative_to(workspace))
         state["agents"][agent_id]["role_file_sha"] = role_sha
         save_team_scoped_state(workspace, state)
         state_path = write_team_state(workspace, spec, state)
-    except Exception:
-        spec_path.write_text(old_spec_text, encoding="utf-8")
-        save_team_scoped_state(workspace, old_state)
-        if old_dynamic is None:
-            dynamic_path.unlink(missing_ok=True)
-        else:
-            dynamic_path.parent.mkdir(parents=True, exist_ok=True)
-            dynamic_path.write_bytes(old_dynamic)
+        _step_done("workspace_state", resource="state.json:agents")
+    except Exception as exc:
+        rolled_back: list[str] = []
+        rollback_errors: list[str] = []
+        try:
+            spec_path.write_text(old_spec_text, encoding="utf-8")
+            rolled_back.append("spec_yaml")
+            event_log.write("lifecycle.add_step_rolled_back", agent_id=agent_id,
+                            step="spec_yaml", resource=str(spec_path))
+        except Exception as restore_exc:
+            rollback_errors.append(f"spec_yaml:{restore_exc}")
+        try:
+            save_team_scoped_state(workspace, old_state)
+            rolled_back.append("workspace_state")
+            event_log.write("lifecycle.add_step_rolled_back", agent_id=agent_id,
+                            step="workspace_state", resource="state.json:agents")
+        except Exception as restore_exc:
+            rollback_errors.append(f"workspace_state:{restore_exc}")
+        try:
+            if old_dynamic is None:
+                dynamic_path.unlink(missing_ok=True)
+            else:
+                dynamic_path.parent.mkdir(parents=True, exist_ok=True)
+                dynamic_path.write_bytes(old_dynamic)
+            rolled_back.append("role_file")
+            event_log.write("lifecycle.add_step_rolled_back", agent_id=agent_id,
+                            step="role_file", resource=str(dynamic_path))
+        except Exception as restore_exc:
+            rollback_errors.append(f"role_file:{restore_exc}")
+        event_log.write(
+            "lifecycle.add_failed",
+            agent_id=agent_id,
+            failed_step=current_step,
+            failed_resource=current_resource,
+            cleared_locations=cleared_locations,
+            rolled_back=rolled_back,
+            rollback_errors=rollback_errors,
+            reason=str(exc),
+        )
         raise
-    event_log.write("add_agent.complete", agent_id=agent_id, role_file=str(dynamic_path), role_file_sha=role_sha, started=started)
+    event_log.write("add_agent.complete", agent_id=agent_id, role_file=str(dynamic_path), role_file_sha=role_sha, started=started, cleared_locations=cleared_locations)
     return {
         "ok": True,
         "agent_id": agent_id,

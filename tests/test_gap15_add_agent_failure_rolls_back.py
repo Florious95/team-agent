@@ -58,6 +58,74 @@ class Gap15AddAgentRollbackTests(unittest.TestCase):
             events = _events(workspace) if (workspace / ".team" / "logs" / "events.jsonl").exists() else []
             self.assertFalse(any(event.get("event") == "add_agent.complete" for event in events))
 
+            rolled_back = [e for e in events if e.get("event") == "lifecycle.add_step_rolled_back"]
+            self.assertEqual({e.get("step") for e in rolled_back}, {"spec_yaml", "workspace_state", "role_file"},
+                             f"expected per-step rollback events; got {rolled_back}")
+            for evt in rolled_back:
+                self.assertEqual(evt.get("agent_id"), "extra_helper")
+                self.assertIsNotNone(evt.get("resource"))
+
+            failed = [e for e in events if e.get("event") == "lifecycle.add_failed"]
+            self.assertEqual(len(failed), 1, f"expected exactly one lifecycle.add_failed event; got {failed}")
+            evt = failed[0]
+            self.assertEqual(evt.get("agent_id"), "extra_helper")
+            self.assertEqual(evt.get("failed_step"), "start_agent",
+                             f"failed_step must point at start_agent (where the injection landed); got {evt}")
+            self.assertEqual(evt.get("failed_resource"), "extra_helper")
+            self.assertIn("injected add-agent startup failure", evt.get("reason", ""))
+            self.assertEqual(set(evt.get("rolled_back") or []), {"spec_yaml", "workspace_state", "role_file"})
+            self.assertEqual(evt.get("rollback_errors") or [], [])
+            # cleared_locations captures the steps that DID succeed before the failure landed.
+            self.assertEqual(set(evt.get("cleared_locations") or []),
+                             {"role_file", "compile_role_doc", "spec_yaml", "team_state_md"},
+                             f"cleared_locations should list steps completed before the failure; got {evt}")
+
+    def test_gap15_add_failed_event_carries_resource_ids(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-gap15-add-resource-ids-") as tmp:
+            workspace = Path(tmp)
+            spec, role_file = _write_add_agent_workspace(workspace)
+
+            def fake_compile(_path: Path, _team_dir: Path, agent_id: str) -> dict:
+                agent = copy.deepcopy(spec["agents"][0])
+                agent["id"] = agent_id
+                agent["role"] = "Extra helper"
+                agent["model"] = "gpt-nonexistent-9999"
+                return agent
+
+            def failing_start(_ws: Path, agent_id: str, **_kwargs: object) -> dict:
+                raise TeamAgentRuntimeError(
+                    f"model_check refused: model gpt-nonexistent-9999 is not a known model for agent {agent_id}"
+                )
+
+            with (
+                patch("team_agent.compiler.compile_role_doc_agent", side_effect=fake_compile),
+                patch("team_agent.runtime.start_agent", side_effect=failing_start),
+            ):
+                with self.assertRaises(TeamAgentRuntimeError):
+                    runtime.add_agent(workspace, "broken_helper", role_file_path=str(role_file), open_display=False)
+
+            events = _events(workspace)
+            failed = [e for e in events if e.get("event") == "lifecycle.add_failed"]
+            self.assertEqual(len(failed), 1)
+            evt = failed[0]
+            self.assertEqual(evt.get("agent_id"), "broken_helper")
+            self.assertEqual(evt.get("failed_step"), "start_agent")
+            self.assertEqual(evt.get("failed_resource"), "broken_helper")
+            self.assertIn("model_check refused", evt.get("reason", ""))
+            self.assertIn("gpt-nonexistent-9999", evt.get("reason", ""))
+            # rolled_back must name every storage path the rollback handler touched.
+            self.assertIn("spec_yaml", evt.get("rolled_back") or [])
+            self.assertIn("workspace_state", evt.get("rolled_back") or [])
+            self.assertIn("role_file", evt.get("rolled_back") or [])
+            # Per-step rolled-back events must also be present, one per cleared storage path.
+            per_step = [e for e in events if e.get("event") == "lifecycle.add_step_rolled_back"]
+            self.assertEqual({e.get("step") for e in per_step}, {"spec_yaml", "workspace_state", "role_file"})
+            # Step events must carry the actual resource id (file path or state key), not just a label.
+            spec_evt = next(e for e in per_step if e.get("step") == "spec_yaml")
+            self.assertTrue(spec_evt.get("resource", "").endswith("team.spec.yaml"))
+            role_evt = next(e for e in per_step if e.get("step") == "role_file")
+            self.assertTrue(role_evt.get("resource", "").endswith("broken_helper.md"))
+
 
 def _write_add_agent_workspace(workspace: Path) -> tuple[dict, Path]:
     spec = _fake_spec(workspace)
