@@ -236,7 +236,10 @@ def _parse_ps_eww_output(text: str, pid: str) -> dict[str, str]:
             target_row = stripped
             break
     if target_row is None:
-        target_row = lines[1].lstrip()
+        # Spark MEDIUM #2 (da436a3): never fall back to lines[1] — that row may belong to
+        # an unrelated process and would leak its env (incl. another team's
+        # TEAM_AGENT_LEADER_SESSION_UUID) into this pane's leader_env, corrupting rediscovery.
+        return env
     for token in target_row.split():
         if "=" not in token:
             continue

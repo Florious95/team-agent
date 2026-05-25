@@ -155,5 +155,38 @@ class PythonFallbackEnvTests(unittest.TestCase):
         self.assertEqual(leader["leader_session_uuid"], "u-from-child")
 
 
+    def test_ps_output_without_target_pid_row_returns_empty_dict_not_arbitrary_row(self) -> None:
+        # Spark MEDIUM #2: lines[1] fallback could leak another process's env into our pane's
+        # leader_env. _parse_ps_eww_output must return {} when the requested pid is not in the
+        # output, even if other rows are present.
+        ps_other_pid = (
+            "  PID TT  STAT TIME COMMAND\n"
+            " 9999 s001 S+   0:00.01 some-other TEAM_AGENT_LEADER_SESSION_UUID=u-WRONG-LEAKED\n"
+            " 8888 s001 S+   0:00.02 unrelated TEAM_AGENT_LEADER_SESSION_UUID=u-also-WRONG\n"
+        )
+        parsed = rust_core._parse_ps_eww_output(ps_other_pid, "4242")
+        self.assertEqual(parsed, {}, "must not leak env from unrelated PID rows")
+
+        # End-to-end through list_targets: ps returns rows for OTHER pids, our 4242 pane scan
+        # must produce leader_env={} (scanned, no marker found) — not the leaked uuid.
+        tmux_one = "%76\tteam-alpha\t0\tleader\t0\t/dev/ttys001\tclaude.exe\t1\t4242\n"
+
+        def env_branch(args, **_kw):
+            if args[:3] == ["ps", "-E", "-ww"]:
+                return _completed(stdout=ps_other_pid)
+            if args[:3] == ["ps", "-o", "pid=,ppid=,comm="]:
+                return _completed(stdout="")  # no children
+            return _completed(stderr="unexpected", returncode=1)
+
+        with patch.object(rust_core, "_run_subprocess", side_effect=_make_tmux_runner(tmux_one, env_branch=env_branch)), \
+             patch.object(rust_core, "call_core", return_value={"ok": False, "error": "binary not found"}), \
+             patch.object(rust_core.platform, "system", return_value="Darwin"):
+            result = rust_core.list_targets()
+
+        leader = result["targets"][0]
+        self.assertEqual(leader["leader_env"], {}, leader)
+        self.assertNotIn("leader_session_uuid", leader, "must NOT promote a leaked uuid from an unrelated PID")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
