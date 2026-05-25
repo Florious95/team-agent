@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from team_agent.events import EventLog
-from team_agent.state import derive_leader_session_uuid, load_runtime_state, save_runtime_state, save_team_scoped_state, select_runtime_state, team_state_key
+from team_agent.state import apply_first_time_leader_binding, derive_leader_session_uuid, leader_env_exports, load_runtime_state, save_runtime_state, save_team_scoped_state, select_runtime_state, team_state_key, validate_leader_uuid_from_targets
 
 
 def attach_leader(workspace: Path, pane: str | None = None, provider: str = "codex") -> dict[str, Any]:
@@ -265,7 +265,9 @@ def attach_leader_to_state(
         _resolve_leader_pane,
         _target_fingerprint,
         _validate_leader_receiver,
+        core_list_targets,
         get_adapter,
+        run_cmd,
     )
     get_adapter(provider)
     pane_info, discovery = _resolve_leader_pane(pane, provider, workspace=workspace, require_current=require_current)
@@ -289,43 +291,54 @@ def attach_leader_to_state(
         "attached_at": datetime.now(timezone.utc).isoformat(),
         "discovery": discovery,
     }
+    if not state.get("team_owner") and source in {"launch", "quick_start"}:
+        validation = apply_first_time_leader_binding(workspace, state, receiver, pane_info, identity, source)
+        if not validation["ok"]:
+            event_log.write("leader_receiver.attach_failed", target=pane or pane_info.get("pane_id"), discovery=discovery, provider=provider, reason=validation["reason"], error=validation.get("error"), source=source, first_time=True, uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12])
+            raise RuntimeError(f"leader pane validation failed: {validation['reason']}")
+        _set_tmux_leader_environment(receiver, identity, event_log, run_cmd)
+        event_log.write("leader_receiver.attached", target=receiver["pane_id"], session_name=receiver["session_name"], window_index=receiver["window_index"], window_name=receiver["window_name"], pane_index=receiver["pane_index"], pane_tty=receiver["pane_tty"], pane_current_command=receiver["pane_current_command"], provider=receiver_provider, requested_provider=provider if receiver_provider != provider else None, discovery=discovery, source=source, first_time=True, uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12], leader_session_uuid_source=identity.get("leader_session_uuid_source"))
+        return receiver, validation
     if receiver_provider != "fake":
         receiver["leader_session_uuid"] = identity["leader_session_uuid"]
     if receiver_provider != provider:
         receiver["requested_provider"] = provider
-    validation = _validate_leader_receiver(receiver)
+    validation = validate_leader_uuid_from_targets(receiver, core_list_targets())
+    if validation["ok"]:
+        validation = _validate_leader_receiver(receiver)
     if not validation["ok"]:
-        event_log.write(
-            "leader_receiver.attach_failed",
-            target=pane or pane_info.get("pane_id"),
-            discovery=discovery,
-            provider=provider,
-            reason=validation["reason"],
-            error=validation.get("error"),
-            source=source,
-            uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12],
-        )
-        raise RuntimeError(f"leader pane validation failed: {validation['reason']}")
+        event_log.write("leader_receiver.attach_failed", target=pane or pane_info.get("pane_id"), discovery=discovery, provider=provider, reason=validation["reason"], error=validation.get("error"), source=source, uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12])
+        raise RuntimeError(_strict_leader_validation_error(validation))
     if validation.get("warning"):
         receiver["warning"] = validation["warning"]
     state["leader_receiver"] = receiver
-    event_log.write(
-        "leader_receiver.attached",
-        target=receiver["pane_id"],
-        session_name=receiver["session_name"],
-        window_index=receiver["window_index"],
-        window_name=receiver["window_name"],
-        pane_index=receiver["pane_index"],
-        pane_tty=receiver["pane_tty"],
-        pane_current_command=receiver["pane_current_command"],
-        provider=receiver_provider,
-        requested_provider=provider if receiver_provider != provider else None,
-        discovery=discovery,
-        source=source,
-        uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12],
-        leader_session_uuid_source=identity.get("leader_session_uuid_source"),
-    )
+    event_log.write("leader_receiver.attached", target=receiver["pane_id"], session_name=receiver["session_name"], window_index=receiver["window_index"], window_name=receiver["window_name"], pane_index=receiver["pane_index"], pane_tty=receiver["pane_tty"], pane_current_command=receiver["pane_current_command"], provider=receiver_provider, requested_provider=provider if receiver_provider != provider else None, discovery=discovery, source=source, uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12], leader_session_uuid_source=identity.get("leader_session_uuid_source"))
     return receiver, validation
+
+
+def _set_tmux_leader_environment(receiver: dict[str, Any], identity: dict[str, Any], event_log: EventLog, run_cmd: Any) -> None:
+    session_name = receiver.get("session_name")
+    if not session_name:
+        return
+    failures: dict[str, str] = {}
+    for key, value in leader_env_exports(receiver, identity).items():
+        proc = run_cmd(["tmux", "set-environment", "-t", str(session_name), key, value], timeout=5)
+        if proc.returncode != 0:
+            failures[key] = proc.stderr.strip() or "tmux set-environment failed"
+    event_log.write(
+        "leader_receiver.first_time_env_seeded",
+        pane_id=receiver.get("pane_id"),
+        session_name=session_name,
+        ok=not failures,
+        failed_keys=sorted(failures),
+    )
+
+def _strict_leader_validation_error(validation: dict[str, Any]) -> str:
+    return (
+        f"leader pane validation failed: {validation['reason']}. "
+        "first quick-start uses cwd+command match only; this team already has team_owner "
+        "so strict UUID gate applies; use team-agent takeover --confirm if you intend to take over"
+    )
 
 
 def leader_identity(workspace: Path, team: str | None = None) -> dict[str, Any]:

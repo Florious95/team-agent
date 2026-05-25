@@ -298,6 +298,68 @@ def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopul
     return owner
 
 
+def apply_first_time_leader_binding(
+    workspace: Path,
+    state: dict[str, Any],
+    receiver: dict[str, Any],
+    pane_info: dict[str, Any],
+    identity: dict[str, Any],
+    source: str,
+) -> dict[str, Any]:
+    from team_agent.messaging.leader_panes import _leader_command_looks_usable
+    command = pane_info.get("pane_current_command", "")
+    provider = str(receiver.get("provider") or "")
+    if not _leader_command_looks_usable(command, provider):
+        return {"ok": False, "reason": "leader_pane_wrong_command", "error": f"pane command {command!r} is not a leader host", "pane": pane_info}
+    current_path = pane_info.get("pane_current_path")
+    if not current_path or os.path.realpath(current_path) != os.path.realpath(str(workspace.resolve())):
+        return {"ok": False, "reason": "leader_pane_wrong_workspace", "error": f"pane cwd {current_path!r} does not match workspace {str(workspace.resolve())!r}", "pane": pane_info}
+    receiver.update({
+        "leader_session_uuid": identity["leader_session_uuid"],
+        "machine_fingerprint": identity["machine_fingerprint"],
+        "owner_epoch": 0,
+    })
+    state["team_owner"] = {
+        "pane_id": receiver["pane_id"],
+        "provider": provider,
+        "machine_fingerprint": identity["machine_fingerprint"],
+        "leader_session_uuid": identity["leader_session_uuid"],
+        "owner_epoch": 0,
+        "claimed_at": datetime.now(timezone.utc).isoformat(),
+        "claimed_via": source,
+    }
+    state["leader_receiver"] = receiver
+    return {"ok": True, "pane": pane_info, "warning": None, "first_time": True}
+
+
+def leader_env_exports(receiver: dict[str, Any], identity: dict[str, Any]) -> dict[str, str]:
+    return {
+        "TEAM_AGENT_LEADER_PANE_ID": str(receiver.get("pane_id") or ""),
+        "TEAM_AGENT_LEADER_PROVIDER": str(receiver.get("provider") or ""),
+        "TEAM_AGENT_LEADER_SESSION_UUID": str(identity.get("leader_session_uuid") or ""),
+        "TEAM_AGENT_MACHINE_FINGERPRINT": str(identity.get("machine_fingerprint") or ""),
+        "TEAM_AGENT_WORKSPACE": str(identity.get("workspace_abspath") or ""),
+        "TEAM_AGENT_TEAM_ID": str(identity.get("team_id") or ""),
+    }
+
+
+def validate_leader_uuid_from_targets(receiver: dict[str, Any], targets: dict[str, Any]) -> dict[str, Any]:
+    expected_uuid = str(receiver.get("leader_session_uuid") or "")
+    if not expected_uuid or receiver.get("provider") == "fake":
+        return {"ok": True}
+    if not targets.get("ok"):
+        return {"ok": False, "reason": "leader_uuid_lookup_failed", "error": targets.get("error") or "tmux target scan failed"}
+    pane_id = receiver.get("pane_id")
+    target = next((item for item in targets.get("targets", []) if item.get("pane_id") == pane_id), None)
+    env = target.get("leader_env") if isinstance((target or {}).get("leader_env"), dict) else {}
+    actual_uuid = str((target or {}).get("leader_session_uuid") or env.get("TEAM_AGENT_LEADER_SESSION_UUID") or "")
+    if not actual_uuid:
+        return {"ok": False, "reason": "leader_uuid_missing", "error": "bound pane has no TEAM_AGENT_LEADER_SESSION_UUID", "pane": target}
+    if actual_uuid != expected_uuid:
+        return {"ok": False, "reason": "leader_uuid_mismatch", "error": "bound pane TEAM_AGENT_LEADER_SESSION_UUID does not match stored team owner", "pane": target}
+    return {"ok": True}
+
+
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
     _migrate_state_identity(state, workspace)
     path = runtime_state_path(workspace)
