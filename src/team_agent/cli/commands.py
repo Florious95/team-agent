@@ -137,9 +137,10 @@ def cmd_takeover(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_send(args: argparse.Namespace) -> dict[str, Any]:
+    target = _send_target(args)
     return runtime.send_message(
         Path(args.workspace).resolve(),
-        args.target,
+        target,
         " ".join(args.message),
         task_id=args.task,
         sender=args.sender,
@@ -150,6 +151,12 @@ def cmd_send(args: argparse.Namespace) -> dict[str, Any]:
         watch_result=args.watch_result,
         team=args.team,
     )
+
+
+def _send_target(args: argparse.Namespace) -> str | list[str] | None:
+    if getattr(args, "targets", None):
+        return [item.strip() for item in args.targets.split(",") if item.strip()]
+    return args.target
 
 
 def cmd_collect(args: argparse.Namespace) -> dict[str, Any]:

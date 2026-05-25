@@ -242,6 +242,7 @@ def main(argv: list[str] | None = None) -> None:
     p.send_order_hint = True
     p.add_argument("target", nargs="?")
     p.add_argument("message", nargs="+")
+    p.add_argument("--to", dest="targets", help="Comma-separated fan-out recipients, for example agent_a,agent_b")
     p.add_argument("--workspace", default=".")
     p.add_argument("--team", help="Explicit team/session target when a workspace has multiple teams")
     p.add_argument("--task")

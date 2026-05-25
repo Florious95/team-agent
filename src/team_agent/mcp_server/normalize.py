@@ -23,7 +23,12 @@ def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
             "fallback_path",
             "suggestion",
         ]
-        return {key: result[key] for key in keys if key in result}
+        compact = {key: result[key] for key in keys if key in result}
+        if str(result.get("status") or "").startswith("fanout_"):
+            for key in ("deliveries", "recipients"):
+                if key in result:
+                    compact[key] = result[key]
+        return compact
     keys = [
         "ok",
         "status",
@@ -50,6 +55,10 @@ def _compact_tool_result(result: dict[str, Any]) -> dict[str, Any]:
         "notification_event_id",
     ]
     compact = {key: result[key] for key in keys if key in result}
+    if str(result.get("status") or "").startswith("fanout_"):
+        for key in ("deliveries", "recipients"):
+            if key in result:
+                compact[key] = result[key]
     if "acknowledged_messages" in result:
         compact["acknowledged_count"] = len(result.get("acknowledged_messages") or [])
     return compact or {"ok": True}

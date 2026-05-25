@@ -21,7 +21,12 @@ TOOLS = [
             "type": "object",
             "required": ["to", "content"],
             "properties": {
-                "to": {"type": "string"},
+                "to": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    ]
+                },
                 "content": {"type": "string"},
             },
             "additionalProperties": False,

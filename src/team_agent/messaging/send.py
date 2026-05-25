@@ -35,7 +35,7 @@ from typing import Any
 
 def send_message(
     workspace: Path,
-    target: str | None,
+    target: str | list[str] | None,
     content: str,
     task_id: str | None = None,
     sender: str = "leader",
@@ -67,7 +67,7 @@ def send_message(
 
 def _send_message_unlocked(
     workspace: Path,
-    target: str | None,
+    target: str | list[str] | None,
     content: str,
     task_id: str | None = None,
     sender: str = "leader",
@@ -92,6 +92,25 @@ def _send_message_unlocked(
     event_log = EventLog(workspace)
     owner_team_id = team_state_key(state)
     leader_id = _leader_id(state, spec)
+
+    if isinstance(target, list):
+        if watch_result:
+            return {"ok": False, "status": "failed", "reason": "watch_result_not_supported_for_fanout", "to": target}
+        return _fanout_message_unlocked(
+            workspace,
+            state,
+            spec,
+            event_log,
+            target,
+            content,
+            task_id=task_id,
+            sender=sender,
+            requires_ack=requires_ack,
+            wait_visible=wait_visible,
+            timeout=timeout,
+            block_until_delivered=block_until_delivered,
+            owner_team_id=owner_team_id,
+        )
 
     if target == "*":
         if watch_result:
@@ -387,6 +406,67 @@ def _broadcast_message_unlocked(
     }
 
 
+def _fanout_message_unlocked(
+    workspace: Path,
+    state: dict[str, Any],
+    spec: dict[str, Any],
+    event_log: EventLog,
+    targets: list[str],
+    content: str,
+    *,
+    task_id: str | None,
+    sender: str,
+    requires_ack: bool,
+    wait_visible: bool,
+    timeout: float,
+    block_until_delivered: bool = True,
+    owner_team_id: str | None = None,
+) -> dict[str, Any]:
+    recipients = [target for target in targets if target]
+    if not recipients:
+        return {"ok": False, "status": "failed", "reason": "no_fanout_recipients", "to": targets, "targets": []}
+    event_log.write("send.fanout_start", sender=sender, targets=recipients, task_id=task_id)
+    deliveries: list[dict[str, Any]] = []
+    by_recipient: dict[str, dict[str, Any]] = {}
+    for recipient in recipients:
+        result = _send_single_message_unlocked(
+            workspace,
+            state,
+            spec,
+            event_log,
+            recipient,
+            content,
+            task_id=task_id,
+            sender=sender,
+            requires_ack=requires_ack,
+            confirm_human=False,
+            wait_visible=wait_visible,
+            timeout=timeout,
+            watch_result=False,
+            mirror_peer=False,
+            route_task_id=False,
+            block_until_delivered=block_until_delivered,
+            owner_team_id=owner_team_id,
+        )
+        compact = _compact_fanout_delivery(result)
+        deliveries.append(compact)
+        by_recipient[recipient] = compact
+    failed = [item for item in deliveries if not item.get("delivered")]
+    status = "fanout_delivered" if not failed else "fanout_partial"
+    aggregate = {
+        "ok": True,
+        "status": status,
+        "to": recipients,
+        "targets": recipients,
+        "delivered_count": len(deliveries) - len(failed),
+        "failed_count": len(failed),
+        "deliveries": deliveries,
+        "recipients": by_recipient,
+    }
+    event_log.write("send.fanout_status", **aggregate)
+    return aggregate
+
+
 def _broadcast_targets(state: dict[str, Any], spec: dict[str, Any], sender: str) -> list[str]:
     leader_id = _leader_id(state, spec)
     targets = [leader_id, *_runtime_team_agent_ids(state, spec)]
@@ -400,3 +480,9 @@ def _broadcast_targets(state: dict[str, Any], spec: dict[str, Any], sender: str)
 def _compact_broadcast_delivery(result: dict[str, Any]) -> dict[str, Any]:
     keys = ["ok", "status", "message_id", "to", "reason", "channel"]
     return {key: result[key] for key in keys if key in result}
+
+
+def _compact_fanout_delivery(result: dict[str, Any]) -> dict[str, Any]:
+    compact = _compact_broadcast_delivery(result)
+    compact["delivered"] = bool(result.get("submitted") or result.get("visible") or result.get("status") in {"submitted", "visible", "delivered", "acknowledged"})
+    return compact

@@ -13,6 +13,12 @@ from team_agent.state import load_runtime_state, save_runtime_state, write_team_
 from team_agent.mcp_server.normalize import _compact_tool_result, _normalize_report_envelope, _text
 
 
+def _requires_ack_for_target(to: str | list[str]) -> bool:
+    if isinstance(to, list):
+        return any(target not in {"leader", "Leader"} for target in to)
+    return to not in {"leader", "Leader"}
+
+
 class TeamOrchestratorTools:
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
@@ -32,14 +38,15 @@ class TeamOrchestratorTools:
 
     def send_message(
         self,
-        to: str,
+        to: str | list[str],
         content: str,
         task_id: str | None = None,
         sender: str | None = None,
         requires_ack: bool | None = None,
     ) -> dict[str, Any]:
-        effective_sender = sender or self._infer_agent_id(task_id=task_id, target=to) or "unknown"
-        effective_requires_ack = requires_ack if requires_ack is not None else to not in {"leader", "Leader"}
+        inferred_target = to if isinstance(to, str) else None
+        effective_sender = sender or self._infer_agent_id(task_id=task_id, target=inferred_target) or "unknown"
+        effective_requires_ack = requires_ack if requires_ack is not None else _requires_ack_for_target(to)
         return _compact_tool_result(
             runtime.send_message(
                 self.workspace,
