@@ -6,7 +6,7 @@ from typing import Any
 
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
-from team_agent.messaging.deps import load_spec, save_runtime_state, team_state_key
+from team_agent.messaging.deps import load_runtime_state, load_spec, save_runtime_state, team_state_key
 from team_agent.messaging.internal_delivery import deliver_stored_message
 
 
@@ -79,6 +79,7 @@ def _team_last_progress_at(
     owner_team_id: str,
     event_log: EventLog | None = None,
     now: datetime | None = None,
+    workspace: Path | None = None,
 ) -> tuple[datetime | None, str | None]:
     sources: list[tuple[datetime, str]] = []
     coordinator = state.get("coordinator") or {}
@@ -97,8 +98,25 @@ def _team_last_progress_at(
         if ts:
             sources.append((ts, "agent_health.last_output_at"))
     if event_log is not None:
+        # Spark MEDIUM #3 (d9f740d): in multi-team workspaces an unscoped progress event in
+        # team A's activity must NOT suppress team B's idle_fallback. require_team_scope=True
+        # when the workspace has more than one team so unscoped events are ignored. The
+        # team-scoped state passed in here does not carry the workspace-level `teams` dict, so
+        # we re-read the workspace state from disk to detect multi-team shape.
+        require_team_scope = False
+        teams = state.get("teams")
+        if isinstance(teams, dict) and len(teams) > 1:
+            require_team_scope = True
+        elif workspace is not None:
+            try:
+                ws_teams = (load_runtime_state(workspace).get("teams") or {})
+            except Exception:
+                ws_teams = {}
+            if isinstance(ws_teams, dict) and len(ws_teams) > 1:
+                require_team_scope = True
         event_ts = _scan_event_progress_signals(
             event_log, owner_team_id, now or datetime.now(timezone.utc),
+            require_team_scope=require_team_scope,
         )
         if event_ts:
             sources.append((event_ts, "event_log"))
@@ -112,6 +130,8 @@ def _scan_event_progress_signals(
     event_log: EventLog,
     owner_team_id: str,
     now: datetime,
+    *,
+    require_team_scope: bool = False,
 ) -> datetime | None:
     window_start = now - timedelta(seconds=_PROGRESS_EVENT_WINDOW_SECONDS)
     latest: datetime | None = None
@@ -122,7 +142,10 @@ def _scan_event_progress_signals(
         ):
             continue
         event_team = event.get("team") or event.get("owner_team_id")
-        if event_team is not None and event_team != owner_team_id:
+        if event_team is None:
+            if require_team_scope:
+                continue
+        elif event_team != owner_team_id:
             continue
         ts = _parse_iso(event.get("ts"))
         if not ts or ts < window_start:
@@ -260,7 +283,7 @@ def detect_idle_fallbacks(
         save_runtime_state(workspace, state)
         return []
     last_progress, progress_source = _team_last_progress_at(
-        state, store, owner_team_id, event_log=event_log, now=now,
+        state, store, owner_team_id, event_log=event_log, now=now, workspace=workspace,
     )
     if last_progress and (now - last_progress) < timedelta(seconds=STABLE_IDLE_SECONDS):
         reason = "recent_team_progress" if progress_source == "event_log" else "stable_idle_window"
