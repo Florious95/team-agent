@@ -202,7 +202,7 @@ def _dispatch_stage(
     stage: dict[str, Any],
     event_log: EventLog,
 ) -> dict[str, Any]:
-    from team_agent import runtime
+    from team_agent.messaging.internal_delivery import deliver_stored_message
     dispatch = stage.get("dispatch") or {}
     to = dispatch.get("to")
     content = dispatch.get("content")
@@ -222,11 +222,22 @@ def _dispatch_stage(
             event_log,
         )
     stage_team = _text_or_none(stage.get("team")) or _text_or_none(state.get("team"))
+    dispatch_task_id = _text_or_none(dispatch.get("task_id"))
+    event_log.write(
+        "orchestrator.stage_dispatch_internal",
+        plan_id=state["plan_id"],
+        stage_id=stage.get("id"),
+        to=to,
+        team=stage_team,
+        delivery="internal_delivery.deliver_stored_message",
+        owner_gate="bypassed_framework_internal",
+    )
     try:
-        result = runtime.send_message(
+        result = deliver_stored_message(
             workspace,
             to,
             str(content),
+            task_id=dispatch_task_id,
             sender="orchestrator",
             requires_ack=False,
             wait_visible=False,

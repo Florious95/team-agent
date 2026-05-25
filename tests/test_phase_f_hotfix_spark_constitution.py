@@ -221,7 +221,7 @@ stages:
             def raising_send(*_args, **_kwargs):
                 raise RuntimeError("tmux pane vanished")
 
-            with patch("team_agent.runtime.send_message", side_effect=raising_send):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=raising_send):
                 outcome = _orchestrator().start_plan(workspace, plan_path, start=True)
 
             self.assertTrue(outcome["ok"], outcome)
@@ -250,7 +250,7 @@ stages:
                 encoding="utf-8",
             )
             dispatches: list[dict] = []
-            with patch("team_agent.runtime.send_message", side_effect=_record_dispatch(dispatches)):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=_record_dispatch(dispatches)):
                 started = _orchestrator().start_plan(workspace, plan_path, start=True)
             self.assertTrue(started["ok"], started)
             self.assertEqual(started["status"], "running")
@@ -276,11 +276,62 @@ stages:
             plan_path = _write_simple_plan(workspace, plan_id="f3-demo", team="alpha")
 
             dispatches: list[dict] = []
-            with patch("team_agent.runtime.send_message", side_effect=_record_dispatch(dispatches)):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=_record_dispatch(dispatches)):
                 _orchestrator().start_plan(workspace, plan_path, start=True)
 
             self.assertEqual(len(dispatches), 1, dispatches)
             self.assertEqual(dispatches[0]["kwargs"].get("team"), "alpha")
+
+    def test_hotfix2_orchestrator_dispatch_bypasses_owner_gate_in_coordinator_context(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-hotfix2-bypass-") as tmp:
+            workspace = Path(tmp)
+            _write_two_agent_runtime(workspace)
+            state = load_runtime_state(workspace)
+            state["team_owner"] = {
+                "pane_id": "%372",
+                "provider": "codex",
+                "machine_fingerprint": "user-mac-mini",
+            }
+            save_runtime_state(workspace, state)
+            plan_path = _write_simple_plan(workspace, plan_id="bypass-demo")
+
+            for key in ("TEAM_AGENT_LEADER_PANE_ID", "TEAM_AGENT_LEADER_PROVIDER", "TEAM_AGENT_MACHINE_FINGERPRINT"):
+                os.environ.pop(key, None)
+
+            from team_agent.state import check_team_owner
+            self.assertIsNotNone(
+                check_team_owner(load_runtime_state(workspace)),
+                "precondition: blank env must trip owner gate when team_owner is bound",
+            )
+
+            sentinel_payloads: list[dict] = []
+
+            def fake_internal(workspace_arg, target, content, **kwargs):
+                sentinel_payloads.append({"to": target, "kwargs": kwargs})
+                return {"ok": True, "status": "submitted", "message_id": "msg_internal"}
+
+            with patch(
+                "team_agent.messaging.internal_delivery.deliver_stored_message",
+                side_effect=fake_internal,
+            ):
+                outcome = _orchestrator().start_plan(workspace, plan_path, start=True)
+
+            self.assertTrue(outcome["ok"], outcome)
+            self.assertEqual(outcome["status"], "running")
+            self.assertEqual(len(sentinel_payloads), 1, sentinel_payloads)
+            self.assertEqual(sentinel_payloads[0]["to"], "agent_a")
+            self.assertEqual(sentinel_payloads[0]["kwargs"].get("sender"), "orchestrator")
+
+            events_path = workspace / ".team" / "logs" / "events.jsonl"
+            self.assertTrue(events_path.exists())
+            bypass_events = [
+                json.loads(line)
+                for line in events_path.read_text(encoding="utf-8").splitlines()
+                if '"orchestrator.stage_dispatch_internal"' in line
+            ]
+            self.assertTrue(bypass_events, "expected orchestrator.stage_dispatch_internal audit event")
+            self.assertEqual(bypass_events[-1].get("owner_gate"), "bypassed_framework_internal")
+            self.assertEqual(bypass_events[-1].get("delivery"), "internal_delivery.deliver_stored_message")
 
 
 if __name__ == "__main__":

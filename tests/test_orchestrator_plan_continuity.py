@@ -27,7 +27,7 @@ class OrchestratorPlanContinuityTests(unittest.TestCase):
             plan_path = _write_two_stage_plan(workspace)
             dispatches: list[dict] = []
 
-            with patch("team_agent.runtime.send_message", side_effect=_record_dispatch(dispatches)):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=_record_dispatch(dispatches)):
                 started = _orchestrator().start_plan(workspace, plan_path, start=True)
 
             self.assertTrue(started["ok"], started)
@@ -37,7 +37,7 @@ class OrchestratorPlanContinuityTests(unittest.TestCase):
             self.assertTrue((workspace / ".team" / "runtime" / "orchestrator" / "plan-nightly-demo.state.json").exists())
 
             stage_1_result = _result("stage_1", "agent_a", "success")
-            with patch("team_agent.runtime.send_message", side_effect=_record_dispatch(dispatches)):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=_record_dispatch(dispatches)):
                 advanced = _orchestrator().handle_report_result(workspace, stage_1_result)
 
             self.assertTrue(advanced["ok"], advanced)
@@ -65,7 +65,7 @@ class OrchestratorPlanContinuityTests(unittest.TestCase):
             plan_path = _write_two_stage_plan(workspace)
             dispatches: list[dict] = []
 
-            with patch("team_agent.runtime.send_message", side_effect=_record_dispatch(dispatches)):
+            with patch("team_agent.messaging.internal_delivery.deliver_stored_message", side_effect=_record_dispatch(dispatches)):
                 _orchestrator().start_plan(workspace, plan_path, start=True)
                 _orchestrator().handle_report_result(workspace, _result("stage_1", "agent_a", "success"))
 
