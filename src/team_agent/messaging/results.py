@@ -212,6 +212,7 @@ def report_result(workspace: Path, envelope: dict[str, Any]) -> dict[str, Any]:
         notification_event_id=notification.get("event_id"),
         owner_team_id=owner_team_id,
     )
+    _orchestrator_advance_on_report_result(workspace, envelope, event_log)
     return {
         "ok": True,
         "result_id": result_id,
@@ -282,6 +283,44 @@ def _notify_leader_of_report_result(
         owner_team_id=event_owner_team_id,
     )
     return notification
+
+
+def _orchestrator_advance_on_report_result(
+    workspace: Path,
+    envelope: dict[str, Any],
+    event_log: EventLog,
+) -> None:
+    try:
+        from team_agent import orchestrator
+    except Exception as exc:
+        event_log.write(
+            "orchestrator.advance_skipped",
+            reason="import_failed",
+            error=str(exc),
+            task_id=envelope.get("task_id"),
+            agent_id=envelope.get("agent_id"),
+        )
+        return
+    try:
+        outcome = orchestrator.handle_report_result(workspace, envelope)
+    except Exception as exc:
+        event_log.write(
+            "orchestrator.advance_failed",
+            error=str(exc),
+            task_id=envelope.get("task_id"),
+            agent_id=envelope.get("agent_id"),
+        )
+        return
+    event_log.write(
+        "orchestrator.advance_processed",
+        outcome_status=outcome.get("status"),
+        plan_id=outcome.get("plan_id"),
+        current_stage=outcome.get("current_stage"),
+        halt_reason=outcome.get("halt_reason"),
+        halt_artifact=outcome.get("halt_artifact"),
+        task_id=envelope.get("task_id"),
+        agent_id=envelope.get("agent_id"),
+    )
 
 
 def _owner_team_id_for_report(store: MessageStore, envelope: dict[str, Any]) -> str | None:

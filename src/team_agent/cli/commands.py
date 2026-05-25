@@ -277,6 +277,20 @@ def cmd_allow_peer_talk(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.allow_peer_talk(Path(args.workspace).resolve(), args.agent_a, args.agent_b)
 
 
+def cmd_run_overnight(args: argparse.Namespace) -> dict[str, Any]:
+    from team_agent import orchestrator
+    workspace = Path(args.workspace).resolve()
+    if args.status:
+        return orchestrator.plan_status(workspace, plan_id=args.plan_id)
+    if args.halt:
+        if not args.plan_id:
+            raise TeamAgentError("--halt requires --plan-id")
+        return orchestrator.halt_plan(workspace, args.plan_id, reason=args.reason)
+    if not args.plan:
+        raise TeamAgentError("--plan PATH is required unless --status or --halt is used")
+    return orchestrator.start_plan(workspace, Path(args.plan).resolve(), start=args.start or True)
+
+
 def cmd_advanced(args: argparse.Namespace) -> str:
     return "\n".join(
         [

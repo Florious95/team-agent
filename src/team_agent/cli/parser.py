@@ -49,6 +49,7 @@ from team_agent.cli.commands import (
     cmd_allow_peer_talk,
     cmd_advanced,
     cmd_install_skill,
+    cmd_run_overnight,
 
 )
 from team_agent.cli.e2e import cmd_e2e
@@ -391,6 +392,20 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--workspace", default=".")
     add_json(p)
     p.set_defaults(func=cmd_allow_peer_talk)
+
+    p = sub.add_parser(
+        "run-overnight",
+        help="Run an orchestrator plan that advances on report_result and halts on failure",
+    )
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--plan", help="Path to plan YAML (required unless --status without --plan-id)")
+    p.add_argument("--start", action="store_true", help="Start the plan and dispatch stage 1")
+    p.add_argument("--status", action="store_true", help="Show plan status instead of starting")
+    p.add_argument("--halt", action="store_true", help="Halt the plan named by --plan-id")
+    p.add_argument("--plan-id", help="Plan id for --status or --halt")
+    p.add_argument("--reason", default="user_requested", help="Halt reason for --halt")
+    add_json(p)
+    p.set_defaults(func=cmd_run_overnight)
 
     p = sub.add_parser(
         "advanced",
