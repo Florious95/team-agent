@@ -355,47 +355,78 @@ def requeue_after_claim_leader(
     *,
     incident_ts: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Post-claim hook (Gap 26 / Mac mini Stage 11 Scenario 3): re-eligibilize watchers that
-    stalled due to ambiguous-candidate state, then trigger an immediate delivery attempt
-    against the newly claimed pane. Returns the list of requeued watcher records (may be
-    empty).
+    """Post-claim hook (Gap 26 / Mac mini Stage 11 Scenarios 3, 11.10): re-route every
+    not-yet-delivered leader-bound notification to the newly claimed pane. Returns the
+    list of requeued watcher records (may be empty).
+
+    Stage 11.10 semantic reframe: claim-leader means "all not-yet-delivered leader-bound
+    notifications for this team_id reroute to the claimed pane". Watcher status is
+    irrelevant — `notified_message_id` is the only dedupe gate. Gap 32 exactly-once
+    contract still holds: notified_message_id non-null blocks redelivery.
 
     Selection rules:
       - watcher is scoped to this team (owner_team_id match)
-      - watcher status is delivery_exhausted or notify_failed
-      - watcher has no notified_message_id (would otherwise be a Gap 32 dedupe target)
-      - watcher's stall timestamp (completed_at fallback created_at) is at-or-after the
-        incident timestamp when provided; without an incident_ts every eligible stalled
-        watcher is requeued.
+      - watcher has no notified_message_id (Gap 32 once-only)
+      - watcher's latest activity timestamp (completed_at fallback created_at) is
+        at-or-after incident_ts when provided; without an incident_ts every
+        un-notified watcher is requeued.
+      - watcher status is otherwise ignored (pending / delivery_blocked /
+        delivery_exhausted / notify_failed all become candidates).
+
+    Atomicity vs coordinator's own scheduled retry: just before flipping a watcher's
+    status, re-fetch the row from the store. If notified_message_id became non-null
+    in the gap (the scheduled retry beat us), emit a benign
+    leader_receiver.claim_requeue_already_in_flight event and skip. If the race
+    leaks past this check, Gap 32 dedupe inside notify_result_watchers still
+    guarantees exactly-once injection.
     """
     incident_dt = _parse_iso(incident_ts)
     requeued: list[dict[str, Any]] = []
-    for watcher in store.result_watchers(owner_team_id=owner_team_id):
-        status = str(watcher.get("status") or "").lower()
-        if status not in {"delivery_exhausted", "notify_failed"}:
-            continue
+    snapshot = store.result_watchers(owner_team_id=owner_team_id)
+    for watcher in snapshot:
         if watcher.get("notified_message_id"):
             continue
-        stall_ts = _parse_iso(watcher.get("completed_at")) or _parse_iso(watcher.get("created_at"))
-        if incident_dt and stall_ts and stall_ts < incident_dt:
+        latest_ts = _parse_iso(watcher.get("completed_at")) or _parse_iso(watcher.get("created_at"))
+        if incident_dt and latest_ts and latest_ts < incident_dt:
             continue
+        watcher_id = watcher["watcher_id"]
+        # Atomic-ish CAS: re-read the row right before mark to narrow the race window
+        # against coordinator's own scheduled retry. If the scheduled retry beat us
+        # (notified_message_id now populated), skip with benign event. If the race leaks
+        # past this check, Gap 32 notify_result_watchers dedupe path still guarantees
+        # exactly-once delivery via leader_notified_message_id_for_result.
+        fresh = next(
+            (row for row in store.result_watchers(owner_team_id=owner_team_id) if row["watcher_id"] == watcher_id),
+            None,
+        )
+        if fresh is None or fresh.get("notified_message_id"):
+            event_log.write(
+                "leader_receiver.claim_requeue_already_in_flight",
+                result_id=watcher.get("result_id"),
+                watcher_id=watcher_id,
+                already_notified_message_id=fresh.get("notified_message_id") if fresh else None,
+                team_id=owner_team_id,
+                claimed_pane_id=claimed_pane_id,
+            )
+            continue
+        prior_state = str(watcher.get("status") or "")
         store.mark_result_watcher(
-            watcher["watcher_id"], "notify_failed",
+            watcher_id, "notify_failed",
             result_id=watcher.get("result_id"),
         )
         event_log.write(
             "leader_receiver.claim_requeue",
             result_id=watcher.get("result_id"),
-            watcher_id=watcher["watcher_id"],
-            prior_state=status,
+            watcher_id=watcher_id,
+            prior_state=prior_state,
             requeued_at=datetime.now(timezone.utc).isoformat(),
             claimed_pane_id=claimed_pane_id,
             team_id=owner_team_id,
         )
         requeued.append({
-            "watcher_id": watcher["watcher_id"],
+            "watcher_id": watcher_id,
             "result_id": watcher.get("result_id"),
-            "prior_state": status,
+            "prior_state": prior_state,
         })
     if requeued:
         try:

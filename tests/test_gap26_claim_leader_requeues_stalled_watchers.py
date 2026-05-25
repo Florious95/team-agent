@@ -261,5 +261,136 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                           "failed redelivery must leave watcher in a retry-able terminal state")
 
 
+    def test_claim_leader_requeues_pending_watchers(self) -> None:
+        # Stage 11.10: a watcher still in 'pending' status (no exhausted retries yet) must
+        # also be re-routed by claim-leader. Old filter only matched delivery_exhausted /
+        # notify_failed and silently dropped pending watchers; Mac mini Scenario 3 evidence
+        # showed this caused the actual worker result to never reach the claimed pane.
+        with tempfile.TemporaryDirectory(prefix="team-agent-claim-pending-") as tmp:
+            workspace, owner_uuid, candidate_a, candidate_b, _ = _setup_two_candidate_workspace(tmp)
+            store = MessageStore(workspace)
+            watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_sent", "leader")
+            result_id = store.add_result(_result_envelope())
+            # Bind the result_id to the watcher row WITHOUT moving status off 'pending'.
+            with closing_helper(store) as conn:
+                conn.execute(
+                    "update result_watchers set result_id = ? where watcher_id = ?",
+                    (result_id, watcher_id),
+                )
+            # Verify precondition: watcher is 'pending' with no notified_message_id.
+            row = next(w for w in store.result_watchers() if w["watcher_id"] == watcher_id)
+            self.assertEqual(row["status"], "pending")
+            self.assertIsNone(row.get("notified_message_id"))
+
+            redelivery_calls: list[dict[str, Any]] = []
+
+            def fake_redeliver(*args, **kwargs):
+                redelivery_calls.append({"args": args, "kwargs": kwargs})
+                return {"ok": True, "status": "submitted", "message_id": "msg_fresh_pending"}
+
+            env_patch = {
+                "TEAM_AGENT_LEADER_PANE_ID": candidate_a,
+                "TEAM_AGENT_LEADER_PROVIDER": "codex",
+                "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
+                "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
+                "TEAM_AGENT_ID": "leader",
+            }
+            targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
+            with (
+                patch.dict(os.environ, env_patch, clear=False),
+                patch.object(runtime, "core_list_targets", return_value=targets),
+                patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
+                patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
+            ):
+                result = runtime.claim_leader(workspace, confirm=True)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["requeued_watchers"], [watcher_id])
+            after = next(w for w in store.result_watchers() if w["watcher_id"] == watcher_id)
+            self.assertEqual(after["status"], "notified")
+            self.assertEqual(after["notified_message_id"], "msg_fresh_pending")
+            self.assertEqual(len(redelivery_calls), 1)
+            events = _events(workspace)
+            requeue_events = [e for e in events if e.get("event") == "leader_receiver.claim_requeue"]
+            self.assertEqual(len(requeue_events), 1)
+            self.assertEqual(requeue_events[0].get("prior_state"), "pending",
+                             "prior_state must reflect actual watcher status pre-requeue")
+
+    def test_claim_leader_atomic_against_scheduled_retry(self) -> None:
+        # Stage 11.10: if a concurrent scheduled retry tick wins the race (writes
+        # notified_message_id after our snapshot but before our mark), we must NOT
+        # double-requeue. Detection: re-fetch the row immediately before the mark; if
+        # notified_message_id is now populated, emit benign claim_requeue_already_in_flight
+        # event and skip. Gap 32 dedupe is the ultimate guarantee even if the CAS leaks.
+        with tempfile.TemporaryDirectory(prefix="team-agent-claim-atomic-") as tmp:
+            workspace, owner_uuid, candidate_a, candidate_b, _ = _setup_two_candidate_workspace(tmp)
+            store = MessageStore(workspace)
+            watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_sent", "leader")
+            result_id = store.add_result(_result_envelope())
+            with closing_helper(store) as conn:
+                conn.execute(
+                    "update result_watchers set result_id = ? where watcher_id = ?",
+                    (result_id, watcher_id),
+                )
+
+            real_result_watchers = store.__class__.result_watchers
+            call_count = {"n": 0}
+
+            def race_inducing_result_watchers(self, owner_team_id=None):
+                """First call (snapshot) returns watcher still pending+None.
+                Second call (CAS re-fetch) simulates the scheduled-retry having beaten us:
+                returns the same watcher with notified_message_id set.
+                """
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    return real_result_watchers(self, owner_team_id=owner_team_id)
+                rows = real_result_watchers(self, owner_team_id=owner_team_id)
+                return [
+                    {**row, "notified_message_id": "msg_other_path_won"} if row["watcher_id"] == watcher_id else row
+                    for row in rows
+                ]
+
+            redelivery_calls: list[dict[str, Any]] = []
+
+            def fake_redeliver(*args, **kwargs):
+                redelivery_calls.append({"args": args, "kwargs": kwargs})
+                return {"ok": True, "status": "submitted", "message_id": "msg_should_not_fire"}
+
+            env_patch = {
+                "TEAM_AGENT_LEADER_PANE_ID": candidate_a,
+                "TEAM_AGENT_LEADER_PROVIDER": "codex",
+                "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
+                "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
+                "TEAM_AGENT_ID": "leader",
+            }
+            targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
+            with (
+                patch.dict(os.environ, env_patch, clear=False),
+                patch.object(runtime, "core_list_targets", return_value=targets),
+                patch.object(store.__class__, "result_watchers", race_inducing_result_watchers),
+                patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
+                patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
+            ):
+                result = runtime.claim_leader(workspace, confirm=True)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["requeued_watchers"], [],
+                             "scheduled-retry-won race must NOT re-mark the watcher")
+            events = _events(workspace)
+            requeue_events = [e for e in events if e.get("event") == "leader_receiver.claim_requeue"]
+            self.assertEqual(requeue_events, [], "no claim_requeue when CAS sees notified_message_id set")
+            already_events = [e for e in events if e.get("event") == "leader_receiver.claim_requeue_already_in_flight"]
+            self.assertEqual(len(already_events), 1)
+            self.assertEqual(already_events[0].get("watcher_id"), watcher_id)
+            self.assertEqual(already_events[0].get("already_notified_message_id"), "msg_other_path_won")
+            self.assertEqual(redelivery_calls, [], "no redelivery should fire when claim-leader skips via CAS")
+
+
+def closing_helper(store: "MessageStore"):
+    """Tiny shim to write directly to the SQLite store inside tests."""
+    from contextlib import closing as _closing
+    return _closing(store.connect())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
