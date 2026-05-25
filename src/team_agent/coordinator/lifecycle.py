@@ -265,6 +265,7 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         detect_idle_fallbacks,
     )
     from team_agent.messaging.activity_detector import detect_compaction_degradation
+    from team_agent.messaging.session_drift import detect_session_drift
     from team_agent.state import load_runtime_state, save_runtime_state
     state = load_runtime_state(workspace)
     event_log = EventLog(workspace)
@@ -304,6 +305,19 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         )
         if result.get("event") and result.get("event") != "compaction_threshold_crossed.none":
             compaction_results.append(result)
+    drift_results: list[dict[str, Any]] = []
+    for agent_id, agent_state in state.get("agents", {}).items():
+        if str(agent_state.get("provider") or "") != "codex":
+            continue
+        scrollback = str((captures.get(agent_id) or {}).get("scrollback") or "")
+        if not scrollback:
+            continue
+        drift = detect_session_drift(
+            workspace, state, event_log,
+            agent_id=agent_id, agent_state=agent_state, scrollback=scrollback,
+        )
+        if drift:
+            drift_results.append(drift)
     save_runtime_state(workspace, state)
     results = _collect_results_and_notify_watchers(workspace, event_log)
     return {
@@ -315,5 +329,6 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         "idle_alerts": idle_alerts,
         "deadlock_alerts": deadlock_alerts,
         "compaction": compaction_results,
+        "session_drift": drift_results,
         "results": results,
     }

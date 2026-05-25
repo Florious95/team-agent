@@ -174,6 +174,11 @@ def _send_single_message_unlocked(
     if _is_leader_target(target, leader_id) and not _is_leader_sender(sender, leader_id):
         return _send_to_leader_receiver(workspace, state, leader_id, content, task_id, sender, requires_ack, event_log)
 
+    from team_agent.messaging.session_drift import session_drift_refusal
+    drift = session_drift_refusal(state, target, leader_id, sender, task_id, event_log)
+    if drift:
+        return drift
+
     if task_id and route_task_id:
         task = _find_task(state.get("tasks", []), task_id)
         if task.get("human_confirmation") and not task.get("human_confirmed"):

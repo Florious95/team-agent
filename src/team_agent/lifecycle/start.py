@@ -219,6 +219,8 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
             reason="rollout_missing" if start_mode == "fresh_after_missing_rollout" else "session_id_missing",
         )
 
+    from team_agent.lifecycle.paste_buffer_hygiene import cleanup_stale_team_agent_buffers
+    cleanup_stale_team_agent_buffers(workspace, event_log, context=f"start_agent:{agent_id}")
     tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent_id, command)
     event_log.write(
         "start_agent.agent_start",
@@ -273,6 +275,7 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
         )
         command = shell_command_for_agent(command_agent, workspace, mcp_config)
         start_mode = "fresh_after_missing_rollout" if missing_resume_rollout else "fresh"
+        cleanup_stale_team_agent_buffers(workspace, event_log, context=f"start_agent_fallback:{agent_id}")
         tmux_cmd, tmux_start_mode = _tmux_start_command_for_agent_window(session_name, agent_id, command)
         event_log.write(
             "start_agent.agent_start",
