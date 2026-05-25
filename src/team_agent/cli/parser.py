@@ -46,6 +46,7 @@ from team_agent.cli.commands import (
     cmd_remove_agent,
     cmd_stuck_list,
     cmd_stuck_cancel,
+    cmd_acknowledge_idle,
     cmd_allow_peer_talk,
     cmd_advanced,
     cmd_install_skill,
@@ -372,6 +373,12 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_stuck_cancel)
 
+    p = sub.add_parser("acknowledge-idle", help="Suppress idle-fallback reminders for this team for a bounded window (default 30 minutes)")
+    p.add_argument("team", nargs="?", help="Explicit team/session target when a workspace has multiple teams")
+    p.add_argument("--workspace", default=".")
+    add_json(p)
+    p.set_defaults(func=cmd_acknowledge_idle)
+
     p = sub.add_parser("install-skill", help=argparse.SUPPRESS)
     p.add_argument("--target", choices=["codex", "claude", "all"], default="codex")
     p.add_argument("--dest", help="Explicit destination directory; overrides --target")
@@ -422,7 +429,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,acknowledge-idle,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:

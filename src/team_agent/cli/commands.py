@@ -273,6 +273,10 @@ def cmd_stuck_cancel(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def cmd_acknowledge_idle(args: argparse.Namespace) -> dict[str, Any]:
+    return runtime.acknowledge_idle(Path(args.workspace).resolve(), team=args.team)
+
+
 def cmd_allow_peer_talk(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.allow_peer_talk(Path(args.workspace).resolve(), args.agent_a, args.agent_b)
 

@@ -311,6 +311,16 @@ def _suppression_clear_reason(
     agent_id: str,
     entry: dict[str, Any],
 ) -> str | None:
+    if entry.get("manual_acknowledge"):
+        try:
+            expires_at = datetime.fromisoformat(str(entry.get("expires_at")))
+        except ValueError:
+            return "invalid_suppression_timestamp"
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < expires_at:
+            return None
+        return "manual_acknowledge_expired"
     previous = entry.get("snapshot") if isinstance(entry.get("snapshot"), dict) else {}
     current = _agent_alert_snapshot(state, store, agent_id)
     if current.get("assigned_task_ids") != previous.get("assigned_task_ids"):

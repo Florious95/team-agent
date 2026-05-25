@@ -78,7 +78,8 @@ class CliContractTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn(
             "{codex,claude,quick-start,send,status,approvals,inbox,shutdown,restart,start-agent,"
-            "stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,doctor}",
+            "stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,"
+            "acknowledge-idle,doctor}",
             proc.stdout,
         )
         self.assertNotIn("peek", proc.stdout)

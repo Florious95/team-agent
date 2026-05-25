@@ -220,6 +220,7 @@ from team_agent.state import (
     save_runtime_state,
     save_team_scoped_state,
     select_runtime_state,
+    team_state_key,
     write_spec,
     write_team_state,
 )
@@ -578,20 +579,27 @@ def remove_agent(
         return lifecycle_remove_agent(workspace, agent_id, from_spec=from_spec, confirm=confirm, force=force, team=team)
 
 
-def acknowledge_idle(workspace: Path, agent_id: str) -> dict[str, Any]:
+def acknowledge_idle(workspace: Path, agent_id: str | None = None, *, team: str | None = None) -> dict[str, Any]:
     with _runtime_lock(workspace, "acknowledge-idle"):
-        state = load_runtime_state(workspace)
+        try:
+            state = select_runtime_state(workspace, team)
+        except Exception as exc:
+            return {"ok": False, "status": "refused", "reason": "team_target_unresolved", "team": team, "error": str(exc)}
         gate = check_team_owner(state)
         if gate:
             return gate
-        now = datetime.now(timezone.utc).isoformat()
-        coordinator = state.setdefault("coordinator", {})
-        ack = coordinator.setdefault("idle_acknowledged", {})
-        ack[agent_id] = {"acknowledged_at": now}
-        save_runtime_state(workspace, state)
-        EventLog(workspace).write("coordinator.idle_acknowledged", agent_id=agent_id, acknowledged_at=now)
-        return {"ok": True, "agent_id": agent_id, "acknowledged_at": now}
-
+        now_dt = datetime.now(timezone.utc); now = now_dt.isoformat()
+        ttl_seconds = 1800
+        expires_at = (now_dt + timedelta(seconds=ttl_seconds)).isoformat()
+        owner_team_id = team_state_key(state); coordinator = state.setdefault("coordinator", {})
+        coordinator.setdefault("idle_acknowledged", {})[owner_team_id] = {"acknowledged_at": now, "expires_at": expires_at, "ttl_seconds": ttl_seconds}
+        team_suppressions = coordinator.setdefault("suppressed_idle_alerts", {}).setdefault(owner_team_id, {})
+        entry = {"suppressed_at": now, "suppressed_by": "manual_acknowledge", "manual_acknowledge": True, "expires_at": expires_at, "ttl_seconds": ttl_seconds}
+        for worker_id in state.get("agents", {}):
+            team_suppressions.setdefault(worker_id, {})["idle_fallback"] = dict(entry)
+        save_team_scoped_state(workspace, state)
+        EventLog(workspace).write("coordinator.idle_acknowledged", agent_id=agent_id, team=owner_team_id, acknowledged_at=now, expires_at=expires_at, ttl_seconds=ttl_seconds)
+        return {"ok": True, "team": owner_team_id, "agent_id": agent_id, "acknowledged_at": now, "expires_at": expires_at, "ttl_seconds": ttl_seconds}
 
 def takeover(workspace: Path, team: str | None = None, confirm: bool = False) -> dict[str, Any]:
     if not confirm:

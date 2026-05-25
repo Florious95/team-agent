@@ -55,6 +55,7 @@ LEGACY_CLI_EXPORTS = (
     "cmd_remove_agent",
     "cmd_stuck_list",
     "cmd_stuck_cancel",
+    "cmd_acknowledge_idle",
     "cmd_allow_peer_talk",
     "cmd_advanced",
     "cmd_install_skill",
