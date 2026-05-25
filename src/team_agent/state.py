@@ -252,14 +252,20 @@ def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
         return None
     _migrate_team_identity(state, Path(_identity_workspace_abspath(state)), team_state_key(state))
     caller = _caller_identity_from_env(state, team_state_key(state))
-    if caller["leader_session_uuid"] == (owner.get("leader_session_uuid") or ""):
+    owner_uuid = str(owner.get("leader_session_uuid") or "")
+    caller_uuid = caller["leader_session_uuid"]
+    owner_pane = str(owner.get("pane_id") or "")
+    caller_pane = caller.get("pane_id") or ""
+    if caller_uuid == owner_uuid and (not caller_pane or caller_pane == owner_pane):
         return None
+    same_uuid = caller_uuid == owner_uuid
     return {
         "ok": False,
         "status": "refused",
         "reason": "team_owner_mismatch",
+        "reason_kind": "sticky_bind_collision" if same_uuid else "owner_takeover_required",
         "error": "not_owner",
-        "action": "use team-agent takeover --confirm",
+        "action": "team-agent claim-leader --confirm" if same_uuid else "team-agent takeover --confirm",
         "team_owner": owner,
         "caller": caller,
     }
