@@ -121,6 +121,16 @@ def _deliver_pending_messages(workspace: Path, state: dict[str, Any], event_log:
     for row in store.messages():
         if row["status"] not in {"pending", "accepted"}:
             continue
+        agent_state = state.get("agents", {}).get(row["recipient"]) or {}
+        if str(agent_state.get("status") or "").lower() == "busy":
+            event_log.write(
+                "send.deferred_busy",
+                message_id=row["message_id"],
+                sender=row.get("sender"),
+                recipient=row["recipient"],
+                reason="recipient_busy",
+            )
+            continue
         result = _deliver_pending_message(workspace, state, row["message_id"], wait_visible=True, timeout=30.0)
         if result.get("ok"):
             delivered.append(row["message_id"])
