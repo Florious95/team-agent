@@ -61,3 +61,9 @@ Log: `/tmp/slice2-fullsuite-sigkill.log`
 Post-arch-fix re-run on HEAD 617a517: 724 tests, errors=0, exit=0, Status: PASS
 
 Log: `/tmp/slice2-fullsuite-arch.log`
+
+## Post-Blank-Tail-Fix Re-Run
+
+Post-blank-tail-fix re-run on HEAD 25b2249: 726 tests, errors=0, exit=0, Status: PASS
+
+Log: `/tmp/slice2-fullsuite-blanktail.log`
