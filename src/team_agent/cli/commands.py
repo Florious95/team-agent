@@ -98,6 +98,15 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     return runtime.format_status(Path(args.workspace).resolve(), getattr(args, "agent", None))
 
 
+def cmd_watch(args: argparse.Namespace) -> None:
+    from team_agent.watch import run_watch
+    try:
+        run_watch(Path(args.workspace).resolve(), team=getattr(args, "team", None))
+    except KeyboardInterrupt:
+        raise SystemExit(0)
+    raise SystemExit(0)
+
+
 def cmd_approvals(args: argparse.Namespace) -> dict[str, Any]:
     if args.json:
         return runtime.approvals(Path(args.workspace).resolve(), agent_id=args.agent)
