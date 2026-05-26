@@ -24,10 +24,14 @@ class Gap18StatusSummaryTests(unittest.TestCase):
                     "stopped": {"status": "stopped"},
                     "failed": {"status": "failed"},
                     "unknown": {},
+                    "blocked": {"status": "running"},
+                    "missing": {"status": "interrupted"},
                 },
                 "agent_health": {
                     "idle": {"status": "IDLE"},
                     "runner": {"status": ""},
+                    "blocked": {"status": "blocked"},
+                    "missing": {"status": "missing"},
                 },
                 "queued_messages": [{"message_id": "m1"}, {"message_id": "m2"}],
                 "latest_results": [{"agent_id": "runner", "summary": summary, "created_at": "2026-05-26T00:00:00+00:00"}],
@@ -44,9 +48,16 @@ class Gap18StatusSummaryTests(unittest.TestCase):
         self.assertEqual(len(lines), 5)
         self.assertEqual(lines[0], "coordinator: running schema_ok=True tmux=True")
         self.assertEqual(lines[1], "receiver: %12 cmd=codex")
-        self.assertEqual(lines[2], "agents: 6 — running=2 busy=1 idle=1 stopped=1 failed=1")
+        self.assertEqual(lines[2], "agents: 8 — running=1 busy=1 idle=1 stopped=1 failed=1 unknown=3")
         self.assertEqual(lines[3], "queued: 2 mailbox messages awaiting delivery")
         self.assertEqual(lines[4], f"latest result: runner -> {summary[:80]} @ 3m ago")
+
+    def test_status_summary_rejects_agent_argument(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap18-status-summary-") as tmp:
+            args = Mock(workspace=str(Path(tmp)), json=False, detail=False, summary=True, agent="developer")
+
+            with self.assertRaisesRegex(TeamAgentError, "status --summary does not accept an agent argument"):
+                cmd_status(args)
 
     def test_status_summary_and_json_conflict(self) -> None:
         with tempfile.TemporaryDirectory(prefix="gap18-status-summary-") as tmp:

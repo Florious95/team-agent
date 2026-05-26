@@ -91,6 +91,8 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "summary", False) is True:
         if getattr(args, "json", False) is True:
             raise TeamAgentError("--summary and --json are mutually exclusive")
+        if getattr(args, "agent", None):
+            raise TeamAgentError("status --summary does not accept an agent argument")
         data = runtime.status(Path(args.workspace).resolve(), as_json=True, compact=False)
         return _format_status_summary(data)
     if getattr(args, "json", False) is True:
@@ -215,6 +217,8 @@ def cmd_validate_result(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
     gate = getattr(args, "gate", None)
+    if getattr(args, "fix", False) is True and not gate:
+        raise TeamAgentError("--fix requires --gate")
     if isinstance(gate, str) and gate:
         from team_agent.diagnose.orphan_cleanup import orphan_gate
         if gate != "orphans":
@@ -240,14 +244,14 @@ def _format_status_summary(data: dict[str, Any]) -> str:
     return "\n".join([
         f"coordinator: {coordinator.get('status') or 'stopped'} schema_ok={bool(coordinator.get('schema_ok'))} tmux={bool(data.get('tmux_session_present'))}",
         f"receiver: {receiver.get('pane_id') or '-'} cmd={receiver.get('pane_current_command') or receiver.get('current_command') or '-'}",
-        f"agents: {len(agents)} — running={counts['running']} busy={counts['busy']} idle={counts['idle']} stopped={counts['stopped']} failed={counts['failed']}",
+        f"agents: {len(agents)} — running={counts['running']} busy={counts['busy']} idle={counts['idle']} stopped={counts['stopped']} failed={counts['failed']} unknown={counts['unknown']}",
         f"queued: {len(data.get('queued_messages') or [])} mailbox messages awaiting delivery",
         _latest_result_line(latest),
     ])
 
 
 def _agent_summary_counts(agents: dict[str, Any], health: dict[str, Any]) -> dict[str, int]:
-    counts = dict.fromkeys(("running", "busy", "idle", "stopped", "failed"), 0)
+    counts = dict.fromkeys(("running", "busy", "idle", "stopped", "failed", "unknown"), 0)
     for agent_id, agent in agents.items():
         raw = str((agent or {}).get("status") or "").lower()
         hstatus = str((health.get(agent_id) or {}).get("status") or "").lower()
@@ -259,8 +263,14 @@ def _agent_summary_counts(agents: dict[str, Any], health: dict[str, Any]) -> dic
             counts["busy"] += 1
         elif hstatus == "idle":
             counts["idle"] += 1
-        else:
+        elif raw in {"blocked", "awaiting_approval", "interrupted", "missing", "stuck", "uncertain"} or hstatus in {
+            "blocked", "awaiting_approval", "interrupted", "missing", "stuck", "uncertain"
+        }:
+            counts["unknown"] += 1
+        elif raw == "running":
             counts["running"] += 1
+        else:
+            counts["unknown"] += 1
     return counts
 
 

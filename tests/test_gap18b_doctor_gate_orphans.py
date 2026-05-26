@@ -5,10 +5,12 @@ import subprocess
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from team_agent.cli import parser as cli_parser
+from team_agent.cli.commands import cmd_doctor
 from team_agent.diagnose.orphan_cleanup import orphan_gate
+from team_agent.errors import TeamAgentError
 
 
 class Gap18DoctorGateOrphansTests(unittest.TestCase):
@@ -103,6 +105,12 @@ class Gap18DoctorGateOrphansTests(unittest.TestCase):
                 cli_parser.main(["doctor", "--gate", "orphans", "--json"])
 
         self.assertIn('"status": "passed"', buf.getvalue())
+
+    def test_doctor_fix_requires_gate(self) -> None:
+        args = Mock(gate=None, fix=True, confirm=True, cleanup_orphans=False, json=False, spec=None)
+
+        with self.assertRaisesRegex(TeamAgentError, "--fix requires --gate"):
+            cmd_doctor(args)
 
 
 def _ps_runner(stdout: str):
