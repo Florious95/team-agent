@@ -57,3 +57,11 @@ Commit: `e7fb747`
 File/line evidence: `src/team_agent/messaging/leader_api_errors.py:169-171`
 Description: the tail-preserve behavior changed to trim only when `len(window) > _WINDOW_MAX_CHARS`, but there are no direct tests around exact `400` and `401` boundary windows. A future change from `>` to `>=` or off-by-one in the cap logic would silently alter recall and may only surface on wrapped multiline diagnostics.
 Suggested fix shape: add focused tests for exact-boundary cases (`len(window)==400` and `==401`) around a valid error pattern to freeze this behavior.
+
+## 2026-05-26 Conversion review — 0846973 (`pytest`→`unittest`)
+
+### [NONE] No additional findings
+
+Commit: `0846973`
+File/line evidence: `tests/test_gap18a_status_summary.py`, `tests/test_gap18b_doctor_gate_orphans.py`
+Description: Migration preserved assertion coverage and control flow from the prior pytest versions: the same fixture setup (`tmp_path`→`tempfile.TemporaryDirectory`), exception paths (`pytest.raises`→`assertRaisesRegex`), and CLI output assertions (`capsys.out`→`redirect_stdout`) were retained. No silent no-op patterns (e.g., patch scope leakage, missing teardown, or dropped assertions) were identified.
