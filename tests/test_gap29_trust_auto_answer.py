@@ -334,6 +334,12 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
         self.event_log = EventLog(self.workspace)
         self._env_backup = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE")
         os.environ.pop("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", None)
+        self._precheck = patch(
+            "team_agent.messaging.delivery._prepare_tmux_pane_for_input",
+            return_value={"ok": True, "verification": "pane_input_ready"},
+        )
+        self._precheck.start()
+        self.addCleanup(self._precheck.stop)
 
     def tearDown(self) -> None:
         if self._env_backup is None:

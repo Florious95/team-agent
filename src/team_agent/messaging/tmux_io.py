@@ -422,7 +422,7 @@ def _non_input_refusal(
         "detected": detected,
         "pane_id": target,
         "pane_mode": pane_mode,
-        "pane_capture_tail": _last_lines(capture_tail, 5),
+        "pane_capture_tail": _last_lines(capture_tail, 10),
     }
     if warning_event:
         result["warning_event"] = warning_event
@@ -444,7 +444,6 @@ def _prepare_failure_attempt(attempt: int, prepared: dict[str, Any]) -> dict[str
 def _last_lines(text: str, count: int) -> str:
     lines = text.splitlines()
     return "\n".join(lines[-count:])
-
 
 
 

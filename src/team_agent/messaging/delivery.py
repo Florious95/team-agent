@@ -5,6 +5,7 @@ from team_agent.messaging.deps import (
     MessageStore,
     _message_by_id,
     _message_payload,
+    _prepare_tmux_pane_for_input,
     _tmux_inject_text,
     _tmux_window_exists,
     core_render_message,
@@ -70,7 +71,7 @@ def _deliver_pending_message(
         recipient_busy=recipient_status == "busy",
         visible_token=rendered.get("token"),
     )
-    injection = _tmux_inject_text(
+    injection = _inject_after_pre_paste_check(
         target,
         text,
         "Enter",
@@ -108,7 +109,7 @@ def _deliver_pending_message(
                     workspace, state, store, message_id, target, injection,
                     attempt=_trust_retry_attempt,
                 )
-            injection = _tmux_inject_text(
+            injection = _inject_after_pre_paste_check(
                 target,
                 text,
                 "Enter",
@@ -163,6 +164,56 @@ def _deliver_pending_message(
         "turn_verification": injection.get("turn_verification"),
         "paste_attempts": injection.get("attempts"),
         "submit_attempts": injection.get("submit_attempts"),
+        "detected": injection.get("detected"),
+        "pane_id": injection.get("pane_id"),
+        "pane_mode": injection.get("pane_mode"),
+        "pane_capture_tail": injection.get("pane_capture_tail"),
+    }
+
+
+def _inject_after_pre_paste_check(
+    target: str,
+    text: str,
+    submit_key: str,
+    buffer_name: str,
+    *,
+    attempts: int,
+    provider: str,
+) -> dict[str, Any]:
+    prepared = _prepare_tmux_pane_for_input(target)
+    if not prepared.get("ok"):
+        return _pre_paste_refusal_as_injection(prepared)
+    return _tmux_inject_text(
+        target,
+        text,
+        submit_key,
+        buffer_name,
+        attempts=attempts,
+        provider=provider,
+    )
+
+
+def _pre_paste_refusal_as_injection(prepared: dict[str, Any]) -> dict[str, Any]:
+    attempt = {
+        "attempt": 1,
+        "visible": False,
+        "verification": prepared.get("verification") or "recipient_pane_in_non_input_mode",
+    }
+    for key in ("reason", "detected", "pane_id", "pane_mode", "pane_capture_tail", "warning_event"):
+        if key in prepared:
+            attempt[key] = prepared[key]
+    return {
+        "ok": False,
+        "status": "failed",
+        "stage": prepared.get("stage") or "pre-paste-pane-state",
+        "reason": prepared.get("reason"),
+        "error": prepared.get("error"),
+        "attempts": [attempt],
+        "verification": prepared.get("verification") or "recipient_pane_in_non_input_mode",
+        "detected": prepared.get("detected"),
+        "pane_id": prepared.get("pane_id"),
+        "pane_mode": prepared.get("pane_mode"),
+        "pane_capture_tail": prepared.get("pane_capture_tail"),
     }
 
 
