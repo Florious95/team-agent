@@ -49,3 +49,9 @@ Log: `/tmp/slice2-fullsuite-final.log`
 Post-hotfix re-run on HEAD 1576bdc: 717 tests, errors=0, exit=0, Status: PASS
 
 Log: `/tmp/slice2-fullsuite-hotfix.log`
+
+## Post-Gap-37 Hotfix Re-Run
+
+Post-Gap-37-hotfix re-run on HEAD 314f484: 722 tests, errors=0, exit=0, Status: PASS (pre-existing killpg sandbox error is OK)
+
+Log: `/tmp/slice2-fullsuite-sigkill.log`
