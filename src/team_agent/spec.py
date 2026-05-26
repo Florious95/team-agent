@@ -190,6 +190,12 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         "tick_interval_sec",
         "push_min_interval_sec",
         "stuck_timeout_sec",
+        # Gap 29 / F3 deprecation (2026-05-26): accept the legacy spec opt-in so
+        # YAMLs that still set it validate and the deprecation warning + structured
+        # event in messaging/leader_panes.py can fire. The preferred per-session
+        # opt-in is the env var TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE; this spec
+        # field will be removed in 0.3.0.
+        "auto_trust_own_workspace",
     }
     _check_keys(runtime, "/runtime", required, allowed, errors)
     if not isinstance(runtime, dict):
@@ -200,6 +206,8 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         errors.append("/runtime/display_backend: invalid display backend")
     if "dangerous_auto_approve" in runtime and not isinstance(runtime["dangerous_auto_approve"], bool):
         errors.append("/runtime/dangerous_auto_approve: must be a boolean")
+    if "auto_trust_own_workspace" in runtime and not isinstance(runtime["auto_trust_own_workspace"], bool):
+        errors.append("/runtime/auto_trust_own_workspace: must be a boolean")
     _check_list(runtime.get("startup_order"), "/runtime/startup_order", errors)
 
 
