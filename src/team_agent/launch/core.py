@@ -261,6 +261,7 @@ def launch(
             event_log,
             timeout_s=1.5,
             exclude_session_ids=known_session_ids,
+            raise_on_missed=False,
         )
         if state.get("display_backend") in GHOSTTY_DISPLAY_BACKENDS:
             display_jobs.append((agent["id"], agent))

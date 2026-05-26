@@ -298,6 +298,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
                 event_log,
                 timeout_s=1.5,
                 exclude_session_ids=known_session_ids,
+                raise_on_missed=False,
             )
         if display_backend in GHOSTTY_DISPLAY_BACKENDS:
             display_jobs.append((agent["id"], agent))
