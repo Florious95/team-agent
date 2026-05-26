@@ -349,16 +349,26 @@ def _atomic_resumability_check(
     state: dict[str, Any],
     get_adapter_fn: Any,
 ) -> list[dict[str, Any]]:
-    """Stage 7 S5 atomicity contract guard. A worker is 'unresumable' when:
+    """Route B atomicity contract (Stage 7 S5 upgrade, 2026-05-27).
 
-      (a) it has no persisted session_id; OR
-      (b) it has one but adapter.session_is_resumable returns False AND neither
-          recover_resume_session_from_events nor adapter.recover_session_id
-          produces a valid candidate.
+    Decision table per worker:
 
-    Mirrors the fallback chain inside sessions.resume.prepare_resume_state so a
-    worker the runtime would legitimately repair is NOT flagged. Returns the
-    list of unresumable workers (empty when every worker can resume).
+      first_send_at | session_id                       | classification
+      ------------- | -------------------------------- | --------------------
+      present       | present and resumable            | resume (skip)
+      present       | missing or unresumable           | atomicity violation
+      null/absent   | present and resumable            | resume (skip)
+      null/absent   | missing or unresumable           | legitimate fresh
+
+    Only the second row (interacted worker whose session cannot be recovered)
+    is reported as unresumable here. Never-interacted workers — those with no
+    first_send_at stamp — have no accumulated conversation state, so a fresh
+    spawn during restart is equivalent to their initial quick-start state and
+    does NOT trip atomicity. The session-repair fallback chain mirrors
+    sessions.resume.prepare_resume_state so workers the runtime would actually
+    repair are not flagged.
+
+    Returns the list of unresumable workers eligible for atomic refusal.
     """
     from team_agent.sessions.resume import recover_resume_session_from_events
     unresumable: list[dict[str, Any]] = []
@@ -383,10 +393,17 @@ def _atomic_resumability_check(
             )
         if repaired:
             continue
+        # Cannot resume. Whether this trips atomicity depends on whether the
+        # worker has ever received work from the leader.
+        first_send_at = previous.get("first_send_at")
+        if not first_send_at:
+            # Never-interacted worker. Legitimate fresh-start; not reported.
+            continue
         unresumable.append({
             "agent_id": agent_id,
             "reason": "no_persisted_session_id" if not session_id else "session_unresumable",
             "session_id": session_id,
+            "first_send_at": first_send_at,
         })
     return unresumable
 

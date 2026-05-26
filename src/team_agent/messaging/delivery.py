@@ -118,6 +118,7 @@ def _deliver_pending_message(
             )
     if injection["ok"]:
         store.mark(message_id, "submitted")
+        _stamp_first_send_at_if_leader_to_worker(state, row)
         EventLog(workspace).write(
             "send.submitted",
             message_id=message_id,
@@ -327,6 +328,38 @@ def _execute_trust_retry(
         _trust_retry_attempt=attempt,
     )
     return delivery_result
+
+
+def _stamp_first_send_at_if_leader_to_worker(state: dict[str, Any], row: dict[str, Any]) -> None:
+    """Route B atomicity (2026-05-27): record the first time the leader
+    successfully sends work to each worker. The presence of this stamp drives
+    restart's resumability decision — a worker the leader has interacted with
+    has accumulated conversation state, so a missing session_id at restart
+    time IS an atomicity violation. A worker that has never received work
+    legitimately fresh-starts during restart.
+
+    Only stamped once per worker (idempotent across re-sends). Only fires on
+    leader -> worker sends; worker-to-worker peer messages do not count.
+    The mutation lives on the state dict the caller already saves
+    (`save_team_scoped_state` in send.py, or `save_runtime_state` after
+    coordinator_tick), so persistence is automatic.
+    """
+    sender = str(row.get("sender") or "")
+    recipient = str(row.get("recipient") or "")
+    if not recipient:
+        return
+    leader_id = str((state.get("leader") or {}).get("id") or "leader")
+    if sender not in {"leader", "Leader", leader_id}:
+        return
+    agents = state.get("agents")
+    if not isinstance(agents, dict):
+        return
+    agent_state = agents.get(recipient)
+    if not isinstance(agent_state, dict):
+        return
+    if agent_state.get("first_send_at"):
+        return
+    agent_state["first_send_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _wait_for_trust_prompt_dismissal(target: str, *, timeout: float = 3.0, poll_interval: float = 0.1) -> bool:
