@@ -18,6 +18,7 @@ from team_agent.state import load_runtime_state, save_runtime_state
 
 
 AGENT_IDS = ["worker_a", "worker_b", "worker_c", "worker_d", "worker_e", "worker_f"]
+FIRST_SEND_AT = "2026-05-26T12:00:00+00:00"
 
 
 class RestartResumeAtomicityAcceptanceTests(unittest.TestCase):
@@ -45,7 +46,12 @@ class RestartResumeAtomicityAcceptanceTests(unittest.TestCase):
     def test_2_one_unresumable_without_allow_fresh_fails_and_rolls_back(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-restart-atomic-one-bad-") as tmp:
             workspace = Path(tmp)
-            session_name = _write_workspace(workspace, AGENT_IDS, missing_session_ids={"worker_e"})
+            session_name = _write_workspace(
+                workspace,
+                AGENT_IDS,
+                missing_session_ids={"worker_e"},
+                first_send_at_ids=set(AGENT_IDS),
+            )
             tmux = FakeTmux()
             adapter = RecordingAdapter(unresumable=set())
 
@@ -60,7 +66,12 @@ class RestartResumeAtomicityAcceptanceTests(unittest.TestCase):
     def test_3_one_unresumable_with_allow_fresh_allowed_partial(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-restart-atomic-allow-fresh-") as tmp:
             workspace = Path(tmp)
-            session_name = _write_workspace(workspace, AGENT_IDS, missing_session_ids={"worker_e"})
+            session_name = _write_workspace(
+                workspace,
+                AGENT_IDS,
+                missing_session_ids={"worker_e"},
+                first_send_at_ids=set(AGENT_IDS),
+            )
             tmux = FakeTmux()
             adapter = RecordingAdapter(unresumable=set())
 
@@ -76,7 +87,12 @@ class RestartResumeAtomicityAcceptanceTests(unittest.TestCase):
     def test_4_all_unresumable_without_allow_fresh_fails(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-restart-atomic-all-bad-") as tmp:
             workspace = Path(tmp)
-            session_name = _write_workspace(workspace, AGENT_IDS, missing_session_ids=set(AGENT_IDS))
+            session_name = _write_workspace(
+                workspace,
+                AGENT_IDS,
+                missing_session_ids=set(AGENT_IDS),
+                first_send_at_ids=set(AGENT_IDS),
+            )
             tmux = FakeTmux()
             adapter = RecordingAdapter(unresumable=set())
 
@@ -87,6 +103,59 @@ class RestartResumeAtomicityAcceptanceTests(unittest.TestCase):
             self.assertEqual(_started_command_modes(tmux), [])
             self.assertEqual(result.get("ok"), False, result)
             self.assertIn("worker_a", _failure_text(result))
+
+    def test_5_never_interacted_workers_restart_fresh_without_violation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-restart-atomic-never-used-") as tmp:
+            workspace = Path(tmp)
+            session_name = _write_workspace(
+                workspace,
+                AGENT_IDS,
+                missing_session_ids=set(AGENT_IDS),
+                first_send_at_ids=set(),
+            )
+            tmux = FakeTmux()
+            adapter = RecordingAdapter(unresumable=set())
+
+            with _patched_restart_dependencies(adapter, tmux):
+                result = runtime.restart(workspace)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(_restart_modes(result), ["fresh"] * 6)
+            self.assertEqual(_started_command_modes(tmux), ["fresh"] * 6)
+            self.assertEqual(sorted(tmux.sessions[session_name]), sorted(AGENT_IDS))
+            self.assertNotIn("restart.atomic_refusal", _event_names(workspace))
+
+    def test_6_mixed_interacted_and_never_interacted_partial_resume(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-restart-atomic-mixed-") as tmp:
+            workspace = Path(tmp)
+            interacted = set(AGENT_IDS[:3])
+            never_interacted = set(AGENT_IDS[3:])
+            session_name = _write_workspace(
+                workspace,
+                AGENT_IDS,
+                missing_session_ids=never_interacted,
+                first_send_at_ids=interacted,
+            )
+            tmux = FakeTmux()
+            adapter = RecordingAdapter(unresumable=set())
+
+            with _patched_restart_dependencies(adapter, tmux):
+                result = runtime.restart(workspace)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(_restart_modes(result), ["resumed", "resumed", "resumed", "fresh", "fresh", "fresh"])
+            self.assertEqual(_started_command_modes(tmux), ["resume", "resume", "resume", "fresh", "fresh", "fresh"])
+            self.assertEqual(sorted(tmux.sessions[session_name]), sorted(AGENT_IDS))
+            state = load_runtime_state(workspace)
+            self.assertEqual(
+                {agent_id: state["agents"][agent_id]["session_id"] for agent_id in interacted},
+                {agent_id: f"session-{agent_id}" for agent_id in interacted},
+            )
+            self.assertEqual(
+                {agent_id: state["agents"][agent_id]["session_id"] for agent_id in never_interacted},
+                {agent_id: None for agent_id in never_interacted},
+            )
+            self.assertNotIn("restart.atomic_refusal", _event_names(workspace))
 
     def _assert_restart_signature(self) -> None:
         signature = inspect.signature(runtime.restart)
@@ -164,8 +233,16 @@ class FakeTmux:
         return proc
 
 
-def _write_workspace(workspace: Path, agent_ids: list[str], *, missing_session_ids: set[str] | None = None) -> str:
+def _write_workspace(
+    workspace: Path,
+    agent_ids: list[str],
+    *,
+    missing_session_ids: set[str] | None = None,
+    first_send_at_ids: set[str] | None = None,
+) -> str:
     missing_session_ids = missing_session_ids or set()
+    if first_send_at_ids is None:
+        first_send_at_ids = {agent_id for agent_id in agent_ids if agent_id not in missing_session_ids}
     spec = cli_fake_spec(workspace)
     base_agent = copy.deepcopy(spec["agents"][0])
     spec["team"]["name"] = "restart-atomicity"
@@ -188,6 +265,7 @@ def _write_workspace(workspace: Path, agent_ids: list[str], *, missing_session_i
             "agent_id": agent_id,
             "window": agent_id,
             "session_id": None if agent_id in missing_session_ids else f"session-{agent_id}",
+            "first_send_at": FIRST_SEND_AT if agent_id in first_send_at_ids else None,
             "spawn_cwd": str(workspace),
             "mcp_config": str(workspace / ".team" / "runtime" / "mcp" / f"{agent_id}.json"),
         }
@@ -262,6 +340,13 @@ def _started_command_modes(tmux: FakeTmux) -> list[str]:
 
 def _failure_text(result: dict[str, Any]) -> str:
     return " ".join(str(result.get(key, "")) for key in ("reason", "error", "message"))
+
+
+def _event_names(workspace: Path) -> list[str]:
+    path = workspace / ".team" / "logs" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line)["event"] for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 if __name__ == "__main__":
