@@ -231,6 +231,29 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             RESULT_WATCHER_COLUMNS,
             {"owner_team_id": "alter table result_watchers add column owner_team_id text"},
         )
+        # Stage 12 (Gap 26 ∩ Gap 32 roundtable consolidation 2026-05-26): dedupe leader
+        # notifications at the injection boundary, keyed by (result_id, leader_session_uuid).
+        # UNIQUE primary key + INSERT OR IGNORE in claim_leader_notification_delivery gives
+        # atomic exactly-once without an advisory lock. Retires the bad6484 watcher-table
+        # UPSERT approach.
+        conn.execute(
+            """
+            create table if not exists leader_notification_log (
+              result_id text not null,
+              leader_session_uuid text not null,
+              notified_message_id text not null,
+              notified_at text not null,
+              leader_pane_id_at_notify text,
+              envelope_content_hash text,
+              owner_team_id text,
+              primary key (result_id, leader_session_uuid)
+            )
+            """
+        )
+        conn.execute(
+            "create index if not exists idx_leader_notification_log_uuid "
+            "on leader_notification_log(leader_session_uuid, notified_at)"
+        )
         conn.execute("create index if not exists idx_messages_owner_team_id on messages(owner_team_id)")
         conn.execute("create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)")
         conn.execute("create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)")

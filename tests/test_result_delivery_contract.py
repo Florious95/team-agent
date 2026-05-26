@@ -194,7 +194,9 @@ class ResultDeliveryContractTests(unittest.TestCase):
             after = MessageStore(workspace).result_watchers()[0]
             self.assertEqual(after["status"], "notify_failed")
             self.assertIsNone(after["error"])
-            self.assertIsNone(after["notified_message_id"])
+            # Gap 32 dedupe: requeue must preserve notified_message_id so the retry path
+            # can dedupe against a prior successful injection (reverses 78055bc).
+            self.assertEqual(after["notified_message_id"], "msg_dead")
             requeued_events = [e for e in _events(workspace) if e.get("event") == "result_watcher.requeued"]
             self.assertEqual(len(requeued_events), 1)
             self.assertEqual(requeued_events[0]["watcher_id"], watcher_id)
@@ -222,11 +224,14 @@ class ResultDeliveryContractTests(unittest.TestCase):
             watcher_id = store.create_result_watcher("task_impl", "fake_impl", "msg_originally_sent", "leader")
             result_id = store.add_result(_result_envelope("success"))
             store.mark_result_collected(result_id)
+            # Gap 32: a failed delivery never persists notified_message_id (would otherwise
+            # short-circuit the dedupe lookup and prevent the legitimate re-delivery this test
+            # exercises). The 78055bc clear-on-requeue logic existed to undo the prior bug of
+            # writing it for failed attempts; we no longer write it in the first place.
             store.mark_result_watcher(
                 watcher_id,
                 "delivery_exhausted",
                 result_id=result_id,
-                notified_message_id="msg_dead_pane",
                 error="leader_pane_missing",
             )
             event_log = EventLog(workspace)

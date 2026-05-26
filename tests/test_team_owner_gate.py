@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import os
 import tempfile
@@ -332,7 +333,12 @@ New worker.
             "spec_path": str(spec_path),
             "workspace": str(workspace),
             "session_name": spec["runtime"]["session_name"],
-            "team_owner": OWNER,
+            # Deepcopy: save_runtime_state's _migrate_team_identity mutates the team_owner dict in
+            # place to populate leader_session_uuid. Sharing the module-level OWNER constant across
+            # tests would freeze the first-test workspace's derived uuid into subsequent runs,
+            # producing spurious team_owner_mismatch refusals (caller derives its own uuid from its
+            # own workspace path). Each fixture must own a fresh dict.
+            "team_owner": copy.deepcopy(OWNER),
             "leader": spec["leader"],
             "agents": {
                 "fake_impl": {

@@ -57,30 +57,80 @@ def remove_agent(
 
     rollback = _RemoveRollback(workspace, spec_path, spec, state, dynamic_role_file, store, agent_id, False)
     stopped: dict[str, Any] | None = None
+    cleared_locations: list[str] = []
+    current_step = "init"
+    current_resource: str | None = None
+
+    def _step_done(name: str, resource: str | None = None, **extra: Any) -> None:
+        cleared_locations.append(name)
+        event_log.write(
+            "lifecycle.remove_step_completed",
+            agent_id=agent_id,
+            step=name,
+            resource=resource,
+            **extra,
+        )
+
     try:
         if running and force:
+            current_step, current_resource = "stop_agent", agent_id
             stopped = runtime.stop_agent(workspace, agent_id, team=team)
             rollback.restore_running = True
             state, _refusal_after = resolve_team_scoped_state(workspace, team)
+            _step_done("stop_agent", resource=agent_id, stopped=stopped)
+
+        current_step, current_resource = "workspace_state", "state.json:agents"
         removed_state = copy.deepcopy(state)
         removed_state.get("agents", {}).pop(agent_id, None)
         save_team_scoped_state(workspace, removed_state)
+        _step_done("workspace_state", resource=current_resource)
 
+        current_step, current_resource = "spec_yaml", str(spec_path)
         removed_spec = copy.deepcopy(spec)
         removed_spec["agents"] = [item for item in removed_spec.get("agents", []) if item.get("id") != agent_id]
         startup_order = removed_spec.get("runtime", {}).get("startup_order")
         if isinstance(startup_order, list):
             removed_spec["runtime"]["startup_order"] = [item for item in startup_order if item != agent_id]
         validate_spec(removed_spec, base_dir=spec_path.parent)
+        current_step, current_resource = "team_state_md", "team_state.md"
         team_state_path = write_team_state(workspace, removed_spec, removed_state)
+        _step_done("team_state_md", resource=str(team_state_path))
+        current_step, current_resource = "spec_yaml", str(spec_path)
         write_spec(spec_path, removed_spec)
+        _step_done("spec_yaml", resource=str(spec_path))
 
+        current_step, current_resource = "role_file", str(dynamic_role_file)
         role_file_removed = _remove_dynamic_role_file(dynamic_role_file, bool(agent_state.get("dynamic_role_file")))
+        if role_file_removed:
+            _step_done("role_file", resource=str(dynamic_role_file))
+
+        current_step, current_resource = "agent_health", agent_id
         _delete_agent_health(store, agent_id)
+        _step_done("agent_health", resource=agent_id)
     except Exception as exc:
         rollback_result = rollback.restore(runtime, event_log)
-        event_log.write("remove_agent.rollback", agent_id=agent_id, ok=rollback_result["ok"], error=str(exc), rollback=rollback_result)
-        raise RuntimeError(f"remove-agent failed for {agent_id}: {exc}; rollback_ok={rollback_result['ok']}") from exc
+        event_log.write(
+            "remove_agent.rollback",
+            agent_id=agent_id,
+            ok=rollback_result["ok"],
+            error=str(exc),
+            failed_step=current_step,
+            resource=current_resource,
+            cleared_before_failure=cleared_locations,
+            rollback=rollback_result,
+        )
+        event_log.write(
+            "lifecycle.remove_rolled_back",
+            agent_id=agent_id,
+            ok=rollback_result["ok"],
+            failed_step=current_step,
+            resource=current_resource,
+            rollback_errors=rollback_result.get("errors", []),
+        )
+        raise RuntimeError(
+            f"remove-agent failed for {agent_id} at step={current_step} "
+            f"resource={current_resource}: {exc}; rollback_ok={rollback_result['ok']}"
+        ) from exc
 
     runtime._save_team_runtime_snapshot(workspace, removed_state)
     warning = None
@@ -93,6 +143,7 @@ def remove_agent(
             force=force,
             stopped=stopped,
             role_file_removed=role_file_removed,
+            cleared_locations=cleared_locations,
         )
     except Exception as exc:
         warning = f"remove-agent completed but success event logging failed: {exc}"
@@ -105,6 +156,7 @@ def remove_agent(
         "stopped": stopped,
         "state_file": str(team_state_path),
         "role_file_removed": role_file_removed,
+        "cleared_locations": cleared_locations,
         **({"warning": warning} if warning else {}),
     }
 
