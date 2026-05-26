@@ -1,0 +1,24 @@
+
+╭─── Claude Code v2.1.131 ─────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│             Welcome back ClaudeShannon!            │ started                 │
+│                                                    │ Run /init to create a … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ What's new              │
+│                        ▘▘ ▝▝                       │ The `/model` picker no… │
+│   Opus 4.7 (1M context) with lo… · Claude Max ·    │ - Added `claude projec… │
+│   alexa_japan2026@hotmail.com's Organization       │ `--dangerously-skip-pe… │
+│  /…/tmp/teamA-slice2-env-slice-2-20260526T103116Z  │ /release-notes for more │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+                                                                ○ low · /effort
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts
