@@ -153,6 +153,80 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
         failed = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answer_failed"]
         self.assertEqual(len(failed), 1)
 
+    def test_spec_opt_in_emits_deprecation_warning_and_event(self) -> None:
+        """Constitution-reviewer F3 MEDIUM: spec.runtime.auto_trust_own_workspace
+        opt-in must emit a stderr deprecation warning AND a structured
+        trust_auto_answer_spec_opt_in_deprecated event pointing at the env-var
+        as the preferred per-session opt-in."""
+        from team_agent.messaging import leader_panes as leader_panes_mod
+        leader_panes_mod._reset_spec_opt_in_deprecation_state()
+        spec = {"runtime": {"auto_trust_own_workspace": True}}
+        from io import StringIO
+        import contextlib
+        stderr_buf = StringIO()
+        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             contextlib.redirect_stderr(stderr_buf):
+            result = attempt_trust_auto_answer(
+                self.workspace, "%worker", _trust_capture_tail(self.workspace),
+                self.event_log, spec=spec,
+            )
+        self.assertTrue(result["answered"])
+        self.assertIn("spec.runtime.auto_trust_own_workspace is deprecated", stderr_buf.getvalue())
+        self.assertIn("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", stderr_buf.getvalue())
+        self.assertIn("0.3.0", stderr_buf.getvalue())
+        deprecated_events = [ev for ev in self._emitted()
+                             if ev.get("event") == "trust_auto_answer_spec_opt_in_deprecated"]
+        self.assertEqual(len(deprecated_events), 1)
+        self.assertEqual(deprecated_events[0]["deprecated_field"], "spec.runtime.auto_trust_own_workspace")
+        self.assertEqual(deprecated_events[0]["removal_target_version"], "0.3.0")
+
+    def test_env_only_opt_in_does_not_emit_deprecation_warning(self) -> None:
+        """When env-var opt-in is used and the spec field is not set, no
+        deprecation warning or structured event fires — env-var is the
+        preferred path."""
+        from team_agent.messaging import leader_panes as leader_panes_mod
+        leader_panes_mod._reset_spec_opt_in_deprecation_state()
+        os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
+        from io import StringIO
+        import contextlib
+        stderr_buf = StringIO()
+        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             contextlib.redirect_stderr(stderr_buf):
+            result = attempt_trust_auto_answer(
+                self.workspace, "%worker", _trust_capture_tail(self.workspace),
+                self.event_log, spec={},
+            )
+        self.assertTrue(result["answered"])
+        self.assertEqual(stderr_buf.getvalue(), "")
+        deprecated_events = [ev for ev in self._emitted()
+                             if ev.get("event") == "trust_auto_answer_spec_opt_in_deprecated"]
+        self.assertEqual(deprecated_events, [])
+
+    def test_spec_opt_in_deprecation_warning_is_one_shot_per_process(self) -> None:
+        """The stderr deprecation prints exactly once per process even when the
+        helper is called repeatedly; the structured event still fires per call
+        so an audit log captures every yaml-driven decision."""
+        from team_agent.messaging import leader_panes as leader_panes_mod
+        leader_panes_mod._reset_spec_opt_in_deprecation_state()
+        spec = {"runtime": {"auto_trust_own_workspace": True}}
+        from io import StringIO
+        import contextlib
+        stderr_buf = StringIO()
+        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             contextlib.redirect_stderr(stderr_buf):
+            for _ in range(3):
+                attempt_trust_auto_answer(
+                    self.workspace, "%worker", _trust_capture_tail(self.workspace),
+                    self.event_log, spec=spec,
+                )
+        stderr_text = stderr_buf.getvalue()
+        # Exactly one warning line across three calls.
+        self.assertEqual(stderr_text.count("spec.runtime.auto_trust_own_workspace is deprecated"), 1)
+        deprecated_events = [ev for ev in self._emitted()
+                             if ev.get("event") == "trust_auto_answer_spec_opt_in_deprecated"]
+        # Structured events fire per call for audit completeness.
+        self.assertEqual(len(deprecated_events), 3)
+
     def test_missing_pane_id_refuses_and_emits_skipped_event(self) -> None:
         """Spark LOW #6: pane_id_missing branch emits trust_auto_answer_skipped."""
         spec = {"runtime": {"auto_trust_own_workspace": True}}

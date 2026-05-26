@@ -516,8 +516,13 @@ def attempt_trust_auto_answer(
 
     Called by the inject path when developer's structured envelope reports
     detected=='codex_trust_prompt'. Auto-answers ONLY when both:
-      (1) runtime is opted in via spec.runtime.auto_trust_own_workspace=True OR env
-          TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE in {1,true,yes,on}; and
+      (1) runtime is opted in. The PREFERRED opt-in is the per-session env var
+          TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE in {1,true,yes,on}. The legacy
+          spec.runtime.auto_trust_own_workspace=True path is still honoured for
+          backwards compatibility but is DEPRECATED (constitution-reviewer F3:
+          a YAML field permanently erases the trust prompt's cognitive moment
+          across all sessions, defeating its purpose). The spec path will be
+          removed in 0.3.0.
       (2) the trust-prompt pane capture references this workspace's absolute path
           (so a worker can only trust its own dir, never some arbitrary path).
 
@@ -536,7 +541,7 @@ def attempt_trust_auto_answer(
                 spec = _load_spec(Path(spec_path_str))
             except Exception:
                 spec = None
-    if not _auto_trust_opt_in(spec):
+    if not _auto_trust_opt_in(spec, event_log=event_log):
         # Spark LOW #6: emit a structured event so the not-opted-in branch is
         # as observable as the workspace_dir_mismatch / tmux_send_keys_failed
         # branches. Keeps the decision matrix uniformly auditable.
@@ -582,14 +587,62 @@ def attempt_trust_auto_answer(
     return {"ok": True, "answered": True, "reason": "trust_auto_answered"}
 
 
-def _auto_trust_opt_in(spec: dict[str, Any] | None) -> bool:
+_SPEC_OPT_IN_DEPRECATION_MESSAGE = (
+    "WARNING: spec.runtime.auto_trust_own_workspace is deprecated. "
+    "Use env TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE=1 per session instead. "
+    "Spec-field will be removed in 0.3.0."
+)
+
+
+def _auto_trust_opt_in(spec: dict[str, Any] | None, *, event_log: EventLog | None = None) -> bool:
+    """Constitution-reviewer F3 (2026-05-26): env-var per-session opt-in is the
+    preferred path. spec.runtime.auto_trust_own_workspace remains honoured for
+    backwards compatibility but emits a one-shot stderr deprecation warning AND
+    a structured trust_auto_answer_spec_opt_in_deprecated event so a normalized
+    YAML field is auditable from a fresh log."""
+    spec_opted_in = (
+        isinstance(spec, dict)
+        and bool((spec.get("runtime") or {}).get("auto_trust_own_workspace"))
+    )
+    if spec_opted_in:
+        _emit_spec_opt_in_deprecation(event_log)
     env = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", "").strip().lower()
-    if env in {"1", "true", "yes", "on"}:
-        return True
-    if not isinstance(spec, dict):
-        return False
-    runtime = spec.get("runtime") or {}
-    return bool(runtime.get("auto_trust_own_workspace"))
+    env_opted_in = env in {"1", "true", "yes", "on"}
+    return env_opted_in or spec_opted_in
+
+
+def _emit_spec_opt_in_deprecation(event_log: EventLog | None) -> None:
+    """Emit the deprecation warning once per process. The structured event still
+    fires per call so an audit log captures every yaml-driven decision."""
+    import sys
+    global _SPEC_OPT_IN_DEPRECATION_WARNED
+    if not _SPEC_OPT_IN_DEPRECATION_WARNED:
+        try:
+            print(_SPEC_OPT_IN_DEPRECATION_MESSAGE, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        _SPEC_OPT_IN_DEPRECATION_WARNED = True
+    if event_log is not None:
+        try:
+            event_log.write(
+                "trust_auto_answer_spec_opt_in_deprecated",
+                preferred_opt_in="env:TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE",
+                deprecated_field="spec.runtime.auto_trust_own_workspace",
+                removal_target_version="0.3.0",
+            )
+        except Exception:
+            pass
+
+
+_SPEC_OPT_IN_DEPRECATION_WARNED = False
+
+
+def _reset_spec_opt_in_deprecation_state() -> None:
+    """Test-only helper: reset the per-process one-shot guard so multiple cases
+    in the same interpreter can each observe the warning. Not part of the
+    public API."""
+    global _SPEC_OPT_IN_DEPRECATION_WARNED
+    _SPEC_OPT_IN_DEPRECATION_WARNED = False
 
 
 def _capture_tail_references_workspace(tail: str, workspace: Path) -> bool:
