@@ -215,7 +215,7 @@ def launch(
                 stdout=proc.stdout,
             )
             raise RuntimeError(f"Failed to start agent {agent['id']}: {proc.stderr.strip()}")
-        handled_prompts = adapter.handle_startup_prompts(session_name, agent["id"], checks=1, sleep_s=0.0)
+        handled_prompts = adapter.handle_startup_prompts(session_name, agent["id"], checks=20, sleep_s=0.5)
         for prompt_event in handled_prompts:
             event_log.write(
                 "launch.startup_prompt_handled",
@@ -261,6 +261,7 @@ def launch(
             event_log,
             timeout_s=1.5,
             exclude_session_ids=known_session_ids,
+            raise_on_missed=False,
         )
         if state.get("display_backend") in GHOSTTY_DISPLAY_BACKENDS:
             display_jobs.append((agent["id"], agent))

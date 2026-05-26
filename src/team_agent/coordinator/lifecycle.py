@@ -265,6 +265,7 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         detect_idle_fallbacks,
     )
     from team_agent.messaging.activity_detector import detect_compaction_degradation
+    from team_agent.messaging.leader_api_errors import detect_leader_api_errors
     from team_agent.messaging.session_drift import detect_session_drift
     from team_agent.state import load_runtime_state, save_runtime_state
     state = load_runtime_state(workspace)
@@ -318,6 +319,7 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         )
         if drift:
             drift_results.append(drift)
+    api_errors = detect_leader_api_errors(workspace, state, store, event_log)
     save_runtime_state(workspace, state)
     results = _collect_results_and_notify_watchers(workspace, event_log)
     # Stage 12: prune the dedupe log every tick — cheap O(n) delete bounded by 24h window.
@@ -338,5 +340,6 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         "deadlock_alerts": deadlock_alerts,
         "compaction": compaction_results,
         "session_drift": drift_results,
+        "api_errors": api_errors,
         "results": results,
     }

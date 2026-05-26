@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,24 @@ from team_agent.message_store import MessageStore
 from team_agent.state import load_runtime_state, save_runtime_state
 from team_agent.status.compact import compact_status
 from team_agent.status.constants import PENDING_DELIVERY_STATUSES
+
+
+def _interacted_marker(first_send_at: Any) -> str:
+    """C3 (cr verdict, 2026-05-27): render the persisted first_send_at as a
+    user-visible status field. Valid ISO 8601 UTC strings pass through; any
+    other shape (None, empty string, 0, False, corrupt garbage) renders as
+    the literal "never" so the operator sees a consistent classification
+    instead of leaking raw garbage into status output. Restart enforces
+    strict typing separately (corrupt values fail the operation); status is
+    a read-only surface and tolerantly degrades to "never" rather than
+    failing the status command."""
+    if isinstance(first_send_at, str) and first_send_at:
+        try:
+            datetime.fromisoformat(first_send_at)
+        except (ValueError, TypeError):
+            return "never"
+        return first_send_at
+    return "never"
 
 
 def status(workspace: Path, as_json: bool = False, *, compact: bool = False) -> dict[str, Any]:
@@ -31,12 +50,24 @@ def status(workspace: Path, as_json: bool = False, *, compact: bool = False) -> 
     save_runtime_state(workspace, state)
     session_name = state.get("session_name")
     tmux_exists = _tmux_session_exists(session_name) if session_name else False
+    # C3 (cr verdict): enrich each worker entry with an explicit `interacted`
+    # field derived from the persisted first_send_at. The original entry
+    # passes through unchanged so any pre-existing field (including raw
+    # first_send_at) stays visible.
+    enriched_agents: dict[str, Any] = {}
+    for aid, raw in (state.get("agents") or {}).items():
+        if isinstance(raw, dict):
+            entry = dict(raw)
+            entry["interacted"] = _interacted_marker(raw.get("first_send_at"))
+        else:
+            entry = raw
+        enriched_agents[aid] = entry
     result = {
         "team": state.get("leader", {}).get("id", "leader"),
         "session_name": session_name,
         "tmux_session_present": tmux_exists,
         "leader_receiver": state.get("leader_receiver", {}),
-        "agents": state.get("agents", {}),
+        "agents": enriched_agents,
         "agent_health": store.agent_health(),
         "tasks": state.get("tasks", []),
         "messages": store.message_counts(),

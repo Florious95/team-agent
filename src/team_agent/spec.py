@@ -27,7 +27,58 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def load_spec(path: Path) -> dict[str, Any]:
     spec = load_yaml(path)
     validate_spec(spec, base_dir=path.parent)
+    _emit_load_time_deprecations(spec, path)
     return spec
+
+
+def _emit_load_time_deprecations(spec: dict[str, Any], path: Path) -> None:
+    """Stage 7 S7 (2026-05-27): deprecation signals attached to the spec field
+    itself must fire when the YAML is read, not lazily inside the trust-prompt
+    code path. A user with the deprecated field in team.spec.yaml needs to see
+    the warning even when startup never reaches attempt_trust_auto_answer.
+
+    The leader-panes helper owns the one-shot stderr guard + the structured
+    audit event, so we reuse it. EventLog points at the WORKSPACE ROOT (not
+    the spec file's directory) so a quick-start layout that stores the spec
+    under <workspace>/.team/current/team.spec.yaml still routes the audit
+    event into the single canonical <workspace>/.team/logs/events.jsonl
+    instead of a doubled <workspace>/.team/current/.team/logs/events.jsonl
+    nesting.
+    """
+    runtime = spec.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    if not bool(runtime.get("auto_trust_own_workspace")):
+        return
+    # Local import keeps the spec module free of messaging-layer coupling at
+    # import time; only YAMLs that opt into the deprecated field pay the cost.
+    from team_agent.events import EventLog
+    from team_agent.messaging.leader_panes import _emit_spec_opt_in_deprecation
+    _emit_spec_opt_in_deprecation(EventLog(_resolve_workspace_root(path)))
+
+
+def _resolve_workspace_root(spec_path: Path) -> Path:
+    """Find the workspace root that owns this spec.
+
+    A workspace root is the directory whose `.team/` subdirectory holds the
+    runtime state, logs, artifacts, and (for quick-start layouts) the spec
+    itself under `.team/current/`. We climb from the spec file's parent
+    looking for the first ancestor that has a `.team/` child. If no ancestor
+    qualifies (fresh workspace before init, or a spec deliberately placed
+    outside any team workspace), we fall back to `spec_path.parent` which is
+    the legacy single-layout behaviour.
+
+    Implementation note: we use real filesystem evidence (`(dir/.team).is_dir()`)
+    rather than path-string parsing so the resolver works correctly even when
+    workspace paths legitimately contain a `.team` segment.
+    """
+    direct_parent = spec_path.parent
+    if (direct_parent / ".team").is_dir():
+        return direct_parent
+    for ancestor in direct_parent.parents:
+        if (ancestor / ".team").is_dir():
+            return ancestor
+    return direct_parent
 
 
 def validate_spec(spec: dict[str, Any], base_dir: Path | None = None) -> None:
@@ -190,6 +241,12 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         "tick_interval_sec",
         "push_min_interval_sec",
         "stuck_timeout_sec",
+        # Gap 29 / F3 deprecation (2026-05-26): accept the legacy spec opt-in so
+        # YAMLs that still set it validate and the deprecation warning + structured
+        # event in messaging/leader_panes.py can fire. The preferred per-session
+        # opt-in is the env var TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE; this spec
+        # field will be removed in 0.3.0.
+        "auto_trust_own_workspace",
     }
     _check_keys(runtime, "/runtime", required, allowed, errors)
     if not isinstance(runtime, dict):
@@ -200,6 +257,8 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         errors.append("/runtime/display_backend: invalid display backend")
     if "dangerous_auto_approve" in runtime and not isinstance(runtime["dangerous_auto_approve"], bool):
         errors.append("/runtime/dangerous_auto_approve: must be a boolean")
+    if "auto_trust_own_workspace" in runtime and not isinstance(runtime["auto_trust_own_workspace"], bool):
+        errors.append("/runtime/auto_trust_own_workspace: must be a boolean")
     _check_list(runtime.get("startup_order"), "/runtime/startup_order", errors)
 
 

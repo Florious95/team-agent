@@ -12,6 +12,93 @@ from team_agent.messaging.deps import (
 from pathlib import Path
 from typing import Any
 
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def detect_non_input_scrollback(capture_tail: str) -> str | None:
+    nonempty = _non_input_scrollback_lines(capture_tail)
+    tail_text = "\n".join(nonempty)
+    lower = tail_text.lower()
+    stale_before_input = _stale_non_input_before_ready_prompt(nonempty)
+    if re.search(r"do\s+you\s+trust\s+the\s+contents\s+of\s+this\s+directory", lower):
+        if stale_before_input:
+            return None
+        return "codex_trust_prompt"
+    if "press enter to log in" in lower or "press enter to login" in lower:
+        if stale_before_input:
+            return None
+        return "codex_first_run_auth"
+    if "capability may degrade" in lower:
+        if stale_before_input:
+            return None
+        return "codex_compaction_warning"
+    if re.search(r"press\s+(enter|return)\s+to\s+continue", lower):
+        if stale_before_input:
+            return None
+        return "generic_press_enter"
+    if re.search(r"press\s+any\s+key", lower):
+        if stale_before_input:
+            return None
+        return "generic_press_enter"
+    if re.search(r"(\(y/n\)|\([yY]/n\)|\[y/N\]|\[Y/n\]|\[y/n\])", tail_text):
+        if stale_before_input:
+            return None
+        return "y_n_confirm"
+    for first, second in zip(nonempty, nonempty[1:]):
+        if _starts_numbered_choice(first, "1") and _starts_numbered_choice(second, "2"):
+            if stale_before_input:
+                return None
+            return "numbered_menu"
+    if nonempty:
+        last = nonempty[-1]
+        if re.search(r"(^|[\s~/.\w-])[$%]\s*$", last):
+            return "shell_prompt_cli_dead"
+    return None
+
+
+def non_input_scrollback_window(capture_tail: str, limit: int = 15) -> str:
+    return "\n".join(_non_input_scrollback_lines(capture_tail, limit=limit))
+
+
+def _non_input_scrollback_lines(capture_tail: str, limit: int = 15) -> list[str]:
+    lines = [_ANSI_ESCAPE_RE.sub("", line).rstrip() for line in capture_tail.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return [line for line in lines if line.strip()][-limit:]
+
+
+def _starts_numbered_choice(line: str, number: str) -> bool:
+    return bool(re.match(rf"^\s*(?:[›❯>]\s*)?{number}\.\s+", line))
+
+
+def _stale_non_input_before_ready_prompt(lines: list[str]) -> bool:
+    latest_non_input = -1
+    latest_ready = -1
+    for index, line in enumerate(lines):
+        lower = line.lower()
+        if (
+            "do you trust the contents of this directory" in lower
+            or re.search(r"press\s+(enter|return)\s+to\s+continue", lower)
+            or re.search(r"press\s+any\s+key", lower)
+            or _starts_numbered_choice(line, "1")
+            or _starts_numbered_choice(line, "2")
+        ):
+            latest_non_input = index
+        if _is_input_ready_prompt(line):
+            latest_ready = index
+    return latest_non_input >= 0 and latest_ready > latest_non_input
+
+
+def _is_input_ready_prompt(line: str) -> bool:
+    if _starts_numbered_choice(line, "1") or _starts_numbered_choice(line, "2"):
+        return False
+    value = line.strip()
+    if re.match(r"^[›❯>]\s+\S", value):
+        return True
+    return bool(re.search(r"\b(codex|claude)\s*[>›❯]\s*$", value, re.IGNORECASE))
+
+
 def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
     target = f"{session_name}:{window_name}"
     proc = run_cmd(["tmux", "send-keys", "-t", target, "/fast", "Enter"], timeout=10)

@@ -72,6 +72,12 @@
         "startup_order": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "auto_trust_own_workspace": {
+          "type": "boolean",
+          "default": false,
+          "deprecated": true,
+          "description": "DEPRECATED: use env TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE per session. Will be removed in 0.3.0."
         }
       }
     },

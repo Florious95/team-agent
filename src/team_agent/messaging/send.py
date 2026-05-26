@@ -34,19 +34,10 @@ from pathlib import Path
 from typing import Any
 
 def send_message(
-    workspace: Path,
-    target: str | list[str] | None,
-    content: str,
-    task_id: str | None = None,
-    sender: str = "leader",
-    requires_ack: bool = True,
-    confirm_human: bool = False,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-    lock_timeout: float = 5.0,
-    watch_result: bool = False,
-    block_until_delivered: bool = True,
-    team: str | None = None,
+    workspace: Path, target: str | list[str] | None, content: str, task_id: str | None = None,
+    sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False,
+    wait_visible: bool = True, timeout: float = 30.0, lock_timeout: float = 5.0,
+    watch_result: bool = False, block_until_delivered: bool = True, team: str | None = None,
 ) -> dict[str, Any]:
     with _runtime_lock(workspace, "send", timeout=lock_timeout):
         return _send_message_unlocked(
@@ -66,18 +57,10 @@ def send_message(
 
 
 def _send_message_unlocked(
-    workspace: Path,
-    target: str | list[str] | None,
-    content: str,
-    task_id: str | None = None,
-    sender: str = "leader",
-    requires_ack: bool = True,
-    confirm_human: bool = False,
-    wait_visible: bool = True,
-    timeout: float = 30.0,
-    watch_result: bool = False,
-    block_until_delivered: bool = True,
-    team: str | None = None,
+    workspace: Path, target: str | list[str] | None, content: str, task_id: str | None = None,
+    sender: str = "leader", requires_ack: bool = True, confirm_human: bool = False,
+    wait_visible: bool = True, timeout: float = 30.0, watch_result: bool = False,
+    block_until_delivered: bool = True, team: str | None = None,
 ) -> dict[str, Any]:
     if team is None:
         ambiguous = ambiguous_team_target_result(load_runtime_state(workspace))
@@ -336,6 +319,8 @@ def _send_single_message_unlocked(
         "submit_verification": delivered_result.get("submit_verification"),
         "turn_verification": delivered_result.get("turn_verification"),
     }
+    result.update({key: delivered_result[key] for key in ("reason", "stage") if delivered_result.get(key)})
+    result.update(_structured_delivery_refusal(delivered_result))
     if delivered_result.get("queued"):
         result["queued"] = True
         result["reason"] = delivered_result.get("reason")
@@ -490,7 +475,7 @@ def _broadcast_targets(state: dict[str, Any], spec: dict[str, Any], sender: str)
 
 
 def _compact_broadcast_delivery(result: dict[str, Any]) -> dict[str, Any]:
-    keys = ["ok", "status", "message_id", "to", "reason", "channel"]
+    keys = ["ok", "status", "message_id", "to", "reason", "channel", "detected", "pane_id", "pane_mode", "pane_capture_tail", "stage", "verification"]
     return {key: result[key] for key in keys if key in result}
 
 
@@ -498,3 +483,13 @@ def _compact_fanout_delivery(result: dict[str, Any]) -> dict[str, Any]:
     compact = _compact_broadcast_delivery(result)
     compact["delivered"] = bool(result.get("submitted") or result.get("visible") or result.get("status") in {"submitted", "visible", "delivered", "acknowledged"})
     return compact
+
+
+def _structured_delivery_refusal(delivered_result: dict[str, Any]) -> dict[str, Any]:
+    attempts = delivered_result.get("paste_attempts")
+    if not isinstance(attempts, list):
+        return {}
+    for attempt in attempts:
+        if isinstance(attempt, dict) and attempt.get("reason") == "recipient_pane_in_non_input_mode":
+            return {key: attempt[key] for key in ("detected", "pane_id", "pane_mode", "pane_capture_tail") if key in attempt}
+    return {}

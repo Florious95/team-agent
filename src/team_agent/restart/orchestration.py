@@ -84,15 +84,72 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         raise RuntimeError(_tmux_session_conflict_error(session_name))
     runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
     display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
-    _close_ghostty_workspace(state, event_log)
-    for agent_id, agent_state in state.get("agents", {}).items():
-        _close_ghostty_display(agent_id, agent_state, event_log)
-    state["display_backend"] = display_backend
+    # Stage 7 S5 — Slice 6 lifecycle atomicity contract: compute restart_agents
+    # early so we can pre-validate resumability BEFORE any destructive teardown
+    # (ghostty close, tmux session creation). Without --allow-fresh, every
+    # non-paused worker MUST be resumable; if any is not, refuse the operation
+    # atomically with a structured result and a restart.atomic_refusal event.
+    # No rollback path is needed because nothing has been created yet.
     restart_agents = [
         agent
         for agent in spec.get("agents", [])
         if state.get("agents", {}).get(agent["id"], {}).get("status") != "paused" and not agent.get("paused")
     ]
+    # cr strict-typing (2026-05-27): refuse the operation deterministically
+    # before any decision logic if any persisted first_send_at is corrupt
+    # (empty string, 0, False, literal "null", any non-ISO garbage). This
+    # avoids silent misclassification through Python truthiness and gives the
+    # operator a clear audit signal that state.json is damaged.
+    invalid_first_send_at = _collect_corrupt_first_send_at(restart_agents, state)
+    if invalid_first_send_at:
+        for entry in invalid_first_send_at:
+            event_log.write(
+                "restart.first_send_at_invalid",
+                worker_id=entry["worker_id"],
+                raw_first_send_at=entry["raw_first_send_at"],
+                raw_first_send_at_type=entry["raw_first_send_at_type"],
+            )
+        invalid_names = [entry["worker_id"] for entry in invalid_first_send_at]
+        return {
+            "ok": False,
+            "status": "refused",
+            "reason": "invalid_first_send_at",
+            "invalid_first_send_at": invalid_first_send_at,
+            "allow_fresh": bool(allow_fresh),
+            "error": (
+                f"Cannot restart: workers {invalid_names} have a corrupt "
+                "first_send_at in state.json (only null/missing or a valid "
+                "ISO-8601 UTC timestamp string is accepted). Inspect the "
+                "restart.first_send_at_invalid audit events for raw values "
+                "and repair state.json before retrying."
+            ),
+        }
+    # cr C2: emit one restart.resume_decision event per non-paused worker so
+    # every restart attempt produces an auditable per-worker classification.
+    # The function returns only refused workers — populated when
+    # allow_fresh=False AND at least one interacted worker cannot be repaired.
+    refused = _emit_resume_decisions(
+        workspace, restart_agents, state, get_adapter, event_log, allow_fresh,
+    )
+    if refused:
+        event_log.write(
+            "restart.atomic_refusal",
+            unresumable=refused,
+            allow_fresh=bool(allow_fresh),
+            reason="resume_atomicity",
+        )
+        return {
+            "ok": False,
+            "status": "refused",
+            "reason": "resume_atomicity",
+            "unresumable": refused,
+            "allow_fresh": bool(allow_fresh),
+            "error": _format_atomic_refusal_error(refused),
+        }
+    _close_ghostty_workspace(state, event_log)
+    for agent_id, agent_state in state.get("agents", {}).items():
+        _close_ghostty_display(agent_id, agent_state, event_log)
+    state["display_backend"] = display_backend
     _ensure_agent_start_requirements(workspace, restart_agents, event_log, "restart")
     first = True
     restarted: list[dict[str, Any]] = []
@@ -271,6 +328,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
                 event_log,
                 timeout_s=1.5,
                 exclude_session_ids=known_session_ids,
+                raise_on_missed=False,
             )
         if display_backend in GHOSTTY_DISPLAY_BACKENDS:
             display_jobs.append((agent["id"], agent))
@@ -313,6 +371,151 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
     return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
+
+
+_FIRST_SEND_AT_ABSENT = "absent"
+_FIRST_SEND_AT_VALID = "valid"
+_FIRST_SEND_AT_CORRUPT = "corrupt"
+
+
+def _classify_first_send_at(value: Any) -> str:
+    """Strict first_send_at typing (cr verdict, 2026-05-27).
+
+    Returns one of:
+      "absent"  — None or missing field (worker never-interacted).
+      "valid"   — non-empty ISO-8601 UTC string parseable by datetime.fromisoformat.
+      "corrupt" — anything else: empty string, 0, False, literal "null", garbage.
+
+    The contract requires that corrupt values be detected deterministically
+    before any restart decision so we never silent-misclassify a worker's
+    interaction state via Python truthiness.
+    """
+    if value is None:
+        return _FIRST_SEND_AT_ABSENT
+    if not isinstance(value, str):
+        return _FIRST_SEND_AT_CORRUPT
+    if not value:
+        return _FIRST_SEND_AT_CORRUPT
+    try:
+        datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return _FIRST_SEND_AT_CORRUPT
+    return _FIRST_SEND_AT_VALID
+
+
+def _collect_corrupt_first_send_at(
+    restart_agents: list[dict[str, Any]],
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Walk every non-paused worker and flag any whose persisted first_send_at
+    is corrupt. Returns the list of invalid records ready for the
+    `restart.first_send_at_invalid` event and the refusal envelope."""
+    invalid: list[dict[str, Any]] = []
+    for agent in restart_agents:
+        agent_id = agent["id"]
+        previous = state.get("agents", {}).get(agent_id, {})
+        raw = previous.get("first_send_at") if isinstance(previous, dict) else None
+        if _classify_first_send_at(raw) != _FIRST_SEND_AT_CORRUPT:
+            continue
+        invalid.append({
+            "worker_id": agent_id,
+            "raw_first_send_at": raw,
+            "raw_first_send_at_type": type(raw).__name__,
+        })
+    return invalid
+
+
+def _emit_resume_decisions(
+    workspace: Path,
+    restart_agents: list[dict[str, Any]],
+    state: dict[str, Any],
+    get_adapter_fn: Any,
+    event_log: EventLog,
+    allow_fresh: bool,
+) -> list[dict[str, Any]]:
+    """Route B audit-events contract (cr C2, 2026-05-27). For every non-paused
+    worker considered by restart, derive the resume decision per the Route B
+    matrix and emit ONE `restart.resume_decision` event:
+
+      resumable AND ...                     -> decision = "resume"
+      not resumable AND not interacted      -> decision = "fresh_start"
+      not resumable AND interacted AND fresh -> decision = "fresh_start"
+      not resumable AND interacted AND not fresh -> decision = "refuse"
+
+    Resumability mirrors sessions.resume.prepare_resume_state's repair chain
+    so workers the runtime would legitimately repair are NOT flagged. Returns
+    the subset of refused workers — populated only when allow_fresh=False AND
+    some interacted worker cannot be repaired — for use by atomic_refusal.
+    """
+    from team_agent.sessions.resume import recover_resume_session_from_events
+    refused: list[dict[str, Any]] = []
+    for agent in restart_agents:
+        agent_id = agent["id"]
+        previous = state.get("agents", {}).get(agent_id, {})
+        session_id = previous.get("session_id")
+        first_send_at = previous.get("first_send_at")
+        has_first_send_at = _classify_first_send_at(first_send_at) == _FIRST_SEND_AT_VALID
+        has_session_id = bool(session_id)
+        adapter = get_adapter_fn(agent["provider"])
+        resumable = bool(session_id) and adapter.session_is_resumable(previous, workspace)
+        if not resumable:
+            known_session_ids = {
+                str(item.get("session_id"))
+                for aid, item in state.get("agents", {}).items()
+                if aid != agent_id and item.get("session_id")
+            }
+            repaired = recover_resume_session_from_events(
+                workspace, agent_id, previous, adapter, known_session_ids,
+            )
+            if not repaired:
+                repaired = adapter.recover_session_id(
+                    agent_id, previous, workspace, known_session_ids,
+                )
+            resumable = bool(repaired)
+        if resumable:
+            decision = "resume"
+        elif not has_first_send_at:
+            decision = "fresh_start"
+        elif allow_fresh:
+            decision = "fresh_start"
+        else:
+            decision = "refuse"
+        event_log.write(
+            "restart.resume_decision",
+            worker_id=agent_id,
+            has_first_send_at=has_first_send_at,
+            has_session_id=has_session_id,
+            allow_fresh=bool(allow_fresh),
+            decision=decision,
+            first_send_at=first_send_at if has_first_send_at else None,
+            session_id=session_id,
+        )
+        if decision == "refuse":
+            refused.append({
+                "agent_id": agent_id,
+                "reason": "no_persisted_session_id" if not session_id else "session_unresumable",
+                "session_id": session_id,
+                "first_send_at": first_send_at,
+            })
+    return refused
+
+
+def _format_atomic_refusal_error(refused: list[dict[str, Any]]) -> str:
+    """C4 (cr verdict, 2026-05-27): the human-readable refusal error must
+    name every refused worker AND its first_send_at timestamp so an operator
+    can decide whether to pass --allow-fresh and accept losing that
+    interaction history."""
+    names = [item["agent_id"] for item in refused]
+    details = ". ".join(
+        f"{item['agent_id']} was first interacted with at {item.get('first_send_at')}; "
+        "its persisted session is missing"
+        for item in refused
+    )
+    return (
+        f"Cannot restart: workers {names} have no resumable session despite "
+        f"previous interaction. {details}. "
+        "Pass --allow-fresh if you accept losing that interaction history."
+    )
 
 
 def rollback_restart_session(session_name: str, event_log: EventLog) -> dict[str, Any]:

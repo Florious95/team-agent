@@ -24,6 +24,7 @@ from team_agent.cli.commands import (
     cmd_wait_ready,
     cmd_settle,
     cmd_status,
+    cmd_watch,
     cmd_approvals,
     cmd_peek,
     cmd_inbox,
@@ -182,8 +183,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("agent", nargs="?")
     p.add_argument("--workspace", default=".")
     p.add_argument("--detail", action="store_true", help="Include full raw runtime state in --json output")
+    p.add_argument("--summary", action="store_true", help="Emit five-line human-readable triage summary")
     add_json(p)
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("watch", help="Watch leader-visible team events")
+    p.add_argument("--workspace", default=".")
+    p.add_argument("--team", help="Explicit team/session selector when a workspace has multiple teams")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("approvals", help="Show structured pending worker approval prompts")
     p.add_argument("agent", nargs="?")
@@ -310,6 +317,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("doctor", help="Check local dependencies, providers, auth hints, tmux, and MCP")
     p.add_argument("spec", nargs="?")
+    p.add_argument("--gate", choices=["orphans"], help="Run a CI-friendly doctor gate")
+    p.add_argument("--fix", action="store_true", help="With --gate orphans: apply the gate fix")
     p.add_argument(
         "--cleanup-orphans",
         action="store_true",
@@ -461,7 +470,7 @@ def main(argv: list[str] | None = None) -> None:
     sub._choices_actions = [  # type: ignore[attr-defined]
         action for action in sub._choices_actions if action.help != argparse.SUPPRESS  # type: ignore[attr-defined]
     ]
-    sub.metavar = "{codex,claude,quick-start,send,status,approvals,inbox,takeover,claim-leader,identity,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,acknowledge-idle,doctor}"
+    sub.metavar = "{codex,claude,quick-start,send,status,watch,approvals,inbox,takeover,claim-leader,identity,shutdown,restart,start-agent,stop-agent,reset-agent,add-agent,fork-agent,remove-agent,stuck-list,stuck-cancel,acknowledge-idle,doctor}"
 
     args = parser.parse_args(raw_argv)
     try:

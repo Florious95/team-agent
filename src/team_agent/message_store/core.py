@@ -331,17 +331,17 @@ class MessageStore:
         return counts
 
     def add_result(self, envelope: dict[str, Any], owner_team_id: str | None = None) -> str:
-        _ = owner_team_id
         validate_result_envelope(envelope)
         result_id = f"res_{uuid.uuid4().hex[:12]}"
         with closing(self.connect()) as conn:
             with conn:
                 conn.execute(
                     """
-                    insert into results(result_id, task_id, agent_id, envelope, status, created_at)
-                    values (?, ?, ?, ?, ?, ?)
+                    insert into results(owner_team_id, result_id, task_id, agent_id, envelope, status, created_at)
+                    values (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        owner_team_id,
                         result_id,
                         envelope["task_id"],
                         envelope["agent_id"],
@@ -423,16 +423,17 @@ class MessageStore:
         return dict(row) if row else None
 
     def latest_results(self, limit: int = 5, owner_team_id: str | None = None) -> list[dict[str, Any]]:
-        _ = owner_team_id
+        owner_clause = "and owner_team_id = ?" if owner_team_id else ""
+        args: tuple[Any, ...] = (owner_team_id, limit) if owner_team_id else (limit,)
         with closing(self.connect()) as conn:
             rows = conn.execute(
-                """
+                f"""
                 select * from results
-                where status != 'invalid'
+                where status != 'invalid' {owner_clause}
                 order by created_at desc
                 limit ?
                 """,
-                (limit,),
+                args,
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 

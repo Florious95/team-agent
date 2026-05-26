@@ -358,6 +358,7 @@ def fork_agent(
             event_log,
             timeout_s=1.5,
             exclude_session_ids={source_session_id},
+            raise_on_missed=False,
         )
         if open_display and state.get("display_backend") in {"ghostty", "ghostty_window"}:
             agent_state["display"] = _open_ghostty_worker_window(workspace, session_name, as_agent_id, new_agent, event_log)

@@ -74,7 +74,10 @@ class RuntimeTests10(unittest.TestCase):
                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
                 patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 444, "status": "started"}),
             ):
-                restarted = runtime.restart(workspace)
+                # Stage 7 S5 atomicity: fake_fresh has session_id=None so the
+                # default refuses; opt into --allow-fresh to exercise the
+                # mixed resume+fresh path this test was written for.
+                restarted = runtime.restart(workspace, allow_fresh=True)
 
             self.assertTrue(restarted["ok"])
             self.assertEqual(len(captured_runtime), 2)

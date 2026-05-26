@@ -251,6 +251,19 @@ def _send_to_leader_receiver(
         f"team-agent-leader-receiver-{message_id}",
         provider=receiver.get("provider", "codex"),
     )
+    if not injection.get("ok") and injection.get("detected") == "codex_trust_prompt":
+        from team_agent.messaging.trust_auto_answer import retry_injection_after_trust_auto_answer
+        injection = retry_injection_after_trust_auto_answer(
+            workspace,
+            state,
+            event_log,
+            injection,
+            target,
+            text,
+            submit_key,
+            f"team-agent-leader-receiver-{message_id}-trust-retry",
+            receiver.get("provider", "codex"),
+        )
     if injection["ok"]:
         store.mark(message_id, "submitted")
         event_log.write(
@@ -441,10 +454,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
-
-
-
 
 
 

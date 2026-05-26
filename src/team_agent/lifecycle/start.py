@@ -319,7 +319,7 @@ def _start_agent_unlocked(workspace: Path, agent_id: str, force: bool, open_disp
         _clear_session_capture_fields(agent_state)
         if command_agent.get("_session_id"):
             agent_state["_pending_session_id"] = command_agent["_session_id"]
-        _capture_agent_session(workspace, agent_id, agent_state, event_log, timeout_s=1.5, exclude_session_ids=known_session_ids)
+        _capture_agent_session(workspace, agent_id, agent_state, event_log, timeout_s=1.5, exclude_session_ids=known_session_ids, raise_on_missed=False)
     if open_display and state.get("display_backend") in {"ghostty", "ghostty_window"}:
         agent_state["display"] = _open_ghostty_worker_window(workspace, session_name, agent_id, agent, event_log)
     elif open_display and state.get("display_backend") == "ghostty_workspace":
