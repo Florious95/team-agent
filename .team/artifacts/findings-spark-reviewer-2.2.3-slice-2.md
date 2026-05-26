@@ -122,3 +122,12 @@ Commit: `0894529`
 File/line evidence: `src/team_agent/messaging/leader_panes.py:622-633`, `src/team_agent/messaging/leader_panes.py:645`, `src/team_agent/messaging/leader_panes.py:648-653`
 Description: `_SPEC_OPT_IN_DEPRECATION_WARNED` is a module-global flag; any subprocess/forked worker emits the deprecation warning independently. In multi-process test/prod paths this can surface repeated warnings even when each process loads the same spec in the same workspace session.
 Suggested fix shape: if the product needs cross-process suppression, persist a short-lived runtime marker under `.team/logs` and gate warning writes per workspace session, while keeping events per spec load untouched.
+
+## 2026-05-27 Review — 9dfedae (`spec` workspace_root resolution for deprecation logs)
+
+### [LOW] Workspace-root resolver is path-literal and not symlink-canonical, so equivalent spec inputs can split audit logs
+
+Commit: `9dfedae`
+File/line evidence: `src/team_agent/spec.py:60-81`
+Description: `_resolve_workspace_root` walks the un-resolved `spec_path` string, so `load_spec` on a symlinked spec file (`alias/team.spec.yaml`) resolves to `alias` rather than the underlying workspace root that actually owns `.team`. That can send `trust_auto_answer_spec_opt_in_deprecated` into the symlink container and split audit streams for one logical workspace when run with mixed spec paths.
+Suggested fix shape: canonicalize `spec_path` first (e.g., `spec_path = spec_path.expanduser().resolve(strict=False)`) before ascending ancestors, or explicitly document this as intentional "path alias not supported" behavior in the contract.
