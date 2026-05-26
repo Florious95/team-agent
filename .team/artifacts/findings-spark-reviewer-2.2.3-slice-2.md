@@ -131,3 +131,19 @@ Commit: `9dfedae`
 File/line evidence: `src/team_agent/spec.py:60-81`
 Description: `_resolve_workspace_root` walks the un-resolved `spec_path` string, so `load_spec` on a symlinked spec file (`alias/team.spec.yaml`) resolves to `alias` rather than the underlying workspace root that actually owns `.team`. That can send `trust_auto_answer_spec_opt_in_deprecated` into the symlink container and split audit streams for one logical workspace when run with mixed spec paths.
 Suggested fix shape: canonicalize `spec_path` first (e.g., `spec_path = spec_path.expanduser().resolve(strict=False)`) before ascending ancestors, or explicitly document this as intentional "path alias not supported" behavior in the contract.
+
+## 2026-05-27 Review — b0cf773 (`restart` Route B first_send_at gates)
+
+### [LOW] Leader identity fallback can suppress first_send_at stamps after migration or rename
+
+Commit: `b0cf773`
+File/line evidence: `src/team_agent/messaging/delivery.py:351-353`
+Description: `leader_id` is resolved from `state["leader"]["id"]` with a fallback of `"leader"`, and only `{"leader", "Leader", leader_id}` is treated as the leader sender. If the state is missing `leader` during migration/repair (or leader id is customized), leader→worker deliveries can be un-stamped and those workers are then considered never-interacted on restart.
+Suggested fix shape: derive a deterministic sender identity source (e.g., explicit leader identity from runtime metadata and sender-not-in-agents fallback) and avoid silently skipping first_send_at when leader metadata is absent.
+
+### [MEDIUM] `first_send_at` classification uses loose truthiness and is sensitive to malformed state
+
+Commit: `b0cf773`
+File/line evidence: `src/team_agent/restart/orchestration.py:398-406`, `tests/contracts/restart_resume_atomicity_contract.md:11-12`
+Description: `_atomic_resumability_check` uses `if not first_send_at`, so invalid values (`""`, `0`, `false`) are treated as never-interacted, while garbage strings like `"null"` are treated as interacted. This can misclassify restart behavior under legacy/corrupt state mutations and cause either false atomic refusal or unintended fresh-start.
+Suggested fix shape: replace truthiness checks with explicit contract checks (`None`/missing => not interacted; strict ISO-8601 parse => interacted; invalid type/value => emit repair event + deterministic fallback) and keep behavior stable for restart decisions.
