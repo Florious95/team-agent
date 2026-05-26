@@ -64,7 +64,7 @@ def handle_provider_startup_prompts(workspace: Path, state: dict[str, Any], even
             continue
         agent_state["startup_prompt_check_count"] = check_count + 1
         adapter = get_adapter(agent_state["provider"])
-        for prompt_event in adapter.handle_startup_prompts(session_name, window, checks=1, sleep_s=0.0):
+        for prompt_event in adapter.handle_startup_prompts(session_name, window, checks=20, sleep_s=0.5):
             event_log.write(
                 "runtime.startup_prompt_handled",
                 agent_id=agent_id,

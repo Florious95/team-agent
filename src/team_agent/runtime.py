@@ -674,7 +674,7 @@ def _handle_startup_prompts_and_verify_window(
     session_name: str,
     start_mode: str,
 ) -> bool:
-    handled_prompts = adapter.handle_startup_prompts(session_name, agent_id, checks=1, sleep_s=0.0)
+    handled_prompts = adapter.handle_startup_prompts(session_name, agent_id, checks=20, sleep_s=0.5)
     for prompt_event in handled_prompts:
         event_log.write(f"{event_prefix}.startup_prompt_handled", agent_id=agent_id, provider=provider, **prompt_event)
     deadline = time.monotonic() + 1.0
