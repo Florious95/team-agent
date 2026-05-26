@@ -119,9 +119,10 @@ def cmd_peek(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_inbox(args: argparse.Namespace) -> dict[str, Any]:
+    since = getattr(args, "since", None)
     if args.json:
-        return runtime.inbox(Path(args.workspace).resolve(), args.agent, limit=args.limit)
-    return runtime.format_inbox(Path(args.workspace).resolve(), args.agent, limit=args.limit)
+        return runtime.inbox(Path(args.workspace).resolve(), args.agent, limit=args.limit, since=since)
+    return runtime.format_inbox(Path(args.workspace).resolve(), args.agent, limit=args.limit, since=since)
 
 
 def cmd_sessions(args: argparse.Namespace) -> dict[str, Any]:

@@ -418,7 +418,7 @@ def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False
             current_pane,
             incident_ts=incident.get("ts"),
         )
-        return {
+        response: dict[str, Any] = {
             "ok": True,
             "status": "claimed",
             "leader_receiver": state["leader_receiver"],
@@ -426,6 +426,24 @@ def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False
             "losers": losers,
             "requeued_watchers": [item["watcher_id"] for item in requeued],
         }
+        # Stage 13 (silent-loss arm mailbox-hint route, 2026-05-26 second roundtable):
+        # the framework cannot guarantee every worker message reached the leader pane during
+        # the ambiguous-state window (retry budgets may have exhausted before the human
+        # claimed). Pointing the leader agent at the inbox lets it self-recover by reading
+        # the messages that landed in storage but never injected to a pane.
+        incident_ts = incident.get("ts")
+        if incident_ts:
+            response["inbox_hint"] = {
+                "message": (
+                    "During the previous ambiguous-leader state, some worker messages may "
+                    "not have been auto-delivered to this pane. Run the command below to "
+                    "retrieve them."
+                ),
+                "command": f"team-agent inbox leader --since {incident_ts}",
+                "since": incident_ts,
+                "incident_id": incident.get("incident_id"),
+            }
+        return response
 
 
 def _latest_ambiguous_incident(event_log: EventLog, team_id: str) -> dict[str, Any] | None:

@@ -211,6 +211,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("agent")
     p.add_argument("--workspace", default=".")
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument(
+        "--since",
+        help="ISO 8601 timestamp; only show messages created at-or-after this time. "
+             "Use the timestamp from claim-leader's inbox_hint to retrieve messages "
+             "missed during a prior ambiguous-leader state.",
+    )
     add_json(p)
     p.set_defaults(func=cmd_inbox)
 
