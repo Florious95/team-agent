@@ -30,6 +30,27 @@ _MACMINI_CODEX_TRUST_PROMPT = """You are in /private/tmp/teamA-slice2-env-slice-
   Press enter to continue
 """
 
+_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL = _MACMINI_CODEX_TRUST_PROMPT + ("\n" * 12)
+
+_MACMINI_CODEX_TRUST_PROMPT_ANSI = _MACMINI_CODEX_TRUST_PROMPT.replace(
+    "Do you trust the contents of this directory?",
+    "\x1b[1mDo you trust the contents of this directory?\x1b[0m",
+)
+
+_MACMINI_CODEX_TRUST_PROMPT_WRAPPED = """You are in /private/tmp/teamA-slice2-env-slice-2-20260526T103705Z
+
+  Do you trust the contents of this
+  directory? Working with untrusted contents comes with higher risk of prompt
+  injection. Trusting the directory allows project-local config, hooks, and
+  exec policies to load.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to
+  continue
+""" + ("\n" * 12)
+
 
 def _ok_proc(stdout: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
@@ -37,6 +58,19 @@ def _ok_proc(stdout: str = "") -> SimpleNamespace:
 
 class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
     def test_send_path_detects_real_codex_trust_prompt_answers_then_re_pastes(self) -> None:
+        self._run_send_path_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT)
+
+    def test_send_path_detects_trust_prompt_variants_with_blank_tail_ansi_and_wrapping(self) -> None:
+        cases = {
+            "blank_tail": _MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL,
+            "ansi": _MACMINI_CODEX_TRUST_PROMPT_ANSI,
+            "wrapped": _MACMINI_CODEX_TRUST_PROMPT_WRAPPED,
+        }
+        for name, fixture in cases.items():
+            with self.subTest(name=name):
+                self._run_send_path_trust_prompt_fixture(fixture)
+
+    def _run_send_path_trust_prompt_fixture(self, prompt_fixture: str) -> None:
         from team_agent import runtime
         from team_agent.state import save_runtime_state
 
@@ -88,7 +122,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 if args[:3] == ["tmux", "capture-pane", "-p"]:
                     if not state["trust_answered"]:
                         actions.append("detect-codex-trust-prompt")
-                        return _ok_proc(_MACMINI_CODEX_TRUST_PROMPT)
+                        return _ok_proc(prompt_fixture)
                     if state["submitted"] and state["message_token"]:
                         return _ok_proc(f"› [team-agent-token:{state['message_token']}] accepted\n")
                     return _ok_proc(state["pasted_text"] or "› idle prompt\n")
@@ -134,6 +168,12 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
             shutil.rmtree(workspace, ignore_errors=True)
 
     def test_leader_receiver_path_detects_trust_prompt_answers_then_re_pastes(self) -> None:
+        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT)
+
+    def test_leader_receiver_path_detects_trust_prompt_with_blank_tail_then_re_pastes(self) -> None:
+        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL)
+
+    def _run_leader_receiver_trust_prompt_fixture(self, prompt_fixture: str) -> None:
         from team_agent import runtime
         from team_agent.events import EventLog
         from team_agent.state import save_runtime_state
@@ -173,7 +213,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 if args[:3] == ["tmux", "capture-pane", "-p"]:
                     if not pane["trust_answered"]:
                         actions.append("detect-codex-trust-prompt")
-                        return _ok_proc(_MACMINI_CODEX_TRUST_PROMPT)
+                        return _ok_proc(prompt_fixture)
                     if pane["submitted"] and pane["message_token"]:
                         return _ok_proc(f"› [team-agent-token:{pane['message_token']}] accepted\n")
                     return _ok_proc(pane["pasted_text"] or "› idle prompt\n")

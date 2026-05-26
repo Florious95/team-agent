@@ -20,7 +20,7 @@ from team_agent.messaging.deps import (
 
 from pathlib import Path
 from typing import Any
-from team_agent.messaging.tmux_prompt import detect_non_input_scrollback
+from team_agent.messaging.tmux_prompt import detect_non_input_scrollback, non_input_scrollback_window
 
 def _tmux_inject_text(
     target: str,
@@ -300,7 +300,7 @@ def _prepare_tmux_pane_for_input(target: str) -> dict[str, Any]:
             "verification": "pane_mode_check_failed",
             "error": mode_result.get("error") or "tmux pane mode check failed",
         }
-    capture_result = _pane_capture_tail(target, lines=10)
+    capture_result = _pane_capture_tail(target, lines=30)
     if not capture_result["ok"]:
         return {
             "ok": False,
@@ -367,7 +367,7 @@ def _pane_mode(target: str) -> dict[str, Any]:
     return {"ok": True, "pane_mode": proc.stdout.strip()}
 
 
-def _pane_capture_tail(target: str, lines: int = 10) -> dict[str, Any]:
+def _pane_capture_tail(target: str, lines: int = 30) -> dict[str, Any]:
     capture = run_cmd(["tmux", "capture-pane", "-p", "-S", f"-{lines}", "-t", target], timeout=5)
     if capture.returncode != 0:
         return {"ok": False, "capture": "", "error": capture.stderr.strip() or "tmux capture-pane failed"}
@@ -428,7 +428,7 @@ def _non_input_refusal(
         "detected": detected,
         "pane_id": target,
         "pane_mode": pane_mode,
-        "pane_capture_tail": _last_lines(capture_tail, 10),
+        "pane_capture_tail": non_input_scrollback_window(capture_tail) or _last_lines(capture_tail, 10),
     }
     if warning_event:
         result["warning_event"] = warning_event
@@ -450,7 +450,6 @@ def _prepare_failure_attempt(attempt: int, prepared: dict[str, Any]) -> dict[str
 def _last_lines(text: str, count: int) -> str:
     lines = text.splitlines()
     return "\n".join(lines[-count:])
-
 
 
 

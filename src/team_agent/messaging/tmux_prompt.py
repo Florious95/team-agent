@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
 def detect_non_input_scrollback(capture_tail: str) -> str | None:
-    lines = [line.rstrip("\n") for line in capture_tail.splitlines()]
-    nonempty = [line for line in lines if line.strip()]
-    tail_text = "\n".join(lines[-10:])
+    nonempty = _non_input_scrollback_lines(capture_tail)
+    tail_text = "\n".join(nonempty)
     lower = tail_text.lower()
-    if "do you trust the contents of this directory" in lower:
+    if re.search(r"do\s+you\s+trust\s+the\s+contents\s+of\s+this\s+directory", lower):
         return "codex_trust_prompt"
     if "press enter to log in" in lower or "press enter to login" in lower:
         return "codex_first_run_auth"
@@ -31,13 +33,29 @@ def detect_non_input_scrollback(capture_tail: str) -> str | None:
     if re.search(r"(\(y/n\)|\([yY]/n\)|\[y/N\]|\[Y/n\]|\[y/n\])", tail_text):
         return "y_n_confirm"
     for first, second in zip(nonempty, nonempty[1:]):
-        if re.match(r"^\s*1\.\s+", first) and re.match(r"^\s*2\.\s+", second):
+        if _starts_numbered_choice(first, "1") and _starts_numbered_choice(second, "2"):
             return "numbered_menu"
     if nonempty:
         last = nonempty[-1]
         if re.search(r"(^|[\s~/.\w-])[$%]\s*$", last):
             return "shell_prompt_cli_dead"
     return None
+
+
+def non_input_scrollback_window(capture_tail: str, limit: int = 15) -> str:
+    return "\n".join(_non_input_scrollback_lines(capture_tail, limit=limit))
+
+
+def _non_input_scrollback_lines(capture_tail: str, limit: int = 15) -> list[str]:
+    lines = [_ANSI_ESCAPE_RE.sub("", line).rstrip() for line in capture_tail.splitlines()]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return [line for line in lines if line.strip()][-limit:]
+
+
+def _starts_numbered_choice(line: str, number: str) -> bool:
+    return bool(re.match(rf"^\s*(?:[›❯>]\s*)?{number}\.\s+", line))
+
 
 def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
     target = f"{session_name}:{window_name}"
