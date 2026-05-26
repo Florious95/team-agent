@@ -249,6 +249,70 @@ class Gap28DetectionTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(self._emitted_api_errors()[0]["error_class"], "NetworkError")
 
+    # ----------------------------------------------------------------
+    # Spark MEDIUM #7: multi-line API-context matching. tmux wraps long log
+    # lines, so 'claude:' on one row and 'request timed out' on the next must
+    # still resolve to a single Timeout detection.
+    # ----------------------------------------------------------------
+
+    def test_two_line_wrapped_timeout_emits_timeout_class(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "● Thinking…\n"
+            "claude:\n"
+            "  request timed out after 60s\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
+
+    def test_two_line_wrapped_5xx_emits_network_error(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "Anthropic\n"
+            "  returned 502 Bad Gateway\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "NetworkError")
+
+    def test_three_line_wrapped_fetch_failed_emits_network_error(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "codex\n"
+            "  upstream returned\n"
+            "  fetch failed (ECONNREFUSED)\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "NetworkError")
+
+    def test_far_apart_lines_do_not_get_joined(self) -> None:
+        """Four lines between the API-context marker and the error keyword must
+        not produce a match — the sliding window cap is 3 lines."""
+        state = _state_with_attached_leader()
+        scrollback = (
+            "claude\n"
+            "filler 1\n"
+            "filler 2\n"
+            "filler 3\n"
+            "  request timed out\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+
     def test_dedupe_does_not_double_emit_for_same_scrollback(self) -> None:
         state = _state_with_attached_leader()
         scrollback = "API Error: Overloaded\n"

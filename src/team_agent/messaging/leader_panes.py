@@ -537,8 +537,23 @@ def attempt_trust_auto_answer(
             except Exception:
                 spec = None
     if not _auto_trust_opt_in(spec):
+        # Spark LOW #6: emit a structured event so the not-opted-in branch is
+        # as observable as the workspace_dir_mismatch / tmux_send_keys_failed
+        # branches. Keeps the decision matrix uniformly auditable.
+        event_log.write(
+            "leader_panes.trust_auto_answer_skipped",
+            pane_id=pane_id,
+            workspace=str(workspace),
+            reason="not_opted_in",
+        )
         return {"ok": False, "answered": False, "reason": "not_opted_in"}
     if not pane_id:
+        event_log.write(
+            "leader_panes.trust_auto_answer_skipped",
+            pane_id=None,
+            workspace=str(workspace),
+            reason="pane_id_missing",
+        )
         return {"ok": False, "answered": False, "reason": "pane_id_missing"}
     if not _capture_tail_references_workspace(pane_capture_tail, workspace):
         event_log.write(
@@ -578,14 +593,53 @@ def _auto_trust_opt_in(spec: dict[str, Any] | None) -> bool:
 
 
 def _capture_tail_references_workspace(tail: str, workspace: Path) -> bool:
+    """Spark MEDIUM #5: a raw substring match accepted '/repo' inside
+    '/repo-backup' and rejected symlinked / trailing-slash spellings. We now
+    canonicalize the workspace via Path.resolve, parse candidate absolute paths
+    out of the prompt tail (one token per line after stripping codex box-drawing
+    glyphs), canonicalize each candidate the same way, and only return True on
+    boundary-safe canonical equality."""
     if not tail:
         return False
+    workspace_canonical = _canonicalize_path(workspace)
+    if not workspace_canonical:
+        return False
+    for candidate in _candidate_paths_from_prompt(tail):
+        if _canonicalize_path(Path(candidate)) == workspace_canonical:
+            return True
+    return False
+
+
+_PATH_LINE_RE = re.compile(r"(/[\w\-./~+@]+)")
+
+
+def _candidate_paths_from_prompt(tail: str) -> list[str]:
+    """Pull every absolute-path-shaped token out of the prompt's tail. Codex
+    renders the trust prompt's directory inside box-drawing glyphs and on its
+    own line; strip leading/trailing whitespace and glyph noise before matching."""
+    paths: list[str] = []
+    for raw_line in tail.splitlines():
+        line = raw_line.strip()
+        # Codex draws box-glyph prefixes (▌ ▎ │) that need to be stripped.
+        for glyph in ("▌", "▎", "│"):
+            line = line.lstrip(glyph).strip()
+        if not line:
+            continue
+        for match in _PATH_LINE_RE.finditer(line):
+            token = match.group(1).rstrip("/")
+            if token and token not in paths:
+                paths.append(token)
+    return paths
+
+
+def _canonicalize_path(p: Path | str) -> str:
     try:
-        resolved = str(workspace.resolve())
+        resolved = Path(p).expanduser().resolve(strict=False)
     except OSError:
-        resolved = str(workspace)
-    raw = str(workspace)
-    return resolved in tail or (raw and raw in tail)
+        return ""
+    text = resolved.as_posix()
+    # Strip a trailing slash so boundary-safe equality holds.
+    return text.rstrip("/") if text != "/" else "/"
 
 
 def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, str]:

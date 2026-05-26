@@ -35,37 +35,44 @@ from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 
 
-# Spark MEDIUM (2026-05-26): require an API/provider context marker on the SAME line
-# as the error keyword. The earlier patterns false-fired on plain user text containing
-# "503" / "fetch failed" / "timed out". Each compound pattern below pairs the error
-# token with an API-context marker (API Error / HTTPError / HTTP Error / request
-# failed / codex / claude / Anthropic / OpenAI / TypeError) on the same logical line.
+# Spark MEDIUM sweeps (2026-05-26):
+# (#3) Require an API/provider context marker near the error keyword. Bare '503' /
+#      'fetch failed' / 'timed out' in user text used to false-fire.
+# (#7) Match across short sliding windows of 1-3 adjacent lines so wrapped tmux
+#      output ("claude:\n  request timed out") still resolves to a single
+#      detection. Window joined with a single space; capped at _WINDOW_MAX_CHARS
+#      so the scan stays bounded.
 _API_CONTEXT = (
     r"(?:API\s+Error|HTTP\s*Error|HTTPError|request\s+failed|"
     r"codex|claude|Anthropic|OpenAI|TypeError)"
 )
 
+# Patterns operate against a sliding window of up to 3 joined lines. The window
+# never contains '\n' (lines are joined with a single space), so `[^\n]` and `.`
+# behave the same; we use `[^\n]` for self-documentation.
 _ERROR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Overloaded — keyword itself already includes the "API Error:" prefix.
     (re.compile(r"API\s+Error:\s*Overloaded", re.IGNORECASE), "Overloaded"),
     # RateLimit — 429 with "Too Many Requests" is sufficiently specific; require it
     # appear AFTER an API context marker OR before "Too Many Requests" tightly.
     (re.compile(rf"(?:{_API_CONTEXT}[^\n]*\b429\b|\b429\s+Too\s+Many\s+Requests)", re.IGNORECASE), "RateLimit"),
-    # 5xx — must share a line with an API-context marker on either side.
-    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}\b5(?:00|02|03|04)\b", re.IGNORECASE), "NetworkError"),
-    (re.compile(rf"\b5(?:00|02|03|04)\b[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
-    # fetch failed — needs an API-context marker on the same line. The TypeError
+    # 5xx — must share a window with an API-context marker on either side.
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,200}}\b5(?:00|02|03|04)\b", re.IGNORECASE), "NetworkError"),
+    (re.compile(rf"\b5(?:00|02|03|04)\b[^\n]{{0,200}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
+    # fetch failed — needs an API-context marker in the same window. The TypeError
     # marker on its own counts (Node fetch frames the error this way).
-    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}fetch\s+failed", re.IGNORECASE), "NetworkError"),
-    (re.compile(rf"fetch\s+failed[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
-    # Timeout — likewise requires an API-context marker on the line, except for the
-    # unambiguous syscall token ETIMEDOUT.
-    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}(?:request|connection)\s+(?:timed\s+out|timeout)", re.IGNORECASE), "Timeout"),
-    (re.compile(rf"(?:request|connection)\s+(?:timed\s+out|timeout)[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "Timeout"),
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,200}}fetch\s+failed", re.IGNORECASE), "NetworkError"),
+    (re.compile(rf"fetch\s+failed[^\n]{{0,200}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
+    # Timeout — likewise requires an API-context marker in the window, except for
+    # the unambiguous syscall token ETIMEDOUT.
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,200}}(?:request|connection)\s+(?:timed\s+out|timeout)", re.IGNORECASE), "Timeout"),
+    (re.compile(rf"(?:request|connection)\s+(?:timed\s+out|timeout)[^\n]{{0,200}}{_API_CONTEXT}", re.IGNORECASE), "Timeout"),
     (re.compile(r"\bETIMEDOUT\b", re.IGNORECASE), "Timeout"),
 ]
 
 _RECENT_LINE_WINDOW = 100        # scan only the most recent N lines
+_SLIDING_WINDOW_LINES = 3        # join up to 3 adjacent lines per scan window
+_WINDOW_MAX_CHARS = 400          # discard windows beyond this length to bound work
 _DISPATCH_WINDOW_SECONDS = 60    # leader→worker sends counted within this lookback
 _PARTIAL_RESPONSE_HEAD_BYTES = 4000
 
@@ -132,26 +139,35 @@ def _default_capture_fn() -> Callable[[str], dict[str, Any]]:
 
 
 def _match_first_error(scrollback: str) -> tuple[str, str] | None:
+    """Spark MEDIUM #7: sliding window of 1..N adjacent lines. Lines inside a
+    window are joined with a single space so a wrapped pair such as
+        claude:
+          request timed out
+    is detected as one event without permitting unbounded cross-line matches.
+    Latest window wins so the freshest error is reported."""
     if not scrollback:
         return None
-    lines = scrollback.splitlines()
+    lines = [line.strip() for line in scrollback.splitlines()[-_RECENT_LINE_WINDOW:]]
     if not lines:
         return None
-    recent = "\n".join(lines[-_RECENT_LINE_WINDOW:])
-    # Walk patterns; return the FIRST (latest position wins among ties because we
-    # restrict to the recent tail).
     best: tuple[int, str, str] | None = None
-    for pattern, error_class in _ERROR_PATTERNS:
-        match = None
-        for candidate in pattern.finditer(recent):
-            match = candidate
-        if not match:
-            continue
-        line_start = recent.rfind("\n", 0, match.start()) + 1
-        line_end = recent.find("\n", match.end())
-        snippet = recent[line_start: line_end if line_end != -1 else len(recent)].strip()
-        if best is None or match.start() > best[0]:
-            best = (match.start(), error_class, snippet)
+    for start in range(len(lines)):
+        for size in range(1, _SLIDING_WINDOW_LINES + 1):
+            end = start + size
+            if end > len(lines):
+                break
+            window = " ".join(line for line in lines[start:end] if line)
+            if not window or len(window) > _WINDOW_MAX_CHARS:
+                continue
+            for pattern, error_class in _ERROR_PATTERNS:
+                match = pattern.search(window)
+                if not match:
+                    continue
+                snippet = window[:240]
+                if best is None or start > best[0]:
+                    best = (start, error_class, snippet)
+                # First match per window is enough; later windows may override.
+                break
     if best is None:
         return None
     return best[1], best[2]

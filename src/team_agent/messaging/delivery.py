@@ -68,8 +68,9 @@ def _deliver_pending_message(
     if not injection.get("ok") and injection.get("detected") == "codex_trust_prompt":
         # Gap 29 (Stage 2): opt-in trust auto-answer. The helper enforces both the
         # opt-in flag and a workspace-dir match before sending '1'+Enter, then we
-        # retry the original paste exactly once. Bypassed entirely when opt-out
-        # (default) — the existing failed envelope is preserved.
+        # retry the original paste once the prompt has actually been dismissed.
+        # Bypassed entirely when opt-out (default) — the existing failed envelope
+        # is preserved.
         from team_agent.messaging.leader_panes import attempt_trust_auto_answer
         answer = attempt_trust_auto_answer(
             workspace,
@@ -79,8 +80,35 @@ def _deliver_pending_message(
             state=state,
         )
         if answer.get("answered"):
-            import time as _time
-            _time.sleep(0.3)
+            # Spark MEDIUM #4 (2026-05-26): replace the fixed 0.3s sleep with a
+            # bounded poll. Slow terminals can take well over a second to clear
+            # the trust prompt; sleeping a fixed amount races dismissal and
+            # leaves the retry hitting the same codex_trust_prompt state. We
+            # poll for prompt dismissal up to 3s; if still present, return a
+            # retry_needed envelope and let the upstream scheduler decide
+            # whether to back off and try again later.
+            dismissed = _wait_for_trust_prompt_dismissal(
+                injection.get("pane_id") or target, timeout=3.0,
+            )
+            if not dismissed:
+                EventLog(workspace).write(
+                    "leader_panes.trust_auto_answer_retry_needed",
+                    pane_id=injection.get("pane_id") or target,
+                    workspace=str(workspace),
+                    reason="trust_prompt_not_dismissed_after_answer",
+                )
+                store.mark(message_id, "failed", "trust_prompt_not_dismissed_after_answer")
+                return {
+                    "ok": False,
+                    "status": "retry_needed",
+                    "reason": "trust_prompt_not_dismissed_after_answer",
+                    "stage": "trust_auto_answer_dismissal_wait",
+                    "verification": "trust_prompt_not_dismissed_after_answer",
+                    "detected": injection.get("detected"),
+                    "pane_id": injection.get("pane_id"),
+                    "pane_mode": injection.get("pane_mode"),
+                    "pane_capture_tail": injection.get("pane_capture_tail"),
+                }
             injection = _tmux_inject_text(
                 target,
                 text,
@@ -137,6 +165,32 @@ def _deliver_pending_message(
         "paste_attempts": injection.get("attempts"),
         "submit_attempts": injection.get("submit_attempts"),
     }
+
+
+def _wait_for_trust_prompt_dismissal(target: str, *, timeout: float = 3.0, poll_interval: float = 0.1) -> bool:
+    """Spark MEDIUM #4: bounded poll for trust prompt dismissal. Returns True once
+    the pane no longer matches detect_non_input_scrollback, False if the prompt
+    is still present after `timeout` seconds. Uses the same detector the inject
+    path uses so behaviour stays consistent."""
+    import time as _time
+    from team_agent.messaging.tmux_prompt import detect_non_input_scrollback
+    deadline = _time.monotonic() + max(timeout, 0.0)
+    while True:
+        capture = _capture_pane_tail(target)
+        detected = detect_non_input_scrollback(capture)
+        if detected != "codex_trust_prompt":
+            return True
+        if _time.monotonic() >= deadline:
+            return False
+        _time.sleep(poll_interval)
+
+
+def _capture_pane_tail(target: str) -> str:
+    from team_agent.messaging.deps import _capture_tmux_pane_text
+    capture = _capture_tmux_pane_text(target)
+    if not capture.get("ok"):
+        return ""
+    return str(capture.get("capture") or "")
 
 
 def _deliver_pending_messages(workspace: Path, state: dict[str, Any], event_log: EventLog) -> list[str]:
