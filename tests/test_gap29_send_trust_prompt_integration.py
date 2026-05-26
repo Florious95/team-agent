@@ -93,7 +93,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                         return _ok_proc(f"› [team-agent-token:{state['message_token']}] accepted\n")
                     return _ok_proc(state["pasted_text"] or "› idle prompt\n")
                 if args[:2] == ["tmux", "set-buffer"]:
-                    actions.append("set-buffer")
+                    actions.append("set-buffer-answer" if args[4] == "1" else "set-buffer-message")
                     buffers[args[3]] = args[4]
                     marker = "[team-agent-token:"
                     if marker in args[4]:
@@ -104,9 +104,10 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 elif args[:2] == ["tmux", "delete-buffer"]:
                     actions.append("delete-buffer")
                 elif args[:3] == ["tmux", "send-keys", "-t"]:
-                    if args[-2:] == ["1", "Enter"]:
+                    if args[-2:] == ["1", "Enter"] or (args[-1] == "Enter" and state["pasted_text"] == "1"):
                         actions.append("trust-answer-1-enter")
                         state["trust_answered"] = True
+                        state["pasted_text"] = ""
                     elif args[-1] == "Enter":
                         actions.append("submit-enter")
                         state["submitted"] = True
@@ -119,10 +120,119 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
             self.assertTrue(result["ok"], result)
             self.assertIn("detect-codex-trust-prompt", actions)
             self.assertIn("trust-answer-1-enter", actions)
-            self.assertIn("set-buffer", actions)
-            self.assertLess(actions.index("trust-answer-1-enter"), actions.index("set-buffer"), actions)
+            self.assertIn("set-buffer-message", actions)
+            self.assertLess(actions.index("trust-answer-1-enter"), actions.index("set-buffer-message"), actions)
             self.assertIn("paste-buffer", actions)
             self.assertIn("submit-enter", actions)
+            emitted = [ev for ev in _read_events(workspace) if ev.get("event") == "leader_panes.trust_auto_answered"]
+            self.assertEqual(len(emitted), 1)
+        finally:
+            if old_env is None:
+                os.environ.pop("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", None)
+            else:
+                os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = old_env
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_leader_receiver_path_detects_trust_prompt_answers_then_re_pastes(self) -> None:
+        from team_agent import runtime
+        from team_agent.events import EventLog
+        from team_agent.state import save_runtime_state
+
+        workspace = Path("/private/tmp/teamA-slice2-env-slice-2-20260526T103705Z")
+        shutil.rmtree(workspace, ignore_errors=True)
+        workspace.mkdir(parents=True)
+        old_env = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE")
+        try:
+            state = {
+                "workspace": str(workspace),
+                "leader": {"id": "leader"},
+                "leader_receiver": {
+                    "mode": "direct_tmux",
+                    "status": "attached",
+                    "provider": "codex",
+                    "pane_id": "%leader",
+                    "session_name": "team-gap29-real",
+                },
+                "agents": {"worker": {"status": "running", "provider": "fake"}},
+                "tasks": [{"id": "task_1", "title": "Task", "assignee": "worker", "status": "running"}],
+            }
+            save_runtime_state(workspace, state)
+            os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
+            actions: list[str] = []
+            buffers: dict[str, str] = {}
+            pane = {
+                "message_token": "",
+                "pasted_text": "",
+                "trust_answered": False,
+                "submitted": False,
+            }
+
+            def fake_run_cmd(args: list[str], timeout: int = 20):
+                if args[:4] == ["tmux", "display-message", "-p", "-t"]:
+                    return _ok_proc("\n")
+                if args[:3] == ["tmux", "capture-pane", "-p"]:
+                    if not pane["trust_answered"]:
+                        actions.append("detect-codex-trust-prompt")
+                        return _ok_proc(_MACMINI_CODEX_TRUST_PROMPT)
+                    if pane["submitted"] and pane["message_token"]:
+                        return _ok_proc(f"› [team-agent-token:{pane['message_token']}] accepted\n")
+                    return _ok_proc(pane["pasted_text"] or "› idle prompt\n")
+                if args[:2] == ["tmux", "set-buffer"]:
+                    if args[4] == "1":
+                        actions.append("set-buffer-answer")
+                    else:
+                        actions.append("set-buffer-message")
+                    buffers[args[3]] = args[4]
+                    marker = "[team-agent-token:"
+                    if marker in args[4]:
+                        pane["message_token"] = args[4].split(marker, 1)[1].split("]", 1)[0]
+                elif args[:3] == ["tmux", "paste-buffer", "-t"]:
+                    actions.append("paste-buffer")
+                    pane["pasted_text"] = buffers[args[5]]
+                elif args[:2] == ["tmux", "delete-buffer"]:
+                    actions.append("delete-buffer")
+                elif args[:3] == ["tmux", "send-keys", "-t"] and args[-1] == "Enter":
+                    if pane["pasted_text"] == "1":
+                        actions.append("trust-answer-1-enter")
+                        pane["trust_answered"] = True
+                        pane["pasted_text"] = ""
+                    else:
+                        actions.append("submit-enter")
+                        pane["submitted"] = True
+                return _ok_proc()
+
+            pane_info = {
+                "pane_id": "%leader",
+                "session_name": "team-gap29-real",
+                "window_index": "0",
+                "window_name": "leader",
+                "pane_index": "0",
+                "pane_tty": "/dev/ttys001",
+                "pane_current_command": "codex",
+                "pane_current_path": str(workspace),
+                "pane_active": "1",
+                "window_active": "1",
+            }
+            with patch("team_agent.runtime._tmux_pane_info", return_value=pane_info), \
+                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.runtime.time.sleep", return_value=None):
+                result = runtime._send_to_leader_receiver(
+                    workspace,
+                    state,
+                    "leader",
+                    "hello after trust",
+                    "task_1",
+                    "worker",
+                    False,
+                    EventLog(workspace),
+                )
+
+            self.assertTrue(result["ok"], result)
+            self.assertIn("detect-codex-trust-prompt", actions)
+            self.assertIn("set-buffer-answer", actions)
+            self.assertIn("trust-answer-1-enter", actions)
+            self.assertIn("set-buffer-message", actions)
+            self.assertLess(actions.index("trust-answer-1-enter"), actions.index("set-buffer-message"), actions)
             emitted = [ev for ev in _read_events(workspace) if ev.get("event") == "leader_panes.trust_auto_answered"]
             self.assertEqual(len(emitted), 1)
         finally:

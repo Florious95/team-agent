@@ -23,7 +23,6 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -38,12 +37,12 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_base)
 
 
-def _ok_proc() -> SimpleNamespace:
-    return SimpleNamespace(returncode=0, stdout="", stderr="")
+def _ok_inject() -> dict[str, Any]:
+    return {"ok": True}
 
 
-def _fail_proc(stderr: str = "tmux refused") -> SimpleNamespace:
-    return SimpleNamespace(returncode=1, stdout="", stderr=stderr)
+def _fail_inject(error: str = "tmux refused") -> dict[str, Any]:
+    return {"ok": False, "error": error}
 
 
 def _trust_capture_tail(workspace: Path) -> str:
@@ -81,14 +80,14 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
     def test_default_opt_out_does_not_touch_pane_but_emits_skipped_event(self) -> None:
         """Spark LOW #6: every refusal branch is observable via a structured event.
         Opt-out emits trust_auto_answer_skipped with reason=not_opted_in."""
-        with patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
                 self.event_log, spec={},
             )
         self.assertFalse(result["answered"])
         self.assertEqual(result["reason"], "not_opted_in")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
         skipped = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answer_skipped"]
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["reason"], "not_opted_in")
@@ -96,26 +95,25 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
 
     def test_opt_in_via_spec_answers_and_emits(self) -> None:
         spec = {"runtime": {"auto_trust_own_workspace": True}}
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()) as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()) as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
                 self.event_log, spec=spec,
             )
         self.assertTrue(result["answered"])
         self.assertEqual(result["reason"], "trust_auto_answered")
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        self.assertEqual(args[:2], ["tmux", "send-keys"])
-        self.assertIn("%worker", args)
-        self.assertIn("1", args)
-        self.assertIn("Enter", args)
+        mock_inject.assert_called_once()
+        args = mock_inject.call_args[0]
+        kwargs = mock_inject.call_args.kwargs
+        self.assertEqual(args[:3], ("%worker", "1", "Enter"))
+        self.assertTrue(kwargs["bypass_non_input_gate"])
         emitted = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answered"]
         self.assertEqual(len(emitted), 1)
         self.assertEqual(emitted[0]["pane_id"], "%worker")
 
     def test_opt_in_via_env_var_answers(self) -> None:
         os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()):
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()):
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
                 self.event_log, spec={},
@@ -129,20 +127,20 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
             "Do you trust the contents of this directory and want to allow execution of source files?\n"
             "\n  ▌ /completely/different/path\n  ▌ 1. Yes  ▌ 2. No\n"
         )
-        with patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", unrelated_dir_tail,
                 self.event_log, spec=spec,
             )
         self.assertFalse(result["answered"])
         self.assertEqual(result["reason"], "workspace_dir_mismatch")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
         refused = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answer_refused"]
         self.assertEqual(len(refused), 1)
 
     def test_tmux_send_keys_failure_surfaces_reason(self) -> None:
         spec = {"runtime": {"auto_trust_own_workspace": True}}
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_fail_proc("no server")):
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_fail_inject("no server")):
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
                 self.event_log, spec=spec,
@@ -164,7 +162,7 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
         from io import StringIO
         import contextlib
         stderr_buf = StringIO()
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              contextlib.redirect_stderr(stderr_buf):
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
@@ -190,7 +188,7 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
         from io import StringIO
         import contextlib
         stderr_buf = StringIO()
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              contextlib.redirect_stderr(stderr_buf):
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", _trust_capture_tail(self.workspace),
@@ -212,7 +210,7 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
         from io import StringIO
         import contextlib
         stderr_buf = StringIO()
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              contextlib.redirect_stderr(stderr_buf):
             for _ in range(3):
                 attempt_trust_auto_answer(
@@ -230,14 +228,14 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
     def test_missing_pane_id_refuses_and_emits_skipped_event(self) -> None:
         """Spark LOW #6: pane_id_missing branch emits trust_auto_answer_skipped."""
         spec = {"runtime": {"auto_trust_own_workspace": True}}
-        with patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, None, _trust_capture_tail(self.workspace),
                 self.event_log, spec=spec,
             )
         self.assertFalse(result["answered"])
         self.assertEqual(result["reason"], "pane_id_missing")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
         skipped = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answer_skipped"]
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["reason"], "pane_id_missing")
@@ -269,18 +267,18 @@ class Gap29PathCanonicalizationTests(unittest.TestCase):
     def test_prefix_lookalike_is_refused(self) -> None:
         """/repo must NOT match /repo-backup. Boundary-safe equality, not substring."""
         evil = str(self.workspace.parent / (self.workspace.name + "-backup"))
-        with patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", self._capture_with_dir(evil),
                 self.event_log, spec=self._spec_opt_in(),
             )
         self.assertFalse(result["answered"])
         self.assertEqual(result["reason"], "workspace_dir_mismatch")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
 
     def test_trailing_slash_variant_is_accepted(self) -> None:
         """Trailing slash on the prompt path must still resolve to the workspace."""
-        with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()):
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()):
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", self._capture_with_dir(str(self.workspace) + "/"),
                 self.event_log, spec=self._spec_opt_in(),
@@ -289,14 +287,14 @@ class Gap29PathCanonicalizationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "trust_auto_answered")
 
     def test_unrelated_directory_is_refused(self) -> None:
-        with patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = attempt_trust_auto_answer(
                 self.workspace, "%worker", self._capture_with_dir("/tmp/some-other-workspace"),
                 self.event_log, spec=self._spec_opt_in(),
             )
         self.assertFalse(result["answered"])
         self.assertEqual(result["reason"], "workspace_dir_mismatch")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
 
     def test_symlink_to_workspace_is_accepted(self) -> None:
         """Symlinked spelling of the same directory resolves to the canonical
@@ -309,7 +307,7 @@ class Gap29PathCanonicalizationTests(unittest.TestCase):
         except OSError:
             self.skipTest("filesystem does not support symlinks")
         try:
-            with patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()):
+            with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()):
                 result = attempt_trust_auto_answer(
                     self.workspace, "%worker", self._capture_with_dir(str(link)),
                     self.event_log, spec=self._spec_opt_in(),
@@ -334,12 +332,6 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
         self.event_log = EventLog(self.workspace)
         self._env_backup = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE")
         os.environ.pop("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", None)
-        self._precheck = patch(
-            "team_agent.messaging.delivery._prepare_tmux_pane_for_input",
-            return_value={"ok": True, "verification": "pane_input_ready"},
-        )
-        self._precheck.start()
-        self.addCleanup(self._precheck.stop)
 
     def tearDown(self) -> None:
         if self._env_backup is None:
@@ -399,7 +391,7 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
 
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()):
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()):
             result = delivery_mod._deliver_pending_message(self.workspace, state, message_id)
 
         self.assertTrue(result["ok"])
@@ -433,7 +425,7 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
 
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=stuck_capture), \
              patch("time.sleep", return_value=None), \
              patch("time.monotonic", side_effect=[0.0, 0.0, 100.0, 100.0]):
@@ -484,7 +476,7 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
         event_log = EventLog(self.workspace)
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=stuck_capture), \
              patch("time.sleep", return_value=None), \
              patch("time.monotonic", side_effect=[0.0, 0.0, 100.0, 100.0]), \
@@ -527,7 +519,7 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
 
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=stuck_capture), \
              patch("time.sleep", return_value=None), \
              patch("time.monotonic", side_effect=[0.0, 0.0, 100.0, 100.0] * 10):
@@ -567,7 +559,7 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
 
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value=_ok_inject()), \
              patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=cleared_capture):
             result = delivery_mod._deliver_pending_message(self.workspace, state, message_id)
 
@@ -588,13 +580,13 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
 
         with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
              patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
-             patch("team_agent.messaging.leader_panes.run_cmd") as mock_run:
+             patch("team_agent.messaging.leader_panes._tmux_inject_text") as mock_inject:
             result = delivery_mod._deliver_pending_message(self.workspace, state, message_id)
 
         self.assertFalse(result["ok"])
         self.assertEqual(len(inject_calls), 1,
             "opt-out must not retry; single inject only")
-        mock_run.assert_not_called()
+        mock_inject.assert_not_called()
         self.assertEqual(
             [ev for ev in self._read_events() if ev.get("event") == "leader_panes.trust_auto_answered"],
             [],

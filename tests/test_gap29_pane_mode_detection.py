@@ -81,6 +81,32 @@ class Gap29PaneModeDetectionTests(unittest.TestCase):
                 self.assertEqual(result["detected"], detected)
                 self.assertFalse(any(call[:3] == ["tmux", "paste-buffer", "-t"] for call in calls))
 
+    def test_bypass_non_input_gate_allows_auto_answer_paste(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run_cmd(args: list[str], timeout: int = 20):
+            calls.append(args)
+            proc = Mock(returncode=0, stdout="", stderr="")
+            if args[:3] == ["tmux", "capture-pane", "-p"]:
+                proc.stdout = "Do you trust the contents of this directory?\nPress enter to continue\n"
+            return proc
+
+        with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch("team_agent.runtime.time.sleep", return_value=None):
+            result = runtime._tmux_inject_text(
+                "%8",
+                "1",
+                "Enter",
+                "team-agent-gap29-auto-answer",
+                attempts=1,
+                provider="fake",
+                bypass_non_input_gate=True,
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(any(call[:2] == ["tmux", "set-buffer"] for call in calls))
+        self.assertTrue(any(call[:3] == ["tmux", "paste-buffer", "-t"] for call in calls))
+        self.assertFalse(any(call[:4] == ["tmux", "display-message", "-p", "-t"] for call in calls))
+
     def test_send_returns_structured_non_input_envelope(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-gap29-send-") as tmp:
             workspace = Path(tmp)

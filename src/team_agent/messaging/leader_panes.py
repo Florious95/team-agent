@@ -568,9 +568,17 @@ def attempt_trust_auto_answer(
             reason="workspace_dir_mismatch",
         )
         return {"ok": False, "answered": False, "reason": "workspace_dir_mismatch"}
-    answer = run_cmd(["tmux", "send-keys", "-t", str(pane_id), "1", "Enter"], timeout=5)
-    if answer.returncode != 0:
-        error = answer.stderr.strip() or "tmux send-keys failed"
+    answer = _tmux_inject_text(
+        str(pane_id),
+        "1",
+        "Enter",
+        f"team-agent-trust-auto-answer-{str(pane_id).strip('%') or 'pane'}",
+        attempts=1,
+        provider="fake",
+        bypass_non_input_gate=True,
+    )
+    if not answer.get("ok"):
+        error = answer.get("error") or "tmux send-keys failed"
         event_log.write(
             "leader_panes.trust_auto_answer_failed",
             pane_id=pane_id,

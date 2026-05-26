@@ -29,6 +29,8 @@ def _tmux_inject_text(
     buffer_name: str,
     attempts: int = 3,
     provider: str = "fake",
+    *,
+    bypass_non_input_gate: bool = False,
 ) -> dict[str, Any]:
     token_match = re.search(r"\[team-agent-token:([^\]]+)\]", text)
     token = token_match.group(1) if token_match else ""
@@ -38,7 +40,11 @@ def _tmux_inject_text(
     submit_settle_timeout = _tmux_submit_settle_timeout(text)
     text_bytes = _tmux_text_size(text)
     for attempt in range(1, max(attempts, 1) + 1):
-        prepared = _prepare_tmux_pane_for_input(target)
+        prepared = (
+            {"ok": True, "verification": "non_input_gate_bypassed"}
+            if bypass_non_input_gate
+            else _prepare_tmux_pane_for_input(target)
+        )
         if not prepared["ok"]:
             attempt_log.append(_prepare_failure_attempt(attempt, prepared))
             return {
@@ -444,7 +450,6 @@ def _prepare_failure_attempt(attempt: int, prepared: dict[str, Any]) -> dict[str
 def _last_lines(text: str, count: int) -> str:
     lines = text.splitlines()
     return "\n".join(lines[-count:])
-
 
 
 
