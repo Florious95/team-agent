@@ -37,3 +37,9 @@ Full-suite log:
 - `/tmp/slice2-fullsuite-rerun.log`
 
 Status: PASS
+
+## Final Re-Run
+
+Final re-run on HEAD cd08303 (after F3 deprecation): 716 tests, errors=0, failures=0, skipped=5, exit=0. Status: PASS
+
+Log: `/tmp/slice2-fullsuite-final.log`
