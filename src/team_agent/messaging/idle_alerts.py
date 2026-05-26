@@ -126,6 +126,14 @@ def _team_last_progress_at(
     return sources[0]
 
 
+# Stage 14 (Gap 36b) — mtime cache per (workspace_path, owner_team_id, require_team_scope).
+# Mac mini 2026-05-26 evidence: _scan_event_progress_signals was a 22% CPU hot path because
+# every 2-second coordinator tick parsed up to 1000 events from a 28 MB events.jsonl. With
+# the cache, the parse only re-runs when the file changes; quiet workspaces pay zero file
+# I/O between writes.
+_PROGRESS_SCAN_CACHE: dict[tuple[str, str, bool], tuple[float, datetime | None]] = {}
+
+
 def _scan_event_progress_signals(
     event_log: EventLog,
     owner_team_id: str,
@@ -133,6 +141,15 @@ def _scan_event_progress_signals(
     *,
     require_team_scope: bool = False,
 ) -> datetime | None:
+    cache_key = (str(event_log.path), owner_team_id, require_team_scope)
+    try:
+        current_mtime = event_log.path.stat().st_mtime
+    except FileNotFoundError:
+        _PROGRESS_SCAN_CACHE.pop(cache_key, None)
+        return None
+    cached = _PROGRESS_SCAN_CACHE.get(cache_key)
+    if cached is not None and cached[0] == current_mtime:
+        return cached[1]
     window_start = now - timedelta(seconds=_PROGRESS_EVENT_WINDOW_SECONDS)
     latest: datetime | None = None
     for event in event_log.tail(_PROGRESS_EVENT_TAIL_LIMIT):
@@ -152,7 +169,13 @@ def _scan_event_progress_signals(
             continue
         if latest is None or ts > latest:
             latest = ts
+    _PROGRESS_SCAN_CACHE[cache_key] = (current_mtime, latest)
     return latest
+
+
+def _reset_progress_scan_cache() -> None:
+    """Test-only hook to force re-scan."""
+    _PROGRESS_SCAN_CACHE.clear()
 
 
 def _team_last_idle_fallback_fire_at(state: dict[str, Any], owner_team_id: str) -> datetime | None:

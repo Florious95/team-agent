@@ -310,6 +310,17 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("doctor", help="Check local dependencies, providers, auth hints, tmux, and MCP")
     p.add_argument("spec", nargs="?")
+    p.add_argument(
+        "--cleanup-orphans",
+        action="store_true",
+        help="Scan for orphan team_agent.coordinator processes pointing at non-existent or "
+             "ephemeral-tempdir workspaces (dry-run unless --confirm is also passed).",
+    )
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="With --cleanup-orphans: send SIGTERM to each orphan (default is dry-run).",
+    )
     add_json(p)
     p.set_defaults(func=cmd_doctor)
 

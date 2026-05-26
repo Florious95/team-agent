@@ -199,7 +199,13 @@ def cmd_validate_result(args: argparse.Namespace) -> dict[str, Any]:
     return {"ok": True, "task_id": envelope["task_id"], "agent_id": envelope["agent_id"], "status": envelope["status"]}
 
 
-def cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
+def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
+    if getattr(args, "cleanup_orphans", False):
+        from team_agent.diagnose.orphan_cleanup import cleanup_orphan_coordinators, format_cleanup_orphans
+        result = cleanup_orphan_coordinators(confirm=bool(getattr(args, "confirm", False)))
+        if args.json:
+            return result
+        return format_cleanup_orphans(result)
     spec = Path(args.spec).resolve() if args.spec else None
     return runtime.doctor(spec)
 
