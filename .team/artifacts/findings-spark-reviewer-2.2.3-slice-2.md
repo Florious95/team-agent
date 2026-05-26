@@ -34,3 +34,26 @@ Commit: `25b2249`
 File/line evidence: `src/team_agent/messaging/tmux_prompt.py:16`, `src/team_agent/messaging/tmux_prompt.py:50`
 Description: `_ANSI_ESCAPE_RE` removes only `ESC[` CSI escapes; OSC sequences (`ESC]...BEL/ST`) and other terminal control payloads are not stripped and can fragment signature text in real Codex output before regex matching.
 Suggested fix shape: switch to a terminal-control normalizer that strips OSC as well (or use a broad ANSI cleaner) before non-input detection.
+
+## 2026-05-26 Review — a3d4fe5 (`gap-29` startup-prompt wait & stale non-input suppression)
+
+### [MEDIUM] Input-ready marker can be over-eager on non-input lines and mask real prompts
+
+Commit: `a3d4fe5`
+File/line evidence: `src/team_agent/messaging/tmux_prompt.py:93-99`, `src/team_agent/messaging/tmux_prompt.py:75-90`
+Description: `_is_input_ready_prompt` treats any line ending in `codex|claude` + `> / › / ❯` as ready. In mixed scrollback where a stale non-input line contains that tokenized pattern (e.g., status/caption text that includes `codex >`), `_stale_non_input_before_ready_prompt` can mark `latest_ready` after `latest_non_input` and suppress trust/pause prompt detection. That can leave active prompts unhandled while returning `None` (input-ready) downstream.
+Suggested fix shape: tighten ready-pattern matching to shell-like prompt contexts only (for example, prompt-marker anchored as start-of-line with optional whitespace and minimal CLI prompt grammar) and guard codex/claude suffix matching with stronger delimiters or capture state.
+
+### [LOW] Startup prompt wait-parameter sweep is not fully wired/observable
+
+Commit: `a3d4fe5`
+File/line evidence: `src/team_agent/approvals/runtime_prompts.py:67`, `src/team_agent/launch/core.py:218`, `src/team_agent/runtime.py:668-678`
+Description: The commit updates `handle_startup_prompts` calls to `checks=20, sleep_s=0.5` in three direct callsites, but `_handle_startup_prompts_and_verify_window` in `runtime.py` is now an isolated wrapper with the same params and no in-tree callsite. This creates an unclear/unused startup path and makes “5 callsite” coverage from the brief hard to verify.
+Suggested fix shape: either call the shared helper from all intended startup paths (and assert via tests that no call path uses defaults), or delete the unused wrapper and make the effective callsite set explicit.
+
+### [LOW] Empty/history-less first-screen acceptance scenario is still untested
+
+Commit: `a3d4fe5`
+File/line evidence: `tests/test_pane_state_classifier_acceptance.py:11-29`, `tests/test_pane_state_classifier_acceptance.py:31-39`
+Description: Existing acceptance tests do not include a zero-history/no-scrollback capture (e.g., empty capture + first visible prompt-only `>`/`›`), so behavior changes in `_is_input_ready_prompt`/`_stale_non_input_before_ready_prompt` cannot be regression-guarded for the exact “fresh tmux first-screen” edge the brief called out.
+Suggested fix shape: add one direct fixture test for `detect_non_input_scrollback("")` and one for `" > "`-style first-screen tails so future regex tuning must preserve the intended `input_ready` result.
