@@ -65,6 +65,30 @@ def _deliver_pending_message(
         attempts=3 if wait_visible else 1,
         provider=agent_state.get("provider", "fake"),
     )
+    if not injection.get("ok") and injection.get("detected") == "codex_trust_prompt":
+        # Gap 29 (Stage 2): opt-in trust auto-answer. The helper enforces both the
+        # opt-in flag and a workspace-dir match before sending '1'+Enter, then we
+        # retry the original paste exactly once. Bypassed entirely when opt-out
+        # (default) — the existing failed envelope is preserved.
+        from team_agent.messaging.leader_panes import attempt_trust_auto_answer
+        answer = attempt_trust_auto_answer(
+            workspace,
+            injection.get("pane_id") or target,
+            injection.get("pane_capture_tail") or "",
+            EventLog(workspace),
+            state=state,
+        )
+        if answer.get("answered"):
+            import time as _time
+            _time.sleep(0.3)
+            injection = _tmux_inject_text(
+                target,
+                text,
+                "Enter",
+                f"team-agent-send-{message_id}-trust-retry",
+                attempts=3 if wait_visible else 1,
+                provider=agent_state.get("provider", "fake"),
+            )
     if injection["ok"]:
         store.mark(message_id, "submitted")
         EventLog(workspace).write(

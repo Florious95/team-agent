@@ -503,6 +503,91 @@ def _leader_command_looks_usable(command: str, provider: str) -> bool:
     return command_name in {"codex", "node", "nodejs", "claude", "claude.exe"}
 
 
+def attempt_trust_auto_answer(
+    workspace: Path,
+    pane_id: str | None,
+    pane_capture_tail: str,
+    event_log: EventLog,
+    *,
+    spec: dict[str, Any] | None = None,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Gap 29 (Slice 2 Stage 2) — opt-in auto-answer of the codex first-run trust prompt.
+
+    Called by the inject path when developer's structured envelope reports
+    detected=='codex_trust_prompt'. Auto-answers ONLY when both:
+      (1) runtime is opted in via spec.runtime.auto_trust_own_workspace=True OR env
+          TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE in {1,true,yes,on}; and
+      (2) the trust-prompt pane capture references this workspace's absolute path
+          (so a worker can only trust its own dir, never some arbitrary path).
+
+    On match, sends '1' + Enter to the pane and emits
+    leader_panes.trust_auto_answered. Default is opt-out — every refusal returns
+    answered=False with a structured reason and the existing failure envelope
+    bubbles up unchanged.
+
+    Return: {"ok": bool, "answered": bool, "reason": str, ...}
+    """
+    if spec is None and state is not None:
+        spec_path_str = state.get("spec_path")
+        if spec_path_str:
+            try:
+                from team_agent.spec import load_spec as _load_spec
+                spec = _load_spec(Path(spec_path_str))
+            except Exception:
+                spec = None
+    if not _auto_trust_opt_in(spec):
+        return {"ok": False, "answered": False, "reason": "not_opted_in"}
+    if not pane_id:
+        return {"ok": False, "answered": False, "reason": "pane_id_missing"}
+    if not _capture_tail_references_workspace(pane_capture_tail, workspace):
+        event_log.write(
+            "leader_panes.trust_auto_answer_refused",
+            pane_id=pane_id,
+            workspace=str(workspace),
+            reason="workspace_dir_mismatch",
+        )
+        return {"ok": False, "answered": False, "reason": "workspace_dir_mismatch"}
+    answer = run_cmd(["tmux", "send-keys", "-t", str(pane_id), "1", "Enter"], timeout=5)
+    if answer.returncode != 0:
+        error = answer.stderr.strip() or "tmux send-keys failed"
+        event_log.write(
+            "leader_panes.trust_auto_answer_failed",
+            pane_id=pane_id,
+            workspace=str(workspace),
+            error=error,
+        )
+        return {"ok": False, "answered": False, "reason": "tmux_send_keys_failed", "error": error}
+    event_log.write(
+        "leader_panes.trust_auto_answered",
+        pane_id=pane_id,
+        workspace=str(workspace),
+        opted_in=True,
+    )
+    return {"ok": True, "answered": True, "reason": "trust_auto_answered"}
+
+
+def _auto_trust_opt_in(spec: dict[str, Any] | None) -> bool:
+    env = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE", "").strip().lower()
+    if env in {"1", "true", "yes", "on"}:
+        return True
+    if not isinstance(spec, dict):
+        return False
+    runtime = spec.get("runtime") or {}
+    return bool(runtime.get("auto_trust_own_workspace"))
+
+
+def _capture_tail_references_workspace(tail: str, workspace: Path) -> bool:
+    if not tail:
+        return False
+    try:
+        resolved = str(workspace.resolve())
+    except OSError:
+        resolved = str(workspace)
+    raw = str(workspace)
+    return resolved in tail or (raw and raw in tail)
+
+
 def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, str]:
     if provider != "codex":
         return "Enter", "non_codex_provider"
