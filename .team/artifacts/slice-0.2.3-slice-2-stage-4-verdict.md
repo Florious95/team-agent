@@ -43,3 +43,9 @@ Status: PASS
 Final re-run on HEAD cd08303 (after F3 deprecation): 716 tests, errors=0, failures=0, skipped=5, exit=0. Status: PASS
 
 Log: `/tmp/slice2-fullsuite-final.log`
+
+## Post-Hotfix Re-Run
+
+Post-hotfix re-run on HEAD 1576bdc: 717 tests, errors=0, exit=0, Status: PASS
+
+Log: `/tmp/slice2-fullsuite-hotfix.log`
