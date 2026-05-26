@@ -57,3 +57,12 @@ Commit: `a3d4fe5`
 File/line evidence: `tests/test_pane_state_classifier_acceptance.py:11-29`, `tests/test_pane_state_classifier_acceptance.py:31-39`
 Description: Existing acceptance tests do not include a zero-history/no-scrollback capture (e.g., empty capture + first visible prompt-only `>`/`›`), so behavior changes in `_is_input_ready_prompt`/`_stale_non_input_before_ready_prompt` cannot be regression-guarded for the exact “fresh tmux first-screen” edge the brief called out.
 Suggested fix shape: add one direct fixture test for `detect_non_input_scrollback("")` and one for `" > "`-style first-screen tails so future regex tuning must preserve the intended `input_ready` result.
+
+## 2026-05-26 Review — f3d00f7 (`gap-29` spec deprecation schema gate fix)
+
+### [LOW] Runtime schema-validator drift still exists beyond this committed fix
+
+Commit: `f3d00f7`
+File/line evidence: `schemas/team.schema.json:60-83`, `src/team_agent/spec.py:185-199`, `src/team_agent/spec.py:209-211`
+Description: This commit correctly adds `auto_trust_own_workspace` to both schema and validator allowed set, but the runtime block still has drift elsewhere: validator still accepts `auto_attach_leader`, `fast`, `tick_interval_sec`, `push_min_interval_sec`, and `stuck_timeout_sec` while schema `additionalProperties: false` excludes them. Tooling that relies on schema validation (IDE/schema-driven docs, CI lint) will still reject these valid keys, so schema remains non-authoritative and can block legitimate specs.
+Suggested fix shape: align schema and runtime validator by either adding those runtime fields with matching types/doc metadata to schema or tightening validator to reject them if deprecation policy changed; then add a drift test that asserts a single symmetric key set for `/runtime`.
