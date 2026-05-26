@@ -2,6 +2,7 @@
 
 ## Scope
 - `617a517` `src/team_agent/messaging/tmux_io.py`, `src/team_agent/messaging/leader.py`, `src/team_agent/messaging/trust_auto_answer.py`, `src/team_agent/messaging/leader_panes.py`, `tests/test_gap29_send_trust_prompt_integration.py`
+- `6b1fc75` `src/team_agent/restart/orchestration.py`, `tests/test_runtime_core_07.py`, `tests/test_runtime_core_10.py`
 
 ## 2026-05-26 Review — 617a517 (`gap-29` canonical non-input gate)
 
@@ -66,3 +67,19 @@ Commit: `f3d00f7`
 File/line evidence: `schemas/team.schema.json:60-83`, `src/team_agent/spec.py:185-199`, `src/team_agent/spec.py:209-211`
 Description: This commit correctly adds `auto_trust_own_workspace` to both schema and validator allowed set, but the runtime block still has drift elsewhere: validator still accepts `auto_attach_leader`, `fast`, `tick_interval_sec`, `push_min_interval_sec`, and `stuck_timeout_sec` while schema `additionalProperties: false` excludes them. Tooling that relies on schema validation (IDE/schema-driven docs, CI lint) will still reject these valid keys, so schema remains non-authoritative and can block legitimate specs.
 Suggested fix shape: align schema and runtime validator by either adding those runtime fields with matching types/doc metadata to schema or tightening validator to reject them if deprecation policy changed; then add a drift test that asserts a single symmetric key set for `/runtime`.
+
+## 2026-05-26 Review — 6b1fc75 (`restart` atomicity pre-check)
+
+### [MEDIUM] Pre-check exclusion context diverges from restart-loop repair context
+
+Commit: `6b1fc75`
+File/line evidence: `src/team_agent/restart/orchestration.py:345-384`, `src/team_agent/restart/orchestration.py:150-164`, `src/team_agent/sessions/resume.py:56-60`
+Description: `_atomic_resumability_check` uses `known_session_ids` derived only from persisted state, while the later `_prepare_resume_state` call uses `state + new_agents`. A worker can pass pre-check with a repaired session candidate and still fail during restart when an earlier repaired session is excluded later, so the operation escapes atomic refusal and fails mid-loop after teardown has begun.
+Suggested fix shape: share a single candidate-resolution helper between pre-check and restart loop (including progressive exclusion of repaired sessions), and treat repair failures there exactly as restart-loop `ResumeUnavailable` outcomes.
+
+### [LOW] New `restart.atomic_refusal` event has no contract assertions
+
+Commit: `6b1fc75`
+File/line evidence: `src/team_agent/restart/orchestration.py:103-118`
+Description: `restart.atomic_refusal` is a new observability event for the refusal path but currently has no dedicated regression assertions. Its payload stability (`unresumable` structure, `reason`, `allow_fresh`) is therefore unverified and can drift without test protection.
+Suggested fix shape: add a focused test that forces refusal and asserts emitted event payload keys/shape for deterministic downstream consumption before this becomes a hard dependency.
