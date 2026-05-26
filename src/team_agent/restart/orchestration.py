@@ -84,15 +84,42 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         raise RuntimeError(_tmux_session_conflict_error(session_name))
     runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
     display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
-    _close_ghostty_workspace(state, event_log)
-    for agent_id, agent_state in state.get("agents", {}).items():
-        _close_ghostty_display(agent_id, agent_state, event_log)
-    state["display_backend"] = display_backend
+    # Stage 7 S5 — Slice 6 lifecycle atomicity contract: compute restart_agents
+    # early so we can pre-validate resumability BEFORE any destructive teardown
+    # (ghostty close, tmux session creation). Without --allow-fresh, every
+    # non-paused worker MUST be resumable; if any is not, refuse the operation
+    # atomically with a structured result and a restart.atomic_refusal event.
+    # No rollback path is needed because nothing has been created yet.
     restart_agents = [
         agent
         for agent in spec.get("agents", [])
         if state.get("agents", {}).get(agent["id"], {}).get("status") != "paused" and not agent.get("paused")
     ]
+    if not allow_fresh:
+        unresumable = _atomic_resumability_check(workspace, restart_agents, state, get_adapter)
+        if unresumable:
+            names = [item["agent_id"] for item in unresumable]
+            event_log.write(
+                "restart.atomic_refusal",
+                unresumable=unresumable,
+                allow_fresh=False,
+                reason="resume_atomicity",
+            )
+            return {
+                "ok": False,
+                "status": "refused",
+                "reason": "resume_atomicity",
+                "unresumable": unresumable,
+                "allow_fresh": False,
+                "error": (
+                    f"Cannot restart: workers {names} have no resumable session. "
+                    "Use team-agent restart --allow-fresh only if losing that worker context is acceptable."
+                ),
+            }
+    _close_ghostty_workspace(state, event_log)
+    for agent_id, agent_state in state.get("agents", {}).items():
+        _close_ghostty_display(agent_id, agent_state, event_log)
+    state["display_backend"] = display_backend
     _ensure_agent_start_requirements(workspace, restart_agents, event_log, "restart")
     first = True
     restarted: list[dict[str, Any]] = []
@@ -313,6 +340,54 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
     return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
+
+
+def _atomic_resumability_check(
+    workspace: Path,
+    restart_agents: list[dict[str, Any]],
+    state: dict[str, Any],
+    get_adapter_fn: Any,
+) -> list[dict[str, Any]]:
+    """Stage 7 S5 atomicity contract guard. A worker is 'unresumable' when:
+
+      (a) it has no persisted session_id; OR
+      (b) it has one but adapter.session_is_resumable returns False AND neither
+          recover_resume_session_from_events nor adapter.recover_session_id
+          produces a valid candidate.
+
+    Mirrors the fallback chain inside sessions.resume.prepare_resume_state so a
+    worker the runtime would legitimately repair is NOT flagged. Returns the
+    list of unresumable workers (empty when every worker can resume).
+    """
+    from team_agent.sessions.resume import recover_resume_session_from_events
+    unresumable: list[dict[str, Any]] = []
+    for agent in restart_agents:
+        agent_id = agent["id"]
+        previous = state.get("agents", {}).get(agent_id, {})
+        session_id = previous.get("session_id")
+        adapter = get_adapter_fn(agent["provider"])
+        if session_id and adapter.session_is_resumable(previous, workspace):
+            continue
+        known_session_ids = {
+            str(item.get("session_id"))
+            for aid, item in state.get("agents", {}).items()
+            if aid != agent_id and item.get("session_id")
+        }
+        repaired = recover_resume_session_from_events(
+            workspace, agent_id, previous, adapter, known_session_ids,
+        )
+        if not repaired:
+            repaired = adapter.recover_session_id(
+                agent_id, previous, workspace, known_session_ids,
+            )
+        if repaired:
+            continue
+        unresumable.append({
+            "agent_id": agent_id,
+            "reason": "no_persisted_session_id" if not session_id else "session_unresumable",
+            "session_id": session_id,
+        })
+    return unresumable
 
 
 def rollback_restart_session(session_name: str, event_log: EventLog) -> dict[str, Any]:

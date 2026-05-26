@@ -255,10 +255,13 @@ class RuntimeTests07(unittest.TestCase):
             state["agents"]["fake_impl"]["session_id"] = None
             save_runtime_state(workspace, state)
             started_windows.clear()
+            # Stage 7 S5 atomicity: a worker with no persisted session_id can
+            # only be restarted fresh when the operator opts in with
+            # --allow-fresh; the default refuses now.
             with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), patch(
                 "team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 322, "status": "started"}
             ):
-                fresh = runtime.restart(workspace)
+                fresh = runtime.restart(workspace, allow_fresh=True)
             self.assertEqual(fresh["agents"][0]["restart_mode"], "fresh")
             fresh_agent = load_runtime_state(workspace)["agents"]["fake_impl"]
             for key in runtime.SESSION_CAPTURE_FIELDS:
