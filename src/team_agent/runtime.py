@@ -840,10 +840,10 @@ def _retry_or_failed(task: dict[str, Any]) -> str:
     return "failed"
 
 
-def _deliver_pending_message(workspace: Path, state: dict[str, Any], message_id: str, wait_visible: bool = True, timeout: float = 30.0) -> dict[str, Any]:
+def _deliver_pending_message(workspace: Path, state: dict[str, Any], message_id: str, wait_visible: bool = True, timeout: float = 30.0, *, _trust_retry_attempt: int = 1) -> dict[str, Any]:
     from team_agent.messaging.delivery import _deliver_pending_message as impl
 
-    return impl(workspace, state, message_id, wait_visible, timeout)
+    return impl(workspace, state, message_id, wait_visible, timeout, _trust_retry_attempt=_trust_retry_attempt)
 
 def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
     from team_agent.messaging.tmux_prompt import _enable_codex_fast_mode as impl
