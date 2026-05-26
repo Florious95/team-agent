@@ -11,6 +11,7 @@ fires. Subtests identify which path bypassed the gate.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import os
 import tempfile
@@ -148,6 +149,40 @@ def _result_id_from_text(text: str) -> str | None:
     return None
 
 
+def _make_retry_rows_due_now(store) -> None:
+    """Spark MEDIUM #1: rewrite any pending retry rows to a past due_at so the
+    next _fire_due_scheduled_events call picks them up. _schedule_send_retry
+    appends a NEW row with status='pending' and due_at = now + 2/4/5s, so we
+    rewrite those pending sends to a past timestamp between fires; otherwise
+    they never enter due_scheduled_events() and the dedupe path is not
+    exercised."""
+    past = "1970-01-01T00:00:00+00:00"
+    with store.connect() as conn:
+        conn.execute(
+            "update scheduled_events set due_at = ? where kind = 'send' and status = 'pending'",
+            (past,),
+        )
+
+
+def _scheduled_event_status_counts(store) -> tuple[int, int]:
+    with store.connect() as conn:
+        rs = conn.execute(
+            "select count(*) from scheduled_events where status='retry_scheduled'"
+        ).fetchone()[0]
+        done = conn.execute(
+            "select count(*) from scheduled_events where status='done'"
+        ).fetchone()[0]
+    return rs, done
+
+
+def _final_scheduled_event_status_counts(store) -> dict[str, int]:
+    with store.connect() as conn:
+        rows = conn.execute(
+            "select status, count(*) from scheduled_events where kind='send' group by status"
+        ).fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
 class Gap38ReproductionTests(unittest.TestCase):
 
     def test_two_report_result_calls_for_same_envelope_inject_exactly_once(self) -> None:
@@ -259,13 +294,20 @@ class Gap38ReproductionTests(unittest.TestCase):
 
             barrier = threading.Barrier(4)
             errors: list[Exception] = []
+            # Spark MEDIUM #2: a single shared mutable `state` dict across threads
+            # races against _send_to_leader_receiver's writes to
+            # state['leader_receiver']. Hand each worker its own deepcopy so any
+            # rediscovery/validation mutation stays thread-local — the gate's
+            # atomic SQLite INSERT OR IGNORE is what serializes work, not a
+            # python dict.
+            state_snapshot = state
 
             def worker():
                 try:
                     barrier.wait()
                     event_log = EventLog(workspace)
                     leader_mod._send_to_leader_receiver(
-                        workspace, state, "leader", content,
+                        workspace, copy.deepcopy(state_snapshot), "leader", content,
                         envelope["task_id"], envelope["agent_id"], False, event_log,
                     )
                 except Exception as exc:
@@ -332,12 +374,20 @@ class Gap38ReproductionTests(unittest.TestCase):
             try:
                 envelope = _envelope()
                 runtime.report_result(workspace, envelope)
-                # Fire the scheduled event up to 4 times (matches the production retry shape).
                 store = MessageStore(workspace)
                 event_log = EventLog(workspace)
                 from team_agent.messaging.scheduler import _fire_due_scheduled_events
+                # Spark MEDIUM (2026-05-26): scheduler retries are scheduled with
+                # future due_at (now + 2s/4s/5s in _schedule_send_retry). Without
+                # advancing time, only the original row is due on each loop and the
+                # retry-dedupe path is never exercised. After each fire we rewrite
+                # any retry_scheduled rows to a past due_at so the very next call
+                # picks them up and pushes them through the gate.
+                fire_states: list[tuple[int, int]] = []  # (retry_scheduled, done)
                 for _ in range(4):
                     _fire_due_scheduled_events(workspace, store, event_log)
+                    fire_states.append(_scheduled_event_status_counts(store))
+                    _make_retry_rows_due_now(store)
             finally:
                 for p in patches:
                     p.stop()
@@ -347,6 +397,7 @@ class Gap38ReproductionTests(unittest.TestCase):
             print(
                 "DIAGNOSTIC scheduler-retries: inject_calls=", len(inject_calls),
                 "log_rows=", [(r["result_id"], r["notified_message_id"]) for r in log],
+                "fire_states=", fire_states,
             )
             # Containment: regardless of how many times the scheduler retries, exactly
             # ONE inject fires per result_id (since the gate claims atomically before
@@ -355,6 +406,21 @@ class Gap38ReproductionTests(unittest.TestCase):
                 f"expected exactly 1 distinct result_id in log; got {result_ids}")
             self.assertEqual(len(inject_calls), 1,
                 f"scheduler retries must collapse to 1 inject; got {len(inject_calls)}")
+            # Spark MEDIUM: verify the scheduler ACTUALLY exercised the retry path.
+            # Evidence is two-fold: (a) the original row is marked retry_scheduled
+            # (so a retry was spawned), and (b) the spawned retry row is marked
+            # done (the gate dedupe at _send_to_leader_receiver returned ok=true
+            # deduped=true, which the scheduler treats as success). Both must hold;
+            # otherwise the retry was never dispatched.
+            final_status_counts = _final_scheduled_event_status_counts(store)
+            self.assertGreaterEqual(
+                final_status_counts.get("retry_scheduled", 0), 1,
+                f"original row did not transition to retry_scheduled; counts={final_status_counts}",
+            )
+            self.assertGreaterEqual(
+                final_status_counts.get("done", 0), 1,
+                f"retry row did not run through the dedupe gate; counts={final_status_counts}",
+            )
 
     def test_claim_leader_replay_for_same_result_id_dedupes(self) -> None:
         """Post-claim_leader recovery (Stage 11.10 semantics): requeue_after_claim_leader

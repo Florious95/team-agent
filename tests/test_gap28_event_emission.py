@@ -122,7 +122,7 @@ class Gap28DetectionTests(unittest.TestCase):
 
     def test_5xx_server_error_pattern_emits_network_error_class(self) -> None:
         state = _state_with_attached_leader()
-        scrollback = "request returned 503 Service Unavailable\n"
+        scrollback = "claude: API Error: 503 Service Unavailable\n"
         events = detect_leader_api_errors(
             self.workspace, state, self.store, self.event_log,
             capture_fn=_make_capture(scrollback),
@@ -142,13 +142,112 @@ class Gap28DetectionTests(unittest.TestCase):
 
     def test_timeout_pattern_emits_timeout_class(self) -> None:
         state = _state_with_attached_leader()
-        scrollback = "request timed out after 60s\n"
+        scrollback = "claude: request timed out after 60s\n"
         events = detect_leader_api_errors(
             self.workspace, state, self.store, self.event_log,
             capture_fn=_make_capture(scrollback),
         )
         self.assertEqual(len(events), 1)
         self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
+
+    def test_etimedout_token_alone_emits_timeout_class(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = "Error: connect ETIMEDOUT 10.0.0.1:443\n"
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
+
+    # ----------------------------------------------------------------
+    # Negative tests (spark MEDIUM #3): benign user text containing 5xx /
+    # 'fetch failed' / 'timed out' WITHOUT an API/provider context marker
+    # on the same line must NOT trigger a leader.api_error event.
+    # ----------------------------------------------------------------
+
+    def test_negative_bare_503_in_user_text_does_not_emit(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "User: I saw a 503 error in my browser yesterday\n"
+            "● Assistant: That can mean the upstream is overloaded.\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(self._emitted_api_errors(), [])
+
+    def test_negative_bare_fetch_failed_in_user_text_does_not_emit(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "User: the unit test description says 'fetch failed' which is misleading\n"
+            "● Assistant: Let me look at the spec.\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(self._emitted_api_errors(), [])
+
+    def test_negative_bare_timed_out_in_user_text_does_not_emit(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "User: my CI build timed out after 30 minutes\n"
+            "● Assistant: A long build can hint at runaway tests.\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(self._emitted_api_errors(), [])
+
+    def test_negative_503_in_a_url_path_does_not_emit(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "User: please open https://example.com/issues/503/comments\n"
+            "● Assistant: Reading the issue thread...\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+
+    def test_negative_fetch_failed_inside_doc_string_unrelated_to_api(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = (
+            "User: when fetch failed in the legacy frontend module we logged at warn level\n"
+            "● Assistant: That's an unrelated wrapper.\n"
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+
+    def test_positive_5xx_with_codex_prefix_still_emits(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = "codex returned 502 Bad Gateway from upstream\n"
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "NetworkError")
+
+    def test_positive_fetch_failed_with_anthropic_prefix_still_emits(self) -> None:
+        state = _state_with_attached_leader()
+        scrollback = "Anthropic SDK: fetch failed (ECONNRESET)\n"
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "NetworkError")
 
     def test_dedupe_does_not_double_emit_for_same_scrollback(self) -> None:
         state = _state_with_attached_leader()

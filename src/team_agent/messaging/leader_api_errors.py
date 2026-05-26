@@ -35,12 +35,33 @@ from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 
 
+# Spark MEDIUM (2026-05-26): require an API/provider context marker on the SAME line
+# as the error keyword. The earlier patterns false-fired on plain user text containing
+# "503" / "fetch failed" / "timed out". Each compound pattern below pairs the error
+# token with an API-context marker (API Error / HTTPError / HTTP Error / request
+# failed / codex / claude / Anthropic / OpenAI / TypeError) on the same logical line.
+_API_CONTEXT = (
+    r"(?:API\s+Error|HTTP\s*Error|HTTPError|request\s+failed|"
+    r"codex|claude|Anthropic|OpenAI|TypeError)"
+)
+
 _ERROR_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"API Error:\s*Overloaded", re.IGNORECASE), "Overloaded"),
-    (re.compile(r"\b429\b.*Too Many Requests", re.IGNORECASE), "RateLimit"),
-    (re.compile(r"\b5(?:00|02|03|04)\b\s*(?:Internal|Bad|Service|Gateway|Server)?", re.IGNORECASE), "NetworkError"),
-    (re.compile(r"fetch\s+failed", re.IGNORECASE), "NetworkError"),
-    (re.compile(r"\b(?:request|connection)\s+(?:timed\s+out|timeout)\b", re.IGNORECASE), "Timeout"),
+    # Overloaded — keyword itself already includes the "API Error:" prefix.
+    (re.compile(r"API\s+Error:\s*Overloaded", re.IGNORECASE), "Overloaded"),
+    # RateLimit — 429 with "Too Many Requests" is sufficiently specific; require it
+    # appear AFTER an API context marker OR before "Too Many Requests" tightly.
+    (re.compile(rf"(?:{_API_CONTEXT}[^\n]*\b429\b|\b429\s+Too\s+Many\s+Requests)", re.IGNORECASE), "RateLimit"),
+    # 5xx — must share a line with an API-context marker on either side.
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}\b5(?:00|02|03|04)\b", re.IGNORECASE), "NetworkError"),
+    (re.compile(rf"\b5(?:00|02|03|04)\b[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
+    # fetch failed — needs an API-context marker on the same line. The TypeError
+    # marker on its own counts (Node fetch frames the error this way).
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}fetch\s+failed", re.IGNORECASE), "NetworkError"),
+    (re.compile(rf"fetch\s+failed[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "NetworkError"),
+    # Timeout — likewise requires an API-context marker on the line, except for the
+    # unambiguous syscall token ETIMEDOUT.
+    (re.compile(rf"{_API_CONTEXT}[^\n]{{0,120}}(?:request|connection)\s+(?:timed\s+out|timeout)", re.IGNORECASE), "Timeout"),
+    (re.compile(rf"(?:request|connection)\s+(?:timed\s+out|timeout)[^\n]{{0,120}}{_API_CONTEXT}", re.IGNORECASE), "Timeout"),
     (re.compile(r"\bETIMEDOUT\b", re.IGNORECASE), "Timeout"),
 ]
 
