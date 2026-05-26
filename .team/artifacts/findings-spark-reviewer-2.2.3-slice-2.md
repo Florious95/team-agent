@@ -99,3 +99,26 @@ Commit: `ff99026`
 File/line evidence: `src/team_agent/lifecycle/start.py:322`, `src/team_agent/lifecycle/operations.py:355`, `src/team_agent/restart/orchestration.py:301`, `src/team_agent/launch/core.py:258`, `src/team_agent/sessions/capture.py:72`
 Description: The new default strict path was introduced on `capture_agent_session`, but all production callsites now pass `raise_on_missed=False` (plus `capture_missing_sessions` has it hard-coded). No non-test caller in the repo invokes the default path today, so the loud-fail contract can be exercised only via direct import/tests and does not actually guard normal spawn/attach flows.
 Suggested fix shape: either document this as an explicit internal best-effort policy and rename the default to `raise_on_missed: bool = False`, or provide a dedicated production caller (if any) that intentionally owns the atomic boundary for strict missing-session failure handling.
+
+## 2026-05-27 Review — 0894529 (`spec` load-time deprecation emission)
+
+### [LOW] `load_spec` writes spec deprecation events to `path.parent/.team/logs` for any caller path, not verified workspace root
+
+Commit: `0894529`
+File/line evidence: `src/team_agent/spec.py:30`, `src/team_agent/spec.py:41-43`, `src/team_agent/spec.py:53`, `src/team_agent/diagnose/health.py:27`, `src/team_agent/messaging/scheduler.py:153`
+Description: `_emit_load_time_deprecations` assumes `EventLog(path.parent)` is the correct workspace audit root for every `load_spec` caller. In practice, `load_spec` is reused in helper paths (diagnostics/test fixtures/spec reads) where `path` can be non-workspace inputs; this can create/append `.team/logs/events.jsonl` beside an arbitrary spec location and makes deprecation logging context-dependent on caller semantics rather than runtime root.
+Suggested fix shape: accept an explicit audit/log workspace argument (or derive from an established `workspace_root`) and only emit load-time deprecation events when that workspace context is known/validated.
+
+### [MEDIUM] Runtime trust-prompt path can emit a second `trust_auto_answer_spec_opt_in_deprecated` event for the same opt-in decision
+
+Commit: `0894529`
+File/line evidence: `src/team_agent/spec.py:30`, `src/team_agent/messaging/leader_panes.py:544-546`, `src/team_agent/messaging/leader_panes.py:605-616`, `tests/contracts/spec_deprecation_contract.md:3`
+Description: With this commit, deprecated-field detection now emits once at `load_spec` and again whenever `attempt_trust_auto_answer` calls `_auto_trust_opt_in` (if the same spec is still in play during prompt handling). That path already writes `trust_auto_answer_spec_opt_in_deprecated` per call, so a real workflow can generate two audit events for one startup/run and blur load-time vs runtime-trigger semantics.
+Suggested fix shape: make the event source explicit (`trigger="load_spec"` vs `trigger="prompt_path"`) and/or suppress the runtime event when load-time emission has already occurred for the same process/workspace/message lifecycle.
+
+### [LOW] Deletion guard is per-process only, so multi-process launches can still spam stderr warning
+
+Commit: `0894529`
+File/line evidence: `src/team_agent/messaging/leader_panes.py:622-633`, `src/team_agent/messaging/leader_panes.py:645`, `src/team_agent/messaging/leader_panes.py:648-653`
+Description: `_SPEC_OPT_IN_DEPRECATION_WARNED` is a module-global flag; any subprocess/forked worker emits the deprecation warning independently. In multi-process test/prod paths this can surface repeated warnings even when each process loads the same spec in the same workspace session.
+Suggested fix shape: if the product needs cross-process suppression, persist a short-lived runtime marker under `.team/logs` and gate warning writes per workspace session, while keeping events per spec load untouched.
