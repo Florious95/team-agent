@@ -88,9 +88,14 @@ def cmd_settle(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
-    if args.json:
-        return runtime.status(Path(args.workspace).resolve(), as_json=True, compact=not args.detail)
-    return runtime.format_status(Path(args.workspace).resolve(), args.agent)
+    if getattr(args, "summary", False) is True:
+        if getattr(args, "json", False) is True:
+            raise TeamAgentError("--summary and --json are mutually exclusive")
+        data = runtime.status(Path(args.workspace).resolve(), as_json=True, compact=False)
+        return _format_status_summary(data)
+    if getattr(args, "json", False) is True:
+        return runtime.status(Path(args.workspace).resolve(), as_json=True, compact=not (getattr(args, "detail", False) is True))
+    return runtime.format_status(Path(args.workspace).resolve(), getattr(args, "agent", None))
 
 
 def cmd_approvals(args: argparse.Namespace) -> dict[str, Any]:
@@ -200,6 +205,12 @@ def cmd_validate_result(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
+    gate = getattr(args, "gate", None)
+    if isinstance(gate, str) and gate:
+        from team_agent.diagnose.orphan_cleanup import orphan_gate
+        if gate != "orphans":
+            raise TeamAgentError(f"unknown doctor gate: {gate}")
+        return orphan_gate(fix=bool(getattr(args, "fix", False)), confirm=bool(getattr(args, "confirm", False)))
     if getattr(args, "cleanup_orphans", False):
         from team_agent.diagnose.orphan_cleanup import cleanup_orphan_coordinators, format_cleanup_orphans
         result = cleanup_orphan_coordinators(confirm=bool(getattr(args, "confirm", False)))
@@ -208,6 +219,47 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
         return format_cleanup_orphans(result)
     spec = Path(args.spec).resolve() if args.spec else None
     return runtime.doctor(spec)
+
+
+def _format_status_summary(data: dict[str, Any]) -> str:
+    coordinator = data.get("coordinator") or {}
+    receiver = data.get("leader_receiver") or {}
+    agents = data.get("agents") or {}
+    health = data.get("agent_health") or {}
+    latest = (data.get("latest_results") or [{}])[0] if data.get("latest_results") else None
+    counts = _agent_summary_counts(agents, health)
+    return "\n".join([
+        f"coordinator: {coordinator.get('status') or 'stopped'} schema_ok={bool(coordinator.get('schema_ok'))} tmux={bool(data.get('tmux_session_present'))}",
+        f"receiver: {receiver.get('pane_id') or '-'} cmd={receiver.get('pane_current_command') or receiver.get('current_command') or '-'}",
+        f"agents: {len(agents)} — running={counts['running']} busy={counts['busy']} idle={counts['idle']} stopped={counts['stopped']} failed={counts['failed']}",
+        f"queued: {len(data.get('queued_messages') or [])} mailbox messages awaiting delivery",
+        _latest_result_line(latest),
+    ])
+
+
+def _agent_summary_counts(agents: dict[str, Any], health: dict[str, Any]) -> dict[str, int]:
+    counts = dict.fromkeys(("running", "busy", "idle", "stopped", "failed"), 0)
+    for agent_id, agent in agents.items():
+        raw = str((agent or {}).get("status") or "").lower()
+        hstatus = str((health.get(agent_id) or {}).get("status") or "").lower()
+        if raw in {"failed", "error"} or hstatus in {"failed", "error"}:
+            counts["failed"] += 1
+        elif raw in {"stopped", "done"} or hstatus == "done":
+            counts["stopped"] += 1
+        elif raw == "busy" or hstatus in {"running", "working"}:
+            counts["busy"] += 1
+        elif hstatus == "idle":
+            counts["idle"] += 1
+        else:
+            counts["running"] += 1
+    return counts
+
+
+def _latest_result_line(result: dict[str, Any] | None) -> str:
+    if not result:
+        return "latest result: none"
+    summary = str(result.get("summary") or "").replace("\n", " ")[:80]
+    return f"latest result: {result.get('agent_id') or '-'} -> {summary or '-'} @ {runtime._age_text(result.get('created_at'))}"
 
 
 def cmd_shutdown(args: argparse.Namespace) -> dict[str, Any]:

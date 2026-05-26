@@ -182,6 +182,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("agent", nargs="?")
     p.add_argument("--workspace", default=".")
     p.add_argument("--detail", action="store_true", help="Include full raw runtime state in --json output")
+    p.add_argument("--summary", action="store_true", help="Emit five-line human-readable triage summary")
     add_json(p)
     p.set_defaults(func=cmd_status)
 
@@ -310,6 +311,8 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("doctor", help="Check local dependencies, providers, auth hints, tmux, and MCP")
     p.add_argument("spec", nargs="?")
+    p.add_argument("--gate", choices=["orphans"], help="Run a CI-friendly doctor gate")
+    p.add_argument("--fix", action="store_true", help="With --gate orphans: apply the gate fix")
     p.add_argument(
         "--cleanup-orphans",
         action="store_true",

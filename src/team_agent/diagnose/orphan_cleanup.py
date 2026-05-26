@@ -16,7 +16,6 @@ import signal
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 # Pattern: argv contains "team_agent.coordinator --workspace <path>" anywhere.
@@ -91,7 +90,7 @@ def classify_orphan(entry: dict[str, Any]) -> tuple[bool, str]:
     workspace = entry.get("workspace")
     if not workspace:
         return False, "cmdline_unparsed"
-    if not Path(workspace).exists():
+    if not os.path.exists(workspace):
         return True, "workspace_path_missing"
     for hint in _EPHEMERAL_PATH_HINTS:
         if hint in workspace:
@@ -166,6 +165,38 @@ def cleanup_orphan_coordinators(
     }
 
 
+def orphan_gate(
+    *,
+    fix: bool = False,
+    confirm: bool = False,
+    runner=subprocess.run,
+    killer=os.kill,
+    sleeper=time.sleep,
+) -> dict[str, Any]:
+    if fix and not confirm:
+        return {
+            "ok": False,
+            "gate": "orphans",
+            "status": "refused",
+            "reason": "fix_requires_confirm",
+            "action": "re-run with --gate orphans --fix --confirm",
+        }
+    result = cleanup_orphan_coordinators(confirm=fix and confirm, runner=runner, killer=killer, sleeper=sleeper)
+    orphans = result.get("orphans") or []
+    failed = result.get("failed") or []
+    passed = not orphans if not fix else not failed
+    envelope = {
+        **result,
+        "ok": passed,
+        "gate": "orphans",
+        "status": "passed" if passed else "failed",
+        "fix": bool(fix),
+    }
+    if not fix and orphans:
+        envelope["action_required"] = "re-run with --gate orphans --fix --confirm"
+    return envelope
+
+
 def format_cleanup_orphans(result: dict[str, Any]) -> str:
     lines = [
         f"Coordinator orphan scan @ {result.get('scanned_at')}",
@@ -190,4 +221,5 @@ __all__ = [
     "classify_orphan",
     "find_coordinator_processes",
     "format_cleanup_orphans",
+    "orphan_gate",
 ]
