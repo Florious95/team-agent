@@ -118,8 +118,9 @@ def _deliver_pending_message(
             )
     if injection["ok"]:
         store.mark(message_id, "submitted")
-        _stamp_first_send_at_if_leader_to_worker(state, row)
-        EventLog(workspace).write(
+        send_event_log = EventLog(workspace)
+        _stamp_first_send_at_if_leader_to_worker(state, row, send_event_log)
+        send_event_log.write(
             "send.submitted",
             message_id=message_id,
             target=target,
@@ -330,7 +331,11 @@ def _execute_trust_retry(
     return delivery_result
 
 
-def _stamp_first_send_at_if_leader_to_worker(state: dict[str, Any], row: dict[str, Any]) -> None:
+def _stamp_first_send_at_if_leader_to_worker(
+    state: dict[str, Any],
+    row: dict[str, Any],
+    event_log: EventLog | None = None,
+) -> None:
     """Route B atomicity (2026-05-27): record the first time the leader
     successfully sends work to each worker. The presence of this stamp drives
     restart's resumability decision — a worker the leader has interacted with
@@ -343,6 +348,12 @@ def _stamp_first_send_at_if_leader_to_worker(state: dict[str, Any], row: dict[st
     The mutation lives on the state dict the caller already saves
     (`save_team_scoped_state` in send.py, or `save_runtime_state` after
     coordinator_tick), so persistence is automatic.
+
+    C1 (cr verdict, 2026-05-27): when the stamp transitions null -> ts (the
+    one-time write), emit a `worker.first_interaction` audit event with
+    worker_id, first_send_at, message_id. Re-sends to the same worker hit the
+    idempotency guard above and do NOT re-emit. Worker-to-worker peer sends
+    short-circuit at the sender check and do NOT emit.
     """
     sender = str(row.get("sender") or "")
     recipient = str(row.get("recipient") or "")
@@ -359,7 +370,15 @@ def _stamp_first_send_at_if_leader_to_worker(state: dict[str, Any], row: dict[st
         return
     if agent_state.get("first_send_at"):
         return
-    agent_state["first_send_at"] = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(timezone.utc).isoformat()
+    agent_state["first_send_at"] = stamp
+    if event_log is not None:
+        event_log.write(
+            "worker.first_interaction",
+            worker_id=recipient,
+            first_send_at=stamp,
+            message_id=str(row.get("message_id") or ""),
+        )
 
 
 def _wait_for_trust_prompt_dismissal(target: str, *, timeout: float = 3.0, poll_interval: float = 0.1) -> bool:

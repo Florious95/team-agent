@@ -241,13 +241,43 @@ def _format_status_summary(data: dict[str, Any]) -> str:
     health = data.get("agent_health") or {}
     latest = (data.get("latest_results") or [{}])[0] if data.get("latest_results") else None
     counts = _agent_summary_counts(agents, health)
+    agents_line = (
+        f"agents: {len(agents)} — running={counts['running']} busy={counts['busy']} "
+        f"idle={counts['idle']} stopped={counts['stopped']} failed={counts['failed']} "
+        f"unknown={counts['unknown']}"
+    )
+    # C3 (cr verdict, 2026-05-27): append a (N interacted, M never) marker
+    # only when at least one worker has a valid first_send_at stamp. When N
+    # is zero, the agents line stays byte-identical to the pre-Route-B
+    # output so the Gap 18a triage contract (strict five-line shape with
+    # exact line[2] string) remains unchanged.
+    interacted_count, never_count = _interaction_counts(agents)
+    if interacted_count > 0:
+        agents_line = f"{agents_line} ({interacted_count} interacted, {never_count} never)"
     return "\n".join([
         f"coordinator: {coordinator.get('status') or 'stopped'} schema_ok={bool(coordinator.get('schema_ok'))} tmux={bool(data.get('tmux_session_present'))}",
         f"receiver: {receiver.get('pane_id') or '-'} cmd={receiver.get('pane_current_command') or receiver.get('current_command') or '-'}",
-        f"agents: {len(agents)} — running={counts['running']} busy={counts['busy']} idle={counts['idle']} stopped={counts['stopped']} failed={counts['failed']} unknown={counts['unknown']}",
+        agents_line,
         f"queued: {len(data.get('queued_messages') or [])} mailbox messages awaiting delivery",
         _latest_result_line(latest),
     ])
+
+
+def _interaction_counts(agents: dict[str, Any]) -> tuple[int, int]:
+    """Return (interacted, never_interacted) over the agents dict. An agent is
+    interacted when its `interacted` field (added by status.queries.status) is
+    a non-empty string other than the literal "never". This intentionally
+    sources from the enriched per-status interacted field rather than re-
+    parsing first_send_at so the summary stays a derived view."""
+    interacted = 0
+    never = 0
+    for entry in agents.values():
+        marker = (entry or {}).get("interacted") if isinstance(entry, dict) else None
+        if isinstance(marker, str) and marker and marker != "never":
+            interacted += 1
+        else:
+            never += 1
+    return interacted, never
 
 
 def _agent_summary_counts(agents: dict[str, Any], health: dict[str, Any]) -> dict[str, int]:
