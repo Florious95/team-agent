@@ -313,6 +313,46 @@ class Gap28DetectionTests(unittest.TestCase):
         )
         self.assertEqual(events, [])
 
+    # ----------------------------------------------------------------
+    # Spark MEDIUM sweep #3 (finding #2): long-window tail preservation.
+    # Previously any 1-3 line window over 400 chars was dropped wholesale,
+    # silently losing recall when verbose diagnostics had the actual error
+    # at the tail. The fix slices the last 400 chars when over cap.
+    # ----------------------------------------------------------------
+
+    def test_long_window_with_error_at_tail_is_detected(self) -> None:
+        """A 600-char window where the API-context + error keyword sit in the
+        last 100 chars must still emit. The earlier wholesale-drop policy
+        regressed recall here."""
+        state = _state_with_attached_leader()
+        # 500 chars of unrelated content, then "claude: request timed out" at the tail.
+        prefix = "x" * 500
+        scrollback = f"{prefix} claude: request timed out after 60s\n"
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1, f"expected detection in tail of long window; got {events}")
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
+
+    def test_long_window_with_no_api_context_anywhere_does_not_emit(self) -> None:
+        """A 800-char window containing NO API/provider context anywhere — even
+        with words like 'fetch' and 'timeout' appearing in user text — must not
+        emit. Confirms the tail-preservation does not relax the API-context
+        requirement."""
+        state = _state_with_attached_leader()
+        # Lots of benign filler; no API context, no real error pattern.
+        scrollback = (
+            "user comment: the legacy frontend fetch helper sometimes flakes when the upstream is slow "
+            * 10
+        )
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(self._emitted_api_errors(), [])
+
     def test_dedupe_does_not_double_emit_for_same_scrollback(self) -> None:
         state = _state_with_attached_leader()
         scrollback = "API Error: Overloaded\n"

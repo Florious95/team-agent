@@ -157,8 +157,17 @@ def _match_first_error(scrollback: str) -> tuple[str, str] | None:
             if end > len(lines):
                 break
             window = " ".join(line for line in lines[start:end] if line)
-            if not window or len(window) > _WINDOW_MAX_CHARS:
+            if not window:
                 continue
+            # Spark MEDIUM sweep #3 (2026-05-26): tail-preserve instead of
+            # dropping the window wholesale. Errors land at the END of verbose
+            # diagnostics (stack traces, retry chatter, etc.). If we discarded
+            # any window over the cap we silently lost recall on long wrapped
+            # output. Scanning the LAST _WINDOW_MAX_CHARS still bounds regex
+            # cost while keeping the freshest context — the bit most likely to
+            # contain the actual provider error keyword.
+            if len(window) > _WINDOW_MAX_CHARS:
+                window = window[-_WINDOW_MAX_CHARS:]
             for pattern, error_class in _ERROR_PATTERNS:
                 match = pattern.search(window)
                 if not match:

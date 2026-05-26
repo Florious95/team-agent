@@ -84,6 +84,18 @@ def _fire_due_scheduled_events(workspace: Path, store: MessageStore, event_log: 
             elif row["kind"] == "health_ping":
                 result = {"ok": True, "status": "logged"}
                 event_log.write("coordinator.health_ping", target=row["target"], payload=payload)
+            elif row["kind"] == "trust_retry":
+                # Spark MEDIUM sweep #3 (2026-05-26) — bounded-backoff consumer
+                # for delivery.py:_handle_trust_retry_needed. payload carries the
+                # message_id and current attempt; _execute_trust_retry resets the
+                # row to 'accepted', re-runs _deliver_pending_message with the
+                # attempt threaded through, and either delivers, reschedules, or
+                # hits the terminal trust_auto_answer_exhausted branch.
+                from team_agent.messaging.delivery import _execute_trust_retry
+                result = _execute_trust_retry(
+                    workspace, store, event_log, payload,
+                    owner_team_id=row.get("owner_team_id"),
+                )
             else:
                 result = {"ok": False, "error": f"unknown scheduled event kind: {row['kind']}"}
             if not result.get("ok") and row["kind"] == "send":

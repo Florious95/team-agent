@@ -330,13 +330,15 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
         emitted = [ev for ev in self._read_events() if ev.get("event") == "leader_panes.trust_auto_answered"]
         self.assertEqual(len(emitted), 1)
 
-    def test_opt_in_delivery_wrap_returns_retry_needed_when_prompt_does_not_dismiss(self) -> None:
-        """Spark MEDIUM #4: if the bounded poll never sees the trust prompt
-        clear, return a retry_needed envelope instead of attempting the second
-        inject blindly. Helper still answered (trust_auto_answered emitted) and
-        the message_id is marked failed so it does not stay claimed.
-        """
+    def test_opt_in_delivery_wrap_schedules_retry_when_prompt_does_not_dismiss(self) -> None:
+        """Spark MEDIUM sweep #3 finding #1: when the bounded poll exhausts,
+        delivery must SCHEDULE a kind='trust_retry' scheduled_event with the
+        bounded backoff (attempt 2 = +5s) instead of dead-ending in 'failed'.
+        Holds the message in 'failed' status so _deliver_pending_messages does
+        NOT race the scheduled consumer. Emits both _retry_needed and
+        _retry_scheduled events."""
         from team_agent.messaging import delivery as delivery_mod
+        from team_agent.message_store import MessageStore
         os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
         message_id = self._seed_message()
         state = self._state()
@@ -346,8 +348,6 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
             inject_calls.append({"target": target, "buffer": buffer_name})
             return self._trust_envelope()
 
-        # Pane capture always reports the trust prompt is still present, so the
-        # bounded poll exhausts and we hit the retry_needed branch.
         def stuck_capture(target):
             return "Do you trust the contents of this directory and want to allow execution of source files?\n"
 
@@ -360,15 +360,116 @@ class Gap29DeliveryWrapTests(unittest.TestCase):
             result = delivery_mod._deliver_pending_message(self.workspace, state, message_id)
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "retry_needed")
+        self.assertEqual(result["status"], "retry_scheduled")
         self.assertEqual(result["reason"], "trust_prompt_not_dismissed_after_answer")
-        # Only the original inject ran; the retry was suppressed because the
-        # prompt never cleared.
-        self.assertEqual(len(inject_calls), 1)
-        emitted_events = [ev for ev in self._read_events()
-                          if ev.get("event") == "leader_panes.trust_auto_answer_retry_needed"]
-        self.assertEqual(len(emitted_events), 1)
-        self.assertEqual(emitted_events[0]["reason"], "trust_prompt_not_dismissed_after_answer")
+        self.assertEqual(result["next_attempt"], 2)
+        self.assertEqual(result["max_attempts"], delivery_mod._TRUST_RETRY_MAX_ATTEMPTS)
+        self.assertIsNotNone(result.get("scheduled_event_id"))
+        self.assertIsNotNone(result.get("scheduled_retry_at"))
+        self.assertEqual(len(inject_calls), 1,
+            "retry must be DEFERRED to scheduler; only the original inject runs in this call")
+        # scheduled_events row exists with kind=trust_retry.
+        store = MessageStore(self.workspace)
+        with store.connect() as conn:
+            rows = conn.execute(
+                "select kind, payload_json, due_at, status from scheduled_events where kind='trust_retry'"
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        emitted = {ev.get("event") for ev in self._read_events()}
+        self.assertIn("leader_panes.trust_auto_answer_retry_needed", emitted)
+        self.assertIn("leader_panes.trust_auto_answer_retry_scheduled", emitted)
+
+    def test_trust_retry_scheduled_event_fires_and_re_attempts_delivery(self) -> None:
+        """Spark MEDIUM sweep #3 finding #1: the scheduled consumer must re-run
+        the delivery attempt. Force the trust_retry event due immediately, fire
+        the scheduler, and observe a SECOND inject call plus a
+        leader_panes.trust_auto_answer_retry_attempted event."""
+        from team_agent.messaging import delivery as delivery_mod
+        from team_agent.messaging.scheduler import _fire_due_scheduled_events
+        from team_agent.message_store import MessageStore
+        os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
+        message_id = self._seed_message()
+        state = self._state()
+        inject_calls: list[Any] = []
+        responses = iter([self._trust_envelope(), self._ok_envelope()])
+
+        def fake_inject(target, text, submit_key, buffer_name, **kwargs):
+            inject_calls.append({"target": target, "buffer": buffer_name})
+            return next(responses)
+
+        def stuck_capture(target):
+            return "Do you trust the contents of this directory and want to allow execution of source files?\n"
+
+        store = MessageStore(self.workspace)
+        event_log = EventLog(self.workspace)
+        with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
+             patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
+             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=stuck_capture), \
+             patch("time.sleep", return_value=None), \
+             patch("time.monotonic", side_effect=[0.0, 0.0, 100.0, 100.0]), \
+             patch("team_agent.state.load_runtime_state", return_value=state):
+            # Initial delivery → retry scheduled.
+            delivery_mod._deliver_pending_message(self.workspace, state, message_id)
+            # Force the scheduled retry to be due now.
+            with store.connect() as conn:
+                conn.execute(
+                    "update scheduled_events set due_at = ? where kind = 'trust_retry'",
+                    ("1970-01-01T00:00:00+00:00",),
+                )
+            # Fire — consumer re-attempts inject (second response is ok).
+            _fire_due_scheduled_events(self.workspace, store, event_log)
+
+        self.assertEqual(len(inject_calls), 2,
+            f"trust_retry consumer must invoke a second inject; got {len(inject_calls)} total")
+        emitted = {ev.get("event") for ev in self._read_events()}
+        self.assertIn("leader_panes.trust_auto_answer_retry_attempted", emitted)
+
+    def test_trust_retry_max_attempts_emits_exhausted_and_marks_failed(self) -> None:
+        """Spark MEDIUM sweep #3 finding #1: after _TRUST_RETRY_MAX_ATTEMPTS
+        retry_needed cycles, the consumer must emit a TERMINAL
+        leader_panes.trust_auto_answer_exhausted event and stop scheduling.
+        Drive the wrap with _trust_retry_attempt=MAX to simulate the final
+        cycle."""
+        from team_agent.messaging import delivery as delivery_mod
+        from team_agent.message_store import MessageStore
+        os.environ["TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE"] = "1"
+        message_id = self._seed_message()
+        state = self._state()
+        inject_calls: list[Any] = []
+
+        def fake_inject(target, text, submit_key, buffer_name, **kwargs):
+            inject_calls.append({"target": target, "buffer": buffer_name})
+            return self._trust_envelope()
+
+        def stuck_capture(target):
+            return "Do you trust the contents of this directory and want to allow execution of source files?\n"
+
+        with patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_inject), \
+             patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
+             patch("team_agent.messaging.leader_panes.run_cmd", return_value=_ok_proc()), \
+             patch("team_agent.messaging.delivery._capture_pane_tail", side_effect=stuck_capture), \
+             patch("time.sleep", return_value=None), \
+             patch("time.monotonic", side_effect=[0.0, 0.0, 100.0, 100.0] * 10):
+            result = delivery_mod._deliver_pending_message(
+                self.workspace, state, message_id,
+                _trust_retry_attempt=delivery_mod._TRUST_RETRY_MAX_ATTEMPTS,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "trust_auto_answer_exhausted")
+        self.assertEqual(result["reason"], "trust_auto_answer_exhausted")
+        emitted = [ev for ev in self._read_events()
+                   if ev.get("event") == "leader_panes.trust_auto_answer_exhausted"]
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["attempts"], delivery_mod._TRUST_RETRY_MAX_ATTEMPTS)
+        # No NEW scheduled retry was added — the exhausted branch is terminal.
+        store = MessageStore(self.workspace)
+        with store.connect() as conn:
+            rows = conn.execute(
+                "select count(*) from scheduled_events where kind='trust_retry'"
+            ).fetchall()
+        self.assertEqual(rows[0][0], 0)
 
     def test_opt_in_delivery_wrap_proceeds_when_poll_observes_dismissal(self) -> None:
         """Bounded poll succeeds quickly when the pane returns to input mode."""
