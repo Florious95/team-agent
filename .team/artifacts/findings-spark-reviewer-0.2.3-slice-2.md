@@ -106,3 +106,26 @@ Suggested fix shape: guard the check/set with a lock (or atomic compare-and-set 
 Commit: `b34c2a2`
 File/line evidence: `src/team_agent/message_store/schema.py:124-129`, `src/team_agent/message_store/core.py:422-437`, `src/team_agent/watch/__init__.py:70-106`, `tests/test_gap18c_watch.py:61-92`
 Description: Reviewed the commit for schema migration, team-scoped filtering, rotation marker behavior, and test coverage. The commit adds `owner_team_id` migration for legacy DBs, applies owner-team filtering consistently for event and result watch paths, and adds explicit cursor-based rotation marker behavior with targeted tests. No additional cross-team leakage/regression risk was identified in the touched surface.
+
+## 2026-05-26 Review — 1576bdc (`gap-29` detection wire-in)
+
+### [MEDIUM] Pre-paste trust/non-input gate is not applied to all paste callsites
+
+Commit: `1576bdc`
+File/line evidence: `src/team_agent/messaging/delivery.py:174-193`, `src/team_agent/messaging/leader.py:247-253`, `src/team_agent/messaging/leader_panes.py:396-403`
+Description: This commit wires pre-paste checks only through `delivery._inject_after_pre_paste_check`, but both `leader` direct delivery and ambiguous-leader fanout still call `_tmux_inject_text` directly. Those paths therefore bypass the new detect→answer chain, so the behavior is only partially wired and the integration test does not validate end-to-end coverage across all send lanes.
+Suggested fix shape: route leader/ambiguous delivery through the same pre-paste gate helper (or make `_tmux_inject_text` the single gate-owned boundary) and add coverage for those lanes.
+
+### [LOW] Duplicate pre-paste preparation now runs twice per wrapped delivery attempt
+
+Commit: `1576bdc`
+File/line evidence: `src/team_agent/messaging/delivery.py:183-193`, `src/team_agent/messaging/tmux_io.py:40-44`
+Description: `_inject_after_pre_paste_check` performs `_prepare_tmux_pane_for_input` and then calls `_tmux_inject_text`, which immediately re-runs the same prepare logic. This adds redundant pane-mode/capture operations and can produce inconsistent behavior if pane mode changes between checks.
+Suggested fix shape: remove one layer of preparation (prefer one canonical pre-check in `_tmux_inject_text`) and/or add a skip flag for already-prepared attempts.
+
+### [LOW] New integration test omits prompt-shape and lane coverage seen in production run
+
+Commit: `1576bdc`
+File/line evidence: `tests/test_gap29_send_trust_prompt_integration.py:21-31`, `tests/test_gap29_send_trust_prompt_integration.py:83-103`
+Description: The new test uses a single, idealized codex prompt fixture and does not test real-world variations (`leader_receiver`, `ambiguous` fanout, and copy-mode/viewport-noise variants). A one-shot mock also cannot validate race or replay characteristics on retries that real tmux sessions expose.
+Suggested fix shape: parameterize the prompt fixture (with realistic wrapped/colored/ANSI variants and intermediate noise), and add companion integration coverage for leader and fanout delivery paths to prove the pre-paste gate is universal.
