@@ -38,8 +38,12 @@ def _emit_load_time_deprecations(spec: dict[str, Any], path: Path) -> None:
     the warning even when startup never reaches attempt_trust_auto_answer.
 
     The leader-panes helper owns the one-shot stderr guard + the structured
-    audit event, so we reuse it. EventLog points at path.parent/.team/logs so
-    the workspace's own audit file records the per-load occurrence.
+    audit event, so we reuse it. EventLog points at the WORKSPACE ROOT (not
+    the spec file's directory) so a quick-start layout that stores the spec
+    under <workspace>/.team/current/team.spec.yaml still routes the audit
+    event into the single canonical <workspace>/.team/logs/events.jsonl
+    instead of a doubled <workspace>/.team/current/.team/logs/events.jsonl
+    nesting.
     """
     runtime = spec.get("runtime")
     if not isinstance(runtime, dict):
@@ -50,7 +54,31 @@ def _emit_load_time_deprecations(spec: dict[str, Any], path: Path) -> None:
     # import time; only YAMLs that opt into the deprecated field pay the cost.
     from team_agent.events import EventLog
     from team_agent.messaging.leader_panes import _emit_spec_opt_in_deprecation
-    _emit_spec_opt_in_deprecation(EventLog(path.parent))
+    _emit_spec_opt_in_deprecation(EventLog(_resolve_workspace_root(path)))
+
+
+def _resolve_workspace_root(spec_path: Path) -> Path:
+    """Find the workspace root that owns this spec.
+
+    A workspace root is the directory whose `.team/` subdirectory holds the
+    runtime state, logs, artifacts, and (for quick-start layouts) the spec
+    itself under `.team/current/`. We climb from the spec file's parent
+    looking for the first ancestor that has a `.team/` child. If no ancestor
+    qualifies (fresh workspace before init, or a spec deliberately placed
+    outside any team workspace), we fall back to `spec_path.parent` which is
+    the legacy single-layout behaviour.
+
+    Implementation note: we use real filesystem evidence (`(dir/.team).is_dir()`)
+    rather than path-string parsing so the resolver works correctly even when
+    workspace paths legitimately contain a `.team` segment.
+    """
+    direct_parent = spec_path.parent
+    if (direct_parent / ".team").is_dir():
+        return direct_parent
+    for ancestor in direct_parent.parents:
+        if (ancestor / ".team").is_dir():
+            return ancestor
+    return direct_parent
 
 
 def validate_spec(spec: dict[str, Any], base_dir: Path | None = None) -> None:
