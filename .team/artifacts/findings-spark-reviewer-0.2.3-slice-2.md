@@ -98,3 +98,11 @@ Commit: `cd08303`
 File/line evidence: `src/team_agent/messaging/leader_panes.py:561-607`, `src/team_agent/messaging/leader_panes.py:616-620`
 Description: `_SPEC_OPT_IN_DEPRECATION_WARNED` is a module-level bool flipped without synchronization. If multiple `attempt_trust_auto_answer` calls execute concurrently in the same process (same runtime session), several threads can observe `False` before any writes it, and stderr deprecation warning can be printed more than once, violating the stated one-shot guarantee. The structured event path remains per-call.
 Suggested fix shape: guard the check/set with a lock (or atomic compare-and-set helper) and keep structured event emission outside the lock to preserve one-shot semantics under concurrency while still logging each yaml-driven decision.
+
+## 2026-05-26 Review — b34c2a2 (`watch team filtering + rotation marker`)
+
+### [NONE] No additional findings
+
+Commit: `b34c2a2`
+File/line evidence: `src/team_agent/message_store/schema.py:124-129`, `src/team_agent/message_store/core.py:422-437`, `src/team_agent/watch/__init__.py:70-106`, `tests/test_gap18c_watch.py:61-92`
+Description: Reviewed the commit for schema migration, team-scoped filtering, rotation marker behavior, and test coverage. The commit adds `owner_team_id` migration for legacy DBs, applies owner-team filtering consistently for event and result watch paths, and adds explicit cursor-based rotation marker behavior with targeted tests. No additional cross-team leakage/regression risk was identified in the touched surface.
