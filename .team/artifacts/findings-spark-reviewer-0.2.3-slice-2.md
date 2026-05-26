@@ -89,3 +89,12 @@ Suggested fix shape: persist archived-segment offsets in the cursor and replay r
 Commit: `4b479fd`
 File/line evidence: `src/team_agent/cli/commands.py:91-108`, `src/team_agent/cli/commands.py:240-266`, `tests/test_gap18a_status_summary.py:44-56`, `tests/test_gap18b_doctor_gate_orphans.py:108-114`
 Description: The targeted fixes for summary-agent rejection, unknown bucket rendering, and `doctor --fix` gating align with the brief and close prior gaps without introducing new behavioral regressions on the touched surfaces. Existing tests include the new rejection branch and the `--fix` validation path.
+
+## 2026-05-26 Review — cd08303 (final claude-rd Gap-29 deprecation/structured event)
+
+### [LOW] Deprecation warning one-shot guard is not thread-safe
+
+Commit: `cd08303`
+File/line evidence: `src/team_agent/messaging/leader_panes.py:561-607`, `src/team_agent/messaging/leader_panes.py:616-620`
+Description: `_SPEC_OPT_IN_DEPRECATION_WARNED` is a module-level bool flipped without synchronization. If multiple `attempt_trust_auto_answer` calls execute concurrently in the same process (same runtime session), several threads can observe `False` before any writes it, and stderr deprecation warning can be printed more than once, violating the stated one-shot guarantee. The structured event path remains per-call.
+Suggested fix shape: guard the check/set with a lock (or atomic compare-and-set helper) and keep structured event emission outside the lock to preserve one-shot semantics under concurrency while still logging each yaml-driven decision.
