@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from team_agent.cli.commands import cmd_watch
 from team_agent.message_store import MessageStore
 from team_agent.paths import logs_dir
-from team_agent.watch import WatchCursor, collect_watch_lines
+from team_agent.watch import ROTATION_MARKER, WatchCursor, collect_watch_lines
 
 
 class Gap18WatchTests(unittest.TestCase):
@@ -52,20 +52,7 @@ class Gap18WatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="gap18-watch-results-") as tmp:
             workspace = Path(tmp)
             store = MessageStore(workspace)
-            store.add_result(
-                {
-                    "schema_version": "result_envelope_v1",
-                    "task_id": "task-1",
-                    "agent_id": "worker_a",
-                    "status": "success",
-                    "summary": "finished " + ("x" * 100),
-                    "artifacts": [],
-                    "changes": [],
-                    "tests": [],
-                    "risks": [],
-                    "next_actions": [],
-                }
-            )
+            store.add_result(_result_envelope("worker_a", "finished " + ("x" * 100)))
             cursor = WatchCursor()
 
             first = collect_watch_lines(workspace, cursor)
@@ -73,6 +60,31 @@ class Gap18WatchTests(unittest.TestCase):
 
         self.assertEqual(first, ["result_received: worker_a -> finished " + ("x" * 71)])
         self.assertEqual(second, [])
+
+    def test_watch_team_filters_events_and_latest_results(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap18-watch-team-") as tmp:
+            workspace = Path(tmp)
+            _write_events(
+                workspace,
+                [
+                    {"event": "send.failed", "team_id": "team_a", "recipient": "worker_a", "reason": "a"},
+                    {"event": "send.failed", "team_id": "team_b", "recipient": "worker_b", "reason": "b"},
+                    {"event": "send.failed", "recipient": "legacy", "reason": "missing team"},
+                ],
+            )
+            store = MessageStore(workspace)
+            store.add_result(_result_envelope("worker_a", "team A result"), owner_team_id="team_a")
+            store.add_result(_result_envelope("worker_b", "team B result"), owner_team_id="team_b")
+
+            lines = collect_watch_lines(workspace, WatchCursor(), team="team_a")
+
+        self.assertEqual(
+            lines,
+            [
+                "send.failed: worker_a reason=a",
+                "result_received: worker_a -> team A result",
+            ],
+        )
 
     def test_watch_exits_cleanly_on_keyboard_interrupt(self) -> None:
         with tempfile.TemporaryDirectory(prefix="gap18-watch-cli-") as tmp:
@@ -98,12 +110,47 @@ class Gap18WatchTests(unittest.TestCase):
 
         self.assertEqual(lines, ["send.failed: current reason=new"])
 
+    def test_watch_emits_one_rotation_marker_when_current_log_shrinks(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap18-watch-rotation-") as tmp:
+            workspace = Path(tmp)
+            cursor = WatchCursor()
+            _write_events(workspace, [{"event": "send.failed", "recipient": "first", "reason": "old"}])
+            self.assertEqual(collect_watch_lines(workspace, cursor), ["send.failed: first reason=old"])
+
+            log_dir = logs_dir(workspace)
+            (log_dir / "events.jsonl.1").write_text(
+                json.dumps({"event": "send.failed", "recipient": "archived", "reason": "lost"}) + "\n",
+                encoding="utf-8",
+            )
+            _write_events(workspace, [{"event": "send.failed", "recipient": "second", "reason": "new"}])
+
+            after_rotation = collect_watch_lines(workspace, cursor)
+            second_poll = collect_watch_lines(workspace, cursor)
+
+        self.assertEqual(after_rotation, [ROTATION_MARKER, "send.failed: second reason=new"])
+        self.assertEqual(second_poll, [])
+
 
 def _write_events(workspace: Path, events: list[dict]) -> None:
     log_dir = logs_dir(workspace)
     log_dir.mkdir(parents=True, exist_ok=True)
     text = "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)
     (log_dir / "events.jsonl").write_text(text, encoding="utf-8")
+
+
+def _result_envelope(agent_id: str, summary: str) -> dict:
+    return {
+        "schema_version": "result_envelope_v1",
+        "task_id": f"task-{agent_id}",
+        "agent_id": agent_id,
+        "status": "success",
+        "summary": summary,
+        "artifacts": [],
+        "changes": [],
+        "tests": [],
+        "risks": [],
+        "next_actions": [],
+    }
 
 
 if __name__ == "__main__":

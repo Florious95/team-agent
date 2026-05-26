@@ -15,6 +15,11 @@ from team_agent.status.queries import result_summary_from_row
 class WatchCursor:
     event_offset: int = 0
     seen_result_ids: set[str] = field(default_factory=set)
+    initialized: bool = False
+    archive_signature: tuple[int, int] | None = None
+
+
+ROTATION_MARKER = "[watch] log rotated; archived segment events.jsonl.1 not replayed — historical replay deferred to a future --replay flag"
 
 
 def run_watch(
@@ -33,7 +38,7 @@ def run_watch(
 
 
 def collect_watch_lines(workspace: Path, cursor: WatchCursor, *, team: str | None = None) -> list[str]:
-    lines = _collect_event_lines(workspace, cursor)
+    lines = _collect_event_lines(workspace, cursor, team=team)
     lines.extend(_collect_result_lines(workspace, cursor, team=team))
     return lines
 
@@ -58,20 +63,32 @@ def render_event_line(event: dict[str, Any]) -> str | None:
     return None
 
 
-def _collect_event_lines(workspace: Path, cursor: WatchCursor) -> list[str]:
+def _collect_event_lines(workspace: Path, cursor: WatchCursor, *, team: str | None = None) -> list[str]:
     path = logs_dir(workspace) / "events.jsonl"
+    archive_signature = _archive_signature(path.with_name("events.jsonl.1"))
+    lines: list[str] = []
+    if not cursor.initialized:
+        cursor.archive_signature = archive_signature
+        cursor.initialized = True
+    elif archive_signature and archive_signature != cursor.archive_signature:
+        lines.append(ROTATION_MARKER)
+        cursor.archive_signature = archive_signature
+        cursor.event_offset = 0
     if not path.exists():
-        return []
+        return lines
     size = path.stat().st_size
     if cursor.event_offset > size:
+        if ROTATION_MARKER not in lines:
+            lines.append(ROTATION_MARKER)
         cursor.event_offset = 0
-    lines: list[str] = []
     with path.open("r", encoding="utf-8") as handle:
         handle.seek(cursor.event_offset)
         for raw in handle:
             try:
                 event = json.loads(raw)
             except json.JSONDecodeError:
+                continue
+            if team and _event_team_id(event) != team:
                 continue
             rendered = render_event_line(event)
             if rendered:
@@ -112,4 +129,17 @@ def _clean(value: Any) -> str:
     return " ".join(str(value).split())
 
 
-__all__ = ["WatchCursor", "collect_watch_lines", "render_event_line", "run_watch"]
+def _event_team_id(event: dict[str, Any]) -> str | None:
+    value = event.get("team_id") or event.get("owner_team_id") or event.get("team")
+    return str(value) if value else None
+
+
+def _archive_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+__all__ = ["ROTATION_MARKER", "WatchCursor", "collect_watch_lines", "render_event_line", "run_watch"]

@@ -22,7 +22,7 @@ MESSAGE_COLUMNS = {
     "error",
     "delivery_attempts",
 }
-RESULT_COLUMNS = {"result_id", "task_id", "agent_id", "envelope", "status", "created_at"}
+RESULT_COLUMNS = {"owner_team_id", "result_id", "task_id", "agent_id", "envelope", "status", "created_at"}
 SCHEDULED_EVENT_COLUMNS = {
     "id",
     "owner_team_id",
@@ -125,6 +125,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             """
             create table if not exists results (
               result_id text primary key,
+              owner_team_id text,
               task_id text not null,
               agent_id text not null,
               envelope text not null,
@@ -215,7 +216,12 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
                 "owner_team_id": "alter table messages add column owner_team_id text",
             },
         )
-        _ensure_table_columns(conn, "results", RESULT_COLUMNS)
+        _ensure_table_columns(
+            conn,
+            "results",
+            RESULT_COLUMNS,
+            {"owner_team_id": "alter table results add column owner_team_id text"},
+        )
         _ensure_table_columns(
             conn,
             "scheduled_events",

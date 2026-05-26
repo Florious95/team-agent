@@ -30,7 +30,7 @@ class MessagingResultsTests(unittest.TestCase):
             conn = store.connect()
             try:
                 conn.execute(
-                    "insert into results values (?, ?, ?, ?, ?, ?)",
+                    "insert into results(result_id, task_id, agent_id, envelope, status, created_at) values (?, ?, ?, ?, ?, ?)",
                     (result_id, "task_impl", "fake_impl", json.dumps(bad), "success", "now"),
                 )
                 conn.commit()
