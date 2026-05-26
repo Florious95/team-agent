@@ -27,7 +27,30 @@ def load_yaml(path: Path) -> dict[str, Any]:
 def load_spec(path: Path) -> dict[str, Any]:
     spec = load_yaml(path)
     validate_spec(spec, base_dir=path.parent)
+    _emit_load_time_deprecations(spec, path)
     return spec
+
+
+def _emit_load_time_deprecations(spec: dict[str, Any], path: Path) -> None:
+    """Stage 7 S7 (2026-05-27): deprecation signals attached to the spec field
+    itself must fire when the YAML is read, not lazily inside the trust-prompt
+    code path. A user with the deprecated field in team.spec.yaml needs to see
+    the warning even when startup never reaches attempt_trust_auto_answer.
+
+    The leader-panes helper owns the one-shot stderr guard + the structured
+    audit event, so we reuse it. EventLog points at path.parent/.team/logs so
+    the workspace's own audit file records the per-load occurrence.
+    """
+    runtime = spec.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    if not bool(runtime.get("auto_trust_own_workspace")):
+        return
+    # Local import keeps the spec module free of messaging-layer coupling at
+    # import time; only YAMLs that opt into the deprecated field pay the cost.
+    from team_agent.events import EventLog
+    from team_agent.messaging.leader_panes import _emit_spec_opt_in_deprecation
+    _emit_spec_opt_in_deprecation(EventLog(path.parent))
 
 
 def validate_spec(spec: dict[str, Any], base_dir: Path | None = None) -> None:
