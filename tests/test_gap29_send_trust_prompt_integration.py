@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,16 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_base)
 
 
-_MACMINI_CODEX_TRUST_PROMPT = """You are in /private/tmp/teamA-slice2-env-slice-2-20260526T103705Z
+# Stage 15 CI hotfix (2026-05-27): the Mac mini run that captured these
+# fixtures embedded its real workspace path into the prompt text. Linux CI
+# (/opt/hostedtoolcache/Python/3.12) has no /private/tmp/, so any code that
+# tries to mkdir that absolute path fails FileNotFoundError before the test
+# can mock the inject. The fixtures keep a {WORKSPACE} placeholder; each
+# test substitutes its OWN tempfile.mkdtemp() path, so the prompt text and
+# the actual Path operations refer to the same real directory on every OS.
+_WORKSPACE_PLACEHOLDER = "{WORKSPACE}"
+
+_MACMINI_CODEX_TRUST_PROMPT_TEMPLATE = """You are in {WORKSPACE}
 
   Do you trust the contents of this directory? Working with untrusted contents
   comes with higher risk of prompt injection. Trusting the directory allows
@@ -30,14 +40,14 @@ _MACMINI_CODEX_TRUST_PROMPT = """You are in /private/tmp/teamA-slice2-env-slice-
   Press enter to continue
 """
 
-_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL = _MACMINI_CODEX_TRUST_PROMPT + ("\n" * 12)
+_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL_TEMPLATE = _MACMINI_CODEX_TRUST_PROMPT_TEMPLATE + ("\n" * 12)
 
-_MACMINI_CODEX_TRUST_PROMPT_ANSI = _MACMINI_CODEX_TRUST_PROMPT.replace(
+_MACMINI_CODEX_TRUST_PROMPT_ANSI_TEMPLATE = _MACMINI_CODEX_TRUST_PROMPT_TEMPLATE.replace(
     "Do you trust the contents of this directory?",
     "\x1b[1mDo you trust the contents of this directory?\x1b[0m",
 )
 
-_MACMINI_CODEX_TRUST_PROMPT_WRAPPED = """You are in /private/tmp/teamA-slice2-env-slice-2-20260526T103705Z
+_MACMINI_CODEX_TRUST_PROMPT_WRAPPED_TEMPLATE = """You are in {WORKSPACE}
 
   Do you trust the contents of this
   directory? Working with untrusted contents comes with higher risk of prompt
@@ -52,31 +62,38 @@ _MACMINI_CODEX_TRUST_PROMPT_WRAPPED = """You are in /private/tmp/teamA-slice2-en
 """ + ("\n" * 12)
 
 
+def _materialize_workspace_and_fixture(prompt_template: str) -> tuple[Path, str]:
+    """Create a real temp dir for this test and inject its absolute path into
+    the prompt template so the workspace-dir check in attempt_trust_auto_answer
+    sees a real on-disk path that matches the prompt's quoted directory. Caller
+    is responsible for shutil.rmtree on teardown."""
+    workspace = Path(tempfile.mkdtemp(prefix="team-agent-gap29-trust-real-")).resolve()
+    return workspace, prompt_template.replace(_WORKSPACE_PLACEHOLDER, str(workspace))
+
+
 def _ok_proc(stdout: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
 
 class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
     def test_send_path_detects_real_codex_trust_prompt_answers_then_re_pastes(self) -> None:
-        self._run_send_path_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT)
+        self._run_send_path_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT_TEMPLATE)
 
     def test_send_path_detects_trust_prompt_variants_with_blank_tail_ansi_and_wrapping(self) -> None:
         cases = {
-            "blank_tail": _MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL,
-            "ansi": _MACMINI_CODEX_TRUST_PROMPT_ANSI,
-            "wrapped": _MACMINI_CODEX_TRUST_PROMPT_WRAPPED,
+            "blank_tail": _MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL_TEMPLATE,
+            "ansi": _MACMINI_CODEX_TRUST_PROMPT_ANSI_TEMPLATE,
+            "wrapped": _MACMINI_CODEX_TRUST_PROMPT_WRAPPED_TEMPLATE,
         }
         for name, fixture in cases.items():
             with self.subTest(name=name):
                 self._run_send_path_trust_prompt_fixture(fixture)
 
-    def _run_send_path_trust_prompt_fixture(self, prompt_fixture: str) -> None:
+    def _run_send_path_trust_prompt_fixture(self, prompt_template: str) -> None:
         from team_agent import runtime
         from team_agent.state import save_runtime_state
 
-        workspace = Path("/private/tmp/teamA-slice2-env-slice-2-20260526T103705Z")
-        shutil.rmtree(workspace, ignore_errors=True)
-        workspace.mkdir(parents=True)
+        workspace, prompt_fixture = _materialize_workspace_and_fixture(prompt_template)
         old_env = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE")
         try:
             spec = _base._fake_spec(workspace)
@@ -168,19 +185,17 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
             shutil.rmtree(workspace, ignore_errors=True)
 
     def test_leader_receiver_path_detects_trust_prompt_answers_then_re_pastes(self) -> None:
-        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT)
+        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT_TEMPLATE)
 
     def test_leader_receiver_path_detects_trust_prompt_with_blank_tail_then_re_pastes(self) -> None:
-        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL)
+        self._run_leader_receiver_trust_prompt_fixture(_MACMINI_CODEX_TRUST_PROMPT_BLANK_TAIL_TEMPLATE)
 
-    def _run_leader_receiver_trust_prompt_fixture(self, prompt_fixture: str) -> None:
+    def _run_leader_receiver_trust_prompt_fixture(self, prompt_template: str) -> None:
         from team_agent import runtime
         from team_agent.events import EventLog
         from team_agent.state import save_runtime_state
 
-        workspace = Path("/private/tmp/teamA-slice2-env-slice-2-20260526T103705Z")
-        shutil.rmtree(workspace, ignore_errors=True)
-        workspace.mkdir(parents=True)
+        workspace, prompt_fixture = _materialize_workspace_and_fixture(prompt_template)
         old_env = os.environ.get("TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE")
         try:
             state = {
