@@ -55,3 +55,9 @@ Log: `/tmp/slice2-fullsuite-hotfix.log`
 Post-Gap-37-hotfix re-run on HEAD 314f484: 722 tests, errors=0, exit=0, Status: PASS (pre-existing killpg sandbox error is OK)
 
 Log: `/tmp/slice2-fullsuite-sigkill.log`
+
+## Post-Arch-Fix Re-Run
+
+Post-arch-fix re-run on HEAD 617a517: 724 tests, errors=0, exit=0, Status: PASS
+
+Log: `/tmp/slice2-fullsuite-arch.log`
