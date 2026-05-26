@@ -82,6 +82,24 @@ class SpecDeprecationAcceptanceTests(unittest.TestCase):
             self.assertTrue(all(event["preferred_opt_in"] == f"env:{ENV_OPT_IN}" for event in events))
             self.assertTrue(all(event["removal_target_version"] == REMOVAL_TARGET for event in events))
 
+    def test_5_quick_start_layout_writes_event_to_workspace_root_log(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-spec-deprecation-current-") as tmp:
+            workspace = Path(tmp)
+            spec_path = _write_quick_start_spec(workspace, auto_trust=True)
+            expected_log = workspace / ".team" / "logs" / "events.jsonl"
+            nested_log = workspace / ".team" / "current" / ".team" / "logs" / "events.jsonl"
+
+            proc = _run_load_spec_subprocess(spec_path, load_count=1)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            events = _deprecated_events(workspace)
+            failures: list[str] = []
+            if len(events) != 1:
+                failures.append(f"expected one root event in {expected_log}, got {events!r}")
+            if nested_log.exists():
+                failures.append(f"deprecated event log must not be nested at {nested_log}")
+            self.assertEqual([], failures)
+
 
 class _Missing:
     pass
@@ -98,6 +116,16 @@ def _write_spec(workspace: Path, *, auto_trust: bool | _Missing) -> Path:
     else:
         spec["runtime"]["auto_trust_own_workspace"] = auto_trust
     spec_path = workspace / "team.spec.yaml"
+    spec_path.write_text(dumps(spec), encoding="utf-8")
+    return spec_path
+
+
+def _write_quick_start_spec(workspace: Path, *, auto_trust: bool) -> Path:
+    spec = _fake_spec(workspace)
+    spec["runtime"]["auto_trust_own_workspace"] = auto_trust
+    spec_dir = workspace / ".team" / "current"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = spec_dir / "team.spec.yaml"
     spec_path.write_text(dumps(spec), encoding="utf-8")
     return spec_path
 

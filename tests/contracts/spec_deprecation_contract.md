@@ -26,3 +26,7 @@ Required behavior:
 Rationale:
 
 The deprecation is attached to the YAML spec field itself. A user who has this field in `team.spec.yaml` must be notified as soon as the spec is loaded, even if startup code handles the Codex trust prompt before the lazy trust-auto-answer path is called.
+
+Workspace-root event path:
+
+Load-time deprecation event must land in `workspace_root/.team/logs/events.jsonl`. The `workspace_root` is the directory containing `.team/`, NOT `spec_path.parent` (which for quick-start layouts is `workspace/.team/current/`, causing a doubled `.team/current/.team/logs` nesting if naively used).
