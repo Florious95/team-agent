@@ -81,3 +81,11 @@ Commit: `339ad49`
 File/line evidence: `src/team_agent/watch/__init__.py:61-81`, `src/team_agent/events.py:12-18`, `tests/test_gap18c_watch.py:86-99`
 Description: `watch` only tails `events.jsonl` and silently ignores archive segments. If the file rotates while the cursor still trails inside the previous segment, unread lines moved to `events.jsonl.N` are not replayed and are lost from stream output. The existing tests explicitly validate archived segments are ignored, so this behavior is currently accepted and can look like silent dropped notifications for long-lived watches.
 Suggested fix shape: persist archived-segment offsets in the cursor and replay required tail segments across rotation, or surface a “log rotated, replay omitted” marker when not all events can be guaranteed delivered.
+
+## 2026-05-26 Review — 4b479fd (`status --summary + doctor gate`)
+
+### [NONE] No additional findings
+
+Commit: `4b479fd`
+File/line evidence: `src/team_agent/cli/commands.py:91-108`, `src/team_agent/cli/commands.py:240-266`, `tests/test_gap18a_status_summary.py:44-56`, `tests/test_gap18b_doctor_gate_orphans.py:108-114`
+Description: The targeted fixes for summary-agent rejection, unknown bucket rendering, and `doctor --fix` gating align with the brief and close prior gaps without introducing new behavioral regressions on the touched surfaces. Existing tests include the new rejection branch and the `--fix` validation path.
