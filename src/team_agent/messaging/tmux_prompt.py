@@ -12,6 +12,33 @@ from team_agent.messaging.deps import (
 from pathlib import Path
 from typing import Any
 
+
+def detect_non_input_scrollback(capture_tail: str) -> str | None:
+    lines = [line.rstrip("\n") for line in capture_tail.splitlines()]
+    nonempty = [line for line in lines if line.strip()]
+    tail_text = "\n".join(lines[-10:])
+    lower = tail_text.lower()
+    if "do you trust the contents of this directory" in lower:
+        return "codex_trust_prompt"
+    if "press enter to log in" in lower or "press enter to login" in lower:
+        return "codex_first_run_auth"
+    if "capability may degrade" in lower:
+        return "codex_compaction_warning"
+    if re.search(r"press\s+(enter|return)\s+to\s+continue", lower):
+        return "generic_press_enter"
+    if re.search(r"press\s+any\s+key", lower):
+        return "generic_press_enter"
+    if re.search(r"(\(y/n\)|\([yY]/n\)|\[y/N\]|\[Y/n\]|\[y/n\])", tail_text):
+        return "y_n_confirm"
+    for first, second in zip(nonempty, nonempty[1:]):
+        if re.match(r"^\s*1\.\s+", first) and re.match(r"^\s*2\.\s+", second):
+            return "numbered_menu"
+    if nonempty:
+        last = nonempty[-1]
+        if re.search(r"(^|[\s~/.\w-])[$%]\s*$", last):
+            return "shell_prompt_cli_dead"
+    return None
+
 def _enable_codex_fast_mode(session_name: str, window_name: str) -> dict[str, Any]:
     target = f"{session_name}:{window_name}"
     proc = run_cmd(["tmux", "send-keys", "-t", target, "/fast", "Enter"], timeout=10)
