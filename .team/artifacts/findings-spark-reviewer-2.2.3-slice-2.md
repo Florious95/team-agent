@@ -83,3 +83,19 @@ Commit: `6b1fc75`
 File/line evidence: `src/team_agent/restart/orchestration.py:103-118`
 Description: `restart.atomic_refusal` is a new observability event for the refusal path but currently has no dedicated regression assertions. Its payload stability (`unresumable` structure, `reason`, `allow_fresh`) is therefore unverified and can drift without test protection.
 Suggested fix shape: add a focused test that forces refusal and asserts emitted event payload keys/shape for deterministic downstream consumption before this becomes a hard dependency.
+
+## 2026-05-27 Review — ff99026 (`session capture retry + loud-fail semantics`)
+
+### [LOW] Attention event is emitted continuously for snapshot checks with `timeout_s=0`
+
+Commit: `ff99026`
+File/line evidence: `src/team_agent/sessions/capture.py:39-54`, `src/team_agent/sessions/capture.py:108-126`, `src/team_agent/coordinator/lifecycle.py:278`, `src/team_agent/status/queries.py:27`, `src/team_agent/messaging/send.py:249,308`
+Description: `capture_missing_sessions` calls `capture_agent_session` with `timeout_s=0.0` from high-frequency paths (status/coordinator/send/collect) and `log_miss=False`, but `capture_agent_session` still writes `session.capture_required_attention` on every timeout when `status == "running"` regardless of whether this miss is retry-budgeted by the caller. A transiently missing session_id on a single call can therefore emit a new attention event on each poll cycle, causing log churn and noisy attention telemetry for persistent misses.
+Suggested fix shape: add a bounded/once-per-agent debounce for `session.capture_required_attention` (or a monotonic retry state in memory/state) so repeated zero-timeout probes do not emit duplicate alerts each call.
+
+### [LOW] Loud-fail contract (`raise_on_missed=True`) is currently unreachable from production paths
+
+Commit: `ff99026`
+File/line evidence: `src/team_agent/lifecycle/start.py:322`, `src/team_agent/lifecycle/operations.py:355`, `src/team_agent/restart/orchestration.py:301`, `src/team_agent/launch/core.py:258`, `src/team_agent/sessions/capture.py:72`
+Description: The new default strict path was introduced on `capture_agent_session`, but all production callsites now pass `raise_on_missed=False` (plus `capture_missing_sessions` has it hard-coded). No non-test caller in the repo invokes the default path today, so the loud-fail contract can be exercised only via direct import/tests and does not actually guard normal spawn/attach flows.
+Suggested fix shape: either document this as an explicit internal best-effort policy and rename the default to `raise_on_missed: bool = False`, or provide a dedicated production caller (if any) that intentionally owns the atomic boundary for strict missing-session failure handling.
