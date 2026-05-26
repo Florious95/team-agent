@@ -147,3 +147,26 @@ Commit: `b0cf773`
 File/line evidence: `src/team_agent/restart/orchestration.py:398-406`, `tests/contracts/restart_resume_atomicity_contract.md:11-12`
 Description: `_atomic_resumability_check` uses `if not first_send_at`, so invalid values (`""`, `0`, `false`) are treated as never-interacted, while garbage strings like `"null"` are treated as interacted. This can misclassify restart behavior under legacy/corrupt state mutations and cause either false atomic refusal or unintended fresh-start.
 Suggested fix shape: replace truthiness checks with explicit contract checks (`None`/missing => not interacted; strict ISO-8601 parse => interacted; invalid type/value => emit repair event + deterministic fallback) and keep behavior stable for restart decisions.
+
+## 2026-05-27 Review — b695843 (`Route B strict-typing + auditability`)
+
+### [LOW] `_classify_first_send_at` accepts naive ISO-8601 strings as valid interacted timestamps
+
+Commit: `b695843`
+File/line evidence: `src/team_agent/restart/orchestration.py:381-403`
+Description: `_classify_first_send_at` accepts any non-empty `datetime.fromisoformat` value as valid, including naive local timestamps like `2026-05-27T10:23:00` with no UTC marker. That can classify a worker as interacted even when the persisted value is not explicitly UTC, while the contract/error text and restart docs say UTC timestamp semantics.
+Suggested fix shape: enforce UTC awareness (`tzinfo is not None` and offset=UTC) before returning `valid`; reject naive timestamps as `corrupt` to keep decision logic deterministic across nodes/clock contexts.
+
+### [LOW] Atomic refusal detail text always says session is missing
+
+Commit: `b695843`
+File/line evidence: `src/team_agent/restart/orchestration.py:496-517`
+Description: `_format_atomic_refusal_error` always emits `"its persisted session is missing"` for refused workers, but refusal reasons can be `session_unresumable` as well as `no_persisted_session_id`. The human message can therefore mislead operations when a session exists but cannot be recovered.
+Suggested fix shape: format refusal evidence by reason (`missing` vs `unresumable`) and include the relevant session id/repair rationale in each worker clause.
+
+### [LOW] Resume-decision events are emitted at full fanout every restart call
+
+Commit: `b695843`
+File/line evidence: `src/team_agent/restart/orchestration.py:127-133`, `src/team_agent/restart/orchestration.py:483-492`
+Description: `restart()` now emits `restart.resume_decision` for every non-paused worker on each restart invocation, including repeated automation retries. If restart is scripted in tight loops, event volume can scale with worker count × retries and increase log churn, whereas the previous path only surfaced refusals.
+Suggested fix shape: keep decision events for explicit restart CLI invocations, and add either batching/level gating or periodic coalescing for automation-heavy call paths.
