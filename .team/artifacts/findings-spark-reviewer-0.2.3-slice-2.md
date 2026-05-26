@@ -65,3 +65,19 @@ Suggested fix shape: add focused tests for exact-boundary cases (`len(window)==4
 Commit: `0846973`
 File/line evidence: `tests/test_gap18a_status_summary.py`, `tests/test_gap18b_doctor_gate_orphans.py`
 Description: Migration preserved assertion coverage and control flow from the prior pytest versions: the same fixture setup (`tmp_path`→`tempfile.TemporaryDirectory`), exception paths (`pytest.raises`→`assertRaisesRegex`), and CLI output assertions (`capsys.out`→`redirect_stdout`) were retained. No silent no-op patterns (e.g., patch scope leakage, missing teardown, or dropped assertions) were identified.
+
+## 2026-05-26 Review — 339ad49 (`watch` MVP stream)
+
+### [MEDIUM] `team` selector is accepted by CLI but not enforced in event or result streams
+
+Commit: `339ad49`
+File/line evidence: `src/team_agent/cli/parser.py:190-193`, `src/team_agent/cli/commands.py:103-107`, `src/team_agent/watch/__init__.py:35-39`, `src/team_agent/watch/__init__.py:83-89`, `src/team_agent/message_store/core.py:425-437`
+Description: `watch --team` is threaded through CLI and `run_watch`, but `_collect_event_lines` ignores team entirely and `MessageStore.latest_results` ignores `owner_team_id` (it is a no-op). In a workspace with multiple teams, `watch` can therefore print events/results from unrelated teams, so the `--team` flag is effectively a no-op and risks cross-team noise.
+Suggested fix shape: pass `team` into event filtering and add owner-team filtering in `latest_results` (or equivalent query) so all emitted lines are scoped to the selected team before rendering.
+
+### [LOW] Rotation can cause in-memory watch cursors to skip unread events
+
+Commit: `339ad49`
+File/line evidence: `src/team_agent/watch/__init__.py:61-81`, `src/team_agent/events.py:12-18`, `tests/test_gap18c_watch.py:86-99`
+Description: `watch` only tails `events.jsonl` and silently ignores archive segments. If the file rotates while the cursor still trails inside the previous segment, unread lines moved to `events.jsonl.N` are not replayed and are lost from stream output. The existing tests explicitly validate archived segments are ignored, so this behavior is currently accepted and can look like silent dropped notifications for long-lived watches.
+Suggested fix shape: persist archived-segment offsets in the cursor and replay required tail segments across rotation, or surface a “log rotated, replay omitted” marker when not all events can be guaranteed delivered.
