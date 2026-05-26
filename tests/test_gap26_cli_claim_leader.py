@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
-
-import pytest
+import os
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
 from team_agent.cli.parser import main
 from team_agent.events import EventLog
@@ -12,39 +17,68 @@ from team_agent.state import load_runtime_state, save_runtime_state
 UUID_A = "a" * 32
 
 
-def test_gap26_cli_claim_leader_first_claim_wins(tmp_path, monkeypatch, capsys) -> None:
-    save_runtime_state(tmp_path, _state())
-    EventLog(tmp_path).write(
-        "leader_receiver.ambiguous_candidates",
-        incident_id="inc-1",
-        old_pane_id="%old",
-        candidates=["%D", "%E"],
-        team_id="team-a",
-        uuid_prefix=UUID_A[:12],
-    )
-    monkeypatch.setenv("TEAM_AGENT_LEADER_PANE_ID", "%D")
-    monkeypatch.setenv("TEAM_AGENT_LEADER_SESSION_UUID", UUID_A)
-    monkeypatch.setattr("team_agent.runtime.core_list_targets", lambda: {"ok": True, "targets": [_target("%D"), _target("%E")]})
+class Gap26CliClaimLeaderTests(unittest.TestCase):
+    """Stage 15 CI fix: converted from pytest fixtures (tmp_path / monkeypatch / capsys)
+    to unittest TestCase so the npm publish workflow's python suite (unittest discover) can
+    run it. pytest.raises → unittest.assertRaises; capsys → redirect_stdout(StringIO())."""
 
-    main(["claim-leader", "--workspace", str(tmp_path), "--team", "team-a", "--confirm", "--json"])
-    claimed = json.loads(capsys.readouterr().out)
+    def test_gap26_cli_claim_leader_first_claim_wins(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap26-cli-claim-") as tmp:
+            workspace = Path(tmp)
+            save_runtime_state(workspace, _state())
+            EventLog(workspace).write(
+                "leader_receiver.ambiguous_candidates",
+                incident_id="inc-1",
+                old_pane_id="%old",
+                candidates=["%D", "%E"],
+                team_id="team-a",
+                uuid_prefix=UUID_A[:12],
+            )
 
-    assert claimed["ok"] is True
-    assert claimed["status"] == "claimed"
-    assert claimed["leader_receiver"]["pane_id"] == "%D"
-    assert claimed["owner_epoch"] == 8
-    state = load_runtime_state(tmp_path)
-    assert state["leader_receiver"]["pane_id"] == "%D"
-    assert state["team_owner"]["owner_epoch"] == 8
+            env_first = {
+                "TEAM_AGENT_LEADER_PANE_ID": "%D",
+                "TEAM_AGENT_LEADER_SESSION_UUID": UUID_A,
+            }
+            with (
+                patch.dict(os.environ, env_first, clear=False),
+                patch(
+                    "team_agent.runtime.core_list_targets",
+                    return_value={"ok": True, "targets": [_target("%D"), _target("%E")]},
+                ),
+            ):
+                buf = StringIO()
+                with redirect_stdout(buf):
+                    main(["claim-leader", "--workspace", str(workspace), "--team", "team-a", "--confirm", "--json"])
+                claimed = json.loads(buf.getvalue())
 
-    monkeypatch.setenv("TEAM_AGENT_LEADER_PANE_ID", "%E")
-    with pytest.raises(SystemExit) as exc:
-        main(["claim-leader", "--workspace", str(tmp_path), "--team", "team-a", "--confirm", "--json"])
-    refused = json.loads(capsys.readouterr().out)
-    assert exc.value.code == 1
-    assert refused["reason"] == "owner_epoch_advanced"
-    assert refused["bound_pane_id"] == "%D"
-    assert "lost the race" in refused["error"]
+            self.assertTrue(claimed["ok"])
+            self.assertEqual(claimed["status"], "claimed")
+            self.assertEqual(claimed["leader_receiver"]["pane_id"], "%D")
+            self.assertEqual(claimed["owner_epoch"], 8)
+            state = load_runtime_state(workspace)
+            self.assertEqual(state["leader_receiver"]["pane_id"], "%D")
+            self.assertEqual(state["team_owner"]["owner_epoch"], 8)
+
+            env_second = {
+                "TEAM_AGENT_LEADER_PANE_ID": "%E",
+                "TEAM_AGENT_LEADER_SESSION_UUID": UUID_A,
+            }
+            with (
+                patch.dict(os.environ, env_second, clear=False),
+                patch(
+                    "team_agent.runtime.core_list_targets",
+                    return_value={"ok": True, "targets": [_target("%D"), _target("%E")]},
+                ),
+            ):
+                buf2 = StringIO()
+                with redirect_stdout(buf2):
+                    with self.assertRaises(SystemExit) as ctx:
+                        main(["claim-leader", "--workspace", str(workspace), "--team", "team-a", "--confirm", "--json"])
+                refused = json.loads(buf2.getvalue())
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertEqual(refused["reason"], "owner_epoch_advanced")
+            self.assertEqual(refused["bound_pane_id"], "%D")
+            self.assertIn("lost the race", refused["error"])
 
 
 def _state() -> dict:
@@ -81,3 +115,7 @@ def _target(pane_id: str) -> dict:
         "pane_current_command": "codex",
         "leader_env": {"TEAM_AGENT_LEADER_SESSION_UUID": UUID_A},
     }
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

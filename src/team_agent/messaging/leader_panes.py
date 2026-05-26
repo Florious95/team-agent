@@ -234,6 +234,19 @@ def _rediscover_leader_receiver(
     targets = core_list_targets()
     if not targets.get("ok"):
         event_log.write("leader_receiver.rediscover_failed", provider=provider, error=targets.get("error"))
+        # Stage 15 CI fix: when the tmux target scan itself fails (no server, no daemon,
+        # CI env without tmux), the caller has no way to recover unless we also emit
+        # rebind_required. Without this, _refresh_leader_receiver_or_flag_rebind silently
+        # returns and report_result queues against the stale pane with zero audit signal.
+        event_log.write(
+            "leader_receiver.rebind_required",
+            old_pane_id=receiver.get("pane_id"),
+            reason=invalidation_reason,
+            provider=provider,
+            team_id=team_id,
+            rediscovery_status="failed",
+            error=targets.get("error"),
+        )
         return {"status": "failed", "error": targets.get("error")}
     candidates = [
         target
