@@ -335,6 +335,28 @@ class Gap28DetectionTests(unittest.TestCase):
         self.assertEqual(len(events), 1, f"expected detection in tail of long window; got {events}")
         self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
 
+    def _assert_tail_error_detected_at_window_length(self, total_chars: int) -> None:
+        state = _state_with_attached_leader()
+        tail = "claude: request timed out"
+        self.assertLessEqual(len(tail), total_chars)
+        scrollback = ("x" * (total_chars - len(tail))) + tail
+        self.assertEqual(len(scrollback), total_chars)
+        events = detect_leader_api_errors(
+            self.workspace, state, self.store, self.event_log,
+            capture_fn=_make_capture(scrollback),
+        )
+        self.assertEqual(len(events), 1, f"expected detection for {total_chars}-char window; got {events}")
+        self.assertEqual(self._emitted_api_errors()[0]["error_class"], "Timeout")
+
+    def test_window_exactly_400_chars_with_error_keyword_at_tail(self) -> None:
+        self._assert_tail_error_detected_at_window_length(400)
+
+    def test_window_exactly_401_chars_with_error_keyword_at_tail(self) -> None:
+        self._assert_tail_error_detected_at_window_length(401)
+
+    def test_window_399_chars_at_baseline(self) -> None:
+        self._assert_tail_error_detected_at_window_length(399)
+
     def test_long_window_with_no_api_context_anywhere_does_not_emit(self) -> None:
         """A 800-char window containing NO API/provider context anywhere — even
         with words like 'fetch' and 'timeout' appearing in user text — must not
