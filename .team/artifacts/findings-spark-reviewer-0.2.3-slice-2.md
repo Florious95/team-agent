@@ -129,3 +129,26 @@ Commit: `1576bdc`
 File/line evidence: `tests/test_gap29_send_trust_prompt_integration.py:21-31`, `tests/test_gap29_send_trust_prompt_integration.py:83-103`
 Description: The new test uses a single, idealized codex prompt fixture and does not test real-world variations (`leader_receiver`, `ambiguous` fanout, and copy-mode/viewport-noise variants). A one-shot mock also cannot validate race or replay characteristics on retries that real tmux sessions expose.
 Suggested fix shape: parameterize the prompt fixture (with realistic wrapped/colored/ANSI variants and intermediate noise), and add companion integration coverage for leader and fanout delivery paths to prove the pre-paste gate is universal.
+
+## 2026-05-26 Review — 314f484 (`gap-37` SIGKILL escalation)
+
+### [MEDIUM] Killpg target selection can kill a broader process group than the orphan
+
+Commit: `314f484`
+File/line evidence: `src/team_agent/diagnose/orphan_cleanup.py:198-200`, `src/team_agent/diagnose/orphan_cleanup.py:205-207`, `src/team_agent/coordinator/lifecycle.py:108-120`
+Description: `_terminate_orphan` chooses `killpg` whenever `getpgid(pid) != pid`, but it does not verify that `pid` is the intended group leader. If a coordinator is running in a shared process group (possible in manual/nonstandard launches), this can signal unrelated processes in that group; the current condition is necessary for children, not sufficient to prove ownership.
+Suggested fix shape: add a stricter guard (`pgid == pid` or explicit coordinator metadata confirmation) before group signaling, and add a fallback to pid-only signaling when ownership cannot be proven.
+
+### [MEDIUM] PID reuse within scan/kill window can turn orphan cleanup into wrong-process termination
+
+Commit: `314f484`
+File/line evidence: `src/team_agent/diagnose/orphan_cleanup.py:136-137`, `src/team_agent/diagnose/orphan_cleanup.py:157-163`, `src/team_agent/diagnose/orphan_cleanup.py:219-247`, `src/team_agent/diagnose/orphan_cleanup.py:276-289`
+Description: Cleaner uses PID-only `kill` checks throughout (`killer(pid, sig)` and `killer(pid, 0)`), but does not bind to any immutable process identity. If a listed orphan PID exits and is reused before/while escalation runs, the cleaner can send SIGTERM/SIGKILL to a new process and report success, while losing the orphaned target.
+Suggested fix shape: snapshot additional process identity before termination (e.g., start time/command lineage from `/proc/<pid>` or re-query of cmdline/argv), and revalidate identity before each signal stage.
+
+### [LOW] Error-path for `getpgid`/`kill` exceptions lacks coverage, especially EPERM races
+
+Commit: `314f484`
+File/line evidence: `src/team_agent/diagnose/orphan_cleanup.py:263-269`, `src/team_agent/diagnose/orphan_cleanup.py:202-212`, `tests/test_gap37_orphan_resists_sigterm.py`
+Description: The new `_safe_getpgid` and `send()` branches handle `ProcessLookupError` and `OSError`, but no regression test exercises ESRCH on `getpgid` or PermissionError/EPERM on `SIGKILL`/`SIGTERM`. Given the race scenarios in the brief (another reaper, reaping gap), lack of coverage means silent behavior drift remains possible in production.
+Suggested fix shape: add explicit tests for `getpgid` failing (ESRCH/PermissionError) and `kill` returning PermissionError during both signal stages to freeze expected envelope outcomes and avoid masked failures.
