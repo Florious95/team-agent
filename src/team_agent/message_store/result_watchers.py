@@ -112,23 +112,26 @@ def claim_leader_notification(
     watcher_id: str,
     proposed_token: str,
 ) -> dict[str, Any]:
-    """Stage 11.12 Gap 32 atomic UPSERT (replaces the check-then-write race that recurred in
-    edac6b3 / 9f52048). Single transaction:
-      - BEGIN IMMEDIATE acquires SQLite's RESERVED lock so concurrent transactions serialize.
-      - If any sibling watcher for the same (team, result_id) already has notified_message_id
-        set, return {'status': 'already_notified_by', 'canonical_message_id': <that id>}.
-      - Else CAS this watcher row's notified_message_id from NULL to the proposed_token.
-        rowcount == 1 means we won the claim; return {'status': 'claimed_by_you',
-        'canonical_message_id': proposed_token}.
-      - rowcount == 0 means a concurrent claim landed on the same watcher_id between our
-        sibling-check and our UPDATE; re-read this row to discover the canonical and
-        return already_notified_by.
+    """DEPRECATED (Stage 12 roundtable retirement). The watcher-table UPSERT did not
+    actually prevent duplicate leader-pane injections in Mac mini real flow because two
+    independent code paths (scheduled_event branch + result_watchers branch) emit
+    deliver_attempt without coordinating at the watcher level. Replaced by
+    leader_notification_log.claim_leader_notification_delivery consulted inside
+    _send_to_leader_receiver. Kept here as a no-op shim so legacy callers / tests that
+    still import this symbol don't crash on import — but it does NOT perform a claim and
+    should NOT be used in new code."""
+    if not result_id:
+        return {"status": "deprecated_noop", "canonical_message_id": None}
+    return {"status": "deprecated_noop", "canonical_message_id": None}
 
-    The caller that receives 'claimed_by_you' fires the actual deliver_attempt and then
-    either promotes the sentinel via promote_leader_notification_id (on success) or
-    releases it via release_leader_notification_claim (on failure). Every other concurrent
-    caller for the same (team, result_id) sees the claim and skips with dedupe_skip.
-    """
+
+def _claim_leader_notification_disabled_impl(  # legacy reference for archaeology
+    store: Any,
+    owner_team_id: str | None,
+    result_id: str | None,
+    watcher_id: str,
+    proposed_token: str,
+) -> dict[str, Any]:
     if not result_id:
         return {"status": "no_result_id", "canonical_message_id": None}
     with closing(store.connect()) as conn:

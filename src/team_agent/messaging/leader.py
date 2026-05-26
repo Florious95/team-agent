@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from team_agent.messaging.deps import (
     EventLog,
     MessageStore,
@@ -51,6 +53,19 @@ def _leader_inbox_path(workspace: Path) -> Path:
     return runtime_dir(workspace) / "leader-inbox.log"
 
 
+def _extract_result_id_from_content(content: str) -> str | None:
+    """Stage 12: result-notification messages embed a `Result id: <id>` line; the gate
+    parses it from content so callers that did NOT plumb the result_id kwarg through
+    still consult the dedupe gate. Format mirrors _format_report_result_notification and
+    format_result_watcher_notification."""
+    if not content:
+        return None
+    for line in content.splitlines():
+        if line.startswith("Result id: "):
+            return line.removeprefix("Result id: ").strip() or None
+    return None
+
+
 def _send_to_leader_receiver(
     workspace: Path,
     state: dict[str, Any],
@@ -60,6 +75,8 @@ def _send_to_leader_receiver(
     sender: str,
     requires_ack: bool,
     event_log: EventLog,
+    *,
+    result_id: str | None = None,
 ) -> dict[str, Any]:
     store = MessageStore(workspace)
     message_id = store.create_message(task_id, sender, leader_id, content, requires_ack=False)
@@ -150,6 +167,69 @@ def _send_to_leader_receiver(
     state["leader_receiver"].update(validation["pane"])
     submit_key, submit_reason = _choose_leader_submit_key(receiver.get("provider", "codex"), validation.get("capture", ""))
     target = receiver["pane_id"]
+    # Stage 12 (Gap 26 ∩ Gap 32 roundtable 2026-05-26) — injection-boundary dedupe gate.
+    # Result-notification injections route through claim_leader_notification_delivery; the
+    # gate suppresses a second inject for the same (result_id, leader_session_uuid).
+    # Non-result messages (peer mirror, idle reminder, ambiguous-prompt) lack a "Result id:"
+    # line in their text and bypass the gate.
+    effective_result_id = result_id or _extract_result_id_from_content(content)
+    leader_uuid_for_gate = str(
+        (state.get("team_owner") or {}).get("leader_session_uuid")
+        or (state.get("leader_receiver") or {}).get("leader_session_uuid")
+        or ""
+    )
+    if effective_result_id and leader_uuid_for_gate:
+        from team_agent.message_store.leader_notification_log import claim_leader_notification_delivery
+        envelope_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        claim = claim_leader_notification_delivery(
+            store,
+            result_id=effective_result_id,
+            leader_session_uuid=leader_uuid_for_gate,
+            proposed_message_id=message_id,
+            envelope_hash=envelope_hash,
+            owner_team_id=team_state_key(state),
+            pane_id=target,
+        )
+        if claim["status"] == "already_notified_by":
+            prev_msg = claim.get("notified_message_id")
+            prev_hash = claim.get("envelope_content_hash")
+            if envelope_hash == prev_hash:
+                event_log.write(
+                    "leader_notification.dedupe_skip",
+                    result_id=effective_result_id,
+                    leader_session_uuid=leader_uuid_for_gate,
+                    prev_message_id=prev_msg,
+                    this_message_id=message_id,
+                    prev_ts=claim.get("notified_at"),
+                    pane_id=target,
+                    team_id=team_state_key(state),
+                )
+            else:
+                event_log.write(
+                    "leader_notification.legitimate_duplicate_suspected",
+                    result_id=effective_result_id,
+                    leader_session_uuid=leader_uuid_for_gate,
+                    prev_message_id=prev_msg,
+                    this_message_id=message_id,
+                    prev_envelope_hash=prev_hash,
+                    this_envelope_hash=envelope_hash,
+                    pane_id=target,
+                    team_id=team_state_key(state),
+                )
+            store.mark(message_id, "submitted", "dedupe_suppressed_by_leader_notification_log")
+            save_runtime_state(workspace, state)
+            return {
+                "ok": True,
+                "message_id": message_id,
+                "status": "submitted",
+                "to": leader_id,
+                "channel": "direct_tmux",
+                "leader_receiver": state["leader_receiver"],
+                "visible": False,
+                "submitted": False,
+                "deduped": True,
+                "canonical_message_id": prev_msg,
+            }
     event_log.write(
         "leader_receiver.deliver_attempt",
         message_id=message_id,
@@ -161,6 +241,8 @@ def _send_to_leader_receiver(
         visible_token=rendered.get("token"),
         payload=payload,
         warning=validation.get("warning"),
+        result_id=effective_result_id,
+        leader_session_uuid=leader_uuid_for_gate or None,
     )
     injection = _tmux_inject_text(
         target,

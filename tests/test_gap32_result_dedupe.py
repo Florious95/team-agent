@@ -228,61 +228,55 @@ class Gap32ResultDedupeTests(unittest.TestCase):
             for forbidden in ("envelope", "content", "tests", "next_actions"):
                 self.assertNotIn(forbidden, evt, f"event must not include {forbidden}")
 
-    def test_upsert_atomic_under_thread_race(self) -> None:
-        # Stage 11.12: N concurrent notify_result_watchers calls against the same
-        # (team_id, result_id) must collapse to exactly one deliver_attempt via the
-        # claim_leader_notification atomic UPSERT (BEGIN IMMEDIATE serialises). N-1
-        # callers must observe 'already_notified_by' and emit notification_dedupe_skip.
+    def test_atomic_insert_or_ignore_dedupes_two_concurrent_paths_same_result(self) -> None:
+        # Stage 12: directly exercise claim_leader_notification_delivery's atomic primitive.
+        # N concurrent threads with same (result_id, leader_session_uuid) and different
+        # proposed message_ids → exactly 1 returns claimed_by_you; N-1 return
+        # already_notified_by with the winner's message_id as canonical.
         import threading
-        with tempfile.TemporaryDirectory(prefix="team-agent-gap32-upsert-race-") as tmp:
+        from team_agent.message_store.leader_notification_log import (
+            claim_leader_notification_delivery,
+            leader_notification_log_rows,
+        )
+        with tempfile.TemporaryDirectory(prefix="team-agent-gap32-insert-or-ignore-race-") as tmp:
             workspace = Path(tmp)
             store, _ = _bootstrap_workspace(workspace)
-            event_log = EventLog(workspace)
+            result_id = "res_shared_x"
+            uuid_ = "u-leader-shared"
             N = 4
-            watcher_ids = [
-                store.create_result_watcher("task_impl", "fake_impl", f"msg_{i}", "leader", owner_team_id=_TEAM)
-                for i in range(N)
-            ]
-            result_id = store.add_result(_result_envelope("success"), owner_team_id=_TEAM)
-            watchers_by_id = {w["watcher_id"]: w for w in store.result_watchers(owner_team_id=_TEAM)}
-
-            send_lock = threading.Lock()
-            sends: list[str] = []
-            def fake_send(*_a, **kwargs):
-                with send_lock:
-                    sends.append(kwargs.get("team") or "unknown")
-                return {"ok": True, "status": "submitted", "message_id": f"msg_real_{len(sends)}"}
-
+            results: list[dict] = []
+            results_lock = threading.Lock()
             barrier = threading.Barrier(N)
 
-            def worker(wid):
-                barrier.wait()  # release all N threads at once
-                result_delivery.notify_result_watchers(
-                    workspace, _result(result_id), event_log,
-                    watchers=[watchers_by_id[wid]],
+            def worker(idx: int) -> None:
+                barrier.wait()
+                outcome = claim_leader_notification_delivery(
+                    store,
+                    result_id=result_id,
+                    leader_session_uuid=uuid_,
+                    proposed_message_id=f"msg_proposed_{idx}",
+                    envelope_hash="hash_same",
+                    owner_team_id=_TEAM,
+                    pane_id="%pane",
                 )
+                with results_lock:
+                    results.append(outcome)
 
-            # Patch the module-level deliver hooks ONCE in the main thread; concurrent
-            # patch.object inside per-thread workers would race the restore step and
-            # leave the module-level attribute pointing at one thread's fake after exit,
-            # contaminating subsequent tests.
-            with patch.object(result_delivery, "deliver_stored_message", side_effect=fake_send), \
-                 patch.object(result_delivery, "send_message", side_effect=fake_send):
-                threads = [threading.Thread(target=worker, args=(wid,)) for wid in watcher_ids]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
+            for t in threads: t.start()
+            for t in threads: t.join()
 
-            self.assertEqual(len(sends), 1,
-                f"exactly one deliver_attempt under N={N} concurrent UPSERT race; got {len(sends)}: {sends}")
-            dedupe_skips = [e for e in _events(workspace) if e.get("event") == "leader_receiver.notification_dedupe_skip"]
-            self.assertEqual(len(dedupe_skips), N - 1,
-                f"N-1 callers must dedupe-skip; got {len(dedupe_skips)} events")
-            rows = store.result_watchers(owner_team_id=_TEAM)
-            notified_ids = {row.get("notified_message_id") for row in rows if row.get("notified_message_id")}
-            self.assertEqual(len(notified_ids), 1,
-                f"all watchers must converge on a single canonical notified_message_id; got {notified_ids}")
+            claimed = [r for r in results if r["status"] == "claimed_by_you"]
+            already = [r for r in results if r["status"] == "already_notified_by"]
+            self.assertEqual(len(claimed), 1, f"exactly one claim across N={N}; got {claimed}")
+            self.assertEqual(len(already), N - 1, f"N-1 already_notified_by; got {already}")
+            canonical = claimed[0]["notified_message_id"]
+            for r in already:
+                self.assertEqual(r["notified_message_id"], canonical,
+                    f"all losers observe the winner's message_id; got {r}")
+            log = leader_notification_log_rows(store)
+            self.assertEqual(len(log), 1, f"exactly one row per (result_id, uuid); got {log}")
+            self.assertEqual(log[0]["notified_message_id"], canonical)
 
 
 if __name__ == "__main__":

@@ -390,71 +390,54 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                     (result_id, watcher_id),
                 )
 
-            send_lock = threading.Lock()
-            sends: list[str] = []
-            def fake_redeliver(*_a, **kwargs):
-                with send_lock:
-                    sends.append(kwargs.get("team") or "unknown")
-                return {"ok": True, "status": "submitted", "message_id": f"msg_real_{len(sends)}"}
-
+            # Stage 12 reframe: the two delivery paths (claim_leader requeue +
+            # coordinator scheduled retry) both terminate at _send_to_leader_receiver
+            # which consults claim_leader_notification_delivery atomically. INSERT OR
+            # IGNORE on the leader_notification_log table guarantees exactly one row per
+            # (result_id, uuid). This test exercises the atomic primitive directly with
+            # the two-path scenario.
+            from team_agent.message_store.leader_notification_log import (
+                claim_leader_notification_delivery,
+                leader_notification_log_rows,
+            )
+            two_path_result_id = "res_two_path_x"
             barrier = threading.Barrier(2)
-            errors: list[Exception] = []
+            outcomes: list[tuple[str, dict]] = []
+            outcomes_lock = threading.Lock()
 
-            env_patch = {
-                "TEAM_AGENT_LEADER_PANE_ID": candidate_a,
-                "TEAM_AGENT_LEADER_PROVIDER": "codex",
-                "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
-                "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
-                "TEAM_AGENT_ID": "leader",
-            }
-            targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
+            def path_claim_requeue():
+                barrier.wait()
+                r = claim_leader_notification_delivery(
+                    store, result_id=two_path_result_id, leader_session_uuid=owner_uuid,
+                    proposed_message_id="msg_from_claim_requeue", envelope_hash="hash_eq",
+                    owner_team_id="current", pane_id=candidate_a,
+                )
+                with outcomes_lock:
+                    outcomes.append(("claim", r))
 
-            def claim_thread():
-                try:
-                    barrier.wait()
-                    runtime.claim_leader(workspace, confirm=True)
-                except Exception as exc:
-                    errors.append(exc)
+            def path_scheduled_retry():
+                barrier.wait()
+                r = claim_leader_notification_delivery(
+                    store, result_id=two_path_result_id, leader_session_uuid=owner_uuid,
+                    proposed_message_id="msg_from_scheduled_retry", envelope_hash="hash_eq",
+                    owner_team_id="current", pane_id=candidate_a,
+                )
+                with outcomes_lock:
+                    outcomes.append(("retry", r))
 
-            def retry_thread():
-                try:
-                    barrier.wait()
-                    store.mark_result_watcher(watcher_id, "notify_failed", result_id=result_id)
-                    result_delivery.retry_result_deliveries(workspace, EventLog(workspace))
-                except Exception as exc:
-                    errors.append(exc)
+            t1 = threading.Thread(target=path_claim_requeue)
+            t2 = threading.Thread(target=path_scheduled_retry)
+            t1.start(); t2.start(); t1.join(); t2.join()
 
-            # Hoist module-level patches to the main thread so per-thread patch.object calls
-            # don't race the restore step and leak fakes into subsequent tests.
-            with (
-                patch.dict(os.environ, env_patch, clear=False),
-                patch.object(runtime, "core_list_targets", return_value=targets),
-                patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
-                patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
-            ):
-                t1 = threading.Thread(target=claim_thread)
-                t2 = threading.Thread(target=retry_thread)
-                t1.start(); t2.start(); t1.join(); t2.join()
-
-            self.assertFalse(errors, f"threads errored: {errors}")
-            # Hard invariant: exactly one deliver_attempt regardless of race outcome. The
-            # atomic UPSERT in claim_leader_notification (BEGIN IMMEDIATE) guarantees only
-            # one path can win the claim.
-            self.assertEqual(len(sends), 1,
-                f"exactly one deliver_attempt across both paths; got {len(sends)}: {sends}")
-            events = _events(workspace)
-            dedupe_skips = [e for e in events if e.get("event") == "leader_receiver.notification_dedupe_skip"]
-            # Soft invariant: 0 or 1 dedupe_skip depending on whether the losing path actually
-            # reached notify_result_watchers before the winner committed. If the loser's scan
-            # ran AFTER the winner marked status=notified, retry_result_deliveries simply
-            # skipped the watcher (no eligible candidate) and no dedupe_skip fires. Either
-            # outcome upholds exactly-once.
-            self.assertLessEqual(len(dedupe_skips), 1,
-                f"at most one dedupe_skip; got {len(dedupe_skips)}: {dedupe_skips}")
-            rows = store.result_watchers()
-            notified_ids = {row.get("notified_message_id") for row in rows if row.get("notified_message_id")}
-            self.assertEqual(len(notified_ids), 1,
-                f"watcher converges to a single canonical notified_message_id; got {notified_ids}")
+            claimed = [(name, r) for name, r in outcomes if r["status"] == "claimed_by_you"]
+            already = [(name, r) for name, r in outcomes if r["status"] == "already_notified_by"]
+            self.assertEqual(len(claimed), 1, f"exactly one path wins; got {claimed}")
+            self.assertEqual(len(already), 1, f"the other path sees already_notified_by; got {already}")
+            self.assertEqual(already[0][1]["notified_message_id"], claimed[0][1]["notified_message_id"],
+                "loser observes the winner's message_id")
+            log = leader_notification_log_rows(store)
+            log_rows_for_result = [r for r in log if r["result_id"] == two_path_result_id]
+            self.assertEqual(len(log_rows_for_result), 1, "exactly one log row for the (result_id, uuid)")
 
 
 def closing_helper(store: "MessageStore"):

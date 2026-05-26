@@ -320,6 +320,14 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
             drift_results.append(drift)
     save_runtime_state(workspace, state)
     results = _collect_results_and_notify_watchers(workspace, event_log)
+    # Stage 12: prune the dedupe log every tick — cheap O(n) delete bounded by 24h window.
+    from team_agent.message_store.leader_notification_log import prune_leader_notification_log
+    try:
+        pruned = prune_leader_notification_log(store, max_age_hours=24)
+        if pruned:
+            event_log.write("leader_notification.log_pruned", removed=pruned)
+    except Exception as exc:
+        event_log.write("leader_notification.prune_failed", error=str(exc))
     return {
         "ok": True,
         "stop": False,

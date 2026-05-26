@@ -7,15 +7,10 @@ from typing import Any
 
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
-from team_agent.message_store.result_watchers import (
-    claim_leader_notification,
-    leader_notified_message_id_for_result,
-    promote_leader_notification_id,
-    release_leader_notification_claim,
-)
+from team_agent.message_store.leader_notification_log import peek_leader_notification
+from team_agent.message_store.result_watchers import leader_notified_message_id_for_result
 from team_agent.messaging.deps import send_message
 from team_agent.messaging.internal_delivery import deliver_stored_message
-import uuid as _uuid
 
 _RESULT_DELIVERY_MAX_ATTEMPTS = 5
 _DELIVERED_RESULT_MESSAGE_STATUSES = {"visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
@@ -82,52 +77,42 @@ def notify_result_watchers(
             }
         )
     attempts = result_delivery_attempts(event_log, primary["watcher_id"], str(result.get("result_id") or ""))
-    # Stage 11.12 Gap 32 atomic UPSERT: collapse the check-then-write race that recurred
-    # in edac6b3 / 9f52048. claim_leader_notification serializes concurrent notify calls
-    # for the same (team, result_id) via a single SQLite BEGIN IMMEDIATE transaction.
-    # Only the caller that receives 'claimed_by_you' fires the actual deliver_attempt;
-    # every other concurrent caller receives 'already_notified_by' and dedupes silently.
+    # Stage 12 (Gap 26 ∩ Gap 32 roundtable consolidation 2026-05-26): exactly-once dedupe
+    # lives in leader_notification_log keyed by (result_id, leader_session_uuid) and is
+    # consulted atomically at the injection boundary inside _send_to_leader_receiver. Here
+    # we add a read-only fast-path peek so concurrent notify_result_watchers calls for the
+    # same result short-circuit without spinning up a deliver_stored_message round-trip.
+    # The peek is NOT the dedupe primitive — the atomic INSERT OR IGNORE at injection is.
     result_id_str = str(result.get("result_id") or "") or None
     if result_id_str:
-        proposed_token = f"claim:{_uuid.uuid4().hex}"
-        claim = claim_leader_notification(
-            store,
-            primary.get("owner_team_id"),
-            result_id_str,
-            primary["watcher_id"],
-            proposed_token,
+        leader_uuid = _resolve_leader_session_uuid(workspace, primary.get("owner_team_id"))
+        if leader_uuid:
+            prior = peek_leader_notification(
+                store, result_id=result_id_str, leader_session_uuid=leader_uuid,
+            )
+            if prior:
+                notified.append(_mark_watcher_dedupe_skip(
+                    store, event_log, primary, result, attempts,
+                    prior["notified_message_id"],
+                    dedupe_reason or "injection_log_already_notified",
+                    notified_at=prior.get("notified_at"),
+                    leader_session_uuid=leader_uuid,
+                ))
+                return notified
+        # Legacy compat: watcher.notified_message_id set by a prior path (Gap 32 reversal of
+        # 78055bc, or any pre-Stage-12 code) also blocks redelivery. This preserves the
+        # Stage 11.9-11.12 era contract while the new gate (leader_notification_log) is the
+        # authoritative dedupe primitive going forward.
+        legacy_canonical = leader_notified_message_id_for_result(
+            store, primary.get("owner_team_id"), result_id_str,
         )
-        if claim["status"] == "already_notified_by":
-            canonical = claim["canonical_message_id"]
-            reason = dedupe_reason or _infer_dedupe_reason(primary, store)
+        if legacy_canonical:
             notified.append(_mark_watcher_dedupe_skip(
-                store, event_log, primary, result, attempts, canonical, reason,
+                store, event_log, primary, result, attempts,
+                legacy_canonical,
+                dedupe_reason or "rebind_retry",
             ))
             return notified
-        if claim["status"] == "claimed_by_you":
-            existing = delivered_result_message(
-                store, result_id_str,
-                task_id=result.get("task_id"),
-                owner_team_id=primary.get("owner_team_id"),
-            )
-            if existing and existing.get("message_id") != proposed_token:
-                # A prior leader-pane delivery already landed for this result via the
-                # legacy delivered_result_message scan (e.g. older watcher in another row).
-                # Promote our sentinel to that canonical id and treat as dedupe.
-                promote_leader_notification_id(store, primary["watcher_id"], proposed_token, existing["message_id"])
-                notified.append(_mark_watcher_already_delivered(store, event_log, primary, result, attempts, existing))
-                return notified
-            if attempts >= _RESULT_DELIVERY_MAX_ATTEMPTS:
-                release_leader_notification_claim(store, primary["watcher_id"], proposed_token)
-                notified.append(_mark_delivery_exhausted(store, event_log, primary, result, attempts))
-            else:
-                notified.append(_deliver_result_to_watcher(
-                    workspace, store, event_log, primary, result, attempts,
-                    claim_token=proposed_token,
-                ))
-            return notified
-    # Fallback path when result has no result_id (legacy contract). Keep the existing
-    # delivered_result_message scan to avoid regressions on that branch.
     existing = delivered_result_message(
         store, str(result.get("result_id") or ""),
         task_id=result.get("task_id"),
@@ -141,6 +126,23 @@ def notify_result_watchers(
     else:
         notified.append(_deliver_result_to_watcher(workspace, store, event_log, primary, result, attempts))
     return notified
+
+
+def _resolve_leader_session_uuid(workspace: Path, owner_team_id: str | None) -> str | None:
+    """Helper: read the team's leader_session_uuid from runtime state for gate lookups."""
+    try:
+        from team_agent.messaging.deps import load_runtime_state, team_state_key
+        state = load_runtime_state(workspace)
+        if owner_team_id and isinstance(state.get("teams"), dict):
+            scoped = state["teams"].get(owner_team_id)
+            if isinstance(scoped, dict):
+                state = scoped
+        elif owner_team_id and team_state_key(state) != owner_team_id:
+            return None
+        owner = state.get("team_owner") or {}
+        return str(owner.get("leader_session_uuid") or "") or None
+    except Exception:
+        return None
 
 
 def _infer_dedupe_reason(primary: dict[str, Any], store: MessageStore) -> str:
@@ -157,18 +159,19 @@ def _mark_watcher_dedupe_skip(
     attempts: int,
     canonical_message_id: str,
     reason: str,
+    *,
+    notified_at: str | None = None,
+    leader_session_uuid: str | None = None,
 ) -> dict[str, Any]:
     original_message_id = watcher.get("notified_message_id")
-    # Stage 11.12: do NOT write notified_message_id to the loser's watcher row. The Gap 32
-    # canonical-id invariant requires at most one watcher row to carry the canonical for a
-    # given (team, result_id). Writing the canonical (which may be a sentinel during the
-    # winner's in-flight delivery) into N loser rows pollutes the future
-    # leader_notified_message_id_for_result lookup with stale sentinels. Status moves to
-    # 'notified' so retry scans skip this watcher; the canonical lives only on the winner.
+    # Stage 12: the canonical message_id (or sentinel from the gate) is auditing metadata
+    # here. The authoritative dedupe gate is leader_notification_log; this mark just keeps
+    # the watcher row from being re-picked by retry scans.
     store.mark_result_watcher(
         watcher["watcher_id"],
         "notified",
         result_id=result.get("result_id"),
+        notified_message_id=canonical_message_id,
     )
     event_log.write(
         "leader_receiver.notification_dedupe_skip",
@@ -181,6 +184,8 @@ def _mark_watcher_dedupe_skip(
         task_id=result.get("task_id"),
         agent_id=result.get("agent_id"),
         attempt=attempts + 1,
+        leader_session_uuid=leader_session_uuid,
+        prior_notified_at=notified_at,
     )
     return {
         "watcher_id": watcher["watcher_id"],
@@ -206,8 +211,6 @@ def _deliver_result_to_watcher(
     watcher: dict[str, Any],
     result: dict[str, Any],
     attempts: int,
-    *,
-    claim_token: str | None = None,
 ) -> dict[str, Any]:
     try:
         deliver = deliver_stored_message if watcher.get("owner_team_id") else send_message
@@ -222,36 +225,24 @@ def _deliver_result_to_watcher(
             team=watcher.get("owner_team_id"),
         )
     except Exception as exc:
-        if claim_token:
-            release_leader_notification_claim(store, watcher["watcher_id"], claim_token)
         return _mark_delivery_failed(store, event_log, watcher, result, attempts, str(exc))
     status = "notified" if delivery.get("ok") else "notify_failed"
     error = delivery.get("reason") or delivery.get("error")
-    # Stage 11.12 Gap 32: if the caller pre-claimed via claim_leader_notification, the
-    # watcher's notified_message_id already holds our sentinel claim_token. On delivery
-    # success we promote the sentinel to the real message_id (atomic compare-and-update).
-    # On failure we RELEASE the sentinel so the next retry path can re-claim — clearing
-    # back to NULL only when our own sentinel is still present (no clobbering of a
-    # concurrent caller's claim).
-    if claim_token:
-        if delivery.get("ok") and delivery.get("message_id"):
-            promote_leader_notification_id(store, watcher["watcher_id"], claim_token, delivery["message_id"])
-        else:
-            release_leader_notification_claim(store, watcher["watcher_id"], claim_token)
-        store.mark_result_watcher(
-            watcher["watcher_id"], status,
-            result_id=result.get("result_id"),
-            error=error,
-        )
-    else:
-        persisted_message_id = delivery.get("message_id") if delivery.get("ok") else None
-        store.mark_result_watcher(
-            watcher["watcher_id"],
-            status,
-            result_id=result.get("result_id"),
-            notified_message_id=persisted_message_id,
-            error=error,
-        )
+    # Stage 12: notified_message_id is now auditing metadata. The exactly-once contract
+    # lives in the leader_notification_log table consulted by _send_to_leader_receiver;
+    # whatever the gate suppresses comes back as ok=true deduped=true, and the watcher row
+    # records this as a successful notification with the canonical message_id.
+    persisted_message_id = (
+        delivery.get("canonical_message_id") if delivery.get("deduped")
+        else (delivery.get("message_id") if delivery.get("ok") else None)
+    )
+    store.mark_result_watcher(
+        watcher["watcher_id"],
+        status,
+        result_id=result.get("result_id"),
+        notified_message_id=persisted_message_id,
+        error=error,
+    )
     event_log.write(
         "result_watcher.notified",
         watcher_id=watcher["watcher_id"],
