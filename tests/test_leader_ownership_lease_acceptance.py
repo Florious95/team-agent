@@ -215,6 +215,74 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.get("leader_receiver", {}).get("pane_id"), REAL_CALLER_PANE)
             self._assert_state_pair_bound(workspace, REAL_CALLER_PANE)
 
+    def test_13_ambiguous_claim_branch_writes_workspace_and_team_snapshot_atomically(self) -> None:
+        with self._workspace_from_s0_fixture(owner_pane=REAL_DEAD_PANE, receiver_pane=REAL_DEAD_PANE) as workspace:
+            EventLog(workspace).write(
+                "leader_receiver.ambiguous_candidates",
+                incident_id="incident-two-live-leaders",
+                old_pane_id=REAL_DEAD_PANE,
+                candidates=["%1830", "%1831"],
+                team_id=None,
+                uuid_prefix=REAL_UUID[:8],
+            )
+            winner = _leader_target("%1830", workspace, provider="claude_code", command="claude.exe")
+            loser = _leader_target("%1831", workspace, provider="claude_code", command="claude.exe")
+
+            with _leader_env(tmux_pane="%1830"), _patched_tmux(targets=[winner, loser], missing={REAL_DEAD_PANE}):
+                result = _result_or_error(runtime.claim_leader, workspace, team=TEAM_ID, confirm=True)
+
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result.get("status"), "claimed", result)
+            workspace_state = _workspace_state(workspace)
+            team_state = _team_file_state(workspace)
+            observed = {
+                "workspace_owner": (workspace_state.get("team_owner") or {}).get("pane_id"),
+                "workspace_receiver": (workspace_state.get("leader_receiver") or {}).get("pane_id"),
+                "workspace_epoch": (workspace_state.get("team_owner") or {}).get("owner_epoch"),
+                "team_owner": (team_state.get("team_owner") or {}).get("pane_id"),
+                "team_receiver": (team_state.get("leader_receiver") or {}).get("pane_id"),
+                "team_epoch": (team_state.get("team_owner") or {}).get("owner_epoch"),
+            }
+            self.assertEqual(
+                observed,
+                {
+                    "workspace_owner": "%1830",
+                    "workspace_receiver": "%1830",
+                    "workspace_epoch": observed["workspace_epoch"],
+                    "team_owner": "%1830",
+                    "team_receiver": "%1830",
+                    "team_epoch": observed["workspace_epoch"],
+                },
+                observed,
+            )
+
+    def test_14_liveness_uses_owner_identity_not_provider_command_name(self) -> None:
+        with self.subTest("node command without owner identity is not a live owner"):
+            with self._workspace_from_s0_fixture(owner_pane="%2200", receiver_pane="%2200") as workspace:
+                bogus_owner = _leader_target("%2200", workspace, provider="codex", command="node", uuid="")
+                bogus_owner.pop("leader_session_uuid", None)
+                bogus_owner["leader_env"] = {"TEAM_AGENT_LEADER_PROVIDER": "codex"}
+                caller = _leader_target(REAL_CALLER_PANE, workspace, provider="claude_code", command="claude.exe")
+
+                with _leader_env(tmux_pane=REAL_CALLER_PANE), _patched_tmux(targets=[bogus_owner, caller]):
+                    result = _result_or_error(runtime.claim_leader, workspace, team=TEAM_ID, confirm=False)
+
+                self.assertTrue(result.get("ok"), result)
+                self._assert_state_pair_bound(workspace, REAL_CALLER_PANE)
+
+        with self.subTest("matching owner identity stays live even when foreground command changed"):
+            with self._workspace_from_s0_fixture(owner_pane="%2300", receiver_pane="%2300") as workspace:
+                owner = _leader_target("%2300", workspace, provider="claude_code", command="python")
+                owner["process_tree"] = ["claude.exe", "python"]
+                caller = _leader_target(REAL_CALLER_PANE, workspace, provider="claude_code", command="claude.exe")
+
+                with _leader_env(tmux_pane=REAL_CALLER_PANE), _patched_tmux(targets=[owner, caller]):
+                    result = _result_or_error(runtime.claim_leader, workspace, team=TEAM_ID, confirm=False)
+
+                self.assertFalse(result.get("ok"), result)
+                self.assertIn(result.get("reason"), {"force_confirm_required", "previous_owner_alive_refused"}, result)
+                self._assert_workspace_receiver(workspace, "%2300")
+
     @contextmanager
     def _workspace_from_s0_fixture(
         self,
