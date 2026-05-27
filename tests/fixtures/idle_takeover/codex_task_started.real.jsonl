@@ -1,0 +1,1 @@
+{"timestamp":"2026-05-25T10:36:55.865Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5eb5-8880-7421-8b1e-a7b7f2cd9bd9","started_at":1779705415,"model_context_window":258400,"collaboration_mode_kind":"default"}}
