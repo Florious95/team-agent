@@ -18,40 +18,43 @@ from team_agent.state import apply_first_time_leader_binding, derive_leader_sess
 
 def attach_leader(workspace: Path, pane: str | None = None, provider: str = "codex") -> dict[str, Any]:
     from team_agent.message_store import MessageStore
-    from team_agent.runtime import _attach_leader_to_state, ensure_workspace_dirs
+    from team_agent.runtime import _attach_leader_to_state, _runtime_lock, ensure_workspace_dirs
     ensure_workspace_dirs(workspace)
-    state = load_runtime_state(workspace)
-    event_log = EventLog(workspace)
-    receiver, validation = _attach_leader_to_state(
-        workspace,
-        state,
-        pane=pane,
-        provider=provider,
-        event_log=event_log,
-        source="manual",
-    )
-    save_runtime_state(workspace, state)
-    requeued = MessageStore(workspace).requeue_delivery_exhausted_watchers()
-    if requeued:
-        event_log.write(
-            "leader_receiver.requeued_exhausted_watchers",
-            watcher_ids=requeued,
-            count=len(requeued),
-            trigger="attach_leader",
+    # MED1/MED3: attach is a lease mutation; hold the single lease mutex so the state
+    # change + event emission + dual-state write happen in one critical section.
+    with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
+        state = load_runtime_state(workspace)
+        event_log = EventLog(workspace)
+        receiver, validation = _attach_leader_to_state(
+            workspace,
+            state,
+            pane=pane,
+            provider=provider,
+            event_log=event_log,
+            source="manual",
         )
-        for watcher_id in requeued:
+        save_runtime_state(workspace, state)
+        requeued = MessageStore(workspace).requeue_delivery_exhausted_watchers()
+        if requeued:
             event_log.write(
-                "result_watcher.requeued",
-                watcher_id=watcher_id,
+                "leader_receiver.requeued_exhausted_watchers",
+                watcher_ids=requeued,
+                count=len(requeued),
                 trigger="attach_leader",
-                new_pane_id=receiver.get("pane_id"),
             )
-    return {
-        "ok": True,
-        "leader_receiver": receiver,
-        "validation": validation,
-        "requeued_exhausted_watchers": requeued,
-    }
+            for watcher_id in requeued:
+                event_log.write(
+                    "result_watcher.requeued",
+                    watcher_id=watcher_id,
+                    trigger="attach_leader",
+                    new_pane_id=receiver.get("pane_id"),
+                )
+        return {
+            "ok": True,
+            "leader_receiver": receiver,
+            "validation": validation,
+            "requeued_exhausted_watchers": requeued,
+        }
 
 
 def start_leader(
@@ -381,6 +384,13 @@ _LEASE_REBIND_REQUIRED_REASONS = frozenset(
     {"not_in_tmux_pane", "caller_not_leader_shaped", "caller_cwd_mismatch"}
 )
 
+# MED1/MED3 (spark, 2026-05-27): one lease mutex serializes every lease mutation —
+# takeover, claim-leader, attach-leader, and autobind. It is the "send" lock so that
+# ownership transfer also serializes against the send mutator (a concurrent send by
+# the old owner cannot race a rebind). takeover must stay on this lock for the same
+# reason, so the three verbs share a single named critical section.
+LEADER_OWNERSHIP_LOCK = "send"
+
 
 def _lease_caller_pane() -> str:
     return os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or os.environ.get("TMUX_PANE") or ""
@@ -401,6 +411,31 @@ def _pane_is_live_leader(target: dict[str, Any] | None) -> bool:
         return True
     command = str(target.get("pane_current_command", ""))
     return _leader_command_looks_usable(command, "") or _leader_command_provider(command) is not None
+
+
+def _owner_pane_is_live(target: dict[str, Any] | None, owner_record: dict[str, Any] | None) -> bool:
+    # MED2 (spark, 2026-05-27): a recorded owner is only "live" when the candidate
+    # pane carries the OWNER's identity, not merely a leader-looking command name.
+    # When the owner has a recorded leader_session_uuid, that uuid is the identity:
+    # a stray node/claude pane without the matching uuid is not the owner (so a
+    # dead-owner recover proceeds), and the real owner is still live even with a
+    # non-leader foreground command as long as its session uuid is in the tree.
+    if not isinstance(target, dict):
+        return False
+    owner = owner_record or {}
+    owner_uuid = str(owner.get("leader_session_uuid") or "")
+    if owner_uuid:
+        from team_agent.messaging.leader_panes import _target_leader_session_uuid
+        return _target_leader_session_uuid(target) == owner_uuid
+    # No recorded uuid: fall back to provider identity (process tree / command for
+    # the owner's provider) rather than any leader-looking command.
+    owner_provider = str(owner.get("provider") or "")
+    if owner_provider:
+        from team_agent.messaging.leader_panes import _leader_command_looks_usable, _target_leader_session_uuid
+        if _target_leader_session_uuid(target):
+            return True
+        return _leader_command_looks_usable(str(target.get("pane_current_command", "")), owner_provider)
+    return _pane_is_live_leader(target)
 
 
 def _cwd_inside_workspace(cwd: str | None, workspace: Path) -> bool:
@@ -577,7 +612,7 @@ def _claim_lease_no_incident(
     by_pane = {str(item.get("pane_id")): item for item in targets if isinstance(item, dict)}
 
     bound_pane = receiver.get("pane_id") or owner.get("pane_id")
-    bound_alive = _pane_is_live_leader(by_pane.get(str(bound_pane))) if bound_pane else False
+    bound_alive = _owner_pane_is_live(by_pane.get(str(bound_pane)), owner) if bound_pane else False
 
     if bound_pane and str(bound_pane) == str(caller_pane):
         return {
@@ -616,7 +651,7 @@ def _claim_lease_no_incident(
     recheck_result = core_list_targets()
     recheck_targets = recheck_result.get("targets", []) if isinstance(recheck_result, dict) and recheck_result.get("ok") else []
     recheck_by_pane = {str(item.get("pane_id")): item for item in recheck_targets if isinstance(item, dict)}
-    revived = bool(bound_pane) and not bound_alive and _pane_is_live_leader(recheck_by_pane.get(str(bound_pane)))
+    revived = bool(bound_pane) and not bound_alive and _owner_pane_is_live(recheck_by_pane.get(str(bound_pane)), owner)
     if locked_epoch != precheck_epoch or (revived and not confirm):
         _emit_lease_refusal(event_log, "owner_epoch_advanced", locked_owner or owner, bound_pane, caller_pane, team_id, host, os_user)
         return _lease_refused(
@@ -699,7 +734,7 @@ def _claim_lease_no_incident(
 def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False) -> dict[str, Any]:
     from team_agent.runtime import RuntimeError, _runtime_lock, core_list_targets
     current_pane = _lease_caller_pane()
-    with _runtime_lock(workspace, "leader_receiver"):
+    with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
         state = select_runtime_state(workspace, team)
         event_log = EventLog(workspace)
         team_id = team_state_key(state)
@@ -734,7 +769,13 @@ def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False
         epoch = int(owner.get("owner_epoch") or receiver.get("owner_epoch") or 0) + 1
         owner.update({"pane_id": current_pane, "owner_epoch": epoch, "claimed_at": datetime.now(timezone.utc).isoformat(), "claimed_via": "claim-leader"})
         state["leader_receiver"] = _receiver_from_claim_target(target, receiver, expected_uuid, epoch)
-        save_team_scoped_state(workspace, state)
+        # HIGH (spark, 2026-05-27): the multi-candidate claim branch must write both
+        # state locations atomically (workspace state.json + team/<session> snapshot),
+        # exactly like the no-incident lease path, so the branches never split state.
+        divergence = _detect_dual_state_divergence(workspace, state)
+        _write_lease_dual_state(workspace, state)
+        if divergence:
+            event_log.write("leader_receiver.state_divergence_repaired", team_id=team_id, owner_epoch=epoch, new_pane_id=current_pane, **divergence)
         losers = [pane for pane in candidates if pane != current_pane]
         event_log.write(
             "leader_receiver.claim_applied",
@@ -834,30 +875,33 @@ def autobind_leader_receiver_from_env(
     tmux_pane = os.environ.get("TMUX_PANE")
     if not tmux_pane:
         return None
-    from team_agent.runtime import ensure_workspace_dirs
+    from team_agent.runtime import _runtime_lock, ensure_workspace_dirs
     ensure_workspace_dirs(workspace)
-    state = load_runtime_state(workspace)
-    event_log = EventLog(workspace)
-    try:
-        receiver, _validation = attach_leader_to_state(
-            workspace,
-            state,
-            pane=tmux_pane,
-            provider=provider,
-            event_log=event_log,
-            source=source,
-        )
-    except Exception as exc:
-        event_log.write(
-            "leader_receiver.autobind_skipped",
-            pane=tmux_pane,
-            provider=provider,
-            source=source,
-            error=str(exc),
-        )
-        return None
-    save_runtime_state(workspace, state)
-    return receiver
+    # MED1/MED3: the startup autobind is a lease mutation; hold the single lease
+    # mutex so it cannot interleave with takeover / claim / attach / send.
+    with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
+        state = load_runtime_state(workspace)
+        event_log = EventLog(workspace)
+        try:
+            receiver, _validation = attach_leader_to_state(
+                workspace,
+                state,
+                pane=tmux_pane,
+                provider=provider,
+                event_log=event_log,
+                source=source,
+            )
+        except Exception as exc:
+            event_log.write(
+                "leader_receiver.autobind_skipped",
+                pane=tmux_pane,
+                provider=provider,
+                source=source,
+                error=str(exc),
+            )
+            return None
+        save_runtime_state(workspace, state)
+        return receiver
 
 
 __all__ = [

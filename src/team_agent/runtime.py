@@ -65,6 +65,7 @@ from team_agent.display import (
     set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
 )
 from team_agent.leader import (
+    LEADER_OWNERSHIP_LOCK,
     attach_leader,
     attach_leader_to_state as _attach_leader_to_state,
     claim_leader,
@@ -617,7 +618,7 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             "reason": "no_caller_identity",
             "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
         }
-    with _runtime_lock(workspace, "send"):
+    with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
         try:
             team_state = select_runtime_state(workspace, team)
         except RuntimeError as exc:
