@@ -134,6 +134,11 @@ def _tmux_inject_text(
                 "submit_attempts": submit.get("attempts"),
             }
         submit_verification = _leader_submit_verification(submit.get("verification"), verification, submit_key)
+        # Gap 42: paste+submit success is authoritative for delivery. The post-submit
+        # turn-boundary probe is observation metadata only, never a delivery gate — a
+        # busy / compacting recipient that has not yet shown a new prompt marker is
+        # still a successful delivery. Real paste/submit failures are caught and
+        # returned above; this point is only reached after submit reported ok.
         turn_visible, turn_verification, turn_capture = _wait_for_leader_new_turn(
             target,
             text,
@@ -142,16 +147,7 @@ def _tmux_inject_text(
             timeout=2.0,
         )
         if not turn_visible:
-            return {
-                "ok": False,
-                "stage": "turn-boundary-verification",
-                "error": f"leader turn boundary not verified: {turn_verification}",
-                "attempts": attempt_log,
-                "verification": verification,
-                "submit_verification": submit_verification,
-                "turn_verification": turn_verification,
-                "submit_attempts": submit.get("attempts"),
-            }
+            turn_verification = "not_yet_observed"
         return {
             "ok": True,
             "stage": "submitted",
