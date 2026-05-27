@@ -8,6 +8,9 @@ from typing import Any
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.permissions import resolve_permissions
+from team_agent.display.backend import DISPLAY_BACKENDS_WITH_WORKER_VIEWS, resolve_display_backend
+from team_agent.display.close import close_adaptive_display
+from team_agent.display.rebuild import rebuild_adaptive_display_after_rebind
 from team_agent.restart.selection import select_restart_state
 from team_agent.restart.snapshot import save_team_runtime_snapshot
 from team_agent.spec import load_spec
@@ -27,7 +30,6 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     # at call time. Runtime re-exports the provider helpers, so this also
     # routes through the providers module without binding it directly.
     from team_agent.runtime import (
-        GHOSTTY_DISPLAY_BACKENDS,
         ResumeUnavailable,
         RuntimeError,
         _attach_profile_resume_root,
@@ -83,7 +85,12 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
         )
         raise RuntimeError(_tmux_session_conflict_error(session_name))
     runtime_cfg = _effective_runtime_config(spec.get("runtime", {}))
-    display_backend = spec.get("runtime", {}).get("display_backend", state.get("display_backend", "none"))
+    display_backend = resolve_display_backend(
+        spec.get("runtime", {}).get("display_backend"),
+        recorded=state.get("display_backend"),
+        event_log=event_log,
+        source="restart",
+    )
     # Stage 7 S5 — Slice 6 lifecycle atomicity contract: compute restart_agents
     # early so we can pre-validate resumability BEFORE any destructive teardown
     # (ghostty close, tmux session creation). Without --allow-fresh, every
@@ -146,6 +153,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
             "allow_fresh": bool(allow_fresh),
             "error": _format_atomic_refusal_error(refused),
         }
+    close_adaptive_display(state, event_log)
     _close_ghostty_workspace(state, event_log)
     for agent_id, agent_state in state.get("agents", {}).items():
         _close_ghostty_display(agent_id, agent_state, event_log)
@@ -330,7 +338,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
                 exclude_session_ids=known_session_ids,
                 raise_on_missed=False,
             )
-        if display_backend in GHOSTTY_DISPLAY_BACKENDS:
+        if display_backend in DISPLAY_BACKENDS_WITH_WORKER_VIEWS:
             display_jobs.append((agent["id"], agent))
         new_agents[agent["id"]] = agent_state
         restarted.append(
@@ -341,7 +349,9 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
                 "display_target": None,
             }
         )
-    display_results = _open_worker_displays(workspace, session_name, display_jobs, event_log, display_backend)
+    display_results = {}
+    if display_backend != "adaptive":
+        display_results = _open_worker_displays(workspace, session_name, display_jobs, event_log, display_backend)
     for agent_id, display in display_results.items():
         if agent_id in new_agents:
             new_agents[agent_id]["display"] = display
@@ -367,7 +377,18 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     write_team_state(workspace, spec, state)
     from team_agent.leader import autobind_leader_receiver_from_env
     leader_provider = str(spec.get("leader", {}).get("provider") or "codex")
-    autobind_leader_receiver_from_env(workspace, leader_provider, source="restart")
+    rebound_receiver = autobind_leader_receiver_from_env(workspace, leader_provider, source="restart")
+    if display_backend == "adaptive":
+        state = load_runtime_state(workspace)
+        state, display_results = rebuild_adaptive_display_after_rebind(
+            workspace, session_name, spec, state, event_log,
+            save_runtime_state, save_team_runtime_snapshot, write_team_state,
+            receiver=rebound_receiver,
+        )
+        for item in restarted:
+            agent_id = item["agent_id"]
+            if agent_id in display_results:
+                item["display_target"] = display_results[agent_id]
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
     return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}

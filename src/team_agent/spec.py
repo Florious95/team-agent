@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from team_agent.errors import ValidationError
+from team_agent.display.backend import VALID_DISPLAY_BACKENDS
 from team_agent.permissions import CANONICAL_TOOLS, expand_tools
 from team_agent.profiles import AUTH_MODES
 from team_agent.simple_yaml import loads
@@ -233,8 +234,8 @@ def _check_communication(comm: Any, errors: list[str]) -> None:
 
 
 def _check_runtime(runtime: Any, errors: list[str]) -> None:
-    required = {"backend", "display_backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"}
-    allowed = required | {
+    required = {"backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"}
+    allowed = required | {"display_backend"} | {
         "dangerous_auto_approve",
         "auto_attach_leader",
         "fast",
@@ -253,7 +254,7 @@ def _check_runtime(runtime: Any, errors: list[str]) -> None:
         return
     if runtime.get("backend") not in {"tmux", "pty"}:
         errors.append("/runtime/backend: invalid backend")
-    if runtime.get("display_backend") not in {"none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace"}:
+    if "display_backend" in runtime and runtime.get("display_backend") not in VALID_DISPLAY_BACKENDS:
         errors.append("/runtime/display_backend: invalid display backend")
     if "dangerous_auto_approve" in runtime and not isinstance(runtime["dangerous_auto_approve"], bool):
         errors.append("/runtime/dangerous_auto_approve: must be a boolean")

@@ -14,9 +14,10 @@ from team_agent.display.ghostty import (
     ghostty_pids_by_title,
     prepare_ghostty_display_session,
 )
+from team_agent.display.tiling import DISPLAY_PANES_PER_WINDOW, display_window_name, grouped_display_jobs
 
 
-GHOSTTY_WORKSPACE_PANES_PER_WINDOW = 3
+GHOSTTY_WORKSPACE_PANES_PER_WINDOW = DISPLAY_PANES_PER_WINDOW
 
 
 def _tmux_stdout_last_line(stdout: str) -> str | None:
@@ -152,7 +153,7 @@ def ghostty_workspace_aggregator_name(session_name: str) -> str:
 
 
 def ghostty_workspace_window_name(index: int) -> str:
-    return "overview" if index == 0 else f"overview-{index + 1}"
+    return display_window_name(index)
 
 
 def ghostty_workspace_pane_command(linked_session: str) -> str:
@@ -214,9 +215,7 @@ def prepare_ghostty_workspace_aggregator(
         return result
 
     panes: list[dict[str, Any]] = []
-    for window_index, start in enumerate(range(0, len(linked_jobs), GHOSTTY_WORKSPACE_PANES_PER_WINDOW)):
-        window_name = ghostty_workspace_window_name(window_index)
-        window_jobs = linked_jobs[start : start + GHOSTTY_WORKSPACE_PANES_PER_WINDOW]
+    for window_index, window_name, window_jobs in grouped_display_jobs(linked_jobs, GHOSTTY_WORKSPACE_PANES_PER_WINDOW):
         first_agent_id, first_agent, first_linked_session = window_jobs[0]
         if window_index == 0:
             proc = run_cmd(

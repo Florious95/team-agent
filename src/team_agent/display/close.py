@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from team_agent.events import EventLog
+from team_agent.display.adaptive import close_adaptive_display
 from team_agent.display.ghostty import ghostty_pids_by_title
 from team_agent.display.workspace import kill_ghostty_workspace_linked_sessions
 

@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+from team_agent.display.adaptive import (
+    ADAPTIVE_BLOCK_REASONS,
+    adaptive_blocked,
+    close_adaptive_display,
+    close_adaptive_windows,
+    open_adaptive_display,
+    prepare_adaptive_windows,
+    probe_display_capabilities,
+)
+from team_agent.display.backend import (
+    ADAPTIVE_DISPLAY_BACKEND,
+    DISPLAY_BACKENDS_WITH_WORKER_VIEWS,
+    GHOSTTY_DISPLAY_BACKENDS,
+    VALID_DISPLAY_BACKENDS,
+    resolve_display_backend,
+)
 from team_agent.display.close import (
+    close_adaptive_display,
     close_ghostty_display,
     close_ghostty_workspace,
     close_ghostty_workspace_slot,
@@ -34,7 +51,15 @@ from team_agent.display.workspace import (
 )
 
 __all__ = [
+    "ADAPTIVE_BLOCK_REASONS",
+    "ADAPTIVE_DISPLAY_BACKEND",
+    "DISPLAY_BACKENDS_WITH_WORKER_VIEWS",
     "GHOSTTY_WORKSPACE_PANES_PER_WINDOW",
+    "GHOSTTY_DISPLAY_BACKENDS",
+    "VALID_DISPLAY_BACKENDS",
+    "adaptive_blocked",
+    "close_adaptive_display",
+    "close_adaptive_windows",
     "close_ghostty_display",
     "close_ghostty_workspace",
     "close_ghostty_workspace_slot",
@@ -51,11 +76,15 @@ __all__ = [
     "ghostty_workspace_window_name",
     "kill_ghostty_workspace_linked_sessions",
     "open_ghostty_worker_window",
+    "open_adaptive_display",
     "open_ghostty_workspace",
     "open_ghostty_workspace_agent_display",
     "open_worker_displays",
+    "prepare_adaptive_windows",
     "prepare_ghostty_display_session",
     "prepare_ghostty_workspace_aggregator",
     "prepare_ghostty_workspace_linked_sessions",
+    "probe_display_capabilities",
+    "resolve_display_backend",
     "set_ghostty_workspace_pane_title",
 ]

@@ -93,7 +93,7 @@ def compile_team(team_dir: Path, out_path: Path | None = None) -> dict[str, Any]
         },
         "runtime": {
             "backend": "tmux",
-            "display_backend": str(team_meta.get("display_backend") or "ghostty_window"),
+            "display_backend": str(team_meta.get("display_backend") or "adaptive"),
             "session_name": str(team_meta.get("session_name") or f"team-{_slug(team_name)}"),
             "auto_launch": True,
             "require_user_approval_before_launch": True,

@@ -39,6 +39,7 @@ from team_agent.providers import (
     shell_resume_command_for_agent,
 )
 from team_agent.display import (
+    GHOSTTY_DISPLAY_BACKENDS,
     GHOSTTY_WORKSPACE_PANES_PER_WINDOW,
     close_ghostty_display as _close_ghostty_display,
     close_ghostty_workspace as _close_ghostty_workspace,
@@ -457,7 +458,6 @@ TMUX_PANE_FORMAT = (
     "#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}"
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
-GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
 DELIVERY_CAPTURE_LINES = 40
 SUBMITTED_DELIVERY_STATUSES = {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
 TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024
@@ -483,6 +483,7 @@ def ensure_workspace_dirs(workspace: Path) -> None:
 
 
 def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -> dict[str, Any]:
+    from team_agent.display.close import close_adaptive_display
     from team_agent.state import resolve_team_scoped_state
     state, refusal = resolve_team_scoped_state(workspace, team)
     if refusal:
@@ -522,6 +523,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             if proc.returncode == 0:
                 log_path.write_text(proc.stdout, encoding="utf-8")
                 captured.append(str(log_path))
+        close_adaptive_display(state, event_log)
         _close_ghostty_workspace(state, event_log)
         for agent_id, agent_state in state.get("agents", {}).items():
             _close_ghostty_display(agent_id, agent_state, event_log)
@@ -536,6 +538,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
     else:
         event_log.write("shutdown.idempotent", session=session_name, reason="session missing")
+        close_adaptive_display(state, event_log)
         _close_ghostty_workspace(state, event_log)
     for agent_id, agent_state in state.get("agents", {}).items():
         if agent_id not in closed_displays:
