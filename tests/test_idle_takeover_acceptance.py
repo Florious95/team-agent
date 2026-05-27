@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import unittest
 from pathlib import Path
@@ -319,6 +320,103 @@ class IdleTakeoverAcceptanceTests(unittest.TestCase):
         )
         self.assertFalse(result["should_ping"], result)
         self.assertEqual(result["reason"], "node_working")
+
+    def test_15_high_coordinator_tick_uses_idle_takeover_not_legacy_scrollback_idle_fallback(self) -> None:
+        lifecycle = importlib.import_module("team_agent.coordinator.lifecycle")
+        source = inspect.getsource(lifecycle.coordinator_tick)
+
+        self.assertNotIn(
+            "detect_idle_fallbacks",
+            source,
+            "coordinator tick must not drive Gap 32 reminders through the old scrollback/agent_health idle fallback path",
+        )
+        self.assertIn("idle_takeover", source)
+        self.assertTrue(
+            "read_turn_state" in source or "evaluate_takeover_reminder" in source,
+            "coordinator tick must call the new provider-file idle/takeover subsystem",
+        )
+
+    def test_16_c4_missing_or_partial_process_identity_is_not_working(self) -> None:
+        cases = [
+            None,
+            {"expected": {"pid": 1234}, "current": {"pid": 1234}},
+            {"expected": {"pid": 1234, "start_time": 100.0}, "current": {"pid": 1234}},
+            {"expected": {"pid": 1234, "cmdline": "codex --no-alt-screen"}, "current": {"pid": 1234}},
+        ]
+
+        for process in cases:
+            with self.subTest(process=process):
+                state = self._classify(
+                    "codex",
+                    "codex_open_turn_silent_build.real.jsonl",
+                    process=process,
+                    file_silence_seconds=900.0,
+                )
+                self.assertNotEqual(state["state"], "working", state)
+                self.assertIn(state["state"], {"unknown", "abnormal"}, state)
+                self.assertTrue(state.get("diagnostics") or state.get("annotations"), state)
+
+    def test_17_c8_missing_turn_id_errors_are_not_deduped_together(self) -> None:
+        api = self._api()
+        records = [
+            {
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread_schema_missing_turn",
+                    "turn": {
+                        "items": "notLoaded",
+                        "status": "failed",
+                        "error": {"message": "first failed turn without id"},
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread_schema_missing_turn",
+                    "turn": {
+                        "items": "notLoaded",
+                        "status": "failed",
+                        "error": {"message": "second failed turn without id"},
+                    },
+                },
+            },
+        ]
+
+        result = api.process_abnormal_records(
+            records,
+            registry={"provider": "codex"},
+            notification_state={},
+            event_sink=EventSink(),
+        )
+        notifications = result.get("notifications", [])
+        self.assertEqual(
+            len(notifications),
+            2,
+            "missing turn_id must not collapse distinct structured errors into one global dedupe bucket",
+        )
+        self.assertEqual(len({n.get("dedupe_key") for n in notifications}), 2, notifications)
+
+    def test_18_c11_overlapping_suspend_intervals_are_merged_before_debounce(self) -> None:
+        api = self._api()
+        result = api.evaluate_takeover_reminder(
+            [
+                _node("leader", "leader", {"state": "idle", "turn_id": "leader_turn"}),
+                _node("worker_a", "worker", {"state": "idle", "turn_id": "worker_turn"}),
+            ],
+            monitor_state={"opened_worker_turn_since_ack": True, "all_idle_since": 0.0},
+            now_monotonic=120.0,
+            debounce_seconds=60.0,
+            suspend_intervals=[(10.0, 50.0), (30.0, 70.0), (30.0, 70.0)],
+        )
+
+        self.assertTrue(
+            result["should_ping"],
+            "overlapping/duplicate suspend windows should subtract only the merged 10..70 interval, leaving 60s active idle",
+        )
+        self.assertGreaterEqual(result.get("active_idle_seconds", 60.0), 60.0)
 
     def _api(self):
         try:
