@@ -392,6 +392,9 @@ def _broadcast_ambiguous_candidates(
         team_id=team_id,
         uuid_prefix=_uuid_prefix(owner_identity),
         debounce_bucket=bucket,
+        # C16/C22: two or more live candidates remain; each must explicitly claim
+        # with --confirm, so the broadcast carries the closed-enum lease reason.
+        reason="force_confirm_required",
     )
     for candidate in candidates:
         pane_id = str(candidate.get("pane_id") or "")

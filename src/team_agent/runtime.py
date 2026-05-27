@@ -628,23 +628,72 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
                 "team": team,
                 "error": str(exc),
             }
-        previous_owner = team_state.get("team_owner")
+        previous_owner = team_state.get("team_owner") if isinstance(team_state.get("team_owner"), dict) else {}
+        previous_receiver = team_state.get("leader_receiver") if isinstance(team_state.get("leader_receiver"), dict) else {}
+        from team_agent.leader import _lease_epoch, _receiver_from_claim_target
+        next_epoch = _lease_epoch(previous_owner, previous_receiver) + 1
+        leader_uuid = str(previous_owner.get("leader_session_uuid") or "")
         new_owner = {
             "pane_id": pane_id,
             "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER", ""),
             "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT", ""),
+            "owner_epoch": next_epoch,
             "claimed_at": datetime.now(timezone.utc).isoformat(),
             "claimed_via": "takeover",
         }
+        if leader_uuid:
+            new_owner["leader_session_uuid"] = leader_uuid
         team_state["team_owner"] = new_owner
-        save_team_scoped_state(workspace, team_state)
-        EventLog(workspace).write(
-            "team_owner.takeover",
-            team=team,
-            previous_owner=previous_owner,
+        # C11/C17: takeover converges on the same lease mutation as claim-leader.
+        # Rebind the leader receiver to the caller pane and write owner + receiver
+        # to both state locations together, so takeover never leaves the receiver
+        # pointing at the old (often dead) pane.
+        targets_result = core_list_targets()
+        targets = targets_result.get("targets", []) if isinstance(targets_result, dict) and targets_result.get("ok") else []
+        caller_target = next((item for item in targets if isinstance(item, dict) and str(item.get("pane_id")) == str(pane_id)), None)
+        new_receiver = None
+        if caller_target:
+            new_receiver = _receiver_from_claim_target(
+                caller_target,
+                previous_receiver,
+                leader_uuid or None,
+                next_epoch,
+            )
+            new_receiver["discovery"] = "takeover"
+            team_state["leader_receiver"] = new_receiver
+        from team_agent.leader import _write_lease_dual_state
+        _write_lease_dual_state(workspace, team_state)
+        # C11: takeover converges on the same lease audit events as claim-leader
+        # instead of a divergent legacy team_owner.takeover record.
+        event_log = EventLog(workspace)
+        uuid_prefix = leader_uuid[:8]
+        old_pane_id = previous_receiver.get("pane_id") or (previous_owner or {}).get("pane_id")
+        if new_receiver is not None:
+            event_log.write(
+                "leader_receiver.rebind_applied",
+                reason="takeover_confirmed",
+                old_pane_id=old_pane_id,
+                new_pane_id=pane_id,
+                owner_epoch=next_epoch,
+                uuid_prefix=uuid_prefix,
+                team_id=team,
+            )
+        event_log.write(
+            "owner_epoch_advanced",
+            reason="takeover_confirmed",
+            old_pane_id=old_pane_id,
+            new_pane_id=pane_id,
+            owner_epoch=next_epoch,
+            uuid_prefix=uuid_prefix,
+            team_id=team,
+            previous_owner=previous_owner or None,
             new_owner=new_owner,
+            receiver_rebound=bool(new_receiver),
         )
-        return {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner}
+        response = {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner or None, "owner_epoch": next_epoch}
+        if new_receiver is not None:
+            response["leader_receiver"] = new_receiver
+        return response
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:

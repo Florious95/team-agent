@@ -77,6 +77,7 @@ def _send_message_unlocked(
             return gate
     owner_team_id = team_state_key(state)
     leader_id = _leader_id(state, spec)
+    _flag_rebind_required_when_unbound_plain_shell_leader(workspace, state, spec, sender, leader_id, event_log)
 
     if isinstance(target, list):
         if watch_result:
@@ -131,6 +132,38 @@ def _send_message_unlocked(
         watch_result=watch_result,
         block_until_delivered=block_until_delivered,
         owner_team_id=owner_team_id,
+    )
+
+
+def _flag_rebind_required_when_unbound_plain_shell_leader(
+    workspace: Path,
+    state: dict[str, Any],
+    spec: dict[str, Any],
+    sender: str,
+    leader_id: str,
+    event_log: EventLog,
+) -> None:
+    # Gap 39 C5: a leader send from a plain shell (no $TMUX_PANE) must never self-bind
+    # the caller as the leader receiver. When the lease is fully unbound, flag a
+    # rebind_required so the message stays queued and the operator knows to reconnect
+    # from a real tmux leader pane. Only fires for an unbound lease + no caller pane.
+    import os
+    from team_agent.messaging.deps import _leader_receiver_is_direct
+    if not _is_leader_sender(sender, leader_id):
+        return
+    if isinstance(state.get("team_owner"), dict) and state["team_owner"].get("pane_id"):
+        return
+    if _leader_receiver_is_direct(state.get("leader_receiver")):
+        return
+    if os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or os.environ.get("TMUX_PANE"):
+        return
+    event_log.write(
+        "leader_receiver.rebind_required",
+        reason="not_in_tmux_pane",
+        old_pane_id=(state.get("leader_receiver") or {}).get("pane_id"),
+        new_pane_id=None,
+        team_id=team_state_key(state),
+        recovery_action="run team-agent claim-leader --confirm from the leader's tmux pane",
     )
 
 
