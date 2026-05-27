@@ -262,8 +262,10 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     )
     from team_agent.messaging.idle_alerts import (
         detect_cross_worker_deadlocks,
-        detect_idle_fallbacks,
     )
+    from team_agent.idle_predicate import evaluate_takeover_reminder
+    from team_agent.idle_takeover_wiring import build_idle_nodes, push_idle_reminder, IDLE_DEBOUNCE_SECONDS
+    import time as _time
     from team_agent.messaging.activity_detector import detect_compaction_degradation
     from team_agent.messaging.leader_api_errors import detect_leader_api_errors
     from team_agent.messaging.session_drift import detect_session_drift
@@ -283,7 +285,23 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     delivered = _deliver_pending_messages(workspace, state, event_log)
     fired = _fire_due_scheduled_events(workspace, store, event_log)
     stuck = _detect_stuck_agents(workspace, state, store, event_log)
-    idle_alerts = detect_idle_fallbacks(workspace, state, store, event_log)
+    # Gap 32: the take-over reminder is driven by file-fact turn-state via the
+    # idle_takeover predicate (the legacy screen-scrape obligation path is retired).
+    _coord_meta = state.setdefault("coordinator", {})
+    idle_eval = evaluate_takeover_reminder(
+        build_idle_nodes(state),
+        monitor_state=_coord_meta.get("idle_takeover_monitor"),
+        now_monotonic=_time.monotonic(),
+        debounce_seconds=IDLE_DEBOUNCE_SECONDS,
+    )
+    _coord_meta["idle_takeover_monitor"] = idle_eval.get("monitor_state")
+    push_idle_reminder(workspace, state, event_log, idle_eval)
+    idle_alerts = (
+        [{"alert_type": "idle_takeover", "message": idle_eval.get("message"),
+          "reason": idle_eval.get("reason"), "interrupted": idle_eval.get("interrupted_nodes")}]
+        if idle_eval.get("should_ping")
+        else []
+    )
     deadlock_alerts = detect_cross_worker_deadlocks(workspace, state, store, event_log)
     compaction_results: list[dict[str, Any]] = []
     for agent_id, agent_state in state.get("agents", {}).items():

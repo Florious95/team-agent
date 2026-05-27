@@ -41,9 +41,12 @@ class CoordinatorTickWiresPhaseEDetectorsTests(unittest.TestCase):
             )
             calls: dict[str, int] = {"idle": 0, "deadlock": 0, "compaction": 0}
 
-            def fake_idle(_workspace, _state, _store, _event_log, now=None):
+            def fake_idle(nodes, *, monitor_state=None, now_monotonic=0.0, debounce_seconds=60.0, suspend_intervals=None, event_sink=None):
+                # Gap 32: coordinator_tick now drives the file-fact idle/takeover
+                # predicate, not the retired screen-scrape detect_idle_fallbacks.
                 calls["idle"] += 1
-                return [{"alert_type": "idle_fallback", "agent_id": "fake_impl"}]
+                return {"should_ping": False, "message": None, "reason": "debounce_active",
+                        "annotations": [], "interrupted_nodes": [], "monitor_state": dict(monitor_state or {})}
 
             def fake_deadlock(_workspace, _state, _store, _event_log, now=None):
                 calls["deadlock"] += 1
@@ -54,16 +57,16 @@ class CoordinatorTickWiresPhaseEDetectorsTests(unittest.TestCase):
                 return {"ok": True, "event": "compaction_threshold_crossed.below_threshold", "agent_id": agent_id, "compaction_count": 0}
 
             with (
-                patch("team_agent.messaging.idle_alerts.detect_idle_fallbacks", side_effect=fake_idle),
+                patch("team_agent.idle_predicate.evaluate_takeover_reminder", side_effect=fake_idle),
                 patch("team_agent.messaging.idle_alerts.detect_cross_worker_deadlocks", side_effect=fake_deadlock),
                 patch("team_agent.messaging.activity_detector.detect_compaction_degradation", side_effect=fake_compaction),
             ):
                 result = runtime.coordinator_tick(workspace)
 
             self.assertTrue(result.get("ok"))
-            self.assertEqual(calls["idle"], 1, "detect_idle_fallbacks must be invoked from coordinator_tick")
+            self.assertEqual(calls["idle"], 1, "the idle/takeover predicate must be invoked from coordinator_tick")
             self.assertEqual(calls["deadlock"], 1, "detect_cross_worker_deadlocks must be invoked from coordinator_tick")
-            self.assertEqual(result.get("idle_alerts"), [{"alert_type": "idle_fallback", "agent_id": "fake_impl"}])
+            self.assertEqual(result.get("idle_alerts"), [])
             self.assertEqual(result.get("deadlock_alerts"), [{"alert_type": "cross_worker_deadlock", "agent_id": "fake_impl"}])
 
     def test_compaction_counter_resets_to_zero_after_successful_auto_reset(self) -> None:
