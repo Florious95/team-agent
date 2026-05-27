@@ -89,57 +89,86 @@ def decide_state(
     if kind == APPROVAL:
         return _result("blocked_on_human", turn_id, reason or "approval_required", "session_file", ["awaiting_approval"], diagnostics)
 
-    # kind == TURN_OPEN with no later close → open turn.
-    alive, live_reason, live_diag = process_is_live(process)
+    # kind == TURN_OPEN with no later close → open turn. To declare "working" we
+    # must POSITIVELY confirm the recorded process is still alive (C4 fail-safe);
+    # missing/partial identity cannot be optimistically read as working.
+    verdict, live_reason, live_diag = process_liveness(process)
     if live_diag:
         diagnostics = diagnostics + [live_diag]
-    if alive:
+    if verdict == "alive":
         return _result("working", turn_id, "open_turn", "session_file", [], diagnostics)
-    return _result("abnormal", turn_id, "crashed_mid_turn", "process_guard", ["crashed_mid_turn", live_reason], diagnostics)
+    if verdict == "dead":
+        return _result("abnormal", turn_id, "crashed_mid_turn", "process_guard", ["crashed_mid_turn", live_reason], diagnostics)
+    # unverifiable: cannot confirm alive → fail safe to unknown, never working.
+    return _result("unknown", turn_id, "process_identity_unverified", "process_guard", ["process_identity_unverified", live_reason], diagnostics)
+
+
+_STRONG_IDENTITY_FIELDS = ("start_time", "cmdline", "create_time")
+
+
+def process_liveness(process: Any) -> tuple[str, str, dict[str, Any] | None]:
+    """Process-identity liveness guard (Gap 32 C4) — three-valued.
+
+    Returns (verdict, reason, diagnostic) where verdict is one of:
+      - ``"alive"``        — positively confirmed the same process is running
+      - ``"dead"``         — confirmed replaced/exited (identity mismatch or flag)
+      - ``"unverifiable"`` — identity missing/partial; CANNOT be read as working
+
+    Identity, not bare PID: aliveness must be affirmatively confirmed by a strong
+    identity field (start_time / cmdline / create_time) present and equal in BOTH
+    the recorded and the current snapshot. Missing/partial info is fail-safe
+    unverifiable, never optimistically "alive".
+
+    Accepted ``process`` shapes (any one):
+      - None / non-dict                      → unverifiable
+      - {"alive"|"running": bool}            → explicit
+      - {"identity_match": bool}             → explicit identity verdict
+      - {"expected"|"recorded": {...}, "current"|"observed": {...}}
+    """
+    if process is None or not isinstance(process, dict):
+        return "unverifiable", "process_identity_missing", {"kind": "process_identity_unverified"}
+    if process.get("alive") is False or process.get("running") is False:
+        return "dead", "process_not_running", {"kind": "process_dead", "detail": "not_running"}
+    if process.get("identity_match") is False:
+        return "dead", "process_identity_mismatch", {"kind": "process_identity_mismatch"}
+    if process.get("alive") is True or process.get("running") is True or process.get("identity_match") is True:
+        return "alive", "process_alive", None
+    recorded = process.get("recorded") if isinstance(process.get("recorded"), dict) else process.get("expected")
+    current = process.get("current") if isinstance(process.get("current"), dict) else process.get("observed")
+    if not (isinstance(recorded, dict) and isinstance(current, dict)):
+        return "unverifiable", "process_identity_partial", {"kind": "process_identity_unverified"}
+    if current.get("alive") is False or current.get("running") is False:
+        return "dead", "process_not_running", {"kind": "process_dead", "detail": "current_not_running"}
+    # Any shared strong identity field that DIFFERS = confirmed replacement.
+    for key in _STRONG_IDENTITY_FIELDS:
+        if key in recorded and key in current and recorded.get(key) != current.get(key):
+            return "dead", f"process_identity_mismatch:{key}", {
+                "kind": "process_identity_mismatch",
+                "field": key,
+                "recorded": recorded.get(key),
+                "current": current.get(key),
+            }
+    # Require at least one strong identity field present+equal in BOTH, with no
+    # recorded strong field missing from current (else we cannot confirm).
+    recorded_strong = [k for k in _STRONG_IDENTITY_FIELDS if k in recorded]
+    confirmed = [k for k in recorded_strong if k in current and recorded.get(k) == current.get(k)]
+    missing = [k for k in recorded_strong if k not in current]
+    if confirmed and not missing:
+        return "alive", "process_identity_match", None
+    return "unverifiable", "process_identity_partial", {
+        "kind": "process_identity_unverified",
+        "recorded_strong": recorded_strong,
+        "confirmed": confirmed,
+        "missing": missing,
+    }
 
 
 def process_is_live(process: Any) -> tuple[bool, str, dict[str, Any] | None]:
-    """Process-identity liveness guard (Gap 32 C4).
-
-    Returns (alive, reason, diagnostic). Identity, not bare PID existence: if a
-    recorded process has been replaced by a different start-time / command, the
-    original process is gone even though the PID may be reused.
-
-    Accepted ``process`` shapes (any one):
-      - None                         → assumed alive (cannot disprove)
-      - {"alive": bool}              → explicit
-      - {"identity_match": bool}     → explicit identity verdict
-      - {"expected"|"recorded": {...}, "current"|"observed": {...}}
-            → compared on pid/start_time/cmdline (identity, not bare PID)
-    """
-    if process is None:
-        return True, "process_unknown_assumed_alive", None
-    if not isinstance(process, dict):
-        return True, "process_opaque_assumed_alive", None
-    if process.get("alive") is False or process.get("running") is False:
-        return False, "process_not_running", {"kind": "process_dead", "detail": "not_running"}
-    if process.get("identity_match") is False:
-        return False, "process_identity_mismatch", {"kind": "process_identity_mismatch"}
-    recorded = process.get("recorded") if isinstance(process.get("recorded"), dict) else process.get("expected")
-    current = process.get("current") if isinstance(process.get("current"), dict) else process.get("observed")
-    if isinstance(recorded, dict) and isinstance(current, dict):
-        if current.get("alive") is False or current.get("running") is False:
-            return False, "process_not_running", {"kind": "process_dead", "detail": "current_not_running"}
-        for key in ("start_time", "cmdline", "create_time"):
-            if key in recorded and key in current and recorded.get(key) != current.get(key):
-                return False, f"process_identity_mismatch:{key}", {
-                    "kind": "process_identity_mismatch",
-                    "field": key,
-                    "recorded": recorded.get(key),
-                    "current": current.get(key),
-                }
-        # pid reuse: same pid, different identity already handled above; if pid
-        # differs and no identity fields given, treat as replaced.
-        if "pid" in recorded and "pid" in current and recorded.get("pid") != current.get("pid"):
-            return False, "process_pid_replaced", {"kind": "process_pid_replaced"}
-    if process.get("alive") is True or process.get("running") is True or process.get("identity_match") is True:
-        return True, "process_alive", None
-    return True, "process_assumed_alive", None
+    """Boolean wrapper used by conservative callers (e.g. whole-team-gone): a
+    process is treated as live unless it is CONFIRMED dead. Unverifiable counts
+    as live here so we never falsely declare the team gone."""
+    verdict, reason, diag = process_liveness(process)
+    return (verdict != "dead"), reason, diag
 
 
 def _result(

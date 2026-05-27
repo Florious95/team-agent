@@ -57,14 +57,20 @@ def process_abnormal_records(
         })
         if decision == "skip":
             continue
-        key = f"{signature}\x00{turn_id}"
+        # C8: dedup by (signature, turn_id) — a retry loop in the SAME turn folds
+        # to one notify. But a MISSING turn_id must not collapse distinct errors
+        # into one global bucket: discriminate by a per-record content fingerprint
+        # so genuinely different faults each notify (identical duplicates still fold).
+        bucket = turn_id if turn_id is not None else f"norow:{_record_fingerprint(fact)}"
+        dedupe_key = (signature, bucket)
+        key = f"{signature}\x00{bucket}"
         if key in seen:
-            continue  # C8: one notify per (signature, turn)
+            continue
         seen.add(key)
         notifications.append({
             "signature": signature,
             "turn_id": turn_id,
-            "dedupe_key": (signature, turn_id),
+            "dedupe_key": dedupe_key,
             "state": "blocked_on_human" if fact.get("kind") == "approval" else "abnormal",
             "decision": decision,
             "provider": provider,
@@ -196,6 +202,18 @@ def _classify(text: str, signature: str, white: list[str], black: list[str]) -> 
     if any(b and (b in text or b in sig) for b in black):
         return "notify_blacklist"
     return "notify_default"  # C9 catch-bias for structured faults
+
+
+def _record_fingerprint(fact: dict[str, Any]) -> str:
+    import hashlib
+    import json
+
+    raw = fact.get("raw", fact)
+    try:
+        blob = json.dumps(raw, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        blob = repr(raw)
+    return hashlib.sha256(blob.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def _raw_message(fact: dict[str, Any]) -> str:

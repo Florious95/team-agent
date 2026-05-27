@@ -129,7 +129,9 @@ def _active_elapsed(start: float, now: float, suspend_intervals: list[tuple[floa
     elapsed = max(0.0, now - start)
     if not suspend_intervals:
         return elapsed
-    suspended = 0.0
+    # C11: clip each window to [start, now], then MERGE overlapping/duplicate
+    # windows before subtracting, so an overlap is never counted twice.
+    clipped: list[tuple[float, float]] = []
     for interval in suspend_intervals:
         try:
             s, e = float(interval[0]), float(interval[1])
@@ -138,8 +140,25 @@ def _active_elapsed(start: float, now: float, suspend_intervals: list[tuple[floa
         lo = max(s, start)
         hi = min(e, now)
         if hi > lo:
-            suspended += hi - lo
+            clipped.append((lo, hi))
+    suspended = 0.0
+    for lo, hi in _merge_intervals(clipped):
+        suspended += hi - lo
     return max(0.0, elapsed - suspended)
+
+
+def _merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    merged: list[tuple[float, float]] = [ordered[0]]
+    for lo, hi in ordered[1:]:
+        last_lo, last_hi = merged[-1]
+        if lo <= last_hi:  # overlapping or touching → merge
+            merged[-1] = (last_lo, max(last_hi, hi))
+        else:
+            merged.append((lo, hi))
+    return merged
 
 
 def _neutral_message(node_count: int, elapsed: float, interrupted: list[dict[str, Any]]) -> str:
