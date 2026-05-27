@@ -1,0 +1,4 @@
+fixture: team_refactor_panes
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-panes -a ... filtered to session_name ~ team-refactor-maintainability
+note: current worker panes only; no pane contents captured.

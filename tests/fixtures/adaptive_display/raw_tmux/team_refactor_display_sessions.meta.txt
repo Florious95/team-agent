@@ -1,0 +1,4 @@
+fixture: team_refactor_display_sessions
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-sessions -F '#{session_name}' | rg 'team-refactor-maintainability(__display__workspace__|__display__)'
+note: live display sessions; state records a workspace aggregator, but current tmux only has per-worker linked display sessions.

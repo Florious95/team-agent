@@ -1,0 +1,4 @@
+fixture: current_tmux_sessions
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-sessions -F '#{session_name}	#{session_windows}	#{session_attached}	#{session_created_string}'
+note: all current tmux sessions; filter for team-refactor-maintainability and display sessions.

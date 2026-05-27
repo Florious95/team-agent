@@ -1,0 +1,4 @@
+fixture: display_state_selected
+captured_at_utc: 2026-05-27T12:02:01Z
+command: jq selected display fields from .team/runtime/state.json
+note: captures configured ghostty_workspace metadata, linked sessions, and recorded aggregator session only.
