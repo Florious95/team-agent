@@ -1,0 +1,6 @@
+{
+  "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
+  "ok": false,
+  "reason": "no_caller_identity",
+  "status": "refused"
+}

@@ -1,0 +1,92 @@
+Scenario: state leader_receiver points at pane %648, but tmux no longer has pane %648.
+captured_at_utc: 2026-05-27T07:32:12Z
+workspace: /Users/alauda/Documents/code/agent前沿探索/多agent协作
+
+$ jq selected leader_receiver fields from .team/runtime/state.json
+{
+  "leader_receiver": {
+    "pane_id": "%648",
+    "session_name": "mdwork-1779706126",
+    "window_name": "多agent协作",
+    "pane_current_command": "claude.exe",
+    "leader_session_uuid": "46b92d5b629cad4930cde96be938475e"
+  },
+  "team_owner": {
+    "pane_id": "%1827",
+    "provider": "claude",
+    "machine_fingerprint": "",
+    "claimed_at": "2026-05-27T07:08:27.910833+00:00",
+    "claimed_via": "takeover",
+    "leader_session_uuid": "46b92d5b629cad4930cde96be938475e"
+  }
+}
+
+$ jq selected leader_receiver fields from .team/runtime/teams/team-refactor-maintainability/state.json
+{
+  "leader_receiver": {
+    "pane_id": "%648",
+    "session_name": "mdwork-1779706126",
+    "window_name": "多agent协作",
+    "pane_current_command": "claude.exe",
+    "leader_session_uuid": "46b92d5b629cad4930cde96be938475e"
+  },
+  "team_owner": null
+}
+
+$ tmux list-panes -a -F "#{pane_id} #{session_name}:#{window_name}.#{pane_index} #{pane_current_command}" | grep -Fx "%648"
+grep_exit=1
+
+$ tmux list-panes -a -F "#{pane_id} #{session_name}:#{window_name}.#{pane_index} #{pane_current_command}" (first 120 lines)
+%877 team-agent-leader-jpl62kvg:leader.0 cat
+%878 team-agent-leader-vd7ag7nd:leader.0 cat
+%1829 team-refactor-maintainability:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability:developer.0 node
+%1832 team-refactor-maintainability:realistic-tester.0 node
+%1833 team-refactor-maintainability:spark-reviewer.0 node
+%1834 team-refactor-maintainability:test-engineer.0 node
+%1829 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:developer.0 node
+%1832 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__claude-runtime-developer__4ed53181:test-engineer.0 node
+%1829 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:developer.0 node
+%1832 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__constitution-reviewer__4a3483d8:test-engineer.0 node
+%1829 team-refactor-maintainability__display__developer__7f111d58:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__developer__7f111d58:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__developer__7f111d58:developer.0 node
+%1832 team-refactor-maintainability__display__developer__7f111d58:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__developer__7f111d58:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__developer__7f111d58:test-engineer.0 node
+%1829 team-refactor-maintainability__display__realistic-tester__f16f3a80:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__realistic-tester__f16f3a80:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__realistic-tester__f16f3a80:developer.0 node
+%1832 team-refactor-maintainability__display__realistic-tester__f16f3a80:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__realistic-tester__f16f3a80:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__realistic-tester__f16f3a80:test-engineer.0 node
+%1829 team-refactor-maintainability__display__spark-reviewer__b471ef5a:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__spark-reviewer__b471ef5a:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__spark-reviewer__b471ef5a:developer.0 node
+%1832 team-refactor-maintainability__display__spark-reviewer__b471ef5a:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__spark-reviewer__b471ef5a:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__spark-reviewer__b471ef5a:test-engineer.0 node
+%1829 team-refactor-maintainability__display__test-engineer__d8b85486:claude-runtime-developer.0 claude.exe
+%1830 team-refactor-maintainability__display__test-engineer__d8b85486:constitution-reviewer.0 claude.exe
+%1831 team-refactor-maintainability__display__test-engineer__d8b85486:developer.0 node
+%1832 team-refactor-maintainability__display__test-engineer__d8b85486:realistic-tester.0 node
+%1833 team-refactor-maintainability__display__test-engineer__d8b85486:spark-reviewer.0 node
+%1834 team-refactor-maintainability__display__test-engineer__d8b85486:test-engineer.0 node
+%1841 team-refactor-maintainability__display__workspace__8897d78f:overview.0 tmux
+%1842 team-refactor-maintainability__display__workspace__8897d78f:overview.1 tmux
+%1843 team-refactor-maintainability__display__workspace__8897d78f:overview.2 tmux
+%1844 team-refactor-maintainability__display__workspace__8897d78f:overview-2.0 tmux
+%1845 team-refactor-maintainability__display__workspace__8897d78f:overview-2.1 tmux
+%1846 team-refactor-maintainability__display__workspace__8897d78f:overview-2.2 tmux
+%1826 termclaude-1779821586:多agent协作.0 yazi
+%1827 termclaude-1779821586:多agent协作.1 claude.exe
+%1828 termclaude-1779821586:多agent协作.2 claude.exe

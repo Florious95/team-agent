@@ -1,0 +1,6 @@
+{
+  "action": "run from a tmux leader pane",
+  "ok": false,
+  "reason": "no_caller_pane",
+  "status": "refused"
+}
