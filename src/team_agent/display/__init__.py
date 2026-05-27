@@ -21,6 +21,7 @@ from team_agent.display.close import (
     close_ghostty_display,
     close_ghostty_workspace,
     close_ghostty_workspace_slot,
+    close_team_display_backends,
 )
 from team_agent.display.ghostty import (
     ghostty_app_exists,
@@ -63,6 +64,7 @@ __all__ = [
     "close_ghostty_display",
     "close_ghostty_workspace",
     "close_ghostty_workspace_slot",
+    "close_team_display_backends",
     "ghostty_app_exists",
     "ghostty_attach_args",
     "ghostty_command",

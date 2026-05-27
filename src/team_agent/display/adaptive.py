@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import os
 import platform as platform_module
-import shlex
 from pathlib import Path
 from typing import Any
 
 from team_agent.display.ghostty import ghostty_display_session_name
-from team_agent.display.tiling import grouped_display_jobs, team_scoped_display_window_name
+from team_agent.display.tiling import (
+    display_pane_title,
+    prepare_tmux_attached_panes,
+    set_tmux_display_pane_title,
+    team_scoped_display_window_name,
+)
 from team_agent.display.workspace import (
-    _tmux_stdout_last_line,
-    ghostty_workspace_pane_command,
-    ghostty_workspace_pane_title,
     kill_ghostty_workspace_linked_sessions,
 )
 from team_agent.events import EventLog
@@ -130,7 +131,7 @@ def open_adaptive_display(
             "window": pane.get("window_name"),
             "workspace_window": pane.get("window_name"),
             "pane_id": pane.get("pane_id"),
-            "pane_title": pane.get("title") or ghostty_workspace_pane_title(agent),
+            "pane_title": pane.get("title") or display_pane_title(agent),
             "target": f"{session_name}:{agent_id}",
             "target_worker_session": f"{session_name}:{agent_id}",
             "linked_session": linked_session,
@@ -149,92 +150,23 @@ def prepare_adaptive_windows(
     session_name: str,
     linked_jobs: list[tuple[str, dict[str, Any], str]],
 ) -> dict[str, Any]:
-    from team_agent.runtime import run_cmd
-
-    def fail(reason: str, proc: Any | None = None, target: str | None = None) -> dict[str, Any]:
-        result = {"ok": False, "reason": reason}
-        if proc is not None:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            if detail in ADAPTIVE_BLOCK_REASONS:
-                result["reason"] = detail
-            result["error"] = detail
-        if target:
-            result["target"] = target
-        return result
-
-    panes: list[dict[str, Any]] = []
-    for window_index, _base_window_name, window_jobs in grouped_display_jobs(linked_jobs):
-        window_name = team_scoped_display_window_name(session_name, window_index)
-        first_agent_id, first_agent, first_linked_session = window_jobs[0]
-        proc = run_cmd(
-            [
-                "tmux",
-                "new-window",
-                "-t",
-                leader_session,
-                "-n",
-                window_name,
-                "-P",
-                "-F",
-                "#{pane_id}",
-                ghostty_workspace_pane_command(first_linked_session),
-            ],
-            timeout=10,
-        )
-        if proc.returncode != 0:
-            return fail("window_create_failed", proc, f"{leader_session}:{window_name}")
-        first_pane_id = _tmux_stdout_last_line(proc.stdout) or f"{leader_session}:{window_name}.0"
-        title = ghostty_workspace_pane_title(first_agent)
-        title_result = set_adaptive_pane_title(first_pane_id, title)
-        if not title_result["ok"]:
-            return fail("aggregator_rebuild_failed", target=first_pane_id)
-        panes.append(
-            {
-                "agent_id": first_agent_id,
-                "pane_id": first_pane_id,
-                "title": title,
-                "linked_session": first_linked_session,
-                "window_name": window_name,
-            }
-        )
-        remain = run_cmd(["tmux", "set-window-option", "-t", f"{leader_session}:{window_name}", "remain-on-exit", "on"], timeout=10)
-        if remain.returncode != 0:
-            return fail("aggregator_rebuild_failed", remain, f"{leader_session}:{window_name}")
-        for index, (agent_id, agent, linked_session) in enumerate(window_jobs[1:], start=1):
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "split-window",
-                    "-t",
-                    f"{leader_session}:{window_name}",
-                    "-h",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    ghostty_workspace_pane_command(linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return fail("split_failed", proc, f"{leader_session}:{window_name}")
-            pane_id = _tmux_stdout_last_line(proc.stdout) or f"{leader_session}:{window_name}.{index}"
-            title = ghostty_workspace_pane_title(agent)
-            title_result = set_adaptive_pane_title(pane_id, title)
-            if not title_result["ok"]:
-                return fail("aggregator_rebuild_failed", target=pane_id)
-            panes.append(
-                {
-                    "agent_id": agent_id,
-                    "pane_id": pane_id,
-                    "title": title,
-                    "linked_session": linked_session,
-                    "window_name": window_name,
-                }
-            )
-        layout = run_cmd(["tmux", "select-layout", "-t", f"{leader_session}:{window_name}", "even-horizontal"], timeout=10)
-        if layout.returncode != 0:
-            return fail("aggregator_rebuild_failed", layout, f"{leader_session}:{window_name}")
-    return {"ok": True, "leader_session": leader_session, "panes": panes}
+    prepared = prepare_tmux_attached_panes(
+        leader_session,
+        linked_jobs,
+        window_name_for_index=lambda index: team_scoped_display_window_name(session_name, index),
+        create_first_as_session=False,
+        reason_map={
+            "create_window": "window_create_failed",
+            "title": "aggregator_rebuild_failed",
+            "remain": "aggregator_rebuild_failed",
+            "split": "split_failed",
+            "layout": "aggregator_rebuild_failed",
+        },
+        stderr_reason_allowlist=ADAPTIVE_BLOCK_REASONS,
+    )
+    if prepared.get("ok"):
+        prepared["leader_session"] = leader_session
+    return prepared
 
 
 def prepare_adaptive_linked_sessions(
@@ -368,11 +300,7 @@ def kill_adaptive_window(target: str) -> bool:
 
 
 def set_adaptive_pane_title(pane_id: str, title: str) -> dict[str, Any]:
-    from team_agent.runtime import run_cmd
-    proc = run_cmd(["tmux", "select-pane", "-t", pane_id, "-T", title], timeout=10)
-    if proc.returncode != 0:
-        return {"ok": False, "reason": "aggregator_rebuild_failed", "error": proc.stderr.strip()}
-    return {"ok": True}
+    return set_tmux_display_pane_title(pane_id, title, "aggregator_rebuild_failed")
 
 
 def _display_platform(value: str | None, env: dict[str, str]) -> str:

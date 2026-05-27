@@ -44,6 +44,7 @@ from team_agent.display import (
     close_ghostty_display as _close_ghostty_display,
     close_ghostty_workspace as _close_ghostty_workspace,
     close_ghostty_workspace_slot as _close_ghostty_workspace_slot,
+    close_team_display_backends as _close_team_display_backends,
     ghostty_app_exists as _ghostty_app_exists,
     ghostty_attach_args as _ghostty_attach_args,
     ghostty_command as _ghostty_command,
@@ -481,9 +482,7 @@ def ensure_workspace_dirs(workspace: Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-
 def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -> dict[str, Any]:
-    from team_agent.display.close import close_adaptive_display
     from team_agent.state import resolve_team_scoped_state
     state, refusal = resolve_team_scoped_state(workspace, team)
     if refusal:
@@ -523,8 +522,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             if proc.returncode == 0:
                 log_path.write_text(proc.stdout, encoding="utf-8")
                 captured.append(str(log_path))
-        close_adaptive_display(state, event_log)
-        _close_ghostty_workspace(state, event_log)
+        _close_team_display_backends(state, event_log)
         for agent_id, agent_state in state.get("agents", {}).items():
             _close_ghostty_display(agent_id, agent_state, event_log)
             closed_displays.add(agent_id)
@@ -538,8 +536,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
     else:
         event_log.write("shutdown.idempotent", session=session_name, reason="session missing")
-        close_adaptive_display(state, event_log)
-        _close_ghostty_workspace(state, event_log)
+        _close_team_display_backends(state, event_log)
     for agent_id, agent_state in state.get("agents", {}).items():
         if agent_id not in closed_displays:
             _close_ghostty_display(agent_id, agent_state, event_log)

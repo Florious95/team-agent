@@ -27,3 +27,20 @@ def resolve_display_backend(
             source=source,
         )
     return resolved
+
+
+def resolve_restart_display_backend(spec: dict[str, Any], state: dict[str, Any], event_log: Any) -> str:
+    return resolve_display_backend(
+        spec.get("runtime", {}).get("display_backend"),
+        recorded=state.get("display_backend"),
+        event_log=event_log,
+        source="restart",
+    )
+
+
+def display_backend_has_worker_views(display_backend: str) -> bool:
+    return display_backend in DISPLAY_BACKENDS_WITH_WORKER_VIEWS
+
+
+def display_backend_opens_before_leader_rebind(display_backend: str) -> bool:
+    return display_backend_has_worker_views(display_backend) and display_backend != ADAPTIVE_DISPLAY_BACKEND

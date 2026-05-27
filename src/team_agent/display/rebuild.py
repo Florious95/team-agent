@@ -6,6 +6,38 @@ from typing import Any
 from team_agent.events import EventLog
 
 
+def rebuild_restart_display_after_rebind(
+    display_backend: str,
+    workspace: Path,
+    session_name: str,
+    spec: dict[str, Any],
+    event_log: EventLog,
+    restarted: list[dict[str, Any]],
+    receiver: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if display_backend != "adaptive":
+        return {}
+    from team_agent.restart.snapshot import save_team_runtime_snapshot
+    from team_agent.state import load_runtime_state, save_runtime_state, write_team_state
+    state = load_runtime_state(workspace)
+    state, display_results = rebuild_adaptive_display_after_rebind(
+        workspace,
+        session_name,
+        spec,
+        state,
+        event_log,
+        save_runtime_state,
+        save_team_runtime_snapshot,
+        write_team_state,
+        receiver=receiver,
+    )
+    for item in restarted:
+        display = display_results.get(item["agent_id"])
+        if display:
+            item["display_target"] = display
+    return state
+
+
 def rebuild_adaptive_display_after_rebind(
     workspace: Path,
     session_name: str,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -14,15 +13,18 @@ from team_agent.display.ghostty import (
     ghostty_pids_by_title,
     prepare_ghostty_display_session,
 )
-from team_agent.display.tiling import DISPLAY_PANES_PER_WINDOW, display_window_name, grouped_display_jobs
+from team_agent.display.tiling import (
+    DISPLAY_PANES_PER_WINDOW,
+    display_pane_title,
+    display_window_name,
+    prepare_tmux_attached_panes,
+    set_tmux_display_pane_title,
+    tmux_attach_pane_command,
+    tmux_stdout_last_line as _tmux_stdout_last_line,
+)
 
 
 GHOSTTY_WORKSPACE_PANES_PER_WINDOW = DISPLAY_PANES_PER_WINDOW
-
-
-def _tmux_stdout_last_line(stdout: str) -> str | None:
-    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    return lines[-1] if lines else None
 
 
 def open_ghostty_workspace(
@@ -157,11 +159,11 @@ def ghostty_workspace_window_name(index: int) -> str:
 
 
 def ghostty_workspace_pane_command(linked_session: str) -> str:
-    return f"TMUX= tmux attach-session -t {shlex.quote(linked_session)}"
+    return tmux_attach_pane_command(linked_session)
 
 
 def ghostty_workspace_pane_title(agent: dict[str, Any]) -> str:
-    return f"team-agent:{agent['id']}:{agent.get('role', '')}"
+    return display_pane_title(agent)
 
 
 def prepare_ghostty_workspace_linked_sessions(
@@ -204,124 +206,32 @@ def prepare_ghostty_workspace_aggregator(
         proc = run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
         if proc.returncode != 0:
             return {"ok": False, "reason": "display_session_cleanup_failed", "error": proc.stderr.strip()}
-
-    def fail(reason: str, proc: Any | None = None, target: str | None = None) -> dict[str, Any]:
-        run_cmd(["tmux", "kill-session", "-t", aggregator_session], timeout=10)
-        result = {"ok": False, "reason": reason}
-        if proc is not None:
-            result["error"] = proc.stderr.strip()
-        if target:
-            result["target"] = target
-        return result
-
-    panes: list[dict[str, Any]] = []
-    for window_index, window_name, window_jobs in grouped_display_jobs(linked_jobs, GHOSTTY_WORKSPACE_PANES_PER_WINDOW):
-        first_agent_id, first_agent, first_linked_session = window_jobs[0]
-        if window_index == 0:
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "new-session",
-                    "-d",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    "-s",
-                    aggregator_session,
-                    "-n",
-                    window_name,
-                    ghostty_workspace_pane_command(first_linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return {"ok": False, "reason": "display_session_create_failed", "error": proc.stderr.strip()}
-        else:
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "new-window",
-                    "-t",
-                    aggregator_session,
-                    "-n",
-                    window_name,
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    ghostty_workspace_pane_command(first_linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return fail("display_session_window_create_failed", proc, first_linked_session)
-        first_pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.0"
-        first_title = ghostty_workspace_pane_title(first_agent)
-        title_result = set_ghostty_workspace_pane_title(first_pane_id, first_title)
-        if not title_result["ok"]:
-            return fail(title_result["reason"], target=first_pane_id)
-        panes.append(
-            {
-                "agent_id": first_agent_id,
-                "pane_id": first_pane_id,
-                "title": first_title,
-                "linked_session": first_linked_session,
-                "window_name": window_name,
-            }
-        )
-
-        proc = run_cmd(["tmux", "set-window-option", "-t", f"{aggregator_session}:{window_name}", "remain-on-exit", "on"], timeout=10)
-        if proc.returncode != 0:
-            return fail("display_session_remain_on_exit_failed", proc)
-
-        for index, (agent_id, agent, linked_session) in enumerate(window_jobs[1:], start=1):
-            proc = run_cmd(
-                [
-                    "tmux",
-                    "split-window",
-                    "-t",
-                    f"{aggregator_session}:{window_name}",
-                    "-h",
-                    "-P",
-                    "-F",
-                    "#{pane_id}",
-                    ghostty_workspace_pane_command(linked_session),
-                ],
-                timeout=10,
-            )
-            if proc.returncode != 0:
-                return fail("display_session_split_failed", proc, linked_session)
-            pane_id = _tmux_stdout_last_line(proc.stdout) or f"{aggregator_session}:{window_name}.{index}"
-            title = ghostty_workspace_pane_title(agent)
-            title_result = set_ghostty_workspace_pane_title(pane_id, title)
-            if not title_result["ok"]:
-                return fail(title_result["reason"], target=pane_id)
-            panes.append(
-                {
-                    "agent_id": agent_id,
-                    "pane_id": pane_id,
-                    "title": title,
-                    "linked_session": linked_session,
-                    "window_name": window_name,
-                }
-            )
-
-        proc = run_cmd(["tmux", "select-layout", "-t", f"{aggregator_session}:{window_name}", "even-horizontal"], timeout=10)
-        if proc.returncode != 0:
-            return fail("display_session_layout_failed", proc)
-
-    proc = run_cmd(["tmux", "set-option", "-t", aggregator_session, "mouse", "on"], timeout=10)
-    if proc.returncode != 0:
-        return fail("display_session_mouse_failed", proc)
-    run_cmd(["tmux", "select-window", "-t", f"{aggregator_session}:{ghostty_workspace_window_name(0)}"], timeout=10)
-    return {"ok": True, "aggregator_session": aggregator_session, "panes": panes}
+    prepared = prepare_tmux_attached_panes(
+        aggregator_session,
+        linked_jobs,
+        window_name_for_index=ghostty_workspace_window_name,
+        create_first_as_session=True,
+        panes_per_window=GHOSTTY_WORKSPACE_PANES_PER_WINDOW,
+        cleanup_session=aggregator_session,
+        enable_mouse=True,
+        select_first_window=True,
+        reason_map={
+            "create_session": "display_session_create_failed",
+            "create_window": "display_session_window_create_failed",
+            "title": "display_session_pane_title_failed",
+            "remain": "display_session_remain_on_exit_failed",
+            "split": "display_session_split_failed",
+            "layout": "display_session_layout_failed",
+            "mouse": "display_session_mouse_failed",
+        },
+    )
+    if prepared.get("ok"):
+        prepared["aggregator_session"] = aggregator_session
+    return prepared
 
 
 def set_ghostty_workspace_pane_title(pane_id: str, title: str) -> dict[str, Any]:
-    from team_agent.runtime import run_cmd
-    proc = run_cmd(["tmux", "select-pane", "-t", pane_id, "-T", title], timeout=10)
-    if proc.returncode != 0:
-        return {"ok": False, "reason": "display_session_pane_title_failed", "error": proc.stderr.strip()}
-    return {"ok": True}
+    return set_tmux_display_pane_title(pane_id, title, "display_session_pane_title_failed")
 
 
 def open_ghostty_workspace_agent_display(
