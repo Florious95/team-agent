@@ -82,6 +82,34 @@ class RestartRecoveryTests(unittest.TestCase):
         self.assertEqual(handled, [{"prompt": "codex_update_available", "action": "sent_skip"}])
         self.assertEqual(sent, [["tmux", "send-keys", "-t", "team-update:worker", "Down", "Enter"]])
 
+    def test_codex_runtime_prompt_skips_mid_session_update_prompt(self) -> None:
+        adapter = get_adapter("codex")
+        capture = Mock(
+            returncode=0,
+            stdout=(
+                "Update available! 0.131.0 -> 0.133.0\n"
+                "1. Update now\n"
+                "2. Skip\n"
+                "Press enter to continue\n"
+            ),
+            stderr="",
+        )
+        sent: list[list[str]] = []
+
+        def fake_run(args: list[str], **_: Any) -> Mock:
+            if args[:3] == ["tmux", "capture-pane", "-p"]:
+                return capture
+            if args[:2] == ["tmux", "send-keys"]:
+                sent.append(args)
+                return Mock(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected command: {args}")
+
+        with patch("team_agent.provider_cli.codex.subprocess.run", side_effect=fake_run):
+            handled = adapter.handle_runtime_prompts("team-update", "worker")
+
+        self.assertEqual(handled, [{"prompt": "codex_update_available", "action": "sent_skip"}])
+        self.assertEqual(sent, [["tmux", "send-keys", "-t", "team-update:worker", "Down", "Enter"]])
+
     def test_codex_startup_prompt_does_not_treat_generic_enter_as_trust(self) -> None:
         adapter = get_adapter("codex")
         capture = Mock(returncode=0, stdout="Press enter to continue\n", stderr="")

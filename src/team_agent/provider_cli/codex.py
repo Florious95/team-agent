@@ -157,19 +157,18 @@ class CodexAdapter(ProviderAdapter):
                 check=False,
             )
             output = proc.stdout if proc.returncode == 0 else ""
+            update = maybe_skip_update_prompt(target, output)
+            if update:
+                handled.append(update)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                continue
             trust_pos = max(
                 output.rfind("Do you trust the contents of this directory?"),
                 output.rfind("Do you trust the files in this folder?"),
                 output.rfind("Do you trust this folder?"),
             )
-            update_pos = max(output.rfind("Update available!"), output.rfind("Update now"))
             ready_pos = max(output.rfind("OpenAI Codex"), output.rfind("›"), output.rfind("codex>"))
-            if update_pos >= 0 and update_pos > ready_pos:
-                subprocess.run(["tmux", "send-keys", "-t", target, "Down", "Enter"], check=False)
-                handled.append({"prompt": "codex_update_available", "action": "sent_skip"})
-                if sleep_s > 0:
-                    time.sleep(sleep_s)
-                continue
             if trust_pos >= 0 and trust_pos > ready_pos:
                 subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], check=False)
                 handled.append({"prompt": "codex_workspace_trust", "action": "sent_enter"})
@@ -183,8 +182,17 @@ class CodexAdapter(ProviderAdapter):
         return handled
 
     def handle_runtime_prompts(self, session_name: str, window_name: str) -> list[dict[str, Any]]:
-        _ = session_name, window_name
-        return []
+        target = f"{session_name}:{window_name}"
+        proc = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-S", "-", "-t", target],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        output = proc.stdout if proc.returncode == 0 else ""
+        handled = maybe_skip_update_prompt(target, output)
+        return [handled] if handled else []
 
     def validate_model(self, model: str | None) -> dict[str, Any]:
         if not model:
@@ -249,6 +257,15 @@ class CodexAdapter(ProviderAdapter):
             return {"ok": False, "reason": "model_catalog_shape_invalid", "command": "codex debug models"}
         self._model_catalog_cache = {"ok": True, "command": "codex debug models", "models": models}
         return self._model_catalog_cache
+
+
+def maybe_skip_update_prompt(target: str, output: str) -> dict[str, Any] | None:
+    update_pos = max(output.rfind("Update available!"), output.rfind("Update now"))
+    ready_pos = max(output.rfind("OpenAI Codex"), output.rfind("›"), output.rfind("codex>"))
+    if update_pos >= 0 and update_pos > ready_pos:
+        subprocess.run(["tmux", "send-keys", "-t", target, "Down", "Enter"], check=False)
+        return {"prompt": "codex_update_available", "action": "sent_skip"}
+    return None
 
 
 def find_codex_rollout(

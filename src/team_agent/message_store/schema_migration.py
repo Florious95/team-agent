@@ -147,6 +147,15 @@ CREATE_TABLE_SQL: dict[str, str] = {
 }
 
 
+INDEX_SQL: tuple[str, ...] = (
+    "create index if not exists idx_leader_notification_log_uuid on leader_notification_log(leader_session_uuid, notified_at)",
+    "create index if not exists idx_messages_owner_team_id on messages(owner_team_id)",
+    "create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)",
+    "create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)",
+    "create index if not exists idx_result_watchers_owner_team_id on result_watchers(owner_team_id)",
+)
+
+
 SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: lambda _conn: None,
     2: lambda _conn: None,
@@ -156,6 +165,11 @@ SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 
 def table_layout(conn: sqlite3.Connection, table: str) -> tuple[str, ...]:
     return tuple(str(row["name"]) for row in conn.execute(f"pragma table_info({table})").fetchall())
+
+
+def ensure_schema_indexes(conn: sqlite3.Connection) -> None:
+    for statement in INDEX_SQL:
+        conn.execute(statement)
 
 
 def schema_diagnosis(workspace: Path, *, schema_version: int) -> dict[str, Any]:
@@ -243,10 +257,17 @@ def _run_version_migrations(conn: sqlite3.Connection, schema_version: int) -> No
 
 def _layout_diffs(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     diffs: dict[str, dict[str, Any]] = {}
+    if not any(_table_exists(conn, table) for table in MANAGED_TABLE_LAYOUTS):
+        return diffs
     for table, expected in MANAGED_TABLE_LAYOUTS.items():
-        actual = table_layout(conn, table)
-        if not actual:
+        if not _table_exists(conn, table):
+            diffs[table] = {
+                "expected": list(expected),
+                "actual": [],
+                "missing": True,
+            }
             continue
+        actual = table_layout(conn, table)
         if actual != expected:
             diffs[table] = {
                 "expected": list(expected),
@@ -266,7 +287,22 @@ def _rebuild_tables(
         for table, diff in diffs.items():
             expected = MANAGED_TABLE_LAYOUTS[table]
             actual = tuple(diff["actual"])
-            before = _table_count(conn, table)
+            before = 0 if diff.get("missing") else _table_count(conn, table)
+            if diff.get("missing"):
+                conn.execute(CREATE_TABLE_SQL[table].format(table=table))
+                after = _table_count(conn, table)
+                if after != before:
+                    raise RuntimeError(f"schema rebuild row count changed for {table}: {before} != {after}")
+                events.append({
+                    "table": table,
+                    "from_layout_columns": [],
+                    "to_layout_columns": list(expected),
+                    "backup_path": str(backup_path),
+                    "row_count_before": before,
+                    "row_count_after": after,
+                    "missing": True,
+                })
+                continue
             temp = f"__team_agent_rebuild_{table}"
             old = f"__team_agent_old_{table}"
             conn.execute(f"drop table if exists {temp}")
@@ -290,6 +326,7 @@ def _rebuild_tables(
                 "row_count_before": before,
                 "row_count_after": after,
             })
+        ensure_schema_indexes(conn)
         conn.execute("COMMIT")
     except Exception:
         conn.execute("ROLLBACK")
@@ -325,6 +362,14 @@ def _db_lock_status(db_path: Path) -> str | None:
 def _table_count(conn: sqlite3.Connection, table: str) -> int:
     row = conn.execute(f"select count(*) as n from {table}").fetchone()
     return int(row["n"])
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "select name from sqlite_master where type = 'table' and name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
 
 
 def _pragma_user_version(conn: sqlite3.Connection) -> int:
@@ -364,23 +409,13 @@ def _backup_path(db_path: Path, user_version: int) -> Path:
 
 
 def _maybe_fault_after_insert() -> None:
-    value = (
-        os.environ.get("TEAM_AGENT_SCHEMA_MIGRATION_FAULT")
-        or os.environ.get("TEAM_AGENT_SCHEMA_MIGRATION_FAULT_AFTER_INSERT")
-        or os.environ.get("TEAM_AGENT_SCHEMA_MIGRATION_CRASH_AFTER_INSERT")
-        or os.environ.get("TEAM_AGENT_SCHEMA_MIGRATION_CRASH_POINT")
-        or os.environ.get("TEAM_AGENT_SCHEMA_REBUILD_CRASH_POINT")
-        or os.environ.get("TEAM_AGENT_SCHEMA_REBUILD_FAULT")
-        or os.environ.get("GAP46_SCHEMA_MIGRATION_FAULT")
-        or ""
-    )
-    if value in {"1", "true", "after_insert", "crash_after_insert", "after_insert_before_rename"}:
-        os._exit(97)
-    for key, env_value in os.environ.items():
-        if "SCHEMA" in key and ("FAULT" in key or "CRASH" in key):
-            if env_value in {"1", "true", "after_insert", "crash_after_insert", "after_insert_before_rename"}:
-                os._exit(97)
-            if "after_insert" in env_value:
-                os._exit(97)
-        if "GAP46" in key and env_value:
+    allowed_keys = {
+        "TEAM_AGENT_SCHEMA_MIGRATION_CRASH_AT",
+        "GAP46_TEST_CRASH",
+        "GAP46_TEST_PARTIAL_REBUILD",
+    }
+    allowed_values = {"1", "crash", "partial", "after_insert_before_rename"}
+    for key in allowed_keys:
+        value = os.environ.get(key)
+        if value in allowed_values:
             os._exit(97)

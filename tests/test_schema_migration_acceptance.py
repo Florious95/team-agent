@@ -200,6 +200,7 @@ class SchemaMigrationAcceptanceTests(unittest.TestCase):
 
     def test_9_layout_rebuild_audit_event_includes_row_count_equality(self) -> None:
         from team_agent.message_store import MessageStore
+        from team_agent.message_store.schema_migration import MANAGED_TABLE_LAYOUTS
 
         with tempfile.TemporaryDirectory(prefix="gap46-c21-") as tmp:
             workspace = Path(tmp)
@@ -220,7 +221,77 @@ class SchemaMigrationAcceptanceTests(unittest.TestCase):
             for event in rebuilds:
                 self.assertIn("backup_path", event)
                 self.assertEqual(event["row_count_before"], event["row_count_after"])
-                self.assertEqual(tuple(event["to_layout_columns"]), CURRENT_LAYOUTS[event["table"]])
+                expected = CURRENT_LAYOUTS.get(event["table"]) or MANAGED_TABLE_LAYOUTS[event["table"]]
+                self.assertEqual(tuple(event["to_layout_columns"]), expected)
+
+    def test_missing_managed_table_is_created_by_doctor_fix_schema(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap46-missing-table-") as tmp:
+            workspace = Path(tmp)
+            db_path = build_legacy_workspace(workspace)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute("drop table results")
+                conn.commit()
+            finally:
+                conn.close()
+
+            proc = _run_team_agent_cli(["doctor", "--fix-schema", "--json"], workspace)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(table_layout(db_path, "results"), CURRENT_LAYOUTS["results"])
+
+    def test_rebuild_restores_schema_indexes(self) -> None:
+        expected = {
+            "idx_leader_notification_log_uuid",
+            "idx_messages_owner_team_id",
+            "idx_scheduled_events_owner_team_id",
+            "idx_agent_health_owner_team_id",
+            "idx_result_watchers_owner_team_id",
+        }
+        with tempfile.TemporaryDirectory(prefix="gap46-indexes-") as tmp:
+            workspace = Path(tmp)
+            db_path = build_legacy_workspace(workspace)
+
+            proc = _run_team_agent_cli(["doctor", "--fix-schema", "--json"], workspace)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            conn = sqlite3.connect(db_path)
+            try:
+                names = {
+                    row[0]
+                    for row in conn.execute(
+                        "select name from sqlite_master where type = 'index' and name like 'idx_%'"
+                    ).fetchall()
+                }
+            finally:
+                conn.close()
+            self.assertTrue(expected.issubset(names), names)
+
+    def test_unrelated_gap46_env_name_does_not_trigger_fault_injection(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="gap46-env-") as tmp:
+            workspace = Path(tmp)
+            db_path = build_legacy_workspace(workspace)
+            script = textwrap.dedent(
+                f"""
+                import sqlite3
+                from team_agent.message_store.schema import initialize_schema
+
+                conn = sqlite3.connect({str(db_path)!r})
+                initialize_schema(conn)
+                conn.close()
+                """
+            )
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=str(REPO),
+                env={**os.environ, "PYTHONPATH": f"{SRC}{os.pathsep}{REPO}", "GAP46_PATH": "foo"},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
 
 
 def _run_team_agent_cli(args: list[str], workspace: Path) -> subprocess.CompletedProcess[str]:

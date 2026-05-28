@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from team_agent.message_store import schema_migration as _schema_migration
-from team_agent.message_store.schema_migration import ensure_table_layout, table_layout
+from team_agent.message_store.schema_migration import ensure_schema_indexes, ensure_table_layout, table_layout
 
 
 MESSAGE_COLUMNS = {
@@ -272,15 +272,8 @@ def initialize_schema(conn: sqlite3.Connection, db_path: Path | None = None) -> 
             )
             """
         )
-        conn.execute(
-            "create index if not exists idx_leader_notification_log_uuid "
-            "on leader_notification_log(leader_session_uuid, notified_at)"
-        )
         _ensure_table_columns(conn, "leader_notification_log", LEADER_NOTIFICATION_LOG_COLUMNS)
-        conn.execute("create index if not exists idx_messages_owner_team_id on messages(owner_team_id)")
-        conn.execute("create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)")
-        conn.execute("create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)")
-        conn.execute("create index if not exists idx_result_watchers_owner_team_id on result_watchers(owner_team_id)")
+        ensure_schema_indexes(conn)
         conn.execute(f"pragma user_version = {SCHEMA_VERSION}")
 
 
