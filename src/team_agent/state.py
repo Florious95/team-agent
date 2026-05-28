@@ -51,12 +51,35 @@ def normalize_agent_session_state(state: dict[str, Any]) -> None:
 def load_runtime_state(workspace: Path) -> dict[str, Any]:
     path = runtime_state_path(workspace)
     if not path.exists():
-        return {"agents": {}, "tasks": [], "session_name": None}
+        return {"agents": {}, "tasks": [], "session_name": None, "active_team_key": None}
     state = json.loads(path.read_text(encoding="utf-8"))
     normalize_agent_session_state(state)
-    if _migrate_state_identity(state, workspace):
+    changed = _migrate_state_identity(state, workspace)
+    if _migrate_active_team_key(state):
+        changed = True
+    if changed:
         save_runtime_state(workspace, state)
     return state
+
+
+def _migrate_active_team_key(state: dict[str, Any]) -> bool:
+    """0.2.6 Family B (C6): legacy states with a top-level ``session_name``
+    but no ``active_team_key`` get the active pointer seeded once. After
+    this, ``active_team_key`` is the single explicit source of truth and
+    callers mutate it through CLI verbs (claim-leader / takeover /
+    shutdown / restart)."""
+    if "active_team_key" in state:
+        return False
+    teams = state.get("teams") if isinstance(state.get("teams"), dict) else {}
+    if state.get("session_name"):
+        seed = team_state_key(state)
+        state["active_team_key"] = seed if seed in teams or not teams else seed
+        return True
+    if isinstance(teams, dict) and len(teams) == 1:
+        state["active_team_key"] = next(iter(teams))
+        return True
+    state["active_team_key"] = None
+    return True
 
 
 def team_state_key(state: dict[str, Any]) -> str:
@@ -98,58 +121,110 @@ def merge_workspace_team_state(existing: dict[str, Any], launched: dict[str, Any
 
 
 def team_state_candidates(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    candidates: dict[str, dict[str, Any]] = {}
-    teams = state.get("teams")
-    if isinstance(teams, dict):
-        for key, value in teams.items():
-            if isinstance(value, dict):
-                candidates[str(key)] = value
-    if state.get("session_name"):
-        candidates.setdefault(team_state_key(state), compact_team_state(state))
-    return candidates
+    """0.2.6 Family B (C7): the only candidate source is ``state.teams``
+    filtered by ``status == "alive"``. Top-level ``session_name`` /
+    ``team_dir`` are a derived view of the active team and never count as
+    an independent candidate. Shutdown/legacy entries with non-alive
+    status are excluded."""
+    out: dict[str, dict[str, Any]] = {}
+    teams = state.get("teams") if isinstance(state.get("teams"), dict) else {}
+    for key, value in teams.items():
+        if not isinstance(value, dict):
+            continue
+        if str(value.get("status") or "alive").lower() != "alive":
+            continue
+        out[str(key)] = value
+    return out
 
 
-def format_team_candidates(candidates: dict[str, dict[str, Any]]) -> str:
-    if not candidates:
+def format_team_candidates(team_states: dict[str, dict[str, Any]]) -> str:
+    if not team_states:
         return "No team state was found."
     parts = []
-    for key, state in sorted(candidates.items()):
-        agents = ",".join(sorted(state.get("agents", {}).keys())) or "-"
-        parts.append(f"{key} session={state.get('session_name') or '-'} agents={agents}")
+    for key in sorted(team_states):
+        st = team_states[key]
+        agents = ",".join(sorted(st.get("agents", {}).keys())) or "-"
+        parts.append(f"{key} session={st.get('session_name') or '-'} agents={agents}")
     return "Candidates: " + "; ".join(parts)
+
+
+def _team_entry_from_state(state: dict[str, Any], team_key: str) -> dict[str, Any] | None:
+    teams = state.get("teams") if isinstance(state.get("teams"), dict) else {}
+    entry = teams.get(team_key)
+    if not isinstance(entry, dict):
+        return None
+    return entry
+
+
+def _project_top_level_view(state: dict[str, Any], team_key: str) -> dict[str, Any]:
+    """0.2.6 Family B (C8): when picking a team for use, the top-level
+    keys (``session_name`` / ``team_dir`` / ``agents`` / ``tasks``) are a
+    derived view of ``teams[team_key]``. We copy the team entry into a
+    flat dict and preserve any auxiliary state (``team_owner`` /
+    ``leader_receiver`` / ``coordinator`` already pinned to the team)."""
+    entry = _team_entry_from_state(state, team_key) or {}
+    projection = copy.deepcopy(entry)
+    projection.setdefault("session_name", entry.get("session_name"))
+    projection.setdefault("team_dir", entry.get("team_dir"))
+    projection["active_team_key"] = team_key
+    # Preserve the full teams dict so consumers can introspect siblings.
+    projection["teams"] = copy.deepcopy(state.get("teams") or {})
+    if "team_owner" in entry:
+        projection["team_owner"] = copy.deepcopy(entry["team_owner"])
+    elif state.get("team_owner") is not None:
+        projection["team_owner"] = copy.deepcopy(state["team_owner"])
+    if "leader_receiver" in entry:
+        projection["leader_receiver"] = copy.deepcopy(entry["leader_receiver"])
+    elif state.get("leader_receiver") is not None:
+        projection["leader_receiver"] = copy.deepcopy(state["leader_receiver"])
+    if "coordinator" in state:
+        projection.setdefault("coordinator", copy.deepcopy(state["coordinator"]))
+    return projection
 
 
 def select_runtime_state(workspace: Path, team: str | None = None) -> dict[str, Any]:
     state = load_runtime_state(workspace)
-    candidates = team_state_candidates(state)
+    alive = team_state_candidates(state)
     if team:
         matches = [
-            value
-            for key, value in candidates.items()
+            (key, value)
+            for key, value in alive.items()
             if team in {key, str(value.get("session_name") or ""), str(value.get("team_dir") or "")}
         ]
         if len(matches) == 1:
-            return copy.deepcopy(matches[0])
+            return _project_top_level_view(state, matches[0][0])
         from team_agent.errors import RuntimeError
         if len(matches) > 1:
-            raise RuntimeError("team selector is ambiguous. " + format_team_candidates(candidates))
-        raise RuntimeError(f"team {team!r} not found. " + format_team_candidates(candidates))
-    if len(candidates) > 1:
-        from team_agent.errors import RuntimeError
-        raise RuntimeError("multiple teams found in this workspace; pass --team <team> to choose. " + format_team_candidates(candidates))
-    return copy.deepcopy(state)
+            raise RuntimeError("team selector is ambiguous. " + format_team_candidates(alive))
+        raise RuntimeError(f"team {team!r} not found. " + format_team_candidates(alive))
+    active = state.get("active_team_key")
+    if active and active in alive:
+        return _project_top_level_view(state, str(active))
+    if len(alive) == 1:
+        return _project_top_level_view(state, next(iter(alive)))
+    if not alive:
+        return copy.deepcopy(state)
+    from team_agent.errors import RuntimeError
+    raise RuntimeError(
+        "multiple teams found in this workspace; pass --team <team> to choose. "
+        + format_team_candidates(alive)
+    )
 
 
 def ambiguous_team_target_result(state: dict[str, Any]) -> dict[str, Any] | None:
-    candidates = team_state_candidates(state)
-    if len(candidates) <= 1:
+    alive = team_state_candidates(state)
+    active = state.get("active_team_key")
+    if active and active in alive:
+        return None
+    if len(alive) <= 1:
         return None
     return {
         "ok": False,
         "status": "refused",
         "reason": "team_target_ambiguous",
-        "candidates": sorted(candidates),
-        "message": "multiple teams found in this workspace; pass --team <team> to choose. " + format_team_candidates(candidates),
+        "candidates": sorted(alive.keys()),
+        "message": "multiple teams found in this workspace; pass --team <team> to choose. "
+        + format_team_candidates(alive),
     }
 
 
