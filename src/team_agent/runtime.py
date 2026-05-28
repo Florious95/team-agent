@@ -819,7 +819,12 @@ def quick_start(
     )
     workspace = team_workspace(team_dir)
     ensure_workspace_dirs(workspace)
-    resolved_team_id = team_id or team_dir.name or "current"
+    # Spark MED 1 (b1b17b1 review): the on-disk team_dir already passed
+    # through ``_safe_snapshot_name``; reusing ``team_dir.name`` here
+    # keeps the on-disk path and the state.teams key aligned. Using the
+    # raw ``team_id`` would have split the two writes whenever the
+    # caller-supplied id contained spaces or shell-unsafe characters.
+    resolved_team_id = team_dir.name or "current"
     bind = bind_owner_from_caller_pane(workspace, resolved_team_id)
     if not bind.get("ok"):
         return {"ok": False, "status": "refused", **bind}
@@ -827,6 +832,13 @@ def quick_start(
     result = _legacy_quick_start(
         Path(agents_dir).resolve(), name=name, yes=yes, fresh=fresh, team_id=team_id
     )
+    # Spark MED 2 (b1b17b1 review): only commit the owner force-write
+    # and emit ``owner.bound_from_caller_pane`` when the legacy bootstrap
+    # actually succeeded. Otherwise pass the refusal envelope back
+    # verbatim — ``existing_runtime_state`` / ``preflight`` failures
+    # must not leave a "team owner claimed" side effect behind.
+    if not result.get("ok"):
+        return result
     state = load_runtime_state(workspace)
     teams = state.setdefault("teams", {})
     team_entry = teams.get(resolved_team_id) or {}
