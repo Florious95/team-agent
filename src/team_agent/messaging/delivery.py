@@ -475,19 +475,29 @@ def _wait_for_codex_idle_after_trust_dismissal(
     next paste lands in the "Messages to be submitted after next tool call"
     queue instead of opening a new model turn.
 
-    Block ONLY on positive evidence of mid-turn activity (one of the busy
-    markers). An empty capture / capture failure is not evidence of busy:
-    _wait_for_trust_prompt_dismissal already confirmed the trust prompt is
-    gone, so absent counter-evidence we accept idle.
+    Block on positive evidence of mid-turn activity (a busy marker) OR on a
+    `›`-prompt line with non-trivial unrelated content (default-template hint,
+    leftover prompt, any non-Team-Agent user text — round 3 contract req 10).
+    An empty capture / capture failure is not evidence of busy: the dismissal
+    poll already confirmed the trust prompt is gone, so absent counter-
+    evidence we accept idle.
 
-    Returns True once a capture shows no busy markers (or capture is empty),
-    False only if positive busy evidence persists past `timeout`.
+    Returns True once a capture shows no busy markers and no unrelated active
+    prompt (or capture is empty), False only if such evidence persists past
+    `timeout`.
     """
     import time as _time
+    from team_agent.messaging.tmux_prompt import _capture_has_unrelated_active_prompt
     deadline = _time.monotonic() + max(timeout, 0.0)
     while True:
         capture = _capture_pane_tail(target)
-        if not capture or not any(marker in capture for marker in _CODEX_BUSY_INDICATORS):
+        has_busy_marker = bool(capture) and any(
+            marker in capture for marker in _CODEX_BUSY_INDICATORS
+        )
+        has_unrelated_prompt = bool(capture) and _capture_has_unrelated_active_prompt(
+            capture
+        )
+        if not has_busy_marker and not has_unrelated_prompt:
             return True
         if _time.monotonic() >= deadline:
             return False

@@ -177,6 +177,62 @@ def _wait_for_message_ready(
 CODEX_QUEUED_MESSAGE_HEADER = "Messages to be submitted after next tool call"
 
 
+_CODEX_ACTIVE_TURN_PROCESSING_MARKERS = (
+    "• Working",
+    "• Reconnecting",
+    "Reconnecting...",
+    "esc to interrupt",
+    "Messages to be submitted after next tool call",
+)
+
+
+def _capture_has_codex_footer(capture_text: str) -> bool:
+    """Codex always renders a status footer `<model> · <directory>` while the
+    REPL is alive. The middot is the discriminator from minimalist test
+    sentinels — real Codex captures contain it, terse mock fixtures do not."""
+    return "·" in capture_text
+
+
+def _capture_has_unrelated_active_prompt(capture_text: str) -> bool:
+    """Gap 43 round 3 (contract req 10/12): True iff the capture shows a
+    `›`/`❯`-marker line carrying unrelated content in a context that is
+    unambiguously a live Codex pane — either co-occurring Codex turn-
+    processing markers (`• Working` / `• Reconnecting` / `esc to interrupt` /
+    queued-message header), or the Codex status footer (`·` middot followed
+    by the cwd path).
+
+    Pure-text captures can carry placeholder/template prompt content like
+    `› Implement {feature}` that real Codex draws in dim ANSI when the input
+    box is empty. After ANSI stripping the placeholder is indistinguishable
+    from user input. Anchoring the check to either a turn-processing marker
+    or the Codex footer disambiguates two surrounding worlds: a real live
+    Codex pane shows one or both signals; a minimalist mock fixture (used
+    by trust-prompt regression tests as a sentinel for "idle pane") shows
+    neither and is treated as idle.
+
+    Payload-level filters: `1` / `2` are trust-choice keystrokes; any payload
+    containing `[team-agent-token:` is the Team Agent brief itself landing in
+    the active prompt. Both are skipped."""
+    has_processing_marker = any(
+        marker in capture_text for marker in _CODEX_ACTIVE_TURN_PROCESSING_MARKERS
+    )
+    if not has_processing_marker and not _capture_has_codex_footer(capture_text):
+        return False
+    for line in capture_text.splitlines():
+        match = re.match(r"^\s*[›❯]\s*(.*)$", line)
+        if not match:
+            continue
+        payload = match.group(1).strip()
+        if not payload:
+            continue
+        if payload in {"1", "2"}:
+            continue
+        if "[team-agent-token:" in payload or "team-agent-token:" in payload:
+            continue
+        return True
+    return False
+
+
 def _capture_codex_queued_message_region(capture_text: str) -> str:
     """Return the contiguous Codex "Messages to be submitted after next tool
     call" block, or "" if the indicator is not present. Codex renders this UI

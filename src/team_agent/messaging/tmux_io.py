@@ -23,6 +23,7 @@ from typing import Any
 from team_agent.messaging.tmux_prompt import (
     CODEX_QUEUED_MESSAGE_HEADER,
     _capture_brief_only_in_codex_queued_region,
+    _capture_has_unrelated_active_prompt,
     detect_non_input_scrollback,
     non_input_scrollback_window,
 )
@@ -75,6 +76,27 @@ def _tmux_inject_text(
                 "verification": "pre_paste_capture_failed",
             }
         baseline_capture = baseline["capture"]
+        # Gap 43 round 3 contract req 11: a normal paste attempt that no
+        # longer sees a trust prompt must still refuse to paste over an
+        # unrelated active Codex prompt (default-template hint, leftover
+        # stray turn). Trust-prompt and pane-mode cases were already filtered
+        # by _prepare_tmux_pane_for_input above. Skip the gate when the
+        # caller is the trust-auto-answer keystroke (`bypass_non_input_gate`
+        # — that path needs to paste `1` into the trust prompt's choice line
+        # which itself carries a non-empty `›` payload like "1. Yes, continue").
+        if (
+            not bypass_non_input_gate
+            and provider == "codex"
+            and _capture_has_unrelated_active_prompt(baseline_capture)
+        ):
+            return {
+                "ok": False,
+                "stage": "pre-paste-codex-pane-not-idle",
+                "verification": "codex_pane_has_unrelated_active_prompt",
+                "error": "Codex pane has an unrelated active prompt; refusing to paste",
+                "attempts": attempt_log,
+                "pane_capture_tail": baseline_capture,
+            }
         buffered = _tmux_set_buffer_text(buffer_name, text)
         if not buffered["ok"]:
             return {"ok": False, "stage": buffered["stage"], "error": buffered.get("error"), "attempts": attempt_log}
