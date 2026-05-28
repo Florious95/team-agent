@@ -90,16 +90,21 @@ class ProviderAdapter:
         _ = agent_id, agent_state, workspace, exclude_session_ids
         return None
 
-    def mcp_config(self, workspace: Path, agent_id: str) -> dict[str, Any]:
+    def mcp_config(self, workspace: Path, agent_id: str, team_id: str | None = None) -> dict[str, Any]:
+        # 0.2.6 Family C (C13): worker spawn env always carries the owning
+        # team id so the MCP server can scope sender requests without
+        # asking the worker which team it belongs to.
+        env = {
+            "TEAM_AGENT_ID": agent_id,
+            "TEAM_AGENT_OWNER_TEAM_ID": str(team_id or ""),
+            "PYTHONPATH": str(repo_root() / "src"),
+        }
         return {
             "team_orchestrator": {
                 "type": "stdio",
                 "command": sys.executable,
                 "args": ["-m", "team_agent.mcp_server", "--workspace", str(workspace)],
-                "env": {
-                    "TEAM_AGENT_ID": agent_id,
-                    "PYTHONPATH": str(repo_root() / "src"),
-                },
+                "env": env,
             }
         }
 

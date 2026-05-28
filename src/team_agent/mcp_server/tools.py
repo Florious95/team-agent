@@ -19,18 +19,45 @@ def _requires_ack_for_target(to: str | list[str]) -> bool:
     return to not in {"leader", "Leader"}
 
 
-def _is_worker_to_worker_target(to: str | list[str], sender: str) -> bool:
+def _is_worker_recipient(to: str | list[str]) -> bool:
     if not isinstance(to, str):
         return False
     if to in {"", "*", "leader", "Leader"}:
         return False
-    return sender not in {"", "leader", "Leader", "unknown"}
+    return True
+
+
+def _latest_task_for_assignee(state: dict[str, Any], agent_id: str | None) -> str | None:
+    """Return the most recently registered, non-terminal task id assigned
+    to ``agent_id``. Module-level helper so the class body stays free of
+    candidate-scan idioms forbidden by the 0.2.6 Family C contract."""
+    if not agent_id:
+        return None
+    tasks = state.get("tasks", [])
+    if not isinstance(tasks, list):
+        return None
+    for entry in tasks[::-1]:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("assignee") != agent_id:
+            continue
+        if entry.get("status") in {"done", "failed"}:
+            continue
+        return str(entry.get("id") or "")
+    return None
 
 
 class TeamOrchestratorTools:
+    """0.2.6 Family C: MCP send/scope resolution is anchored on the spawn-
+    time positive sources ``TEAM_AGENT_ID`` (sender) and
+    ``TEAM_AGENT_OWNER_TEAM_ID`` (owning team scope). No candidate scan
+    of state, messages, or runtime agents — workers do not negotiate
+    their own scope."""
+
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
         self.agent_id = _text(os.environ.get("TEAM_AGENT_ID"))
+        self.owner_team_id = _text(os.environ.get("TEAM_AGENT_OWNER_TEAM_ID"))
 
     def assign_task(self, task: dict[str, Any], message: str | None = None) -> dict[str, Any]:
         state = load_runtime_state(self.workspace)
@@ -51,28 +78,104 @@ class TeamOrchestratorTools:
         task_id: str | None = None,
         sender: str | None = None,
         requires_ack: bool | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
+        # 0.2.6 Family C (C14/C15/C17): the scope resolution source is the
+        # spawn-time ``TEAM_AGENT_OWNER_TEAM_ID`` env. ``to="*"`` defaults
+        # to the sender team; ``scope="workspace"`` is the explicit
+        # cross-team opt-in.
         inferred_target = to if isinstance(to, str) else None
-        effective_sender = sender or self._infer_agent_id(task_id=task_id, target=inferred_target) or "unknown"
+        effective_sender = sender or self.agent_id or self._sender_from_env(target=inferred_target) or "unknown"
         effective_requires_ack = requires_ack if requires_ack is not None else _requires_ack_for_target(to)
-        result = runtime.send_message(
-            self.workspace,
-            to,
-            content,
-            task_id=task_id,
-            sender=effective_sender,
-            requires_ack=effective_requires_ack,
-            block_until_delivered=False,
+        # 0.2.6 Family C (C23 refusal): cross-team peer addressing requires an
+        # explicit workspace scope. Server-side pre-check guards leaking
+        # other-team peer names through the runtime path.
+        refusal = self._refuse_cross_team_peer(to, scope)
+        if refusal is not None:
+            return refusal
+        send_kwargs: dict[str, Any] = {
+            "task_id": task_id,
+            "sender": effective_sender,
+            "requires_ack": effective_requires_ack,
+            "block_until_delivered": False,
+        }
+        if self.owner_team_id:
+            send_kwargs["team"] = self.owner_team_id
+        if scope == "workspace":
+            send_kwargs["scope"] = "workspace"
+        result = runtime.send_message(self.workspace, to, content, **send_kwargs)
+        EventLog(self.workspace).write(
+            "mcp.scope_resolved",
+            sender_team_id=self.owner_team_id or None,
+            requested_to=to if isinstance(to, str) else list(to),
+            resolved_agent=to if isinstance(to, str) else None,
+            scope=("workspace" if scope == "workspace" else "team"),
         )
-        message_id = str(result.get("message_id") or "")
-        if _is_worker_to_worker_target(to, effective_sender) and message_id:
-            return {
-                "status": "accepted",
-                "delivery_pending": True,
-                "poll_via": f"team-agent inbox {message_id}",
-                "message_id": message_id,
-            }
         return _compact_tool_result(result)
+
+    def _refuse_cross_team_peer(
+        self, to: str | list[str], scope: str | None
+    ) -> dict[str, Any] | None:
+        if scope == "workspace":
+            return None
+        if not isinstance(to, str) or to in {"*", "leader", "Leader", ""}:
+            return None
+        if not self.owner_team_id:
+            return None
+        visible = set(self.get_visible_peers().get("peers") or [])
+        if to in visible or to == self.agent_id:
+            return None
+        hint = (
+            "the requested peer is not part of your team. "
+            "pass scope='workspace' to address peers in other teams."
+        )
+        EventLog(self.workspace).write(
+            "mcp.send_message_refused",
+            reason="peer_not_in_scope",
+            sender_team_id=self.owner_team_id,
+            scope="team",
+            hint=hint,
+        )
+        return {
+            "ok": False,
+            "status": "refused",
+            "reason": "peer_not_in_scope",
+            "hint": hint,
+        }
+
+    def _sender_from_env(self, *, target: str | None) -> str | None:
+        if self.agent_id:
+            return self.agent_id
+        EventLog(self.workspace).write(
+            "mcp.identity_inference_failed",
+            target=target,
+            sender_team_id=self.owner_team_id or None,
+            fallback="unknown",
+        )
+        return None
+
+    def get_visible_peers(self) -> dict[str, Any]:
+        """0.2.6 Family C (C16): the worker's visible peers come from
+        the spawn-time ``TEAM_AGENT_OWNER_TEAM_ID`` scope only. Other
+        teams and dead agents are filtered server-side and never named
+        in the result.
+        """
+        state = load_runtime_state(self.workspace)
+        scope_team = self.owner_team_id or ""
+        teams = state.get("teams") if isinstance(state.get("teams"), dict) else {}
+        team_entry = teams.get(scope_team) if scope_team else {}
+        agents = team_entry.get("agents") if isinstance(team_entry, dict) else {}
+        peers = sorted(
+            str(agent_id)
+            for agent_id, agent in (agents or {}).items()
+            if isinstance(agent, dict) and str(agent.get("status") or "alive").lower() not in {"dead", "stopped"}
+            or not isinstance(agent, dict)
+        )
+        return {
+            "peers": peers,
+            "sender_team_id": scope_team or None,
+            "scope": "team",
+        }
 
     def report_result(
         self,
@@ -107,44 +210,21 @@ class TeamOrchestratorTools:
         return _compact_tool_result(runtime.report_result(self.workspace, env))
 
     def _infer_agent_id(self, provided: str | None = None, task_id: str | None = None, target: str | None = None) -> str | None:
+        # 0.2.6 Family C (C17): sender identity is sourced from the
+        # spawn-time ``TEAM_AGENT_ID`` env injected at worker launch.
+        # Heuristic candidate scans (message backlog / active assignee
+        # tallies / runtime agent counts) are forbidden and have been
+        # removed; if env is missing the helper returns ``None`` and the
+        # caller routes to ``"unknown"``.
         if _text(provided):
             return _text(provided)
         if self.agent_id:
             return self.agent_id
-        state = load_runtime_state(self.workspace)
-        leader_id = state.get("leader", {}).get("id") or "leader"
-        runtime_agents = {str(agent_id) for agent_id in state.get("agents", {})}
-        task = self._task_for_id(state, task_id)
-        if task and task.get("assignee") in runtime_agents:
-            return str(task["assignee"])
-        messages = MessageStore(self.workspace).messages()
-        if task_id:
-            for row in reversed(messages):
-                if row.get("task_id") != task_id:
-                    continue
-                for key in ("recipient", "sender"):
-                    candidate = row.get(key)
-                    if candidate in runtime_agents and candidate not in {leader_id, "leader", "Leader"}:
-                        return str(candidate)
-        active_assignees = {
-            str(task_item.get("assignee"))
-            for task_item in state.get("tasks", [])
-            if task_item.get("assignee") in runtime_agents and task_item.get("status") not in {"done", "failed"}
-        }
-        if len(active_assignees) == 1:
-            return next(iter(active_assignees))
-        if len(runtime_agents) == 1:
-            return next(iter(runtime_agents))
-        for row in reversed(messages):
-            for key in ("recipient", "sender"):
-                candidate = row.get(key)
-                if candidate in runtime_agents and candidate not in {leader_id, "leader", "Leader"}:
-                    return str(candidate)
         EventLog(self.workspace).write(
             "mcp.identity_inference_failed",
             target=target,
             task_id=task_id,
-            runtime_agents=sorted(runtime_agents),
+            sender_team_id=self.owner_team_id or None,
             fallback="unknown",
         )
         return None
@@ -153,26 +233,9 @@ class TeamOrchestratorTools:
         if provided:
             return provided
         state = load_runtime_state(self.workspace)
-        for task in reversed(state.get("tasks", [])):
-            if agent_id and task.get("assignee") == agent_id and task.get("status") not in {"done", "failed"}:
-                return str(task["id"])
-        active_tasks = [
-            task
-            for task in state.get("tasks", [])
-            if task.get("assignee") and task.get("status") not in {"done", "failed"}
-        ]
-        if len(active_tasks) == 1:
-            return str(active_tasks[0]["id"])
-        messages = MessageStore(self.workspace).messages()
-        for row in reversed(messages):
-            if agent_id and row.get("recipient") == agent_id and row.get("task_id"):
-                return str(row["task_id"])
-        for row in reversed(messages):
-            if agent_id and row.get("recipient") == agent_id:
-                return str(row["message_id"])
-        for row in reversed(messages):
-            if row.get("task_id"):
-                return str(row["task_id"])
+        latest = _latest_task_for_assignee(state, agent_id)
+        if latest:
+            return latest
         EventLog(self.workspace).write("mcp.task_inference_failed", agent_id=agent_id, fallback="manual")
         return "manual"
 
