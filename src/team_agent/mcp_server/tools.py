@@ -27,6 +27,28 @@ def _is_worker_recipient(to: str | list[str]) -> bool:
     return True
 
 
+def _merge_tasks_by_id(prefer: list[Any], fallback: list[Any]) -> list[dict[str, Any]]:
+    """Build a deduped task list keyed by ``id``.
+
+    ``prefer`` is searched first so its entries win on duplicate ids — the
+    top-level ``state["tasks"]`` view receives in-place updates from
+    ``collect`` (Family B view-vs-source asymmetry) while
+    ``teams[team_key].tasks`` may have stayed pre-collect. Walking the
+    preferred list first ensures an earlier ``done`` status is not
+    regressed when ``assign_task`` re-publishes the merged list as the
+    new source on ``teams[team_key].tasks``.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for entry in list(prefer) + list(fallback):
+        if not isinstance(entry, dict):
+            continue
+        task_id = entry.get("id")
+        if not task_id:
+            continue
+        out.setdefault(str(task_id), entry)
+    return list(out.values())
+
+
 def _latest_task_for_assignee(state: dict[str, Any], agent_id: str | None) -> str | None:
     """Return the most recently registered, non-terminal task id assigned
     to ``agent_id``. Module-level helper so the class body stays free of
@@ -60,13 +82,52 @@ class TeamOrchestratorTools:
         self.owner_team_id = _text(os.environ.get("TEAM_AGENT_OWNER_TEAM_ID"))
 
     def assign_task(self, task: dict[str, Any], message: str | None = None) -> dict[str, Any]:
+        # 0.2.6 Family B (C8): the source of truth for tasks lives in
+        # ``state.teams[team_key].tasks``; the top-level ``tasks`` field is
+        # a derived view. Workflow:
+        #   * resolve the team key from the spawn-time
+        #     ``TEAM_AGENT_OWNER_TEAM_ID`` env (Family C C13), or
+        #     ``state.active_team_key`` for legacy single-team callers.
+        #   * reconcile teams[team_key].tasks with the top-level view by id
+        #     before appending — readers that still write to top-level
+        #     (legacy ``collect`` updates ``state["tasks"]`` in place)
+        #     leave the team entry stale; using top-level entries first
+        #     keeps an earlier ``done`` from regressing to ``pending``.
+        #   * append / update the new task into the merged list and bind
+        #     the same list object as both source and view so the next
+        #     save round-trips one truth in two locations.
         state = load_runtime_state(self.workspace)
-        tasks = state.setdefault("tasks", [])
-        existing = next((item for item in tasks if item.get("id") == task.get("id")), None)
+        team_key = (
+            self.owner_team_id
+            or _text(state.get("active_team_key"))
+            or ""
+        )
+        teams = state.setdefault("teams", {})
+        team_entry: dict[str, Any] | None
+        if team_key and isinstance(teams.get(team_key), dict):
+            team_entry = teams[team_key]
+        elif team_key:
+            team_entry = {"tasks": [], "status": "alive"}
+            teams[team_key] = team_entry
+        else:
+            team_entry = None
+        if team_entry is None:
+            # Legacy single-team workspaces — no team scope to write through.
+            target_tasks = state.setdefault("tasks", [])
+        else:
+            top_view = state.get("tasks")
+            team_tasks = team_entry.get("tasks")
+            target_tasks = _merge_tasks_by_id(
+                top_view if isinstance(top_view, list) else [],
+                team_tasks if isinstance(team_tasks, list) else [],
+            )
+            team_entry["tasks"] = target_tasks
+            state["tasks"] = target_tasks
+        existing = next((item for item in target_tasks if item.get("id") == task.get("id")), None)
         if existing:
             existing.update(task)
         else:
-            tasks.append(task)
+            target_tasks.append(task)
         save_runtime_state(self.workspace, state)
         content = message or task.get("description") or task.get("title") or json.dumps(task)
         return _compact_tool_result(runtime.send_message(self.workspace, task.get("assignee"), content, task_id=task["id"]))
