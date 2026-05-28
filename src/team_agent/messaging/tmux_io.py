@@ -20,13 +20,7 @@ from team_agent.messaging.deps import (
 
 from pathlib import Path
 from typing import Any
-from team_agent.messaging.tmux_prompt import (
-    CODEX_QUEUED_MESSAGE_HEADER,
-    _capture_brief_only_in_codex_queued_region,
-    _capture_has_unrelated_active_prompt,
-    detect_non_input_scrollback,
-    non_input_scrollback_window,
-)
+from team_agent.messaging.tmux_prompt import detect_non_input_scrollback, non_input_scrollback_window
 
 def _tmux_inject_text(
     target: str,
@@ -76,27 +70,6 @@ def _tmux_inject_text(
                 "verification": "pre_paste_capture_failed",
             }
         baseline_capture = baseline["capture"]
-        # Gap 43 round 3 contract req 11: a normal paste attempt that no
-        # longer sees a trust prompt must still refuse to paste over an
-        # unrelated active Codex prompt (default-template hint, leftover
-        # stray turn). Trust-prompt and pane-mode cases were already filtered
-        # by _prepare_tmux_pane_for_input above. Skip the gate when the
-        # caller is the trust-auto-answer keystroke (`bypass_non_input_gate`
-        # — that path needs to paste `1` into the trust prompt's choice line
-        # which itself carries a non-empty `›` payload like "1. Yes, continue").
-        if (
-            not bypass_non_input_gate
-            and provider == "codex"
-            and _capture_has_unrelated_active_prompt(baseline_capture)
-        ):
-            return {
-                "ok": False,
-                "stage": "pre-paste-codex-pane-not-idle",
-                "verification": "codex_pane_has_unrelated_active_prompt",
-                "error": "Codex pane has an unrelated active prompt; refusing to paste",
-                "attempts": attempt_log,
-                "pane_capture_tail": baseline_capture,
-            }
         buffered = _tmux_set_buffer_text(buffer_name, text)
         if not buffered["ok"]:
             return {"ok": False, "stage": buffered["stage"], "error": buffered.get("error"), "attempts": attempt_log}
@@ -175,27 +148,6 @@ def _tmux_inject_text(
         )
         if not turn_visible:
             turn_verification = "not_yet_observed"
-        # Gap 43: narrow refinement of Gap 42's "submit success authoritative"
-        # stance. The submit mechanic succeeded, but if the post-submit pane
-        # capture shows the brief sitting only inside Codex's
-        # "Messages to be submitted after next tool call" region (i.e. Codex
-        # was mid-turn — typically the stray `1` trust-choice turn — and
-        # queued the paste instead of opening a new user turn), the brief
-        # was NOT delivered to the model. Refuse success so trust-retry /
-        # operator attention can pick the message up again.
-        if turn_capture and _capture_brief_only_in_codex_queued_region(
-            turn_capture, token, text
-        ):
-            return {
-                "ok": False,
-                "stage": "codex_queued_not_delivered",
-                "error": "brief_visible_only_in_codex_queued_message_block",
-                "verification": verification,
-                "submit_verification": submit_verification,
-                "turn_verification": "codex_queued_message_not_active_turn",
-                "attempts": attempt_log,
-                "submit_attempts": submit.get("attempts"),
-            }
         return {
             "ok": True,
             "stage": "submitted",
@@ -254,26 +206,10 @@ def _wait_for_leader_new_turn(
 def _capture_has_leader_new_turn(capture_text: str, expected_text: str, token: str, provider: str) -> bool:
     if provider == "fake":
         return True
-    # Gap 43: Codex renders a "Messages to be submitted after next tool call"
-    # block when a paste arrives while the model is busy. A brief that only
-    # appears inside that block has not opened a new model turn — even if a
-    # `›` marker line (e.g. the stray `1` trust-choice keystroke turn) sits
-    # above it in the capture.
-    if _capture_brief_only_in_codex_queued_region(capture_text, token, expected_text):
-        return False
     lines = capture_text.splitlines()
-    for index, line in enumerate(lines):
-        if not re.match(r"^\s*[❯›>]\s*", line):
-            continue
-        payload = re.sub(r"^\s*[❯›>]\s*", "", line).strip()
-        if payload in {"1", "2"}:
-            # Stray trust-choice (`1` Yes / `2` No) keystroke turn produced by
-            # the trust auto-answer — not a real leader brief turn.
-            continue
-        window_lines = lines[index : index + 12]
-        window = "\n".join(window_lines)
-        if CODEX_QUEUED_MESSAGE_HEADER in window:
-            window = window.split(CODEX_QUEUED_MESSAGE_HEADER, 1)[0]
+    marker_indexes = [index for index, line in enumerate(lines) if re.match(r"^\s*[❯›>]\s*", line)]
+    for index in marker_indexes:
+        window = "\n".join(lines[index : index + 12])
         if token and token in window:
             return True
         if _leader_turn_contains_message_fragment(window, expected_text):

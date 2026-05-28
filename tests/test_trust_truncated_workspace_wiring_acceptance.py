@@ -127,7 +127,7 @@ class TrustTruncatedWorkspaceWiringAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(delivery_inject_calls), 2)
         self.assertTrue(any("trust-retry" in call["buffer"] for call in delivery_inject_calls))
         trust_answer.assert_called_once()
-        self.assertEqual(trust_answer.call_args[0][:3], (self.target, "1", "Enter"))
+        self.assertEqual(trust_answer.call_args[0][:3], (self.target, "", "Enter"))
         refused_mismatch = [
             ev for ev in self._events()
             if ev.get("event") == "leader_panes.trust_auto_answer_refused"
