@@ -211,18 +211,44 @@ def ensure_table_layout(
     schema_version: int,
     db_path: Path | None = None,
 ) -> list[dict[str, Any]]:
+    # 0.2.6 CI hotfix #3: hold the SQLite RESERVED lock across the diff
+    # read AND the rebuild writes. Earlier code only acquired BEGIN
+    # IMMEDIATE inside ``_rebuild_tables`` — so a concurrent writer
+    # could squeeze a row in between ``_layout_diffs`` and the rebuild,
+    # and the post-rebuild row-count drift check fired with
+    # before != after even though no schema layout was clobbered.
+    # Wrapping the whole sequence makes the drift check an invariant
+    # (no writer can interleave once we hold the lock).
     conn.row_factory = sqlite3.Row
     _run_version_migrations(conn, schema_version)
-    diffs = _layout_diffs(conn)
-    if not diffs:
-        return []
-    db_path = db_path or _db_path_from_conn(conn)
-    if db_path is None:
-        raise RuntimeError("cannot rebuild team.db layout without a database path")
-    backup_path = _backup_path(db_path, _pragma_user_version(conn))
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(db_path, backup_path)
-    events = _rebuild_tables(conn, diffs, backup_path)
+    started_tx = False
+    if not conn.in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+        started_tx = True
+    try:
+        diffs = _layout_diffs(conn)
+        if not diffs:
+            if started_tx:
+                conn.execute("COMMIT")
+                started_tx = False
+            return []
+        db_path = db_path or _db_path_from_conn(conn)
+        if db_path is None:
+            raise RuntimeError("cannot rebuild team.db layout without a database path")
+        backup_path = _backup_path(db_path, _pragma_user_version(conn))
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(db_path, backup_path)
+        events = _rebuild_tables(conn, diffs, backup_path)
+        if started_tx:
+            conn.execute("COMMIT")
+            started_tx = False
+    except Exception:
+        if started_tx and conn.in_transaction:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
     _emit_rebuild_events(db_path, events)
     return events
 
@@ -281,56 +307,55 @@ def _rebuild_tables(
     diffs: dict[str, dict[str, Any]],
     backup_path: Path,
 ) -> list[dict[str, Any]]:
+    # Caller (``ensure_table_layout``) now holds the BEGIN IMMEDIATE for
+    # the full diff+rebuild window, so the drift check between ``before``
+    # and ``after`` is an invariant rather than a concurrency race. The
+    # inner BEGIN/COMMIT/ROLLBACK was removed alongside that move (a
+    # nested BEGIN raises in SQLite and would mask the outer lock).
     events: list[dict[str, Any]] = []
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        for table, diff in diffs.items():
-            expected = MANAGED_TABLE_LAYOUTS[table]
-            actual = tuple(diff["actual"])
-            before = 0 if diff.get("missing") else _table_count(conn, table)
-            if diff.get("missing"):
-                conn.execute(CREATE_TABLE_SQL[table].format(table=table))
-                after = _table_count(conn, table)
-                if after != before:
-                    raise RuntimeError(f"schema rebuild row count changed for {table}: {before} != {after}")
-                events.append({
-                    "table": table,
-                    "from_layout_columns": [],
-                    "to_layout_columns": list(expected),
-                    "backup_path": str(backup_path),
-                    "row_count_before": before,
-                    "row_count_after": after,
-                    "missing": True,
-                })
-                continue
-            temp = f"__team_agent_rebuild_{table}"
-            old = f"__team_agent_old_{table}"
-            conn.execute(f"drop table if exists {temp}")
-            conn.execute(f"drop table if exists {old}")
-            conn.execute(CREATE_TABLE_SQL[table].format(table=temp))
-            common = [column for column in expected if column in actual]
-            column_sql = ", ".join(common)
-            conn.execute(f"insert into {temp}({column_sql}) select {column_sql} from {table}")
-            _maybe_fault_after_insert()
-            conn.execute(f"alter table {table} rename to {old}")
-            conn.execute(f"alter table {temp} rename to {table}")
-            conn.execute(f"drop table {old}")
+    for table, diff in diffs.items():
+        expected = MANAGED_TABLE_LAYOUTS[table]
+        actual = tuple(diff["actual"])
+        before = 0 if diff.get("missing") else _table_count(conn, table)
+        if diff.get("missing"):
+            conn.execute(CREATE_TABLE_SQL[table].format(table=table))
             after = _table_count(conn, table)
-            if before != after:
+            if after != before:
                 raise RuntimeError(f"schema rebuild row count changed for {table}: {before} != {after}")
             events.append({
                 "table": table,
-                "from_layout_columns": list(actual),
+                "from_layout_columns": [],
                 "to_layout_columns": list(expected),
                 "backup_path": str(backup_path),
                 "row_count_before": before,
                 "row_count_after": after,
+                "missing": True,
             })
-        ensure_schema_indexes(conn)
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+            continue
+        temp = f"__team_agent_rebuild_{table}"
+        old = f"__team_agent_old_{table}"
+        conn.execute(f"drop table if exists {temp}")
+        conn.execute(f"drop table if exists {old}")
+        conn.execute(CREATE_TABLE_SQL[table].format(table=temp))
+        common = [column for column in expected if column in actual]
+        column_sql = ", ".join(common)
+        conn.execute(f"insert into {temp}({column_sql}) select {column_sql} from {table}")
+        _maybe_fault_after_insert()
+        conn.execute(f"alter table {table} rename to {old}")
+        conn.execute(f"alter table {temp} rename to {table}")
+        conn.execute(f"drop table {old}")
+        after = _table_count(conn, table)
+        if before != after:
+            raise RuntimeError(f"schema rebuild row count changed for {table}: {before} != {after}")
+        events.append({
+            "table": table,
+            "from_layout_columns": list(actual),
+            "to_layout_columns": list(expected),
+            "backup_path": str(backup_path),
+            "row_count_before": before,
+            "row_count_after": after,
+        })
+    ensure_schema_indexes(conn)
     return events
 
 
