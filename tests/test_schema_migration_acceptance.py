@@ -13,16 +13,28 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tests.contracts.legacy_team_db_fixture import (
-    CURRENT_LAYOUTS,
-    FIXTURE_COUNTS,
-    LEGACY_LAYOUTS,
-    MIGRATED_TABLES,
-    all_table_counts,
-    build_legacy_workspace,
-    table_count,
-    table_layout,
-)
+try:
+    from .contracts.legacy_team_db_fixture import (
+        CURRENT_LAYOUTS,
+        FIXTURE_COUNTS,
+        LEGACY_LAYOUTS,
+        MIGRATED_TABLES,
+        all_table_counts,
+        build_legacy_workspace,
+        table_count,
+        table_layout,
+    )
+except ImportError:  # unittest discover -s tests imports this module as top-level in CI.
+    from contracts.legacy_team_db_fixture import (
+        CURRENT_LAYOUTS,
+        FIXTURE_COUNTS,
+        LEGACY_LAYOUTS,
+        MIGRATED_TABLES,
+        all_table_counts,
+        build_legacy_workspace,
+        table_count,
+        table_layout,
+    )
 
 
 REPO = Path(__file__).resolve().parents[1]
