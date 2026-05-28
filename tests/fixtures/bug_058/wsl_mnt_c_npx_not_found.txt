@@ -1,0 +1,6 @@
+npm error config prefix cannot be changed from project config: /mnt/c/Users/AlaudaLancy/.npmrc.
+Need to install the following packages:
+@team-agent/installer@0.2.5
+Ok to proceed? (y) y
+
+sh: 1: team-agent-installer: not found
