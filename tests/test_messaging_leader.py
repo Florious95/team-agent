@@ -146,9 +146,12 @@ class MessagingLeaderTests(unittest.TestCase):
                 return proc
             raise AssertionError(args)
 
-        with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
+        with (
+            patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+            patch("team_agent._legacy_pane_discovery.run_cmd", side_effect=fake_run_cmd),
+        ):
             pane, discovery = runtime._resolve_leader_pane(None, "codex")
-        self.assertEqual(discovery, "current_client")
+        self.assertEqual(discovery, "active_pane_scan")
         self.assertIn("pane_id", pane)
         self.assertIn(pane["pane_current_command"], {"node", "claude", "claude.exe", "codex"})
 
@@ -171,11 +174,14 @@ class MessagingLeaderTests(unittest.TestCase):
                 return proc
             raise AssertionError(args)
 
-        with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
-            with self.assertRaises(TeamAgentRuntimeError) as ctx:
-                runtime._resolve_leader_pane(None, "codex", workspace=workspace, require_current=True)
+        with (
+            patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd),
+            patch("team_agent._legacy_pane_discovery.run_cmd", side_effect=fake_run_cmd),
+        ):
+            pane, discovery = runtime._resolve_leader_pane(None, "codex", workspace=workspace, require_current=True)
 
-        self.assertIn("Current tmux client points at pane %1", str(ctx.exception))
+        self.assertEqual(discovery, "workspace_pane_scan")
+        self.assertEqual(pane["pane_id"], "%2")
 
     def test_resolve_leader_reports_ambiguous_workspace_panes(self) -> None:
         workspace = Path("/tmp/team-agent-ambiguous")
