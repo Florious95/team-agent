@@ -41,7 +41,7 @@ MANAGED_TABLE_LAYOUTS: dict[str, tuple[str, ...]] = {
 
 CREATE_TABLE_SQL: dict[str, str] = {
     "messages": """
-        create table {table} (
+        create table if not exists {table} (
           message_id text primary key,
           owner_team_id text,
           task_id text,
@@ -61,7 +61,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "results": """
-        create table {table} (
+        create table if not exists {table} (
           result_id text primary key,
           owner_team_id text,
           task_id text not null,
@@ -72,7 +72,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "scheduled_events": """
-        create table {table} (
+        create table if not exists {table} (
           id integer primary key,
           owner_team_id text,
           due_at text not null,
@@ -86,7 +86,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "delivery_tokens": """
-        create table {table} (
+        create table if not exists {table} (
           message_id text primary key,
           unique_token text not null,
           injected_at text not null,
@@ -97,7 +97,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "agent_health": """
-        create table {table} (
+        create table if not exists {table} (
           owner_team_id text,
           agent_id text not null,
           status text not null,
@@ -109,7 +109,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "peer_allowlist": """
-        create table {table} (
+        create table if not exists {table} (
           a text not null,
           b text not null,
           created_at text not null,
@@ -117,7 +117,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "result_watchers": """
-        create table {table} (
+        create table if not exists {table} (
           watcher_id text primary key,
           owner_team_id text,
           task_id text,
@@ -133,7 +133,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
         )
     """,
     "leader_notification_log": """
-        create table {table} (
+        create table if not exists {table} (
           result_id text not null,
           leader_session_uuid text not null,
           notified_message_id text not null,
