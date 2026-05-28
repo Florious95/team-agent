@@ -20,6 +20,7 @@
     "team-agent-installer": "npm/install.mjs"
   },
   "scripts": {
+    "postinstall": "node npm/bincheck.mjs",
     "test": "PYTHONPATH=src python3 tests/run_tests.py",
     "test:regression": "PYTHONPATH=src python3 scripts/run_regression_tests.py --iterations 3",
     "test:rust": "cargo test --manifest-path crates/team-agent-core/Cargo.toml",

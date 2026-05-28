@@ -103,6 +103,28 @@ cd team-agent
 npm exec --yes --package . -- team-agent-installer install
 ```
 
+### Windows + WSL
+
+If you run `npx @team-agent/installer@latest install` from
+`/mnt/c/Users/<user>/` and see npm warn
+`config prefix cannot be changed from project config`, followed by
+`team-agent-installer: not found`, npm did not expose the installer bin shim.
+
+This is usually caused by a project-level `.npmrc` under `/mnt/c/Users/<user>/`
+that contains a `prefix=...` setting. Action: move that setting to `~/.npmrc`,
+or delete the project-level `prefix` line, then retry from your Linux home:
+
+```bash
+cd ~
+npx @team-agent/installer@latest install
+```
+
+Fallback explicit package form:
+
+```bash
+npx --package @team-agent/installer team-agent-installer install
+```
+
 ### Use
 
 Start the lead inside tmux. The shortcut commands create or attach a tmux
