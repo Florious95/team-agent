@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import copy
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -313,12 +314,32 @@ def _caller_identity_from_env(state: dict[str, Any] | None = None, team_id: str 
         team_id or os.environ.get("TEAM_AGENT_TEAM_ID") or team_state_key(state),
     )
     return {
-        "pane_id": os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or "",
+        "pane_id": os.environ.get("TEAM_AGENT_LEADER_PANE_ID") or os.environ.get("TMUX_PANE") or "",
         "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER") or "",
         "machine_fingerprint": machine_fingerprint,
         "leader_session_uuid": leader_uuid,
         "leader_session_uuid_source": "explicit-override" if override else ("env" if env_uuid else "derived"),
     }
+
+
+def _tmux_pane_is_live(pane_id: str) -> bool:
+    if not pane_id:
+        return False
+    try:
+        from team_agent.runtime import run_cmd
+        proc = run_cmd(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"], timeout=3)
+    except Exception:
+        try:
+            proc = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"],
+                text=True,
+                capture_output=True,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            return False
+    return proc.returncode == 0
 
 
 def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -331,6 +352,10 @@ def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
     caller_uuid = caller["leader_session_uuid"]
     owner_pane = str(owner.get("pane_id") or "")
     caller_pane = caller.get("pane_id") or ""
+    if caller_pane and caller_pane == owner_pane:
+        return None
+    if owner_pane and not _tmux_pane_is_live(owner_pane):
+        return None
     if caller_uuid == owner_uuid and (not caller_pane or caller_pane == owner_pane):
         return None
     same_uuid = caller_uuid == owner_uuid

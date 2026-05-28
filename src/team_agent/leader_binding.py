@@ -10,8 +10,8 @@ is sourced from the caller-supplied positive facts only:
 
 Reverse enumeration of panes / windows / clients is forbidden. Heuristic
 ranking ("active pane", "current client", "first leader-shaped pane") is
-forbidden. ``$TMUX_PANE`` missing or the caller pane not running a leader
-host → refuse and emit ``owner.bind_refused``.  Successful binds emit
+forbidden. ``$TMUX_PANE`` missing → refuse and emit ``owner.bind_refused``.
+The pane's current command is diagnostic metadata only. Successful binds emit
 ``owner.bound_from_caller_pane`` and force-write every owner identity
 field; old fields are not merged or migrated.
 """
@@ -37,11 +37,9 @@ def run_cmd(args: list[str], timeout: int = 5) -> subprocess.CompletedProcess[st
     )
 
 
-LEADER_HOST_COMMANDS = frozenset({"claude", "claude.exe", "codex"})
-
 _HINT_RUN_FROM_LEADER_PANE = (
     "run team-agent from inside your leader pane "
-    "(the tmux pane currently running claude or codex)."
+    "(the tmux pane you want to own this team)."
 )
 
 
@@ -71,7 +69,7 @@ def bind_owner_from_caller_pane(
 
         {
             "ok": False,
-            "reason": "caller_pane_missing" | "caller_not_leader_shaped",
+            "reason": "caller_pane_missing",
             "caller_pane_id": ..., "caller_current_command": ...,
             "hint": ...,
         }
@@ -110,26 +108,6 @@ def bind_owner_from_caller_pane(
         caller_command = ""
     else:
         caller_command = (getattr(proc, "stdout", "") or "").strip()
-    if caller_command not in LEADER_HOST_COMMANDS:
-        hint = (
-            f"run team-agent from inside your leader pane "
-            f"(this pane is running {caller_command or '<unknown>'})."
-        )
-        event_log.write(
-            "owner.bind_refused",
-            reason="caller_not_leader_shaped",
-            caller_pane_id=caller_pane,
-            caller_current_command=caller_command,
-            team_id=team_id,
-            hint=hint,
-        )
-        return {
-            "ok": False,
-            "reason": "caller_not_leader_shaped",
-            "caller_pane_id": caller_pane,
-            "caller_current_command": caller_command,
-            "hint": hint,
-        }
     machine_fingerprint = os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT") or ""
     os_user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
     provider = (

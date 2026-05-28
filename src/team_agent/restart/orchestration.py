@@ -367,6 +367,18 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     from team_agent.leader import autobind_leader_receiver_from_env
     leader_provider = str(spec.get("leader", {}).get("provider") or "codex")
     rebound_receiver = autobind_leader_receiver_from_env(workspace, leader_provider, source="restart")
+    if rebound_receiver is None and state.get("leader_receiver"):
+        stale = state.pop("leader_receiver", None)
+        event_log.write(
+            "leader_receiver.rebind_required",
+            reason="restart_autobind_unresolved",
+            old_pane_id=(stale or {}).get("pane_id") if isinstance(stale, dict) else None,
+            old_session_name=(stale or {}).get("session_name") if isinstance(stale, dict) else None,
+            source="restart",
+        )
+        save_runtime_state(workspace, state)
+        save_team_runtime_snapshot(workspace, state)
+        write_team_state(workspace, spec, state)
     rebuild_restart_display_after_rebind(display_backend, workspace, session_name, spec, event_log, restarted, receiver=rebound_receiver)
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
