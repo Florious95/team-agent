@@ -406,9 +406,9 @@ def _fail_leader_delivery(
     )
     save_runtime_state(workspace, state)
     return {
-        "ok": False,
+        "ok": True,
         "message_id": message_id,
-        "status": "fallback",
+        "status": "fallback_log",
         "message_status": message_status,
         "to": payload["to"],
         "channel": "fallback_inbox",
@@ -454,7 +454,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
 
 
 

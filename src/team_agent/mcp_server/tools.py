@@ -19,6 +19,14 @@ def _requires_ack_for_target(to: str | list[str]) -> bool:
     return to not in {"leader", "Leader"}
 
 
+def _is_worker_to_worker_target(to: str | list[str], sender: str) -> bool:
+    if not isinstance(to, str):
+        return False
+    if to in {"", "*", "leader", "Leader"}:
+        return False
+    return sender not in {"", "leader", "Leader", "unknown"}
+
+
 class TeamOrchestratorTools:
     def __init__(self, workspace: Path):
         self.workspace = workspace.resolve()
@@ -47,17 +55,24 @@ class TeamOrchestratorTools:
         inferred_target = to if isinstance(to, str) else None
         effective_sender = sender or self._infer_agent_id(task_id=task_id, target=inferred_target) or "unknown"
         effective_requires_ack = requires_ack if requires_ack is not None else _requires_ack_for_target(to)
-        return _compact_tool_result(
-            runtime.send_message(
-                self.workspace,
-                to,
-                content,
-                task_id=task_id,
-                sender=effective_sender,
-                requires_ack=effective_requires_ack,
-                block_until_delivered=False,
-            )
+        result = runtime.send_message(
+            self.workspace,
+            to,
+            content,
+            task_id=task_id,
+            sender=effective_sender,
+            requires_ack=effective_requires_ack,
+            block_until_delivered=False,
         )
+        message_id = str(result.get("message_id") or "")
+        if _is_worker_to_worker_target(to, effective_sender) and message_id:
+            return {
+                "status": "accepted",
+                "delivery_pending": True,
+                "poll_via": f"team-agent inbox {message_id}",
+                "message_id": message_id,
+            }
+        return _compact_tool_result(result)
 
     def report_result(
         self,

@@ -406,20 +406,14 @@ class Gap38ReproductionTests(unittest.TestCase):
                 f"expected exactly 1 distinct result_id in log; got {result_ids}")
             self.assertEqual(len(inject_calls), 1,
                 f"scheduler retries must collapse to 1 inject; got {len(inject_calls)}")
-            # Spark MEDIUM: verify the scheduler ACTUALLY exercised the retry path.
-            # Evidence is two-fold: (a) the original row is marked retry_scheduled
-            # (so a retry was spawned), and (b) the spawned retry row is marked
-            # done (the gate dedupe at _send_to_leader_receiver returned ok=true
-            # deduped=true, which the scheduler treats as success). Both must hold;
-            # otherwise the retry was never dispatched.
+            # Bug 52 makes durable leader-inbox fallback a successful delivery result,
+            # so the original scheduler row can complete without spawning a retry.
+            # The containment assertion above remains the important regression guard:
+            # retries or direct completion must still produce exactly one inject.
             final_status_counts = _final_scheduled_event_status_counts(store)
             self.assertGreaterEqual(
-                final_status_counts.get("retry_scheduled", 0), 1,
-                f"original row did not transition to retry_scheduled; counts={final_status_counts}",
-            )
-            self.assertGreaterEqual(
                 final_status_counts.get("done", 0), 1,
-                f"retry row did not run through the dedupe gate; counts={final_status_counts}",
+                f"scheduler row did not complete; counts={final_status_counts}",
             )
 
     def test_claim_leader_replay_for_same_result_id_dedupes(self) -> None:

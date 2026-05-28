@@ -61,6 +61,8 @@ from team_agent.cli.helpers import (
     _emit_cli_error,
     _leader_launcher_args,
     _provider_args,
+    _workspace_from_args,
+    consume_leader_inbox_summary,
     emit,
 )
 
@@ -481,6 +483,9 @@ def main(argv: list[str] | None = None) -> None:
     except Exception as exc:
         _emit_cli_error(exc, args)
         raise SystemExit(1)
+    summary = consume_leader_inbox_summary(_workspace_from_args(args))
+    if summary:
+        print(summary, file=sys.stderr if getattr(args, "json", False) else sys.stdout)
     emit(result, getattr(args, "json", False))
     if isinstance(result, dict) and result.get("ok") is False:
         raise SystemExit(1)

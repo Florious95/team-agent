@@ -86,7 +86,8 @@ class WorkerPeerDeliverySchedulingTests(unittest.TestCase):
                     content="peer ping",
                     sender="worker_a",
                 )
-                self.assertTrue(accepted["ok"], accepted)
+                self.assertEqual(accepted["status"], "accepted", accepted)
+                self.assertTrue(accepted["delivery_pending"], accepted)
                 rows = MessageStore(workspace).messages()
                 self.assertEqual(len(rows), 1, accepted)
                 message_id = rows[0]["message_id"]

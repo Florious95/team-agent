@@ -341,8 +341,8 @@ class MessagingLeaderTests(unittest.TestCase):
                 task_id="task_impl",
                 sender="fake_impl",
             )
-            self.assertFalse(result["ok"])
-            self.assertEqual(result["status"], "fallback")
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "fallback_log")
             self.assertEqual(result["message_status"], "failed")
             self.assertEqual(result["reason"], "leader_pane_missing")
             state = load_runtime_state(workspace)
