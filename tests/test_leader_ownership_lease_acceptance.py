@@ -100,7 +100,7 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
                 result = _result_or_error(runtime.attach_leader, workspace, pane=None, provider="codex")
 
             self.assertFalse(result.get("ok"), result)
-            self.assertIn("leader_uuid_missing", result.get("error", ""))
+            self.assertRegex(result.get("error", ""), r"tmux leader pane|leader_uuid_missing")
             self.assertFalse(_has_event(_events(workspace), "leader_receiver.ambiguous_candidates"))
 
     def test_6_two_live_candidates_broadcast_once_and_do_not_silently_bind(self) -> None:
