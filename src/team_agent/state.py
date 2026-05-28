@@ -322,9 +322,14 @@ def _caller_identity_from_env(state: dict[str, Any] | None = None, team_id: str 
     }
 
 
-def _tmux_pane_is_live(pane_id: str) -> bool:
+_TMUX_PANE_LIVE = "live"
+_TMUX_PANE_DEAD = "dead"
+_TMUX_PANE_UNKNOWN = "unknown"
+
+
+def _tmux_pane_liveness(pane_id: str) -> str:
     if not pane_id:
-        return False
+        return _TMUX_PANE_UNKNOWN
     try:
         from team_agent.runtime import run_cmd
         proc = run_cmd(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"], timeout=3)
@@ -338,8 +343,13 @@ def _tmux_pane_is_live(pane_id: str) -> bool:
                 check=False,
             )
         except Exception:
-            return False
-    return proc.returncode == 0
+            return _TMUX_PANE_UNKNOWN
+    if proc.returncode == 0:
+        return _TMUX_PANE_LIVE
+    stderr = str(getattr(proc, "stderr", "") or "").lower()
+    if "can't find pane" in stderr or "can't find window" in stderr or "can't find session" in stderr:
+        return _TMUX_PANE_DEAD
+    return _TMUX_PANE_UNKNOWN
 
 
 def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
@@ -354,7 +364,12 @@ def check_team_owner(state: dict[str, Any]) -> dict[str, Any] | None:
     caller_pane = caller.get("pane_id") or ""
     if caller_pane and caller_pane == owner_pane:
         return None
-    if owner_pane and not _tmux_pane_is_live(owner_pane):
+    if (
+        caller_pane
+        and not os.environ.get("TEAM_AGENT_ID")
+        and owner_pane
+        and _tmux_pane_liveness(owner_pane) != _TMUX_PANE_LIVE
+    ):
         return None
     if caller_uuid == owner_uuid and (not caller_pane or caller_pane == owner_pane):
         return None
