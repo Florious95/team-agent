@@ -2,17 +2,40 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import agent_health as _agent_health
 from . import result_watchers as _result_watchers
 from .schema import SCHEMA_VERSION, initialize_schema, utcnow
 from team_agent.paths import runtime_dir
 from team_agent.spec import validate_result_envelope
+
+
+def _is_sqlite_locked(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database schema is locked" in message
+    )
+
+
+def _with_sqlite_busy_retry(action: Callable[[], None]) -> None:
+    delay = 0.05
+    for attempt in range(6):
+        try:
+            action()
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked(exc) or attempt == 5:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 class MessageStore:
@@ -27,13 +50,16 @@ class MessageStore:
     def connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
     def _init(self) -> None:
-        with closing(self.connect()) as conn:
-            initialize_schema(conn)
+        def initialize() -> None:
+            with closing(self.connect()) as conn:
+                initialize_schema(conn)
+
+        _with_sqlite_busy_retry(initialize)
 
     def create_message(
         self,

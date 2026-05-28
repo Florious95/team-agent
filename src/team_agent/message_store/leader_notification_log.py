@@ -11,7 +11,18 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+import sqlite3
+import time
 from typing import Any
+
+
+def _sqlite_locked(exc: sqlite3.OperationalError) -> bool:
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database schema is locked" in message
+    )
 
 
 def claim_leader_notification_delivery(
@@ -28,32 +39,42 @@ def claim_leader_notification_delivery(
     rowcount=0 means a prior row exists for (result_id, leader_session_uuid); SELECT
     it and return so the caller can decide to suppress (same envelope_hash) or surface
     legitimate-duplicate (different envelope_hash)."""
-    now = datetime.now(timezone.utc).isoformat()
-    with closing(store.connect()) as conn:
-        with conn:
-            cur = conn.execute(
-                "insert or ignore into leader_notification_log("
-                "  result_id, leader_session_uuid, notified_message_id, notified_at,"
-                "  leader_pane_id_at_notify, envelope_content_hash, owner_team_id"
-                ") values (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    result_id, leader_session_uuid, proposed_message_id, now,
-                    pane_id, envelope_hash, owner_team_id,
-                ),
-            )
-            if cur.rowcount == 1:
-                return {
-                    "status": "claimed_by_you",
-                    "notified_message_id": proposed_message_id,
-                    "notified_at": now,
-                    "envelope_content_hash": envelope_hash,
-                }
-            row = conn.execute(
-                "select notified_message_id, notified_at, envelope_content_hash, "
-                "leader_pane_id_at_notify from leader_notification_log "
-                "where result_id = ? and leader_session_uuid = ?",
-                (result_id, leader_session_uuid),
-            ).fetchone()
+    delay = 0.05
+    row = None
+    for attempt in range(6):
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            with closing(store.connect()) as conn:
+                with conn:
+                    cur = conn.execute(
+                        "insert or ignore into leader_notification_log("
+                        "  result_id, leader_session_uuid, notified_message_id, notified_at,"
+                        "  leader_pane_id_at_notify, envelope_content_hash, owner_team_id"
+                        ") values (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            result_id, leader_session_uuid, proposed_message_id, now,
+                            pane_id, envelope_hash, owner_team_id,
+                        ),
+                    )
+                    if cur.rowcount == 1:
+                        return {
+                            "status": "claimed_by_you",
+                            "notified_message_id": proposed_message_id,
+                            "notified_at": now,
+                            "envelope_content_hash": envelope_hash,
+                        }
+                    row = conn.execute(
+                        "select notified_message_id, notified_at, envelope_content_hash, "
+                        "leader_pane_id_at_notify from leader_notification_log "
+                        "where result_id = ? and leader_session_uuid = ?",
+                        (result_id, leader_session_uuid),
+                    ).fetchone()
+            break
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_locked(exc) or attempt == 5:
+                raise
+            time.sleep(delay)
+            delay *= 2
     if row is None:
         # Should not happen (INSERT OR IGNORE returned 0 → row must exist), but be defensive.
         return {"status": "claimed_by_you", "notified_message_id": proposed_message_id,

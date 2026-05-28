@@ -33,12 +33,15 @@ class RuntimeTests01(unittest.TestCase):
                 sent = runtime.send_message(workspace, None, "do fake work", task_id="task_impl", requires_ack=True)
                 self.assertTrue(sent["ok"])
                 collected = {"collected": []}
-                for _ in range(10):
+                status = {"tasks": []}
+                for _ in range(30):
                     time.sleep(0.5)
                     collected = runtime.collect(workspace)
+                    status = runtime.status(workspace, as_json=True)
                     if collected["collected"]:
                         break
-                status = runtime.status(workspace, as_json=True)
+                    if status["tasks"][0]["status"] == "done" and status["tasks"][0].get("accepted_result_id"):
+                        break
                 if collected["collected"]:
                     self.assertEqual(collected["collected"][0]["task_id"], "task_impl")
                 else:
