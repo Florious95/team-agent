@@ -90,7 +90,7 @@ class PositiveSourceBindAcceptanceTests(unittest.TestCase):
         self.assertTrue(any(event.get("event") == "owner.bind_refused" and event.get("reason") == "caller_pane_missing" for event in events))
 
     @unittest.skipUnless(tmux_available(), "tmux required for real caller-pane fixture")
-    def test_c4_non_leader_caller_pane_refuses_and_does_not_mutate_state(self) -> None:
+    def test_c4_non_provider_command_is_accepted_as_caller_pane_identity(self) -> None:
         bind_owner = _bind_owner_from_caller_pane(self)
         state_path = write_runtime_state(self.workspace, shutdown_state())
         before = state_path.read_text(encoding="utf-8")
@@ -99,11 +99,10 @@ class PositiveSourceBindAcceptanceTests(unittest.TestCase):
             self.assertEqual(fixture.command_for(broot), "broot")
             with patch.dict(os.environ, {"TMUX_PANE": broot}, clear=False):
                 result = bind_owner(self.workspace, "current")
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "caller_not_leader_shaped")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["caller_pane_id"], broot)
+        self.assertEqual(result["caller_current_command"], "broot")
         self.assertEqual(state_path.read_text(encoding="utf-8"), before)
-        events = read_events(self.workspace)
-        self.assertTrue(any(event.get("event") == "owner.bind_refused" and event.get("caller_current_command") == "broot" for event in events))
 
     @unittest.skipUnless(tmux_available(), "tmux required for real caller-pane fixture")
     def test_c5_takeover_force_writes_all_owner_fields_from_caller_and_is_idempotent(self) -> None:

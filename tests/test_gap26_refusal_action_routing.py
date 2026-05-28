@@ -1,53 +1,54 @@
 from __future__ import annotations
 
+import os
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
 from team_agent.state import check_team_owner, derive_leader_session_uuid
 
 
-def test_same_uuid_different_pane_id_refusal_hints_claim_leader(tmp_path, monkeypatch) -> None:
-    uuid = _uuid(tmp_path)
-    monkeypatch.setenv("TEAM_AGENT_LEADER_SESSION_UUID", uuid)
-    monkeypatch.setenv("TEAM_AGENT_LEADER_PANE_ID", "%branch")
+class Gap26RefusalActionRoutingTests(unittest.TestCase):
+    def test_same_pane_allows_owner_even_when_uuid_drifted(self) -> None:
+        workspace = Path("/tmp/team-agent-gap26")
+        with patch.dict(
+            os.environ,
+            {
+                "TMUX_PANE": "%owner",
+                "TEAM_AGENT_LEADER_SESSION_UUID": "b" * 32,
+            },
+            clear=True,
+        ):
+            refusal = check_team_owner(_state(workspace, _uuid(workspace)))
 
-    refusal = check_team_owner(_state(tmp_path, uuid))
+        self.assertIsNone(refusal, refusal)
 
-    assert refusal is not None
-    assert refusal["reason"] == "team_owner_mismatch"
-    assert refusal["action"] == "team-agent claim-leader --confirm"
+    def test_team_owner_mismatch_is_reserved_for_confirmed_different_live_owner(self) -> None:
+        workspace = Path("/tmp/team-agent-gap26")
+        with patch.dict(
+            os.environ,
+            {
+                "TMUX_PANE": "%branch",
+                "TEAM_AGENT_LEADER_PANE_ID": "%branch",
+                "TEAM_AGENT_LEADER_SESSION_UUID": "c" * 32,
+            },
+            clear=True,
+        ):
+            refusal = check_team_owner(_state(workspace, _uuid(workspace)))
 
-
-def test_different_uuid_refusal_hints_takeover(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("TEAM_AGENT_LEADER_SESSION_UUID", "b" * 32)
-    monkeypatch.setenv("TEAM_AGENT_LEADER_PANE_ID", "%branch")
-
-    refusal = check_team_owner(_state(tmp_path, _uuid(tmp_path)))
-
-    assert refusal is not None
-    assert refusal["reason"] == "team_owner_mismatch"
-    assert refusal["action"] == "team-agent takeover --confirm"
-
-
-def test_refusal_envelope_carries_reason_kind(tmp_path, monkeypatch) -> None:
-    uuid = _uuid(tmp_path)
-    monkeypatch.setenv("TEAM_AGENT_LEADER_SESSION_UUID", uuid)
-    monkeypatch.setenv("TEAM_AGENT_LEADER_PANE_ID", "%branch")
-    same_uuid = check_team_owner(_state(tmp_path, uuid))
-
-    monkeypatch.setenv("TEAM_AGENT_LEADER_SESSION_UUID", "c" * 32)
-    different_uuid = check_team_owner(_state(tmp_path, uuid))
-
-    assert same_uuid is not None
-    assert different_uuid is not None
-    assert same_uuid["reason_kind"] == "sticky_bind_collision"
-    assert different_uuid["reason_kind"] == "owner_takeover_required"
+        self.assertIsNone(
+            refusal,
+            "without a confirmed-live owner pane, uuid drift alone must not produce team_owner_mismatch",
+        )
 
 
-def _uuid(tmp_path) -> str:
-    return derive_leader_session_uuid("machine-a", str(tmp_path.resolve()), "alice", "team-a")
+def _uuid(path: Path) -> str:
+    return derive_leader_session_uuid("machine-a", str(path.resolve()), "alice", "team-a")
 
 
-def _state(tmp_path, uuid: str) -> dict:
+def _state(path: Path, uuid: str) -> dict:
     return {
-        "workspace": str(tmp_path),
+        "workspace": str(path),
         "session_name": "team-a",
         "team_owner": {
             "pane_id": "%owner",
@@ -58,3 +59,7 @@ def _state(tmp_path, uuid: str) -> dict:
         "agents": {},
         "tasks": [],
     }
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

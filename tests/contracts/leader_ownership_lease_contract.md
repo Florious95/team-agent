@@ -53,7 +53,7 @@ C20. Every acquire-on-vacant, rebind, and epoch advance emits a structured audit
 C21. Every refusal emits a structured audit event. Refusals include owner-gate refusal, lost epoch race, caller not leader-shaped, cwd mismatch, different user, and not-in-tmux-pane.
 
 C22. Lease audit events carry a closed-enum `reason`, redacted uuid prefix, old pane id, new pane id, host, and OS user when known. The reason enum is:
-`vacant_acquired`, `previous_owner_pane_dead`, `previous_owner_alive_refused`, `owner_epoch_advanced`, `force_confirm_required`, `caller_not_leader_shaped`, `caller_cwd_mismatch`, `not_in_tmux_pane`.
+`vacant_acquired`, `previous_owner_pane_dead`, `previous_owner_alive_refused`, `owner_epoch_advanced`, `force_confirm_required`, `caller_pane_missing`, `caller_cwd_mismatch`, `not_in_tmux_pane`.
 
 C23. `coordinator.pid` false-negative status is a separate gap. This slice may read coordinator state for diagnostics, but leader lease liveness must not depend on cached coordinator pid state.
 

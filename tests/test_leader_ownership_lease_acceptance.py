@@ -433,7 +433,6 @@ def _all_lease_reasons_closed(events: list[dict[str, Any]]) -> bool:
         "previous_owner_alive_refused",
         "owner_epoch_advanced",
         "force_confirm_required",
-        "caller_not_leader_shaped",
         "caller_pane_missing",
         "caller_cwd_mismatch",
         "not_in_tmux_pane",

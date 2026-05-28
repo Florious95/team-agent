@@ -113,7 +113,7 @@ class PositiveSourceAuditAcceptanceTests(unittest.TestCase):
         matches = [event for event in events if event.get("event", "").endswith("_refused")]
         self.assertGreaterEqual(len(matches), 1)
         refusal = matches[0]
-        self.assertIn(refusal["reason"], {"caller_pane_missing", "caller_not_leader_shaped", "team_target_ambiguous", "peer_not_in_scope", "peer_not_found"})
+        self.assertIn(refusal["reason"], {"caller_pane_missing", "team_target_ambiguous", "peer_not_in_scope", "peer_not_found"})
         self.assertIn("hint", refusal)
 
 
