@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -25,6 +26,10 @@ def _trust_prompt_for(path_text: str) -> str:
         "  2. No, quit\n\n"
         "  Press enter to continue\n"
     )
+
+
+def _flatten_commands(commands: list[list[str]]) -> list[str]:
+    return [part for command in commands for part in command]
 
 
 class TrustAutoAnswerTurnIntegrityAcceptanceTests(unittest.TestCase):
@@ -143,6 +148,66 @@ class TrustAutoAnswerTurnIntegrityAcceptanceTests(unittest.TestCase):
         self.assertEqual(delivery_calls[1][2], "Enter")
         submitted = [event for event in self._events() if event.get("event") == "send.submitted"]
         self.assertEqual(len(submitted), 1)
+
+    def test_empty_text_enter_path_uses_send_keys_without_empty_tmux_buffer(self) -> None:
+        from team_agent.messaging.tmux_io import _tmux_inject_text
+
+        commands: list[list[str]] = []
+
+        def fake_run_cmd(args: list[str], timeout: int = 20) -> SimpleNamespace:
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("team_agent.messaging.tmux_io.run_cmd", side_effect=fake_run_cmd), \
+             patch("team_agent.messaging.tmux_prompt.run_cmd", side_effect=fake_run_cmd), \
+             patch("team_agent.messaging.tmux_io._capture_tmux_pane_text", return_value={"ok": True, "capture": ""}), \
+             patch("team_agent.messaging.tmux_io.time.sleep", return_value=None):
+            result = _tmux_inject_text(
+                self.target,
+                "",
+                "Enter",
+                "team-agent-empty-trust-answer",
+                attempts=1,
+                provider="fake",
+                bypass_non_input_gate=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn("set-buffer", _flatten_commands(commands))
+        self.assertNotIn("load-buffer", _flatten_commands(commands))
+        self.assertNotIn("paste-buffer", _flatten_commands(commands))
+        self.assertIn(["tmux", "send-keys", "-t", self.target, "Enter"], commands)
+
+    def test_buffer_paste_path_is_only_used_for_non_empty_text(self) -> None:
+        from team_agent.messaging.tmux_io import _tmux_inject_text
+
+        commands: list[list[str]] = []
+
+        def fake_run_cmd(args: list[str], timeout: int = 20) -> SimpleNamespace:
+            commands.append(args)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("team_agent.messaging.tmux_io.run_cmd", side_effect=fake_run_cmd), \
+             patch("team_agent.messaging.tmux_prompt.run_cmd", side_effect=fake_run_cmd), \
+             patch("team_agent.messaging.tmux_io._capture_tmux_pane_text", return_value={"ok": True, "capture": ""}), \
+             patch("team_agent.messaging.tmux_io.time.sleep", return_value=None):
+            result = _tmux_inject_text(
+                self.target,
+                "non-empty message",
+                "Enter",
+                "team-agent-non-empty-message",
+                attempts=1,
+                provider="fake",
+                bypass_non_input_gate=True,
+            )
+
+        self.assertTrue(result["ok"])
+        set_buffer_commands = [command for command in commands if len(command) >= 3 and command[1] == "set-buffer"]
+        paste_buffer_commands = [command for command in commands if len(command) >= 2 and command[1] == "paste-buffer"]
+        self.assertEqual(len(set_buffer_commands), 1)
+        self.assertEqual(set_buffer_commands[0][-1], "non-empty message")
+        self.assertNotEqual(set_buffer_commands[0][-1], "")
+        self.assertEqual(len(paste_buffer_commands), 1)
 
 
 if __name__ == "__main__":

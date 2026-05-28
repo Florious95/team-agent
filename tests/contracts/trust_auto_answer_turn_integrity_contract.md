@@ -23,6 +23,13 @@ Agent brief delivery immediately after the trust prompt is dismissed.
 2. After trust auto-answer, if Team Agent pastes the brief and sends Enter
    successfully, delivery is successful regardless of the current visible Codex
    pane content.
+3. The empty-text Enter path must be implemented as a direct tmux
+   `send-keys -t <pane> Enter` call. It must not call tmux `set-buffer`,
+   `load-buffer`, or `paste-buffer` with empty text; tmux may reject empty
+   buffers, leaving the trust prompt stuck.
+4. Non-empty message delivery may continue to use the tmux buffer/paste path,
+   but any `set-buffer`, `load-buffer`, or `paste-buffer` operation must be
+   associated with non-empty text.
 
 ## Non-Requirements
 
