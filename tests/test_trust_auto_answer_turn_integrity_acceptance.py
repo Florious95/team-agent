@@ -25,6 +25,7 @@ EVENTS_FIXTURE = FIXTURE_DIR / "gap39-dead-owner-restart.events.jsonl"
 TEMPLATE_RAW_CAPTURE = FIXTURE_DIR / "codex-worker1-gap39-template-turn-fail.raw.txt"
 TEMPLATE_EVENTS_FIXTURE = FIXTURE_DIR / "gap39-template-turn.events.jsonl"
 TEMPLATE_DB_FIXTURE = FIXTURE_DIR / "gap39-template-turn.db-posthalt.json"
+SKILLS_IDLE_CAPTURE = FIXTURE_DIR / "codex-worker1-gap39-skills-idle.raw.txt"
 INCIDENT_MESSAGE = (
     "GAP39_PRIME_0.2.4-bundled-20260528T033300Z: reply via report_result "
     "summary GAP39_PRIME_DONE_0.2.4-bundled-20260528T033300Z"
@@ -289,6 +290,8 @@ class TrustAutoAnswerTurnIntegrityAcceptanceTests(unittest.TestCase):
 
         active_default_template_turn = (
             "› Implement {feature}\n\n"
+            "• Reconnecting... 1/5 (6m 23s • esc to interrupt)\n"
+            "  └ Timeout waiting for child process to exit\n\n"
             "  gpt-5.5 xhigh · ~/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-g…\n"
         )
 
@@ -298,12 +301,59 @@ class TrustAutoAnswerTurnIntegrityAcceptanceTests(unittest.TestCase):
                 "an unrelated active Codex user turn is not idle for the Team Agent brief",
             )
 
+    def test_detection_real_codex_skills_tip_with_footer_is_idle_when_no_processing_marker(self) -> None:
+        from team_agent.messaging.delivery import _wait_for_codex_idle_after_trust_dismissal
+
+        idle_capture = SKILLS_IDLE_CAPTURE.read_text(encoding="utf-8")
+
+        self.assertIn("Use /skills to list available skills", idle_capture)
+        self.assertIn("·", idle_capture)
+        self.assertNotIn("• Working", idle_capture)
+        self.assertNotIn("• Reconnecting", idle_capture)
+        self.assertNotIn("esc to interrupt", idle_capture)
+        self.assertNotIn("Messages to be submitted after next tool call", idle_capture)
+        with patch("team_agent.messaging.delivery._capture_pane_tail", return_value=idle_capture):
+            self.assertTrue(
+                _wait_for_codex_idle_after_trust_dismissal(self.target, timeout=0.0),
+                "Codex idle hint/placeholder text plus footer is idle when no active-turn marker is present",
+            )
+
+    def test_live_delivery_allows_paste_over_real_codex_skills_idle_tip(self) -> None:
+        from team_agent.messaging import delivery as delivery_mod
+
+        message_id = self._seed_template_message()
+        idle_capture = SKILLS_IDLE_CAPTURE.read_text(encoding="utf-8")
+
+        def fake_run_cmd(_args: list[str], timeout: int = 20) -> SimpleNamespace:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
+             patch("team_agent.messaging.tmux_io._pane_mode", return_value={"ok": True, "pane_mode": ""}), \
+             patch("team_agent.messaging.tmux_io._pane_capture_tail", return_value={"ok": True, "capture": idle_capture}), \
+             patch("team_agent.messaging.tmux_io._capture_tmux_pane_text", return_value={"ok": True, "capture": idle_capture}), \
+             patch("team_agent.messaging.tmux_io._tmux_set_buffer_text", return_value={"ok": True, "stage": "set-buffer", "method": "set_buffer_arg", "text_bytes": 193}) as set_buffer, \
+             patch("team_agent.messaging.tmux_io._tmux_delete_buffer", return_value={"ok": True}), \
+             patch("team_agent.messaging.tmux_io.run_cmd", side_effect=fake_run_cmd), \
+             patch("team_agent.messaging.tmux_io._wait_for_message_ready", return_value=(True, "capture_contains_token", idle_capture + "\n" + TEMPLATE_MESSAGE)), \
+             patch("team_agent.messaging.tmux_io._submit_worker_prompt", return_value={"ok": True, "verification": "enter_sent_without_placeholder_check", "attempts": [{"attempt": 1}]}), \
+             patch("team_agent.messaging.tmux_io._wait_for_leader_new_turn", return_value=(True, "leader_new_turn_boundary_verified", idle_capture + "\n" + TEMPLATE_MESSAGE)), \
+             patch("team_agent.messaging.tmux_io.time.sleep", return_value=None):
+            result = delivery_mod._deliver_pending_message(self.workspace, self._state(), message_id)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("status"), "delivered")
+        set_buffer.assert_called_once()
+        submitted = [event for event in self._local_events() if event.get("event") == "send.submitted"]
+        self.assertEqual(len(submitted), 1)
+
     def test_prevention_live_trust_chain_blocks_default_template_turn_before_brief_paste(self) -> None:
         from team_agent.messaging import delivery as delivery_mod
 
         message_id = self._seed_template_message()
         post_trust_default_template_turn = (
             "› Implement {feature}\n\n"
+            "• Reconnecting... 1/5 (6m 23s • esc to interrupt)\n"
+            "  └ Timeout waiting for child process to exit\n\n"
             "  gpt-5.5 xhigh · ~/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-g…\n"
         )
         delivery_inject_calls: list[dict[str, Any]] = []

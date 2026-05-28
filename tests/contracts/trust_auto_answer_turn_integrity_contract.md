@@ -59,6 +59,16 @@ The second raw pane fixture shows the same failure class with a different stray 
 
 The second events fixture shows two `leader_panes.trust_auto_answered` events, no `trust_prompt_not_input_ready` event, one `leader_panes.trust_auto_answer_retry_needed` with `reason="codex_not_idle_after_trust_dismissal"`, then a final `send.submitted` with `verification="capture_contains_token"` and `turn_verification="leader_new_turn_boundary_verified"`. The DB post-halt snapshot records the message as `status="submitted"` with `delivery_attempts=3` and no results.
 
+The third fixture is a real Codex idle prompt snippet from `0.2.4-bundled-20260528T061134Z`:
+
+```text
+› Use /skills to list available skills
+
+  gpt-5.5 xhigh · ~/team-agent-test/workspaces/0.2.4-bundled-20260528T061134Z-g…
+```
+
+This is idle. The `Use /skills...` text is a Codex hint/placeholder in the input area, and the footer middot `·` is normal in idle Codex panes. Neither is an active-turn-processing marker.
+
 ## Required Behavior
 
 1. After Team Agent auto-answers a Codex trust prompt, the Codex model-turn sequence must not contain a user turn whose content is only `1`, nor any other visible model-turn artifact of the trust-choice key sequence.
@@ -73,6 +83,9 @@ The second events fixture shows two `leader_panes.trust_auto_answered` events, n
 10. **PREVENTION:** The idle gate must reject any active Codex user turn that is not the Team Agent brief, not only turns whose text is `1`. Default/template turns such as `Implement {feature}` are non-idle and must block the next paste.
 11. **PREVENTION:** A normal retry attempt that no longer sees the trust prompt must still run the same "recipient is idle for a new Team Agent turn" gate before pasting. The gate is not limited to the immediate trust-answer branch.
 12. **DETECTION:** Any recognizer that claims Codex is idle or claims a Team Agent message opened a new turn must treat a queued-message block plus an unrelated active prompt (`› Implement {feature}`, or any other non-Team-Agent user text) as not delivered.
+13. **DETECTION narrowing:** Codex hint, tip, or placeholder text in the input area, including `Use /skills to list available skills` and `Press / to use slash commands`, is idle when no active-turn-processing marker is present.
+14. **DETECTION narrowing:** The Codex footer/status line, including the middot `·`, is not by itself evidence of an active unrelated prompt. Non-idle requires a real active-turn-processing marker such as `• Working`, `• Reconnecting`, `esc to interrupt`, a queued-message header, or equivalent provider evidence.
+15. **REGRESSION:** Stray user-turn content such as `Implement {feature}` or `1` plus an active-turn-processing marker remains non-idle and must still block paste.
 
 ## Non-Requirements
 
