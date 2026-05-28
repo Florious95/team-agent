@@ -147,18 +147,101 @@ def _wait_for_message_ready(
         if capture["ok"]:
             capture_text = capture["capture"]
             last_capture = capture_text
-            if message_id in capture_text or f"[team-agent-token:{message_id}]" in capture_text:
+            token_visible = (
+                message_id in capture_text
+                or f"[team-agent-token:{message_id}]" in capture_text
+            )
+            fragment_visible = bool(expected_text) and _capture_contains_message_fragment(
+                capture_text, expected_text
+            )
+            queued_only = _capture_brief_only_in_codex_queued_region(
+                capture_text, message_id, expected_text
+            )
+            if queued_only:
+                last = "capture_token_in_codex_queued_message_block"
+            elif token_visible:
                 return True, "capture_contains_token", capture_text
-            if expected_text and _capture_contains_message_fragment(capture_text, expected_text):
+            elif fragment_visible:
                 return True, "capture_contains_message_fragment", capture_text
-            if allow_pasted_prompt and _capture_has_pasted_content_prompt(capture_text) and not baseline_had_pasted_prompt:
+            elif allow_pasted_prompt and _capture_has_pasted_content_prompt(capture_text) and not baseline_had_pasted_prompt:
                 return True, "capture_contains_new_pasted_content_prompt", capture_text
-            last = "capture_missing_token"
+            else:
+                last = "capture_missing_token"
         else:
             last = f"capture_failed: {capture.get('error')}"
         if time.monotonic() >= deadline:
             return False, last, last_capture
         time.sleep(0.1)
+
+
+CODEX_QUEUED_MESSAGE_HEADER = "Messages to be submitted after next tool call"
+
+
+def _capture_codex_queued_message_region(capture_text: str) -> str:
+    """Return the contiguous Codex "Messages to be submitted after next tool
+    call" block, or "" if the indicator is not present. Codex renders this UI
+    when a paste lands while the model is mid-turn — text inside is queued,
+    not part of any active model turn."""
+    if CODEX_QUEUED_MESSAGE_HEADER not in capture_text:
+        return ""
+    lines = capture_text.splitlines()
+    region: list[str] = []
+    inside = False
+    for line in lines:
+        if not inside:
+            if CODEX_QUEUED_MESSAGE_HEADER in line:
+                inside = True
+                region.append(line)
+            continue
+        if re.match(r"^\s*[›❯]\s*\S", line):
+            break
+        region.append(line)
+    return "\n".join(region)
+
+
+def _capture_brief_only_in_codex_queued_region(
+    capture_text: str, token: str, expected_text: str = ""
+) -> bool:
+    """True iff the brief (token or strong message fragment) appears only inside
+    Codex's queued-message region and nowhere in an active turn marker window.
+    Used to refuse declaring a brief delivered when Codex has queued it instead
+    of starting a new model turn (Gap 43 stray-trust-answer scenario)."""
+    region = _capture_codex_queued_message_region(capture_text)
+    if not region:
+        return False
+    token_in_region = bool(token) and (
+        token in region or f"[team-agent-token:{token}]" in region
+    )
+    fragment_in_region = bool(expected_text) and _capture_contains_message_fragment(
+        region, expected_text
+    )
+    if not (token_in_region or fragment_in_region):
+        return False
+    return not _capture_brief_in_active_turn_marker(capture_text, token, expected_text)
+
+
+def _capture_brief_in_active_turn_marker(
+    capture_text: str, token: str, expected_text: str = ""
+) -> bool:
+    """True iff the brief content appears in a `›`/`❯`-marker active-turn
+    window that is not a stray trust-choice keystroke and is outside any
+    Codex queued-message region."""
+    lines = capture_text.splitlines()
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*[❯›>]\s*", line):
+            continue
+        payload = re.sub(r"^\s*[❯›>]\s*", "", line).strip()
+        if payload in {"1", "2"}:
+            continue
+        window_lines = lines[index : index + 12]
+        window = "\n".join(window_lines)
+        if CODEX_QUEUED_MESSAGE_HEADER in window:
+            window = window.split(CODEX_QUEUED_MESSAGE_HEADER, 1)[0]
+        if token and (token in window or f"[team-agent-token:{token}]" in window):
+            return True
+        if expected_text and _capture_contains_message_fragment(window, expected_text):
+            return True
+    return False
 
 
 def _wait_for_worker_message_ready(target: str, message_id: str, timeout: float, expected_text: str = "") -> tuple[bool, str, str]:
