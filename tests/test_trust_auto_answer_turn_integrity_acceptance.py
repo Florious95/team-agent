@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 
 
@@ -162,6 +163,82 @@ class TrustAutoAnswerTurnIntegrityAcceptanceTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertNotEqual(result.get("status"), "delivered")
         self.assertNotEqual(result.get("message_status"), "submitted")
+        submitted = [event for event in self._local_events() if event.get("event") == "send.submitted"]
+        self.assertEqual(submitted, [])
+
+    def test_prevention_trust_auto_answer_does_not_send_choice_until_codex_input_ready(self) -> None:
+        from team_agent.messaging.leader_panes import attempt_trust_auto_answer
+
+        not_ready_capture = (
+            _trust_prompt_for(str(self.workspace))
+            + "\n• Reconnecting... 1/5 (booting • esc to interrupt)\n"
+            + "  └ initializing Codex runtime\n"
+        )
+
+        with patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value={"ok": True}) as inject:
+            result = attempt_trust_auto_answer(
+                self.workspace,
+                self.target,
+                not_ready_capture,
+                EventLog(self.workspace),
+                state={"pane_width": 160},
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["answered"])
+        self.assertEqual(result.get("reason"), "trust_prompt_not_input_ready")
+        inject.assert_not_called()
+        answered = [event for event in self._local_events() if event.get("event") == "leader_panes.trust_auto_answered"]
+        self.assertEqual(answered, [])
+
+    def test_prevention_live_delivery_does_not_paste_brief_until_codex_idle_after_trust_dismissal(self) -> None:
+        from team_agent.messaging import delivery as delivery_mod
+
+        message_id = self._seed_message()
+        mid_turn_after_trust_dismissal = (
+            "› 1\n\n"
+            "• Working (12s • esc to interrupt)\n\n"
+            "› Improve documentation in @filename\n"
+        )
+        delivery_inject_calls: list[dict[str, Any]] = []
+
+        def fake_delivery_inject(target: str, text: str, submit_key: str, buffer_name: str, **kwargs: Any) -> dict[str, Any]:
+            delivery_inject_calls.append({"target": target, "buffer": buffer_name, "text": text})
+            if len(delivery_inject_calls) == 1:
+                return {
+                    "ok": False,
+                    "status": "failed",
+                    "stage": "pre-paste-pane-state",
+                    "reason": "recipient_pane_in_non_input_mode",
+                    "verification": "recipient_pane_in_non_input_mode",
+                    "detected": "codex_trust_prompt",
+                    "pane_id": self.target,
+                    "pane_mode": "",
+                    "pane_capture_tail": _trust_prompt_for(str(self.workspace)),
+                }
+            return {
+                "ok": True,
+                "stage": "submitted",
+                "visible": True,
+                "submitted": True,
+                "verification": "capture_contains_token",
+                "submit_verification": "Enter_sent_after_visible_token",
+                "turn_verification": "leader_new_turn_boundary_verified",
+                "attempts": [{"attempt": 1}],
+                "submit_attempts": [{"attempt": 1}],
+            }
+
+        with patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
+             patch("team_agent.messaging.delivery._tmux_pane_width", return_value={"ok": True, "pane_width": 160}), \
+             patch("team_agent.messaging.delivery._capture_pane_tail", return_value=mid_turn_after_trust_dismissal), \
+             patch("team_agent.messaging.delivery._tmux_inject_text", side_effect=fake_delivery_inject), \
+             patch("team_agent.messaging.leader_panes._tmux_inject_text", return_value={"ok": True}):
+            result = delivery_mod._deliver_pending_message(self.workspace, self._state(), message_id)
+
+        self.assertFalse(result["ok"])
+        self.assertNotEqual(result.get("status"), "delivered")
+        self.assertEqual(len(delivery_inject_calls), 1, "brief must not be pasted while Codex is still mid-turn")
+        self.assertFalse(any("trust-retry" in call["buffer"] for call in delivery_inject_calls))
         submitted = [event for event in self._local_events() if event.get("event") == "send.submitted"]
         self.assertEqual(submitted, [])
 
