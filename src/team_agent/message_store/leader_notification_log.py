@@ -15,6 +15,11 @@ import sqlite3
 import time
 from typing import Any
 
+from team_agent.message_store.schema_migration import MANAGED_TABLE_LAYOUTS
+
+
+LEADER_NOTIFICATION_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["leader_notification_log"])
+
 
 def _sqlite_locked(exc: sqlite3.OperationalError) -> bool:
     message = str(exc).lower()
@@ -79,13 +84,12 @@ def claim_leader_notification_delivery(
         # Should not happen (INSERT OR IGNORE returned 0 → row must exist), but be defensive.
         return {"status": "claimed_by_you", "notified_message_id": proposed_message_id,
                 "notified_at": now, "envelope_content_hash": envelope_hash}
-    prev_message_id, prev_ts, prev_hash, prev_pane = row[0], row[1], row[2], row[3]
     return {
         "status": "already_notified_by",
-        "notified_message_id": prev_message_id,
-        "notified_at": prev_ts,
-        "envelope_content_hash": prev_hash,
-        "leader_pane_id_at_notify": prev_pane,
+        "notified_message_id": row["notified_message_id"],
+        "notified_at": row["notified_at"],
+        "envelope_content_hash": row["envelope_content_hash"],
+        "leader_pane_id_at_notify": row["leader_pane_id_at_notify"],
     }
 
 
@@ -109,11 +113,11 @@ def peek_leader_notification(
     if row is None:
         return None
     return {
-        "notified_message_id": row[0],
-        "notified_at": row[1],
-        "envelope_content_hash": row[2],
-        "leader_pane_id_at_notify": row[3],
-        "owner_team_id": row[4],
+        "notified_message_id": row["notified_message_id"],
+        "notified_at": row["notified_at"],
+        "envelope_content_hash": row["envelope_content_hash"],
+        "leader_pane_id_at_notify": row["leader_pane_id_at_notify"],
+        "owner_team_id": row["owner_team_id"],
     }
 
 
@@ -134,11 +138,11 @@ def leader_notification_log_rows(store: Any, *, owner_team_id: str | None = None
     with closing(store.connect()) as conn:
         if owner_team_id is None:
             rows = conn.execute(
-                "select * from leader_notification_log order by notified_at"
+                f"select {LEADER_NOTIFICATION_SELECT} from leader_notification_log order by notified_at"
             ).fetchall()
         else:
             rows = conn.execute(
-                "select * from leader_notification_log where owner_team_id = ? "
+                f"select {LEADER_NOTIFICATION_SELECT} from leader_notification_log where owner_team_id = ? "
                 "or owner_team_id is null order by notified_at",
                 (owner_team_id,),
             ).fetchall()

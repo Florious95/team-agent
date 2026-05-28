@@ -224,6 +224,20 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
         if gate != "orphans":
             raise TeamAgentError(f"unknown doctor gate: {gate}")
         return orphan_gate(fix=bool(getattr(args, "fix", False)), confirm=bool(getattr(args, "confirm", False)))
+    from team_agent.message_store.schema import SCHEMA_VERSION
+    from team_agent.message_store.schema_migration import fix_schema_layout, schema_diagnosis
+    if getattr(args, "fix_schema", False) is True:
+        return fix_schema_layout(Path(args.workspace).resolve(), schema_version=SCHEMA_VERSION)
+    schema = schema_diagnosis(Path(args.workspace).resolve(), schema_version=SCHEMA_VERSION)
+    if schema.get("layout_diffs"):
+        return {
+            "ok": True,
+            "schema": schema,
+            "coordinator": {
+                "schema_ok": False,
+                "schema_error": "team.db physical layout drift detected",
+            },
+        }
     if getattr(args, "cleanup_orphans", False):
         from team_agent.diagnose.orphan_cleanup import cleanup_orphan_coordinators, format_cleanup_orphans
         result = cleanup_orphan_coordinators(confirm=bool(getattr(args, "confirm", False)))
@@ -231,7 +245,9 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
             return result
         return format_cleanup_orphans(result)
     spec = Path(args.spec).resolve() if args.spec else None
-    return runtime.doctor(spec)
+    result = runtime.doctor(spec)
+    result["schema"] = schema
+    return result
 
 
 def _format_status_summary(data: dict[str, Any]) -> str:

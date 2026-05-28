@@ -54,7 +54,6 @@ from team_agent.cli.commands import (
     cmd_advanced,
     cmd_install_skill,
     cmd_run_overnight,
-
 )
 from team_agent.cli.e2e import cmd_e2e
 from team_agent.cli.helpers import (
@@ -64,7 +63,6 @@ from team_agent.cli.helpers import (
     _provider_args,
     emit,
 )
-
 
 SEND_ORDER_HINT = (
     "options must appear before target/message. Use: "
@@ -317,8 +315,10 @@ def main(argv: list[str] | None = None) -> None:
 
     p = sub.add_parser("doctor", help="Check local dependencies, providers, auth hints, tmux, and MCP")
     p.add_argument("spec", nargs="?")
+    p.add_argument("--workspace", default=".", help="Workspace whose team.db schema should be diagnosed")
     p.add_argument("--gate", choices=["orphans"], help="Run a CI-friendly doctor gate")
     p.add_argument("--fix", action="store_true", help="With --gate orphans: apply the gate fix")
+    p.add_argument("--fix-schema", action="store_true", help="Rebuild drifted team.db table layouts after writing a backup")
     p.add_argument(
         "--cleanup-orphans",
         action="store_true",

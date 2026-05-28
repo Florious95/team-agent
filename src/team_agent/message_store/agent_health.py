@@ -3,7 +3,11 @@ from __future__ import annotations
 from contextlib import closing
 from typing import Any
 
+from team_agent.message_store.schema_migration import MANAGED_TABLE_LAYOUTS
 from team_agent.message_store.schema import utcnow
+
+
+AGENT_HEALTH_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["agent_health"])
 
 
 def upsert_agent_health(
@@ -50,10 +54,10 @@ def upsert_agent_health(
 def agent_health(self, owner_team_id: str | None = None) -> dict[str, dict[str, Any]]:
     with closing(self.connect()) as conn:
         if owner_team_id is None:
-            rows = conn.execute("select * from agent_health order by agent_id").fetchall()
+            rows = conn.execute(f"select {AGENT_HEALTH_SELECT} from agent_health order by agent_id").fetchall()
         else:
             rows = conn.execute(
-                "select * from agent_health where owner_team_id = ? or owner_team_id is null order by agent_id",
+                f"select {AGENT_HEALTH_SELECT} from agent_health where owner_team_id = ? or owner_team_id is null order by agent_id",
                 (owner_team_id,),
             ).fetchall()
     return {row["agent_id"]: dict(row) for row in rows}

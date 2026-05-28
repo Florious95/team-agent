@@ -12,8 +12,15 @@ from typing import Any, Callable
 from . import agent_health as _agent_health
 from . import result_watchers as _result_watchers
 from .schema import SCHEMA_VERSION, initialize_schema, utcnow
+from .schema_migration import MANAGED_TABLE_LAYOUTS
 from team_agent.paths import runtime_dir
 from team_agent.spec import validate_result_envelope
+
+
+MESSAGE_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["messages"])
+RESULT_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["results"])
+SCHEDULED_EVENT_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["scheduled_events"])
+DELIVERY_TOKEN_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["delivery_tokens"])
 
 
 def _is_sqlite_locked(exc: sqlite3.OperationalError) -> bool:
@@ -57,7 +64,7 @@ class MessageStore:
     def _init(self) -> None:
         def initialize() -> None:
             with closing(self.connect()) as conn:
-                initialize_schema(conn)
+                initialize_schema(conn, self.path)
 
         _with_sqlite_busy_retry(initialize)
 
@@ -224,10 +231,10 @@ class MessageStore:
     def messages(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
             if owner_team_id is None:
-                rows = conn.execute("select * from messages order by created_at").fetchall()
+                rows = conn.execute(f"select {MESSAGE_SELECT} from messages order by created_at").fetchall()
             else:
                 rows = conn.execute(
-                    "select * from messages where owner_team_id = ? or owner_team_id is null order by created_at",
+                    f"select {MESSAGE_SELECT} from messages where owner_team_id = ? or owner_team_id is null order by created_at",
                     (owner_team_id,),
                 ).fetchall()
         return [dict(row) for row in rows]
@@ -236,8 +243,8 @@ class MessageStore:
         with closing(self.connect()) as conn:
             if owner_team_id is None:
                 rows = conn.execute(
-                    """
-                    select * from messages
+                    f"""
+                    select {MESSAGE_SELECT} from messages
                     where sender = ? or recipient = ?
                     order by created_at desc
                     limit ?
@@ -246,8 +253,8 @@ class MessageStore:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    select * from messages
+                    f"""
+                    select {MESSAGE_SELECT} from messages
                     where (sender = ? or recipient = ?)
                       and (owner_team_id = ? or owner_team_id is null)
                     order by created_at desc
@@ -259,7 +266,7 @@ class MessageStore:
 
     def delivery_tokens(self) -> list[dict[str, Any]]:
         with closing(self.connect()) as conn:
-            rows = conn.execute("select * from delivery_tokens order by injected_at").fetchall()
+            rows = conn.execute(f"select {DELIVERY_TOKEN_SELECT} from delivery_tokens order by injected_at").fetchall()
         return [dict(row) for row in rows]
 
     def add_scheduled_event(
@@ -285,8 +292,8 @@ class MessageStore:
         with closing(self.connect()) as conn:
             if owner_team_id is None:
                 rows = conn.execute(
-                    """
-                    select * from scheduled_events
+                    f"""
+                    select {SCHEDULED_EVENT_SELECT} from scheduled_events
                     where status = 'pending' and due_at <= ?
                     order by due_at, id
                     """,
@@ -294,8 +301,8 @@ class MessageStore:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
-                    select * from scheduled_events
+                    f"""
+                    select {SCHEDULED_EVENT_SELECT} from scheduled_events
                     where status = 'pending' and due_at <= ?
                       and (owner_team_id = ? or owner_team_id is null)
                     order by due_at, id
@@ -438,14 +445,14 @@ class MessageStore:
         if uncollected_only:
             clauses.append("status not in ('collected', 'invalid')")
         where = " where " + " and ".join(clauses) if clauses else ""
-        query = f"select * from results{where} order by created_at"
+        query = f"select {RESULT_SELECT} from results{where} order by created_at"
         with closing(self.connect()) as conn:
             rows = conn.execute(query, args).fetchall()
         return [dict(row) for row in rows]
 
     def result_by_id(self, result_id: str) -> dict[str, Any] | None:
         with closing(self.connect()) as conn:
-            row = conn.execute("select * from results where result_id = ?", (result_id,)).fetchone()
+            row = conn.execute(f"select {RESULT_SELECT} from results where result_id = ?", (result_id,)).fetchone()
         return dict(row) if row else None
 
     def latest_results(self, limit: int = 5, owner_team_id: str | None = None) -> list[dict[str, Any]]:
@@ -454,7 +461,7 @@ class MessageStore:
         with closing(self.connect()) as conn:
             rows = conn.execute(
                 f"""
-                select * from results
+                select {RESULT_SELECT} from results
                 where status != 'invalid' {owner_clause}
                 order by created_at desc
                 limit ?

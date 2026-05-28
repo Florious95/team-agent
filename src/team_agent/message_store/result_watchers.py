@@ -4,7 +4,11 @@ import uuid
 from contextlib import closing
 from typing import Any
 
+from team_agent.message_store.schema_migration import MANAGED_TABLE_LAYOUTS
 from team_agent.message_store.schema import utcnow
+
+
+RESULT_WATCHER_SELECT = ", ".join(MANAGED_TABLE_LAYOUTS["result_watchers"])
 
 
 def create_result_watcher(
@@ -32,11 +36,13 @@ def create_result_watcher(
 def pending_result_watchers(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
     with closing(self.connect()) as conn:
         if owner_team_id is None:
-            rows = conn.execute("select * from result_watchers where status = 'pending' order by created_at").fetchall()
+            rows = conn.execute(
+                f"select {RESULT_WATCHER_SELECT} from result_watchers where status = 'pending' order by created_at"
+            ).fetchall()
         else:
             rows = conn.execute(
-                """
-                select * from result_watchers
+                f"""
+                select {RESULT_WATCHER_SELECT} from result_watchers
                 where status = 'pending' and (owner_team_id = ? or owner_team_id is null)
                 order by created_at
                 """,
@@ -47,17 +53,17 @@ def pending_result_watchers(self, owner_team_id: str | None = None) -> list[dict
 def retryable_result_watchers(self) -> list[dict[str, Any]]:
     with closing(self.connect()) as conn:
         rows = conn.execute(
-            "select * from result_watchers where status in ('pending', 'notify_failed') order by created_at"
+            f"select {RESULT_WATCHER_SELECT} from result_watchers where status in ('pending', 'notify_failed') order by created_at"
         ).fetchall()
     return [dict(row) for row in rows]
 
 def result_watchers(self, owner_team_id: str | None = None) -> list[dict[str, Any]]:
     with closing(self.connect()) as conn:
         if owner_team_id is None:
-            rows = conn.execute("select * from result_watchers order by created_at").fetchall()
+            rows = conn.execute(f"select {RESULT_WATCHER_SELECT} from result_watchers order by created_at").fetchall()
         else:
             rows = conn.execute(
-                "select * from result_watchers where owner_team_id = ? or owner_team_id is null order by created_at",
+                f"select {RESULT_WATCHER_SELECT} from result_watchers where owner_team_id = ? or owner_team_id is null order by created_at",
                 (owner_team_id,),
             ).fetchall()
     return [dict(row) for row in rows]
@@ -92,7 +98,7 @@ def requeue_delivery_exhausted_watchers(self) -> list[str]:
             rows = conn.execute(
                 "select watcher_id from result_watchers where status = 'delivery_exhausted'"
             ).fetchall()
-            watcher_ids = [row[0] for row in rows]
+            watcher_ids = [row["watcher_id"] for row in rows]
             if watcher_ids:
                 # Phase D hotfix-3 (78055bc) cleared notified_message_id here; Gap 32 dedupe
                 # reverses that — preserve notified_message_id so the retry path can re-confirm
@@ -153,9 +159,9 @@ def _claim_leader_notification_disabled_impl(  # legacy reference for archaeolog
                     "order by coalesce(completed_at, created_at) limit 1",
                     (result_id, owner_team_id),
                 ).fetchone()
-            if sibling and sibling[0]:
+            if sibling and sibling["notified_message_id"]:
                 conn.execute("COMMIT")
-                return {"status": "already_notified_by", "canonical_message_id": sibling[0]}
+                return {"status": "already_notified_by", "canonical_message_id": sibling["notified_message_id"]}
             cur = conn.execute(
                 "update result_watchers "
                 "set notified_message_id = ?, result_id = coalesce(result_id, ?) "
@@ -172,7 +178,7 @@ def _claim_leader_notification_disabled_impl(  # legacy reference for archaeolog
             conn.execute("COMMIT")
             return {
                 "status": "already_notified_by",
-                "canonical_message_id": (row[0] if row else None) or None,
+                "canonical_message_id": (row["notified_message_id"] if row else None) or None,
             }
         except Exception:
             try:
@@ -242,4 +248,4 @@ def leader_notified_message_id_for_result(
                 "order by coalesce(completed_at, created_at) limit 1",
                 (result_id, owner_team_id),
             ).fetchone()
-    return row[0] if row else None
+    return row["notified_message_id"] if row else None

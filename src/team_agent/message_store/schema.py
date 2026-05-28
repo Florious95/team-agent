@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
+
+from team_agent.message_store import schema_migration as _schema_migration
+from team_agent.message_store.schema_migration import ensure_table_layout, table_layout
 
 
 MESSAGE_COLUMNS = {
@@ -68,16 +72,26 @@ RESULT_WATCHER_COLUMNS = {
     "notified_message_id",
     "error",
 }
+LEADER_NOTIFICATION_LOG_COLUMNS = {
+    "result_id",
+    "leader_session_uuid",
+    "notified_message_id",
+    "notified_at",
+    "leader_pane_id_at_notify",
+    "envelope_content_hash",
+    "owner_team_id",
+}
 
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 SCHEMA_VERSION = 3
+SCHEMA_MIGRATIONS = _schema_migration.SCHEMA_MIGRATIONS
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in conn.execute(f"pragma table_info({table})").fetchall()}
+    return set(table_layout(conn, table))
 
 
 def _ensure_table_columns(
@@ -97,7 +111,9 @@ def _ensure_table_columns(
         conn.execute(migrations[name])
 
 
-def initialize_schema(conn: sqlite3.Connection) -> None:
+def initialize_schema(conn: sqlite3.Connection, db_path: Path | None = None) -> None:
+    _schema_migration.SCHEMA_MIGRATIONS = SCHEMA_MIGRATIONS
+    ensure_table_layout(conn, schema_version=SCHEMA_VERSION, db_path=db_path)
     with conn:
         conn.execute(
             """
@@ -260,6 +276,7 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             "create index if not exists idx_leader_notification_log_uuid "
             "on leader_notification_log(leader_session_uuid, notified_at)"
         )
+        _ensure_table_columns(conn, "leader_notification_log", LEADER_NOTIFICATION_LOG_COLUMNS)
         conn.execute("create index if not exists idx_messages_owner_team_id on messages(owner_team_id)")
         conn.execute("create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)")
         conn.execute("create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)")
