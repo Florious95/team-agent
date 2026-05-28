@@ -785,17 +785,71 @@ def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False
     return _legacy_claim_leader(workspace, team=team, confirm=confirm)
 
 
-def quick_start(*args: Any, **kwargs: Any) -> dict[str, Any]:
+def quick_start(
+    agents_dir: Path,
+    name: str | None = None,
+    yes: bool = False,
+    fresh: bool = False,
+    team_id: str | None = None,
+) -> dict[str, Any]:
     """0.2.6 Family A: positive-source quick-start.
 
     The caller-pane shape gate is owned by
-    :func:`bind_owner_from_caller_pane`. Quick-start does not derive its
-    own caller identity. The bind import keeps the call site discoverable
-    for the shared-binding contract grep (test_c1) while the legacy
-    quick-start delegate handles team scaffolding once the bind passes.
+    :func:`bind_owner_from_caller_pane`. Quick-start binds the caller
+    pane BEFORE any team setup runs; ``$TMUX_PANE`` missing or the
+    caller pane not running a leader host short-circuits to a refusal
+    (no fallback to legacy reverse-scan). On success, the legacy
+    bootstrap brings up the workspace and the bind-derived
+    ``team_owner`` is force-written into
+    ``state.teams[team_id].team_owner`` so the runtime owner identity
+    matches the caller pane verbatim.
     """
-    from team_agent.leader_binding import bind_owner_from_caller_pane  # noqa: F401
-    return _legacy_quick_start(*args, **kwargs)
+    from team_agent.leader_binding import (
+        bind_owner_from_caller_pane,
+        emit_owner_bound_event,
+    )
+    from team_agent.diagnose.quick_start import prepare_quick_start_team
+
+    # Pre-resolve team_dir + workspace so the caller-pane bind can write
+    # its audit event before any worker is spawned. ``prepare_quick_start_team``
+    # is idempotent (mkdir + shutil.copy2 of role docs) and used inside
+    # ``_legacy_quick_start`` as the very first step anyway.
+    team_dir = prepare_quick_start_team(
+        Path(agents_dir).resolve(), Path.cwd().resolve(), name, team_id=team_id
+    )
+    workspace = team_workspace(team_dir)
+    ensure_workspace_dirs(workspace)
+    resolved_team_id = team_id or team_dir.name or "current"
+    bind = bind_owner_from_caller_pane(workspace, resolved_team_id)
+    if not bind.get("ok"):
+        return {"ok": False, "status": "refused", **bind}
+    new_owner = bind["owner"]
+    result = _legacy_quick_start(
+        Path(agents_dir).resolve(), name=name, yes=yes, fresh=fresh, team_id=team_id
+    )
+    state = load_runtime_state(workspace)
+    teams = state.setdefault("teams", {})
+    team_entry = teams.get(resolved_team_id) or {}
+    existing_owner = (
+        team_entry.get("team_owner")
+        if isinstance(team_entry.get("team_owner"), dict)
+        else {}
+    )
+    if not (existing_owner and _owner_identity_matches(existing_owner, new_owner)):
+        team_entry["team_owner"] = new_owner
+        teams[resolved_team_id] = team_entry
+        if not state.get("active_team_key"):
+            state["active_team_key"] = resolved_team_id
+        save_runtime_state(workspace, state)
+        emit_owner_bound_event(
+            workspace,
+            caller_pane_id=bind.get("caller_pane_id", ""),
+            caller_current_command=bind.get("caller_current_command", ""),
+            derived_leader_session_uuid=new_owner["leader_session_uuid"],
+            team_id=resolved_team_id,
+            old_leader_session_uuid=str(existing_owner.get("leader_session_uuid") or ""),
+        )
+    return result
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
