@@ -284,7 +284,9 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertIn("detect-codex-trust-prompt", actions)
-            self.assertIn("set-buffer-answer", actions)
+            # Round-6 wiring: trust auto-answer's empty Enter goes through a
+            # direct send-keys call, no set-buffer/paste-buffer for the answer.
+            self.assertNotIn("set-buffer-answer", actions)
             self.assertIn("trust-answer-1-enter", actions)
             self.assertIn("set-buffer-message", actions)
             self.assertLess(actions.index("trust-answer-1-enter"), actions.index("set-buffer-message"), actions)

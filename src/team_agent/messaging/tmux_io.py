@@ -32,6 +32,49 @@ def _tmux_inject_text(
     *,
     bypass_non_input_gate: bool = False,
 ) -> dict[str, Any]:
+    # Round-5 follow-up: empty-text Enter path (used by trust auto-answer to
+    # accept Codex's default `1. Yes, continue` choice with a plain Enter).
+    # tmux rejects set-buffer / paste-buffer of an empty string, so the
+    # buffer-paste route would leave the trust prompt stuck. Issue
+    # `send-keys -t <target> <submit_key>` directly and bypass the buffer
+    # path entirely.
+    if text == "":
+        proc = run_cmd(["tmux", "send-keys", "-t", target, submit_key], timeout=10)
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "stage": "send-keys",
+                "error": proc.stderr.strip() or "tmux send-keys failed",
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "submitted": False,
+                        "verification": "send_keys_failed",
+                        "submit_key": submit_key,
+                    }
+                ],
+                "verification": "send_keys_failed",
+            }
+        return {
+            "ok": True,
+            "stage": "submitted",
+            "visible": True,
+            "submitted": True,
+            "verification": "empty_text_send_keys",
+            "submit_verification": f"{submit_key}_sent_direct",
+            "turn_verification": "not_required",
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "submitted": True,
+                    "verification": "empty_text_send_keys",
+                    "submit_key": submit_key,
+                }
+            ],
+            "submit_attempts": [
+                {"attempt": 1, "submitted": True, "verification": "send_keys"}
+            ],
+        }
     token_match = re.search(r"\[team-agent-token:([^\]]+)\]", text)
     token = token_match.group(1) if token_match else ""
     attempt_log: list[dict[str, Any]] = []
