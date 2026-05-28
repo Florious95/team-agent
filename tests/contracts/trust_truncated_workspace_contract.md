@@ -24,6 +24,31 @@ Hard truncation is only trustworthy when the capture proves the path token reach
 
 The public call surface must carry enough pane metadata to distinguish right-edge truncation from a complete shorter token. For the current public API, `attempt_trust_auto_answer(...)` receives this as `state["pane_width"]`, an integer pane width in display columns for the capture.
 
+## Live Delivery Wiring
+
+The live delivery path is part of this contract, not an optional caller detail.
+
+When `_deliver_pending_message(...)` receives a `codex_trust_prompt` non-input envelope from the tmux injection path, it must query the target tmux pane width at that moment and pass that width to the trust matcher before deciding whether the workspace matches. The existing `state["pane_width"]` field is only the carrier into `attempt_trust_auto_answer(...)`; production behavior may not rely on that field already being populated by unrelated startup code.
+
+The wiring acceptance seam is:
+
+```text
+team_agent.messaging.delivery._tmux_pane_width(target) -> {"ok": true, "pane_width": <int>}
+```
+
+or, on failure:
+
+```text
+team_agent.messaging.delivery._tmux_pane_width(target) -> {"ok": false, "error": "..."}
+```
+
+For a trust prompt detected during live message delivery:
+
+1. Delivery queries `_tmux_pane_width(target)` for the same pane that produced the trust prompt.
+2. If the query succeeds, delivery passes that integer as `state["pane_width"]` to `attempt_trust_auto_answer(...)`.
+3. If the query fails or returns no positive integer, delivery must fail safe. It must not auto-answer a hard-truncated prefix based on `pane_width=None`.
+4. A right-edge truncated workspace that matches the runtime cwd must not emit `leader_panes.trust_auto_answer_refused` with `reason="workspace_dir_mismatch"` merely because the original runtime state lacked `pane_width`.
+
 ## Real Fixture
 
 The blocker fixture is the verbatim Codex pane capture where the displayed path is hard-truncated without an ellipsis and reaches the pane's right edge. Its pane width fixture is `80`.
