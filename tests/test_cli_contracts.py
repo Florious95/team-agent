@@ -165,6 +165,32 @@ class CliContractTests(unittest.TestCase):
             self.assertIn("action:", proc.stderr)
             self.assertIn("log:", proc.stderr)
 
+    def test_quick_start_missing_roles_stderr_guides_role_md_creation(self) -> None:
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-quick-start-empty-") as tmp:
+            workspace = Path(tmp)
+            empty_roles = workspace / "compiled-team"
+            empty_roles.mkdir()
+            (empty_roles / "team.spec.yaml").write_text("team:\n  name: compiled-only\n", encoding="utf-8")
+            env = dict(os.environ)
+            env["PYTHONDONTWRITEBYTECODE"] = "1"
+            env["PYTHONPATH"] = str(ROOT / "src")
+            proc = subprocess.run(
+                [sys.executable, "-m", "team_agent", "quick-start", str(empty_roles)],
+                cwd=workspace,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("角色定义文件", proc.stderr)
+        self.assertIn("role .md 创建", proc.stderr)
+        self.assertIn("team-agent quick-start <roles-dir>", proc.stderr)
+
     def test_quick_start_session_conflict_payload_only_guides_rename(self) -> None:
         args = Mock(command="quick-start")
         payload = cli._cli_error_payload(

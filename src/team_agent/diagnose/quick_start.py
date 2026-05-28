@@ -121,7 +121,7 @@ def prepare_quick_start_team(agents_dir: Path, workspace: Path, name: str | None
     team_source = agents_dir / "TEAM.md"
     role_docs = [path for path in sorted(agents_dir.glob("*.md")) if path.name != "TEAM.md"] if agents_dir.is_dir() else []
     if not role_docs:
-        raise RuntimeError(f"{agents_dir}: expected .team/current or a directory of role .md files")
+        raise RuntimeError(f"{agents_dir}: 该目录缺角色定义文件 — 先用 'team-agent quick-start <roles-dir>' 从 role .md 创建一个新 team")
     team_dir = workspace / ".team" / (_safe_snapshot_name(team_id) if team_id else "current")
     target_agents = team_dir / "agents"
     target_profiles = team_dir / "profiles"
