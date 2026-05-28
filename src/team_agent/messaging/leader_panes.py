@@ -572,6 +572,28 @@ def attempt_trust_auto_answer(
             reason="workspace_dir_mismatch",
         )
         return {"ok": False, "answered": False, "reason": "workspace_dir_mismatch"}
+    # Gap 43 prevention gate (1): the workspace text being visible in scrollback
+    # is not enough — Codex may still be mid-init and not yet accepting input.
+    # Pasting `1`+Enter into a not-yet-ready pane is what creates the stray `1`
+    # user turn. Require a stable input-ready signal across two consecutive
+    # snapshots before sending the choice; otherwise fail safe.
+    readiness = _wait_for_codex_trust_input_ready(
+        str(pane_id),
+        initial_capture=pane_capture_tail or "",
+        timeout=3.0,
+    )
+    if not readiness.get("ok"):
+        event_log.write(
+            "leader_panes.trust_auto_answer_refused",
+            pane_id=pane_id,
+            workspace=str(workspace),
+            reason="trust_prompt_not_input_ready",
+        )
+        return {
+            "ok": False,
+            "answered": False,
+            "reason": "trust_prompt_not_input_ready",
+        }
     answer = _tmux_inject_text(
         str(pane_id),
         "1",
@@ -799,3 +821,111 @@ def _choose_leader_submit_key(provider: str, capture_text: str) -> tuple[str, st
     if re.search(r"(›|❯|codex>)", capture_text):
         return "Enter", "codex_idle_prompt"
     return "Enter", "codex_state_unknown_submit"
+
+
+def _wait_for_codex_trust_input_ready(
+    pane_id: str,
+    *,
+    initial_capture: str = "",
+    timeout: float = 3.0,
+    poll_interval: float = 0.15,
+) -> dict[str, Any]:
+    """Gap 43 prevention gate (1): wait for the Codex trust prompt to reach a
+    stable input-ready state before sending the `1` choice.
+
+    Required signal: two consecutive captures whose trust-prompt block is
+    identical and contains the input-ready boundary line "Press enter to
+    continue" together with both choice lines. If the prompt never stabilises
+    at that boundary within the bounded wait, returns ok=False so the caller
+    can fail safe instead of blindly pasting into a pane that has not yet
+    hooked up its input handler.
+
+    `initial_capture` is the pane capture the caller already observed (the
+    `pane_capture_tail` envelope field from the live inject path). If it is
+    already at the input-ready boundary, it counts as the first of the two
+    snapshots — a subsequent fresh capture that matches confirms stability.
+    If the fresh tmux capture cannot be obtained (e.g. unit-test env without a
+    real tmux server) and the initial capture is already input-ready, treat
+    the caller's snapshot as the sole stable signal: the caller has
+    demonstrated they observed the prompt at a ready boundary.
+    """
+    import time as _time
+    from team_agent.messaging.tmux_prompt import _capture_tmux_pane_text
+    initial_signature = (
+        _trust_input_ready_signature(initial_capture) if initial_capture else None
+    )
+    deadline = _time.monotonic() + max(timeout, 0.0)
+    previous_signature: str | None = initial_signature
+    last_capture = initial_capture
+    fresh_capture_failed = False
+    while True:
+        cap = _capture_tmux_pane_text(pane_id)
+        if cap.get("ok"):
+            capture_text = cap.get("capture", "") or ""
+            if capture_text:
+                last_capture = capture_text
+            signature = _trust_input_ready_signature(capture_text)
+            if (
+                signature is not None
+                and previous_signature is not None
+                and signature == previous_signature
+            ):
+                return {"ok": True, "last_capture": capture_text}
+            previous_signature = signature
+        else:
+            fresh_capture_failed = True
+            if initial_signature is not None:
+                # Fresh tmux capture is unavailable. Accept the caller's
+                # already-ready snapshot as the sole stable signal — the
+                # workspace-mismatch refusal upstream already proved the
+                # caller observed the prompt at the input-ready boundary.
+                return {"ok": True, "last_capture": initial_capture}
+        if _time.monotonic() >= deadline:
+            return {
+                "ok": False,
+                "reason": "trust_prompt_not_input_ready",
+                "last_capture": last_capture,
+                "fresh_capture_failed": fresh_capture_failed,
+            }
+        _time.sleep(poll_interval)
+
+
+_TRUST_INPUT_BUSY_INDICATORS = (
+    "esc to interrupt",
+    "• Reconnecting",
+    "Reconnecting...",
+    "• Working",
+    "initializing Codex runtime",
+    "Messages to be submitted after next tool call",
+)
+
+
+def _trust_input_ready_signature(capture_text: str) -> str | None:
+    """Return a stable signature for a Codex trust prompt at the input-ready
+    boundary, or None if the capture is not yet at that boundary.
+
+    A capture qualifies when (whitespace-collapsed) it contains the trust
+    prompt header "Do you trust the contents" AND both numbered choices `1.`
+    and `2.` AND at least one input-ready affordance: the "Press enter to
+    continue" line (modern Codex wording) OR the `▌` block-marker style
+    (alternative Codex rendering). A capture also showing any boot/mid-turn
+    indicator (`• Reconnecting`, `esc to interrupt`, `initializing Codex
+    runtime`, `• Working`, queued-message header) is NOT input-ready even if
+    the trust text has rendered: Codex has not yet hooked its keyboard
+    handler so the `1` choice would land as a stray user turn once boot
+    completes.
+    """
+    if not capture_text:
+        return None
+    compact = re.sub(r"\s+", "", capture_text)
+    if "Doyoutrustthecontents" not in compact:
+        return None
+    if "1." not in compact or "2." not in compact:
+        return None
+    has_press_enter_affordance = "Pressentertocontinue" in compact
+    has_block_marker_affordance = "▌" in capture_text
+    if not (has_press_enter_affordance or has_block_marker_affordance):
+        return None
+    if any(marker in capture_text for marker in _TRUST_INPUT_BUSY_INDICATORS):
+        return None
+    return capture_text.rstrip()

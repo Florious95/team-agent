@@ -151,6 +151,20 @@ def _deliver_pending_message(
                     workspace, state, store, message_id, target, injection,
                     attempt=_trust_retry_attempt,
                 )
+            # Gap 43 prevention gate (2): trust prompt being gone is NOT enough.
+            # If Codex is still on a stray `1` user turn (Reconnecting /
+            # • Working / "Messages to be submitted after next tool call"), a
+            # brief paste lands in the queued-message area, not in a new model
+            # turn. Refuse to paste and let the trust-retry scheduler hand the
+            # message a fresh attempt once Codex is truly idle.
+            if not _wait_for_codex_idle_after_trust_dismissal(
+                injection.get("pane_id") or target, timeout=3.0,
+            ):
+                return _handle_trust_retry_needed(
+                    workspace, state, store, message_id, target, injection,
+                    attempt=_trust_retry_attempt,
+                    reason="codex_not_idle_after_trust_dismissal",
+                )
             injection = _tmux_inject_text(
                 target,
                 text,
@@ -224,6 +238,7 @@ def _handle_trust_retry_needed(
     injection: dict[str, Any],
     *,
     attempt: int,
+    reason: str = "trust_prompt_not_dismissed_after_answer",
 ) -> dict[str, Any]:
     """Spark MEDIUM sweep #3: replace the dead-end failed mark with a real
     bounded-backoff consumer. attempt is the number of the delivery that JUST
@@ -286,7 +301,7 @@ def _handle_trust_retry_needed(
         workspace=str(workspace),
         pane_id=injection.get("pane_id") or target,
         target=target,
-        reason="trust_prompt_not_dismissed_after_answer",
+        reason=reason,
         attempt=attempt,
     )
     event_log.write(
@@ -302,9 +317,9 @@ def _handle_trust_retry_needed(
     return {
         "ok": False,
         "status": "retry_scheduled",
-        "reason": "trust_prompt_not_dismissed_after_answer",
+        "reason": reason,
         "stage": "trust_auto_answer_dismissal_wait",
-        "verification": "trust_prompt_not_dismissed_after_answer",
+        "verification": reason,
         "scheduled_event_id": event_id,
         "scheduled_retry_at": due_at,
         "next_attempt": next_attempt,
@@ -436,6 +451,43 @@ def _wait_for_trust_prompt_dismissal(target: str, *, timeout: float = 3.0, poll_
         capture = _capture_pane_tail(target)
         detected = detect_non_input_scrollback(capture)
         if detected != "codex_trust_prompt":
+            return True
+        if _time.monotonic() >= deadline:
+            return False
+        _time.sleep(poll_interval)
+
+
+_CODEX_BUSY_INDICATORS = (
+    "Messages to be submitted after next tool call",
+    "• Working",
+    "• Reconnecting",
+    "Reconnecting...",
+    "esc to interrupt",
+)
+
+
+def _wait_for_codex_idle_after_trust_dismissal(
+    target: str, *, timeout: float = 3.0, poll_interval: float = 0.15,
+) -> bool:
+    """Gap 43 prevention gate (2): the trust prompt being gone is not enough to
+    paste the next user-turn brief. Codex may still be mid-turn — e.g. a stray
+    `1` trust-choice user turn the runtime just produced — in which case the
+    next paste lands in the "Messages to be submitted after next tool call"
+    queue instead of opening a new model turn.
+
+    Block ONLY on positive evidence of mid-turn activity (one of the busy
+    markers). An empty capture / capture failure is not evidence of busy:
+    _wait_for_trust_prompt_dismissal already confirmed the trust prompt is
+    gone, so absent counter-evidence we accept idle.
+
+    Returns True once a capture shows no busy markers (or capture is empty),
+    False only if positive busy evidence persists past `timeout`.
+    """
+    import time as _time
+    deadline = _time.monotonic() + max(timeout, 0.0)
+    while True:
+        capture = _capture_pane_tail(target)
+        if not capture or not any(marker in capture for marker in _CODEX_BUSY_INDICATORS):
             return True
         if _time.monotonic() >= deadline:
             return False
