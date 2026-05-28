@@ -243,7 +243,7 @@ def stuck_list(workspace: Path) -> dict[str, Any]:
                 "status": "refused",
                 "reason": "team_owner_unresolved",
                 "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT to your team's claimed identity, or use team-agent takeover --confirm",
-                "candidates": sorted(candidates),
+                "candidates": sorted(list(candidates)),
             }
         return {"ok": True, "suppressed_idle_alerts": suppressed.get(caller_team, {}), "team": caller_team}
     known_team_keys = set(team_state_candidates(state).keys())
