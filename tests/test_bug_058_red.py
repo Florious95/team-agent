@@ -46,7 +46,7 @@ class Bug058InstallerWslAcceptanceTests(unittest.TestCase):
         self.assertIn("postinstall", scripts)
         postinstall = scripts["postinstall"]
         self.assertIn("node", postinstall)
-        self.assertRegex(postinstall, r"npm/[^ ]+\\.mjs")
+        self.assertRegex(postinstall, r"npm/[^ ]+\.mjs")
 
     def test_4_postinstall_script_contains_required_diagnostic_text(self) -> None:
         script = _postinstall_script_path()
@@ -122,7 +122,7 @@ def _package_json() -> dict:
 def _postinstall_script_path() -> Path:
     scripts = _package_json().get("scripts") or {}
     command = str(scripts.get("postinstall") or "")
-    match = re.search(r"(npm/[^\\s]+\\.mjs)", command)
+    match = re.search(r"(npm/[^\s]+\.mjs)", command)
     if not match:
         raise AssertionError(f"postinstall must run a committed npm/*.mjs script, got: {command!r}")
     path = ROOT / match.group(1)
@@ -132,11 +132,11 @@ def _postinstall_script_path() -> Path:
 
 
 def _section(markdown: str, heading: str) -> str:
-    pattern = re.compile(rf"^###+\\s+{re.escape(heading)}\\s*$", re.MULTILINE)
+    pattern = re.compile(rf"^##+\s+{re.escape(heading)}\s*$", re.MULTILINE)
     match = pattern.search(markdown)
     if not match:
         raise AssertionError(f"README.md must contain a dedicated heading for {heading!r}")
-    next_heading = re.search(r"^##+\\s+", markdown[match.end():], re.MULTILINE)
+    next_heading = re.search(r"^##+\s+", markdown[match.end():], re.MULTILINE)
     end = match.end() + next_heading.start() if next_heading else len(markdown)
     return markdown[match.start():end]
 
