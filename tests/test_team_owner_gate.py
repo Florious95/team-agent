@@ -295,7 +295,8 @@ class TeamOwnerGateTests(unittest.TestCase):
             ):
                 send_result = TeamOrchestratorTools(workspace).send_message("fake_impl", "first", sender="leader")
                 takeover_result = runtime.takeover(workspace, team=None, confirm=True)
-            self.assertTrue(send_result.get("ok"), send_result)
+            self.assertEqual(send_result.get("status"), "accepted", send_result)
+            self.assertTrue(send_result.get("delivery_pending"), send_result)
             self.assertTrue(takeover_result.get("ok"), takeover_result)
             self.assertIn(
                 "send",

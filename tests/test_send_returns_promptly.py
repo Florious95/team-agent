@@ -54,8 +54,9 @@ class SendReturnsPromptlyTests(unittest.TestCase):
             self.assertLess(elapsed, 2.0, "send_message must return after durable DB submission, not worker consumption")
             row = MessageStore(workspace).messages()[0]
             self.assertEqual(row["recipient"], "fake_impl")
-            self.assertIn(result["status"], {"queued", "accepted", "durably_stored"})
-            self.assertTrue(result.get("queued") or result.get("durably_stored"))
+            self.assertEqual(result["status"], "accepted")
+            self.assertTrue(result["delivery_pending"])
+            self.assertEqual(result["poll_via"], f"team-agent inbox {row['message_id']}")
             self.assertNotEqual(result["status"], "delivered")
             self.assertNotEqual(result.get("message_status"), "submitted")
 

@@ -180,7 +180,15 @@ class McpServerBoundaryTests(unittest.TestCase):
                     {"to": "fake_impl", "content": "hello worker", "sender": "leader", "requires_ack": True},
                 )
             self.assertFalse(response["result"]["isError"])
-            self.assertEqual(payload, {"ok": True, "status": "submitted", "message_id": "msg_worker", "to": "fake_impl", "submitted": True})
+            self.assertEqual(
+                payload,
+                {
+                    "status": "accepted",
+                    "delivery_pending": True,
+                    "poll_via": "team-agent inbox msg_worker",
+                    "message_id": "msg_worker",
+                },
+            )
             send.assert_called_once_with(
                 workspace.resolve(),
                 "fake_impl",

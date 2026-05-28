@@ -111,6 +111,14 @@ class TeamOrchestratorTools:
             resolved_agent=to if isinstance(to, str) else None,
             scope=("workspace" if scope == "workspace" else "team"),
         )
+        message_id = str(result.get("message_id") or "")
+        if _is_worker_recipient(to) and message_id:
+            return {
+                "status": "accepted",
+                "delivery_pending": True,
+                "poll_via": f"team-agent inbox {message_id}",
+                "message_id": message_id,
+            }
         return _compact_tool_result(result)
 
     def _refuse_cross_team_peer(
