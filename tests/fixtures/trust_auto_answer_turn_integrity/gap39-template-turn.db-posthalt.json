@@ -1,0 +1,23 @@
+{
+  "messages": [
+    {
+      "acknowledged_at": null,
+      "artifact_refs": "[]",
+      "content": "GAP39_PRIME_0.2.4-bundled-20260528T052538Z: reply via report_result summary GAP39_PRIME_DONE_0.2.4-bundled-20260528T052538Z",
+      "created_at": "2026-05-28T05:27:57.874523+00:00",
+      "delivered_at": "2026-05-28T05:28:28.966784+00:00",
+      "delivery_attempts": 3,
+      "error": "trust_retry_resuming",
+      "message_id": "msg_bf123881c62b",
+      "owner_team_id": "current",
+      "recipient": "worker_1",
+      "reply_to": null,
+      "requires_ack": 0,
+      "sender": "leader",
+      "status": "submitted",
+      "task_id": null,
+      "updated_at": "2026-05-28T05:28:28.966784+00:00"
+    }
+  ],
+  "results": []
+}

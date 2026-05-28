@@ -10,11 +10,17 @@ Auto-answering the Codex trust prompt must be transparent to the worker's model-
 
 Real incident: `0.2.4-bundled-20260528T033300Z`, candidate `integration/0.2.4 @ 95194cd760ccf4ab195f95d5c6924c8d838353e6`, result `res_95b40f1add79`.
 
+Second real incident: `0.2.4-bundled-20260528T052538Z`, candidate `integration/0.2.4 @ 84acb17dcd8df255a00e3bd4e1ce5a9735b53a11`, result `res_50f649f4ab6d`.
+
 Local fixtures copied from the latest Mac mini E2E artifact:
 
 - `tests/fixtures/trust_auto_answer_turn_integrity/codex-worker1-gap39-fail.raw.txt`
 - `tests/fixtures/trust_auto_answer_turn_integrity/codex-worker1-gap39-fail.ansi.txt`
 - `tests/fixtures/trust_auto_answer_turn_integrity/gap39-dead-owner-restart.events.jsonl`
+- `tests/fixtures/trust_auto_answer_turn_integrity/codex-worker1-gap39-template-turn-fail.raw.txt`
+- `tests/fixtures/trust_auto_answer_turn_integrity/codex-worker1-gap39-template-turn-fail.ansi.txt`
+- `tests/fixtures/trust_auto_answer_turn_integrity/gap39-template-turn.events.jsonl`
+- `tests/fixtures/trust_auto_answer_turn_integrity/gap39-template-turn.db-posthalt.json`
 
 The raw pane fixture shows all three failure signals together:
 
@@ -33,6 +39,26 @@ The raw pane fixture shows all three failure signals together:
 
 The events fixture shows Team Agent emitted `leader_panes.trust_auto_answered`, then retried the same message, then emitted `send.submitted` with `turn_verification="leader_new_turn_boundary_verified"`. That was a false success: the Team Agent brief was only visible in Codex's queued-message area while Codex was busy on the stray `1` turn.
 
+The second raw pane fixture shows the same failure class with a different stray user turn:
+
+```text
+› 1
+
+• Reconnecting... 1/5 (6m 23s • esc to interrupt)
+  └ Timeout waiting for child process to exit
+
+• Messages to be submitted after next tool call (press esc to interrupt and send
+  immediately)
+  ↳ Team Agent message from leader:
+
+    GAP39_PRIME_0.2.4-bundled-20260528T052538Z: reply via report_result summary
+    …
+
+› Implement {feature}
+```
+
+The second events fixture shows two `leader_panes.trust_auto_answered` events, no `trust_prompt_not_input_ready` event, one `leader_panes.trust_auto_answer_retry_needed` with `reason="codex_not_idle_after_trust_dismissal"`, then a final `send.submitted` with `verification="capture_contains_token"` and `turn_verification="leader_new_turn_boundary_verified"`. The DB post-halt snapshot records the message as `status="submitted"` with `delivery_attempts=3` and no results.
+
 ## Required Behavior
 
 1. After Team Agent auto-answers a Codex trust prompt, the Codex model-turn sequence must not contain a user turn whose content is only `1`, nor any other visible model-turn artifact of the trust-choice key sequence.
@@ -44,6 +70,9 @@ The events fixture shows Team Agent emitted `leader_panes.trust_auto_answered`, 
 7. If the trust prompt never becomes input-ready within the bounded wait, auto-answer must fail safe: no `1` key sequence is sent, no `leader_panes.trust_auto_answered` event is emitted, and the caller receives a structured non-success reason such as `trust_prompt_not_input_ready`.
 8. After a trust prompt is dismissed and before retrying the original Team Agent brief, the live delivery path must confirm Codex is idle and ready for a new user turn. "The trust prompt disappeared" is not sufficient. If Codex is still working on any user turn, including a stray `1` turn, the Team Agent brief must not be pasted.
 9. If Codex does not become idle before the bounded pre-brief gate expires, delivery must fail safe with a structured non-success result and no `send.submitted` event. The message may be retried or surfaced for operator attention, but it must not be reported as submitted.
+10. **PREVENTION:** The idle gate must reject any active Codex user turn that is not the Team Agent brief, not only turns whose text is `1`. Default/template turns such as `Implement {feature}` are non-idle and must block the next paste.
+11. **PREVENTION:** A normal retry attempt that no longer sees the trust prompt must still run the same "recipient is idle for a new Team Agent turn" gate before pasting. The gate is not limited to the immediate trust-answer branch.
+12. **DETECTION:** Any recognizer that claims Codex is idle or claims a Team Agent message opened a new turn must treat a queued-message block plus an unrelated active prompt (`› Implement {feature}`, or any other non-Team-Agent user text) as not delivered.
 
 ## Non-Requirements
 

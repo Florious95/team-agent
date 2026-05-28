@@ -1,0 +1,235 @@
+{"checks": [{"agents": ["worker_1"], "name": "compile", "ok": true}, {"name": "tmux", "ok": true, "path": "/opt/homebrew/bin/tmux"}, {"name": "ghostty", "ok": true, "path": "/Applications/Ghostty.app/Contents/MacOS/ghostty", "required": false}, {"checks": [{"agent_id": "worker_1", "auth_mode": "subscription", "credential_present": false, "keys_present": [], "missing_required": [], "ok": true, "profile": null, "provider": "codex"}], "name": "profiles", "ok": true}, {"checks": [{"agent_id": "worker_1", "auth_mode": "subscription", "ok": true, "profile": null, "provider": "codex", "status": "not_required"}], "name": "profile_smoke", "ok": true}, {"checks": [{"agent_id": "worker_1", "model": "gpt-5.5", "ok": true, "provider": "codex", "status": "model_supported"}], "name": "models", "ok": true}, {"available": false, "name": "rust_core", "ok": true, "path": null, "required": false, "status": "python_fallback"}, {"name": "profile_dir", "ok": true}], "details_log": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39/.team/logs/preflight-1779946062.json", "event": "preflight.complete", "ok": true, "ts": "2026-05-28T05:27:42.746735+00:00"}
+{"event": "routing.decision", "manual_override": false, "reason": "explicit assignee on task", "selected_agent": "worker_1", "source": "launch", "task_id": "task_initial", "ts": "2026-05-28T05:27:42.791334+00:00"}
+{"dangerous_auto_approve": false, "dangerous_auto_approve_source": "disabled", "event": "launch.permissions_resolved", "permissions": [{"agent_id": "worker_1", "has_prompt_only": true, "provider": "codex", "resolved_tools": [{"enforcement": "prompt_only", "tool": "mcp_team"}], "tools": ["mcp_team"]}], "ts": "2026-05-28T05:27:42.791719+00:00"}
+{"checks": [{"agent_id": "worker_1", "auth_mode": "subscription", "credential_present": false, "keys_present": [], "missing_required": [], "ok": true, "profile": null, "provider": "codex"}], "event": "launch.profile_check", "ok": true, "ts": "2026-05-28T05:27:42.800514+00:00"}
+{"event": "launch.profile_smoke_check", "ok": true, "reason": "already_checked", "skipped": true, "ts": "2026-05-28T05:27:42.800736+00:00"}
+{"checks": [{"agent_id": "worker_1", "model": "gpt-5.5", "ok": true, "provider": "codex", "status": "model_supported"}], "event": "launch.model_check", "ok": true, "ts": "2026-05-28T05:27:42.800832+00:00"}
+{"event": "leader_receiver.first_time_env_seeded", "failed_keys": [], "ok": true, "pane_id": "%643", "session_name": "leader-024-gap39-a-0-2-4-bundled-20260528T052538Z", "ts": "2026-05-28T05:27:42.846552+00:00"}
+{"discovery": "current_client", "event": "leader_receiver.attached", "first_time": true, "leader_session_uuid_source": "derived", "pane_current_command": "claude.exe", "pane_index": "0", "pane_tty": "/dev/ttys012", "provider": "claude_code", "requested_provider": "claude", "session_name": "leader-024-gap39-a-0-2-4-bundled-20260528T052538Z", "source": "launch", "target": "%643", "ts": "2026-05-28T05:27:42.846727+00:00", "uuid_prefix": "0a1c1679468b", "window_index": "0", "window_name": "leader"}
+{"agent_id": "worker_1", "command": "cd /Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39 && export TEAM_AGENT_ID=worker_1 TEAM_AGENT_WORKSPACE=/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39 PYTHONPATH=/Users/alauda/.team-agent/runtime/0.2.3/src PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/Users/alauda/.local/bin && exec codex --no-alt-screen --disable shell_snapshot --disable apps --sandbox read-only --ask-for-approval on-request --model gpt-5.5 -c 'developer_instructions=\"You are Team Agent worker `worker_1` with role `worker_1`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime, not the user'\"'\"'s primary assistant.\\nThe user normally talks to the team lead. Plain text you write in this worker\\nsession is local to this session and is not a team message.\\n\\nUse Team Agent MCP tools for team-visible coordination:\\n- Send progress, blockers, permission needs, tool failures, scope changes, and\\n  long-running status updates with team_orchestrator.send_message(to='\"'\"'leader'\"'\"',\\n  content='\"'\"'<short message>'\"'\"').\\n- Send to another teammate by agent id when coordination is useful, or use\\n  to='\"'\"'*'\"'\"' to notify every other team member. The runtime resolves only this team\\n  and excludes your own worker.\\n- When the task is complete, call team_orchestrator.report_result exactly once.\\n- Do not pass sender, task_id, agent_id, schema_version, or ack fields unless\\n  doing a low-level compatibility diagnostic. The MCP runtime fills protocol\\n  fields from the current worker and task state.\\n\\nIf you are blocked or cannot continue, message the leader promptly instead of\\nwaiting silently. If work takes several minutes, send a short progress update.\\n\\n\\nYou are worker_1 for the 0.2.4 bundled Mac mini E2E. Follow the exact task. Use report_result when asked.\\n\\nFor progress or blockers, call team_orchestrator.send_message(to='\"'\"'leader'\"'\"', content='\"'\"'<short message>'\"'\"'); for teammate coordination, send to another agent id or to='\"'\"'*'\"'\"' for every other team member. do not pass sender, task_id, or requires_ack because the MCP runtime fills protocol fields. the runtime injects it into the attached Codex leader pane when the leader has run attach-leader. If no leader is attached, the tool returns a fallback/failed result instead of completion. Final completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; MCP fills schema_version, task_id, and agent_id.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"' -c 'mcp_servers.team_orchestrator.command=\"/opt/homebrew/opt/python@3.11/bin/python3.11\"' -c 'mcp_servers.team_orchestrator.args=[\"-m\", \"team_agent.mcp_server\", \"--workspace\", \"/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39\"]' -c 'mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"worker_1\"' -c 'mcp_servers.team_orchestrator.env.PYTHONPATH=\"/Users/alauda/.team-agent/runtime/0.2.3/src\"' -c mcp_servers.team_orchestrator.tool_timeout_sec=600.0", "event": "launch.agent_start", "mcp_config": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39/.team/runtime/mcp/worker_1.json", "provider": "codex", "session": "team-024-gap39-0-2-4-bundled-20260528T052538Z", "ts": "2026-05-28T05:27:42.847142+00:00", "window": "worker_1"}
+{"action": "sent_skip", "agent_id": "worker_1", "event": "launch.startup_prompt_handled", "prompt": "codex_update_available", "provider": "codex", "ts": "2026-05-28T05:27:43.925418+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 1.5, "ts": "2026-05-28T05:27:45.447468+00:00", "window": "worker_1"}
+{"event": "launch.complete", "session": "team-024-gap39-0-2-4-bundled-20260528T052538Z", "started": [{"agent_id": "worker_1", "provider": "codex", "window": "worker_1"}], "ts": "2026-05-28T05:27:45.456828+00:00"}
+{"event": "coordinator.started", "log": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39/.team/runtime/coordinator.log", "pid": 98310, "ts": "2026-05-28T05:27:45.465310+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:45.489691+00:00", "window": "worker_1"}
+{"event": "coordinator.boot", "once": false, "ts": "2026-05-28T05:27:45.530077+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:45.561037+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:45.629176+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:47.686916+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:47.766266+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:49.825069+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:49.896138+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:51.954450+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:52.028685+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:54.084208+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:54.153451+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:56.212806+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:56.287751+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:57.721308+00:00", "window": "worker_1"}
+{"event": "runtime.lock_acquired", "lock": "send", "ts": "2026-05-28T05:27:57.872580+00:00", "waited_sec": 0.0}
+{"event": "send.deliver_attempt", "message_id": "msg_bf123881c62b", "payload": {"artifact_refs": [], "content": "GAP39_PRIME_0.2.4-bundled-20260528T052538Z: reply via report_result summary GAP39_PRIME_DONE_0.2.4-bundled-20260528T052538Z", "from": "leader", "message_id": "msg_bf123881c62b", "reply_to": null, "requires_ack": false, "task_id": null, "to": "worker_1"}, "recipient_busy": false, "recipient_status": "running", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:27:57.882245+00:00", "visible_token": "msg_bf123881c62b"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:27:58.353356+00:00", "window": "worker_1"}
+{"event": "leader_panes.trust_auto_answered", "opted_in": true, "pane_id": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:27:58.385086+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:27:58.425858+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:28:00.481288+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:00.554523+00:00"}
+{"attempt": 1, "event": "leader_panes.trust_auto_answer_retry_needed", "message_id": "msg_bf123881c62b", "pane_id": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "reason": "trust_prompt_not_dismissed_after_answer", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:01.392408+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"backoff_seconds": 5, "due_at": "2026-05-28T05:28:06.387635+00:00", "event": "leader_panes.trust_auto_answer_retry_scheduled", "max_attempts": 4, "message_id": "msg_bf123881c62b", "next_attempt": 2, "scheduled_event_id": 1, "ts": "2026-05-28T05:28:01.392690+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:28:01.424736+00:00", "window": "worker_1"}
+{"event": "runtime.lock_released", "lock": "send", "ts": "2026-05-28T05:28:01.426500+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:28:02.613031+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:02.690292+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:28:04.748475+00:00", "window": "worker_1"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:04.827442+00:00"}
+{"agent_id": "worker_1", "event": "session.capture_required_attention", "provider": "codex", "session_name": null, "spawn_cwd": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39", "timeout_s": 0.0, "ts": "2026-05-28T05:28:06.885508+00:00", "window": "worker_1"}
+{"attempt": 2, "event": "leader_panes.trust_auto_answer_retry_attempted", "max_attempts": 4, "message_id": "msg_bf123881c62b", "ts": "2026-05-28T05:28:06.953193+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"event": "send.deliver_attempt", "message_id": "msg_bf123881c62b", "payload": {"artifact_refs": [], "content": "GAP39_PRIME_0.2.4-bundled-20260528T052538Z: reply via report_result summary GAP39_PRIME_DONE_0.2.4-bundled-20260528T052538Z", "from": "leader", "message_id": "msg_bf123881c62b", "reply_to": null, "requires_ack": false, "task_id": null, "to": "worker_1"}, "recipient_busy": false, "recipient_status": "running", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:06.959227+00:00", "visible_token": "msg_bf123881c62b"}
+{"event": "leader_panes.trust_auto_answered", "opted_in": true, "pane_id": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:07.465862+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"attempt": 2, "event": "leader_panes.trust_auto_answer_retry_needed", "message_id": "msg_bf123881c62b", "pane_id": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "reason": "codex_not_idle_after_trust_dismissal", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:11.603560+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"backoff_seconds": 15, "due_at": "2026-05-28T05:28:26.599028+00:00", "event": "leader_panes.trust_auto_answer_retry_scheduled", "max_attempts": 4, "message_id": "msg_bf123881c62b", "next_attempt": 3, "scheduled_event_id": 2, "ts": "2026-05-28T05:28:11.603947+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:11.629079+00:00"}
+{"agent_id": "worker_1", "attribution_confidence": "high", "captured_via": "fs_watch", "event": "session.captured", "provider": "codex", "rollout_path": "/Users/alauda/.codex/sessions/2026/05/28/rollout-2026-05-28T13-28-08-019e6d0d-e7db-7072-9953-31afbcbf0d31.jsonl", "session_id": "019e6d0d-e7db-7072-9953-31afbcbf0d31", "ts": "2026-05-28T05:28:13.689092+00:00"}
+{"agent_ids": ["worker_1"], "alert_count": 1, "event": "coordinator.cross_worker_deadlock", "team": "current", "ts": "2026-05-28T05:28:13.757734+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:13.765136+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:15.892816+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:18.020270+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:20.150137+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:22.278447+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:24.408714+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:26.534954+00:00"}
+{"attempt": 3, "event": "leader_panes.trust_auto_answer_retry_attempted", "max_attempts": 4, "message_id": "msg_bf123881c62b", "ts": "2026-05-28T05:28:28.654678+00:00", "workspace": "/Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T052538Z-gap39"}
+{"event": "send.deliver_attempt", "message_id": "msg_bf123881c62b", "payload": {"artifact_refs": [], "content": "GAP39_PRIME_0.2.4-bundled-20260528T052538Z: reply via report_result summary GAP39_PRIME_DONE_0.2.4-bundled-20260528T052538Z", "from": "leader", "message_id": "msg_bf123881c62b", "reply_to": null, "requires_ack": false, "task_id": null, "to": "worker_1"}, "recipient_busy": false, "recipient_status": "running", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:28.660975+00:00", "visible_token": "msg_bf123881c62b"}
+{"event": "worker.first_interaction", "first_send_at": "2026-05-28T05:28:28.967659+00:00", "message_id": "msg_bf123881c62b", "ts": "2026-05-28T05:28:28.967665+00:00", "worker_id": "worker_1"}
+{"event": "send.submitted", "message_id": "msg_bf123881c62b", "paste_attempts": [{"attempt": 1, "buffer_deleted": true, "buffer_method": "set_buffer_arg", "buffer_name": "team-agent-send-msg_bf123881c62b", "ready_timeout_sec": 1.5, "text_bytes": 193, "verification": "capture_contains_token", "visible": true}], "status": "submitted", "submit_attempts": [{"attempt": 1, "submitted": true, "verification": "not_required"}], "submit_verification": "Enter_sent_after_visible_token", "target": "team-024-gap39-0-2-4-bundled-20260528T052538Z:worker_1", "ts": "2026-05-28T05:28:28.967747+00:00", "turn_verification": "leader_new_turn_boundary_verified", "verification": "capture_contains_token"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:28.979041+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:31.054135+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:33.180676+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:35.273225+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:37.381483+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:39.479942+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:41.609515+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:43.726410+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:45.837571+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:47.971845+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:50.100009+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:52.229418+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:54.357290+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:56.484165+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:28:58.611059+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:00.744173+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:02.873831+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:05.007056+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:07.130249+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:09.255480+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:11.384556+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:13.512405+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:15.642588+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:17.771165+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:19.892759+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:21.998054+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:24.096366+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:26.218503+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:28.355756+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:30.482671+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:32.562745+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:34.689322+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:36.764162+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:38.893032+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:41.011940+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:43.136125+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:45.264437+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:47.393119+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:49.523502+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:51.651881+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:53.782517+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:55.899953+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:29:58.021410+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:00.134083+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:02.229456+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:04.328137+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:06.429320+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:08.563056+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:10.694115+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:12.826034+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:14.955683+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:17.086297+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:19.212926+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:21.340023+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:23.465731+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:25.595715+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:27.728958+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:29.861718+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:31.993381+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:34.078390+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:36.196223+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:38.277559+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:40.407668+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:42.541848+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:44.672133+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:46.777321+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:48.883359+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:50.998363+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:53.125098+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:55.251630+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:57.380279+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:30:59.510409+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:01.640171+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:03.770569+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:05.907633+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:08.036107+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:10.173502+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:12.309363+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:14.435161+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:16.554873+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:18.676593+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:20.790453+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:22.928939+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:25.060430+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:27.199037+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:29.333791+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:31.464327+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:33.570236+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:35.655250+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:37.763974+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:39.843146+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:41.969436+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:44.087988+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:46.214921+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:48.343436+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:50.475824+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:52.604462+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:54.722140+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:56.835432+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:31:58.960071+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:01.091851+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:03.222087+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:05.346894+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:07.470981+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:09.595103+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:11.724366+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:13.843384+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:15.949091+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:18.042260+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:20.176025+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:22.308994+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:24.434750+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:26.566839+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:28.698054+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:30.816717+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:32.936287+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:35.047953+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:37.167635+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:39.298274+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:41.375621+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:43.504214+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:45.612690+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:47.739840+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:49.867284+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:51.987356+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:54.114593+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:56.242789+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:32:58.359109+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:00.458281+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:02.557727+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:04.692073+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:06.810991+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:08.930357+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:11.041203+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:13.170691+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:15.305845+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:17.431074+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:19.560434+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:21.686709+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:23.817267+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:25.945552+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:28.073448+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:30.197086+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:32.327098+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:34.454691+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:36.586888+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:38.706329+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:40.846366+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:42.937429+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:45.035956+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:47.151731+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:49.255568+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:51.388057+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:53.520651+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:55.651522+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:57.784326+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:33:59.911736+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:02.027983+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:04.162192+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:06.295986+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:08.423037+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:10.552927+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:12.680963+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:14.811342+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:16.941638+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:19.070054+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:21.195990+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:23.325508+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:25.463244+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:27.584765+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:29.689796+00:00"}
+{"collected": 0, "event": "coordinator.result_collect", "notified": 0, "ts": "2026-05-28T05:34:31.783926+00:00"}
