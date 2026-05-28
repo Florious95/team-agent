@@ -38,17 +38,24 @@ class PositiveSourceMcpScopeAcceptanceTests(unittest.TestCase):
         def fake_send_message(*args, **kwargs):
             captured["args"] = args
             captured["kwargs"] = kwargs
-            return {"ok": True, "status": "accepted", "message_id": "msg_scope"}
+            return {"status": "accepted", "delivery_pending": True, "poll_via": "team-agent inbox msg_scope", "message_id": "msg_scope"}
 
         with patch.dict(os.environ, {"TEAM_AGENT_ID": "a_worker", "TEAM_AGENT_OWNER_TEAM_ID": "team-a"}, clear=False), \
              patch("team_agent.mcp_server.tools.runtime.send_message", side_effect=fake_send_message):
             result = TeamOrchestratorTools(self.workspace).send_message(to="a_peer", content="hello")
 
-        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "accepted")
+        self.assertIs(result["delivery_pending"], True)
+        self.assertEqual(result["poll_via"], "team-agent inbox msg_scope")
+        self.assertNotIn("ok", result)
         self.assertIn("team", captured["kwargs"])
         self.assertEqual(captured["kwargs"]["team"], "team-a")
         self.assertEqual(captured["kwargs"]["sender"], "a_worker")
         self.assertEqual(captured["args"][1], "a_peer")
+        events = read_events(self.workspace)
+        scope_event = next(event for event in events if event.get("event") == "mcp.scope_resolved")
+        self.assertEqual(scope_event.get("sender_team_id"), "team-a")
+        self.assertEqual(scope_event.get("requested_to"), "a_peer")
 
     def test_c15_star_broadcast_defaults_to_team_scope_unless_workspace_scope_is_explicit(self) -> None:
         from team_agent.mcp_server.tools import TeamOrchestratorTools

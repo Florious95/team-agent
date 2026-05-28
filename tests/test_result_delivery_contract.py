@@ -97,14 +97,15 @@ class ResultDeliveryContractTests(unittest.TestCase):
             store.mark_result_watcher(watcher_id, "notify_failed", result_id=result_id, error="prior transient failure")
             delivered: list[str] = []
 
-            def fake_leader_delivery(_workspace, state, _leader_id, content, *_args, **_kwargs):
+            def fake_leader_delivery(_workspace, _leader_id, content, *_args, **_kwargs):
+                state = load_runtime_state(workspace)
                 self.assertEqual(state["team_owner"]["pane_id"], "%owner")
                 delivered.append(content)
                 return {"ok": True, "message_id": "msg_notice", "status": "submitted"}
 
             with (
                 patch.dict(os.environ, {}, clear=True),
-                patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_leader_delivery),
+                patch("team_agent.messaging.result_delivery.deliver_stored_message", side_effect=fake_leader_delivery),
             ):
                 tick = runtime._collect_results_and_notify_watchers(workspace, EventLog(workspace))
 

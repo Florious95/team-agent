@@ -57,11 +57,11 @@ class IdleFallbackStableWindowTests(unittest.TestCase):
             now = datetime.now(timezone.utc)
             delivered: list[dict] = []
 
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"leader_id": leader_id, "content": content})
                 return {"ok": True, "status": "submitted", "message_id": f"msg_{len(delivered)}"}
 
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 for offset in (0.0, 5.0, 10.0, 15.0, 20.0):
                     alerts = idle_alerts.detect_idle_fallbacks(
                         workspace, state, store, event_log, now=now + timedelta(seconds=offset)

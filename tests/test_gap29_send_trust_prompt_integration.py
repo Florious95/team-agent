@@ -164,7 +164,11 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                         state["submitted"] = True
                 return _ok_proc()
 
-            with patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), \
+            with patch("team_agent.messaging.tmux_io.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.messaging.leader_panes.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True), \
+                 patch("team_agent.messaging.delivery._wait_for_trust_prompt_dismissal", return_value=True), \
                  patch("team_agent.runtime.time.sleep", return_value=None):
                 result = runtime.send_message(workspace, "developer", "hello after trust", wait_visible=True)
 
@@ -226,6 +230,9 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 if args[:4] == ["tmux", "display-message", "-p", "-t"]:
                     return _ok_proc("\n")
                 if args[:3] == ["tmux", "capture-pane", "-p"]:
+                    lines = args[args.index("-S") + 1] if "-S" in args else ""
+                    if lines == "-40":
+                        return _ok_proc("› idle prompt\n")
                     if not pane["trust_answered"]:
                         actions.append("detect-codex-trust-prompt")
                         return _ok_proc(prompt_fixture)
@@ -268,8 +275,11 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 "pane_active": "1",
                 "window_active": "1",
             }
-            with patch("team_agent.runtime._tmux_pane_info", return_value=pane_info), \
+            with patch("team_agent._legacy_pane_discovery._tmux_pane_info", return_value=pane_info), \
+                 patch("team_agent.messaging.tmux_io.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.messaging.leader_panes.run_cmd", side_effect=fake_run_cmd), \
                  patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd), \
+                 patch("team_agent.messaging.delivery._wait_for_trust_prompt_dismissal", return_value=True), \
                  patch("team_agent.runtime.time.sleep", return_value=None):
                 result = runtime._send_to_leader_receiver(
                     workspace,

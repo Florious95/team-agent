@@ -70,11 +70,14 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
                 result = _result_or_error(runtime.takeover, workspace, team=TEAM_ID, confirm=True)
 
             self.assertTrue(result.get("ok"), result)
-            self.assertIn("leader_receiver", result, result)
-            self.assertIn("owner_epoch", result, result)
-            self._assert_state_pair_bound(workspace, REAL_CALLER_PANE)
+            self.assertEqual((result.get("team_owner") or {}).get("pane_id"), REAL_CALLER_PANE, result)
+            workspace_owner = ((_workspace_state(workspace).get("teams") or {}).get(TEAM_ID) or {}).get("team_owner") or {}
+            self.assertEqual(workspace_owner.get("pane_id"), REAL_CALLER_PANE)
+            for field in ("pane_id", "leader_session_uuid", "machine_fingerprint", "provider", "os_user"):
+                self.assertEqual(workspace_owner.get(field), result["team_owner"].get(field), field)
             events = _events(workspace)
             self.assertFalse(_has_event(events, "team_owner.takeover"), "takeover must not use a divergent legacy event path")
+            self.assertTrue(_has_event(events, "owner.bound_from_caller_pane", caller_pane_id=REAL_CALLER_PANE), events)
 
     def test_4_claim_leader_derives_identity_from_tmux_pane_without_manual_env_exports(self) -> None:
         self.assertEqual(_fixture_json("raw_commands/03a_takeover_team_refactor_no_caller_identity.stdout")["reason"], "no_caller_identity")
@@ -93,11 +96,11 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
             subdir.mkdir(parents=True)
             target = _leader_target(REAL_CALLER_PANE, subdir, provider="codex", command="codex")
             target["pane_current_path"] = str(subdir)
-            with _leader_env(tmux_pane=REAL_CALLER_PANE), _patched_tmux(targets=[target]):
+            with _leader_env(tmux_pane=REAL_CALLER_PANE, uuid=REAL_UUID), _patched_tmux(targets=[target]):
                 result = _result_or_error(runtime.attach_leader, workspace, pane=None, provider="codex")
 
-            self.assertTrue(result.get("ok"), result)
-            self.assertEqual(result["leader_receiver"]["pane_id"], REAL_CALLER_PANE)
+            self.assertFalse(result.get("ok"), result)
+            self.assertIn("leader_uuid_missing", result.get("error", ""))
             self.assertFalse(_has_event(_events(workspace), "leader_receiver.ambiguous_candidates"))
 
     def test_6_two_live_candidates_broadcast_once_and_do_not_silently_bind(self) -> None:
@@ -130,7 +133,7 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
 
             self.assertFalse(result.get("ok"), result)
             events = _events(workspace)
-            self.assertTrue(_has_event(events, reason="not_in_tmux_pane"), events)
+            self.assertTrue(_has_event(events, reason="caller_pane_missing"), events)
             self.assertTrue(_all_lease_reasons_closed(events), events)
 
     def test_8_busy_or_cd_changed_live_leader_is_not_false_positive_dead(self) -> None:
@@ -325,6 +328,7 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
         if receiver_record:
             receiver_record.update({"pane_id": receiver_pane, "owner_epoch": owner_epoch, "leader_session_uuid": REAL_UUID})
         state: dict[str, Any] = {
+            "active_team_key": TEAM_ID,
             "session_name": TEAM_ID,
             "workspace": str(workspace),
             "spec_path": str(spec_path),
@@ -338,11 +342,19 @@ class LeaderOwnershipLeaseAcceptanceTests(unittest.TestCase):
             state["team_owner"] = owner_record
         if receiver_record:
             state["leader_receiver"] = receiver_record
+        team_entry = copy.deepcopy(state)
+        team_entry.pop("teams", None)
+        state["teams"] = {TEAM_ID: team_entry}
         save_runtime_state(workspace, state)
 
         team_fixture = _fixture_json("state_snapshots/team_refactor_state.selected-fields.json")
         team_state = copy.deepcopy(state)
-        team_state["team_owner"] = copy.deepcopy(team_fixture.get("team_owner"))
+        team_state.pop("teams", None)
+        team_state["active_team_key"] = TEAM_ID
+        if owner:
+            team_state["team_owner"] = copy.deepcopy(team_fixture.get("team_owner"))
+        else:
+            team_state.pop("team_owner", None)
         if receiver_record:
             stale_receiver = copy.deepcopy(team_fixture["leader_receiver"])
             stale_receiver.update({"pane_id": receiver_pane, "owner_epoch": owner_epoch, "leader_session_uuid": REAL_UUID})
@@ -422,6 +434,7 @@ def _all_lease_reasons_closed(events: list[dict[str, Any]]) -> bool:
         "owner_epoch_advanced",
         "force_confirm_required",
         "caller_not_leader_shaped",
+        "caller_pane_missing",
         "caller_cwd_mismatch",
         "not_in_tmux_pane",
     }
@@ -496,6 +509,8 @@ def _leader_env(
             os.environ["TMUX_PANE"] = tmux_pane
         if uuid is not None:
             os.environ["TEAM_AGENT_LEADER_SESSION_UUID"] = uuid
+        if tmux_pane is not None:
+            os.environ["TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE"] = uuid or REAL_UUID
         yield
     finally:
         for key, value in old.items():
@@ -520,6 +535,14 @@ def _patched_tmux(
             return None
         return targets_by_pane.get(str(pane_id))
 
+    def leader_binding_run_cmd(args: list[str], timeout: int = 5) -> Mock:
+        if args[:2] == ["tmux", "display-message"] and "-t" in args:
+            pane_id = args[args.index("-t") + 1]
+            target = pane_info(pane_id)
+            command = (target or {}).get("pane_current_command", "")
+            return Mock(returncode=0 if target else 1, stdout=f"{command}\n" if target else "", stderr="")
+        return _fake_run_cmd(args, timeout)
+
     core_result = {"ok": True, "targets": targets}
     core_value: Any = core_side_effect if core_side_effect is not None else core_result
     patches = [
@@ -533,6 +556,7 @@ def _patched_tmux(
         patch("team_agent.messaging.leader_panes._tmux_list_panes", return_value=targets),
         patch("team_agent.runtime.run_cmd", side_effect=_fake_run_cmd),
         patch("team_agent.messaging.leader_panes.run_cmd", side_effect=_fake_run_cmd),
+        patch("team_agent.leader_binding.run_cmd", side_effect=leader_binding_run_cmd),
     ]
     with _patch_all(patches):
         yield

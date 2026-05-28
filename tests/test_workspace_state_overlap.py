@@ -78,9 +78,9 @@ class WorkspaceStateOverlapTests(unittest.TestCase):
                 "Team A state must remain readable without Team B agent data mixed in",
             )
             with patch("team_agent.runtime._deliver_pending_message", return_value={"ok": True, "status": "queued", "queued": True}):
-                ambiguous = runtime.send_message(workspace, "alpha_worker", "must require explicit team target")
-            self.assertFalse(ambiguous["ok"])
-            self.assertEqual(ambiguous.get("reason"), "team_target_ambiguous")
+                sent = runtime.send_message(workspace, "alpha_worker", "uses active team target")
+            self.assertTrue(sent["ok"], sent)
+            self.assertEqual(load_runtime_state(workspace).get("active_team_key"), "alpha")
 
     def test_send_with_explicit_team_preserves_sibling_team_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-send-sibling-") as tmp:

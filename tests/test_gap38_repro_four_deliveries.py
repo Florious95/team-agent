@@ -71,37 +71,37 @@ def _setup_workspace(tmp: str) -> tuple[Path, str]:
     workspace_abspath = str(workspace.resolve())
     user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
     owner_uuid = derive_leader_session_uuid("mfp-gap38", workspace_abspath, user, "current")
-    save_runtime_state(
-        workspace,
-        {
-            "spec_path": str(spec_path),
-            "team_dir": str(team_dir),
-            "workspace": workspace_abspath,
-            "session_name": "team-gap38",
-            "leader": spec["leader"],
-            "team_owner": {
-                "pane_id": "%leader",
-                "provider": "codex",
-                "machine_fingerprint": "mfp-gap38",
-                "leader_session_uuid": owner_uuid,
-            },
-            "leader_receiver": {
-                "mode": "direct_tmux",
-                "status": "attached",
-                "provider": "codex",
-                "pane_id": "%leader",
-                "session_name": "team-gap38",
-                "leader_session_uuid": owner_uuid,
-                "window_index": "0",
-                "window_name": "leader",
-                "pane_index": "0",
-                "pane_tty": "/dev/ttys001",
-                "pane_current_command": "codex",
-            },
-            "agents": {"claude-runtime-developer": {"status": "running", "provider": "fake", "window": "claude-runtime-developer"}},
-            "tasks": [{"id": "task-stage15", "assignee": "claude-runtime-developer", "status": "running"}],
+    state = {
+        "spec_path": str(spec_path),
+        "team_dir": str(team_dir),
+        "workspace": workspace_abspath,
+        "session_name": "team-gap38",
+        "active_team_key": "current",
+        "leader": spec["leader"],
+        "team_owner": {
+            "pane_id": "%leader",
+            "provider": "codex",
+            "machine_fingerprint": "mfp-gap38",
+            "leader_session_uuid": owner_uuid,
         },
-    )
+        "leader_receiver": {
+            "mode": "direct_tmux",
+            "status": "attached",
+            "provider": "codex",
+            "pane_id": "%leader",
+            "session_name": "team-gap38",
+            "leader_session_uuid": owner_uuid,
+            "window_index": "0",
+            "window_name": "leader",
+            "pane_index": "0",
+            "pane_tty": "/dev/ttys001",
+            "pane_current_command": "codex",
+        },
+        "agents": {"claude-runtime-developer": {"status": "running", "provider": "fake", "window": "claude-runtime-developer"}},
+        "tasks": [{"id": "task-stage15", "assignee": "claude-runtime-developer", "status": "running"}],
+    }
+    state["teams"] = {"current": copy.deepcopy({k: v for k, v in state.items() if k != "teams"})}
+    save_runtime_state(workspace, state)
     # Seed a worker→leader inbound message so _owner_team_id_for_report can resolve owner.
     return workspace, owner_uuid
 
@@ -135,9 +135,12 @@ def _patches_for_leader_pane(fake_inject):
         "pane_active": "1",
     }
     return [
-        patch("team_agent.runtime._tmux_pane_info", return_value=pane_info),
-        patch("team_agent.runtime.run_cmd", return_value=MagicMock(returncode=0, stdout="› idle", stderr="")),
-        patch("team_agent.runtime._tmux_inject_text", side_effect=fake_inject),
+        patch(
+            "team_agent.messaging.leader._validate_leader_receiver",
+            return_value={"ok": True, "pane": pane_info, "capture": "› idle", "warning": None},
+        ),
+        patch("team_agent.messaging.leader._tmux_inject_text", side_effect=fake_inject),
+        patch("team_agent.messaging.tmux_io.run_cmd", return_value=MagicMock(returncode=0, stdout="› idle", stderr="")),
         patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 0, "status": "started"}),
     ]
 

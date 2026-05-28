@@ -112,9 +112,12 @@ Work.
                     {
                         "HTTPS_PROXY": "http://user:secret@proxy.local:8443",
                         "https_proxy": "http://user:secret@proxy.local:8443",
+                        "TMUX_PANE": "%leader",
+                        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick",
                     },
                 ),
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch("team_agent.profiles.urllib.request.urlopen", side_effect=Exception("Connection reset by peer")),
             ):
                 cwd = os.getcwd()
@@ -178,8 +181,9 @@ Work.
                 encoding="utf-8",
             )
             with (
-                patch.dict(os.environ, {"HTTPS_PROXY": "http://user:ambient-secret@proxy.local:8443"}),
+                patch.dict(os.environ, {"HTTPS_PROXY": "http://user:ambient-secret@proxy.local:8443", "TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}),
                 patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch("team_agent.profiles.urllib.request.urlopen", side_effect=Exception("Connection reset by peer")),
             ):
                 cwd = os.getcwd()

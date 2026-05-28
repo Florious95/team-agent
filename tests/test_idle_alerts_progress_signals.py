@@ -56,7 +56,7 @@ class IdleAlertsProgressSignalsTests(unittest.TestCase):
             # Leader-side send delivered to a worker 5 seconds ago — clear "team is doing work" signal.
             event_log.write("send.deliver_attempt", team=_TEAM, target="fake_impl", message_id="msg_recent")
             delivered: list[dict] = []
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=lambda *_a, **_k: delivered.append("x") or {"ok": True, "status": "submitted", "message_id": "msg_x"}):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=lambda *_a, **_k: delivered.append("x") or {"ok": True, "status": "submitted", "message_id": "msg_x"}):
                 alerts = idle_alerts.detect_idle_fallbacks(workspace, state, store, event_log, now=now)
             self.assertEqual(alerts, [], "recent send.deliver_attempt must suppress idle_fallback fire")
             self.assertEqual(delivered, [])
@@ -89,10 +89,10 @@ class IdleAlertsProgressSignalsTests(unittest.TestCase):
             # No fresh events written. The detector must fire normally.
             now = datetime.now(timezone.utc)
             delivered: list[dict] = []
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"to": leader_id})
                 return {"ok": True, "status": "submitted", "message_id": "msg_alert"}
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 alerts = idle_alerts.detect_idle_fallbacks(workspace, state, store, event_log, now=now)
             self.assertEqual([a["alert_type"] for a in alerts], ["idle_fallback"])
             self.assertEqual(len(delivered), 1)
@@ -106,10 +106,10 @@ class IdleAlertsProgressSignalsTests(unittest.TestCase):
             base_now = datetime.now(timezone.utc)
             event_log.write("send.deliver_attempt", team=_TEAM, target="fake_impl", message_id="msg_anchor")
             delivered: list[dict] = []
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"to": leader_id})
                 return {"ok": True, "status": "submitted", "message_id": f"msg_{len(delivered)}"}
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 for offset in (0.0, 5.0, 15.0, 30.0, 45.0):
                     alerts = idle_alerts.detect_idle_fallbacks(
                         workspace, state, store, event_log,
@@ -172,11 +172,11 @@ class IdleAlertsProgressSignalsTests(unittest.TestCase):
             event_log.write("mcp.report_result", team="alpha", agent_id="fake_impl", result_id="res_alpha")
 
             delivered: list[dict] = []
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"to": leader_id})
                 return {"ok": True, "status": "submitted", "message_id": "msg_beta_alert"}
 
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 alerts = idle_alerts.detect_idle_fallbacks(
                     workspace, beta_state, store, event_log,
                     now=datetime.now(timezone.utc),

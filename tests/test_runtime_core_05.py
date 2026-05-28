@@ -125,11 +125,12 @@ class RuntimeTests05(unittest.TestCase):
             self.skipTest("tmux not installed")
         with tempfile.TemporaryDirectory(prefix="team-agent-quick-start-") as tmp:
             workspace = Path(tmp)
+            team_name = "quick-test-" + workspace.name[-6:]
             roles = workspace / "roles"
             roles.mkdir()
             (roles / "TEAM.md").write_text(
-                """---
-name: quick-test
+                f"""---
+name: {team_name}
 objective: Team config only.
 display_backend: none
 fast: false
@@ -158,16 +159,20 @@ Handle fake tasks.
 """,
                 encoding="utf-8",
             )
-            with patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}):
+            with (
+                patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}),
+                patch.dict(os.environ, {"TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
+            ):
                 cwd = os.getcwd()
                 os.chdir(workspace)
                 try:
-                    result = runtime.quick_start(roles, name="quick-test")
+                    result = runtime.quick_start(roles, name=team_name)
                 finally:
                     os.chdir(cwd)
             try:
                 self.assertTrue(result["ok"])
-                self.assertIn("team quick-test ready", result["summary"])
+                self.assertIn(f"team {team_name} ready", result["summary"])
                 self.assertIn("Do not wait, sleep, or poll status", result["ready_signal"])
                 self.assertIn("Dispatch work with team-agent send", result["next_actions"][0])
                 self.assertTrue((workspace / ".team" / "current" / "TEAM.md").exists())
@@ -189,11 +194,12 @@ Handle fake tasks.
             self.skipTest("tmux not installed")
         with tempfile.TemporaryDirectory(prefix="team-agent-skill-example-") as tmp:
             workspace = Path(tmp)
+            team_name = "skill-example-" + workspace.name[-6:]
             team = workspace / ".team" / "current"
             (team / "agents").mkdir(parents=True)
             (team / "TEAM.md").write_text(
-                """---
-name: skill-example
+                f"""---
+name: {team_name}
 objective: Minimal example team.
 dangerous_auto_approve: false
 display_backend: none
@@ -220,7 +226,11 @@ Coder role.
 """,
                 encoding="utf-8",
             )
-            with patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}):
+            with (
+                patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}),
+                patch.dict(os.environ, {"TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
+            ):
                 cwd = os.getcwd()
                 os.chdir(workspace)
                 try:
@@ -265,7 +275,11 @@ Coder role.
             cwd = os.getcwd()
             os.chdir(workspace)
             try:
-                result = runtime.quick_start(team)
+                with (
+                    patch.dict(os.environ, {"TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}, clear=False),
+                    patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
+                ):
+                    result = runtime.quick_start(team)
             finally:
                 os.chdir(cwd)
 
@@ -280,11 +294,12 @@ Coder role.
             self.skipTest("tmux not installed")
         with tempfile.TemporaryDirectory(prefix="team-agent-quick-team-id-") as tmp:
             workspace = Path(tmp)
+            team_name = "alpha-team-" + workspace.name[-6:]
             roles = workspace / "roles"
             roles.mkdir()
             (roles / "TEAM.md").write_text(
-                """---
-name: alpha-team
+                f"""---
+name: {team_name}
 objective: Team config only.
 display_backend: none
 fast: false
@@ -310,7 +325,11 @@ Handle fake tasks.
 """,
                 encoding="utf-8",
             )
-            with patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}):
+            with (
+                patch("team_agent.runtime.start_coordinator", return_value={"ok": True, "pid": 123, "status": "started"}),
+                patch.dict(os.environ, {"TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
+            ):
                 cwd = os.getcwd()
                 os.chdir(workspace)
                 try:
@@ -332,12 +351,13 @@ Handle fake tasks.
             self.skipTest("tmux not installed")
         with tempfile.TemporaryDirectory(prefix="team-agent-start-team-dir-") as tmp:
             workspace = Path(tmp)
+            team_name = "alpha-team-" + workspace.name[-6:]
             team = workspace / ".team" / "alpha"
             (team / "agents").mkdir(parents=True)
             (team / "profiles").mkdir(parents=True)
             (team / "TEAM.md").write_text(
-                """---
-name: alpha-team
+                f"""---
+name: {team_name}
 objective: Team config only.
 display_backend: none
 fast: false

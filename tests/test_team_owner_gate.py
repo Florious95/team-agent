@@ -125,12 +125,16 @@ class TeamOwnerGateTests(unittest.TestCase):
                 },
             )
             claimant_env = {
+                "TMUX_PANE": "%claimant",
                 "TEAM_AGENT_LEADER_PANE_ID": "%claimant",
                 "TEAM_AGENT_LEADER_PROVIDER": "codex",
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "machine-c",
                 "TEAM_AGENT_ID": "leader",
             }
-            with patch.dict(os.environ, claimant_env, clear=False):
+            with (
+                patch.dict(os.environ, claimant_env, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
+            ):
                 result = runtime.takeover(workspace, team="beta", confirm=True)
             self.assertTrue(result.get("ok"), result)
             self.assertEqual(result.get("team"), "beta")
@@ -225,7 +229,7 @@ class TeamOwnerGateTests(unittest.TestCase):
                 "stop-agent --team beta must not touch alpha's worker state",
             )
 
-    def test_lifecycle_mutator_without_team_in_multi_team_workspace_refuses_ambiguous(self) -> None:
+    def test_lifecycle_mutator_without_team_uses_active_team_in_multi_team_workspace(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-lifecycle-ambig-") as tmp:
             workspace = Path(tmp)
             spec = _fake_spec(workspace)
@@ -263,15 +267,14 @@ class TeamOwnerGateTests(unittest.TestCase):
                 },
             )
             result = runtime.stop_agent(workspace, "fake_impl")
-            self.assertFalse(result.get("ok"), result)
-            self.assertEqual(result.get("reason"), "team_target_ambiguous")
-            self.assertIn("alpha", result.get("candidates") or [])
-            self.assertIn("beta", result.get("candidates") or [])
+            self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result.get("target"), "team-alpha:fake_impl")
 
     def test_takeover_acquires_same_lock_namespace_as_send_mutator(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-takeover-lock-") as tmp:
             workspace = _owner_workspace(Path(tmp))
             owner_env = {
+                "TMUX_PANE": OWNER["pane_id"],
                 "TEAM_AGENT_LEADER_PANE_ID": OWNER["pane_id"],
                 "TEAM_AGENT_LEADER_PROVIDER": OWNER["provider"],
                 "TEAM_AGENT_MACHINE_FINGERPRINT": OWNER["machine_fingerprint"],
@@ -292,6 +295,7 @@ class TeamOwnerGateTests(unittest.TestCase):
                 patch.dict(os.environ, owner_env, clear=False),
                 patch("team_agent.runtime._runtime_lock", side_effect=tracking_runtime_lock),
                 patch("team_agent.runtime._deliver_pending_message", return_value={"ok": True, "status": "queued", "queued": True}),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
             ):
                 send_result = TeamOrchestratorTools(workspace).send_message("fake_impl", "first", sender="leader")
                 takeover_result = runtime.takeover(workspace, team=None, confirm=True)

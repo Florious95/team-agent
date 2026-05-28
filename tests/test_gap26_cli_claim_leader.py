@@ -7,7 +7,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from team_agent.cli.parser import main
 from team_agent.events import EventLog
@@ -38,9 +38,12 @@ class Gap26CliClaimLeaderTests(unittest.TestCase):
             env_first = {
                 "TEAM_AGENT_LEADER_PANE_ID": "%D",
                 "TEAM_AGENT_LEADER_SESSION_UUID": UUID_A,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": UUID_A,
+                "TMUX_PANE": "%D",
             }
             with (
                 patch.dict(os.environ, env_first, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch(
                     "team_agent.runtime.core_list_targets",
                     return_value={"ok": True, "targets": [_target("%D"), _target("%E")]},
@@ -62,9 +65,12 @@ class Gap26CliClaimLeaderTests(unittest.TestCase):
             env_second = {
                 "TEAM_AGENT_LEADER_PANE_ID": "%E",
                 "TEAM_AGENT_LEADER_SESSION_UUID": UUID_A,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": UUID_A,
+                "TMUX_PANE": "%E",
             }
             with (
                 patch.dict(os.environ, env_second, clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch(
                     "team_agent.runtime.core_list_targets",
                     return_value={"ok": True, "targets": [_target("%D"), _target("%E")]},
@@ -82,7 +88,8 @@ class Gap26CliClaimLeaderTests(unittest.TestCase):
 
 
 def _state() -> dict:
-    return {
+    state = {
+        "active_team_key": "team-a",
         "session_name": "team-a",
         "team_owner": {
             "pane_id": "%old",
@@ -102,6 +109,8 @@ def _state() -> dict:
         "agents": {},
         "tasks": [],
     }
+    state["teams"] = {"team-a": dict(state)}
+    return state
 
 
 def _target(pane_id: str) -> dict:

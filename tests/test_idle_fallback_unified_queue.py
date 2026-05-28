@@ -40,11 +40,11 @@ class IdleFallbackUnifiedQueueTests(unittest.TestCase):
             )
             deliveries: list[dict] = []
 
-            def fake_leader_receiver(_workspace, _state, leader_id, content, *_args, **_kwargs):
+            def fake_leader_receiver(_workspace, leader_id, content, *_args, **_kwargs):
                 deliveries.append({"leader_id": leader_id, "content": content})
                 return {"ok": True, "status": "submitted", "message_id": "msg_idle_reminder"}
 
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_leader_receiver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_leader_receiver):
                 alerts = _detect_idle_fallbacks(workspace, state, store, event_log)
 
             self.assertEqual([alert["alert_type"] for alert in alerts], ["idle_fallback"])
@@ -70,9 +70,8 @@ class IdleFallbackUnifiedQueueTests(unittest.TestCase):
             self.assertEqual([alert["agent_id"] for alert in alerts], ["worker_a"])
             self.assertEqual(alerts[0]["alert_type"], "cross_worker_deadlock")
             listed = runtime.stuck_list(workspace)
-            self.assertIn("team-idle", listed["suppressed_idle_alerts"])
-            self.assertIn("worker_a", listed["suppressed_idle_alerts"]["team-idle"])
-            self.assertIn("cross_worker_deadlock", listed["suppressed_idle_alerts"]["team-idle"]["worker_a"])
+            self.assertIn("worker_a", listed["suppressed_idle_alerts"])
+            self.assertIn("cross_worker_deadlock", listed["suppressed_idle_alerts"]["worker_a"])
 
             suppressed = runtime.stuck_cancel(workspace, "worker_a", alert_type="cross_worker_deadlock")
             self.assertTrue(suppressed["ok"], suppressed)

@@ -36,6 +36,8 @@ class RuntimeTests06(unittest.TestCase):
                 with (
                     patch("team_agent.runtime.shutil_which", return_value="/usr/bin/tmux"),
                     patch("team_agent.runtime._model_checks_for_agents", return_value=[]),
+                    patch.dict(os.environ, {"TMUX_PANE": "%leader", "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": "uuid-quick"}, clear=False),
+                    patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                     self.assertRaises(runtime.RuntimeError) as ctx,
                 ):
                     runtime.quick_start(team)
@@ -64,7 +66,7 @@ class RuntimeTests06(unittest.TestCase):
 
     def test_runtime_state_missing_file_default_is_literal(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-missing-state-") as tmp:
-            self.assertEqual(load_runtime_state(Path(tmp)), {"agents": {}, "tasks": [], "session_name": None})
+            self.assertEqual(load_runtime_state(Path(tmp)), {"agents": {}, "tasks": [], "session_name": None, "active_team_key": None})
 
     def test_snapshot_state_session_fields_are_backward_compatible(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-old-snapshot-") as tmp:

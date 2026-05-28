@@ -94,14 +94,23 @@ class MultiPaneTmuxFixture:
         self.panes: dict[str, str] = {}
 
     def __enter__(self) -> "MultiPaneTmuxFixture":
-        self._run(["tmux", "new-session", "-d", "-s", self.session, "-n", "leader", str(self.claude_bin)])
-        self.panes["claude_active"] = self._pane_id(f"{self.session}:0.0")
-        self._run(["tmux", "split-window", "-d", "-t", f"{self.session}:0", str(self.claude_bin)])
-        self.panes["claude_residual"] = self._pane_id(f"{self.session}:0.1")
-        self._run(["tmux", "split-window", "-d", "-t", f"{self.session}:0", str(self.broot_bin)])
-        self.panes["broot"] = self._pane_id(f"{self.session}:0.2")
+        proc = self._run([
+            "tmux", "new-session", "-d", "-s", self.session, "-n", "leader",
+            "-P", "-F", "#{pane_id}", str(self.claude_bin),
+        ])
+        self.panes["claude_active"] = proc.stdout.strip()
+        proc = self._run([
+            "tmux", "split-window", "-d", "-P", "-F", "#{pane_id}",
+            "-t", self.panes["claude_active"], str(self.claude_bin),
+        ])
+        self.panes["claude_residual"] = proc.stdout.strip()
+        proc = self._run([
+            "tmux", "split-window", "-d", "-P", "-F", "#{pane_id}",
+            "-t", self.panes["claude_active"], str(self.broot_bin),
+        ])
+        self.panes["broot"] = proc.stdout.strip()
         self._run(["tmux", "select-pane", "-t", self.panes["claude_active"]])
-        time.sleep(0.1)
+        time.sleep(0.7)
         return self
 
     def __exit__(self, *_exc: object) -> None:
@@ -152,4 +161,3 @@ def _team(session_name: str, team_dir: str, agents: dict[str, Any], *, status: s
         "tasks": [],
         "leader": {"id": "leader"},
     }
-

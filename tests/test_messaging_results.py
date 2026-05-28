@@ -225,7 +225,7 @@ class MessagingResultsTests(unittest.TestCase):
             self.assertEqual(envelope["changes"], [])
             self.assertEqual(envelope["tests"], [{"command": "unit", "status": "passed"}])
 
-    def test_mcp_report_result_without_env_infers_task_and_agent(self) -> None:
+    def test_mcp_report_result_without_env_uses_manual_unknown_without_candidate_scan(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-mcp-missing-id-report-") as tmp:
             workspace = Path(tmp)
             spec = _fake_spec(workspace)
@@ -256,12 +256,12 @@ class MessagingResultsTests(unittest.TestCase):
                 if old_agent is not None:
                     os.environ["TEAM_AGENT_ID"] = old_agent
             self.assertTrue(result["ok"])
-            self.assertEqual(result["task_id"], "task_impl")
-            self.assertEqual(result["agent_id"], "fake_impl")
+            self.assertEqual(result["task_id"], "manual")
+            self.assertEqual(result["agent_id"], "unknown")
             self.assertTrue(result["leader_notified"])
             envelope = json.loads(MessageStore(workspace).results()[0]["envelope"])
-            self.assertEqual(envelope["task_id"], "task_impl")
-            self.assertEqual(envelope["agent_id"], "fake_impl")
+            self.assertEqual(envelope["task_id"], "manual")
+            self.assertEqual(envelope["agent_id"], "unknown")
 
     def test_mcp_report_result_normalizes_common_loose_shapes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-mcp-lenient-report-") as tmp:

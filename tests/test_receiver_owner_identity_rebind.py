@@ -67,8 +67,8 @@ class ReceiverOwnerIdentityRebindTests(unittest.TestCase):
             }
             delivered_panes: list[str] = []
 
-            def fake_leader_delivery(_workspace, state, *_args, **_kwargs):
-                delivered_panes.append(state["leader_receiver"]["pane_id"])
+            def fake_leader_delivery(_workspace, _target, _content, *_args, **_kwargs):
+                delivered_panes.append(load_runtime_state(workspace)["leader_receiver"]["pane_id"])
                 return {"ok": True, "message_id": "msg_notice", "status": "submitted"}
 
             with (
@@ -91,7 +91,7 @@ class ReceiverOwnerIdentityRebindTests(unittest.TestCase):
                         "TEAM_AGENT_MACHINE_FINGERPRINT": OWNER["machine_fingerprint"],
                     },
                 ),
-                patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_leader_delivery),
+                patch("team_agent.messaging.scheduler.deliver_stored_message", side_effect=fake_leader_delivery),
             ):
                 runtime._fire_due_scheduled_events(workspace, MessageStore(workspace), EventLog(workspace))
 

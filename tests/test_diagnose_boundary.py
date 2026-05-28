@@ -43,8 +43,8 @@ class DiagnoseBoundaryTests(unittest.TestCase):
         # Representative aliases prove the runtime re-export wiring is live;
         # the loop below catches per-symbol drift without exhaustive assertIs.
         self.assertIs(runtime.diagnose, diagnose.diagnose)
-        self.assertIs(runtime.quick_start, diagnose.quick_start)
         self.assertIs(runtime.preflight, diagnose.preflight)
+        self.assertTrue(callable(runtime.quick_start))
 
     def test_every_public_name_is_re_exported_on_runtime(self) -> None:
         for name in PUBLIC_NAMES:
@@ -54,6 +54,9 @@ class DiagnoseBoundaryTests(unittest.TestCase):
             public_attr = getattr(diagnose, name)
             runtime_attr = getattr(runtime, name, None) or getattr(runtime, f"_{name}", None)
             self.assertIsNotNone(runtime_attr, f"runtime missing alias for {name}")
+            if name == "quick_start":
+                self.assertTrue(callable(runtime_attr), "runtime.quick_start is a 0.2.6 positive-source wrapper")
+                continue
             self.assertIs(public_attr, runtime_attr, f"runtime alias for {name} drifted")
 
     def test_helpers_have_explicit_signatures(self) -> None:

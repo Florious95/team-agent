@@ -241,7 +241,7 @@ class MessagingMcpTests(unittest.TestCase):
                 },
             )
 
-    def test_mcp_send_message_without_env_infers_worker_before_leader_send(self) -> None:
+    def test_mcp_send_message_without_env_uses_unknown_sender_without_candidate_scan(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-mcp-missing-id-send-") as tmp:
             workspace = Path(tmp)
             spec = _fake_spec(workspace)
@@ -271,7 +271,7 @@ class MessagingMcpTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             args, kwargs = send.call_args
             self.assertEqual(args[:3], (workspace.resolve(), "leader", "hello"))
-            self.assertEqual(kwargs["sender"], "fake_impl")
+            self.assertEqual(kwargs["sender"], "unknown")
             self.assertFalse(kwargs["requires_ack"])
 
 

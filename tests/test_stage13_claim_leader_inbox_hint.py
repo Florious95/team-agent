@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from team_agent import runtime
 from team_agent.cli import _fake_spec as cli_fake_spec
@@ -98,6 +98,7 @@ def _fake_target(pane_id: str, owner_uuid: str) -> dict[str, Any]:
 
 def _env_patch_for_pane(pane: str, owner_uuid: str) -> dict[str, str]:
     return {
+        "TMUX_PANE": pane,
         "TEAM_AGENT_LEADER_PANE_ID": pane,
         "TEAM_AGENT_LEADER_PROVIDER": "codex",
         "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-stage13",
@@ -117,6 +118,7 @@ class Stage13InboxHintTests(unittest.TestCase):
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, _env_patch_for_pane(candidate_a, owner_uuid), clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(runtime, "core_list_targets", return_value=targets),
             ):
                 result = runtime.claim_leader(workspace, confirm=True)
@@ -155,6 +157,7 @@ class Stage13InboxHintTests(unittest.TestCase):
             }
             with (
                 patch.dict(os.environ, _env_patch_for_pane(candidate_a, owner_uuid), clear=False),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(runtime, "core_list_targets", return_value=targets),
                 patch.object(leader_module, "_latest_ambiguous_incident", return_value=incident_without_ts),
                 patch.object(leader_module, "_incident_already_claimed", return_value=False),

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import ast
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 try:
     from .contracts.positive_source_rebind_fixtures import (
@@ -36,14 +37,21 @@ class PositiveSourceBindAcceptanceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_c1_takeover_claim_leader_and_quick_start_share_bind_owner_from_caller_pane(self) -> None:
-        sources = [
-            Path("src/team_agent/runtime.py"),
-            Path("src/team_agent/cli/commands.py"),
-        ]
-        text = "\n".join((Path.cwd() / path).read_text(encoding="utf-8") for path in sources)
-        self.assertTrue("bind_owner_from_caller_pane" in text, "owner-binding entries must call shared bind_owner_from_caller_pane")
-        for entry in ("takeover", "claim_leader", "quick_start"):
-            self.assertRegex(text, rf"def .*{entry}.*[\s\S]*bind_owner_from_caller_pane")
+        runtime_tree = ast.parse((_repo_root() / "src/team_agent/runtime.py").read_text(encoding="utf-8"))
+        commands_tree = ast.parse((_repo_root() / "src/team_agent/cli/commands.py").read_text(encoding="utf-8"))
+
+        runtime_functions = _top_level_functions(runtime_tree)
+        commands_functions = _top_level_functions(commands_tree)
+        for entry in ("takeover", "claim_leader"):
+            self.assertTrue(
+                _function_calls_name(runtime_functions[entry], "bind_owner_from_caller_pane"),
+                f"runtime.{entry} must call bind_owner_from_caller_pane",
+            )
+        self.assertTrue(
+            _function_calls_name(runtime_functions["quick_start"], "bind_owner_from_caller_pane"),
+            "runtime.quick_start must carry the shared bind_owner_from_caller_pane gate",
+        )
+        self.assertTrue(_function_calls_name(commands_functions["cmd_quick_start"], "quick_start"))
 
     def test_c2_bind_owner_uses_only_tmux_pane_env_as_source(self) -> None:
         bind_owner = _bind_owner_from_caller_pane(self)
@@ -57,10 +65,14 @@ class PositiveSourceBindAcceptanceTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="claude\n", stderr="")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+        run_cmd = Mock(side_effect=fake_run_cmd)
+        patch_target = f"{bind_owner.__module__}.run_cmd"
+        self.assertIs(bind_owner.__globals__["run_cmd"], __import__(bind_owner.__module__, fromlist=["run_cmd"]).run_cmd)
         with patch.dict(os.environ, {"TMUX_PANE": "%132"}, clear=False), \
-             patch("team_agent.leader_binding.run_cmd", side_effect=fake_run_cmd, create=True):
+             patch(patch_target, run_cmd):
             bind_owner(self.workspace, "current", override_uuid="uuid-caller")
 
+        self.assertGreater(run_cmd.call_count, 0, "contract must patch the run_cmd symbol bind_owner actually calls")
         flat = [part for call in calls for part in call]
         self.assertLessEqual(len(calls), 2)
         self.assertNotIn("list-panes", flat)
@@ -136,10 +148,14 @@ class PositiveSourceBindAcceptanceTests(unittest.TestCase):
                 self.assertEqual(args[args.index("-t") + 1], "%caller")
             return SimpleNamespace(returncode=0, stdout="codex\n", stderr="")
 
+        run_cmd = Mock(side_effect=fake_run_cmd)
+        patch_target = f"{bind_owner.__module__}.run_cmd"
+        self.assertIs(bind_owner.__globals__["run_cmd"], __import__(bind_owner.__module__, fromlist=["run_cmd"]).run_cmd)
         with patch.dict(os.environ, {"TMUX_PANE": "%caller"}, clear=False), \
-             patch("team_agent.leader_binding.run_cmd", side_effect=fake_run_cmd, create=True):
+             patch(patch_target, run_cmd):
             bind_owner(self.workspace, "current", override_uuid="uuid-caller")
 
+        self.assertGreater(run_cmd.call_count, 0, "contract must patch the run_cmd symbol bind_owner actually calls")
         self.assertLessEqual(len(calls), 2)
 
 
@@ -149,6 +165,30 @@ def _bind_owner_from_caller_pane(testcase: unittest.TestCase):
     except Exception as exc:  # noqa: BLE001 - missing API is the RED contract.
         testcase.fail(f"missing public bind_owner_from_caller_pane API: {exc}")
     return bind_owner_from_caller_pane
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _top_level_functions(tree: ast.AST) -> dict[str, ast.FunctionDef]:
+    return {
+        node.name: node
+        for node in getattr(tree, "body", [])
+        if isinstance(node, ast.FunctionDef)
+    }
+
+
+def _function_calls_name(function: ast.FunctionDef, name: str) -> bool:
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if isinstance(callee, ast.Name) and callee.id == name:
+            return True
+        if isinstance(callee, ast.Attribute) and callee.attr == name:
+            return True
+    return False
 
 
 if __name__ == "__main__":

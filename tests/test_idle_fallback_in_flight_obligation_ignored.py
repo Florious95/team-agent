@@ -58,11 +58,11 @@ class IdleFallbackInFlightObligationTests(unittest.TestCase):
             store.create_message("task_impl", "leader", "fake_impl", "fresh ping", owner_team_id=_TEAM)
             delivered: list[dict] = []
 
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"leader_id": leader_id, "content": content})
                 return {"ok": True, "status": "submitted", "message_id": "msg_x"}
 
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 alerts = idle_alerts.detect_idle_fallbacks(
                     workspace, state, store, event_log,
                     now=datetime.now(timezone.utc),
@@ -79,11 +79,11 @@ class IdleFallbackInFlightObligationTests(unittest.TestCase):
             future_now = datetime.now(timezone.utc) + timedelta(seconds=idle_alerts.OBLIGATION_PENDING_MIN_AGE_SECONDS + 5)
             delivered: list[dict] = []
 
-            def fake_deliver(_workspace, _state, leader_id, content, *_a, **_kw):
+            def fake_deliver(_workspace, leader_id, content, *_a, **_kw):
                 delivered.append({"leader_id": leader_id, "content": content})
                 return {"ok": True, "status": "submitted", "message_id": "msg_y"}
 
-            with patch("team_agent.runtime._send_to_leader_receiver", side_effect=fake_deliver):
+            with patch("team_agent.messaging.idle_alerts.deliver_stored_message", side_effect=fake_deliver):
                 alerts = idle_alerts.detect_idle_fallbacks(
                     workspace, state, store, event_log, now=future_now,
                 )

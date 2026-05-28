@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from team_agent import runtime
 from team_agent.cli import _fake_spec as cli_fake_spec
@@ -150,11 +150,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
                 patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
             ):
@@ -183,11 +186,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(result_delivery, "deliver_stored_message", return_value={"ok": True, "status": "submitted", "message_id": "msg_fresh"}),
                 patch.object(result_delivery, "send_message", return_value={"ok": True, "status": "submitted", "message_id": "msg_fresh"}),
             ):
@@ -212,11 +218,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
             ):
                 result = runtime.claim_leader(workspace, confirm=True)
 
@@ -243,11 +252,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(result_delivery, "deliver_stored_message", side_effect=failing_deliver),
                 patch.object(result_delivery, "send_message", side_effect=failing_deliver),
             ):
@@ -294,11 +306,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
                 patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
             ):
@@ -350,11 +365,14 @@ class ClaimLeaderRequeueTests(unittest.TestCase):
                 "TEAM_AGENT_MACHINE_FINGERPRINT": "mfp-claim",
                 "TEAM_AGENT_LEADER_SESSION_UUID": owner_uuid,
                 "TEAM_AGENT_ID": "leader",
+                "TMUX_PANE": candidate_a,
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE": owner_uuid,
             }
             targets = {"ok": True, "targets": [_fake_target(candidate_a, owner_uuid), _fake_target(candidate_b, owner_uuid)]}
             with (
                 patch.dict(os.environ, env_patch, clear=False),
                 patch.object(runtime, "core_list_targets", return_value=targets),
+                patch("team_agent.leader_binding.run_cmd", return_value=Mock(returncode=0, stdout="codex\n", stderr="")),
                 patch.object(result_delivery, "deliver_stored_message", side_effect=fake_redeliver),
                 patch.object(result_delivery, "send_message", side_effect=fake_redeliver),
             ):
