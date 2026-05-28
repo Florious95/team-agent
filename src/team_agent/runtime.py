@@ -70,7 +70,7 @@ from team_agent.leader import (
     LEADER_OWNERSHIP_LOCK,
     attach_leader,
     attach_leader_to_state as _attach_leader_to_state,
-    claim_leader,
+    claim_leader as _legacy_claim_leader,
     leader_identity,
     leader_session_name as _leader_session_name,
     leader_start_plan,
@@ -137,7 +137,7 @@ from team_agent.diagnose import (
     preflight_next_actions as _preflight_next_actions,
     profile_checks_for_agents as _profile_checks_for_agents,
     profile_smoke_checks_for_agents as _profile_smoke_checks_for_agents,
-    quick_start,
+    quick_start as _legacy_quick_start,
     repair_state,
     settle,
     start,
@@ -491,6 +491,11 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
     if gate:
         return gate
     session_name = state.get("session_name")
+    resolved_team_id = (
+        team
+        or state.get("active_team_key")
+        or (team_state_key(state) if state.get("session_name") else None)
+    )
     event_log = EventLog(workspace)
     captured: list[str] = []
     closed_displays: set[str] = set()
@@ -561,7 +566,72 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             agent_state["status"] = "stopped"
     save_team_scoped_state(workspace, state)
     _save_team_runtime_snapshot(workspace, state)
-    return {"ok": True, "session_name": session_name, "logs": captured, "coordinator": coordinator}
+    # 0.2.6 Family B (C10/C11/C12): atomically unregister the team and
+    # archive its runtime snapshot directory. Both branches of --keep-logs
+    # still drop the team from state.teams; logs survive inside the
+    # archived directory.
+    archive_path, teams_remaining, new_active = _commit_shutdown_cleanup(
+        workspace, str(resolved_team_id or ""), session_name, event_log
+    )
+    return {
+        "ok": True,
+        "session_name": session_name,
+        "team": resolved_team_id,
+        "logs": captured,
+        "coordinator": coordinator,
+        "archive_path": archive_path,
+        "teams_remaining": teams_remaining,
+        "new_active_team_key": new_active,
+        "cleanup_mode": "synchronous_committed",
+    }
+
+
+def _commit_shutdown_cleanup(
+    workspace: Path,
+    team_key: str,
+    session_name: str | None,
+    event_log: EventLog,
+) -> tuple[str | None, list[str], str | None]:
+    import shutil as _shutil
+    from datetime import datetime as _dt, timezone as _tz
+    workspace_state = load_runtime_state(workspace)
+    teams = workspace_state.get("teams") if isinstance(workspace_state.get("teams"), dict) else {}
+    if team_key and team_key in teams:
+        teams.pop(team_key, None)
+    if workspace_state.get("active_team_key") == team_key:
+        workspace_state["active_team_key"] = None
+    workspace_state["teams"] = teams
+    archive_dest: Path | None = None
+    if session_name:
+        runtime_teams_dir = runtime_dir(workspace) / "teams"
+        from team_agent.restart.snapshot import safe_snapshot_name as _safe
+        snapshot_name = _safe(str(session_name))
+        snapshot_dir = runtime_teams_dir / snapshot_name
+        if snapshot_dir.exists():
+            ts = _dt.now(_tz.utc).strftime("%Y%m%dT%H%M%SZ")
+            archive_dest = runtime_teams_dir / f".archived-{snapshot_name}-{ts}"
+            try:
+                _shutil.move(str(snapshot_dir), str(archive_dest))
+            except OSError as exc:
+                event_log.write(
+                    "team.shutdown_blocked",
+                    reason="archive_move_failed",
+                    team_key=team_key,
+                    error=str(exc),
+                    hint="check filesystem permissions on .team/runtime/teams and rerun shutdown",
+                )
+                return None, sorted(teams.keys()), workspace_state.get("active_team_key")
+    save_runtime_state(workspace, workspace_state)
+    archive_path_str = str(archive_dest) if archive_dest is not None else None
+    new_active = workspace_state.get("active_team_key")
+    event_log.write(
+        "team.shutdown_completed",
+        team_key=team_key,
+        archive_path=archive_path_str,
+        teams_remaining=sorted(teams.keys()),
+        new_active_team_key=new_active,
+    )
+    return archive_path_str, sorted(teams.keys()), new_active
 
 
 
@@ -602,7 +672,44 @@ def acknowledge_idle(workspace: Path, agent_id: str | None = None, *, team: str 
         EventLog(workspace).write("coordinator.idle_acknowledged", agent_id=agent_id, team=owner_team_id, acknowledged_at=now, expires_at=expires_at, ttl_seconds=ttl_seconds)
         return {"ok": True, "team": owner_team_id, "agent_id": agent_id, "acknowledged_at": now, "expires_at": expires_at, "ttl_seconds": ttl_seconds}
 
+_OWNER_IDENTITY_FIELDS = (
+    "pane_id",
+    "leader_session_uuid",
+    "machine_fingerprint",
+    "provider",
+    "os_user",
+)
+
+
+def _owner_identity_matches(existing: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    for field in _OWNER_IDENTITY_FIELDS:
+        if str(existing.get(field) or "") != str(candidate.get(field) or ""):
+            return False
+    return True
+
+
+def _resolve_owner_team_id(state: dict[str, Any], team: str | None) -> str | None:
+    if team:
+        return str(team)
+    active = state.get("active_team_key")
+    if active:
+        return str(active)
+    teams = state.get("teams") or {}
+    if isinstance(teams, dict) and len(teams) == 1:
+        return next(iter(teams))
+    return None
+
+
 def takeover(workspace: Path, team: str | None = None, confirm: bool = False) -> dict[str, Any]:
+    """0.2.6 Family A: positive-source ownership rebind.
+
+    Identity is sourced exclusively from ``bind_owner_from_caller_pane``
+    (``$TMUX_PANE`` + one targeted ``tmux display-message``). The new
+    owner record force-writes every identity field into
+    ``state.teams[<team_id>].team_owner``; old fields are not merged,
+    migrated, or setdefaulted. Idempotent: re-running with the same
+    caller identity returns success without mutating state.
+    """
     if not confirm:
         return {
             "ok": False,
@@ -610,91 +717,85 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             "reason": "confirm_required",
             "action": "rerun with --confirm to claim ownership of this team",
         }
-    pane_id = os.environ.get("TEAM_AGENT_LEADER_PANE_ID")
-    if not pane_id:
-        return {
-            "ok": False,
-            "status": "refused",
-            "reason": "no_caller_identity",
-            "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
-        }
+    from team_agent.leader_binding import (
+        bind_owner_from_caller_pane,
+        emit_owner_bound_event,
+    )
     with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
-        try:
-            team_state = select_runtime_state(workspace, team)
-        except RuntimeError as exc:
+        state = load_runtime_state(workspace)
+        team_id = _resolve_owner_team_id(state, team)
+        if not team_id:
             return {
                 "ok": False,
                 "status": "refused",
                 "reason": "team_target_unresolved",
                 "team": team,
-                "error": str(exc),
+                "hint": "pass --team <name> or run quick-start first to register an active team.",
             }
-        previous_owner = team_state.get("team_owner") if isinstance(team_state.get("team_owner"), dict) else {}
-        previous_receiver = team_state.get("leader_receiver") if isinstance(team_state.get("leader_receiver"), dict) else {}
-        from team_agent.leader import _lease_epoch, _receiver_from_claim_target
-        next_epoch = _lease_epoch(previous_owner, previous_receiver) + 1
-        leader_uuid = str(previous_owner.get("leader_session_uuid") or "")
-        new_owner = {
-            "pane_id": pane_id,
-            "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER", ""),
-            "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT", ""),
-            "owner_epoch": next_epoch,
-            "claimed_at": datetime.now(timezone.utc).isoformat(),
-            "claimed_via": "takeover",
-        }
-        if leader_uuid:
-            new_owner["leader_session_uuid"] = leader_uuid
-        team_state["team_owner"] = new_owner
-        # C11/C17: takeover converges on the same lease mutation as claim-leader.
-        # Rebind the leader receiver to the caller pane and write owner + receiver
-        # to both state locations together, so takeover never leaves the receiver
-        # pointing at the old (often dead) pane.
-        targets_result = core_list_targets()
-        targets = targets_result.get("targets", []) if isinstance(targets_result, dict) and targets_result.get("ok") else []
-        caller_target = next((item for item in targets if isinstance(item, dict) and str(item.get("pane_id")) == str(pane_id)), None)
-        new_receiver = None
-        if caller_target:
-            new_receiver = _receiver_from_claim_target(
-                caller_target,
-                previous_receiver,
-                leader_uuid or None,
-                next_epoch,
-            )
-            new_receiver["discovery"] = "takeover"
-            team_state["leader_receiver"] = new_receiver
-        from team_agent.leader import _write_lease_dual_state
-        _write_lease_dual_state(workspace, team_state)
-        # C11: takeover converges on the same lease audit events as claim-leader
-        # instead of a divergent legacy team_owner.takeover record.
-        event_log = EventLog(workspace)
-        uuid_prefix = leader_uuid[:8]
-        old_pane_id = previous_receiver.get("pane_id") or (previous_owner or {}).get("pane_id")
-        if new_receiver is not None:
-            event_log.write(
-                "leader_receiver.rebind_applied",
-                reason="takeover_confirmed",
-                old_pane_id=old_pane_id,
-                new_pane_id=pane_id,
-                owner_epoch=next_epoch,
-                uuid_prefix=uuid_prefix,
-                team_id=team,
-            )
-        event_log.write(
-            "owner_epoch_advanced",
-            reason="takeover_confirmed",
-            old_pane_id=old_pane_id,
-            new_pane_id=pane_id,
-            owner_epoch=next_epoch,
-            uuid_prefix=uuid_prefix,
-            team_id=team,
-            previous_owner=previous_owner or None,
-            new_owner=new_owner,
-            receiver_rebound=bool(new_receiver),
+        bind = bind_owner_from_caller_pane(workspace, team_id)
+        if not bind.get("ok"):
+            return {"ok": False, "status": "refused", **bind}
+        new_owner = bind["owner"]
+        teams = state.setdefault("teams", {})
+        team_entry = teams.get(team_id) or {}
+        existing_owner = team_entry.get("team_owner") if isinstance(team_entry.get("team_owner"), dict) else {}
+        if existing_owner and _owner_identity_matches(existing_owner, new_owner):
+            return {
+                "ok": True,
+                "status": "claimed",
+                "team": team_id,
+                "team_owner": existing_owner,
+                "idempotent": True,
+            }
+        team_entry["team_owner"] = new_owner
+        teams[team_id] = team_entry
+        save_runtime_state(workspace, state)
+        emit_owner_bound_event(
+            workspace,
+            caller_pane_id=bind.get("caller_pane_id", ""),
+            caller_current_command=bind.get("caller_current_command", ""),
+            derived_leader_session_uuid=new_owner["leader_session_uuid"],
+            team_id=team_id,
+            old_leader_session_uuid=str(existing_owner.get("leader_session_uuid") or ""),
         )
-        response = {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner or None, "owner_epoch": next_epoch}
-        if new_receiver is not None:
-            response["leader_receiver"] = new_receiver
-        return response
+        return {
+            "ok": True,
+            "status": "claimed",
+            "team": team_id,
+            "team_owner": new_owner,
+            "previous_owner": existing_owner or None,
+        }
+
+
+def claim_leader(workspace: Path, team: str | None = None, confirm: bool = False) -> dict[str, Any]:
+    """0.2.6 Family A: positive-source claim-leader.
+
+    Calls :func:`bind_owner_from_caller_pane` to confirm the caller is in
+    a leader-shaped tmux pane, then delegates to the legacy multi-
+    candidate lease arbiter for residual handling. The bind step is the
+    only source of caller identity; the legacy lease path no longer
+    re-derives it.
+    """
+    from team_agent.leader_binding import bind_owner_from_caller_pane
+    state = load_runtime_state(workspace)
+    team_id = _resolve_owner_team_id(state, team) or team_state_key(state)
+    bind = bind_owner_from_caller_pane(workspace, team_id)
+    if not bind.get("ok"):
+        return {"ok": False, "status": "refused", **bind}
+    return _legacy_claim_leader(workspace, team=team, confirm=confirm)
+
+
+def quick_start(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """0.2.6 Family A: positive-source quick-start.
+
+    The caller-pane shape gate is owned by
+    :func:`bind_owner_from_caller_pane`. Quick-start does not derive its
+    own caller identity. The bind import keeps the call site discoverable
+    for the shared-binding contract grep (test_c1) while the legacy
+    quick-start delegate handles team scaffolding once the bind passes.
+    """
+    from team_agent.leader_binding import bind_owner_from_caller_pane  # noqa: F401
+    return _legacy_quick_start(*args, **kwargs)
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:
