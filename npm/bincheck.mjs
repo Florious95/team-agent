@@ -10,7 +10,7 @@ const pathValue = process.env.PATH || "";
 
 if (!findOnPath(BIN_NAME, pathValue)) {
   printMissingBinDiagnostic(initCwd, pathValue);
-  process.exit(1);
+  process.exit(SELF_CHECK_ONLY ? 1 : 0);
 }
 
 if (SELF_CHECK_ONLY) {
