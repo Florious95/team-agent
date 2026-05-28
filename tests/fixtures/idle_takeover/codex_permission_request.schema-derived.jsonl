@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{"threadId":"thread_schema_1","turnId":"turn_permission_schema_1","itemId":"call_schema_1","startedAtMs":1779900000000,"approvalId":null,"reason":"command requires approval","command":"rm -rf build","cwd":"/tmp/team-agent-fixture","availableDecisions":["approve","deny"]}}

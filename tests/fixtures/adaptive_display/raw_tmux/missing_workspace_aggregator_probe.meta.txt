@@ -1,0 +1,4 @@
+fixture: missing_workspace_aggregator_probe
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux has-session -t team-refactor-maintainability__display__workspace__8897d78f
+note: state records this aggregator_session/display_session, but live tmux currently reports it missing.

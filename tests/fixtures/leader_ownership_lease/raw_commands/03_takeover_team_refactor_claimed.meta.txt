@@ -1,0 +1,4 @@
+command: team-agent takeover --workspace /Users/alauda/Documents/code/agent前沿探索/多agent协作 --team team-refactor-maintainability --confirm --json
+env: TEAM_AGENT_LEADER_PANE_ID=%1827 TEAM_AGENT_LEADER_PROVIDER=claude TEAM_AGENT_MACHINE_FINGERPRINT=<empty>
+cwd: /Users/alauda/Documents/code/agent前沿探索/多agent协作
+captured_at_utc: 2026-05-27T07:37:33Z

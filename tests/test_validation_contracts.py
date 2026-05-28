@@ -85,7 +85,7 @@ class ValidationTests(unittest.TestCase):
             spec = load_spec(out)
             self.assertEqual(spec["agents"][0]["id"], "implementer")
             self.assertEqual(spec["agents"][0]["profile"], "codex-default")
-            self.assertEqual(spec["runtime"]["display_backend"], "ghostty_window")
+            self.assertEqual(spec["runtime"]["display_backend"], "adaptive")
             self.assertTrue(spec["communication"]["worker_to_worker"])
             self.assertNotIn("API_KEY", out.read_text(encoding="utf-8"))
 

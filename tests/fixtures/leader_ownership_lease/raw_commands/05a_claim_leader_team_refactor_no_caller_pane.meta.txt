@@ -1,0 +1,3 @@
+command: team-agent claim-leader --workspace /Users/alauda/Documents/code/agent前沿探索/多agent协作 --team team-refactor-maintainability --confirm --json
+cwd: /Users/alauda/Documents/code/agent前沿探索/多agent协作
+captured_at_utc: 2026-05-27T07:25:32Z

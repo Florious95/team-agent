@@ -1,0 +1,10 @@
+> You are in /Users/alauda/team-agent-test/workspaces/0.2.4-bundled-20260528T014
+
+  Do you trust the contents of this directory? Working with untrusted contents
+  comes with higher risk of prompt injection. Trusting the directory allows
+  project-local config, hooks, and exec policies to load.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue

@@ -32,6 +32,49 @@ def _tmux_inject_text(
     *,
     bypass_non_input_gate: bool = False,
 ) -> dict[str, Any]:
+    # Round-5 follow-up: empty-text Enter path (used by trust auto-answer to
+    # accept Codex's default `1. Yes, continue` choice with a plain Enter).
+    # tmux rejects set-buffer / paste-buffer of an empty string, so the
+    # buffer-paste route would leave the trust prompt stuck. Issue
+    # `send-keys -t <target> <submit_key>` directly and bypass the buffer
+    # path entirely.
+    if text == "":
+        proc = run_cmd(["tmux", "send-keys", "-t", target, submit_key], timeout=10)
+        if proc.returncode != 0:
+            return {
+                "ok": False,
+                "stage": "send-keys",
+                "error": proc.stderr.strip() or "tmux send-keys failed",
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "submitted": False,
+                        "verification": "send_keys_failed",
+                        "submit_key": submit_key,
+                    }
+                ],
+                "verification": "send_keys_failed",
+            }
+        return {
+            "ok": True,
+            "stage": "submitted",
+            "visible": True,
+            "submitted": True,
+            "verification": "empty_text_send_keys",
+            "submit_verification": f"{submit_key}_sent_direct",
+            "turn_verification": "not_required",
+            "attempts": [
+                {
+                    "attempt": 1,
+                    "submitted": True,
+                    "verification": "empty_text_send_keys",
+                    "submit_key": submit_key,
+                }
+            ],
+            "submit_attempts": [
+                {"attempt": 1, "submitted": True, "verification": "send_keys"}
+            ],
+        }
     token_match = re.search(r"\[team-agent-token:([^\]]+)\]", text)
     token = token_match.group(1) if token_match else ""
     attempt_log: list[dict[str, Any]] = []
@@ -134,6 +177,11 @@ def _tmux_inject_text(
                 "submit_attempts": submit.get("attempts"),
             }
         submit_verification = _leader_submit_verification(submit.get("verification"), verification, submit_key)
+        # Gap 42: paste+submit success is authoritative for delivery. The post-submit
+        # turn-boundary probe is observation metadata only, never a delivery gate — a
+        # busy / compacting recipient that has not yet shown a new prompt marker is
+        # still a successful delivery. Real paste/submit failures are caught and
+        # returned above; this point is only reached after submit reported ok.
         turn_visible, turn_verification, turn_capture = _wait_for_leader_new_turn(
             target,
             text,
@@ -142,16 +190,7 @@ def _tmux_inject_text(
             timeout=2.0,
         )
         if not turn_visible:
-            return {
-                "ok": False,
-                "stage": "turn-boundary-verification",
-                "error": f"leader turn boundary not verified: {turn_verification}",
-                "attempts": attempt_log,
-                "verification": verification,
-                "submit_verification": submit_verification,
-                "turn_verification": turn_verification,
-                "submit_attempts": submit.get("attempts"),
-            }
+            turn_verification = "not_yet_observed"
         return {
             "ok": True,
             "stage": "submitted",

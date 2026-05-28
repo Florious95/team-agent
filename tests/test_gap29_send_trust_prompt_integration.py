@@ -144,7 +144,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                         return _ok_proc(f"› [team-agent-token:{state['message_token']}] accepted\n")
                     return _ok_proc(state["pasted_text"] or "› idle prompt\n")
                 if args[:2] == ["tmux", "set-buffer"]:
-                    actions.append("set-buffer-answer" if args[4] == "1" else "set-buffer-message")
+                    actions.append("set-buffer-answer" if "trust-auto-answer" in args[3] else "set-buffer-message")
                     buffers[args[3]] = args[4]
                     marker = "[team-agent-token:"
                     if marker in args[4]:
@@ -155,7 +155,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 elif args[:2] == ["tmux", "delete-buffer"]:
                     actions.append("delete-buffer")
                 elif args[:3] == ["tmux", "send-keys", "-t"]:
-                    if args[-2:] == ["1", "Enter"] or (args[-1] == "Enter" and state["pasted_text"] == "1"):
+                    if args[-1] == "Enter" and state["pasted_text"] == "" and not state["trust_answered"]:
                         actions.append("trust-answer-1-enter")
                         state["trust_answered"] = True
                         state["pasted_text"] = ""
@@ -233,7 +233,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                         return _ok_proc(f"› [team-agent-token:{pane['message_token']}] accepted\n")
                     return _ok_proc(pane["pasted_text"] or "› idle prompt\n")
                 if args[:2] == ["tmux", "set-buffer"]:
-                    if args[4] == "1":
+                    if "trust-auto-answer" in args[3]:
                         actions.append("set-buffer-answer")
                     else:
                         actions.append("set-buffer-message")
@@ -247,7 +247,7 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
                 elif args[:2] == ["tmux", "delete-buffer"]:
                     actions.append("delete-buffer")
                 elif args[:3] == ["tmux", "send-keys", "-t"] and args[-1] == "Enter":
-                    if pane["pasted_text"] == "1":
+                    if pane["pasted_text"] == "" and not pane["trust_answered"]:
                         actions.append("trust-answer-1-enter")
                         pane["trust_answered"] = True
                         pane["pasted_text"] = ""
@@ -284,7 +284,9 @@ class Gap29SendTrustPromptIntegrationTests(unittest.TestCase):
 
             self.assertTrue(result["ok"], result)
             self.assertIn("detect-codex-trust-prompt", actions)
-            self.assertIn("set-buffer-answer", actions)
+            # Round-6 wiring: trust auto-answer's empty Enter goes through a
+            # direct send-keys call, no set-buffer/paste-buffer for the answer.
+            self.assertNotIn("set-buffer-answer", actions)
             self.assertIn("trust-answer-1-enter", actions)
             self.assertIn("set-buffer-message", actions)
             self.assertLess(actions.index("trust-answer-1-enter"), actions.index("set-buffer-message"), actions)

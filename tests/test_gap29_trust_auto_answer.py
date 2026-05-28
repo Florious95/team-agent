@@ -105,7 +105,7 @@ class Gap29TrustAutoAnswerTests(unittest.TestCase):
         mock_inject.assert_called_once()
         args = mock_inject.call_args[0]
         kwargs = mock_inject.call_args.kwargs
-        self.assertEqual(args[:3], ("%worker", "1", "Enter"))
+        self.assertEqual(args[:3], ("%worker", "", "Enter"))
         self.assertTrue(kwargs["bypass_non_input_gate"])
         emitted = [ev for ev in self._emitted() if ev.get("event") == "leader_panes.trust_auto_answered"]
         self.assertEqual(len(emitted), 1)

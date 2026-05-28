@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from team_agent.events import EventLog
+from team_agent.display.adaptive import open_adaptive_display
 from team_agent.display.ghostty import (
     ghostty_app_exists,
     ghostty_attach_args,
@@ -21,9 +22,12 @@ def open_worker_displays(
     jobs: list[tuple[str, dict[str, Any]]],
     event_log: EventLog,
     display_backend: str = "ghostty_window",
+    capability_probe: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not jobs:
         return {}
+    if display_backend == "adaptive":
+        return open_adaptive_display(workspace, session_name, jobs, event_log, capability_probe=capability_probe)
     if display_backend == "ghostty_workspace":
         return open_ghostty_workspace(workspace, session_name, jobs, event_log)
     if len(jobs) == 1:

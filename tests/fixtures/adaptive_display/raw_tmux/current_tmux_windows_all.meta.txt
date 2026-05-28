@@ -1,0 +1,4 @@
+fixture: current_tmux_windows_all
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-windows -a -F '#{session_name}	#{window_index}	#{window_name}	#{window_panes}	#{window_layout}	#{window_active}'
+note: all current windows; shows team has 6 worker windows and each linked display session mirrors 6 single-pane windows.

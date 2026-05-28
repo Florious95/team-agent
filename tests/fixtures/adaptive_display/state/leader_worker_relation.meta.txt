@@ -1,0 +1,4 @@
+fixture: leader_worker_relation.selected.json
+captured_at_utc: 2026-05-27T12:04:30Z
+source: selected metadata from live Team Agent state.json; no provider transcript, profile, or env data included
+layout_point: leader pane identity and worker display/session relation for Gap 41 adaptive display

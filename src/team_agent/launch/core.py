@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from team_agent.events import EventLog
+from team_agent.display.backend import DISPLAY_BACKENDS_WITH_WORKER_VIEWS, resolve_display_backend
 from team_agent.launch.bootstrap import (
     attach_team_profile_dirs,
     spec_team_dir,
@@ -32,7 +33,6 @@ def launch(
     skip_profile_smoke: bool = False,
 ) -> dict[str, Any]:
     from team_agent.runtime import (
-        GHOSTTY_DISPLAY_BACKENDS,
         RuntimeError,
         _attach_leader_to_state,
         _capture_agent_session,
@@ -54,6 +54,11 @@ def launch(
     ensure_workspace_dirs(workspace)
     event_log = EventLog(workspace)
     session_name = spec.get("runtime", {}).get("session_name") or f"team-{spec['team']['name']}"
+    display_backend = resolve_display_backend(
+        spec.get("runtime", {}).get("display_backend"),
+        event_log=event_log,
+        source="launch",
+    )
     state = {
         "spec_path": str(spec_path.resolve()),
         "workspace": str(workspace),
@@ -62,7 +67,7 @@ def launch(
         "leader": spec.get("leader"),
         "agents": {},
         "tasks": [dict(task) for task in spec.get("tasks", [])],
-        "display_backend": spec.get("runtime", {}).get("display_backend", "none"),
+        "display_backend": display_backend,
     }
     runtime_cfg = effective_runtime_config(spec.get("runtime", {}))
     dangerous_auto_approve = bool(runtime_cfg.get("dangerous_auto_approve"))
@@ -215,7 +220,11 @@ def launch(
                 stdout=proc.stdout,
             )
             raise RuntimeError(f"Failed to start agent {agent['id']}: {proc.stderr.strip()}")
-        handled_prompts = adapter.handle_startup_prompts(session_name, agent["id"], checks=20, sleep_s=0.5)
+        handled_prompts = (
+            adapter.handle_startup_prompts(session_name, agent["id"], checks=20, sleep_s=0.5)
+            if hasattr(adapter, "handle_startup_prompts")
+            else []
+        )
         for prompt_event in handled_prompts:
             event_log.write(
                 "launch.startup_prompt_handled",
@@ -263,7 +272,7 @@ def launch(
             exclude_session_ids=known_session_ids,
             raise_on_missed=False,
         )
-        if state.get("display_backend") in GHOSTTY_DISPLAY_BACKENDS:
+        if state.get("display_backend") in DISPLAY_BACKENDS_WITH_WORKER_VIEWS:
             display_jobs.append((agent["id"], agent))
         started.append({"agent_id": agent["id"], "provider": agent["provider"], "window": agent["id"]})
     for agent_id, display in _open_worker_displays(

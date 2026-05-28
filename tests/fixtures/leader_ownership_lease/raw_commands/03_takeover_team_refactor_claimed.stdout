@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "previous_owner": {
+    "claimed_at": "2026-05-27T07:08:27.910833+00:00",
+    "claimed_via": "takeover",
+    "leader_session_uuid": "46b92d5b629cad4930cde96be938475e",
+    "machine_fingerprint": "",
+    "pane_id": "%1827",
+    "provider": "claude"
+  },
+  "status": "claimed",
+  "team": "team-refactor-maintainability",
+  "team_owner": {
+    "claimed_at": "2026-05-27T07:37:33.234588+00:00",
+    "claimed_via": "takeover",
+    "machine_fingerprint": "",
+    "pane_id": "%1827",
+    "provider": "claude"
+  }
+}

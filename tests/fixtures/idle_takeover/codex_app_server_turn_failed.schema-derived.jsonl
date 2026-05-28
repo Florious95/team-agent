@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread_schema_1","turn":{"id":"turn_failed_schema_1","items":"notLoaded","status":"failed","error":{"message":"schema-derived Codex turn failure","additionalDetails":"Derived from TurnStatus failed in codex-rs app-server schema."}}}}

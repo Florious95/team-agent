@@ -39,10 +39,12 @@ from team_agent.providers import (
     shell_resume_command_for_agent,
 )
 from team_agent.display import (
+    GHOSTTY_DISPLAY_BACKENDS,
     GHOSTTY_WORKSPACE_PANES_PER_WINDOW,
     close_ghostty_display as _close_ghostty_display,
     close_ghostty_workspace as _close_ghostty_workspace,
     close_ghostty_workspace_slot as _close_ghostty_workspace_slot,
+    close_team_display_backends as _close_team_display_backends,
     ghostty_app_exists as _ghostty_app_exists,
     ghostty_attach_args as _ghostty_attach_args,
     ghostty_command as _ghostty_command,
@@ -65,6 +67,7 @@ from team_agent.display import (
     set_ghostty_workspace_pane_title as _set_ghostty_workspace_pane_title,
 )
 from team_agent.leader import (
+    LEADER_OWNERSHIP_LOCK,
     attach_leader,
     attach_leader_to_state as _attach_leader_to_state,
     claim_leader,
@@ -456,7 +459,6 @@ TMUX_PANE_FORMAT = (
     "#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}"
 )
 HEALTH_STATUSES = {"RUNNING", "IDLE", "AWAITING_APPROVAL", "BLOCKED", "ERROR", "DONE"}
-GHOSTTY_DISPLAY_BACKENDS = {"ghostty", "ghostty_window", "ghostty_workspace"}
 DELIVERY_CAPTURE_LINES = 40
 SUBMITTED_DELIVERY_STATUSES = {"injected", "visible", "submitted", "submitted_unverified", "delivered", "acknowledged"}
 TMUX_STDIN_BUFFER_THRESHOLD = 16 * 1024
@@ -478,7 +480,6 @@ def run_cmd(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess[s
 def ensure_workspace_dirs(workspace: Path) -> None:
     for path in [runtime_dir(workspace), logs_dir(workspace), artifacts_dir(workspace), messages_dir(workspace)]:
         path.mkdir(parents=True, exist_ok=True)
-
 
 
 def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -> dict[str, Any]:
@@ -521,7 +522,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             if proc.returncode == 0:
                 log_path.write_text(proc.stdout, encoding="utf-8")
                 captured.append(str(log_path))
-        _close_ghostty_workspace(state, event_log)
+        _close_team_display_backends(state, event_log)
         for agent_id, agent_state in state.get("agents", {}).items():
             _close_ghostty_display(agent_id, agent_state, event_log)
             closed_displays.add(agent_id)
@@ -535,7 +536,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
     else:
         event_log.write("shutdown.idempotent", session=session_name, reason="session missing")
-        _close_ghostty_workspace(state, event_log)
+        _close_team_display_backends(state, event_log)
     for agent_id, agent_state in state.get("agents", {}).items():
         if agent_id not in closed_displays:
             _close_ghostty_display(agent_id, agent_state, event_log)
@@ -617,7 +618,7 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             "reason": "no_caller_identity",
             "action": "set TEAM_AGENT_LEADER_PANE_ID/PROVIDER/MACHINE_FINGERPRINT or run from a tmux pane",
         }
-    with _runtime_lock(workspace, "send"):
+    with _runtime_lock(workspace, LEADER_OWNERSHIP_LOCK):
         try:
             team_state = select_runtime_state(workspace, team)
         except RuntimeError as exc:
@@ -628,23 +629,72 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
                 "team": team,
                 "error": str(exc),
             }
-        previous_owner = team_state.get("team_owner")
+        previous_owner = team_state.get("team_owner") if isinstance(team_state.get("team_owner"), dict) else {}
+        previous_receiver = team_state.get("leader_receiver") if isinstance(team_state.get("leader_receiver"), dict) else {}
+        from team_agent.leader import _lease_epoch, _receiver_from_claim_target
+        next_epoch = _lease_epoch(previous_owner, previous_receiver) + 1
+        leader_uuid = str(previous_owner.get("leader_session_uuid") or "")
         new_owner = {
             "pane_id": pane_id,
             "provider": os.environ.get("TEAM_AGENT_LEADER_PROVIDER", ""),
             "machine_fingerprint": os.environ.get("TEAM_AGENT_MACHINE_FINGERPRINT", ""),
+            "owner_epoch": next_epoch,
             "claimed_at": datetime.now(timezone.utc).isoformat(),
             "claimed_via": "takeover",
         }
+        if leader_uuid:
+            new_owner["leader_session_uuid"] = leader_uuid
         team_state["team_owner"] = new_owner
-        save_team_scoped_state(workspace, team_state)
-        EventLog(workspace).write(
-            "team_owner.takeover",
-            team=team,
-            previous_owner=previous_owner,
+        # C11/C17: takeover converges on the same lease mutation as claim-leader.
+        # Rebind the leader receiver to the caller pane and write owner + receiver
+        # to both state locations together, so takeover never leaves the receiver
+        # pointing at the old (often dead) pane.
+        targets_result = core_list_targets()
+        targets = targets_result.get("targets", []) if isinstance(targets_result, dict) and targets_result.get("ok") else []
+        caller_target = next((item for item in targets if isinstance(item, dict) and str(item.get("pane_id")) == str(pane_id)), None)
+        new_receiver = None
+        if caller_target:
+            new_receiver = _receiver_from_claim_target(
+                caller_target,
+                previous_receiver,
+                leader_uuid or None,
+                next_epoch,
+            )
+            new_receiver["discovery"] = "takeover"
+            team_state["leader_receiver"] = new_receiver
+        from team_agent.leader import _write_lease_dual_state
+        _write_lease_dual_state(workspace, team_state)
+        # C11: takeover converges on the same lease audit events as claim-leader
+        # instead of a divergent legacy team_owner.takeover record.
+        event_log = EventLog(workspace)
+        uuid_prefix = leader_uuid[:8]
+        old_pane_id = previous_receiver.get("pane_id") or (previous_owner or {}).get("pane_id")
+        if new_receiver is not None:
+            event_log.write(
+                "leader_receiver.rebind_applied",
+                reason="takeover_confirmed",
+                old_pane_id=old_pane_id,
+                new_pane_id=pane_id,
+                owner_epoch=next_epoch,
+                uuid_prefix=uuid_prefix,
+                team_id=team,
+            )
+        event_log.write(
+            "owner_epoch_advanced",
+            reason="takeover_confirmed",
+            old_pane_id=old_pane_id,
+            new_pane_id=pane_id,
+            owner_epoch=next_epoch,
+            uuid_prefix=uuid_prefix,
+            team_id=team,
+            previous_owner=previous_owner or None,
             new_owner=new_owner,
+            receiver_rebound=bool(new_receiver),
         )
-        return {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner}
+        response = {"ok": True, "status": "claimed", "team": team, "team_owner": new_owner, "previous_owner": previous_owner or None, "owner_epoch": next_epoch}
+        if new_receiver is not None:
+            response["leader_receiver"] = new_receiver
+        return response
 
 
 def _running_agent_state(workspace: Path, agent: dict[str, Any], previous: dict[str, Any]) -> dict[str, Any]:

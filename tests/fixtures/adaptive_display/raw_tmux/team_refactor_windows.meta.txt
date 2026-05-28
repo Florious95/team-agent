@@ -1,0 +1,4 @@
+fixture: team_refactor_windows
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-windows -a ... filtered to session_name ~ team-refactor-maintainability
+note: current 6-worker shape: main team session has 6 windows x 1 pane; each linked display session also has 6 windows x 1 pane.

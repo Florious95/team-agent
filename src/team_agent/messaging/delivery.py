@@ -15,6 +15,40 @@ from pathlib import Path
 from typing import Any
 
 
+def _tmux_pane_width(target: str) -> dict[str, Any]:
+    """Query the tmux pane width (display columns) for ``target``.
+
+    Live wiring seam for the trust-prompt truncation matcher: returns
+    ``{"ok": True, "pane_width": <int>}`` on success or
+    ``{"ok": False, "error": "..."}`` on any failure / timeout / unparseable
+    output. Fail-safe by design: NEVER returns a default width. Callers must
+    treat failure as "no boundary signal" and let the workspace matcher fall
+    back to exact equality, so a hard-truncated prompt is never auto-answered
+    on guesswork.
+    """
+    from team_agent.messaging.deps import run_cmd
+    try:
+        proc = run_cmd(
+            ["tmux", "display-message", "-p", "-t", str(target), "-F", "#{pane_width}"],
+            timeout=2,
+        )
+    except Exception as exc:  # pragma: no cover - defensive; tmux not present, timeout, etc.
+        return {"ok": False, "error": f"tmux_query_failed:{exc.__class__.__name__}"}
+    if getattr(proc, "returncode", 1) != 0:
+        err = (getattr(proc, "stderr", "") or "").strip().splitlines()
+        return {"ok": False, "error": err[0] if err else "tmux_query_nonzero"}
+    text = (getattr(proc, "stdout", "") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty_output"}
+    try:
+        width = int(text.splitlines()[0].strip())
+    except (ValueError, IndexError):
+        return {"ok": False, "error": "unparseable_output"}
+    if width <= 0:
+        return {"ok": False, "error": "non_positive_width"}
+    return {"ok": True, "pane_width": width}
+
+
 # Spark MEDIUM sweep #3 (2026-05-26): retry_needed bounded backoff. Each entry is
 # the delay (seconds) BEFORE the attempt with that number runs; attempt 1 was the
 # original delivery, attempt 2 fires 5s after retry_needed, attempt 3 fires 15s
@@ -85,12 +119,21 @@ def _deliver_pending_message(
         # Bypassed entirely when opt-out (default) — the existing failed envelope
         # is preserved.
         from team_agent.messaging.leader_panes import attempt_trust_auto_answer
+        pane_target = injection.get("pane_id") or target
+        # Live wiring: query the tmux pane width now and hand it to the trust
+        # matcher via state["pane_width"]. On failure we leave pane_width
+        # absent so the matcher falls back to exact equality (fail-safe — a
+        # right-edge truncated prefix is never auto-answered on guesswork).
+        width_query = _tmux_pane_width(pane_target)
+        trust_state = dict(state) if isinstance(state, dict) else {}
+        if width_query.get("ok"):
+            trust_state["pane_width"] = width_query["pane_width"]
         answer = attempt_trust_auto_answer(
             workspace,
-            injection.get("pane_id") or target,
+            pane_target,
             injection.get("pane_capture_tail") or "",
             EventLog(workspace),
-            state=state,
+            state=trust_state,
         )
         if answer.get("answered"):
             # Spark MEDIUM #4 (2026-05-26): replace the fixed 0.3s sleep with a

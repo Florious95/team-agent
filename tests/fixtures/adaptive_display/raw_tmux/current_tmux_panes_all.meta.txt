@@ -1,0 +1,4 @@
+fixture: current_tmux_panes_all
+captured_at_utc: 2026-05-27T12:02:01Z
+command: tmux list-panes -a -F '#{pane_id}	#{session_name}	#{window_index}	#{window_name}	#{pane_index}	#{pane_width}x#{pane_height}	#{pane_current_command}	#{pane_active}	#{pane_current_path}'
+note: all current panes; captures leader pane and worker pane/session/window relationship without pane scrollback.

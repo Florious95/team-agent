@@ -1,0 +1,197 @@
+{
+  "display_backend": "ghostty_workspace",
+  "agents": [
+    {
+      "id": "claude-runtime-developer",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:claude-runtime-developer:Runtime Semantics Developer",
+        "target": "team-refactor-maintainability:claude-runtime-developer",
+        "linked_session": "team-refactor-maintainability__display__claude-runtime-developer__4ed53181",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview",
+        "pane_id": "%1841",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    },
+    {
+      "id": "constitution-reviewer",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:constitution-reviewer:Architecture and Constitution Reviewer",
+        "target": "team-refactor-maintainability:constitution-reviewer",
+        "linked_session": "team-refactor-maintainability__display__constitution-reviewer__4a3483d8",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview",
+        "pane_id": "%1842",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    },
+    {
+      "id": "developer",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:developer:Runtime Implementation Developer",
+        "target": "team-refactor-maintainability:developer",
+        "linked_session": "team-refactor-maintainability__display__developer__7f111d58",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview",
+        "pane_id": "%1843",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    },
+    {
+      "id": "realistic-tester",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:realistic-tester:External Realistic Acceptance Tester",
+        "target": "team-refactor-maintainability:realistic-tester",
+        "linked_session": "team-refactor-maintainability__display__realistic-tester__f16f3a80",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview-2",
+        "pane_id": "%1844",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    },
+    {
+      "id": "spark-reviewer",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:spark-reviewer:Low-Cost Code Risk Reviewer",
+        "target": "team-refactor-maintainability:spark-reviewer",
+        "linked_session": "team-refactor-maintainability__display__spark-reviewer__b471ef5a",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview-2",
+        "pane_id": "%1845",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    },
+    {
+      "id": "test-engineer",
+      "display": {
+        "backend": "ghostty_workspace",
+        "status": "opened",
+        "title": "team-agent:team-refactor-maintainability:workspace",
+        "pane_title": "team-agent:test-engineer:Module Contract Owner",
+        "target": "team-refactor-maintainability:test-engineer",
+        "linked_session": "team-refactor-maintainability__display__test-engineer__d8b85486",
+        "aggregator_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "display_session": "team-refactor-maintainability__display__workspace__8897d78f",
+        "workspace_window": "overview-2",
+        "pane_id": "%1846",
+        "launch_args": [
+          "open",
+          "-na",
+          "Ghostty.app",
+          "--args",
+          "--title=team-agent:team-refactor-maintainability:workspace",
+          "-e",
+          "tmux",
+          "attach-session",
+          "-t",
+          "team-refactor-maintainability__display__workspace__8897d78f"
+        ],
+        "pid": null,
+        "pids": [],
+        "tty": null,
+        "fallback": "tmux_headless",
+        "note": "Ghostty opens one aggregator tmux session; each pane attaches to a distinct linked session pinned to one base worker window, so runtime injection remains session:agent_id addressed."
+      }
+    }
+  ]
+}

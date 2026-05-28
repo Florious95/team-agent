@@ -133,7 +133,13 @@ class LeaderReceiverBufferTests(unittest.TestCase):
         self.assertNotEqual(submitted["attempts"][0]["buffer_method"], "preexisting_prompt")
         self.assertTrue(any(call[:2] == ["tmux", "paste-buffer"] for call in calls))
 
-    def test_missing_new_turn_marker_requeues_scheduled_notification_once(self) -> None:
+    def test_visible_without_turn_marker_is_delivered_not_requeued(self) -> None:
+        # Gap 42: a payload that pasted and submitted but shows no new turn marker
+        # (busy / compacting recipient) is a SUCCESSFUL delivery, not a failure. The
+        # old behavior — fail at the turn-boundary gate and requeue the scheduled
+        # notification once — is superseded by the send-busy-recipient contract:
+        # submitted is authoritative, the missing marker is recorded as
+        # turn_verification=not_yet_observed, and nothing is requeued.
         with tempfile.TemporaryDirectory(prefix="team-agent-leader-buffer-retry-") as tmp:
             workspace = Path(tmp)
             self._write_spec(workspace)
@@ -164,12 +170,13 @@ class LeaderReceiverBufferTests(unittest.TestCase):
             ):
                 fired = runtime._fire_due_scheduled_events(workspace, store, event_log)
             events = [json.loads(line) for line in (workspace / ".team" / "logs" / "events.jsonl").read_text().splitlines()]
-            scheduled_rows = store.due_scheduled_events("9999-12-31T00:00:00+00:00")
+            pending_rows = [row for row in store.due_scheduled_events("9999-12-31T00:00:00+00:00") if row["status"] == "pending"]
         self.assertEqual(fired, [1])
-        self.assertTrue(any(event["event"] == "coordinator.scheduled_retry" for event in events))
-        failed = next(event for event in events if event["event"] == "leader_receiver.delivery_failed")
-        self.assertEqual(failed["stage"], "turn-boundary-verification")
-        self.assertEqual(scheduled_rows[0]["status"], "pending")
+        submitted = next(event for event in events if event["event"] == "leader_receiver.submitted")
+        self.assertEqual(submitted["turn_verification"], "not_yet_observed")
+        self.assertFalse(any(event["event"] == "leader_receiver.delivery_failed" for event in events))
+        self.assertFalse(any(event["event"] == "coordinator.scheduled_retry" for event in events))
+        self.assertEqual(pending_rows, [])
 
 
 if __name__ == "__main__":
