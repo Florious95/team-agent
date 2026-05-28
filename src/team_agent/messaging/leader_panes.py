@@ -563,7 +563,8 @@ def attempt_trust_auto_answer(
             reason="pane_id_missing",
         )
         return {"ok": False, "answered": False, "reason": "pane_id_missing"}
-    if not _capture_tail_references_workspace(pane_capture_tail, workspace):
+    pane_width = state.get("pane_width") if isinstance(state, dict) else None
+    if not _capture_tail_references_workspace(pane_capture_tail, workspace, pane_width):
         event_log.write(
             "leader_panes.trust_auto_answer_refused",
             pane_id=pane_id,
@@ -656,44 +657,128 @@ def _reset_spec_opt_in_deprecation_state() -> None:
     _SPEC_OPT_IN_DEPRECATION_WARNED = False
 
 
-def _capture_tail_references_workspace(tail: str, workspace: Path) -> bool:
-    """Spark MEDIUM #5: a raw substring match accepted '/repo' inside
-    '/repo-backup' and rejected symlinked / trailing-slash spellings. We now
-    canonicalize the workspace via Path.resolve, parse candidate absolute paths
-    out of the prompt tail (one token per line after stripping codex box-drawing
-    glyphs), canonicalize each candidate the same way, and only return True on
-    boundary-safe canonical equality."""
+def _capture_tail_references_workspace(tail: str, workspace: Path, pane_width: int | None = None) -> bool:
+    """Decide whether the Codex trust-prompt tail names the worker's own
+    workspace cwd. The runtime cwd is the source of truth; the prompt path is a
+    consistency guard. Match cases (one converged helper per token):
+
+      - exact canonical equality (the unchanged baseline);
+      - mid-ellipsis ``head…tail`` / ``head...tail`` where head is a prefix of
+        the runtime cwd and tail is its suffix;
+      - hard right-edge truncation: the canonical runtime cwd starts with the
+        canonical captured path AND the captured token reaches the capture
+        line's right boundary (pane_width).
+
+    Without a pane_width signal, prefix matching is forbidden — the captured
+    path is treated as a complete token and must exactly equal the runtime cwd
+    (this is what stops ``/repo`` from sliding into ``/repo-backup``).
+    """
     if not tail:
         return False
     workspace_canonical = _canonicalize_path(workspace)
     if not workspace_canonical:
         return False
-    for candidate in _candidate_paths_from_prompt(tail):
-        if _canonicalize_path(Path(candidate)) == workspace_canonical:
+    for token, source_line in _candidate_path_lines_from_prompt(tail):
+        if _workspace_matches_token(workspace_canonical, token, source_line, pane_width):
             return True
     return False
 
 
-_PATH_LINE_RE = re.compile(r"(/[\w\-./~+@]+)")
+_PATH_LINE_RE = re.compile(r"(/[\w\-./~+@…]+)")
+_ELLIPSIS_TOKENS = ("…", "...")
 
 
-def _candidate_paths_from_prompt(tail: str) -> list[str]:
-    """Pull every absolute-path-shaped token out of the prompt's tail. Codex
-    renders the trust prompt's directory inside box-drawing glyphs and on its
-    own line; strip leading/trailing whitespace and glyph noise before matching."""
-    paths: list[str] = []
+def _candidate_path_lines_from_prompt(tail: str) -> list[tuple[str, str]]:
+    """Pull (path_token, source_line) pairs out of the prompt's tail. The
+    source line is the line AFTER stripping Codex box-drawing glyphs, so the
+    matcher can locate the token's end column relative to the visible width."""
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for raw_line in tail.splitlines():
         line = raw_line.strip()
-        # Codex draws box-glyph prefixes (▌ ▎ │) that need to be stripped.
         for glyph in ("▌", "▎", "│"):
             line = line.lstrip(glyph).strip()
         if not line:
             continue
         for match in _PATH_LINE_RE.finditer(line):
             token = match.group(1).rstrip("/")
-            if token and token not in paths:
-                paths.append(token)
-    return paths
+            if not token:
+                continue
+            key = (token, line)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+    return pairs
+
+
+def _candidate_paths_from_prompt(tail: str) -> list[str]:
+    """Backwards-compatible token-only view (kept for any external callers)."""
+    out: list[str] = []
+    for token, _line in _candidate_path_lines_from_prompt(tail):
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def _workspace_matches_token(
+    workspace_canonical: str,
+    token: str,
+    source_line: str,
+    pane_width: int | None,
+) -> bool:
+    """The converged trust-prompt match logic.
+
+    Order matters:
+      1. exact canonical equality;
+      2. mid-ellipsis head/tail match;
+      3. right-edge hard truncation (prefix + boundary-reached).
+    A captured token that does NOT reach the line's right boundary is treated
+    as a complete short path and must equal the runtime cwd exactly.
+    """
+    # 1. Exact canonical equality.
+    captured_canonical = _canonicalize_path(Path(token))
+    if not captured_canonical:
+        return False
+    if captured_canonical == workspace_canonical:
+        return True
+    # 2. Mid-ellipsis: split on … or ..., require head ⊑ workspace and workspace ⊐ tail.
+    for ellipsis in _ELLIPSIS_TOKENS:
+        if ellipsis in token:
+            head, _, tail_part = token.partition(ellipsis)
+            head_canonical = _canonicalize_path(Path(head)) if head.startswith("/") else head
+            if not head_canonical or not tail_part:
+                return False
+            return (
+                workspace_canonical.startswith(head_canonical)
+                and workspace_canonical.endswith(tail_part)
+            )
+    # 3. Right-edge hard truncation: prefix + boundary.
+    if not _token_reaches_right_edge(token, source_line, pane_width):
+        # No boundary signal → captured must be a complete token; exact already
+        # failed → mismatch (this rejects /repo vs /repo-backup both ways).
+        return False
+    return (
+        workspace_canonical == captured_canonical
+        or workspace_canonical.startswith(captured_canonical + "/")
+        or workspace_canonical.startswith(captured_canonical)
+    )
+
+
+def _token_reaches_right_edge(token: str, source_line: str, pane_width: int | None) -> bool:
+    """The token reaches the capture line's right boundary iff the line is wide
+    enough to be at pane capacity AND the token sits flush against the line's
+    end. Without a pane_width we cannot prove truncation — return False so the
+    caller falls back to exact-equality (this is the C/repo vs C/repo-backup
+    safeguard)."""
+    if not pane_width or pane_width <= 0:
+        return False
+    rstripped = source_line.rstrip()
+    if not rstripped.endswith(token):
+        return False
+    # Allow a one-column tolerance for trailing whitespace stripped from the
+    # raw capture; the line must be at pane capacity to count as hard-cut.
+    return len(rstripped) >= max(1, pane_width - 1)
 
 
 def _canonicalize_path(p: Path | str) -> str:
