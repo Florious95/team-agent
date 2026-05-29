@@ -167,6 +167,27 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(health["status"], "WORKING", health)
 
+    def test_c15_active_task_visible_claude_prompt_with_streaming_output_still_working(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c15-claude-stream-") as tmp:
+            workspace = Path(tmp)
+            state = _health_state(
+                workspace,
+                tasks=[{"id": "task_1", "assignee": "worker_1", "status": "running"}],
+                provider="claude_code",
+            )
+            store = MessageStore(workspace)
+            _sync_health_with_capture(
+                workspace,
+                state,
+                store,
+                "❯ python -m unittest discover -s tests\n"
+                "test_alpha ... ok\n"
+                "test_beta ... ok\n",
+            )
+            health = store.agent_health(owner_team_id="current")["worker_1"]
+
+        self.assertEqual(health["status"], "WORKING", health)
+
     def test_c15_no_active_task_with_pane_delta_may_remain_idle(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c15-no-active-") as tmp:
             workspace = Path(tmp)
@@ -302,7 +323,7 @@ def _idle_prompt_fixture(name: str) -> str:
     return text
 
 
-def _health_state(workspace: Path, *, tasks: list[dict]) -> dict:
+def _health_state(workspace: Path, *, tasks: list[dict], provider: str = "codex") -> dict:
     return {
         "workspace": str(workspace),
         "team_dir": str(workspace / ".team" / "current"),
@@ -310,7 +331,7 @@ def _health_state(workspace: Path, *, tasks: list[dict]) -> dict:
         "agents": {
             "worker_1": {
                 "status": "running",
-                "provider": "codex",
+                "provider": provider,
                 "window": "worker_1",
             }
         },

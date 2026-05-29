@@ -59,7 +59,7 @@ class MessagingMcpTests(unittest.TestCase):
                 detail = runtime.format_status(workspace, "fake_impl")
                 peeked = runtime.peek(workspace, "fake_impl", tail=20)
                 searched = runtime.peek(workspace, "fake_impl", search="fake_ready", context=0)
-            self.assertIn("fake_impl  IDLE  task_impl", text)
+            self.assertIn("fake_impl  WORKING  task_impl", text)
             self.assertIn("results total 0 uncollected 0 collected 0 invalid 0", text)
             self.assertIn("sid session-123", text)
             self.assertIn("via fs_watch high", text)
