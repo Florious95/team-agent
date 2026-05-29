@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +18,12 @@ from team_agent.leader import (
     _pane_is_live_leader,
     _try_readopt_leader_pane,
 )
+from team_agent.message_store import MessageStore
+from team_agent.message_store.leader_notification_log import claim_leader_notification_delivery, leader_notification_log_rows
+from team_agent.message_store.schema import initialize_schema
+from team_agent.message_store.schema_migration import table_layout
 from team_agent.messaging.leader import claim_leader_receiver
+from team_agent.messaging.leader import _send_to_leader_receiver
 from team_agent.messaging.leader_panes import (
     _leader_command_looks_usable,
     _validate_leader_receiver,
@@ -290,7 +297,43 @@ class QuickStartExternalPaneAcceptanceTests(unittest.TestCase):
         self.assertFalse(result.get("ok"), result)
         self.assertIn(result.get("reason"), {"uuid_mismatch", "owner_pane_mismatch"}, result)
 
-    def test_14_restart_preserves_top_level_spec_session_and_team_dir_identity(self) -> None:
+    def test_14_readopt_allows_owner_pane_without_injected_uuid_env(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-readopt-no-uuid-") as tmp:
+            workspace = Path(tmp)
+            pane = _pane("%3622", workspace, command=REAL_CLAUDE_CODE_BINARY_COMMAND)
+            state = {
+                "leader_receiver": {
+                    "pane_id": "%old",
+                    "provider": "claude_code",
+                    "leader_session_uuid": "owner-uuid-from-state",
+                    "owner_epoch": 4,
+                }
+            }
+            receiver = dict(state["leader_receiver"])
+            owner_record = {
+                "pane_id": "%3622",
+                "provider": "claude_code",
+                "leader_session_uuid": "owner-uuid-from-state",
+                "owner_epoch": 4,
+            }
+            targets = {"ok": True, "targets": [dict(pane)]}
+
+            readopt = _try_readopt_leader_pane(
+                workspace,
+                state,
+                receiver,
+                dict(pane),
+                targets,
+                owner_record,
+                "claude_code",
+                "manual",
+                EventLog(workspace),
+            )
+
+        self.assertIsNotNone(readopt, "readopt must use owner pane equality, not injected UUID env")
+        self.assertEqual(readopt["pane_id"], "%3622")
+
+    def test_15_restart_preserves_top_level_spec_session_and_team_dir_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-028-restart-identity-") as tmp:
             workspace = Path(tmp)
             spec, spec_path, team_dir = _write_current_team_spec(workspace)
@@ -313,7 +356,7 @@ class QuickStartExternalPaneAcceptanceTests(unittest.TestCase):
         self.assertTrue(state_after.get("session_name"), state_after)
         self.assertTrue(state_after.get("team_dir"), state_after)
 
-    def test_15_send_resolves_team_spec_from_team_dir_when_spec_path_is_missing(self) -> None:
+    def test_16_send_resolves_team_spec_from_team_dir_when_spec_path_is_missing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-028-send-team-dir-") as tmp:
             workspace = Path(tmp)
             spec, _spec_path, team_dir = _write_current_team_spec(workspace)
@@ -342,6 +385,182 @@ class QuickStartExternalPaneAcceptanceTests(unittest.TestCase):
 
         self.assertTrue(result.get("ok"), result)
         self.assertNotEqual(result.get("reason"), "target_not_in_team", result)
+
+    def test_17_worker_to_leader_external_no_uuid_pane_injects_directly_not_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-worker-leader-direct-") as tmp:
+            workspace = Path(tmp)
+            pane = _pane("%3190", workspace, command=REAL_CLAUDE_CODE_BINARY_COMMAND)
+            state = {
+                "workspace": str(workspace),
+                "leader": {"id": "leader", "provider": "claude_code"},
+                "team_owner": {
+                    "pane_id": "%3190",
+                    "provider": "claude_code",
+                    "leader_session_uuid": "legacy-owner-uuid",
+                    "owner_epoch": 7,
+                },
+                "leader_receiver": {
+                    "mode": "direct_tmux",
+                    "provider": "claude_code",
+                    "pane_id": "%3190",
+                    "owner_epoch": 7,
+                },
+            }
+            injected: list[tuple[str, str]] = []
+
+            def fake_inject(target: str, text: str, *_args, **_kwargs) -> dict:
+                injected.append((target, text))
+                return {
+                    "ok": True,
+                    "verification": "submitted",
+                    "turn_verification": "submitted",
+                    "attempts": [],
+                    "submit_attempts": [],
+                }
+
+            with patch("team_agent._legacy_pane_discovery._tmux_pane_info", return_value=dict(pane)), patch(
+                "team_agent.messaging.leader_panes.run_cmd",
+                return_value=Mock(returncode=0, stdout="Claude idle\n", stderr=""),
+            ), patch("team_agent.messaging.leader._tmux_inject_text", side_effect=fake_inject):
+                result = _send_to_leader_receiver(
+                    workspace,
+                    state,
+                    "leader",
+                    "E2E pane identity hello TOKEN-028",
+                    None,
+                    "developer",
+                    False,
+                    EventLog(workspace),
+                )
+            inbox = workspace / ".team" / "runtime" / "leader-inbox.log"
+            fallback_created = inbox.exists()
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(result.get("status"), "submitted", result)
+        self.assertEqual(result.get("channel"), "direct_tmux", result)
+        self.assertEqual(injected[0][0], "%3190")
+        self.assertIn("TOKEN-028", injected[0][1])
+        self.assertFalse(fallback_created, "direct delivery must not fall back to leader-inbox.log")
+
+    def test_18_lease_mutation_entrypoints_route_through_dual_state_writer(self) -> None:
+        mutation_sources = {
+            "runtime.takeover": runtime.takeover,
+            "runtime.quick_start": runtime.quick_start,
+            "state.populate_team_owner_from_env": __import__("team_agent.state", fromlist=["populate_team_owner_from_env"]).populate_team_owner_from_env,
+            "state.apply_first_time_leader_binding": apply_first_time_leader_binding,
+            "messaging.leader.claim_leader_receiver": claim_leader_receiver,
+        }
+
+        missing = [
+            name
+            for name, func in mutation_sources.items()
+            if "_write_lease_dual_state" not in inspect.getsource(func)
+        ]
+
+        self.assertEqual(
+            missing,
+            [],
+            "all lease mutations must converge on _write_lease_dual_state so team_owner and leader_receiver stay atomic",
+        )
+
+    def test_19_leader_notification_log_schema_keys_by_team_and_epoch_not_uuid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-schema-dedupe-") as tmp:
+            store = MessageStore(Path(tmp))
+            with store.connect() as conn:
+                rows = conn.execute("pragma table_info(leader_notification_log)").fetchall()
+
+        columns = [row["name"] for row in rows]
+        primary_key = [row["name"] for row in sorted([row for row in rows if row["pk"]], key=lambda r: r["pk"])]
+        self.assertIn("owner_team_id", columns)
+        self.assertIn("owner_epoch", columns)
+        self.assertNotIn("leader_session_uuid", primary_key)
+        self.assertEqual(primary_key, ["result_id", "owner_team_id", "owner_epoch"])
+
+    def test_20_leader_notification_claim_dedupes_same_epoch_and_reopens_after_epoch_advance(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-claim-dedupe-") as tmp:
+            store = MessageStore(Path(tmp))
+            try:
+                first = claim_leader_notification_delivery(
+                    store,
+                    result_id="res-pane-identity",
+                    owner_team_id="current",
+                    owner_epoch=7,
+                    proposed_message_id="msg-first",
+                    envelope_hash="hash",
+                    pane_id="%3190",
+                )
+                same_epoch = claim_leader_notification_delivery(
+                    store,
+                    result_id="res-pane-identity",
+                    owner_team_id="current",
+                    owner_epoch=7,
+                    proposed_message_id="msg-duplicate",
+                    envelope_hash="hash",
+                    pane_id="%3190",
+                )
+                next_epoch = claim_leader_notification_delivery(
+                    store,
+                    result_id="res-pane-identity",
+                    owner_team_id="current",
+                    owner_epoch=8,
+                    proposed_message_id="msg-after-claim",
+                    envelope_hash="hash",
+                    pane_id="%4001",
+                )
+            except TypeError as exc:
+                self.fail(f"claim_leader_notification_delivery must accept owner_epoch and not require leader_session_uuid: {exc}")
+
+        self.assertEqual(first["status"], "claimed_by_you")
+        self.assertEqual(same_epoch["status"], "already_notified_by")
+        self.assertEqual(next_epoch["status"], "claimed_by_you")
+        rows = leader_notification_log_rows(store)
+        self.assertEqual(len(rows), 2)
+
+    def test_21_legacy_uuid_dedupe_schema_migrates_to_team_epoch_key(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-migrate-dedupe-") as tmp:
+            workspace = Path(tmp)
+            db_path = workspace / ".team" / "runtime" / "team.db"
+            db_path.parent.mkdir(parents=True)
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute(
+                    """
+                    create table leader_notification_log (
+                      result_id text not null,
+                      leader_session_uuid text not null,
+                      notified_message_id text not null,
+                      notified_at text not null,
+                      leader_pane_id_at_notify text,
+                      envelope_content_hash text,
+                      owner_team_id text,
+                      primary key (result_id, leader_session_uuid)
+                    )
+                    """
+                )
+                conn.execute(
+                    "insert into leader_notification_log values (?, ?, ?, ?, ?, ?, ?)",
+                    ("res-old", "uuid-old", "msg-old", "2026-05-29T00:00:00+00:00", "%3190", "hash", "current"),
+                )
+                conn.commit()
+                initialize_schema(conn, db_path=db_path)
+                layout = table_layout(conn, "leader_notification_log")
+                row_count = conn.execute("select count(*) as n from leader_notification_log").fetchone()["n"]
+                pk_rows = conn.execute("pragma table_info(leader_notification_log)").fetchall()
+            finally:
+                conn.close()
+
+        primary_key = [row["name"] for row in sorted([row for row in pk_rows if row["pk"]], key=lambda r: r["pk"])]
+        self.assertIn("owner_epoch", layout)
+        self.assertEqual(primary_key, ["result_id", "owner_team_id", "owner_epoch"])
+        self.assertEqual(row_count, 1)
+
+    def test_22_contract_contains_non_mockable_external_claude_e2e_acceptance(self) -> None:
+        contract = (Path(__file__).parent / "contracts" / "0.2.8-quickstart-external-pane-contract.md").read_text(encoding="utf-8")
+        self.assertIn("End-To-End Real-Machine Acceptance", contract)
+        self.assertIn("official Claude Code", contract)
+        self.assertIn("no `TEAM_AGENT_LEADER_SESSION_UUID`", contract)
+        self.assertIn("not substitutable by unit\ntests", contract)
 
 
 def _pane(pane_id: str, cwd: Path, *, command: str) -> dict[str, str]:

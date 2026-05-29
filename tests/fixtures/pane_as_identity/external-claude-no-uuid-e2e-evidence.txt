@@ -1,0 +1,10 @@
+Source: .team/bugs/068-worker-hello-not-on-leader-screen-e2e.md
+Date: 2026-05-29
+Context: real machine external official Claude leader pane; no injected TEAM_AGENT_LEADER_SESSION_UUID.
+
+events.jsonl evidence:
+leader_receiver.attach_failed   reason=leader_uuid_missing  error="bound pane has no TEAM_AGENT_LEADER_SESSION_UUID"  target=%3190
+leader_receiver.delivery_failed reason=leader_not_attached   error="No direct leader tmux pane is attached. Run team-agent attach-leader."  target=None
+
+leader-inbox fallback evidence:
+developer -> leader failed: hello from developer — 实机投递测试 0.2.8

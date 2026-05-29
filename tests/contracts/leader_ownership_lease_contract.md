@@ -4,7 +4,15 @@ This contract defines Gap 39 leader ownership and receiver binding behavior for 
 
 ## Model
 
-Leader ownership is a lease. The persistent identity is the deterministic `leader_session_uuid`; pane ids are routing hints that can die or be rebound. A leader lease mutation means any acquire, claim, rebind, takeover, attach, or owner epoch advance that changes the effective owner or receiver.
+Leader ownership is a lease. The persistent routing and authorization identity
+is the tmux pane id recorded in `team_owner.pane_id`; `leader_receiver.pane_id`
+must name the same pane after every successful mutation. `owner_epoch` is the
+lease version used for races, compare-and-swap, and result-notification dedupe.
+Deterministic `leader_session_uuid`, injected `TEAM_AGENT_LEADER_*` env,
+provider, machine fingerprint, and foreground command are compatibility/audit
+metadata only; they are never required to authorize a bound leader pane. A
+leader lease mutation means any acquire, claim, rebind, takeover, attach, or
+owner epoch advance that changes the effective owner or receiver.
 
 Every lease decision is made from live evidence at decision time. Cached state fields can be input context, but never the final liveness source.
 
@@ -28,7 +36,11 @@ C8. Workspace membership is subtree containment: cwd equal to the workspace root
 
 C9. Cwd enumeration is only a superset filter. When multiple teams share one workspace, explicit `--team` or a human claim resolves the team. The runtime must over-include and broadcast rather than silently bind the wrong team.
 
-C10. Injected `TEAM_AGENT_LEADER_SESSION_UUID` remains a fast path. If present and uniquely matching one live pane, it takes precedence and avoids broadcast. Without it, cwd plus leader-shape enumeration is used.
+C10. Injected `TEAM_AGENT_LEADER_SESSION_UUID` is optional metadata. If present
+and uniquely matching one live pane it may be used as a ranking hint to avoid a
+broadcast, but absence or mismatch of this env is not an authorization failure
+when pane equality and workspace safety checks pass. Without it, cwd plus
+leader-shape enumeration is used.
 
 C11. `claim-leader`, `takeover`, and `attach-leader` converge on one lease-claim code path and therefore share identical safety gates.
 
@@ -44,7 +56,10 @@ C16. Broadcast occurs only when two or more live candidates remain after filteri
 
 C17. Every lease mutation writes `team_owner` and `leader_receiver` to both state locations in one runtime lock hold: workspace-level state and team-level state. Workspace-only or team-only writes are prohibited.
 
-C18. After any mutation, both state files must agree on `owner_uuid`, `receiver_pane_id`, and `owner_epoch`. Divergence is a detectable audited error. Existing workspace `team_owner` and team-level owner naming must represent the same fact.
+C18. After any mutation, both state files must agree on `owner_pane_id`,
+`receiver_pane_id`, and `owner_epoch`. Divergence is a detectable audited error.
+Existing workspace `team_owner` and team-level owner naming must represent the
+same fact. UUID mismatch alone is not divergence.
 
 C19. Doctor/repair detects and heals owner/receiver divergence and stale `leader_receiver` panes.
 
@@ -52,7 +67,10 @@ C20. Every acquire-on-vacant, rebind, and epoch advance emits a structured audit
 
 C21. Every refusal emits a structured audit event. Refusals include owner-gate refusal, lost epoch race, caller not leader-shaped, cwd mismatch, different user, and not-in-tmux-pane.
 
-C22. Lease audit events carry a closed-enum `reason`, redacted uuid prefix, old pane id, new pane id, host, and OS user when known. The reason enum is:
+C22. Lease audit events carry a closed-enum `reason`, old pane id, new pane id,
+owner epoch, host, and OS user when known. A redacted uuid prefix may be emitted
+as metadata if available, but it is not the identity used for authorization. The
+reason enum is:
 `vacant_acquired`, `previous_owner_pane_dead`, `previous_owner_alive_refused`, `owner_epoch_advanced`, `force_confirm_required`, `caller_pane_missing`, `caller_cwd_mismatch`, `not_in_tmux_pane`.
 
 C23. `coordinator.pid` false-negative status is a separate gap. This slice may read coordinator state for diagnostics, but leader lease liveness must not depend on cached coordinator pid state.
