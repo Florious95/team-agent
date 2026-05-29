@@ -136,6 +136,40 @@ B2. Worker idle, worker to leader: after an idle challenge, the worker produces
 a bounded leader-bound response that renders into the disposable capture
 receiver and not the live leader pane.
 
+C18. B1/B2 worker-to-leader isolation must not rely on in-process state swaps.
+The worker-origin send/report path must resolve its leader receiver by reading
+the throwaway workspace's persisted state. If live persisted state contains
+`leader_receiver.pane_id=%live-fake` and the throwaway persisted state contains
+`leader_receiver.pane_id=%capture`, the worker must resolve `%capture`, and the
+selftest JSON must expose `checks.throwaway_state.{workspace,
+persisted_leader_receiver_pane_id,worker_resolved_receiver_pane_id}`.
+
+C19. The throwaway workspace is outside the live workspace, under
+`/tmp/ta-selftest-comms-<runid>/workspace`. The live workspace's persistent
+Team Agent files are byte-identical before and after `doctor --comms`, including
+state, team.db, logs, and `.team/runtime/*`. JSON must include
+`checks.live_workspace_unchanged.status`.
+
+C20. Live-leader pollution is a hard failure. The run token must be absent from
+all four live sources: live pane capture before the probe, live pane capture
+after probe and cleanup, live workspace messages table, and live workspace event
+log leader-delivery events. Any hit sets
+`checks.live_leader_pollution.status=fail`, top-level `ok=false`, and reports
+`{live_pane_id, token, detected_in}`. A disposable capture hit does not offset a
+live hit.
+
+C21. Throwaway cleanup is four independent checks:
+`cleanup.tmux`, `cleanup.workspace`, `cleanup.coordinator`, and
+`cleanup.worker`. Any non-pass subcheck makes top-level `ok=false`. Startup
+sweep must clean both stale `ta-selftest-comms-*` tmux sessions and stale
+`/tmp/ta-selftest-comms-*` directories, with
+`selftest.swept_stale.{tmux,workspaces}` arrays.
+
+C22. The throwaway team must not register itself in global or live registries.
+After the run, the run id may only appear under
+`/tmp/ta-selftest-comms-<runid>/` and explicit test/artifact logs. JSON must
+include `checks.global_registry_pollution`.
+
 No selftest path may test or perform preemption, Ctrl+C, or interrupt behavior.
 
 ## Feature B: Idle Accuracy
@@ -171,3 +205,10 @@ A realistic tester must run one external-leader, real-worker flow:
 5. No `ta-selftest-comms-*` sessions remain after success or failure.
 6. `team-agent status --json` shows an active outputting worker as `WORKING` or
    `RUNNING`, not `IDLE`; after provider idle prompt returns, it shows `IDLE`.
+7. C18 full causal chain: run a worker subprocess inside the throwaway
+   workspace and deliberately set the live workspace receiver to a fake live
+   pane. The worker's MCP `send_message(to="leader")` must resolve the
+   throwaway persisted capture receiver, not any in-memory swap.
+8. Bug-073 negative control: intentionally mislaunch the throwaway worker with
+   the live workspace. The live pollution scan must detect the token in the live
+   pane and fail the selftest while still completing cleanup.

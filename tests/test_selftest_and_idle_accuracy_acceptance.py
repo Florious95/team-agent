@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import importlib
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -193,6 +195,150 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
                 self.assertEqual(matrix["leader_notification_ack"]["status"], "pass")
                 self.assertTrue(matrix["capture_contains_token"], matrix)
                 self.assertFalse(matrix["live_leader_contains_token"], matrix)
+
+    def test_c18_c19_worker_to_leader_uses_persisted_throwaway_receiver_and_live_files_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-live-") as tmp:
+            workspace = Path(tmp)
+            live_state = _health_state(workspace, tasks=[])
+            live_state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
+            live_state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
+            save_runtime_state(workspace, live_state)
+            MessageStore(workspace).create_message(None, "leader", "worker_1", "live durable row", owner_team_id="current")
+            EventLog(workspace).write("live.baseline", stable=True)
+            before = _persistent_hashes(workspace)
+            comms = importlib.import_module("team_agent.diagnose.comms")
+
+            result = comms.run_comms_selftest(
+                workspace,
+                team="current",
+                driver=FakeSelftestDriver(
+                    matrix_case="B1_B2_WORKER_TO_LEADER",
+                    state_before=live_state,
+                    worker_resolved_receiver_pane_id="%capture",
+                ),
+            )
+            after = _persistent_hashes(workspace)
+
+        self.assertEqual(after, before)
+        self.assertIn("throwaway_state", result["checks"], result)
+        throwaway = result["checks"]["throwaway_state"]
+        self.assertTrue(Path(throwaway["workspace"]).is_absolute(), throwaway)
+        self.assertIn("/ta-selftest-comms-", throwaway["workspace"], throwaway)
+        self.assertEqual(throwaway["persisted_leader_receiver_pane_id"], "%capture")
+        self.assertEqual(throwaway["worker_resolved_receiver_pane_id"], "%capture")
+        self.assertNotEqual(throwaway["worker_resolved_receiver_pane_id"], "%live-fake")
+        self.assertEqual(result["checks"]["live_workspace_unchanged"]["status"], "pass")
+
+    def test_c20_live_leader_pollution_scans_pane_store_and_event_log_as_hard_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c20-live-") as tmp:
+            workspace = Path(tmp)
+            token = "selftest-comms-pollute073"
+            state = _health_state(workspace, tasks=[])
+            state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
+            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
+            save_runtime_state(workspace, state)
+            MessageStore(workspace).create_message(None, "selftest_worker", "leader", f"live store pollution {token}", owner_team_id="current")
+            EventLog(workspace).write("leader_receiver.submitted", target_pane_id="%live-fake", content=f"live event pollution {token}")
+            comms = importlib.import_module("team_agent.diagnose.comms")
+
+            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex="pollute073")):
+                result = comms.run_comms_selftest(
+                    workspace,
+                    team="current",
+                    driver=FakeSelftestDriver(
+                        matrix_case="B1_B2_WORKER_TO_LEADER",
+                        capture_text=f"disposable capture also has {token}",
+                        live_capture_before="no token here",
+                        live_capture_after=f"live pane pollution {token}",
+                    ),
+                )
+
+        self.assertIn("live_leader_pollution", result["checks"], result)
+        pollution = result["checks"]["live_leader_pollution"]
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(pollution["status"], "fail", pollution)
+        self.assertEqual(pollution["live_pane_id"], "%live-fake")
+        self.assertEqual(pollution["token"], token)
+        self.assertGreaterEqual(set(pollution["detected_in"]), {"capture_after", "message_store", "event_log"})
+
+    def test_c21_cleanup_reports_four_subsystems_and_startup_sweeps_tmux_and_workspaces(self) -> None:
+        run_id = "c21cleanup073"
+        stale_tmux = f"{SELFTEST_PREFIX}stale-c21"
+        stale_dir = Path(tempfile.gettempdir()) / f"{SELFTEST_PREFIX}stale-c21"
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        sessions = {stale_tmux}
+        try:
+            with tempfile.TemporaryDirectory(prefix="ta-selftest-c21-live-") as tmp:
+                workspace = Path(tmp)
+                save_runtime_state(workspace, _health_state(workspace, tasks=[]))
+
+                def fake_run_cmd(args: list[str], timeout: int = 10) -> SimpleNamespace:
+                    if args[:3] == ["tmux", "ls", "-F"]:
+                        return SimpleNamespace(returncode=0, stdout="\n".join(sorted(sessions)) + ("\n" if sessions else ""), stderr="")
+                    if args[:2] == ["tmux", "kill-session"]:
+                        target = args[args.index("-t") + 1]
+                        sessions.discard(target)
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    if args[:2] == ["tmux", "new-session"]:
+                        sessions.add(args[args.index("-s") + 1])
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    if args[:3] == ["tmux", "display-message", "-p"]:
+                        return SimpleNamespace(returncode=0, stdout="%capture\n", stderr="")
+                    if args[:3] == ["tmux", "capture-pane", "-p"]:
+                        return SimpleNamespace(returncode=0, stdout=f"selftest-comms-{run_id}\n", stderr="")
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+                comms = importlib.import_module("team_agent.diagnose.comms")
+                with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch.object(
+                    comms,
+                    "_check_receiver_binding",
+                    return_value={"status": "pass"},
+                ), patch.object(
+                    comms,
+                    "_check_leader_to_worker",
+                    return_value=_passing_ack(),
+                ), patch.object(
+                    comms,
+                    "_check_worker_to_leader",
+                    return_value=_passing_ack(),
+                ), patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
+                    result = comms.run_comms_selftest(workspace, team="current")
+
+            cleanup = result["checks"]["cleanup"]
+            self.assertTrue(result.get("events"), result)
+            swept = result["events"][0]
+            self.assertIsInstance(swept, dict, result)
+            self.assertEqual(swept["event"], "selftest.swept_stale", result)
+            self.assertIn(stale_tmux, swept["tmux"])
+            self.assertIn(str(stale_dir), swept["workspaces"])
+            for key in ("tmux", "workspace", "coordinator", "worker"):
+                self.assertEqual(cleanup[key]["status"], "pass", cleanup)
+            self.assertTrue(result.get("ok"), result)
+        finally:
+            shutil.rmtree(stale_dir, ignore_errors=True)
+
+    def test_c22_throwaway_runid_does_not_pollute_global_registries(self) -> None:
+        run_id = "global073"
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c22-live-") as tmp, tempfile.TemporaryDirectory(prefix="ta-selftest-c22-home-") as home:
+            workspace = Path(tmp)
+            home_path = Path(home)
+            registry = home_path / ".team-agent" / "teams.json"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(json.dumps({"teams": [run_id]}), encoding="utf-8")
+            save_runtime_state(workspace, _health_state(workspace, tasks=[]))
+            comms = importlib.import_module("team_agent.diagnose.comms")
+
+            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch(
+                "pathlib.Path.home",
+                return_value=home_path,
+            ):
+                result = comms.run_comms_selftest(workspace, team="current", driver=FakeSelftestDriver(matrix_case="B1_B2_WORKER_TO_LEADER"))
+
+        self.assertIn("global_registry_pollution", result["checks"], result)
+        pollution = result["checks"]["global_registry_pollution"]
+        self.assertFalse(result.get("ok"), result)
+        self.assertEqual(pollution["status"], "fail", pollution)
+        self.assertIn(str(registry), pollution["detected_paths"])
 
     def test_doctor_comms_does_not_deliver_preexisting_pending_messages(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-no-drain-") as tmp:
@@ -386,6 +532,7 @@ class FakeSelftestDriver:
         state_before: dict | None = None,
         matrix_case: str | None = None,
         idle_execution: dict | None = None,
+        **kwargs,
     ) -> None:
         self.worker_to_leader = worker_to_leader or {"ok": True, "status": "submitted", "visible": True, "submitted": True}
         self.capture_text = capture_text if capture_text is not None else "SELFTEST_TOKEN rendered"
@@ -399,6 +546,8 @@ class FakeSelftestDriver:
         self.matrix_case = matrix_case
         self.idle_execution = idle_execution or {"status": "pass"}
         self._sessions = list(self.stale_sessions)
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
     def remaining_sessions(self) -> list[str]:
         return list(self._sessions)
@@ -466,6 +615,29 @@ def _visible_command_words(help_text: str) -> set[str]:
 
 def _ack_statuses(matrix_cell: dict) -> dict[str, str]:
     return {key: value.get("status") for key, value in matrix_cell.items() if key.endswith("_ack")}
+
+
+def _passing_ack() -> dict:
+    return {
+        "status": "pass",
+        "enqueue_ack": {"status": "pass"},
+        "delivery_ack": {"status": "pass"},
+        "execution_ack": {"status": "pass"},
+        "leader_notification_ack": {"status": "pass"},
+    }
+
+
+def _persistent_hashes(workspace: Path) -> dict[str, str]:
+    roots = [workspace / ".team", workspace / "team.spec.yaml"]
+    out: dict[str, str] = {}
+    for root in roots:
+        if not root.exists():
+            continue
+        paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
+        for path in sorted(paths):
+            rel = path.relative_to(workspace).as_posix()
+            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
 
 
 def _idle_prompt_fixture(name: str) -> str:
