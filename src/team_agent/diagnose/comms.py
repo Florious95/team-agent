@@ -42,7 +42,6 @@ def run_comms_selftest(
         content = f"{content}\n[token:{token}]"
 
     swept = _sweep_stale_sessions(driver, event_log)
-    cleanup_sessions.extend(swept)
     events: list[str] = ["selftest.swept_stale"] if swept else []
     disposable: dict[str, Any] | None = None
     try:
@@ -55,7 +54,7 @@ def run_comms_selftest(
                 checks["state_readonly"] = {"status": "fail", "reason": "owner_or_receiver_mutated"}
             else:
                 checks["state_readonly"] = {"status": "pass"}
-            return _finish(run_id, token, gate, {**checks, "cleanup": _cleanup_sessions(driver, cleanup_sessions)}, events=events)
+            return _finish(run_id, token, gate, {**checks, "cleanup": _cleanup_sessions(driver, cleanup_sessions, already_killed=swept)}, events=events)
         state_copy = copy.deepcopy(state)
         checks["receiver_binding"] = _check_receiver_binding(workspace, state_copy, driver)
         disposable = _create_disposable_receiver(driver, run_id)
@@ -88,7 +87,7 @@ def run_comms_selftest(
     except Exception as exc:
         checks.setdefault("worker_to_leader", {"status": "fail", "reason": type(exc).__name__, "error": str(exc)})
     finally:
-        checks["cleanup"] = _cleanup_sessions(driver, cleanup_sessions)
+        checks["cleanup"] = _cleanup_sessions(driver, cleanup_sessions, already_killed=swept)
     return _finish(run_id, token, gate, checks, events=events)
 
 
@@ -431,11 +430,11 @@ def _sweep_stale_sessions(driver: CommsSelftestDriver, event_log: EventLog) -> l
     return killed
 
 
-def _cleanup_sessions(driver: CommsSelftestDriver, sessions: list[str]) -> dict[str, Any]:
+def _cleanup_sessions(driver: CommsSelftestDriver, sessions: list[str], *, already_killed: list[str] | None = None) -> dict[str, Any]:
     override = _driver_call(driver, "cleanup_sessions", sessions, default=None)
     if isinstance(override, dict):
         return _normalize_check(override)
-    killed: list[str] = []
+    killed: list[str] = list(dict.fromkeys(already_killed or []))
     failed: list[dict[str, str]] = []
     for session in list(dict.fromkeys(item for item in sessions if item)):
         if _driver_is_synthetic(driver):
@@ -450,6 +449,8 @@ def _cleanup_sessions(driver: CommsSelftestDriver, sessions: list[str]) -> dict[
         proc = _driver_run_cmd(driver, ["tmux", "kill-session", "-t", session])
         if proc.returncode == 0:
             killed.append(session)
+        elif _tmux_session_missing(proc.stderr):
+            continue
         else:
             failed.append({"session": session, "error": proc.stderr.strip() or "kill-session failed"})
     if failed:
@@ -459,6 +460,11 @@ def _cleanup_sessions(driver: CommsSelftestDriver, sessions: list[str]) -> dict[
     else:
         status = "pass"
     return {"status": status, "killed_sessions": killed, "created_sessions": list(dict.fromkeys(item for item in sessions if item)), "failed": failed}
+
+
+def _tmux_session_missing(stderr: str) -> bool:
+    text = str(stderr or "").lower()
+    return "can't find session" in text or "no such session" in text
 
 
 def _list_selftest_sessions(driver: CommsSelftestDriver) -> list[str]:
