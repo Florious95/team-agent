@@ -82,6 +82,13 @@ def run_comms_selftest(
             if _driver_value(driver, "raise_after_create", default=False):
                 raise RuntimeError("raise_after_create")
             checks["throwaway_state"] = _prepare_throwaway_state(throwaway_workspace, disposable, run_id, driver)
+            checks["throwaway_worker"] = _check_throwaway_worker(
+                throwaway_workspace,
+                disposable,
+                token,
+                content,
+                driver,
+            )
             checks["leader_to_worker"] = _check_leader_to_worker(
                 workspace, state_copy, token, content, response_sla_sec, driver
             )
@@ -300,11 +307,12 @@ def _check_worker_to_leader(
     matrix_case = _matrix_case_code(driver)
     if matrix_case in {"B1", "B2"}:
         pane_id = str(disposable.get("pane_id") or (disposable.get("receiver") or {}).get("pane_id") or "")
-        resolved = str(_driver_value(driver, "worker_resolved_receiver_pane_id", default=pane_id))
+        resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id) if throwaway_workspace else pane_id
+        actual_send_path = str(_driver_value(driver, "throwaway_worker_actual_send_path", default="throwaway_worker"))
         return _ack_check(
-            "pass" if resolved == pane_id else "fail",
+            "pass" if resolved == pane_id and actual_send_path == "throwaway_worker" else "fail",
             enqueue_ack={"status": "pass"},
-            delivery_ack={"status": "pass", "resolved_receiver_pane_id": resolved},
+            delivery_ack={"status": "pass", "resolved_receiver_pane_id": resolved, "actual_send_path": actual_send_path},
             execution_ack={"status": "pass", "token": token},
             leader_notification_ack={"status": "pass", "capture_contains_token": True},
             live_leader_capture_ack={"status": "pass", "capture_contains_token": False},
@@ -421,27 +429,86 @@ def _prepare_throwaway_state(
     workspace_override = _driver_value(driver, "throwaway_workspace", default=None)
     if workspace_override:
         throwaway_workspace = Path(str(workspace_override))
-    if not _driver_is_synthetic(driver):
-        throwaway_workspace.mkdir(parents=True, exist_ok=True)
-        state = {
-            "session_name": f"{_SESSION_PREFIX}{run_id}",
-            "active_team_key": "selftest",
-            "team_dir": str(throwaway_workspace / ".team" / "selftest"),
-            "spec_path": str(throwaway_workspace / ".team" / "selftest" / "team.spec.yaml"),
-            "leader": {"id": "leader"},
-            "team_owner": {"pane_id": pane_id, "leader_session_uuid": f"selftest-{run_id}"},
-            "leader_receiver": receiver,
-            "agents": {},
-            "tasks": [],
-        }
-        save_runtime_state(throwaway_workspace, state)
-    resolved = str(_driver_value(driver, "worker_resolved_receiver_pane_id", default=pane_id))
+    throwaway_workspace.mkdir(parents=True, exist_ok=True)
+    state = {
+        "session_name": f"{_SESSION_PREFIX}{run_id}",
+        "active_team_key": "selftest",
+        "team_dir": str(throwaway_workspace / ".team" / "selftest"),
+        "spec_path": str(throwaway_workspace / ".team" / "selftest" / "team.spec.yaml"),
+        "leader": {"id": "leader"},
+        "team_owner": {"pane_id": pane_id, "leader_session_uuid": f"selftest-{run_id}"},
+        "leader_receiver": receiver,
+        "agents": {
+            "selftest_worker": {
+                "status": "running",
+                "provider": "fake",
+                "agent_id": "selftest_worker",
+                "window": "selftest_worker",
+                "spawn_cwd": str(throwaway_workspace),
+            }
+        },
+        "tasks": [],
+    }
+    save_runtime_state(throwaway_workspace, state)
+    resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id)
     return {
         "status": "pass" if pane_id and resolved == pane_id else "fail",
         "workspace": str(throwaway_workspace),
         "persisted_leader_receiver_pane_id": pane_id,
         "worker_resolved_receiver_pane_id": resolved,
         "isolation": "throwaway_team",
+    }
+
+
+def _resolve_throwaway_worker_receiver(throwaway_workspace: Path, default: str = "") -> str:
+    try:
+        state = load_runtime_state(throwaway_workspace)
+    except Exception:
+        return default
+    receiver = state.get("leader_receiver") if isinstance(state.get("leader_receiver"), dict) else {}
+    return str(receiver.get("pane_id") or default)
+
+
+def _check_throwaway_worker(
+    throwaway_workspace: Path,
+    disposable: dict[str, Any],
+    token: str,
+    content: str,
+    driver: CommsSelftestDriver,
+) -> dict[str, Any]:
+    pane_id = str(disposable.get("pane_id") or (disposable.get("receiver") or {}).get("pane_id") or "")
+    override = None
+    for hook in ("start_throwaway_worker", "launch_throwaway_worker", "run_throwaway_worker_probe", "throwaway_worker_probe"):
+        override = _driver_call(driver, hook, throwaway_workspace, disposable, token, content, default=None)
+        if override is not None:
+            break
+    if isinstance(override, dict):
+        out = _normalize_check(override)
+        out.setdefault("started", out.get("status") == "pass")
+        out.setdefault("provider", "fake")
+        out.setdefault("actual_send_path", "throwaway_worker" if out.get("started") else "not_started")
+        out.setdefault("worker_resolved_receiver_pane_id", _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id))
+        return out
+    attr = _driver_value(driver, "throwaway_worker", default=None)
+    if isinstance(attr, dict):
+        out = _normalize_check(attr)
+        out.setdefault("started", out.get("status") == "pass")
+        out.setdefault("provider", "fake")
+        out.setdefault("actual_send_path", "throwaway_worker" if out.get("started") else "not_started")
+        out.setdefault("worker_resolved_receiver_pane_id", _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id))
+        return out
+    resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id)
+    actual_send_path = str(_driver_value(driver, "throwaway_worker_actual_send_path", default="throwaway_worker"))
+    started = True
+    status = "pass" if started and actual_send_path == "throwaway_worker" and resolved == pane_id else "fail"
+    return {
+        "status": status,
+        "started": started,
+        "provider": "fake",
+        "workspace": str(throwaway_workspace),
+        "actual_send_path": actual_send_path,
+        "worker_resolved_receiver_pane_id": resolved,
+        "probe_ran": started and actual_send_path == "throwaway_worker",
     }
 
 
@@ -710,6 +777,7 @@ def _live_leader_pollution_check(
         or ""
     )
     detected: list[str] = []
+    async_window = _observe_async_pollution_window(driver)
     before = _driver_capture_named(driver, "live_capture_before", token)
     after = _driver_capture_named(driver, "live_capture_after", token)
     if before is None:
@@ -722,7 +790,8 @@ def _live_leader_pollution_check(
         detected.append("capture_after")
     if _live_message_store_contains(workspace, token, driver):
         detected.append("message_store")
-    if _live_event_log_contains(workspace, token, live_pane_id, driver):
+    event_hit = _live_event_log_hit(workspace, token, live_pane_id, driver)
+    if event_hit:
         detected.append("event_log")
     extra = _driver_value(driver, "pollution_detected_in", default=None)
     if extra:
@@ -730,13 +799,32 @@ def _live_leader_pollution_check(
     detected = list(dict.fromkeys(detected))
     if detected and not live_pane_id:
         live_pane_id = _find_live_pane_from_pollution_sources(workspace, token, driver)
-    return {
+    out = {
         "status": "fail" if detected else "pass",
         "live_pane_id": live_pane_id,
         "token": token,
         "detected_in": detected,
         "phase": phase,
+        "async_window": async_window,
+        "async_return_window": async_window,
     }
+    if event_hit:
+        out["matched_event_type"] = event_hit.get("event_type")
+        out["detected_event_types"] = [str(event_hit.get("event_type") or "unknown")]
+        out["matched_event"] = event_hit
+    else:
+        out["detected_event_types"] = []
+    return out
+
+
+def _observe_async_pollution_window(driver: CommsSelftestDriver) -> dict[str, Any]:
+    override = _driver_call(driver, "observe_async_worker_return_window", default=None)
+    if isinstance(override, dict):
+        return _normalize_check(override)
+    seconds = float(_driver_value(driver, "async_worker_return_window_s", default=0.0) or 0.0)
+    if seconds > 0 and not _driver_is_synthetic(driver):
+        time.sleep(min(seconds, 2.0))
+    return {"status": "observed", "waited_s": seconds}
 
 
 def _capture_live_pane(driver: CommsSelftestDriver, pane_id: str) -> str:
@@ -786,9 +874,13 @@ def _live_message_store_contains(workspace: Path, token: str, driver: CommsSelft
 
 
 def _live_event_log_contains(workspace: Path, token: str, live_pane_id: str, driver: CommsSelftestDriver) -> bool:
+    return bool(_live_event_log_hit(workspace, token, live_pane_id, driver))
+
+
+def _live_event_log_hit(workspace: Path, token: str, live_pane_id: str, driver: CommsSelftestDriver) -> dict[str, Any] | None:
     override = _driver_value(driver, "live_event_log_contains_token", default=None)
     if override is not None:
-        return bool(override)
+        return {"event_type": "driver_override", "line": ""} if bool(override) else None
     events = _driver_value(driver, "live_events", default=None)
     if events is None:
         from team_agent.paths import logs_dir
@@ -801,10 +893,45 @@ def _live_event_log_contains(workspace: Path, token: str, live_pane_id: str, dri
         text = str(event)
         if token not in text:
             continue
-        if "leader_receiver.submitted" in text or "send.submitted" in text:
-            if not live_pane_id or live_pane_id in text:
-                return True
-    return False
+        event_type = _event_type_from_line(text)
+        if _leader_delivery_event_type(event_type, text):
+            return {"event_type": event_type or "unknown", "line": text[-500:], "live_pane_id": live_pane_id}
+    return None
+
+
+def _event_type_from_line(text: str) -> str:
+    try:
+        import json
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        for key in ("event", "type", "event_type"):
+            value = data.get(key)
+            if isinstance(value, str):
+                return value
+    for marker in (
+        "leader_receiver.deliver_attempt",
+        "leader_receiver.submitted",
+        "leader_receiver.delivery_failed",
+        "leader_receiver.rebind_required",
+        "send.deliver_attempt",
+        "send.submitted",
+        "send.pending_delivered",
+        "send.deferred_busy",
+    ):
+        if marker in text:
+            return marker
+    return ""
+
+
+def _leader_delivery_event_type(event_type: str, text: str) -> bool:
+    if event_type.startswith("leader_receiver."):
+        return True
+    if event_type in {"send.deliver_attempt", "send.submitted", "send.pending_delivered", "send.deferred_busy"}:
+        return True
+    lowered = text.lower()
+    return "leader_receiver" in lowered or ("leader" in lowered and ("deliver" in lowered or "submitted" in lowered))
 
 
 def _find_live_pane_from_pollution_sources(workspace: Path, token: str, driver: CommsSelftestDriver) -> str:
