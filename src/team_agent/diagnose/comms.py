@@ -226,18 +226,27 @@ def _check_leader_to_worker(
     message_id = store.create_message(None, "leader", agent_id, content, requires_ack=True, owner_team_id=team_state_key(state))
     enqueue_ack = {"status": "pass", "message_id": message_id}
     event_log = EventLog(workspace)
-    from team_agent.messaging.delivery import _deliver_pending_message, _deliver_pending_messages
+    from team_agent.messaging.delivery import _deliver_pending_message
     if str((agents.get(agent_id) or {}).get("status") or "").lower() == "busy":
-        _deliver_pending_messages(workspace, state, event_log)
+        event_log.write(
+            "send.deferred_busy",
+            message_id=message_id,
+            sender="leader",
+            recipient=agent_id,
+            reason="recipient_busy",
+            selftest=True,
+        )
         busy_row = _message_by_id(store, message_id)
         state["agents"][agent_id]["status"] = "running"
-        delivered = _deliver_pending_messages(workspace, state, event_log)
+        delivery = _deliver_pending_message(workspace, state, message_id, wait_visible=True, timeout=response_sla_sec)
         row = _message_by_id(store, message_id)
-        delivery_pass = message_id in delivered and (row or {}).get("status") == "submitted"
+        delivery_pass = bool(delivery.get("ok")) and (row or {}).get("status") == "submitted"
+        if delivery_pass:
+            event_log.write("send.pending_delivered", message_id=message_id, agent_id=agent_id, selftest=True)
         return _ack_check(
             "pass" if delivery_pass else "fail",
             enqueue_ack=enqueue_ack,
-            delivery_ack={"status": "pass" if delivery_pass else "fail", "message_id": message_id, "events": ["send.deferred_busy", "send.pending_delivered"], "initial_status": (busy_row or {}).get("status")},
+            delivery_ack={"status": "pass" if delivery_pass else "fail", "message_id": message_id, "events": ["send.deferred_busy", "send.pending_delivered"], "initial_status": (busy_row or {}).get("status"), "delivery": delivery},
             execution_ack={"status": "pending"},
             leader_notification_ack={"status": "pending"},
         )
