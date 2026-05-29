@@ -33,8 +33,8 @@ MANAGED_TABLE_LAYOUTS: dict[str, tuple[str, ...]] = {
         "status", "created_at", "completed_at", "result_id", "notified_message_id", "error",
     ),
     "leader_notification_log": (
-        "result_id", "leader_session_uuid", "notified_message_id", "notified_at",
-        "leader_pane_id_at_notify", "envelope_content_hash", "owner_team_id",
+        "result_id", "owner_team_id", "owner_epoch", "leader_session_uuid",
+        "notified_message_id", "notified_at", "leader_pane_id_at_notify", "envelope_content_hash",
     ),
 }
 
@@ -135,13 +135,14 @@ CREATE_TABLE_SQL: dict[str, str] = {
     "leader_notification_log": """
         create table if not exists {table} (
           result_id text not null,
-          leader_session_uuid text not null,
+          owner_team_id text not null default '',
+          owner_epoch integer not null default 0,
+          leader_session_uuid text,
           notified_message_id text not null,
           notified_at text not null,
           leader_pane_id_at_notify text,
           envelope_content_hash text,
-          owner_team_id text,
-          primary key (result_id, leader_session_uuid)
+          primary key (result_id, owner_team_id, owner_epoch)
         )
     """,
 }
@@ -149,6 +150,7 @@ CREATE_TABLE_SQL: dict[str, str] = {
 
 INDEX_SQL: tuple[str, ...] = (
     "create index if not exists idx_leader_notification_log_uuid on leader_notification_log(leader_session_uuid, notified_at)",
+    "create index if not exists idx_leader_notification_log_team_epoch on leader_notification_log(owner_team_id, owner_epoch, notified_at)",
     "create index if not exists idx_messages_owner_team_id on messages(owner_team_id)",
     "create index if not exists idx_scheduled_events_owner_team_id on scheduled_events(owner_team_id)",
     "create index if not exists idx_agent_health_owner_team_id on agent_health(owner_team_id)",

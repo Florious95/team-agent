@@ -85,10 +85,14 @@ def notify_result_watchers(
     # The peek is NOT the dedupe primitive — the atomic INSERT OR IGNORE at injection is.
     result_id_str = str(result.get("result_id") or "") or None
     if result_id_str:
-        leader_uuid = _resolve_leader_session_uuid(workspace, primary.get("owner_team_id"))
-        if leader_uuid:
+        leader_identity = _resolve_leader_notification_identity(workspace, primary.get("owner_team_id"))
+        if leader_identity:
             prior = peek_leader_notification(
-                store, result_id=result_id_str, leader_session_uuid=leader_uuid,
+                store,
+                result_id=result_id_str,
+                leader_session_uuid=leader_identity.get("leader_session_uuid"),
+                owner_team_id=primary.get("owner_team_id"),
+                owner_epoch=leader_identity.get("owner_epoch"),
             )
             if prior:
                 notified.append(_mark_watcher_dedupe_skip(
@@ -96,7 +100,7 @@ def notify_result_watchers(
                     prior["notified_message_id"],
                     dedupe_reason or "injection_log_already_notified",
                     notified_at=prior.get("notified_at"),
-                    leader_session_uuid=leader_uuid,
+                    leader_session_uuid=leader_identity.get("leader_session_uuid"),
                 ))
                 return notified
         # Legacy compat: watcher.notified_message_id set by a prior path (Gap 32 reversal of
@@ -141,6 +145,26 @@ def _resolve_leader_session_uuid(workspace: Path, owner_team_id: str | None) -> 
             return None
         owner = state.get("team_owner") or {}
         return str(owner.get("leader_session_uuid") or "") or None
+    except Exception:
+        return None
+
+
+def _resolve_leader_notification_identity(workspace: Path, owner_team_id: str | None) -> dict[str, Any] | None:
+    try:
+        from team_agent.messaging.deps import load_runtime_state, team_state_key
+        state = load_runtime_state(workspace)
+        if owner_team_id and isinstance(state.get("teams"), dict):
+            scoped = state["teams"].get(owner_team_id)
+            if isinstance(scoped, dict):
+                state = scoped
+        elif owner_team_id and team_state_key(state) != owner_team_id:
+            return None
+        owner = state.get("team_owner") or {}
+        receiver = state.get("leader_receiver") or {}
+        return {
+            "leader_session_uuid": str(owner.get("leader_session_uuid") or receiver.get("leader_session_uuid") or "") or None,
+            "owner_epoch": int(owner.get("owner_epoch") or receiver.get("owner_epoch") or 0),
+        }
     except Exception:
         return None
 

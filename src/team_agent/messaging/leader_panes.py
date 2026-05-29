@@ -188,6 +188,9 @@ def _rediscover_leader_receiver(
 
 
 def _target_matches_owner_identity(target: dict[str, Any], owner_identity: dict[str, Any]) -> bool:
+    owner_pane = str((owner_identity or {}).get("pane_id") or "")
+    if owner_pane and str(target.get("pane_id") or "") == owner_pane:
+        return True
     expected_uuid = owner_identity.get("leader_session_uuid")
     if expected_uuid:
         actual_uuid = _target_leader_session_uuid(target)
@@ -350,7 +353,7 @@ def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
             "pane": pane_info,
         }
     expected_uuid = receiver.get("leader_session_uuid")
-    if expected_uuid:
+    if expected_uuid and _target_leader_session_uuid(pane_info):
         actual_uuid = _leader_uuid_for_bound_pane(receiver, pane_info)
         if not actual_uuid:
             return {"ok": False, "reason": "leader_uuid_missing", "error": "bound pane has no TEAM_AGENT_LEADER_SESSION_UUID", "pane": pane_info}

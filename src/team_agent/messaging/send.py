@@ -68,7 +68,11 @@ def _send_message_unlocked(
             return ambiguous
     state = select_runtime_state(workspace, team)
     gate = check_team_owner(state)
-    spec_path = Path(state.get("spec_path", workspace / "team.spec.yaml"))
+    spec_path = Path(state.get("spec_path") or workspace / "team.spec.yaml")
+    if not spec_path.exists() and state.get("team_dir"):
+        candidate = Path(str(state["team_dir"])) / "team.spec.yaml"
+        if candidate.exists():
+            spec_path = candidate
     spec = load_spec(spec_path)
     event_log = EventLog(workspace)
     if gate:

@@ -74,12 +74,13 @@ RESULT_WATCHER_COLUMNS = {
 }
 LEADER_NOTIFICATION_LOG_COLUMNS = {
     "result_id",
+    "owner_team_id",
+    "owner_epoch",
     "leader_session_uuid",
     "notified_message_id",
     "notified_at",
     "leader_pane_id_at_notify",
     "envelope_content_hash",
-    "owner_team_id",
 }
 
 
@@ -253,8 +254,9 @@ def initialize_schema(conn: sqlite3.Connection, db_path: Path | None = None) -> 
             RESULT_WATCHER_COLUMNS,
             {"owner_team_id": "alter table result_watchers add column owner_team_id text"},
         )
-        # Stage 12 (Gap 26 ∩ Gap 32 roundtable consolidation 2026-05-26): dedupe leader
-        # notifications at the injection boundary, keyed by (result_id, leader_session_uuid).
+        # Dedupe leader notifications at the injection boundary by
+        # (result_id, owner_team_id, owner_epoch). leader_session_uuid remains
+        # nullable compatibility/audit metadata.
         # UNIQUE primary key + INSERT OR IGNORE in claim_leader_notification_delivery gives
         # atomic exactly-once without an advisory lock. Retires the bad6484 watcher-table
         # UPSERT approach.
@@ -262,13 +264,14 @@ def initialize_schema(conn: sqlite3.Connection, db_path: Path | None = None) -> 
             """
             create table if not exists leader_notification_log (
               result_id text not null,
-              leader_session_uuid text not null,
+              owner_team_id text not null default '',
+              owner_epoch integer not null default 0,
+              leader_session_uuid text,
               notified_message_id text not null,
               notified_at text not null,
               leader_pane_id_at_notify text,
               envelope_content_hash text,
-              owner_team_id text,
-              primary key (result_id, leader_session_uuid)
+              primary key (result_id, owner_team_id, owner_epoch)
             )
             """
         )

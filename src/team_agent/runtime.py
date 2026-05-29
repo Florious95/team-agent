@@ -749,7 +749,10 @@ def takeover(workspace: Path, team: str | None = None, confirm: bool = False) ->
             }
         team_entry["team_owner"] = new_owner
         teams[team_id] = team_entry
-        save_runtime_state(workspace, state)
+        if team_state_key(state) == team_id:
+            state["team_owner"] = new_owner
+        from team_agent.leader import _write_lease_dual_state
+        _write_lease_dual_state(workspace, state)
         emit_owner_bound_event(
             workspace,
             caller_pane_id=bind.get("caller_pane_id", ""),
@@ -852,7 +855,8 @@ def quick_start(
         teams[resolved_team_id] = team_entry
         if not state.get("active_team_key"):
             state["active_team_key"] = resolved_team_id
-        save_runtime_state(workspace, state)
+        from team_agent.leader import _write_lease_dual_state
+        _write_lease_dual_state(workspace, state)
         emit_owner_bound_event(
             workspace,
             caller_pane_id=bind.get("caller_pane_id", ""),

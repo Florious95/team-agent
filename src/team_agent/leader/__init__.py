@@ -316,7 +316,7 @@ def attach_leader_to_state(
     if not validation["ok"]:
         readopt = _try_readopt_leader_pane(workspace, state, receiver, pane_info, targets, owner_record, receiver_provider, source, event_log)
         if readopt is not None:
-            return readopt
+            return readopt, {"ok": True, "pane": pane_info, "readopted": True, "warning": None}
         event_log.write("leader_receiver.attach_failed", target=pane or pane_info.get("pane_id"), discovery=discovery, provider=provider, reason=validation["reason"], error=validation.get("error"), source=source, uuid_prefix=str(identity.get("leader_session_uuid") or "")[:12])
         raise RuntimeError(_strict_leader_validation_error(validation))
     if validation.get("warning"):
@@ -346,6 +346,7 @@ def _set_tmux_leader_environment(receiver: dict[str, Any], identity: dict[str, A
 def _strict_leader_validation_error(validation: dict[str, Any]) -> str:
     return (
         f"leader pane validation failed: {validation['reason']}. "
+        "tmux leader pane validation could not bind the recorded pane. "
         "first quick-start uses cwd+command match only; this team already has team_owner "
         "so strict UUID gate applies; use team-agent takeover --confirm if you intend to take over"
     )
@@ -500,7 +501,7 @@ def _try_readopt_leader_pane(
     receiver_provider: str,
     source: str,
     event_log: EventLog,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
+) -> dict[str, Any] | None:
     # C4/C11/C12: attach-leader converges on the lease claim. When the strict UUID
     # gate would refuse, re-adopt the pane instead IF it is a live workspace leader
     # (real injected uuid + cwd inside the workspace subtree) and the lease is either
@@ -509,20 +510,29 @@ def _try_readopt_leader_pane(
     from team_agent.messaging.leader_panes import _leader_command_looks_usable, _target_leader_session_uuid
     target_list = targets.get("targets", []) if isinstance(targets, dict) and targets.get("ok") else []
     pane_target = next((item for item in target_list if isinstance(item, dict) and str(item.get("pane_id")) == str(pane_info.get("pane_id"))), None)
-    pane_uuid = _target_leader_session_uuid(pane_target or {}) or _target_leader_session_uuid(pane_info)
-    if not pane_uuid:
-        return None
+    pane_uuid = _target_leader_session_uuid(pane_target or {}) or _target_leader_session_uuid(pane_info) or str(owner_record.get("leader_session_uuid") or receiver.get("leader_session_uuid") or "")
     if not _cwd_inside_workspace(pane_info.get("pane_current_path"), workspace):
         return None
     if not _leader_command_looks_usable(str(pane_info.get("pane_current_command", "")), receiver_provider):
         return None
+    owner_pane = str(owner_record.get("pane_id") or "")
     owner_uuid = str(owner_record.get("leader_session_uuid") or "")
-    if owner_uuid and owner_uuid != pane_uuid:
+    target_uuid = _target_leader_session_uuid(pane_target or {})
+    if owner_pane and owner_pane != str(pane_info.get("pane_id") or "") and (not owner_uuid or target_uuid != owner_uuid):
         return None
     epoch = _lease_epoch(owner_record, receiver) + (1 if owner_record else 0)
-    receiver["leader_session_uuid"] = pane_uuid
-    receiver["owner_epoch"] = epoch
-    receiver["discovery"] = "attach_readopt"
+    receiver.update({
+        "pane_id": pane_info["pane_id"],
+        "session_name": pane_info.get("session_name"),
+        "window_index": pane_info.get("window_index"),
+        "window_name": pane_info.get("window_name"),
+        "pane_index": pane_info.get("pane_index"),
+        "pane_tty": pane_info.get("pane_tty"),
+        "pane_current_command": pane_info.get("pane_current_command"),
+        "leader_session_uuid": pane_uuid,
+        "owner_epoch": epoch,
+        "discovery": "attach_readopt",
+    })
     receiver.pop("warning", None)
     old_pane = owner_record.get("pane_id") or (state.get("leader_receiver") or {}).get("pane_id")
     state["team_owner"] = {
@@ -540,7 +550,7 @@ def _try_readopt_leader_pane(
         event_log.write("owner.adopted_on_restart", reason="attach_readopt", old_pane_id=old_pane, new_pane_id=pane_info["pane_id"], owner_epoch=epoch, uuid_prefix=pane_uuid[:8], team_id=team_state_key(state))
     event_log.write("leader_receiver.rebind_applied", reason="attach_readopt", old_pane_id=old_pane, new_pane_id=pane_info["pane_id"], owner_epoch=epoch, uuid_prefix=pane_uuid[:8], team_id=team_state_key(state))
     event_log.write("leader_receiver.attached", target=pane_info["pane_id"], session_name=pane_info.get("session_name"), provider=receiver.get("provider"), discovery="attach_readopt", source=source, owner_epoch=epoch, uuid_prefix=pane_uuid[:8])
-    return receiver, {"ok": True, "pane": pane_info, "readopted": True, "warning": None}
+    return receiver
 
 
 def _detect_dual_state_divergence(workspace: Path, state: dict[str, Any]) -> dict[str, Any] | None:

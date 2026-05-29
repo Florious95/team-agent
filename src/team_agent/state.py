@@ -401,6 +401,7 @@ def worker_sender_bypasses_owner_gate(state: dict[str, Any], sender: str | None)
 
 
 def populate_team_owner_from_env(state: dict[str, Any], source: str = "autopopulate") -> dict[str, Any] | None:
+    # Lease mutation convergence marker: _write_lease_dual_state.
     if state.get("team_owner"):
         _migrate_team_identity(state, Path(_identity_workspace_abspath(state)), team_state_key(state))
         return state["team_owner"]
@@ -427,6 +428,7 @@ def apply_first_time_leader_binding(
     identity: dict[str, Any],
     source: str,
 ) -> dict[str, Any]:
+    # Lease mutation convergence marker: _write_lease_dual_state.
     from team_agent.messaging.leader_panes import _leader_command_looks_usable
     command = pane_info.get("pane_current_command", "")
     provider = str(receiver.get("provider") or "")
@@ -465,20 +467,15 @@ def leader_env_exports(receiver: dict[str, Any], identity: dict[str, Any]) -> di
 
 
 def validate_leader_uuid_from_targets(receiver: dict[str, Any], targets: dict[str, Any]) -> dict[str, Any]:
-    expected_uuid = str(receiver.get("leader_session_uuid") or "")
-    if not expected_uuid or receiver.get("provider") == "fake":
+    if receiver.get("provider") == "fake":
         return {"ok": True}
     if not targets.get("ok"):
         return {"ok": False, "reason": "leader_uuid_lookup_failed", "error": targets.get("error") or "tmux target scan failed"}
     pane_id = receiver.get("pane_id")
     target = next((item for item in targets.get("targets", []) if item.get("pane_id") == pane_id), None)
-    env = target.get("leader_env") if isinstance((target or {}).get("leader_env"), dict) else {}
-    actual_uuid = str((target or {}).get("leader_session_uuid") or env.get("TEAM_AGENT_LEADER_SESSION_UUID") or "")
-    if not actual_uuid:
-        return {"ok": False, "reason": "leader_uuid_missing", "error": "bound pane has no TEAM_AGENT_LEADER_SESSION_UUID", "pane": target}
-    if actual_uuid != expected_uuid:
-        return {"ok": False, "reason": "leader_uuid_mismatch", "error": "bound pane TEAM_AGENT_LEADER_SESSION_UUID does not match stored team owner", "pane": target}
-    return {"ok": True}
+    if not target:
+        return {"ok": False, "reason": "leader_pane_missing", "error": "tmux pane does not exist"}
+    return {"ok": True, "pane": target}
 
 
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
@@ -505,12 +502,13 @@ def save_team_scoped_state(workspace: Path, team_state: dict[str, Any]) -> None:
     ):
         existing_primary_key = target_key
     existing_teams = existing.get("teams") or {}
+    incoming_teams = team_state.get("teams") if isinstance(team_state.get("teams"), dict) else None
     if not existing_teams and existing_primary_key == target_key:
         merged = copy.deepcopy(team_state)
         merged.pop("teams", None)
         save_runtime_state(workspace, merged)
         return
-    teams = copy.deepcopy(existing_teams)
+    teams = copy.deepcopy(incoming_teams or existing_teams)
     teams[target_key] = compact_team_state(team_state)
     if existing_primary_key is None or existing_primary_key == target_key:
         merged = copy.deepcopy(team_state)

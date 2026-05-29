@@ -178,13 +178,19 @@ def _send_to_leader_receiver(
         or (state.get("leader_receiver") or {}).get("leader_session_uuid")
         or ""
     )
-    if effective_result_id and leader_uuid_for_gate:
+    owner_epoch_for_gate = int(
+        (state.get("team_owner") or {}).get("owner_epoch")
+        or (state.get("leader_receiver") or {}).get("owner_epoch")
+        or 0
+    )
+    if effective_result_id:
         from team_agent.message_store.leader_notification_log import claim_leader_notification_delivery
         envelope_hash = hashlib.sha256(content.encode("utf-8", errors="ignore")).hexdigest()[:16]
         claim = claim_leader_notification_delivery(
             store,
             result_id=effective_result_id,
             leader_session_uuid=leader_uuid_for_gate,
+            owner_epoch=owner_epoch_for_gate,
             proposed_message_id=message_id,
             envelope_hash=envelope_hash,
             owner_team_id=team_state_key(state),
@@ -359,7 +365,15 @@ def claim_leader_receiver(
         return {"ok": False, "status": "refused", "reason": "owner_epoch_advanced", "owner_epoch": current_epoch, "bound_pane_id": receiver.get("pane_id")}
     if receiver.get("pane_id") == candidate.get("pane_id"):
         return {"ok": True, "status": "already_bound", "leader_receiver": receiver, "owner_epoch": current_epoch}
-    if not _target_matches_owner_identity(candidate, owner):
+    owner_pane = str(owner.get("pane_id") or "")
+    if (
+        owner_pane
+        and str(candidate.get("pane_id") or "") != owner_pane
+        and not _target_matches_owner_identity(candidate, owner)
+    ):
+        event_log.write("leader_receiver.claim_refused", reason="owner_pane_mismatch", candidate_pane_id=candidate.get("pane_id"), owner_pane_id=owner_pane)
+        return {"ok": False, "status": "refused", "reason": "owner_pane_mismatch"}
+    if not owner_pane and not _target_matches_owner_identity(candidate, owner):
         event_log.write("leader_receiver.claim_refused", reason="uuid_mismatch", candidate_pane_id=candidate.get("pane_id"))
         return {"ok": False, "status": "refused", "reason": "uuid_mismatch"}
     provider = str(candidate.get("provider") or receiver.get("provider") or "codex")
@@ -369,9 +383,10 @@ def claim_leader_receiver(
     new_receiver = _receiver_from_target(candidate, provider, owner.get("leader_session_uuid"), next_epoch)
     owner["owner_epoch"] = next_epoch
     state["leader_receiver"] = new_receiver
-    from team_agent.runtime import _runtime_lock, save_runtime_state
+    from team_agent.leader import _write_lease_dual_state
+    from team_agent.runtime import _runtime_lock
     with _runtime_lock(workspace, "leader_receiver"):
-        save_runtime_state(workspace, state)
+        _write_lease_dual_state(workspace, state)
     event_log.write("leader_receiver.claimed", pane_id=new_receiver["pane_id"], owner_epoch=next_epoch, uuid_prefix=_uuid_prefix(owner))
     return {"ok": True, "status": "claimed", "leader_receiver": new_receiver, "owner_epoch": next_epoch}
 
@@ -454,9 +469,6 @@ def _message_payload(row: dict[str, Any]) -> dict[str, Any]:
 
 def _format_team_agent_message(payload: dict[str, Any]) -> str:
     return core_render_message(payload)["text"]
-
-
-
 
 
 
