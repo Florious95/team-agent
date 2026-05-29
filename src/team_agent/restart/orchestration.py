@@ -16,8 +16,10 @@ from team_agent.restart.snapshot import save_team_runtime_snapshot
 from team_agent.spec import load_spec
 from team_agent.state import (
     check_team_owner,
+    compact_team_state,
     populate_team_owner_from_env,
     save_runtime_state,
+    team_state_key,
     write_team_state,
 )
 
@@ -360,7 +362,7 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
     state["session_name"] = session_name
     state["agents"] = new_agents
     populate_team_owner_from_env(state, source="restart")
-    save_runtime_state(workspace, state)
+    _save_restart_selected_team_state(workspace, state)
     save_team_runtime_snapshot(workspace, state)
     MessageStore(workspace)
     write_team_state(workspace, spec, state)
@@ -376,13 +378,22 @@ def restart(workspace: Path, allow_fresh: bool = False, team: str | None = None)
             old_session_name=(stale or {}).get("session_name") if isinstance(stale, dict) else None,
             source="restart",
         )
-        save_runtime_state(workspace, state)
+        _save_restart_selected_team_state(workspace, state)
         save_team_runtime_snapshot(workspace, state)
         write_team_state(workspace, spec, state)
     rebuild_restart_display_after_rebind(display_backend, workspace, session_name, spec, event_log, restarted, receiver=rebound_receiver)
     coordinator = start_coordinator(workspace)
     event_log.write("restart.complete", session=session_name, agents=restarted, coordinator=coordinator)
     return {"ok": True, "session_name": session_name, "agents": restarted, "coordinator": coordinator}
+
+
+def _save_restart_selected_team_state(workspace: Path, state: dict[str, Any]) -> None:
+    team_key = str(state.get("active_team_key") or team_state_key(state))
+    teams = copy.deepcopy(state.get("teams") if isinstance(state.get("teams"), dict) else {})
+    state["active_team_key"] = team_key
+    state["teams"] = teams
+    teams[team_key] = compact_team_state(state)
+    save_runtime_state(workspace, state)
 
 
 _FIRST_SEND_AT_ABSENT = "absent"

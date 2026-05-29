@@ -26,6 +26,7 @@ SESSION_STATE_FIELDS = [
     "spawn_cwd",
 ]
 _UUID_SEPARATOR = "\0"
+_RUNTIME_STATE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def derive_leader_session_uuid(machine_fingerprint: str, workspace_abspath: str, os_user: str, team_id: str) -> str:
@@ -52,6 +53,9 @@ def normalize_agent_session_state(state: dict[str, Any]) -> None:
 def load_runtime_state(workspace: Path) -> dict[str, Any]:
     path = runtime_state_path(workspace)
     if not path.exists():
+        cached = _RUNTIME_STATE_CACHE.get(str(path))
+        if cached is not None:
+            return copy.deepcopy(cached)
         return {"agents": {}, "tasks": [], "session_name": None, "active_team_key": None}
     state = json.loads(path.read_text(encoding="utf-8"))
     normalize_agent_session_state(state)
@@ -60,6 +64,7 @@ def load_runtime_state(workspace: Path) -> dict[str, Any]:
         changed = True
     if changed:
         save_runtime_state(workspace, state)
+    _RUNTIME_STATE_CACHE[str(path)] = copy.deepcopy(state)
     return state
 
 
@@ -187,6 +192,10 @@ def select_runtime_state(workspace: Path, team: str | None = None) -> dict[str, 
     state = load_runtime_state(workspace)
     alive = team_state_candidates(state)
     if team:
+        if not alive and team in {str(state.get("active_team_key") or ""), team_state_key(state)}:
+            projection = copy.deepcopy(state)
+            projection["active_team_key"] = str(team)
+            return projection
         matches = [
             (key, value)
             for key, value in alive.items()
@@ -486,6 +495,7 @@ def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
     try:
         tmp_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_path, path)
+        _RUNTIME_STATE_CACHE[str(path)] = copy.deepcopy(state)
     finally:
         tmp_path.unlink(missing_ok=True)
 
