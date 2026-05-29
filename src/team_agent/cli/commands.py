@@ -219,6 +219,13 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
     gate = getattr(args, "gate", None)
     if getattr(args, "fix", False) is True and not gate:
         raise TeamAgentError("--fix requires --gate")
+    if getattr(args, "comms", False) is True or gate == "comms":
+        from team_agent.diagnose.comms import run_comms_selftest
+        return run_comms_selftest(
+            Path(args.workspace).resolve(),
+            team=getattr(args, "team", None),
+            gate=gate,
+        )
     if isinstance(gate, str) and gate:
         from team_agent.diagnose.orphan_cleanup import orphan_gate
         if gate != "orphans":
