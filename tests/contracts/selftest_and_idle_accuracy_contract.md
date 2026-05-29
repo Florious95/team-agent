@@ -143,6 +143,14 @@ the throwaway workspace's persisted state. If live persisted state contains
 `leader_receiver.pane_id=%capture`, the worker must resolve `%capture`, and the
 selftest JSON must expose `checks.throwaway_state.{workspace,
 persisted_leader_receiver_pane_id,worker_resolved_receiver_pane_id}`.
+The B1/B2 probe must also prove that a throwaway fake-provider worker was
+actually started and that the probe send ran through that throwaway worker, not
+the live worker or live send path. The JSON must expose
+`checks.throwaway_worker.{status,started,provider,actual_send_path,
+worker_resolved_receiver_pane_id}`; pass requires `started=true`,
+`provider=fake`, `actual_send_path=throwaway_worker`, and
+`worker_resolved_receiver_pane_id=%capture`. Creating throwaway state files
+without launching and using the throwaway worker is a failure.
 
 C19. The throwaway workspace is outside the live workspace, under
 `/tmp/ta-selftest-comms-<runid>/workspace`. The live workspace's persistent
@@ -156,7 +164,11 @@ after probe and cleanup, live workspace messages table, and live workspace event
 log leader-delivery events. Any hit sets
 `checks.live_leader_pollution.status=fail`, top-level `ok=false`, and reports
 `{live_pane_id, token, detected_in}`. A disposable capture hit does not offset a
-live hit.
+live hit. The event-log scan must include every leader-delivery event type,
+including `leader_receiver.deliver_attempt`, not only submitted-style events.
+The scan must run after the bounded asynchronous worker-return window; JSON
+must expose the async-window observation and the matched event type when an
+event-log hit is found.
 
 C21. Throwaway cleanup is four independent checks:
 `cleanup.tmux`, `cleanup.workspace`, `cleanup.coordinator`, and
