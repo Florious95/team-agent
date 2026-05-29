@@ -92,6 +92,11 @@ owner-population/first-bind mutators and does not persist the disposable
 receiver. `state.json` `team_owner` and `leader_receiver` are byte-identical
 before and after the run.
 
+C13b. The helper is also read-only with respect to pre-existing user messages.
+Running `doctor --comms` must not advance, submit, deliver, acknowledge, fail,
+or otherwise mutate any pending/accepted message that existed before the run.
+Only selftest-owned probe rows may be processed by the selftest.
+
 ## Four Ack Layers
 
 Every matrix cell reports the four signals independently:

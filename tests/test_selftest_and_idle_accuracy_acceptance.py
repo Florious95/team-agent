@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib
 import io
@@ -17,6 +18,7 @@ from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
 from team_agent.messaging import scheduler
 from team_agent.messaging.activity_detector import classify_agent_activity
+from team_agent.state import save_runtime_state
 
 
 SELFTEST_PREFIX = "ta-selftest-comms-"
@@ -126,6 +128,68 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
                 self.assertTrue(matrix["capture_contains_token"], matrix)
                 self.assertFalse(matrix["live_leader_contains_token"], matrix)
 
+    def test_doctor_comms_does_not_deliver_preexisting_pending_messages(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-no-drain-") as tmp:
+            workspace = Path(tmp)
+            state = _health_state(
+                workspace,
+                tasks=[{"id": "task_1", "assignee": "worker_1", "status": "running"}],
+            )
+            state["agents"]["worker_1"]["status"] = "busy"
+            state["team_owner"] = {"pane_id": "%100", "provider": "fake", "owner_epoch": 1}
+            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%100", "provider": "fake", "owner_epoch": 1}
+            save_runtime_state(workspace, state)
+            store = MessageStore(workspace)
+            preexisting = store.create_message(
+                "task_other",
+                "leader",
+                "worker_1",
+                "preexisting user work must stay queued",
+                owner_team_id="current",
+            )
+
+            def fake_deliver(patched_workspace: Path, _state: dict, message_id: str, **_kwargs) -> dict:
+                MessageStore(patched_workspace).mark(message_id, "submitted")
+                return {"ok": True, "status": "delivered", "message_id": message_id}
+
+            comms = importlib.import_module("team_agent.diagnose.comms")
+            with patch.object(comms, "_check_receiver_binding", return_value={"status": "pass"}), patch.object(
+                comms,
+                "_create_disposable_receiver",
+                return_value={
+                    "status": "pass",
+                    "session_name": f"{SELFTEST_PREFIX}no-drain",
+                    "pane_id": "%capture",
+                    "receiver": {"mode": "direct_tmux", "provider": "fake", "pane_id": "%capture"},
+                },
+            ), patch.object(
+                comms,
+                "_check_worker_to_leader",
+                return_value={
+                    "status": "pass",
+                    "enqueue_ack": {"status": "pass"},
+                    "delivery_ack": {"status": "pass"},
+                    "execution_ack": {"status": "pass"},
+                    "leader_notification_ack": {"status": "pass"},
+                },
+            ), patch.object(comms, "_sweep_stale_sessions", return_value=[]), patch.object(
+                comms,
+                "_cleanup_sessions",
+                return_value={"status": "pass", "killed_sessions": [], "created_sessions": []},
+            ), patch("team_agent.messaging.delivery._deliver_pending_message", side_effect=fake_deliver):
+                result = comms.run_comms_selftest(workspace, team="current")
+
+            rows = {row["message_id"]: row for row in store.messages(owner_team_id="current")}
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(rows[preexisting]["status"], "accepted", rows[preexisting])
+        submitted_selftest = [
+            row for message_id, row in rows.items()
+            if message_id != preexisting and row["sender"] == "leader" and row["recipient"] == "worker_1"
+        ]
+        self.assertTrue(submitted_selftest, rows)
+        self.assertTrue(all(row["status"] == "submitted" for row in submitted_selftest), submitted_selftest)
+
     def test_idle_behavior_challenge_times_out_when_worker_claimed_idle_but_busy(self) -> None:
         result = _evaluate_idle_behavior(
             agent_id="worker_1",
@@ -200,10 +264,33 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
 
     def test_c16_idle_takeover_wiring_does_not_import_agent_health_or_status(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "src/team_agent/idle_takeover_wiring.py").read_text()
-        self.assertNotIn("agent_health", source)
-        self.assertNotIn("approvals.status", source)
-        self.assertNotIn("activity_output_hash", source)
-        self.assertNotIn("last_output_at", source)
+        tree = ast.parse(source)
+        imported_modules: set[str] = set()
+        referenced_names: set[str] = set()
+        referenced_strings: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported_modules.add(node.module)
+                imported_modules.update(f"{node.module}.{alias.name}" if node.module else alias.name for alias in node.names)
+            elif isinstance(node, ast.Name):
+                referenced_names.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                referenced_names.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                referenced_strings.add(node.value)
+
+        forbidden_imports = {
+            "team_agent.approvals.status",
+            "team_agent.message_store.agent_health",
+            "team_agent.messaging.activity_detector",
+        }
+        self.assertTrue(imported_modules.isdisjoint(forbidden_imports), imported_modules)
+        self.assertNotIn("agent_health", referenced_names)
+        self.assertNotIn("activity_output_hash", referenced_strings)
+        self.assertNotIn("last_output_at", referenced_strings)
 
     def test_c17_working_status_is_included_in_stuck_detection(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c17-stuck-") as tmp:
@@ -318,9 +405,14 @@ def _ack_statuses(matrix_cell: dict) -> dict[str, str]:
 def _idle_prompt_fixture(name: str) -> str:
     text = (Path(__file__).resolve().parent / "fixtures" / "idle_prompts" / name).read_text()
     lines = text.splitlines(keepends=True)
-    if lines and lines[0].startswith("# provider="):
-        return "".join(lines[1:])
-    return text
+    while lines and _is_fixture_metadata_line(lines[0]):
+        lines.pop(0)
+    return "".join(lines)
+
+
+def _is_fixture_metadata_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("#") or stripped.startswith(("provider=", "captured_at=", "source_pane=", "source_agent="))
 
 
 def _health_state(workspace: Path, *, tasks: list[dict], provider: str = "codex") -> dict:
