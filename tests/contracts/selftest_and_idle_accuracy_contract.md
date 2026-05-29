@@ -80,6 +80,11 @@ C10. Cleanup is a first-class check. JSON contains
 `checks.cleanup.{status,killed_sessions}`. Any cleanup failure makes top-level
 `ok=false`.
 
+C10b. Sessions removed during the startup sweep are not run-created sessions.
+They must not appear in `checks.cleanup.created_sessions`, and a second
+`kill-session` returning "can't find session" for an already-swept stale
+session is idempotent and must not fail cleanup.
+
 C11. Receiver binding may not reintroduce command-name whitelists. A live
 external Claude pane whose `pane_current_command` is `2.1.154` is usable.
 

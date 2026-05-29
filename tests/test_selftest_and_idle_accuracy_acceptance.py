@@ -74,6 +74,72 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertTrue(all(name.startswith(SELFTEST_PREFIX) for name in cleanup["created_sessions"]), cleanup)
         self.assertIn("selftest.swept_stale", result.get("events", []))
 
+    def test_c9_c10_swept_stale_session_is_not_cleaned_up_twice_or_reported_created(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-stale-idempotent-") as tmp:
+            workspace = Path(tmp)
+            save_runtime_state(workspace, _health_state(workspace, tasks=[]))
+            sessions = {f"{SELFTEST_PREFIX}stale-1"}
+            kill_calls: list[str] = []
+            run_id = "freshrun0000"
+            created_session = f"{SELFTEST_PREFIX}{run_id}"
+
+            def fake_run_cmd(args: list[str], timeout: int = 10) -> SimpleNamespace:
+                if args[:3] == ["tmux", "ls", "-F"]:
+                    return SimpleNamespace(returncode=0, stdout="\n".join(sorted(sessions)) + ("\n" if sessions else ""), stderr="")
+                if args[:2] == ["tmux", "kill-session"]:
+                    target = args[args.index("-t") + 1]
+                    kill_calls.append(target)
+                    if target in sessions:
+                        sessions.remove(target)
+                        return SimpleNamespace(returncode=0, stdout="", stderr="")
+                    return SimpleNamespace(returncode=1, stdout="", stderr=f"can't find session: {target}")
+                if args[:2] == ["tmux", "new-session"]:
+                    sessions.add(args[args.index("-s") + 1])
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if args[:3] == ["tmux", "display-message", "-p"]:
+                    return SimpleNamespace(returncode=0, stdout="%capture\n", stderr="")
+                if args[:3] == ["tmux", "capture-pane", "-p"]:
+                    return SimpleNamespace(returncode=0, stdout="Team Agent comms selftest probe selftest-comms-freshrun\n", stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            comms = importlib.import_module("team_agent.diagnose.comms")
+            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch.object(
+                comms,
+                "_check_receiver_binding",
+                return_value={"status": "pass"},
+            ), patch.object(
+                comms,
+                "_check_leader_to_worker",
+                return_value={
+                    "status": "pass",
+                    "enqueue_ack": {"status": "pass"},
+                    "delivery_ack": {"status": "pass"},
+                    "execution_ack": {"status": "pass"},
+                    "leader_notification_ack": {"status": "pass"},
+                },
+            ), patch.object(
+                comms,
+                "_check_worker_to_leader",
+                return_value={
+                    "status": "pass",
+                    "enqueue_ack": {"status": "pass"},
+                    "delivery_ack": {"status": "pass"},
+                    "execution_ack": {"status": "pass"},
+                    "leader_notification_ack": {"status": "pass"},
+                },
+            ), patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
+                result = comms.run_comms_selftest(workspace, team="current")
+
+            cleanup = result["checks"]["cleanup"]
+
+        self.assertIn("selftest.swept_stale", result.get("events", []), result)
+        self.assertTrue(result.get("ok"), result)
+        self.assertNotIn(f"{SELFTEST_PREFIX}stale-1", cleanup["created_sessions"], cleanup)
+        self.assertEqual(kill_calls.count(f"{SELFTEST_PREFIX}stale-1"), 1, kill_calls)
+        self.assertEqual(cleanup["status"], "killed", cleanup)
+        self.assertEqual(cleanup["created_sessions"], [created_session], cleanup)
+        self.assertNotIn(f"{SELFTEST_PREFIX}stale-1", sessions)
+
     def test_c8_created_disposable_session_is_killed_when_probe_raises(self) -> None:
         driver = FakeSelftestDriver(raise_after_create=True)
         result = _run_comms_selftest(driver=driver)
