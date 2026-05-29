@@ -159,7 +159,7 @@ def _detect_stuck_agents(
     stuck: list[str] = []
     now = datetime.now(timezone.utc)
     for agent_id, row in health.items():
-        if row.get("status") not in {"RUNNING"} or not row.get("last_output_at"):
+        if row.get("status") not in {"RUNNING", "WORKING"} or not row.get("last_output_at"):
             continue
         try:
             last = datetime.fromisoformat(row["last_output_at"])

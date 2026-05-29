@@ -54,6 +54,8 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
         health_status = agent_health_status(agent_state)
         last_output_at = agent_state.get("last_output_at")
         window = agent_state.get("window", agent_id)
+        current_task = current_task_for_agent(state.get("tasks", []), agent_id)
+        pane_delta_recent = False
         scrollback = ""
         pane_info: dict[str, Any] | None = None
         if session_name and _tmux_window_exists(session_name, window):
@@ -62,6 +64,7 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
                 scrollback = proc.stdout
                 digest = hashlib.sha256(proc.stdout.encode("utf-8", errors="ignore")).hexdigest()
                 if digest != agent_state.get("last_output_hash"):
+                    pane_delta_recent = True
                     last_output_at = datetime.now(timezone.utc).isoformat()
                     agent_state["last_output_hash"] = digest
                     agent_state["last_output_at"] = last_output_at
@@ -78,6 +81,8 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
                     last_output_at,
                     pane_info,
                     scrollback,
+                    active_task=current_task is not None,
+                    pane_delta_recent=pane_delta_recent,
                 )
                 agent_state["activity"] = {
                     "status": activity.get("status"),
@@ -91,7 +96,6 @@ def sync_agent_health(workspace: Path, state: dict[str, Any], store: MessageStor
                     mapped = mapping.get(raw)
                     if mapped:
                         health_status = mapped
-        current_task = current_task_for_agent(state.get("tasks", []), agent_id)
         store.upsert_agent_health(
             agent_id,
             health_status,

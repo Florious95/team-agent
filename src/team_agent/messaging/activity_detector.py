@@ -37,15 +37,30 @@ _IDLE_PROMPT_PATTERNS = (
     re.compile(r"›\s*Find and fix a bug in @filename"),
     re.compile(r"─\s*for agents"),
     re.compile(r"^›[^\n]*\n(?:\s*\n){0,8}\s*gpt-[\w.-]+\s+\S+\s+·", re.MULTILINE),
+    # Codex idle input prompt line (rotating hints like
+    # "› Use /skills to list available skills"). Working lines start with a
+    # spinner/✱ glyph, not "›". An optional leading "│ " tolerates a boxed
+    # input frame.
+    re.compile(r"^(?:│\s*)?›\s", re.MULTILINE),
+    # Claude Code idle input prompt: an empty "❯" line (the box may render the
+    # trailing space as U+00A0). Only the empty prompt is idle; a "❯ <command>"
+    # line is a submitted turn, so the trailing-content form is deliberately
+    # excluded to avoid false IDLE while Claude is still working.
+    re.compile(r"^(?:│\s*)?❯[ \t\xa0]*$", re.MULTILINE),
 )
-_WORKING_PATTERNS = (
+# Substantive working indicators carry their own text ("Working", "Thinking",
+# "esc to interrupt", ...). The bare spinner glyph alone is only a pane-refresh
+# artifact, so it is kept separate: it still counts as working when nothing else
+# is present, but it must not override a fresh idle prompt (C14).
+_SUBSTANTIVE_WORKING_PATTERNS = (
     re.compile(r"\bWorking(?:\s*\((?P<working_seconds>\d+)s\))?", re.IGNORECASE),
     re.compile(r"\bReticulating\b", re.IGNORECASE),
     re.compile(r"\bBaked for (?P<baked_seconds>\d+)s\b", re.IGNORECASE),
     re.compile(r"\bThinking\b", re.IGNORECASE),
     re.compile(r"esc to interrupt", re.IGNORECASE),
-    re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"),
 )
+_SPINNER_GLYPH_PATTERN = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]")
+_WORKING_PATTERNS = _SUBSTANTIVE_WORKING_PATTERNS + (_SPINNER_GLYPH_PATTERN,)
 
 
 def classify_agent_activity(
@@ -57,6 +72,8 @@ def classify_agent_activity(
     *,
     now: datetime | None = None,
     stuck_timeout_sec: int = 300,
+    active_task: bool = False,
+    pane_delta_recent: bool = False,
 ) -> dict[str, Any]:
     _ = agent_id, provider
     now = now or datetime.now(timezone.utc)
@@ -68,14 +85,25 @@ def classify_agent_activity(
     if command and command not in _PROVIDER_COMMANDS:
         return {"status": "uncertain", "confidence": 0.75, "rationale": f"unexpected pane current_command={command}"}
     working = _latest_working_match(scrollback)
+    substantive = _latest_working_match(scrollback, _SUBSTANTIVE_WORKING_PATTERNS)
     idle_pos = _latest_idle_prompt_position(scrollback)
-    if idle_pos is not None and (working is None or idle_pos > working[0]):
+    # C14: a fresh idle prompt is the strongest signal. Only a substantive
+    # working indicator positioned after the prompt counts as newer work; a
+    # trailing bare spinner glyph (pane refresh) or pane delta must not flip a
+    # fresh idle prompt to WORKING.
+    if idle_pos is not None and (substantive is None or idle_pos > substantive[0]):
         return {"status": "idle", "confidence": 0.9, "rationale": "provider idle prompt is the latest scrollback signal"}
     if working:
         _pos, label, elapsed = working
         if elapsed is not None and elapsed >= stuck_timeout_sec:
             return {"status": "stuck", "confidence": 0.85, "rationale": f"stale {label} indicator for {elapsed}s"}
         return {"status": "working", "confidence": 0.9, "rationale": f"{label} indicator is the latest scrollback signal"}
+    # C15: an active task whose pane changed since the last sync is real work,
+    # not idle. Placed after the idle-prompt check so a fresh idle prompt always
+    # wins; without an active task this rule never fires and raw running may stay
+    # IDLE.
+    if active_task and pane_delta_recent and (not command or command in _PROVIDER_COMMANDS):
+        return {"status": "working", "confidence": 0.9, "rationale": "active task with recent pane delta"}
     age = _last_output_age_seconds(last_output_at, now)
     if age is not None and age >= stuck_timeout_sec:
         return {"status": "stuck", "confidence": 0.85, "rationale": "last_output_at exceeded timeout with no idle prompt"}
@@ -163,9 +191,11 @@ def _reset_or_recommend(
     return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "threshold": threshold, "leader_visible_message": message, "reset": reset}
 
 
-def _latest_working_match(scrollback: str) -> tuple[int, str, int | None] | None:
+def _latest_working_match(
+    scrollback: str, patterns: tuple[re.Pattern[str], ...] = _WORKING_PATTERNS
+) -> tuple[int, str, int | None] | None:
     best: tuple[int, str, int | None] | None = None
-    for pattern in _WORKING_PATTERNS:
+    for pattern in patterns:
         for match in pattern.finditer(scrollback):
             elapsed_raw = match.groupdict().get("working_seconds") or match.groupdict().get("baked_seconds")
             elapsed = int(elapsed_raw) if elapsed_raw else None
