@@ -1,0 +1,92 @@
+# provider=codex captured_at=2026-05-29T18:41:38Z source_pane=%3788 source_agent=architect command=tmux_capture-pane_-p_-S_-40
+    508 +Claude Code / Claude:
+    509 +
+    510 +- What exactly happens if tmux sends Ctrl+C during a Claude Code turn? Does it cancel the model turn, cancel a tool call, return to prompt, or require confirmation?
+    511 +- After Ctrl+C, is the session transcript/context preserved and safe to continue?
+    512 +- Can a new prompt be pasted while Claude Code is mid-turn? Is it buffered, ignored, appended to terminal input, or corrupting?
+    513 +- Is there a stable screen/log signal for "input prompt ready" independent of language/theme/version?
+    514 +- Does Claude Code expose any machine-readable turn state or queue state that is safer than screen scraping?
+    515 +
+    516 +Codex:
+    517 +
+    518 +- What exactly happens if tmux sends Ctrl+C during a Codex turn, during a shell tool call, and during an approval prompt?
+    519 +- After interruption, can Codex continue the same task, or does it require an explicit recovery prompt?
+    520 +- Does mid-turn paste buffer until prompt returns, or does it get mixed into the running terminal/tool?
+    521 +- Is there a stable app-server/session-log event for turn open/turn complete/interrupt that can drive input-safe delivery?
+    522 +- Are `Working`, `esc to interrupt`, and prompt markers stable enough for provider-neutral tests, or must the runtime rely on provider_state logs?
+    523 +
+    524 +Both providers:
+    525 +
+    526 +- Is there a supported non-UI API for cancelling an in-flight turn?
+    527 +- Is there a supported non-UI API for appending a queued prompt to run after current turn?
+    528 +- What is the minimum reliable "input-ready" signal for real subscription clients?
+    529 +- What user-visible recovery prompt is required after an interrupted turn?
+    530 +
+    531 +### V2 Acceptance Contract
+    532 +
+    533 +Real-machine default selftest should pass without preemption:
+    534 +
+    535 +1. External leader, live team, at least one real worker.
+    536 +2. `team-agent doctor --comms --workspace . --json` runs the full matrix where feasible.
+    537 +3. A1: an idle-classified worker returns bounded execution ack.
+    538 +4. A2: a busy worker gets durable enqueue ack while busy; delivery ack appears after it becomes input-safe; execution ack is separately reported and may occur after current task completion.
+    539 +5. B1/B2: worker-to-leader probes render only in disposable capture pane, never in live leader.
+    540 +6. JSON separates `enqueue_ack`, `delivery_ack`, `execution_ack`, and `leader_notification_ack`.
+    541 +7. Cleanup C7-C10 still passes; no `ta-selftest-comms-*` residue.
+    542 +
+    543 +Negative tests:
+    544 +
+    545 +- Mark a busy worker as `IDLE`: idle behavior check must fail/timeout rather than green.
+    546 +- Make delivery fail after enqueue: A2 must report enqueue pass but delivery fail/pending, not overall green.
+    547 +- Make worker execute but leader receiver fallback: execution ack can pass, leader notification ack must fail.
+    548 +- Live leader pane containing a selftest token is a hard fail.
+    549 +
+    550 +### V2 Open Decisions
+    551 +
+    552 +1. Default busy-worker semantics: FIFO after current turn, explicit preempt, always preempt, or priority-without-interrupt.
+    553 +2. Whether public `team-agent send` should gain an async/enqueue spelling later. The selftest can use the internal durable branch first.
+    554 +3. Whether execution ack must become schema-level (`reply_to_message_id`) or can stay selftest-only by using unique task/message tokens.
+    555 +4. Provider-specific interrupt facts must be answered before any preemption implementation.
+
+• Ran wc -l .team/artifacts/architect-selftest-and-idle-accuracy-plan.md
+  └      555 .team/artifacts/architect-selftest-and-idle-accuracy-plan.md
+
+• Explored
+  └ Search ^## V2|Ack Model|Full Matrix|Provider-Specific|V2 Open in architect-selftest-and-idle-accuracy-plan.md
+
+• Ran git status --short .team/artifacts/architect-selftest-and-idle-accuracy-plan.md
+  └ (no output)
+
+• Called
+  └ team_orchestrator.report_result({"status":"success","summary":"已把 v2 扩展追加到同一份 plan：.team/artifacts/architect-selftest-and-idle-accuracy-plan.md。新增内容覆盖全矩阵 A1/A2/B1/B2 自动化设计、idle=响应性行为定义、enqueue/
+        delivery/execution/leader_notification 四层 ack 模型、现状差距（CLI 直投 vs MCP durable enqueue/coordinator drain 混合语义）、FIFO/抢占/优先级选项与取舍、provider 专属问题清单。文档现 555 行，v2 从第 291 行开始。","artifacts":
+        [{"path":".team/artifacts/architect-selftest-and-idle-accuracy-plan.md","description":"v2 core-link automation matrix extension appended to existing architect plan"}],"next_actions":[{"description":"需要用户按场景拍板：worker
+        忙时 leader 插新指令，默认是“等它做完再按顺序做下一条”，还是允许 leader 显式选择“立刻停下当前任务做新指令”，还是做“当前任务完成后优先处理这条但不中断”。"},{"description":"需要用户拍板：是否只在 doctor 自检内部使用 durable
+        enqueue，还是未来也给人类 CLI 暴露类似 team-agent send --enqueue/--async 的明确模式。"},{"description":"需要用户拍板：执行回执是否必须产品级绑定原 message_id（schema/API 增 reply_to_message_id），还是本轮 selftest 用唯一 token/
+        唯一任务先薄做。"}],"risks":[{"description":"Provider 专属问题需路由：Claude Code/Codex 的 Ctrl+C 真实语义、mid-turn paste 是否缓冲/污染/丢弃、是否有稳定 input-ready/turn-state 机器信号、被中断后上下文是否可安全继续、是否存在非
+        UI cancel/queued prompt API。抢占实现前必须拿到这些事实。"}],"tests":[{"command":"wc -l .team/artifacts/architect-selftest-and-idle-accuracy-plan.md","status":"passed","output":"555 lines"},{"command":"rg V2 section
+        headings","status":"passed","output":"V2 section present at line 291; ack/model/matrix/provider/open-decision sections present"}]})
+    {"ok": true, "result_id": "res_d02f09f64534", "task_id": "manual", "agent_id": "architect", "leader_notified": false, "notification_message_id": null, "notification_status": "queued", "notification_channel": "coordinator",
+        "notification_event_id": 674, "acknowledged_count": 0}
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• 已完成并 report。
+
+  扩展写入同一份文档：.team/artifacts/architect-selftest-and-idle-accuracy-plan.md
+  新增 v2 从第 291 行开始，覆盖全矩阵 A1/A2/B1/B2、四层 ack 模型、idle 响应性定义、busy 投递现状差距、抢占选项、provider 问题清单。
+
+  需要用户拍板的开放决策：
+
+  - worker 忙时新指令默认 FIFO，还是允许显式抢占，还是仅优先排队不中断。
+  - durable enqueue 是否只给 doctor --comms 内部用，还是未来暴露成 CLI 模式。
+  - 执行回执是否要产品级绑定 message_id，还是本轮 selftest 用唯一 token/唯一任务薄做。
+
+  Provider 需路由确认：Claude/Codex 的 Ctrl+C 语义、mid-turn paste 行为、稳定 input-ready/turn-state 信号、中断后上下文安全性、是否有非 UI cancel/queue API。
+
+─ Worked for 4m 21s ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› Find and fix a bug in @filename
+
+  gpt-5.5 medium · ~/Documents/code/agent前沿探索/多agent协作

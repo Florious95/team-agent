@@ -131,7 +131,11 @@ No selftest path may test or perform preemption, Ctrl+C, or interrupt behavior.
 ## Feature B: Idle Accuracy
 
 C14. The latest provider idle prompt remains the strongest signal. Pane delta or
-old working scrollback must not override a fresh idle prompt.
+old working scrollback must not override a fresh idle prompt. This is backed by
+verbatim real pane captures for both Codex
+(`tests/fixtures/idle_prompts/codex_idle.txt`) and Claude Code
+(`tests/fixtures/idle_prompts/claude_code_idle.txt`); the first metadata line is
+not part of the scrollback input.
 
 C15. Active task is required before pane-delta `running` can be promoted to
 `WORKING`. Without an active task, raw `running` plus pane delta may remain

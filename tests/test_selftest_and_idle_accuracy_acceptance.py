@@ -135,13 +135,24 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["execution_ack"], "timeout")
         self.assertEqual(result["classification_accuracy"], "fail")
 
-    def test_c14_latest_idle_prompt_still_wins_over_pane_delta_and_old_working(self) -> None:
+    def test_c14_real_codex_idle_prompt_fixture_is_idle(self) -> None:
         activity = classify_agent_activity(
             "worker_1",
             "codex",
             datetime.now(timezone.utc).isoformat(),
             {"pane_current_command": "node", "pane_in_mode": "0"},
-            "old output\n✱ Working (40s) ⠋\nfinished\n\n› Use /skills to list available skills\n",
+            _idle_prompt_fixture("codex_idle.txt"),
+        )
+        self.assertEqual(activity["status"], "idle", activity)
+        self.assertGreaterEqual(activity["confidence"], 0.85, activity)
+
+    def test_c14_real_claude_code_idle_prompt_fixture_is_idle(self) -> None:
+        activity = classify_agent_activity(
+            "worker_1",
+            "claude_code",
+            datetime.now(timezone.utc).isoformat(),
+            {"pane_current_command": "node", "pane_in_mode": "0"},
+            _idle_prompt_fixture("claude_code_idle.txt"),
         )
         self.assertEqual(activity["status"], "idle", activity)
         self.assertGreaterEqual(activity["confidence"], 0.85, activity)
@@ -281,6 +292,14 @@ def _visible_command_words(help_text: str) -> set[str]:
 
 def _ack_statuses(matrix_cell: dict) -> dict[str, str]:
     return {key: value.get("status") for key, value in matrix_cell.items() if key.endswith("_ack")}
+
+
+def _idle_prompt_fixture(name: str) -> str:
+    text = (Path(__file__).resolve().parent / "fixtures" / "idle_prompts" / name).read_text()
+    lines = text.splitlines(keepends=True)
+    if lines and lines[0].startswith("# provider="):
+        return "".join(lines[1:])
+    return text
 
 
 def _health_state(workspace: Path, *, tasks: list[dict]) -> dict:
