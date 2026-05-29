@@ -373,14 +373,8 @@ def _validate_leader_receiver(receiver: dict[str, Any]) -> dict[str, Any]:
 
 
 def _leader_command_looks_usable(command: str, provider: str) -> bool:
-    if provider == "fake":
-        return True
-    command_name = Path(command).name
-    if provider == "codex":
-        return command_name in {"codex", "node", "nodejs"}
-    if provider in {"claude", "claude_code"}:
-        return command_name in {"claude", "claude.exe"}
-    return command_name in {"codex", "node", "nodejs", "claude", "claude.exe"}
+    _ = provider
+    return bool(str(command or "").strip())
 
 
 def attempt_trust_auto_answer(

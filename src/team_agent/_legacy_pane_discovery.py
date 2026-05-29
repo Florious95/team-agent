@@ -100,10 +100,7 @@ def _infer_workspace_tmux_pane(provider: str, workspace: Path) -> dict[str, Any]
 
 
 def _pane_is_usable_leader(pane: dict[str, str], provider: str, workspace: Path | None) -> bool:
-    from team_agent.messaging.leader_panes import _leader_command_looks_usable, _leader_command_provider
-    command = pane.get("pane_current_command", "")
-    if not _leader_command_looks_usable(command, provider) and _leader_command_provider(command) is None:
-        return False
+    _ = provider
     if workspace is not None and not _pane_path_matches_workspace(pane, workspace):
         return False
     return True
@@ -177,7 +174,7 @@ def _resolve_leader_pane(
             )
         raise _RuntimeError(
             "Team Agent could not locate a tmux-managed leader pane for this workspace. "
-            "Run quick-start from the visible tmux-managed leader pane, pass --pane explicitly, "
+            "Run quick-start from the visible tmux-managed leader pane, "
             "or use `team-agent codex`/`team-agent claude` as a convenience fallback."
             + details
         )
