@@ -22,6 +22,7 @@ from team_agent.message_store import MessageStore
 from team_agent.message_store.leader_notification_log import claim_leader_notification_delivery, leader_notification_log_rows
 from team_agent.message_store.schema import initialize_schema
 from team_agent.message_store.schema_migration import table_layout
+from team_agent.messaging import result_delivery
 from team_agent.messaging.leader import claim_leader_receiver
 from team_agent.messaging.leader import _send_to_leader_receiver
 from team_agent.messaging.leader_panes import (
@@ -29,7 +30,7 @@ from team_agent.messaging.leader_panes import (
     _validate_leader_receiver,
 )
 from team_agent.simple_yaml import dumps
-from team_agent.state import apply_first_time_leader_binding, load_runtime_state, save_runtime_state, validate_leader_uuid_from_targets
+from team_agent.state import apply_first_time_leader_binding, load_runtime_state, save_runtime_state, select_runtime_state, validate_leader_uuid_from_targets
 
 
 REAL_CLAUDE_CODE_BINARY_COMMAND = "2.1.154"
@@ -562,6 +563,84 @@ class QuickStartExternalPaneAcceptanceTests(unittest.TestCase):
         self.assertIn("no `TEAM_AGENT_LEADER_SESSION_UUID`", contract)
         self.assertIn("not substitutable by unit\ntests", contract)
 
+    def test_23_restart_preserves_selected_team_entry_for_post_restart_team_resolution(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-bug070-restart-team-entry-") as tmp:
+            workspace = Path(tmp)
+            spec, spec_path, team_dir = _write_current_team_spec(workspace)
+            state = _restartable_state(workspace, spec, spec_path, team_dir)
+            state.pop("teams", None)
+            state["leader_receiver"] = _receiver("%3190")
+            save_runtime_state(workspace, state)
+            started_windows: set[str] = set()
+
+            with patch("team_agent.runtime.run_cmd", side_effect=_fake_tmux_run_cmd(started_windows)), patch(
+                "team_agent.runtime.start_coordinator",
+                return_value={"ok": True, "pid": 123, "status": "started"},
+            ), patch("team_agent.leader.autobind_leader_receiver_from_env", return_value=_receiver("%3190")):
+                result = runtime.restart(workspace, team="current")
+
+            state_after = load_runtime_state(workspace)
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertIn("current", state_after.get("teams") or {}, state_after)
+        current = state_after["teams"]["current"]
+        for field in ("spec_path", "session_name", "team_dir", "leader_receiver"):
+            self.assertTrue(current.get(field), current)
+        selected = select_runtime_state(workspace, "current")
+        self.assertEqual(selected.get("active_team_key"), "current")
+        self.assertEqual(selected.get("session_name"), spec["runtime"]["session_name"])
+
+    def test_24_post_restart_result_notification_resolves_current_team_before_delivery(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-028-bug070-notification-") as tmp:
+            workspace = Path(tmp)
+            spec, spec_path, team_dir = _write_current_team_spec(workspace)
+            state = _restartable_state(workspace, spec, spec_path, team_dir)
+            state.pop("teams", None)
+            state["team_owner"] = _owner("%3190")
+            state["leader_receiver"] = _receiver("%3190")
+            save_runtime_state(workspace, state)
+            store = MessageStore(workspace)
+            envelope = {
+                "schema_version": "result_envelope_v1",
+                "task_id": "task_1",
+                "agent_id": "fake_impl",
+                "status": "success",
+                "summary": "post-restart report",
+                "artifacts": [],
+                "changes": [],
+                "next_actions": [],
+                "risks": [],
+                "tests": [],
+            }
+            result_id = store.add_result(envelope, owner_team_id="current")
+            watcher_id = store.create_result_watcher("task_1", "fake_impl", None, owner_team_id="current")
+            watcher = next(row for row in store.result_watchers(owner_team_id="current") if row["watcher_id"] == watcher_id)
+            result = {
+                "result_id": result_id,
+                "task_id": "task_1",
+                "agent_id": "fake_impl",
+                "status": "success",
+                "summary": "post-restart report",
+            }
+            deliveries: list[dict] = []
+
+            def fake_send(*_args, **_kwargs) -> dict:
+                deliveries.append({"called": True})
+                return {"ok": True, "status": "submitted", "message_id": "msg-notified"}
+
+            with patch("team_agent.messaging.internal_delivery._send_single_message_unlocked", side_effect=fake_send):
+                notified = result_delivery.notify_result_watchers(
+                    workspace,
+                    result,
+                    EventLog(workspace),
+                    watchers=[watcher],
+                )
+
+        self.assertTrue(notified, notified)
+        self.assertTrue(notified[0].get("ok"), notified)
+        self.assertNotIn("team 'current' not found", str(notified[0].get("error") or ""))
+        self.assertEqual(len(deliveries), 1, "post-restart report_result notification must reach internal delivery")
+
 
 def _pane(pane_id: str, cwd: Path, *, command: str) -> dict[str, str]:
     return {
@@ -651,6 +730,24 @@ def _restartable_state(workspace: Path, spec: dict, spec_path: Path | None, team
     compact.pop("teams", None)
     state["teams"] = {"current": dict(compact)}
     return state
+
+
+def _owner(pane_id: str) -> dict:
+    return {
+        "pane_id": pane_id,
+        "provider": "claude_code",
+        "owner_epoch": 7,
+        "leader_session_uuid": "legacy-uuid",
+    }
+
+
+def _receiver(pane_id: str) -> dict:
+    return {
+        "mode": "direct_tmux",
+        "provider": "claude_code",
+        "pane_id": pane_id,
+        "owner_epoch": 7,
+    }
 
 
 def _fake_tmux_run_cmd(started_windows: set[str]):
