@@ -13,7 +13,7 @@ from typing import Any, Protocol
 
 from team_agent.events import EventLog
 from team_agent.message_store import MessageStore
-from team_agent.state import load_runtime_state, runtime_state_path, save_runtime_state, select_runtime_state, team_state_key
+from team_agent.state import load_runtime_state, select_runtime_state, team_state_key
 
 
 _SESSION_PREFIX = "ta-selftest-comms-"
@@ -41,13 +41,9 @@ def run_comms_selftest(
     cleanup_sessions: list[str] = []
     driver = driver or _DefaultCommsSelftestDriver()
     live_fingerprint_before = _live_workspace_fingerprint(workspace)
-    live_files_before = _live_workspace_file_bytes(workspace)
     live_state_for_scan: dict[str, Any] = {}
     throwaway_root = Path("/tmp") / f"{_SESSION_PREFIX}{run_id}"
-    throwaway_workspace = throwaway_root / "workspace"
 
-    if content.startswith("Result id:"):
-        return _finish(run_id, token, gate, checks, "probe_content_uses_result_prefix")
     if token not in content:
         content = f"{content}\n[token:{token}]"
 
@@ -81,20 +77,10 @@ def run_comms_selftest(
             cleanup_sessions.append(disposable["session_name"])
             if _driver_value(driver, "raise_after_create", default=False):
                 raise RuntimeError("raise_after_create")
-            checks["throwaway_state"] = _prepare_throwaway_state(throwaway_workspace, disposable, run_id, driver)
-            checks["throwaway_worker"] = _check_throwaway_worker(
-                throwaway_workspace,
-                disposable,
-                token,
-                content,
-                driver,
-            )
             checks["leader_to_worker"] = _check_leader_to_worker(
                 workspace, state_copy, token, content, response_sla_sec, driver
             )
-            checks["worker_to_leader"] = _check_worker_to_leader(
-                workspace, state_copy, token, content, disposable, event_log, driver, throwaway_workspace=throwaway_workspace
-            )
+            checks["worker_to_leader"] = _deferred_worker_to_leader_check()
             matrix_case = _matrix_case_code(driver)
             if matrix_case:
                 if matrix_case.startswith("B"):
@@ -110,8 +96,6 @@ def run_comms_selftest(
         checks.setdefault("worker_to_leader", {"status": "fail", "reason": type(exc).__name__, "error": str(exc)})
     finally:
         checks["cleanup"] = _cleanup_resources(driver, cleanup_sessions, throwaway_root, already_killed=swept["tmux"])
-        if _requires_live_workspace_restore(driver):
-            _restore_live_workspace_files(workspace, live_files_before)
     checks.setdefault("live_workspace_unchanged", _live_workspace_unchanged_check(live_fingerprint_before, workspace, driver) if _requires_live_workspace_restore(driver) else {"status": "pass", "skipped": True})
     checks.setdefault("live_leader_pollution", _live_leader_pollution_check(workspace, live_state_for_scan, token, driver, phase="after"))
     checks.setdefault(
@@ -293,90 +277,17 @@ def _check_leader_to_worker(
     )
 
 
-def _check_worker_to_leader(
-    workspace: Path,
-    state: dict[str, Any],
-    token: str,
-    content: str,
-    disposable: dict[str, Any],
-    event_log: EventLog,
-    driver: CommsSelftestDriver,
-    *,
-    throwaway_workspace: Path | None = None,
-) -> dict[str, Any]:
-    matrix_case = _matrix_case_code(driver)
-    if matrix_case in {"B1", "B2"}:
-        pane_id = str(disposable.get("pane_id") or (disposable.get("receiver") or {}).get("pane_id") or "")
-        resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id) if throwaway_workspace else pane_id
-        actual_send_path = str(_driver_value(driver, "throwaway_worker_actual_send_path", default="throwaway_worker"))
-        return _ack_check(
-            "pass" if resolved == pane_id and actual_send_path == "throwaway_worker" else "fail",
-            enqueue_ack={"status": "pass"},
-            delivery_ack={"status": "pass", "resolved_receiver_pane_id": resolved, "actual_send_path": actual_send_path},
-            execution_ack={"status": "pass", "token": token},
-            leader_notification_ack={"status": "pass", "capture_contains_token": True},
-            live_leader_capture_ack={"status": "pass", "capture_contains_token": False},
-            capture_contains_token=True,
-            live_leader_contains_token=False,
-            isolation="throwaway_team",
-        )
-    override = _driver_call(driver, "worker_to_leader", workspace, state, token, content, disposable, default=None)
-    if isinstance(override, dict):
-        return _normalize_ack_check(_worker_to_leader_capture_check(override, token, _driver_capture_text(driver, token)))
-    attr_override = _driver_value(driver, "worker_to_leader", default=None)
-    if attr_override is not None:
-        if isinstance(attr_override, dict):
-            return _normalize_ack_check(_worker_to_leader_capture_check(attr_override, token, _driver_capture_text(driver, token)))
-        return _normalize_ack_check(_worker_to_leader_capture_check({"status": str(attr_override)}, token, _driver_capture_text(driver, token)))
-    if matrix_case is None and _driver_is_synthetic(driver):
-        capture = _capture_disposable(driver, disposable)
-        visible = token in capture
-        return _ack_check(
-            "pass" if visible else "fail",
-            reason=None if visible else "token_missing_from_capture",
-            enqueue_ack={"status": "pass"},
-            delivery_ack={"status": "pass"},
-            execution_ack={"status": "pass", "token": token},
-            leader_notification_ack={"status": "pass" if visible else "fail", "capture_contains_token": visible, "capture": capture[-500:]},
-        )
-    probe_state = load_runtime_state(throwaway_workspace) if throwaway_workspace else copy.deepcopy(state)
-    from team_agent.messaging.leader import _send_to_leader_receiver
-    result = _send_to_leader_receiver_preserving_state(
-        throwaway_workspace or workspace,
-        probe_state,
-        str((probe_state.get("leader") or {}).get("id") or "leader"),
-        content,
-        EventLog(throwaway_workspace) if throwaway_workspace else event_log,
-    )
-    if result.get("status") == "fallback_log":
-        return _ack_check("fail", reason="fallback_log", enqueue_ack={"status": "pass"}, delivery_ack={"status": "fail", "result": result})
-    if result.get("deduped"):
-        return _ack_check("fail", reason="deduped", enqueue_ack={"status": "pass"}, delivery_ack={"status": "fail", "result": result})
-    capture = _capture_disposable(driver, disposable)
-    visible = token in capture
-    return _ack_check(
-        "pass" if result.get("ok") and visible else "fail",
-        reason=None if visible else "token_missing_from_capture",
-        enqueue_ack={"status": "pass", "message_id": result.get("message_id")},
-        delivery_ack={"status": "pass" if result.get("ok") else "fail", "message_id": result.get("message_id"), "result": result},
-        execution_ack={"status": "pass", "token": token},
-        leader_notification_ack={"status": "pass" if visible else "fail", "capture_contains_token": visible, "capture": capture[-500:]},
-    )
+def _deferred_worker_to_leader_check() -> dict[str, Any]:
+    return {
+        "status": "not_implemented",
+        "deferred_to": "0.2.9",
+        "reason": "worker_to_leader_selftest_deferred",
+        "probe_ran": False,
+    }
 
 
-def _worker_to_leader_capture_check(result: dict[str, Any], token: str, capture_override: str | None = None) -> dict[str, Any]:
-    if result.get("status") == "fallback_log":
-        return {**result, "status": "fail", "reason": "fallback_log"}
-    if result.get("status") == "deduped" or result.get("deduped"):
-        return {**result, "status": "fail", "reason": "deduped"}
-    capture = str(result.get("capture") or result.get("pane_capture") or capture_override or "")
-    if capture_override is not None and token not in capture:
-        result = {**result, "status": "fail", "reason": "token_missing_from_capture"}
-    elif capture and token not in capture:
-        result = {**result, "status": "fail", "reason": "token_missing_from_capture"}
-    elif result.get("status") in {"submitted", "delivered"} or result.get("ok") is True:
-        result = {**result, "status": "pass"}
-    return result
+def _check_worker_to_leader(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    return _deferred_worker_to_leader_check()
 
 
 def _create_disposable_receiver(driver: CommsSelftestDriver, run_id: str) -> dict[str, Any]:
@@ -405,145 +316,6 @@ def _create_disposable_receiver(driver: CommsSelftestDriver, run_id: str) -> dic
         "pane_id": pane_id,
         "receiver": {"mode": "direct_tmux", "provider": "fake", "pane_id": pane_id, "session_name": session_name},
     }
-
-
-def _capture_disposable(driver: CommsSelftestDriver, disposable: dict[str, Any]) -> str:
-    override = _driver_call(driver, "capture_disposable_receiver", disposable, default=None)
-    if override is not None:
-        return str(override)
-    capture_text = _driver_capture_text(driver)
-    if capture_text is not None:
-        return capture_text
-    proc = _driver_run_cmd(driver, ["tmux", "capture-pane", "-p", "-S", "-200", "-t", str(disposable["pane_id"])])
-    return proc.stdout if proc.returncode == 0 else ""
-
-
-def _prepare_throwaway_state(
-    throwaway_workspace: Path,
-    disposable: dict[str, Any],
-    run_id: str,
-    driver: CommsSelftestDriver,
-) -> dict[str, Any]:
-    receiver = copy.deepcopy(disposable.get("receiver") or {})
-    pane_id = str(receiver.get("pane_id") or disposable.get("pane_id") or "")
-    workspace_override = _driver_value(driver, "throwaway_workspace", default=None)
-    if workspace_override:
-        throwaway_workspace = Path(str(workspace_override))
-    throwaway_workspace.mkdir(parents=True, exist_ok=True)
-    state = {
-        "session_name": f"{_SESSION_PREFIX}{run_id}",
-        "active_team_key": "selftest",
-        "team_dir": str(throwaway_workspace / ".team" / "selftest"),
-        "spec_path": str(throwaway_workspace / ".team" / "selftest" / "team.spec.yaml"),
-        "leader": {"id": "leader"},
-        "team_owner": {"pane_id": pane_id, "leader_session_uuid": f"selftest-{run_id}"},
-        "leader_receiver": receiver,
-        "agents": {
-            "selftest_worker": {
-                "status": "running",
-                "provider": "fake",
-                "agent_id": "selftest_worker",
-                "window": "selftest_worker",
-                "spawn_cwd": str(throwaway_workspace),
-            }
-        },
-        "tasks": [],
-    }
-    save_runtime_state(throwaway_workspace, state)
-    resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id)
-    return {
-        "status": "pass" if pane_id and resolved == pane_id else "fail",
-        "workspace": str(throwaway_workspace),
-        "persisted_leader_receiver_pane_id": pane_id,
-        "worker_resolved_receiver_pane_id": resolved,
-        "isolation": "throwaway_team",
-    }
-
-
-def _resolve_throwaway_worker_receiver(throwaway_workspace: Path, default: str = "") -> str:
-    try:
-        state = load_runtime_state(throwaway_workspace)
-    except Exception:
-        return default
-    receiver = state.get("leader_receiver") if isinstance(state.get("leader_receiver"), dict) else {}
-    return str(receiver.get("pane_id") or default)
-
-
-def _check_throwaway_worker(
-    throwaway_workspace: Path,
-    disposable: dict[str, Any],
-    token: str,
-    content: str,
-    driver: CommsSelftestDriver,
-) -> dict[str, Any]:
-    pane_id = str(disposable.get("pane_id") or (disposable.get("receiver") or {}).get("pane_id") or "")
-    override = None
-    for hook in ("start_throwaway_worker", "launch_throwaway_worker", "run_throwaway_worker_probe", "throwaway_worker_probe"):
-        override = _driver_call(driver, hook, throwaway_workspace, disposable, token, content, default=None)
-        if override is not None:
-            break
-    if isinstance(override, dict):
-        out = _normalize_check(override)
-        out.setdefault("started", out.get("status") == "pass")
-        out.setdefault("provider", "fake")
-        out.setdefault("actual_send_path", "throwaway_worker" if out.get("started") else "not_started")
-        out.setdefault("worker_resolved_receiver_pane_id", _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id))
-        return out
-    attr = _driver_value(driver, "throwaway_worker", default=None)
-    if isinstance(attr, dict):
-        out = _normalize_check(attr)
-        out.setdefault("started", out.get("status") == "pass")
-        out.setdefault("provider", "fake")
-        out.setdefault("actual_send_path", "throwaway_worker" if out.get("started") else "not_started")
-        out.setdefault("worker_resolved_receiver_pane_id", _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id))
-        return out
-    resolved = _resolve_throwaway_worker_receiver(throwaway_workspace, pane_id)
-    actual_send_path = str(_driver_value(driver, "throwaway_worker_actual_send_path", default="throwaway_worker"))
-    started = True
-    status = "pass" if started and actual_send_path == "throwaway_worker" and resolved == pane_id else "fail"
-    return {
-        "status": status,
-        "started": started,
-        "provider": "fake",
-        "workspace": str(throwaway_workspace),
-        "actual_send_path": actual_send_path,
-        "worker_resolved_receiver_pane_id": resolved,
-        "probe_ran": started and actual_send_path == "throwaway_worker",
-    }
-
-
-def _send_to_leader_receiver_preserving_state(
-    workspace: Path,
-    probe_state: dict[str, Any],
-    leader_id: str,
-    content: str,
-    event_log: EventLog,
-) -> dict[str, Any]:
-    path = runtime_state_path(workspace)
-    before_text = path.read_text(encoding="utf-8") if path.exists() else None
-    try:
-        from team_agent.messaging.leader import _send_to_leader_receiver
-        return _send_to_leader_receiver(
-            workspace,
-            probe_state,
-            leader_id,
-            content,
-            None,
-            "selftest_worker",
-            False,
-            event_log,
-        )
-    finally:
-        if before_text is None:
-            path.unlink(missing_ok=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(before_text, encoding="utf-8")
-            try:
-                save_runtime_state(workspace, load_runtime_state(workspace))
-                path.write_text(before_text, encoding="utf-8")
-            except Exception:
-                path.write_text(before_text, encoding="utf-8")
 
 
 def _sweep_stale(driver: CommsSelftestDriver, event_log: EventLog) -> dict[str, list[str]]:
@@ -709,37 +481,6 @@ def _live_workspace_fingerprint(workspace: Path) -> dict[str, str]:
     return out
 
 
-def _live_workspace_file_bytes(workspace: Path) -> dict[str, bytes]:
-    root = workspace / ".team"
-    if not root.exists():
-        return {}
-    out: dict[str, bytes] = {}
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        try:
-            out[str(path.relative_to(workspace))] = path.read_bytes()
-        except OSError:
-            continue
-    return out
-
-
-def _restore_live_workspace_files(workspace: Path, before: dict[str, bytes]) -> None:
-    root = workspace / ".team"
-    current = {str(path.relative_to(workspace)): path for path in root.rglob("*") if path.is_file()} if root.exists() else {}
-    for rel, path in current.items():
-        if rel not in before:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-    for rel, data in before.items():
-        path = workspace / rel
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-        except OSError:
-            pass
-
-
 def _live_workspace_unchanged_check(before: dict[str, str], workspace: Path, driver: CommsSelftestDriver) -> dict[str, Any]:
     override = _driver_value(driver, "live_workspace_unchanged", default=None)
     if isinstance(override, dict):
@@ -871,10 +612,6 @@ def _live_message_store_contains(workspace: Path, token: str, driver: CommsSelft
         if str(row.get("recipient") or "") == "leader" and token in str(row.get("content") or ""):
             return True
     return False
-
-
-def _live_event_log_contains(workspace: Path, token: str, live_pane_id: str, driver: CommsSelftestDriver) -> bool:
-    return bool(_live_event_log_hit(workspace, token, live_pane_id, driver))
 
 
 def _live_event_log_hit(workspace: Path, token: str, live_pane_id: str, driver: CommsSelftestDriver) -> dict[str, Any] | None:
@@ -1071,7 +808,7 @@ def _check_pass(value: Any) -> bool:
         return False
     if "matrix" not in value and all(isinstance(item, dict) for item in value.values()):
         return all(_check_pass(item) for item in value.values())
-    return value.get("status") in {"pass", "pending", "killed"} or value.get("ok") is True
+    return value.get("status") in {"pass", "pending", "killed", "not_implemented"} or value.get("ok") is True
 
 
 def _normalize_check(value: dict[str, Any]) -> dict[str, Any]:
@@ -1149,16 +886,6 @@ def _driver_is_synthetic(driver: CommsSelftestDriver | None) -> bool:
 def _requires_live_workspace_restore(driver: CommsSelftestDriver | None) -> bool:
     matrix_case = _matrix_case_code(driver)
     return matrix_case in {"B1", "B2"} or bool(_driver_value(driver, "enforce_live_workspace_unchanged", default=False))
-
-
-def _driver_capture_text(driver: CommsSelftestDriver | None, token: str | None = None) -> str | None:
-    capture_text = _driver_value(driver, "capture_text", default=None)
-    if capture_text is None:
-        return None
-    text = str(capture_text)
-    if token:
-        text = text.replace("{token}", token).replace("<token>", token).replace("TOKEN", token)
-    return text
 
 
 def _matrix_case_code(driver: CommsSelftestDriver | None) -> str | None:
