@@ -61,6 +61,26 @@ _SUBSTANTIVE_WORKING_PATTERNS = (
 )
 _SPINNER_GLYPH_PATTERN = re.compile(r"[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]")
 _WORKING_PATTERNS = _SUBSTANTIVE_WORKING_PATTERNS + (_SPINNER_GLYPH_PATTERN,)
+# A live provider working footer carries an elapsed-seconds counter
+# ("Working (35s ...)", "Baked for 12s"). That counter form is only rendered in
+# the live status line during an active turn and is removed when the turn ends,
+# so it never appears in prose/scrollback history (unlike a bare "Working" word
+# or "esc to interrupt" mention). It is the positive "provider is working right
+# now" signal that the permanent input box ("› ... gpt-" / "❯") below it must
+# not override.
+_LIVE_WORKING_PATTERNS = (
+    re.compile(r"\bWorking\s*\(\d+s", re.IGNORECASE),
+    re.compile(r"\bBaked for \d+s", re.IGNORECASE),
+)
+
+
+def _latest_live_working_footer(scrollback: str) -> str | None:
+    best: tuple[int, str] | None = None
+    for pattern in _LIVE_WORKING_PATTERNS:
+        for match in pattern.finditer(scrollback):
+            if best is None or match.start() > best[0]:
+                best = (match.start(), match.group(0))
+    return best[1] if best else None
 
 
 def classify_agent_activity(
@@ -87,6 +107,16 @@ def classify_agent_activity(
     working = _latest_working_match(scrollback)
     substantive = _latest_working_match(scrollback, _SUBSTANTIVE_WORKING_PATTERNS)
     idle_pos = _latest_idle_prompt_position(scrollback)
+    # bug-071: a live provider working footer ("Working (Ns ...)") plus an active
+    # task is an active turn. The provider input box ("› ... gpt-" / "❯") is
+    # permanent UI rendered BELOW the footer, so the position-based idle-prompt
+    # check would otherwise flip a working Codex turn to IDLE. Checked before the
+    # idle-prompt rule. The seconds-counter form never appears in prose, so a
+    # real idle prompt (no live footer) is unaffected (C14); gating on
+    # active_task keeps task-less classifier cases on the existing logic.
+    live_footer = _latest_live_working_footer(scrollback)
+    if active_task and live_footer is not None:
+        return {"status": "working", "confidence": 0.9, "rationale": f"live '{live_footer}' footer with active task"}
     # C14: a fresh idle prompt is the strongest signal. Only a substantive
     # working indicator positioned after the prompt counts as newer work; a
     # trailing bare spinner glyph (pane refresh) or pane delta must not flip a
