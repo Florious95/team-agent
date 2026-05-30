@@ -220,12 +220,15 @@ def cmd_doctor(args: argparse.Namespace) -> dict[str, Any] | str:
     if getattr(args, "fix", False) is True and not gate:
         raise TeamAgentError("--fix requires --gate")
     if getattr(args, "comms", False) is True or gate == "comms":
-        from team_agent.diagnose.comms import run_comms_selftest
-        return run_comms_selftest(
+        from team_agent.diagnose.comms import COMMS_BOUNDARY_TEXT, run_comms_selftest
+        result = run_comms_selftest(
             Path(args.workspace).resolve(),
             team=getattr(args, "team", None),
             gate=gate,
         )
+        if args.json:
+            return result
+        return f"{COMMS_BOUNDARY_TEXT}\n{json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True)}"
     if isinstance(gate, str) and gate:
         from team_agent.diagnose.orphan_cleanup import orphan_gate
         if gate != "orphans":

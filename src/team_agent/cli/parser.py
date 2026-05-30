@@ -315,11 +315,25 @@ def main(argv: list[str] | None = None) -> None:
     add_json(p)
     p.set_defaults(func=cmd_validate_result)
 
-    p = sub.add_parser("doctor", help="Check local dependencies, providers, auth hints, tmux, and MCP")
+    p = sub.add_parser(
+        "doctor",
+        help="Check local dependencies, providers, auth hints, tmux, and MCP",
+        usage=(
+            "team-agent doctor validates comms code correctness (contract suite on installed code) + live pane "
+            "bindings. Does NOT perform live runtime message round-trip. (zero token, zero pollution) [options]"
+        ),
+    )
     p.add_argument("spec", nargs="?")
     p.add_argument("--workspace", default=".", help="Workspace whose team.db schema should be diagnosed")
     p.add_argument("--gate", choices=["orphans", "comms"], help="Run a CI-friendly doctor gate")
-    p.add_argument("--comms", action="store_true", help="Run core worker/leader communication self-test")
+    p.add_argument(
+        "--comms",
+        action="store_true",
+        help=(
+            "Validate comms code correctness and live pane bindings. Does NOT perform live runtime message "
+            "round-trip. (zero token, zero pollution)"
+        ),
+    )
     p.add_argument("--team", help="Explicit team/session target for --comms")
     p.add_argument("--fix", action="store_true", help="With --gate orphans: apply the gate fix")
     p.add_argument("--fix-schema", action="store_true", help="Rebuild drifted team.db table layouts after writing a backup")
