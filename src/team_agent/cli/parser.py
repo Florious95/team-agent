@@ -319,8 +319,9 @@ def main(argv: list[str] | None = None) -> None:
         "doctor",
         help="Check local dependencies, providers, auth hints, tmux, and MCP",
         usage=(
-            "team-agent doctor validates comms code correctness (contract suite on installed code) + live pane "
-            "bindings. Does NOT perform live runtime message round-trip. (zero token, zero pollution) [options]"
+            "team-agent doctor validates live pane binding consistency. Does NOT perform live runtime message "
+            "round-trip. comms contract suite deferred to 0.2.9 (test files not shipped). "
+            "(zero token, zero pollution) [options]"
         ),
     )
     p.add_argument("spec", nargs="?")
@@ -330,8 +331,8 @@ def main(argv: list[str] | None = None) -> None:
         "--comms",
         action="store_true",
         help=(
-            "Validate comms code correctness and live pane bindings. Does NOT perform live runtime message "
-            "round-trip. (zero token, zero pollution)"
+            "Validate live pane binding consistency. Does NOT perform live runtime message round-trip. "
+            "comms contract suite deferred to 0.2.9 (test files not shipped). (zero token, zero pollution)"
         ),
     )
     p.add_argument("--team", help="Explicit team/session target for --comms")

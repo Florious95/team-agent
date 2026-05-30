@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import importlib.metadata
 import os
-import re
-import subprocess
-import sys
 import uuid
 from pathlib import Path
 from typing import Any, Protocol
@@ -13,24 +9,13 @@ from team_agent.state import load_runtime_state, select_runtime_state
 
 
 COMMS_BOUNDARY_TEXT = (
-    "validates comms code correctness (contract suite on installed code) + live pane bindings. "
-    "Does NOT perform live runtime message round-trip. (zero token, zero pollution)"
+    "validates live pane binding consistency. Does NOT perform live runtime message round-trip. "
+    "comms contract suite deferred to 0.2.9 (test files not shipped). (zero token, zero pollution)"
 )
-
-CONTRACT_ALLOWLIST = [
-    "tests.test_messaging_tmux",
-    "tests.test_send_busy_recipient_acceptance",
-    "tests.test_messaging_leader_receiver_buffer",
-    "tests.test_selftest_and_idle_accuracy_acceptance",
-    "tests.test_messaging_leader",
-    "tests.test_messaging_mcp",
-    "tests.test_worker_peer_delivery_scheduling",
-    "tests.test_result_delivery_contract",
-]
 
 
 class CommsSelftestDriver(Protocol):
-    """Injectable boundary for tests; production uses local Python subprocesses only."""
+    """Injectable boundary for tests; production reads state only."""
 
 
 def run_comms_selftest(
@@ -56,7 +41,7 @@ def run_comms_selftest(
         "ok": ok,
         "status": "pass" if ok else "fail",
         "run_id": run_id,
-        "scope": "code_correctness_and_binding",
+        "scope": "binding_consistency",
         "boundary": COMMS_BOUNDARY_TEXT,
         "checks": checks,
     }
@@ -145,113 +130,13 @@ def _receiver_binding_check(workspace: Path, team: str | None, driver: CommsSelf
 
 
 def _contract_suite_check(workspace: Path, driver: CommsSelftestDriver) -> dict[str, Any]:
-    override = _driver_call(driver, "contract_suite", workspace, CONTRACT_ALLOWLIST, default=None)
-    if override is None:
-        override = _driver_value(driver, "contract_suite", default=None)
-    from_override = isinstance(override, dict)
-    if from_override:
-        out = dict(override)
-    else:
-        out = _run_contract_pytest(workspace, driver)
-    out.setdefault("verifies", "code_correctness")
-    out.setdefault("allowlist", list(CONTRACT_ALLOWLIST))
-    if not from_override:
-        out.setdefault("pytest_executed", True)
-    out.setdefault("pytest_env", _pytest_env())
-    out.setdefault("live_environment", out.get("live_env") or _live_environment_snapshot(driver))
-    _normalize_pytest_payload(out)
-    mismatch = _environment_mismatches(out.get("pytest_env") or {}, out.get("live_environment") or {})
-    missing_evidence = not out.get("pytest_executed") or "exit_code" not in out["pytest"] or not out["pytest"].get("counts")
-    if missing_evidence:
-        out["status"] = "fail"
-        out["reason"] = "missing_pytest_evidence"
-    elif mismatch:
-        out["status"] = "fail"
-        out["error"] = "install_mismatch"
-        out["mismatched_fields"] = mismatch
-    elif not out["pytest"]["tests_run"]:
-        out["status"] = "fail"
-        out["reason"] = "no_tests_run"
-    elif out["pytest"]["counts"].get("skipped", 0) > 0 and out["pytest"]["counts"].get("passed", 0) == 0:
-        out["status"] = "fail"
-        out["reason"] = "all_relevant_tests_skipped"
-    else:
-        out.setdefault("status", "pass" if out["pytest"].get("exit_code") == 0 else "fail")
-    return out
-
-
-def _run_contract_pytest(workspace: Path, driver: CommsSelftestDriver) -> dict[str, Any]:
-    override = _driver_call(driver, "run_contract_pytest", workspace, CONTRACT_ALLOWLIST, default=None)
-    if isinstance(override, dict):
-        return override
-    if os.environ.get("TEAM_AGENT_DOCTOR_COMMS_CONTRACT_CHILD") == "1":
-        return _contract_child_stub()
-    cmd = [sys.executable, "-m", "pytest", "-q", *CONTRACT_ALLOWLIST]
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
-    env["TEAM_AGENT_DOCTOR_COMMS_CONTRACT_CHILD"] = "1"
-    repo_root = Path(__file__).resolve().parents[3]
-    proc = subprocess.run(cmd, cwd=str(repo_root), text=True, capture_output=True, env=env, timeout=120)
-    output = f"{proc.stdout}\n{proc.stderr}"
-    if proc.returncode != 0 and "No module named pytest" in output:
-        proc = subprocess.run(
-            [sys.executable, "-m", "unittest", *CONTRACT_ALLOWLIST],
-            cwd=str(repo_root),
-            text=True,
-            capture_output=True,
-            env=env,
-            timeout=120,
-        )
-        output = f"{proc.stdout}\n{proc.stderr}"
-    counts = _parse_pytest_counts(output)
+    del workspace, driver
     return {
-        "status": "pass" if proc.returncode == 0 else "fail",
-        "pytest_executed": True,
-        "pytest": {
-            "exit_code": proc.returncode,
-            "tests_run": list(CONTRACT_ALLOWLIST) if sum(counts.values()) else [],
-            "counts": counts,
-            "duration_seconds": 0.0,
-            "warnings": [],
-        },
-        "pytest_env": _pytest_env(),
-        "live_environment": _live_environment_snapshot(driver),
+        "status": "deferred",
+        "deferred_to": "0.2.9",
+        "reason": "contract test files not shipped with package",
+        "message": "comms contract verification deferred to 0.2.9; contract test files not shipped with package",
     }
-
-
-def _contract_child_stub() -> dict[str, Any]:
-    return {
-        "status": "pass",
-        "pytest_executed": True,
-        "pytest": {
-            "exit_code": 0,
-            "tests_run": list(CONTRACT_ALLOWLIST),
-            "counts": {"passed": 1, "failed": 0, "errors": 0, "skipped": 0},
-            "duration_seconds": 0.0,
-            "warnings": [],
-        },
-        "pytest_env": _pytest_env(),
-        "live_environment": _pytest_env(),
-    }
-
-
-def _normalize_pytest_payload(out: dict[str, Any]) -> None:
-    pytest_data = out.get("pytest")
-    if not isinstance(pytest_data, dict):
-        pytest_data = {}
-        out["pytest"] = pytest_data
-    if "exit_code" not in pytest_data and "exit_code" in out:
-        pytest_data["exit_code"] = out["exit_code"]
-    if "tests_run" not in pytest_data:
-        pytest_data["tests_run"] = out.get("tests_run", [])
-    if "counts" not in pytest_data:
-        pytest_data["counts"] = out.get("counts", {})
-    if "duration_seconds" not in pytest_data:
-        pytest_data["duration_seconds"] = out.get("duration_seconds", 0.0)
-    if "warnings" not in pytest_data:
-        pytest_data["warnings"] = out.get("warnings", [])
-    pytest_data["tests_run"] = [str(item) for item in (pytest_data.get("tests_run") or [])]
-    pytest_data["counts"] = _normalize_counts(pytest_data.get("counts") or {})
 
 
 def _provider_sdk_calls_check(driver: CommsSelftestDriver) -> dict[str, Any]:
@@ -264,68 +149,6 @@ def _provider_sdk_calls_check(driver: CommsSelftestDriver) -> dict[str, Any]:
         "verifies": "no_provider_sdk_calls",
         "calls": calls,
     }
-
-
-def _pytest_env() -> dict[str, str]:
-    try:
-        version = importlib.metadata.version("team-agent")
-    except importlib.metadata.PackageNotFoundError:
-        import team_agent
-        version = getattr(team_agent, "__version__", "unknown")
-    import team_agent
-    package_path = str(Path(team_agent.__file__).resolve())
-    site_packages = next((str(parent) for parent in Path(package_path).parents if "site-packages" in str(parent)), str(Path(package_path).parent))
-    return {
-        "python_path": sys.executable,
-        "team_agent_version": version,
-        "site_packages_path": site_packages,
-        "package_path": package_path,
-    }
-
-
-def _live_environment_snapshot(driver: CommsSelftestDriver) -> dict[str, str]:
-    override = _driver_value(driver, "live_environment", default=None)
-    if not isinstance(override, dict):
-        override = _driver_value(driver, "live_env", default=None)
-    if isinstance(override, dict):
-        return {str(key): str(value) for key, value in override.items()}
-    return _pytest_env()
-
-
-def _environment_mismatches(pytest_env: dict[str, Any], live_env: dict[str, Any]) -> list[str]:
-    fields = ("python_path", "team_agent_version", "site_packages_path")
-    return [field for field in fields if live_env.get(field) and pytest_env.get(field) and str(live_env.get(field)) != str(pytest_env.get(field))]
-
-
-def _parse_pytest_counts(output: str) -> dict[str, int]:
-    counts = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0}
-    unittest_match = re.search(r"Ran\s+(\d+)\s+tests?", output)
-    if unittest_match:
-        ran = int(unittest_match.group(1))
-        failed = sum(int(value) for value in re.findall(r"failures=(\d+)", output))
-        errors = sum(int(value) for value in re.findall(r"errors=(\d+)", output))
-        skipped = sum(int(value) for value in re.findall(r"skipped=(\d+)", output))
-        counts.update({"passed": max(ran - failed - errors - skipped, 0), "failed": failed, "errors": errors, "skipped": skipped})
-        return counts
-    summary_lines = [line for line in output.splitlines() if " in " in line and any(word in line for word in ("passed", "failed", "error", "skipped"))]
-    text = summary_lines[-1] if summary_lines else output
-    for count, word in re.findall(r"(\d+)\s+(passed|failed|errors?|skipped)", text):
-        key = "errors" if word.startswith("error") else word
-        counts[key] = counts.get(key, 0) + int(count)
-    return counts
-
-
-def _parse_pytest_warnings(output: str) -> list[str]:
-    return [line.strip() for line in output.splitlines() if "warning" in line.lower()][:20]
-
-
-def _normalize_counts(counts: dict[str, Any]) -> dict[str, int]:
-    normalized = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0}
-    for key, value in counts.items():
-        mapped = "errors" if str(key).startswith("error") else str(key)
-        if mapped in normalized:
-            normalized[mapped] = int(value or 0)
-    return normalized
 
 
 def _selftest_state(workspace: Path, team: str | None, driver: CommsSelftestDriver) -> dict[str, Any]:
@@ -345,16 +168,17 @@ def _selftest_state(workspace: Path, team: str | None, driver: CommsSelftestDriv
 
 
 def _check_pass(value: Any) -> bool:
-    return isinstance(value, dict) and value.get("status") in {"pass", "not_implemented"} and _has_required_evidence(value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("status") == "deferred":
+        return True
+    return value.get("status") in {"pass", "not_implemented"} and _has_required_evidence(value)
 
 
 def _has_required_evidence(value: dict[str, Any]) -> bool:
     verifies = value.get("verifies")
     if verifies == "binding_consistency":
         return value.get("proof") == "state_read" and value.get("state_read_observed") is True
-    if verifies == "code_correctness":
-        pytest_data = value.get("pytest") if isinstance(value.get("pytest"), dict) else {}
-        return bool(value.get("pytest_executed")) and pytest_data.get("exit_code") == 0 and bool(pytest_data.get("tests_run")) and bool(pytest_data.get("counts"))
     if verifies == "no_provider_sdk_calls":
         calls = value.get("calls") if isinstance(value.get("calls"), dict) else {}
         return all(int(calls.get(name, 0) or 0) == 0 for name in ("anthropic", "openai", "httpx"))
