@@ -148,6 +148,48 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertEqual(activity["status"], "idle", activity)
         self.assertGreaterEqual(activity["confidence"], 0.85, activity)
 
+    def test_c14_real_codex_working_spinner_with_active_task_is_working_not_idle(self) -> None:
+        status_fixture = _fixture_json("codex_working_status.json")
+        activity = classify_agent_activity(
+            status_fixture["agent_id"],
+            status_fixture["provider"],
+            status_fixture["last_output_at"],
+            {"pane_current_command": "codex", "pane_in_mode": "0"},
+            _idle_prompt_fixture("codex_working.txt"),
+            now=datetime.fromisoformat(status_fixture["captured_at"].replace("Z", "+00:00")),
+            active_task=True,
+            pane_delta_recent=True,
+        )
+
+        self.assertEqual(activity["status"], "working", activity)
+        self.assertGreaterEqual(activity["confidence"], 0.85, activity)
+        self.assertIn("Working", activity["rationale"])
+
+    def test_c15_agent_health_real_codex_working_spinner_with_active_task_is_working_not_idle(self) -> None:
+        status_fixture = _fixture_json("codex_working_status.json")
+        agent_id = status_fixture["agent_id"]
+        task_id = status_fixture["current_task_id"]
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c15-codex-working-") as tmp:
+            workspace = Path(tmp)
+            state = _health_state(
+                workspace,
+                tasks=[{"id": task_id, "assignee": agent_id, "status": "running"}],
+                provider=status_fixture["provider"],
+            )
+            state["agents"] = {
+                agent_id: {
+                    "status": "running",
+                    "provider": status_fixture["provider"],
+                    "window": agent_id,
+                }
+            }
+            store = MessageStore(workspace)
+            _sync_health_with_capture(workspace, state, store, _idle_prompt_fixture("codex_working.txt"))
+            health = store.agent_health(owner_team_id="current")[agent_id]
+
+        self.assertEqual(health["current_task_id"], task_id, health)
+        self.assertEqual(health["status"], "WORKING", health)
+
     def test_c14_real_claude_code_idle_prompt_fixture_is_idle(self) -> None:
         activity = classify_agent_activity(
             "worker_1",
@@ -411,6 +453,11 @@ def _idle_prompt_fixture(name: str) -> str:
     while lines and _is_fixture_metadata_line(lines[0]):
         lines.pop(0)
     return "".join(lines)
+
+
+def _fixture_json(name: str) -> dict:
+    text = (Path(__file__).resolve().parent / "fixtures" / "idle_prompts" / name).read_text()
+    return json.loads(text)
 
 
 def _is_fixture_metadata_line(line: str) -> bool:

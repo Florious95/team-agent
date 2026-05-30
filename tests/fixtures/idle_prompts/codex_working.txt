@@ -1,0 +1,41 @@
+# provider=codex captured_at=2026-05-30T03:33:08Z source_pane=team-ta-bug071-team-bug071-fixture-20260530T033216Z:worker_a workspace=/tmp/team-agent-bug071-bug071-fixture-20260530T033216Z run_id=bug071-fixture-20260530T033216Z head=08e1342 note=real tmux capture, not hand-written
+│ model:       loading   /model to change                  │
+│ directory:   /private/…/…bug071-fixture-20260530T033216Z │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+• Starting MCP servers (1/3): computer-use, team_orchestrator (0s • esc to inte…
+
+
+› Summarize recent commits
+
+  gpt-5.5 default · /private/tmp/team-agent-bug071-bug071-fixture-20260530T0332…
+
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.135.0)                               │
+│                                                          │
+│ model:       gpt-5.5 medium   /model to change           │
+│ directory:   /private/…/…bug071-fixture-20260530T033216Z │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: Try the Codex App. Run 'codex app' or visit
+  https://chatgpt.com/codex?app-landing-page=true
+
+
+› Team Agent message from leader:
+
+  BUG071_WORKING_bug071-fixture-20260530T033216Z: use the shell tool to run
+  sleep 90. Keep the turn active while the command runs. After it exits, call
+  team_orchestrator.report_result with summary BUG071_WORKING_bug071-fixture-
+  20260530T033216Z_DONE.
+
+  [team-agent-token:msg_4b587d14df4f]
+
+
+• Working (35s • esc to interrupt) · 1 background terminal running · /ps to vie…
+
+
+› Summarize recent commits
+
+  gpt-5.5 medium · /private/tmp/team-agent-bug071-bug071-fixture-20260530T03321…
