@@ -28,24 +28,39 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         doctor_help = _cli_stdout(["doctor", "--help"])
         self.assertIn("--comms", doctor_help)
         first_line = next(line for line in doctor_help.splitlines() if line.strip())
-        self.assertIn("validates comms code correctness", first_line)
+        self.assertIn("validates live pane binding consistency", first_line)
         self.assertIn("Does NOT perform live runtime message round-trip", first_line)
+        self.assertIn("comms contract suite deferred to 0.2.9", first_line)
 
     def test_c_rt_8_doctor_comms_non_json_banner_discloses_no_live_round_trip(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c2-") as tmp:
             workspace = Path(tmp)
-            output = _cli_stdout(["doctor", "--comms", "--workspace", str(workspace)])
+            with patch(
+                "team_agent.diagnose.comms.run_comms_selftest",
+                return_value={
+                    "notice": "Does NOT perform live runtime message round-trip; comms contract suite deferred to 0.2.9 (test files not shipped); zero token, zero pollution",
+                    "ok": True,
+                },
+            ):
+                output = _cli_stdout(["doctor", "--comms", "--workspace", str(workspace)])
 
         first_line = next(line for line in output.splitlines() if line.strip())
         self.assertIn("Does NOT perform live runtime message round-trip", first_line)
+        self.assertIn("comms contract suite deferred to 0.2.9", first_line)
         self.assertIn("zero token", first_line)
         self.assertIn("zero pollution", first_line)
 
     def test_c2_doctor_comms_and_gate_comms_route_to_same_json_helper(self) -> None:
+        result = {
+            "ok": True,
+            "scope": "binding_consistency",
+            "checks": {"receiver_binding": {"status": "pass"}},
+        }
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c2-") as tmp:
             workspace = Path(tmp)
-            direct = _cli_json(["doctor", "--comms", "--workspace", str(workspace), "--json"])
-            gate = _cli_json(["doctor", "--gate", "comms", "--workspace", str(workspace), "--json"])
+            with patch("team_agent.diagnose.comms.run_comms_selftest", return_value=result):
+                direct = _cli_json(["doctor", "--comms", "--workspace", str(workspace), "--json"])
+                gate = _cli_json(["doctor", "--gate", "comms", "--workspace", str(workspace), "--json"])
 
         self.assertEqual(_canonical_selftest_json(direct), _canonical_selftest_json(gate))
 
@@ -72,66 +87,24 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertTrue(binding["state_read_observed"], binding)
         self.assertEqual(binding["pane_id"], "%100")
 
-    def test_contract_suite_reports_installed_code_env_allowlist_and_scope(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=_passing_contract_suite()))
+    def test_contract_suite_is_deferred_and_neutral_for_0_2_8_ship(self) -> None:
+        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=_deferred_contract_suite()))
 
         self.assertTrue(result.get("ok"), result)
         self.assertIn("scope", result)
-        self.assertEqual(result["scope"], "code_correctness_and_binding", result)
+        self.assertEqual(result["scope"], "binding_consistency", result)
         self.assertNotEqual(result["scope"], "live_link_runtime_end_to_end", result)
+        self.assertNotIn("code_correctness", result["scope"], result)
         self.assertIn("contract_suite", result["checks"], result)
         suite = result["checks"]["contract_suite"]
-        self.assertEqual(suite["status"], "pass", suite)
-        self.assertEqual(suite["verifies"], "code_correctness", suite)
-        self.assertTrue(suite["pytest_executed"], suite)
-        self.assertEqual(suite["pytest"]["exit_code"], 0, suite)
-        self.assertGreater(len(suite["pytest"]["tests_run"]), 0, suite)
-        self.assertGreaterEqual(suite["pytest"]["counts"]["passed"], 1, suite)
-        self.assertEqual(suite["pytest_env"]["python_path"], suite["live_env"]["python_path"], suite)
-        self.assertEqual(suite["pytest_env"]["team_agent_version"], suite["live_env"]["team_agent_version"], suite)
-        self.assertEqual(suite["pytest_env"]["site_packages_path"], suite["live_env"]["site_packages_path"], suite)
-        self.assertIn("tests.test_messaging_tmux", suite["allowlist"])
-        self.assertIn("tests.test_selftest_and_idle_accuracy_acceptance", suite["allowlist"])
-
-    def test_contract_suite_install_mismatch_fails_with_explicit_error(self) -> None:
-        suite = _passing_contract_suite()
-        suite["pytest_env"]["site_packages_path"] = "/tmp/wrong-install"
-        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
-
-        self.assertFalse(result.get("ok"), result)
-        suite_check = result["checks"]["contract_suite"]
-        self.assertEqual(suite_check["status"], "fail", suite_check)
-        self.assertEqual(suite_check["error"], "install_mismatch", suite_check)
-        self.assertIn("site_packages_path", suite_check["mismatched_fields"], suite_check)
-
-    def test_contract_suite_empty_or_all_skip_is_failure_not_default_pass(self) -> None:
-        cases = [
-            ("empty", {"tests_run": [], "counts": {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}}, "no_tests_run"),
-            ("all_skip", {"tests_run": ["tests.test_messaging_tmux"], "counts": {"passed": 0, "failed": 0, "skipped": 1, "errors": 0}}, "all_relevant_tests_skipped"),
-        ]
-        for _name, override, reason in cases:
-            with self.subTest(reason=reason):
-                suite = _passing_contract_suite()
-                suite["pytest"].update(override)
-                result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
-
-                self.assertFalse(result.get("ok"), result)
-                suite_check = result["checks"]["contract_suite"]
-                self.assertEqual(suite_check["status"], "fail", suite_check)
-                self.assertEqual(suite_check["reason"], reason, suite_check)
-
-    def test_pass_checks_must_include_physical_evidence_fields_not_default_pass(self) -> None:
-        suite = _passing_contract_suite()
-        suite.pop("pytest_executed")
-        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
-
-        self.assertFalse(result.get("ok"), result)
-        suite_check = result["checks"]["contract_suite"]
-        self.assertEqual(suite_check["status"], "fail", suite_check)
-        self.assertEqual(suite_check["reason"], "missing_pytest_evidence", suite_check)
+        self.assertEqual(suite["status"], "deferred", suite)
+        self.assertEqual(suite["deferred_to"], "0.2.9", suite)
+        self.assertEqual(suite["reason"], "contract test files not shipped with package", suite)
+        self.assertIn("comms contract verification deferred to 0.2.9", suite["message"], suite)
+        self.assertNotIn("pytest_executed", suite)
 
     def test_doctor_comms_does_not_create_throwaway_sessions_or_run_message_probes(self) -> None:
-        driver = FakeSelftestDriver(contract_suite=_passing_contract_suite())
+        driver = FakeSelftestDriver(contract_suite=_deferred_contract_suite())
         result = _run_comms_selftest(driver=driver)
 
         self.assertTrue(result.get("ok"), result)
@@ -141,10 +114,10 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertNotIn("matrix", result["checks"], result)
         self.assertNotIn("cleanup", result["checks"], result)
 
-    def test_provider_sdk_calls_are_forbidden_even_when_contract_suite_passes(self) -> None:
+    def test_provider_sdk_calls_are_forbidden_even_when_contract_suite_deferred(self) -> None:
         result = _run_comms_selftest(
             driver=FakeSelftestDriver(
-                contract_suite=_passing_contract_suite(),
+                contract_suite=_deferred_contract_suite(),
                 provider_sdk_calls={"anthropic": 1, "openai": 0, "httpx": 0},
             )
         )
@@ -301,7 +274,7 @@ class FakeSelftestDriver:
         self.state_after = json.loads(json.dumps(self.state_before, sort_keys=True))
         self.matrix_case = matrix_case
         self.idle_execution = idle_execution or {"status": "pass"}
-        self.contract_suite = json.loads(json.dumps(contract_suite or _passing_contract_suite(), sort_keys=True))
+        self.contract_suite = json.loads(json.dumps(contract_suite or _deferred_contract_suite(), sort_keys=True))
         self.provider_sdk_calls = dict(provider_sdk_calls or {"anthropic": 0, "openai": 0, "httpx": 0})
         self._current_pane_id = current_pane_id
         self.old_probe_calls: list[str] = []
@@ -416,36 +389,12 @@ def _canonical_selftest_json(data: dict) -> dict:
     return scrub
 
 
-def _passing_contract_suite() -> dict:
-    env = {
-        "python_path": "/opt/team-agent/bin/python",
-        "team_agent_version": "0.2.8",
-        "site_packages_path": "/opt/team-agent/lib/python/site-packages/team_agent",
-    }
-    allowlist = [
-        "tests.test_messaging_tmux",
-        "tests.test_send_busy_recipient_acceptance",
-        "tests.test_messaging_leader_receiver_buffer",
-        "tests.test_selftest_and_idle_accuracy_acceptance",
-        "tests.test_messaging_leader",
-        "tests.test_messaging_mcp",
-        "tests.test_worker_peer_delivery_scheduling",
-        "tests.test_result_delivery_contract",
-    ]
+def _deferred_contract_suite() -> dict:
     return {
-        "status": "pass",
-        "verifies": "code_correctness",
-        "pytest_executed": True,
-        "pytest": {
-            "exit_code": 0,
-            "tests_run": list(allowlist),
-            "counts": {"passed": 57, "failed": 0, "skipped": 0, "errors": 0},
-            "duration_seconds": 9.1,
-            "warnings": [],
-        },
-        "allowlist": allowlist,
-        "pytest_env": dict(env),
-        "live_env": dict(env),
+        "status": "deferred",
+        "deferred_to": "0.2.9",
+        "reason": "contract test files not shipped with package",
+        "message": "comms contract verification deferred to 0.2.9 (test files not shipped with package)",
     }
 
 
