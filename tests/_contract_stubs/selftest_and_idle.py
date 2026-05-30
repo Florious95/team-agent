@@ -17,7 +17,7 @@ def run_comms_selftest(
     probe_content: str | None = None,
     driver: CommsSelftestDriver | None = None,
 ) -> dict[str, Any]:
-    """Run the doctor --comms core-link selftest and return stable JSON."""
+    """Run doctor --comms binding + installed-code contract checks and return stable JSON."""
     raise NotImplementedError("contract stub: implement in team_agent.diagnose.comms")
 
 

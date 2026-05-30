@@ -40,6 +40,15 @@ def evaluate_idle_behavior(
 
 ## Feature A: doctor --comms
 
+Final 0.2.8 scope: `doctor --comms` is a no-token, no-paste diagnostic. It
+does not create throwaway sessions, does not send to live workers, does not ask
+workers to report back, and does not claim live runtime end-to-end success. It
+performs exactly two substantive checks plus honesty metadata:
+
+1. `receiver_binding`: pure state read of live owner/receiver binding.
+2. `contract_suite`: run an allowlisted communications contract suite against
+   the same installed Team Agent code used by the live team.
+
 C1. `doctor --comms` extends the existing `team-agent doctor` surface. There is
 no new top-level `team-agent selftest` command. `team-agent doctor --help`
 documents `--comms`.
@@ -48,118 +57,58 @@ C2. `doctor --comms --json` and `doctor --gate comms --json` route to the same
 helper. For the same workspace and same tick, their canonical JSON is byte
 identical after timestamp/run-id fields are removed.
 
-C3-C6. Worker-to-leader selftest is explicitly deferred for 0.2.8. The helper
-must report `checks.worker_to_leader.status=not_implemented` and
-`deferred_to=0.2.9`. This is not a pass and not a fail: top-level `ok` may be
-true when all implemented checks pass and the deferred worker-to-leader probe
-causes zero live pollution. While deferred, invalid worker-to-leader probe
-content, fallback responses, dedupe signals, and capture-token checks must not
-be evaluated because the worker-to-leader probe must not run at all.
+C-RT-8. The help first line and non-JSON banner must state the boundary:
+`validates comms code correctness (contract suite on installed code) + live
+pane bindings. Does NOT perform live runtime message round-trip. (zero token,
+zero pollution)`.
 
-C7. Disposable tmux sessions use only the prefix `ta-selftest-comms-<runid>`.
-They must never reuse `quick-test-*`, `team-agent-*`, or live team session
-names.
+C-RT-5. Top-level JSON has `scope="code_correctness_and_binding"` and must not
+use `scope="live_link_runtime_end_to_end"`. Every check has a `verifies` value:
+`receiver_binding.verifies="binding_consistency"`,
+`contract_suite.verifies="code_correctness"`, and
+`provider_sdk_calls.verifies="no_provider_sdk_calls"`.
 
-C8. Created disposable sessions are killed in a finally path. If the helper
-raises or returns failure after creation, cleanup still runs and JSON includes
-`checks.cleanup.status=killed` or `pass`.
+C-RT-1. A `status=pass` check must include physical evidence for its category:
+`receiver_binding` has `proof="state_read"` and `state_read_observed=true`;
+`contract_suite` has `pytest_executed=true`, `pytest.exit_code=0`, non-empty
+`pytest.tests_run`, and a non-empty `pytest.counts` dict. Missing evidence is a
+failure, not a default pass.
 
-C9. At startup, the helper sweeps stale `ta-selftest-comms-*` sessions from a
-previous crash and emits `selftest.swept_stale`.
+Receiver binding. The check reads live state only. It verifies that
+`team_owner.pane_id`, `leader_receiver.pane_id`, and the current caller pane are
+consistent when those fields exist, without command-name or UUID hard gates. It
+does not call owner-population/first-bind mutators and does not persist the
+disposable receiver.
 
-C10. Cleanup is a first-class check. JSON contains
-`checks.cleanup.{status,killed_sessions}`. Any cleanup failure makes top-level
-`ok=false`.
+Contract suite. The allowlist is explicit and stable enough to audit. It must
+include the representative communications tests:
+`tests.test_messaging_tmux`, `tests.test_send_busy_recipient_acceptance`,
+`tests.test_messaging_leader_receiver_buffer`,
+`tests.test_selftest_and_idle_accuracy_acceptance`,
+`tests.test_messaging_leader`, `tests.test_messaging_mcp`,
+`tests.test_worker_peer_delivery_scheduling`, and
+`tests.test_result_delivery_contract`. The result contains
+`pytest.{exit_code, tests_run, counts, duration_seconds, warnings}`.
 
-C10b. Sessions removed during the startup sweep are not run-created sessions.
-They must not appear in `checks.cleanup.created_sessions`, and a second
-`kill-session` returning "can't find session" for an already-swept stale
-session is idempotent and must not fail cleanup.
+C-RT-6. The suite runs against the same installed Python and Team Agent package
+as the live team. JSON includes
+`pytest_env.{python_path, team_agent_version, site_packages_path}` and a live
+environment snapshot. Any mismatch fails with `error="install_mismatch"` and a
+list of mismatched fields.
 
-C11. Receiver binding may not reintroduce command-name whitelists. A live
-external Claude pane whose `pane_current_command` is `2.1.154` is usable.
+C-RT-7. `tests_run` must be non-empty. `tests_run=[]` fails with
+`reason="no_tests_run"`. `skipped>0 and passed==0` fails with
+`reason="all_relevant_tests_skipped"`. The exit code and counts are mandatory.
 
-C12. Receiver binding may not require `TEAM_AGENT_LEADER_SESSION_UUID*`.
-Pane equality between `team_owner.pane_id`, `leader_receiver.pane_id`, and the
-caller pane is sufficient identity.
+MUST-NOT-13. `doctor --comms` must not call provider SDKs or network clients
+used for provider APIs. JSON reports call counts for `anthropic`, `openai`, and
+`httpx`. Any count greater than zero fails the diagnostic.
 
-C13. The helper is read-only with respect to live owner state. It does not call
-owner-population/first-bind mutators and does not persist the disposable
-receiver. `state.json` `team_owner` and `leader_receiver` are byte-identical
-before and after the run.
-
-C13b. The helper is also read-only with respect to pre-existing user messages.
-Running `doctor --comms` must not advance, submit, deliver, acknowledge, fail,
-or otherwise mutate any pending/accepted message that existed before the run.
-Only selftest-owned probe rows may be processed by the selftest.
-
-## Four Ack Layers
-
-Every implemented matrix cell reports the four signals independently:
-
-- `enqueue_ack`: durable message row accepted.
-- `delivery_ack`: exact message id was submitted to the recipient pane and a
-  `send.submitted` or `send.pending_delivered` event exists.
-- `execution_ack`: the worker produced a bounded result or leader-bound message
-  tied to the unique task/message token.
-- `leader_notification_ack`: the execution result/leader-bound response reached
-  the disposable capture receiver and not the live leader pane.
-
-The JSON must not collapse these signals into one `ok` field.
-
-## Matrix
-
-A1. Worker idle, leader to worker: pass requires all four ack layers. This is
-also the behavioral definition of idle: an idle worker can accept a probe and
-produce a bounded execution ack.
-
-A2. Worker working, leader to worker: default semantics are FIFO, not
-preemption. While busy, the second message gets `enqueue_ack=pass`, a
-`send.deferred_busy` event, and no paste into the busy pane. After busy clears,
-the same message gets `delivery_ack=pass` through `send.pending_delivered`.
-Execution ack is separate and may arrive later.
-
-B1. Worker working, worker to leader: deferred for 0.2.8. The matrix cell must
-report `status=not_implemented`, `deferred_to=0.2.9`, and must not run a worker
-probe.
-
-B2. Worker idle, worker to leader: deferred for 0.2.8. The matrix cell must
-report `status=not_implemented`, `deferred_to=0.2.9`, and must not run a worker
-probe.
-
-C18. B1/B2 worker-to-leader isolation is deferred rather than fake-green. The
-selftest must not create a result that looks like a successful worker-to-leader
-round trip. It must expose the deferred status above and avoid invoking the
-worker-to-leader probe path entirely. A mock implementation that would write a
-selftest token through the live worker if called must leave no token behind,
-proving the deferred probe did not run.
-
-C19. The throwaway workspace is outside the live workspace, under
-`/tmp/ta-selftest-comms-<runid>/workspace`. The live workspace's persistent
-Team Agent files are byte-identical before and after `doctor --comms`, including
-state, team.db, logs, and `.team/runtime/*`. JSON must include
-`checks.live_workspace_unchanged.status`.
-
-C20. Because B1/B2 are deferred, a normal successful 0.2.8 `doctor --comms` run
-must leave zero selftest tokens in the live leader pane, live workspace message
-store, and live event log. If a token is already present in any live source or a
-buggy path writes one while the deferred probe should be skipped,
-`checks.live_leader_pollution.status=fail`, top-level `ok=false`, and
-`{live_pane_id, token, detected_in}` identify the source.
-
-C21. Throwaway cleanup is four independent checks:
-`cleanup.tmux`, `cleanup.workspace`, `cleanup.coordinator`, and
-`cleanup.worker`. Any non-pass subcheck makes top-level `ok=false`. Startup
-sweep must clean both stale `ta-selftest-comms-*` tmux sessions and stale
-`/tmp/ta-selftest-comms-*` directories, with
-`selftest.swept_stale.{tmux,workspaces}` arrays.
-
-C22. The throwaway team must not register itself in global or live registries.
-After the run, the run id may only appear under
-`/tmp/ta-selftest-comms-<runid>/` and explicit test/artifact logs. JSON must
-include `checks.global_registry_pollution`.
-
-No selftest path may test or perform preemption, Ctrl+C, or interrupt behavior.
+Removed old mechanisms. `doctor --comms` must not expose or execute A1/A2/B1/B2
+round-trip probes, throwaway tmux sessions, throwaway workspaces, stale selftest
+cleanup, worker-to-leader pollution scans, or live message delivery. Those
+behaviors belong to the standalone contract suite or future real-machine E2E,
+not to the doctor command itself.
 
 ## Feature B: Idle Accuracy
 
@@ -185,19 +134,17 @@ after Feature B introduces the `WORKING` label.
 
 ## Real-Machine Acceptance
 
-A realistic tester must run one external-leader, real-worker flow:
+A realistic tester must run `team-agent doctor --comms --workspace . --json`
+inside a live team and confirm:
 
-1. `team-agent doctor --comms --workspace . --json` while one worker is idle.
-2. A long-running worker task, then `doctor --comms` during busy state.
-3. The A2 busy case shows durable enqueue and deferred delivery, not preempt.
-4. Worker-to-leader probes render only in disposable capture panes.
-5. No `ta-selftest-comms-*` sessions remain after success or failure.
-6. `team-agent status --json` shows an active outputting worker as `WORKING` or
-   `RUNNING`, not `IDLE`; after provider idle prompt returns, it shows `IDLE`.
-7. C18 full causal chain: run a worker subprocess inside the throwaway
-   workspace and deliberately set the live workspace receiver to a fake live
-   pane. The worker's MCP `send_message(to="leader")` must resolve the
-   throwaway persisted capture receiver, not any in-memory swap.
-8. Bug-073 negative control: intentionally mislaunch the throwaway worker with
-   the live workspace. The live pollution scan must detect the token in the live
-   pane and fail the selftest while still completing cleanup.
+1. No worker pane receives selftest text, no leader pane receives selftest text,
+   and no new `ta-selftest-comms-*` tmux session or `/tmp` workspace is created.
+2. JSON has `scope="code_correctness_and_binding"` and does not contain
+   `live_link_runtime_end_to_end`.
+3. `receiver_binding` passes by state read and names the live bound pane.
+4. `contract_suite` runs the installed-code allowlist and reports non-empty
+   `tests_run`, counts, exit code, duration, environment, and package path.
+5. Provider SDK call counts remain zero.
+6. `team-agent status --json` still shows an active outputting worker as
+   `WORKING` or `RUNNING`, not `IDLE`; after provider idle prompt returns, it
+   shows `IDLE`.

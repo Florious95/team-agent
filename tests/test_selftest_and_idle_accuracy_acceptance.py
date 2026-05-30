@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import hashlib
 import importlib
 import io
 import json
-import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -22,17 +20,26 @@ from team_agent.messaging import scheduler
 from team_agent.messaging.activity_detector import classify_agent_activity
 from team_agent.state import save_runtime_state
 
-
-SELFTEST_PREFIX = "ta-selftest-comms-"
-
-
 class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
-    def test_c1_doctor_comms_extends_doctor_without_new_top_level_selftest(self) -> None:
+    def test_c1_c_rt_8_doctor_comms_help_discloses_no_live_round_trip(self) -> None:
         top_help = _cli_stdout(["--help"])
         self.assertNotIn("selftest", _visible_command_words(top_help))
 
         doctor_help = _cli_stdout(["doctor", "--help"])
         self.assertIn("--comms", doctor_help)
+        first_line = next(line for line in doctor_help.splitlines() if line.strip())
+        self.assertIn("validates comms code correctness", first_line)
+        self.assertIn("Does NOT perform live runtime message round-trip", first_line)
+
+    def test_c_rt_8_doctor_comms_non_json_banner_discloses_no_live_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c2-") as tmp:
+            workspace = Path(tmp)
+            output = _cli_stdout(["doctor", "--comms", "--workspace", str(workspace)])
+
+        first_line = next(line for line in output.splitlines() if line.strip())
+        self.assertIn("Does NOT perform live runtime message round-trip", first_line)
+        self.assertIn("zero token", first_line)
+        self.assertIn("zero pollution", first_line)
 
     def test_c2_doctor_comms_and_gate_comms_route_to_same_json_helper(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c2-") as tmp:
@@ -42,392 +49,111 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(_canonical_selftest_json(direct), _canonical_selftest_json(gate))
 
-    def test_c3_c6_worker_to_leader_selftest_is_deferred_not_false_green_or_false_fail(self) -> None:
-        result = _run_comms_selftest(
-            probe_content="Result id: res_fake\nthis would be invalid if the deferred probe ran",
-            driver=FakeSelftestDriver(worker_to_leader={"ok": True, "status": "fallback_log", "deduped": True}),
-        )
-
-        self.assertTrue(result.get("ok"), result)
-        worker_to_leader = result["checks"]["worker_to_leader"]
-        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
-        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
-        self.assertNotIn(worker_to_leader.get("reason"), {"fallback_log", "deduped", "token_missing_from_capture"})
-
-    def test_c7_c10_disposable_session_prefix_cleanup_and_sweep_are_first_class_checks(self) -> None:
-        driver = FakeSelftestDriver(stale_sessions=[f"{SELFTEST_PREFIX}stale-1"], kill_ok=False)
-        result = _run_comms_selftest(driver=driver)
-        self.assertFalse(result.get("ok"), result)
-        cleanup = result["checks"]["cleanup"]
-        self.assertEqual(cleanup["status"], "fail")
-        self.assertIn(f"{SELFTEST_PREFIX}stale-1", cleanup["killed_sessions"])
-        self.assertTrue(all(name.startswith(SELFTEST_PREFIX) for name in cleanup["created_sessions"]), cleanup)
-        self.assertIn("selftest.swept_stale", result.get("events", []))
-
-    def test_c9_c10_swept_stale_session_is_not_cleaned_up_twice_or_reported_created(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-stale-idempotent-") as tmp:
-            workspace = Path(tmp)
-            save_runtime_state(workspace, _health_state(workspace, tasks=[]))
-            sessions = {f"{SELFTEST_PREFIX}stale-1"}
-            kill_calls: list[str] = []
-            run_id = "freshrun0000"
-            created_session = f"{SELFTEST_PREFIX}{run_id}"
-
-            def fake_run_cmd(args: list[str], timeout: int = 10) -> SimpleNamespace:
-                if args[:3] == ["tmux", "ls", "-F"]:
-                    return SimpleNamespace(returncode=0, stdout="\n".join(sorted(sessions)) + ("\n" if sessions else ""), stderr="")
-                if args[:2] == ["tmux", "kill-session"]:
-                    target = args[args.index("-t") + 1]
-                    kill_calls.append(target)
-                    if target in sessions:
-                        sessions.remove(target)
-                        return SimpleNamespace(returncode=0, stdout="", stderr="")
-                    return SimpleNamespace(returncode=1, stdout="", stderr=f"can't find session: {target}")
-                if args[:2] == ["tmux", "new-session"]:
-                    sessions.add(args[args.index("-s") + 1])
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
-                if args[:3] == ["tmux", "display-message", "-p"]:
-                    return SimpleNamespace(returncode=0, stdout="%capture\n", stderr="")
-                if args[:3] == ["tmux", "capture-pane", "-p"]:
-                    return SimpleNamespace(returncode=0, stdout="Team Agent comms selftest probe selftest-comms-freshrun\n", stderr="")
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-            comms = importlib.import_module("team_agent.diagnose.comms")
-            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch.object(
-                comms,
-                "_check_receiver_binding",
-                return_value={"status": "pass"},
-            ), patch.object(
-                comms,
-                "_check_leader_to_worker",
-                return_value={
-                    "status": "pass",
-                    "enqueue_ack": {"status": "pass"},
-                    "delivery_ack": {"status": "pass"},
-                    "execution_ack": {"status": "pass"},
-                    "leader_notification_ack": {"status": "pass"},
-                },
-            ), patch.object(
-                comms,
-                "_check_worker_to_leader",
-                return_value={
-                    "status": "pass",
-                    "enqueue_ack": {"status": "pass"},
-                    "delivery_ack": {"status": "pass"},
-                    "execution_ack": {"status": "pass"},
-                    "leader_notification_ack": {"status": "pass"},
-                },
-            ), patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
-                result = comms.run_comms_selftest(workspace, team="current")
-
-            cleanup = result["checks"]["cleanup"]
-
-        self.assertIn("selftest.swept_stale", result.get("events", []), result)
-        self.assertTrue(result.get("ok"), result)
-        self.assertNotIn(f"{SELFTEST_PREFIX}stale-1", cleanup["created_sessions"], cleanup)
-        self.assertEqual(kill_calls.count(f"{SELFTEST_PREFIX}stale-1"), 1, kill_calls)
-        self.assertEqual(cleanup["status"], "killed", cleanup)
-        self.assertEqual(cleanup["created_sessions"], [created_session], cleanup)
-        self.assertNotIn(f"{SELFTEST_PREFIX}stale-1", sessions)
-
-    def test_c8_created_disposable_session_is_killed_when_probe_raises(self) -> None:
-        driver = FakeSelftestDriver(raise_after_create=True)
-        result = _run_comms_selftest(driver=driver)
-        cleanup = result["checks"]["cleanup"]
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(cleanup["status"], "killed")
-        self.assertEqual(driver.remaining_sessions(), [])
-
-    def test_c11_c13_external_version_command_no_uuid_and_state_read_only(self) -> None:
-        before = {
-            "team_owner": {"pane_id": "%100", "provider": "claude_code", "owner_epoch": 1},
-            "leader_receiver": {"mode": "direct_tmux", "pane_id": "%100", "provider": "claude_code", "owner_epoch": 1},
-        }
-        driver = FakeSelftestDriver(
-            pane_current_command="2.1.154",
-            env={},
-            state_before=json.loads(json.dumps(before, sort_keys=True)),
-        )
-        result = _run_comms_selftest(driver=driver)
-        self.assertTrue(result.get("ok"), result)
-        self.assertEqual(result["checks"]["receiver_binding"]["status"], "pass")
-        self.assertFalse(result.get("used_uuid_gate"), result)
-        self.assertEqual(driver.state_after, before)
-
-    def test_matrix_a1_idle_leader_to_worker_reports_all_four_acks(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(matrix_case="A1_IDLE_LEADER_TO_WORKER"))
-        self.assertTrue(result.get("ok"), result)
-        matrix = result["checks"]["matrix"]["A1"]
-        self.assertEqual(_ack_statuses(matrix), {
-            "enqueue_ack": "pass",
-            "delivery_ack": "pass",
-            "execution_ack": "pass",
-            "leader_notification_ack": "pass",
-        })
-
-    def test_matrix_a2_busy_leader_to_worker_is_fifo_defer_then_deliver_not_preempt(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(matrix_case="A2_BUSY_LEADER_TO_WORKER"))
-        self.assertTrue(result.get("ok"), result)
-        matrix = result["checks"]["matrix"]["A2"]
-        self.assertEqual(matrix["enqueue_ack"]["status"], "pass")
-        self.assertEqual(matrix["busy_defer_ack"]["event"], "send.deferred_busy")
-        self.assertEqual(matrix["delivery_ack"]["event"], "send.pending_delivered")
-        self.assertFalse(matrix.get("preempt_attempted"), matrix)
-
-    def test_matrix_b1_b2_worker_to_leader_reports_not_implemented_without_probe(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(matrix_case="B1_B2_WORKER_TO_LEADER"))
-        self.assertTrue(result.get("ok"), result)
-        for cell in ("B1", "B2"):
-            with self.subTest(cell=cell):
-                matrix = result["checks"]["matrix"][cell]
-                self.assertEqual(matrix["status"], "not_implemented", matrix)
-                self.assertEqual(matrix["deferred_to"], "0.2.9", matrix)
-                self.assertNotIn("leader_notification_ack", matrix)
-
-    def test_c18_c19_worker_to_leader_deferred_and_live_files_unchanged(self) -> None:
+    def test_receiver_binding_is_state_read_only_and_labeled_binding_consistency(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-live-") as tmp:
             workspace = Path(tmp)
-            live_state = _health_state(workspace, tasks=[])
-            live_state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            live_state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            save_runtime_state(workspace, live_state)
-            MessageStore(workspace).create_message(None, "leader", "worker_1", "live durable row", owner_team_id="current")
-            EventLog(workspace).write("live.baseline", stable=True)
-            before = _persistent_hashes(workspace)
-            comms = importlib.import_module("team_agent.diagnose.comms")
+            state = _health_state(workspace, tasks=[])
+            state["team_owner"] = {"pane_id": "%100", "provider": "claude_code", "owner_epoch": 7}
+            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%100", "provider": "claude_code", "owner_epoch": 7}
+            save_runtime_state(workspace, state)
+            before = json.loads(json.dumps(state, sort_keys=True))
 
-            result = comms.run_comms_selftest(
-                workspace,
-                team="current",
-                driver=FakeSelftestDriver(
-                    matrix_case="B1_B2_WORKER_TO_LEADER",
-                    state_before=live_state,
-                    worker_resolved_receiver_pane_id="%capture",
-                ),
-            )
-            after = _persistent_hashes(workspace)
+            driver = FakeSelftestDriver(state_before=state, current_pane_id="%100")
+            result = _run_comms_selftest(workspace=workspace, driver=driver)
+            after = driver.state_after
 
         self.assertTrue(result.get("ok"), result)
         self.assertEqual(after, before)
-        worker_to_leader = result["checks"]["worker_to_leader"]
-        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
-        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
-        self.assertEqual(result["checks"]["live_workspace_unchanged"]["status"], "pass")
+        binding = result["checks"]["receiver_binding"]
+        self.assertEqual(binding["status"], "pass", binding)
+        self.assertIn("verifies", binding)
+        self.assertEqual(binding["verifies"], "binding_consistency", binding)
+        self.assertEqual(binding["proof"], "state_read", binding)
+        self.assertTrue(binding["state_read_observed"], binding)
+        self.assertEqual(binding["pane_id"], "%100")
 
-    def test_c18_c20_worker_to_leader_deferred_probe_does_not_touch_live_leader_store_or_event_log(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-no-probe-") as tmp:
-            workspace = Path(tmp)
-            token = "selftest-comms-defer073"
-            live_state = _health_state(workspace, tasks=[])
-            live_state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            live_state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            save_runtime_state(workspace, live_state)
-            comms = importlib.import_module("team_agent.diagnose.comms")
-
-            def poison_if_worker_to_leader_probe_runs(*_args, **_kwargs) -> dict:
-                MessageStore(workspace).create_message(None, "selftest_worker", "leader", f"live store pollution {token}", owner_team_id="current")
-                EventLog(workspace).write("leader_receiver.deliver_attempt", target_pane_id="%live-fake", content=f"live event pollution {token}")
-                return {"status": "pass", "leader_notification_ack": {"status": "pass"}}
-
-            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex="defer073")), patch.object(
-                comms,
-                "_check_worker_to_leader",
-                side_effect=poison_if_worker_to_leader_probe_runs,
-            ):
-                result = comms.run_comms_selftest(
-                    workspace,
-                    team="current",
-                    driver=FakeSelftestDriver(
-                        matrix_case="B1_B2_WORKER_TO_LEADER",
-                        state_before=live_state,
-                        live_capture_before="no token before deferred probe",
-                        live_capture_after="no token after deferred probe",
-                    ),
-                )
-
-            live_text = _workspace_text(workspace)
+    def test_contract_suite_reports_installed_code_env_allowlist_and_scope(self) -> None:
+        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=_passing_contract_suite()))
 
         self.assertTrue(result.get("ok"), result)
-        worker_to_leader = result["checks"]["worker_to_leader"]
-        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
-        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
-        self.assertNotIn(token, live_text)
-        pollution = result["checks"]["live_leader_pollution"]
-        self.assertEqual(pollution["status"], "pass", pollution)
-        self.assertEqual(pollution["detected_in"], [], pollution)
+        self.assertIn("scope", result)
+        self.assertEqual(result["scope"], "code_correctness_and_binding", result)
+        self.assertNotEqual(result["scope"], "live_link_runtime_end_to_end", result)
+        self.assertIn("contract_suite", result["checks"], result)
+        suite = result["checks"]["contract_suite"]
+        self.assertEqual(suite["status"], "pass", suite)
+        self.assertEqual(suite["verifies"], "code_correctness", suite)
+        self.assertTrue(suite["pytest_executed"], suite)
+        self.assertEqual(suite["pytest"]["exit_code"], 0, suite)
+        self.assertGreater(len(suite["pytest"]["tests_run"]), 0, suite)
+        self.assertGreaterEqual(suite["pytest"]["counts"]["passed"], 1, suite)
+        self.assertEqual(suite["pytest_env"]["python_path"], suite["live_env"]["python_path"], suite)
+        self.assertEqual(suite["pytest_env"]["team_agent_version"], suite["live_env"]["team_agent_version"], suite)
+        self.assertEqual(suite["pytest_env"]["site_packages_path"], suite["live_env"]["site_packages_path"], suite)
+        self.assertIn("tests.test_messaging_tmux", suite["allowlist"])
+        self.assertIn("tests.test_selftest_and_idle_accuracy_acceptance", suite["allowlist"])
 
-    def test_c20_preexisting_live_selftest_token_is_still_pollution_failure(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-c20-live-") as tmp:
-            workspace = Path(tmp)
-            token = "selftest-comms-pollute073"
-            state = _health_state(workspace, tasks=[])
-            state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            save_runtime_state(workspace, state)
-            MessageStore(workspace).create_message(None, "selftest_worker", "leader", f"live store pollution {token}", owner_team_id="current")
-            EventLog(workspace).write("leader_receiver.submitted", target_pane_id="%live-fake", content=f"live event pollution {token}")
-            comms = importlib.import_module("team_agent.diagnose.comms")
+    def test_contract_suite_install_mismatch_fails_with_explicit_error(self) -> None:
+        suite = _passing_contract_suite()
+        suite["pytest_env"]["site_packages_path"] = "/tmp/wrong-install"
+        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
 
-            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex="pollute073")):
-                result = comms.run_comms_selftest(
-                    workspace,
-                    team="current",
-                    driver=FakeSelftestDriver(
-                        matrix_case="B1_B2_WORKER_TO_LEADER",
-                        capture_text=f"disposable capture also has {token}",
-                        live_capture_before="no token here",
-                        live_capture_after=f"live pane pollution {token}",
-                    ),
-                )
-
-        self.assertIn("live_leader_pollution", result["checks"], result)
-        pollution = result["checks"]["live_leader_pollution"]
         self.assertFalse(result.get("ok"), result)
-        self.assertEqual(pollution["status"], "fail", pollution)
-        self.assertEqual(pollution["live_pane_id"], "%live-fake")
-        self.assertEqual(pollution["token"], token)
-        self.assertGreaterEqual(set(pollution["detected_in"]), {"capture_after", "message_store", "event_log"})
+        suite_check = result["checks"]["contract_suite"]
+        self.assertEqual(suite_check["status"], "fail", suite_check)
+        self.assertEqual(suite_check["error"], "install_mismatch", suite_check)
+        self.assertIn("site_packages_path", suite_check["mismatched_fields"], suite_check)
 
-    def test_c21_cleanup_reports_four_subsystems_and_startup_sweeps_tmux_and_workspaces(self) -> None:
-        run_id = "c21cleanup073"
-        stale_tmux = f"{SELFTEST_PREFIX}stale-c21"
-        stale_dir = Path(tempfile.gettempdir()) / f"{SELFTEST_PREFIX}stale-c21"
-        stale_dir.mkdir(parents=True, exist_ok=True)
-        sessions = {stale_tmux}
-        try:
-            with tempfile.TemporaryDirectory(prefix="ta-selftest-c21-live-") as tmp:
-                workspace = Path(tmp)
-                save_runtime_state(workspace, _health_state(workspace, tasks=[]))
-
-                def fake_run_cmd(args: list[str], timeout: int = 10) -> SimpleNamespace:
-                    if args[:3] == ["tmux", "ls", "-F"]:
-                        return SimpleNamespace(returncode=0, stdout="\n".join(sorted(sessions)) + ("\n" if sessions else ""), stderr="")
-                    if args[:2] == ["tmux", "kill-session"]:
-                        target = args[args.index("-t") + 1]
-                        sessions.discard(target)
-                        return SimpleNamespace(returncode=0, stdout="", stderr="")
-                    if args[:2] == ["tmux", "new-session"]:
-                        sessions.add(args[args.index("-s") + 1])
-                        return SimpleNamespace(returncode=0, stdout="", stderr="")
-                    if args[:3] == ["tmux", "display-message", "-p"]:
-                        return SimpleNamespace(returncode=0, stdout="%capture\n", stderr="")
-                    if args[:3] == ["tmux", "capture-pane", "-p"]:
-                        return SimpleNamespace(returncode=0, stdout=f"selftest-comms-{run_id}\n", stderr="")
-                    return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-                comms = importlib.import_module("team_agent.diagnose.comms")
-                with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch.object(
-                    comms,
-                    "_check_receiver_binding",
-                    return_value={"status": "pass"},
-                ), patch.object(
-                    comms,
-                    "_check_leader_to_worker",
-                    return_value=_passing_ack(),
-                ), patch.object(
-                    comms,
-                    "_check_worker_to_leader",
-                    return_value=_passing_ack(),
-                ), patch("team_agent.runtime.run_cmd", side_effect=fake_run_cmd):
-                    result = comms.run_comms_selftest(workspace, team="current")
-
-            cleanup = result["checks"]["cleanup"]
-            self.assertTrue(result.get("events"), result)
-            swept = result["events"][0]
-            self.assertIsInstance(swept, dict, result)
-            self.assertEqual(swept["event"], "selftest.swept_stale", result)
-            self.assertIn(stale_tmux, swept["tmux"])
-            self.assertIn(str(stale_dir), swept["workspaces"])
-            for key in ("tmux", "workspace", "coordinator", "worker"):
-                self.assertEqual(cleanup[key]["status"], "pass", cleanup)
-            self.assertTrue(result.get("ok"), result)
-        finally:
-            shutil.rmtree(stale_dir, ignore_errors=True)
-
-    def test_c22_throwaway_runid_does_not_pollute_global_registries(self) -> None:
-        run_id = "global073"
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-c22-live-") as tmp, tempfile.TemporaryDirectory(prefix="ta-selftest-c22-home-") as home:
-            workspace = Path(tmp)
-            home_path = Path(home)
-            registry = home_path / ".team-agent" / "teams.json"
-            registry.parent.mkdir(parents=True, exist_ok=True)
-            registry.write_text(json.dumps({"teams": [run_id]}), encoding="utf-8")
-            save_runtime_state(workspace, _health_state(workspace, tasks=[]))
-            comms = importlib.import_module("team_agent.diagnose.comms")
-
-            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex=run_id)), patch(
-                "pathlib.Path.home",
-                return_value=home_path,
-            ):
-                result = comms.run_comms_selftest(workspace, team="current", driver=FakeSelftestDriver(matrix_case="B1_B2_WORKER_TO_LEADER"))
-
-        self.assertIn("global_registry_pollution", result["checks"], result)
-        pollution = result["checks"]["global_registry_pollution"]
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(pollution["status"], "fail", pollution)
-        self.assertIn(str(registry), pollution["detected_paths"])
-
-    def test_doctor_comms_does_not_deliver_preexisting_pending_messages(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-no-drain-") as tmp:
-            workspace = Path(tmp)
-            state = _health_state(
-                workspace,
-                tasks=[{"id": "task_1", "assignee": "worker_1", "status": "running"}],
-            )
-            state["agents"]["worker_1"]["status"] = "busy"
-            state["team_owner"] = {"pane_id": "%100", "provider": "fake", "owner_epoch": 1}
-            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%100", "provider": "fake", "owner_epoch": 1}
-            save_runtime_state(workspace, state)
-            store = MessageStore(workspace)
-            preexisting = store.create_message(
-                "task_other",
-                "leader",
-                "worker_1",
-                "preexisting user work must stay queued",
-                owner_team_id="current",
-            )
-
-            def fake_deliver(patched_workspace: Path, _state: dict, message_id: str, **_kwargs) -> dict:
-                MessageStore(patched_workspace).mark(message_id, "submitted")
-                return {"ok": True, "status": "delivered", "message_id": message_id}
-
-            comms = importlib.import_module("team_agent.diagnose.comms")
-            with patch.object(comms, "_check_receiver_binding", return_value={"status": "pass"}), patch.object(
-                comms,
-                "_create_disposable_receiver",
-                return_value={
-                    "status": "pass",
-                    "session_name": f"{SELFTEST_PREFIX}no-drain",
-                    "pane_id": "%capture",
-                    "receiver": {"mode": "direct_tmux", "provider": "fake", "pane_id": "%capture"},
-                },
-            ), patch.object(
-                comms,
-                "_check_worker_to_leader",
-                return_value={
-                    "status": "pass",
-                    "enqueue_ack": {"status": "pass"},
-                    "delivery_ack": {"status": "pass"},
-                    "execution_ack": {"status": "pass"},
-                    "leader_notification_ack": {"status": "pass"},
-                },
-            ), patch.object(comms, "_sweep_stale_sessions", return_value=[]), patch.object(
-                comms,
-                "_cleanup_sessions",
-                return_value={"status": "pass", "killed_sessions": [], "created_sessions": []},
-            ), patch("team_agent.messaging.delivery._deliver_pending_message", side_effect=fake_deliver):
-                result = comms.run_comms_selftest(workspace, team="current")
-
-            rows = {row["message_id"]: row for row in store.messages(owner_team_id="current")}
-
-        self.assertTrue(result.get("ok"), result)
-        self.assertEqual(rows[preexisting]["status"], "accepted", rows[preexisting])
-        submitted_selftest = [
-            row for message_id, row in rows.items()
-            if message_id != preexisting and row["sender"] == "leader" and row["recipient"] == "worker_1"
+    def test_contract_suite_empty_or_all_skip_is_failure_not_default_pass(self) -> None:
+        cases = [
+            ("empty", {"tests_run": [], "counts": {"passed": 0, "failed": 0, "skipped": 0, "errors": 0}}, "no_tests_run"),
+            ("all_skip", {"tests_run": ["tests.test_messaging_tmux"], "counts": {"passed": 0, "failed": 0, "skipped": 1, "errors": 0}}, "all_relevant_tests_skipped"),
         ]
-        self.assertTrue(submitted_selftest, rows)
-        self.assertTrue(all(row["status"] == "submitted" for row in submitted_selftest), submitted_selftest)
+        for _name, override, reason in cases:
+            with self.subTest(reason=reason):
+                suite = _passing_contract_suite()
+                suite["pytest"].update(override)
+                result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
+
+                self.assertFalse(result.get("ok"), result)
+                suite_check = result["checks"]["contract_suite"]
+                self.assertEqual(suite_check["status"], "fail", suite_check)
+                self.assertEqual(suite_check["reason"], reason, suite_check)
+
+    def test_pass_checks_must_include_physical_evidence_fields_not_default_pass(self) -> None:
+        suite = _passing_contract_suite()
+        suite.pop("pytest_executed")
+        result = _run_comms_selftest(driver=FakeSelftestDriver(contract_suite=suite))
+
+        self.assertFalse(result.get("ok"), result)
+        suite_check = result["checks"]["contract_suite"]
+        self.assertEqual(suite_check["status"], "fail", suite_check)
+        self.assertEqual(suite_check["reason"], "missing_pytest_evidence", suite_check)
+
+    def test_doctor_comms_does_not_create_throwaway_sessions_or_run_message_probes(self) -> None:
+        driver = FakeSelftestDriver(contract_suite=_passing_contract_suite())
+        result = _run_comms_selftest(driver=driver)
+
+        self.assertTrue(result.get("ok"), result)
+        self.assertEqual(driver.old_probe_calls, [], driver.old_probe_calls)
+        self.assertNotIn("leader_to_worker", result["checks"], result)
+        self.assertNotIn("worker_to_leader", result["checks"], result)
+        self.assertNotIn("matrix", result["checks"], result)
+        self.assertNotIn("cleanup", result["checks"], result)
+
+    def test_provider_sdk_calls_are_forbidden_even_when_contract_suite_passes(self) -> None:
+        result = _run_comms_selftest(
+            driver=FakeSelftestDriver(
+                contract_suite=_passing_contract_suite(),
+                provider_sdk_calls={"anthropic": 1, "openai": 0, "httpx": 0},
+            )
+        )
+
+        self.assertFalse(result.get("ok"), result)
+        provider = result["checks"]["provider_sdk_calls"]
+        self.assertEqual(provider["status"], "fail", provider)
+        self.assertEqual(provider["verifies"], "no_provider_sdk_calls", provider)
+        self.assertEqual(provider["calls"]["anthropic"], 1, provider)
 
     def test_idle_behavior_challenge_times_out_when_worker_claimed_idle_but_busy(self) -> None:
         result = _evaluate_idle_behavior(
@@ -559,6 +285,9 @@ class FakeSelftestDriver:
         state_before: dict | None = None,
         matrix_case: str | None = None,
         idle_execution: dict | None = None,
+        contract_suite: dict | None = None,
+        provider_sdk_calls: dict | None = None,
+        current_pane_id: str | None = None,
         **kwargs,
     ) -> None:
         self.worker_to_leader = worker_to_leader or {"ok": True, "status": "submitted", "visible": True, "submitted": True}
@@ -572,6 +301,10 @@ class FakeSelftestDriver:
         self.state_after = json.loads(json.dumps(self.state_before, sort_keys=True))
         self.matrix_case = matrix_case
         self.idle_execution = idle_execution or {"status": "pass"}
+        self.contract_suite = json.loads(json.dumps(contract_suite or _passing_contract_suite(), sort_keys=True))
+        self.provider_sdk_calls = dict(provider_sdk_calls or {"anthropic": 0, "openai": 0, "httpx": 0})
+        self._current_pane_id = current_pane_id
+        self.old_probe_calls: list[str] = []
         self._sessions = list(self.stale_sessions)
         for key, value in kwargs.items():
             setattr(self, key, value)
@@ -579,18 +312,68 @@ class FakeSelftestDriver:
     def remaining_sessions(self) -> list[str]:
         return list(self._sessions)
 
+    def current_pane_id(self) -> str | None:
+        return self._current_pane_id
 
-def _run_comms_selftest(**kwargs) -> dict:
+    def select_runtime_state(self, _workspace: Path, *, team: str | None = None) -> dict:
+        return json.loads(json.dumps(self.state_before, sort_keys=True))
+
+    def run_contract_suite(self, *_args, **_kwargs) -> dict:
+        return json.loads(json.dumps(self.contract_suite, sort_keys=True))
+
+    def provider_sdk_call_counts(self) -> dict:
+        return dict(self.provider_sdk_calls)
+
+    def list_selftest_sessions(self, *_args, **_kwargs) -> list[str]:
+        self.old_probe_calls.append("list_selftest_sessions")
+        return []
+
+    def list_selftest_workspaces(self, *_args, **_kwargs) -> list[str]:
+        self.old_probe_calls.append("list_selftest_workspaces")
+        return []
+
+    def create_disposable_receiver(self, *_args, **_kwargs) -> dict:
+        self.old_probe_calls.append("create_disposable_receiver")
+        return {
+            "status": "pass",
+            "session_name": "ta-selftest-comms-old-path",
+            "pane_id": "%capture",
+            "receiver": {"mode": "direct_tmux", "provider": "fake", "pane_id": "%capture"},
+        }
+
+    def leader_to_worker(self, *_args, **_kwargs) -> dict:
+        self.old_probe_calls.append("leader_to_worker")
+        return {"status": "pass"}
+
+    def worker_to_leader(self, *_args, **_kwargs) -> dict:
+        self.old_probe_calls.append("worker_to_leader")
+        return {"status": "pass"}
+
+    def cleanup_sessions(self, *_args, **_kwargs) -> dict:
+        self.old_probe_calls.append("cleanup_sessions")
+        return {"status": "pass", "killed_sessions": [], "created_sessions": [], "failed": []}
+
+    def cleanup_throwaway_workspace(self, *_args, **_kwargs) -> dict:
+        self.old_probe_calls.append("cleanup_throwaway_workspace")
+        return {"status": "pass"}
+
+
+def _run_comms_selftest(*, workspace: Path | None = None, **kwargs) -> dict:
+    if workspace is not None:
+        return _run_comms_selftest_in_workspace(workspace, **kwargs)
     with tempfile.TemporaryDirectory(prefix="ta-selftest-contract-") as tmp:
-        workspace = Path(tmp)
-        try:
-            module = importlib.import_module("team_agent.diagnose.comms")
-        except ModuleNotFoundError:
-            module = importlib.import_module("_contract_stubs.selftest_and_idle")
-        try:
-            return module.run_comms_selftest(workspace, **kwargs)
-        except NotImplementedError as exc:
-            raise AssertionError(str(exc)) from exc
+        return _run_comms_selftest_in_workspace(Path(tmp), **kwargs)
+
+
+def _run_comms_selftest_in_workspace(workspace: Path, **kwargs) -> dict:
+    try:
+        module = importlib.import_module("team_agent.diagnose.comms")
+    except ModuleNotFoundError:
+        module = importlib.import_module("_contract_stubs.selftest_and_idle")
+    try:
+        return module.run_comms_selftest(workspace, **kwargs)
+    except NotImplementedError as exc:
+        raise AssertionError(str(exc)) from exc
 
 
 def _evaluate_idle_behavior(**kwargs) -> dict:
@@ -633,48 +416,44 @@ def _canonical_selftest_json(data: dict) -> dict:
     return scrub
 
 
+def _passing_contract_suite() -> dict:
+    env = {
+        "python_path": "/opt/team-agent/bin/python",
+        "team_agent_version": "0.2.8",
+        "site_packages_path": "/opt/team-agent/lib/python/site-packages/team_agent",
+    }
+    allowlist = [
+        "tests.test_messaging_tmux",
+        "tests.test_send_busy_recipient_acceptance",
+        "tests.test_messaging_leader_receiver_buffer",
+        "tests.test_selftest_and_idle_accuracy_acceptance",
+        "tests.test_messaging_leader",
+        "tests.test_messaging_mcp",
+        "tests.test_worker_peer_delivery_scheduling",
+        "tests.test_result_delivery_contract",
+    ]
+    return {
+        "status": "pass",
+        "verifies": "code_correctness",
+        "pytest_executed": True,
+        "pytest": {
+            "exit_code": 0,
+            "tests_run": list(allowlist),
+            "counts": {"passed": 57, "failed": 0, "skipped": 0, "errors": 0},
+            "duration_seconds": 9.1,
+            "warnings": [],
+        },
+        "allowlist": allowlist,
+        "pytest_env": dict(env),
+        "live_env": dict(env),
+    }
+
+
 def _visible_command_words(help_text: str) -> set[str]:
     words: set[str] = set()
     for token in help_text.replace("{", " ").replace("}", " ").replace(",", " ").split():
         words.add(token.strip())
     return words
-
-
-def _ack_statuses(matrix_cell: dict) -> dict[str, str]:
-    return {key: value.get("status") for key, value in matrix_cell.items() if key.endswith("_ack")}
-
-
-def _passing_ack() -> dict:
-    return {
-        "status": "pass",
-        "enqueue_ack": {"status": "pass"},
-        "delivery_ack": {"status": "pass"},
-        "execution_ack": {"status": "pass"},
-        "leader_notification_ack": {"status": "pass"},
-    }
-
-
-def _persistent_hashes(workspace: Path) -> dict[str, str]:
-    roots = [workspace / ".team", workspace / "team.spec.yaml"]
-    out: dict[str, str] = {}
-    for root in roots:
-        if not root.exists():
-            continue
-        paths = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()]
-        for path in sorted(paths):
-            rel = path.relative_to(workspace).as_posix()
-            out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
-    return out
-
-
-def _workspace_text(workspace: Path) -> str:
-    chunks: list[str] = []
-    root = workspace / ".team"
-    if not root.exists():
-        return ""
-    for path in sorted(path for path in root.rglob("*") if path.is_file()):
-        chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
-    return "\n".join(chunks)
 
 
 def _idle_prompt_fixture(name: str) -> str:
