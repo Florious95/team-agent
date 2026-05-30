@@ -1,0 +1,22 @@
+{
+  "provider": "codex",
+  "captured_at": "2026-05-30T04:14:53Z",
+  "source_pane": "team-ta-bug071-wait-team-bug071-waiting-20260530T041328Z:worker_a",
+  "workspace": "/tmp/team-agent-bug071-waiting-bug071-waiting-20260530T041328Z",
+  "run_id": "bug071-waiting-20260530T041328Z",
+  "head": "9f56697",
+  "agent_id": "worker_a",
+  "status": "IDLE",
+  "last_output_at": "2026-05-30T04:14:52.860292+00:00",
+  "current_task_id": "task_initial",
+  "updated_at": "2026-05-30T04:14:53.145702+00:00",
+  "raw_agent_health": {
+    "agent_id": "worker_a",
+    "context_usage_pct": null,
+    "current_task_id": "task_initial",
+    "last_output_at": "2026-05-30T04:14:52.860292+00:00",
+    "owner_team_id": "current",
+    "status": "IDLE",
+    "updated_at": "2026-05-30T04:14:53.145702+00:00"
+  }
+}
