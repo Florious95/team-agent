@@ -42,29 +42,17 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
 
         self.assertEqual(_canonical_selftest_json(direct), _canonical_selftest_json(gate))
 
-    def test_c3_worker_to_leader_probe_rejects_result_id_prefix_before_dedupe(self) -> None:
-        result = _run_comms_selftest(probe_content="Result id: res_fake\nSELFTEST token")
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(result.get("error"), "probe_content_uses_result_prefix")
-        self.assertFalse(result.get("dedupe_checked"), result)
+    def test_c3_c6_worker_to_leader_selftest_is_deferred_not_false_green_or_false_fail(self) -> None:
+        result = _run_comms_selftest(
+            probe_content="Result id: res_fake\nthis would be invalid if the deferred probe ran",
+            driver=FakeSelftestDriver(worker_to_leader={"ok": True, "status": "fallback_log", "deduped": True}),
+        )
 
-    def test_c4_fallback_log_is_worker_to_leader_failure_not_green_ok(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(worker_to_leader={"ok": True, "status": "fallback_log"}))
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(result["checks"]["worker_to_leader"]["status"], "fail")
-        self.assertEqual(result["checks"]["worker_to_leader"]["reason"], "fallback_log")
-
-    def test_c5_deduped_worker_to_leader_notification_is_failure(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(worker_to_leader={"ok": True, "status": "submitted", "deduped": True}))
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(result["checks"]["worker_to_leader"]["status"], "fail")
-        self.assertEqual(result["checks"]["worker_to_leader"]["reason"], "deduped")
-
-    def test_c6_db_submitted_without_capture_token_is_failure(self) -> None:
-        result = _run_comms_selftest(driver=FakeSelftestDriver(capture_text="capture has no probe token"))
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(result["checks"]["worker_to_leader"]["status"], "fail")
-        self.assertEqual(result["checks"]["worker_to_leader"]["reason"], "token_missing_from_capture")
+        self.assertTrue(result.get("ok"), result)
+        worker_to_leader = result["checks"]["worker_to_leader"]
+        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
+        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
+        self.assertNotIn(worker_to_leader.get("reason"), {"fallback_log", "deduped", "token_missing_from_capture"})
 
     def test_c7_c10_disposable_session_prefix_cleanup_and_sweep_are_first_class_checks(self) -> None:
         driver = FakeSelftestDriver(stale_sessions=[f"{SELFTEST_PREFIX}stale-1"], kill_ok=False)
@@ -186,17 +174,17 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertEqual(matrix["delivery_ack"]["event"], "send.pending_delivered")
         self.assertFalse(matrix.get("preempt_attempted"), matrix)
 
-    def test_matrix_b1_b2_worker_to_leader_renders_only_in_disposable_capture(self) -> None:
+    def test_matrix_b1_b2_worker_to_leader_reports_not_implemented_without_probe(self) -> None:
         result = _run_comms_selftest(driver=FakeSelftestDriver(matrix_case="B1_B2_WORKER_TO_LEADER"))
         self.assertTrue(result.get("ok"), result)
         for cell in ("B1", "B2"):
             with self.subTest(cell=cell):
                 matrix = result["checks"]["matrix"][cell]
-                self.assertEqual(matrix["leader_notification_ack"]["status"], "pass")
-                self.assertTrue(matrix["capture_contains_token"], matrix)
-                self.assertFalse(matrix["live_leader_contains_token"], matrix)
+                self.assertEqual(matrix["status"], "not_implemented", matrix)
+                self.assertEqual(matrix["deferred_to"], "0.2.9", matrix)
+                self.assertNotIn("leader_notification_ack", matrix)
 
-    def test_c18_c19_worker_to_leader_uses_persisted_throwaway_receiver_and_live_files_unchanged(self) -> None:
+    def test_c18_c19_worker_to_leader_deferred_and_live_files_unchanged(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-live-") as tmp:
             workspace = Path(tmp)
             live_state = _health_state(workspace, tasks=[])
@@ -219,49 +207,56 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
             )
             after = _persistent_hashes(workspace)
 
+        self.assertTrue(result.get("ok"), result)
         self.assertEqual(after, before)
-        self.assertIn("throwaway_state", result["checks"], result)
-        throwaway = result["checks"]["throwaway_state"]
-        self.assertTrue(Path(throwaway["workspace"]).is_absolute(), throwaway)
-        self.assertIn("/ta-selftest-comms-", throwaway["workspace"], throwaway)
-        self.assertEqual(throwaway["persisted_leader_receiver_pane_id"], "%capture")
-        self.assertEqual(throwaway["worker_resolved_receiver_pane_id"], "%capture")
-        self.assertNotEqual(throwaway["worker_resolved_receiver_pane_id"], "%live-fake")
+        worker_to_leader = result["checks"]["worker_to_leader"]
+        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
+        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
         self.assertEqual(result["checks"]["live_workspace_unchanged"]["status"], "pass")
 
-    def test_c18_b1_b2_probe_must_execute_through_throwaway_worker_not_live_worker(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-path-") as tmp:
+    def test_c18_c20_worker_to_leader_deferred_probe_does_not_touch_live_leader_store_or_event_log(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ta-selftest-c18-no-probe-") as tmp:
             workspace = Path(tmp)
+            token = "selftest-comms-defer073"
             live_state = _health_state(workspace, tasks=[])
             live_state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
             live_state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
             save_runtime_state(workspace, live_state)
             comms = importlib.import_module("team_agent.diagnose.comms")
 
-            result = comms.run_comms_selftest(
-                workspace,
-                team="current",
-                driver=FakeSelftestDriver(
-                    matrix_case="B1_B2_WORKER_TO_LEADER",
-                    state_before=live_state,
-                    throwaway_worker_started=False,
-                    actual_send_path="live_worker",
-                    worker_resolved_receiver_pane_id="%live-fake",
-                    live_worker_delivered_to="%live-fake",
-                ),
-            )
+            def poison_if_worker_to_leader_probe_runs(*_args, **_kwargs) -> dict:
+                MessageStore(workspace).create_message(None, "selftest_worker", "leader", f"live store pollution {token}", owner_team_id="current")
+                EventLog(workspace).write("leader_receiver.deliver_attempt", target_pane_id="%live-fake", content=f"live event pollution {token}")
+                return {"status": "pass", "leader_notification_ack": {"status": "pass"}}
 
-        self.assertIn("throwaway_worker", result["checks"], result)
-        throwaway_worker = result["checks"]["throwaway_worker"]
-        self.assertEqual(throwaway_worker["status"], "pass", throwaway_worker)
-        self.assertIs(throwaway_worker["started"], True, throwaway_worker)
-        self.assertEqual(throwaway_worker["provider"], "fake", throwaway_worker)
-        self.assertEqual(throwaway_worker["actual_send_path"], "throwaway_worker", throwaway_worker)
-        self.assertEqual(throwaway_worker["worker_resolved_receiver_pane_id"], "%capture", throwaway_worker)
-        self.assertNotEqual(throwaway_worker["worker_resolved_receiver_pane_id"], "%live-fake")
-        self.assertEqual(throwaway_worker.get("live_worker_delivered_to"), None, throwaway_worker)
+            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex="defer073")), patch.object(
+                comms,
+                "_check_worker_to_leader",
+                side_effect=poison_if_worker_to_leader_probe_runs,
+            ):
+                result = comms.run_comms_selftest(
+                    workspace,
+                    team="current",
+                    driver=FakeSelftestDriver(
+                        matrix_case="B1_B2_WORKER_TO_LEADER",
+                        state_before=live_state,
+                        live_capture_before="no token before deferred probe",
+                        live_capture_after="no token after deferred probe",
+                    ),
+                )
 
-    def test_c20_live_leader_pollution_scans_pane_store_and_event_log_as_hard_failure(self) -> None:
+            live_text = _workspace_text(workspace)
+
+        self.assertTrue(result.get("ok"), result)
+        worker_to_leader = result["checks"]["worker_to_leader"]
+        self.assertEqual(worker_to_leader["status"], "not_implemented", worker_to_leader)
+        self.assertEqual(worker_to_leader["deferred_to"], "0.2.9", worker_to_leader)
+        self.assertNotIn(token, live_text)
+        pollution = result["checks"]["live_leader_pollution"]
+        self.assertEqual(pollution["status"], "pass", pollution)
+        self.assertEqual(pollution["detected_in"], [], pollution)
+
+    def test_c20_preexisting_live_selftest_token_is_still_pollution_failure(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ta-selftest-c20-live-") as tmp:
             workspace = Path(tmp)
             token = "selftest-comms-pollute073"
@@ -292,43 +287,6 @@ class SelftestAndIdleAccuracyAcceptanceTests(unittest.TestCase):
         self.assertEqual(pollution["live_pane_id"], "%live-fake")
         self.assertEqual(pollution["token"], token)
         self.assertGreaterEqual(set(pollution["detected_in"]), {"capture_after", "message_store", "event_log"})
-
-    def test_c20_deliver_attempt_event_with_token_is_live_pollution_failure_after_async_window(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="ta-selftest-c20-deliver-attempt-") as tmp:
-            workspace = Path(tmp)
-            token = "selftest-comms-deliver073"
-            state = _health_state(workspace, tasks=[])
-            state["team_owner"] = {"pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            state["leader_receiver"] = {"mode": "direct_tmux", "pane_id": "%live-fake", "provider": "fake", "owner_epoch": 1}
-            save_runtime_state(workspace, state)
-            EventLog(workspace).write(
-                "leader_receiver.deliver_attempt",
-                target_pane_id="%live-fake",
-                content=f"live async worker return polluted leader with {token}",
-            )
-            comms = importlib.import_module("team_agent.diagnose.comms")
-
-            with patch("team_agent.diagnose.comms.uuid.uuid4", return_value=SimpleNamespace(hex="deliver073")):
-                result = comms.run_comms_selftest(
-                    workspace,
-                    team="current",
-                    driver=FakeSelftestDriver(
-                        matrix_case="B1_B2_WORKER_TO_LEADER",
-                        capture_text=f"disposable capture has {token}",
-                        live_capture_before="no token before async return",
-                        live_capture_after="no token in pane capture",
-                    ),
-                )
-
-        self.assertIn("live_leader_pollution", result["checks"], result)
-        pollution = result["checks"]["live_leader_pollution"]
-        self.assertFalse(result.get("ok"), result)
-        self.assertEqual(pollution["status"], "fail", pollution)
-        self.assertEqual(pollution["live_pane_id"], "%live-fake")
-        self.assertEqual(pollution["token"], token)
-        self.assertIn("event_log", pollution["detected_in"], pollution)
-        self.assertIn("leader_receiver.deliver_attempt", pollution["detected_event_types"], pollution)
-        self.assertEqual(pollution["async_return_window"]["status"], "observed", pollution)
 
     def test_c21_cleanup_reports_four_subsystems_and_startup_sweeps_tmux_and_workspaces(self) -> None:
         run_id = "c21cleanup073"
@@ -707,6 +665,16 @@ def _persistent_hashes(workspace: Path) -> dict[str, str]:
             rel = path.relative_to(workspace).as_posix()
             out[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return out
+
+
+def _workspace_text(workspace: Path) -> str:
+    chunks: list[str] = []
+    root = workspace / ".team"
+    if not root.exists():
+        return ""
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
+    return "\n".join(chunks)
 
 
 def _idle_prompt_fixture(name: str) -> str:

@@ -48,22 +48,13 @@ C2. `doctor --comms --json` and `doctor --gate comms --json` route to the same
 helper. For the same workspace and same tick, their canonical JSON is byte
 identical after timestamp/run-id fields are removed.
 
-C3. Worker-to-leader probe content must include a unique token and must not
-start with `Result id:`. If it does, the helper returns
-`ok=false`, `error=probe_content_uses_result_prefix`, and does not use result
-notification dedupe as a success signal.
-
-C4. Any fallback leader delivery is a selftest failure. A messaging-compatible
-`ok=true, status=fallback_log` response is translated by doctor to
-`checks.worker_to_leader.status=fail`, top-level `ok=false`, and non-zero CLI
-exit.
-
-C5. A deduped leader notification is a selftest failure. Dedupe proves DB state,
-not live render.
-
-C6. Worker-to-leader pass requires the unique token to appear in the disposable
-capture pane text. DB rows or `leader_receiver.submitted` events alone are not
-enough.
+C3-C6. Worker-to-leader selftest is explicitly deferred for 0.2.8. The helper
+must report `checks.worker_to_leader.status=not_implemented` and
+`deferred_to=0.2.9`. This is not a pass and not a fail: top-level `ok` may be
+true when all implemented checks pass and the deferred worker-to-leader probe
+causes zero live pollution. While deferred, invalid worker-to-leader probe
+content, fallback responses, dedupe signals, and capture-token checks must not
+be evaluated because the worker-to-leader probe must not run at all.
 
 C7. Disposable tmux sessions use only the prefix `ta-selftest-comms-<runid>`.
 They must never reuse `quick-test-*`, `team-agent-*`, or live team session
@@ -104,7 +95,7 @@ Only selftest-owned probe rows may be processed by the selftest.
 
 ## Four Ack Layers
 
-Every matrix cell reports the four signals independently:
+Every implemented matrix cell reports the four signals independently:
 
 - `enqueue_ack`: durable message row accepted.
 - `delivery_ack`: exact message id was submitted to the recipient pane and a
@@ -128,29 +119,20 @@ preemption. While busy, the second message gets `enqueue_ack=pass`, a
 the same message gets `delivery_ack=pass` through `send.pending_delivered`.
 Execution ack is separate and may arrive later.
 
-B1. Worker working, worker to leader: when the worker reaches a safe point, the
-leader-bound response renders into the disposable capture receiver. It must not
-fall back, dedupe, or appear in the live leader pane.
+B1. Worker working, worker to leader: deferred for 0.2.8. The matrix cell must
+report `status=not_implemented`, `deferred_to=0.2.9`, and must not run a worker
+probe.
 
-B2. Worker idle, worker to leader: after an idle challenge, the worker produces
-a bounded leader-bound response that renders into the disposable capture
-receiver and not the live leader pane.
+B2. Worker idle, worker to leader: deferred for 0.2.8. The matrix cell must
+report `status=not_implemented`, `deferred_to=0.2.9`, and must not run a worker
+probe.
 
-C18. B1/B2 worker-to-leader isolation must not rely on in-process state swaps.
-The worker-origin send/report path must resolve its leader receiver by reading
-the throwaway workspace's persisted state. If live persisted state contains
-`leader_receiver.pane_id=%live-fake` and the throwaway persisted state contains
-`leader_receiver.pane_id=%capture`, the worker must resolve `%capture`, and the
-selftest JSON must expose `checks.throwaway_state.{workspace,
-persisted_leader_receiver_pane_id,worker_resolved_receiver_pane_id}`.
-The B1/B2 probe must also prove that a throwaway fake-provider worker was
-actually started and that the probe send ran through that throwaway worker, not
-the live worker or live send path. The JSON must expose
-`checks.throwaway_worker.{status,started,provider,actual_send_path,
-worker_resolved_receiver_pane_id}`; pass requires `started=true`,
-`provider=fake`, `actual_send_path=throwaway_worker`, and
-`worker_resolved_receiver_pane_id=%capture`. Creating throwaway state files
-without launching and using the throwaway worker is a failure.
+C18. B1/B2 worker-to-leader isolation is deferred rather than fake-green. The
+selftest must not create a result that looks like a successful worker-to-leader
+round trip. It must expose the deferred status above and avoid invoking the
+worker-to-leader probe path entirely. A mock implementation that would write a
+selftest token through the live worker if called must leave no token behind,
+proving the deferred probe did not run.
 
 C19. The throwaway workspace is outside the live workspace, under
 `/tmp/ta-selftest-comms-<runid>/workspace`. The live workspace's persistent
@@ -158,17 +140,12 @@ Team Agent files are byte-identical before and after `doctor --comms`, including
 state, team.db, logs, and `.team/runtime/*`. JSON must include
 `checks.live_workspace_unchanged.status`.
 
-C20. Live-leader pollution is a hard failure. The run token must be absent from
-all four live sources: live pane capture before the probe, live pane capture
-after probe and cleanup, live workspace messages table, and live workspace event
-log leader-delivery events. Any hit sets
-`checks.live_leader_pollution.status=fail`, top-level `ok=false`, and reports
-`{live_pane_id, token, detected_in}`. A disposable capture hit does not offset a
-live hit. The event-log scan must include every leader-delivery event type,
-including `leader_receiver.deliver_attempt`, not only submitted-style events.
-The scan must run after the bounded asynchronous worker-return window; JSON
-must expose the async-window observation and the matched event type when an
-event-log hit is found.
+C20. Because B1/B2 are deferred, a normal successful 0.2.8 `doctor --comms` run
+must leave zero selftest tokens in the live leader pane, live workspace message
+store, and live event log. If a token is already present in any live source or a
+buggy path writes one while the deferred probe should be skipped,
+`checks.live_leader_pollution.status=fail`, top-level `ok=false`, and
+`{live_pane_id, token, detected_in}` identify the source.
 
 C21. Throwaway cleanup is four independent checks:
 `cleanup.tmux`, `cleanup.workspace`, `cleanup.coordinator`, and
