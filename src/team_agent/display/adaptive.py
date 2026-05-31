@@ -276,17 +276,20 @@ def close_adaptive_display(state: dict[str, Any], event_log: EventLog) -> dict[s
         seen_targets.add(target)
         if kill_adaptive_window(target):
             killed_windows.append(target)
+    removed_orphans: dict[str, list[str]] = {}
     if needs_named_fallback and leader_session and session_name:
-        killed_windows.extend(close_adaptive_windows(leader_session, session_name, event_log))
+        named_windows = close_adaptive_windows(leader_session, session_name, event_log)
+        killed_windows.extend(named_windows)
         linked_closed = kill_ghostty_workspace_linked_sessions(linked_sessions)
         named_closed, named_failed = _kill_adaptive_named_display_sessions(session_name, [agent_id for agent_id, _display in displays])
         linked_closed.extend(named_closed)
+        removed_orphans = _adaptive_orphan_summary(named_closed, named_windows)
     else:
         named_failed = []
         linked_closed = kill_ghostty_workspace_linked_sessions(linked_sessions)
     orphans = _adaptive_orphans(session_name, leader_session, [agent_id for agent_id, _display in displays], named_failed) if needs_named_fallback else {}
-    event_log.write("display.adaptive_closed", windows=killed_windows, linked_sessions=linked_closed, orphans_detected=orphans)
-    return {"windows": killed_windows, "linked_sessions": linked_closed, "orphans_detected": orphans}
+    event_log.write("display.adaptive_closed", windows=killed_windows, linked_sessions=linked_closed, orphans_detected=orphans, orphans_removed=removed_orphans)
+    return {"windows": killed_windows, "linked_sessions": linked_closed, "orphans_detected": orphans, "orphans_removed": removed_orphans}
 
 
 def close_adaptive_windows(leader_session: str, session_name: str, event_log: EventLog | None = None) -> list[str]:
@@ -346,6 +349,15 @@ def _adaptive_orphans(session_name: str, leader_session: str, agent_ids: list[st
     windows: list[str] = []
     if leader_session and session_name:
         windows = _adaptive_window_orphans(leader_session, session_name)
+    if not display_sessions and not windows:
+        return {}
+    return {
+        "adaptive_display_sessions": sorted(set(display_sessions)),
+        "adaptive_overview_windows": sorted(set(windows)),
+    }
+
+
+def _adaptive_orphan_summary(display_sessions: list[str], windows: list[str]) -> dict[str, list[str]]:
     if not display_sessions and not windows:
         return {}
     return {

@@ -584,18 +584,22 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
         "new_active_team_key": new_active,
         "cleanup_mode": "synchronous_committed",
     }
-    orphans = (display_cleanup or {}).get("orphans_detected") or []
-    if orphans:
+    removed_orphans = (display_cleanup or {}).get("orphans_removed") or {}
+    remaining_orphans = (display_cleanup or {}).get("orphans_detected") or {}
+    if removed_orphans:
+        result["orphans_detected"] = removed_orphans
+        result["warnings"] = ["Adaptive display tmux objects were found and removed during shutdown cleanup."]
+    if remaining_orphans:
         result["cleanup_mode"] = "synchronous_with_orphans"
-        result["orphans_detected"] = orphans
+        result["orphans_detected"] = remaining_orphans
         result["warning"] = "Adaptive display tmux objects remain after shutdown cleanup."
         event_log.write(
             "shutdown.orphans_detected",
             warning=result["warning"],
             message=result["warning"],
-            orphans_detected=orphans,
-            adaptive_display_sessions=orphans.get("adaptive_display_sessions", []),
-            adaptive_overview_windows=orphans.get("adaptive_overview_windows", []),
+            orphans_detected=remaining_orphans,
+            adaptive_display_sessions=remaining_orphans.get("adaptive_display_sessions", []),
+            adaptive_overview_windows=remaining_orphans.get("adaptive_overview_windows", []),
         )
     return result
 
