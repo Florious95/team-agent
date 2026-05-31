@@ -154,6 +154,8 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
     while time.monotonic() - start_time <= timeout:
         last = status(workspace, as_json=True)
         agents = last.get("agents", {})
+        if agents and any(agent.get("status") == "awaiting_trust_prompt" for agent in agents.values()):
+            break
         if agents and all(agent.get("tmux_window_present") and agent.get("status") in {"running", "busy"} for agent in agents.values()):
             break
         time.sleep(1.0)
@@ -164,8 +166,19 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
         "task_prompt_delivered": bool(MessageStore(workspace).message_counts()),
     }
     ok = readiness["process_started"] and readiness["cli_prompt_ready"] and readiness["mcp_ready"]
+    awaiting_trust = any(agent.get("status") == "awaiting_trust_prompt" for agent in last.get("agents", {}).values()) if last.get("agents") else False
     details_log = logs_dir(workspace) / f"wait-ready-{int(time.time())}.json"
     details_log.write_text(json.dumps({"readiness": readiness, "status": last}, indent=2, ensure_ascii=False), encoding="utf-8")
+    if awaiting_trust:
+        return {
+            "ok": False,
+            "status": "pending",
+            "reason": "awaiting_trust_prompt",
+            "summary": "workers pending: awaiting_trust_prompt",
+            "next_actions": ["Answer the Codex workspace trust prompt in the worker pane."],
+            "details_log": str(details_log),
+            "readiness": readiness,
+        }
     return {
         "ok": ok,
         "summary": "workers ready" if ok else "workers not fully ready before timeout",

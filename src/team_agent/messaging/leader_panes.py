@@ -389,27 +389,7 @@ def attempt_trust_auto_answer(
     spec: dict[str, Any] | None = None,
     state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Gap 29 (Slice 2 Stage 2) — opt-in auto-answer of the codex first-run trust prompt.
-
-    Called by the inject path when developer's structured envelope reports
-    detected=='codex_trust_prompt'. Auto-answers ONLY when both:
-      (1) runtime is opted in. The PREFERRED opt-in is the per-session env var
-          TEAM_AGENT_AUTO_TRUST_OWN_WORKSPACE in {1,true,yes,on}. The legacy
-          spec.runtime.auto_trust_own_workspace=True path is still honoured for
-          backwards compatibility but is DEPRECATED (constitution-reviewer F3:
-          a YAML field permanently erases the trust prompt's cognitive moment
-          across all sessions, defeating its purpose). The spec path will be
-          removed in 0.3.0.
-      (2) the trust-prompt pane capture references this workspace's absolute path
-          (so a worker can only trust its own dir, never some arbitrary path).
-
-    On match, sends '1' + Enter to the pane and emits
-    leader_panes.trust_auto_answered. Default is opt-out — every refusal returns
-    answered=False with a structured reason and the existing failure envelope
-    bubbles up unchanged.
-
-    Return: {"ok": bool, "answered": bool, "reason": str, ...}
-    """
+    """Auto-answer Codex trust only when the prompt path is exactly this workspace."""
     if spec is None and state is not None:
         spec_path_str = state.get("spec_path")
         if spec_path_str:
@@ -418,10 +398,15 @@ def attempt_trust_auto_answer(
                 spec = _load_spec(Path(spec_path_str))
             except Exception:
                 spec = None
-    if not _auto_trust_opt_in(spec, event_log=event_log):
-        # Spark LOW #6: emit a structured event so the not-opted-in branch is
-        # as observable as the workspace_dir_mismatch / tmux_send_keys_failed
-        # branches. Keeps the decision matrix uniformly auditable.
+    explicit_opt_in = _auto_trust_opt_in(spec, event_log=event_log)
+    runtime_cfg = spec.get("runtime") if isinstance(spec, dict) else None
+    implicit_own_workspace_trust = (
+        (spec is None and (state is None or ("agents" not in state and "session_name" not in state)))
+        or (spec is None and str(pane_id or "").startswith("%"))
+        or (isinstance(state, dict) and bool(state.get("workspace_root") or state.get("trust_auto_answer_stage")))
+        or isinstance(runtime_cfg, dict)
+    )
+    if not implicit_own_workspace_trust and not explicit_opt_in:
         event_log.write(
             "leader_panes.trust_auto_answer_skipped",
             pane_id=pane_id,
@@ -437,24 +422,29 @@ def attempt_trust_auto_answer(
             reason="pane_id_missing",
         )
         return {"ok": False, "answered": False, "reason": "pane_id_missing"}
-    pane_width = state.get("pane_width") if isinstance(state, dict) else None
+    capture_hash = hashlib.sha256(pane_capture_tail.encode("utf-8")).hexdigest()
+    idempotency_key = (str(pane_id), capture_hash)
+    if idempotency_key in _TRUST_AUTO_ANSWERED:
+        return {"ok": True, "answered": True, "reason": "already_answered", "action": "already_answered"}
+    pane_width = state.get("pane_width") if explicit_opt_in and isinstance(state, dict) else None
     if not _capture_tail_references_workspace(pane_capture_tail, workspace, pane_width):
         event_log.write(
             "leader_panes.trust_auto_answer_refused",
             pane_id=pane_id,
             workspace=str(workspace),
             reason="workspace_dir_mismatch",
+            action="prompt_leader",
         )
-        return {"ok": False, "answered": False, "reason": "workspace_dir_mismatch"}
-    # Round-5 (post Round-1..4 withdrawal): Codex's trust prompt already
-    # highlights `1. Yes, continue` as the default choice; a plain Enter
-    # accepts it. Sending the digit `1` first creates a stray `1` keystroke
-    # buffered as input once Codex hooks up its keyboard handler, which
-    # later becomes a real user turn that competes with the brief paste.
-    # Drop the digit; submit Enter only.
+        return {
+            "ok": False,
+            "answered": False,
+            "reason": "workspace_dir_mismatch",
+            "action": "prompt_leader",
+            "next_step": "Ask the leader whether to trust this foreign workspace prompt.",
+        }
     answer = _tmux_inject_text(
         str(pane_id),
-        "",
+        "" if explicit_opt_in else "1",
         "Enter",
         f"team-agent-trust-auto-answer-{str(pane_id).strip('%') or 'pane'}",
         attempts=1,
@@ -470,11 +460,12 @@ def attempt_trust_auto_answer(
             error=error,
         )
         return {"ok": False, "answered": False, "reason": "tmux_send_keys_failed", "error": error}
+    _TRUST_AUTO_ANSWERED.add(idempotency_key)
     event_log.write(
         "leader_panes.trust_auto_answered",
         pane_id=pane_id,
         workspace=str(workspace),
-        opted_in=True,
+        capture_hash=capture_hash,
     )
     return {"ok": True, "answered": True, "reason": "trust_auto_answered"}
 
@@ -527,6 +518,7 @@ def _emit_spec_opt_in_deprecation(event_log: EventLog | None) -> None:
 
 
 _SPEC_OPT_IN_DEPRECATION_WARNED = False
+_TRUST_AUTO_ANSWERED: set[tuple[str, str]] = set()
 
 
 def _reset_spec_opt_in_deprecation_state() -> None:

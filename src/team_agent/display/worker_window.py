@@ -21,7 +21,7 @@ def open_worker_displays(
     session_name: str,
     jobs: list[tuple[str, dict[str, Any]]],
     event_log: EventLog,
-    display_backend: str = "ghostty_window",
+    display_backend: str = "adaptive",
     capability_probe: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not jobs:

@@ -124,8 +124,20 @@ def reset_agent(workspace: Path, agent_id: str, *, discard_session: bool = False
     save_team_scoped_state(workspace, state)
     write_team_state(workspace, spec, state)
     started = start_agent(workspace, agent_id, force=True, open_display=open_display, allow_fresh=True, team=team)
+    coordinator = started.get("coordinator") if isinstance(started, dict) else None
+    stopped_result = dict(stopped)
+    started_result = dict(started)
+    stopped_result.pop("coordinator", None)
+    started_result.pop("coordinator", None)
     EventLog(workspace).write("reset_agent.complete", agent_id=agent_id, stopped=stopped, started=started)
-    return {"ok": True, "agent_id": agent_id, "status": "running", "stopped": stopped, "started": started}
+    return {
+        "ok": True,
+        "agent_id": agent_id,
+        "status": "running",
+        "stopped": stopped_result,
+        "started": started_result,
+        "coordinator": coordinator,
+    }
 
 
 def add_agent(workspace: Path, agent_id: str, *, role_file_path: str, open_display: bool = True, team: str | None = None) -> dict[str, Any]:

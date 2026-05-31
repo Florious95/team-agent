@@ -149,9 +149,12 @@ def age_text(iso_text: str | None) -> str:
 
 def detect_provider_status(provider: str, session_name: str, window: str) -> str | None:
     from team_agent.runtime import get_adapter, run_cmd
+    from team_agent.messaging.tmux_prompt import detect_non_input_scrollback
     proc = run_cmd(["tmux", "capture-pane", "-p", "-t", f"{session_name}:{window}"], timeout=5)
     if proc.returncode != 0:
         return None
+    if detect_non_input_scrollback(proc.stdout) == "codex_trust_prompt":
+        return "awaiting_trust_prompt"
     patterns = get_adapter(provider).status_patterns()
     positions: dict[str, int] = {}
     for status_name, pattern in patterns.items():
