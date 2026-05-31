@@ -1,0 +1,8 @@
+> You are in __PATH__
+
+  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+
+› 1. Yes, I trust this directory
+  2. No, exit
+
+  Press enter to continue
