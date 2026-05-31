@@ -47,6 +47,8 @@ def detect_non_input_scrollback(capture_tail: str) -> str | None:
         return "y_n_confirm"
     for first, second in zip(nonempty, nonempty[1:]):
         if _starts_numbered_choice(first, "1") and _starts_numbered_choice(second, "2"):
+            if not _numbered_menu_shape(nonempty):
+                continue
             if stale_before_input:
                 return None
             return "numbered_menu"
@@ -70,6 +72,26 @@ def _non_input_scrollback_lines(capture_tail: str, limit: int = 15) -> list[str]
 
 def _starts_numbered_choice(line: str, number: str) -> bool:
     return bool(re.match(rf"^\s*(?:[›❯>]\s*)?{number}\.\s+", line))
+
+
+def _numbered_menu_shape(lines: list[str]) -> bool:
+    tail_text = "\n".join(lines)
+    if any(re.match(r"^\s*[›❯>]\s*\d+\.\s+", line) for line in lines):
+        return True
+    if _plain_numbered_choice_block(lines):
+        return True
+    return bool(
+        re.search(r"\b(enter|return)\b.*\b(confirm|select|continue)\b", tail_text, re.IGNORECASE)
+        or re.search(r"\b(confirm|select|continue)\b.*\b(enter|return)\b", tail_text, re.IGNORECASE)
+        or re.search(r"\besc\b.*\b(cancel|back|quit)\b", tail_text, re.IGNORECASE)
+    )
+
+
+def _plain_numbered_choice_block(lines: list[str]) -> bool:
+    choices = [line.strip() for line in lines if re.match(r"^\s*\d+\.\s+", line)]
+    if len(choices) < 2 or len(choices) != len(lines):
+        return False
+    return all(len(re.sub(r"^\d+\.\s+", "", choice).strip()) <= 32 for choice in choices)
 
 
 def _stale_non_input_before_ready_prompt(lines: list[str]) -> bool:
