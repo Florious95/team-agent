@@ -1,0 +1,15 @@
+{
+  "shutdown_ok_true": true,
+  "orphan_team_sessions": [],
+  "orphan_display_sessions": [
+    "team-bug080-owned2-bug080-owned2-20260531-213101-r1__display__alpha__97dc1365: 2 windows (created Sun May 31 21:31:14 2026) (group team-bug080-owned2-bug080-owned2-20260531-213101-r1) (attached)",
+    "team-bug080-owned2-bug080-owned2-20260531-213101-r1__display__beta__59f940a7: 2 windows (created Sun May 31 21:31:14 2026) (group team-bug080-owned2-bug080-owned2-20260531-213101-r1) (attached)"
+  ],
+  "orphan_overview_windows": [
+    "bug080-owned2-leader-bug080-owned2-20260531-213101-r1:team-agent:team-bug080-owned2-bug080-owned2-20260531-213101-r1:overview:2"
+  ],
+  "adaptive_closed_events": [
+    "{\"event\": \"display.adaptive_closed\", \"linked_sessions\": [], \"ts\": \"2026-05-31T13:31:09.213430+00:00\", \"windows\": []}",
+    "{\"event\": \"display.adaptive_closed\", \"linked_sessions\": [], \"ts\": \"2026-05-31T13:31:27.144346+00:00\", \"windows\": []}"
+  ]
+}

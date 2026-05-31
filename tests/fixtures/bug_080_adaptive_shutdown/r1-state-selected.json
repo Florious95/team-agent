@@ -1,0 +1,94 @@
+{
+  "session_name": "team-bug080-owned2-bug080-owned2-20260531-213101-r1",
+  "display_backend": "adaptive",
+  "active_team_key": "current",
+  "leader_receiver": {
+    "mode": "direct_tmux",
+    "status": "attached",
+    "provider": "codex",
+    "pane_id": "%688",
+    "session_name": "bug080-owned2-leader-bug080-owned2-20260531-213101-r1",
+    "window_index": "0",
+    "window_name": "leader",
+    "pane_index": "0",
+    "pane_current_command": "zsh",
+    "leader_session_uuid": "ec7197d3a77b726386b4cbccf09bfbee",
+    "owner_epoch": 1,
+    "attached_at": "2026-05-31T13:31:09.131729+00:00",
+    "discovery": "claim_leader"
+  },
+  "agents": {
+    "alpha": {
+      "status": "running",
+      "provider": "fake",
+      "agent_id": "alpha",
+      "window": "alpha",
+      "session_id": null,
+      "display": {
+        "backend": "adaptive",
+        "status": "blocked",
+        "reason": "leader_not_in_tmux",
+        "error": null,
+        "target": "alpha",
+        "target_worker_session": "alpha",
+        "leader_session": null,
+        "linked_session": null,
+        "display_session": null,
+        "fallback": "tmux_headless",
+        "hint": "Start the leader inside tmux to enable adaptive team display.",
+        "platform": "darwin"
+      }
+    },
+    "beta": {
+      "status": "running",
+      "provider": "fake",
+      "agent_id": "beta",
+      "window": "beta",
+      "session_id": null,
+      "display": {
+        "backend": "adaptive",
+        "status": "blocked",
+        "reason": "leader_not_in_tmux",
+        "error": null,
+        "target": "beta",
+        "target_worker_session": "beta",
+        "leader_session": null,
+        "linked_session": null,
+        "display_session": null,
+        "fallback": "tmux_headless",
+        "hint": "Start the leader inside tmux to enable adaptive team display.",
+        "platform": "darwin"
+      }
+    }
+  },
+  "opened_display_by_agent": {
+    "alpha": {
+      "backend": "adaptive",
+      "status": "opened",
+      "window": "team-agent:team-bug080-owned2-bug080-owned2-20260531-213101-r1:overview",
+      "workspace_window": "team-agent:team-bug080-owned2-bug080-owned2-20260531-213101-r1:overview",
+      "pane_id": "%693",
+      "pane_title": "team-agent:alpha:No-op Alpha",
+      "target": "team-bug080-owned2-bug080-owned2-20260531-213101-r1:alpha",
+      "target_worker_session": "team-bug080-owned2-bug080-owned2-20260531-213101-r1:alpha",
+      "linked_session": "team-bug080-owned2-bug080-owned2-20260531-213101-r1__display__alpha__97dc1365",
+      "leader_session": "bug080-owned2-leader-bug080-owned2-20260531-213101-r1",
+      "display_session": "bug080-owned2-leader-bug080-owned2-20260531-213101-r1",
+      "fallback": "tmux_headless"
+    },
+    "beta": {
+      "backend": "adaptive",
+      "status": "opened",
+      "window": "team-agent:team-bug080-owned2-bug080-owned2-20260531-213101-r1:overview",
+      "workspace_window": "team-agent:team-bug080-owned2-bug080-owned2-20260531-213101-r1:overview",
+      "pane_id": "%694",
+      "pane_title": "team-agent:beta:No-op Beta",
+      "target": "team-bug080-owned2-bug080-owned2-20260531-213101-r1:beta",
+      "target_worker_session": "team-bug080-owned2-bug080-owned2-20260531-213101-r1:beta",
+      "linked_session": "team-bug080-owned2-bug080-owned2-20260531-213101-r1__display__beta__59f940a7",
+      "leader_session": "bug080-owned2-leader-bug080-owned2-20260531-213101-r1",
+      "display_session": "bug080-owned2-leader-bug080-owned2-20260531-213101-r1",
+      "fallback": "tmux_headless"
+    }
+  }
+}
