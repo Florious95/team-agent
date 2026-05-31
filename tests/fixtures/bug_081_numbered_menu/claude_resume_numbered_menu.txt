@@ -1,0 +1,6 @@
+Welcome back to Claude Code
+
+❯ 1. Resume previous conversation
+  2. Start a new conversation
+
+Enter to confirm · Esc to cancel

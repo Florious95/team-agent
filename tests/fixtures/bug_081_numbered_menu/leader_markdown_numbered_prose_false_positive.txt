@@ -1,0 +1,9 @@
+Team Agent message from leader:
+
+我现在按这个顺序处理：
+
+1. 核实改动落地，确认 smoke 和 targeted tests 都已经跑完。
+2. 复位游戏状态，避免上一轮临时会话残留影响下一轮判断。
+3. 派发下一轮验证任务，并要求 worker 只回报可审计结果。
+
+✻ Baked for 18s

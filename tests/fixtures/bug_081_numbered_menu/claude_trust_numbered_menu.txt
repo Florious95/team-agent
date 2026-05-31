@@ -1,0 +1,6 @@
+Quick safety check
+
+❯ 1. Yes, I trust this folder
+  2. No, go back
+
+Enter to confirm · Esc to cancel
