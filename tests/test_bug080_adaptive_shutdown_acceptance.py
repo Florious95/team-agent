@@ -75,6 +75,10 @@ class Bug080AdaptiveShutdownAcceptanceTests(unittest.TestCase):
     def test_shutdown_result_reports_orphan_cleanup_at_top_level_when_real_named_orphans_were_removed(self) -> None:
         step4_result = _step4_shutdown_result()
         fixture = _fixture_state()
+        session_name = fixture["session_name"]
+        leader_session = fixture["leader_receiver"]["session_name"]
+        expected_display_sessions = _real_orphan_display_sessions()
+        expected_overview = f"{leader_session}:team-agent:{session_name}:overview"
 
         with tempfile.TemporaryDirectory(prefix="team-agent-bug080-result-warning-") as tmp:
             workspace = Path(tmp)
@@ -84,9 +88,13 @@ class Bug080AdaptiveShutdownAcceptanceTests(unittest.TestCase):
             with _patched_shutdown(tmux):
                 result = runtime.shutdown(workspace, keep_logs=True, team="current")
 
-            self.assertTrue(
-                result.get("orphans_detected") or result.get("warnings") or result.get("warning"),
-                f"Step4 shutdown result cleaned real adaptive orphans but exposed no top-level warning: {step4_result}",
+            self.assertEqual(
+                result.get("orphans_detected"),
+                {
+                    "adaptive_display_sessions": expected_display_sessions,
+                    "adaptive_overview_windows": [expected_overview],
+                },
+                f"Step4 shutdown result cleaned real adaptive orphans but did not expose specific top-level orphans_detected: {step4_result}",
             )
 
     def test_shutdown_does_not_overclean_when_real_adaptive_display_objects_are_already_closed(self) -> None:
