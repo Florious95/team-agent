@@ -1,0 +1,14 @@
+{
+  "cleanup_mode": "synchronous_committed",
+  "coordinator": {
+    "ok": true,
+    "status": "stopped"
+  },
+  "new_active_team_key": "current",
+  "ok": true,
+  "session_name": "team-bug080-fix-bug080-fix-20260531-220353-r1",
+  "team": "team-bug080-fix-bug080-fix-20260531-220353-r1",
+  "teams_remaining": [
+    "current"
+  ]
+}

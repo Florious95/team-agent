@@ -72,6 +72,23 @@ class Bug080AdaptiveShutdownAcceptanceTests(unittest.TestCase):
             self.assertEqual(warnings[-1].get("adaptive_display_sessions"), expected_display_sessions)
             self.assertEqual(warnings[-1].get("adaptive_overview_windows"), [expected_overview])
 
+    def test_shutdown_result_reports_orphan_cleanup_at_top_level_when_real_named_orphans_were_removed(self) -> None:
+        step4_result = _step4_shutdown_result()
+        fixture = _fixture_state()
+
+        with tempfile.TemporaryDirectory(prefix="team-agent-bug080-result-warning-") as tmp:
+            workspace = Path(tmp)
+            save_runtime_state(workspace, _workspace_state_from_fixture(fixture))
+            tmux = FixtureTmux.from_real_before_shutdown()
+
+            with _patched_shutdown(tmux):
+                result = runtime.shutdown(workspace, keep_logs=True, team="current")
+
+            self.assertTrue(
+                result.get("orphans_detected") or result.get("warnings") or result.get("warning"),
+                f"Step4 shutdown result cleaned real adaptive orphans but exposed no top-level warning: {step4_result}",
+            )
+
     def test_shutdown_does_not_overclean_when_real_adaptive_display_objects_are_already_closed(self) -> None:
         fixture = _fixture_state()
         session_name = fixture["session_name"]
@@ -220,6 +237,10 @@ def _workspace_state_from_fixture(fixture: dict) -> dict:
 
 def _fixture_state() -> dict:
     return json.loads((FIXTURE_ROOT / "r1-state-selected.json").read_text(encoding="utf-8"))
+
+
+def _step4_shutdown_result() -> dict:
+    return json.loads((FIXTURE_ROOT / "step4-r1-shutdown-selected.json").read_text(encoding="utf-8"))
 
 
 def _real_orphan_display_sessions() -> list[str]:
