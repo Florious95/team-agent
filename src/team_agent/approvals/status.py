@@ -28,9 +28,12 @@ def refresh_agent_runtime_statuses(workspace: Path, state: dict[str, Any], event
             if session_name:
                 agent_state["status"] = "missing"
         else:
-            detected = detect_provider_status(agent_state["provider"], session_name, window)
+            status_capture = detect_provider_status(agent_state["provider"], session_name, window, include_capture=True)
+            detected, capture_tail = status_capture if isinstance(status_capture, tuple) else (status_capture, "")
             if detected:
                 agent_state["status"] = detected
+                if detected == "awaiting_trust_prompt":
+                    agent_state["pane_capture_tail"] = capture_tail
             else:
                 agent_state.setdefault("status", "running")
         if old_status != agent_state.get("status"):
@@ -147,14 +150,14 @@ def age_text(iso_text: str | None) -> str:
     return f"{minutes // 60}h ago"
 
 
-def detect_provider_status(provider: str, session_name: str, window: str) -> str | None:
+def detect_provider_status(provider: str, session_name: str, window: str, *, include_capture: bool = False) -> str | tuple[str | None, str] | None:
     from team_agent.runtime import get_adapter, run_cmd
     from team_agent.messaging.tmux_prompt import detect_non_input_scrollback
     proc = run_cmd(["tmux", "capture-pane", "-p", "-t", f"{session_name}:{window}"], timeout=5)
     if proc.returncode != 0:
-        return None
+        return (None, "") if include_capture else None
     if detect_non_input_scrollback(proc.stdout) == "codex_trust_prompt":
-        return "awaiting_trust_prompt"
+        return ("awaiting_trust_prompt", proc.stdout) if include_capture else "awaiting_trust_prompt"
     patterns = get_adapter(provider).status_patterns()
     positions: dict[str, int] = {}
     for status_name, pattern in patterns.items():
@@ -167,6 +170,7 @@ def detect_provider_status(provider: str, session_name: str, window: str) -> str
         if matches:
             positions[status_name] = matches[-1].start()
     if not positions:
-        return None
+        return (None, proc.stdout) if include_capture else None
     latest = max(positions, key=positions.get)
-    return {"idle": "running", "processing": "busy", "error": "error"}.get(latest)
+    detected = {"idle": "running", "processing": "busy", "error": "error"}.get(latest)
+    return (detected, proc.stdout) if include_capture else detected

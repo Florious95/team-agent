@@ -151,10 +151,19 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
 
     start_time = time.monotonic()
     last: dict[str, Any] = {}
+    trust_answered = False
     while time.monotonic() - start_time <= timeout:
         last = status(workspace, as_json=True)
         agents = last.get("agents", {})
         if agents and any(agent.get("status") == "awaiting_trust_prompt" for agent in agents.values()):
+            if _auto_answer_ready_wait_trust_prompt(workspace, last):
+                trust_answered = True
+                time.sleep(0.5)
+                last = status(workspace, as_json=True)
+                agents = last.get("agents", {})
+                if agents and all(agent.get("tmux_window_present") and agent.get("status") in {"running", "busy"} for agent in agents.values()):
+                    break
+                continue
             break
         if agents and all(agent.get("tmux_window_present") and agent.get("status") in {"running", "busy"} for agent in agents.values()):
             break
@@ -165,12 +174,19 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
         "mcp_ready": all(Path(agent.get("mcp_config", "")).exists() for agent in last.get("agents", {}).values()) if last.get("agents") else False,
         "task_prompt_delivered": bool(MessageStore(workspace).message_counts()),
     }
+    if trust_answered and readiness["process_started"] and readiness["mcp_ready"]:
+        readiness["cli_prompt_ready"] = True
     ok = readiness["process_started"] and readiness["cli_prompt_ready"] and readiness["mcp_ready"]
     awaiting_trust = any(agent.get("status") == "awaiting_trust_prompt" for agent in last.get("agents", {}).values()) if last.get("agents") else False
+    if awaiting_trust and not trust_answered and _auto_answer_ready_wait_trust_prompt(workspace, last):
+        trust_answered = True
+        if readiness["process_started"] and readiness["mcp_ready"]:
+            readiness["cli_prompt_ready"] = True
+            ok = True
     details_log = logs_dir(workspace) / f"wait-ready-{int(time.time())}.json"
     details_log.write_text(json.dumps({"readiness": readiness, "status": last}, indent=2, ensure_ascii=False), encoding="utf-8")
-    if awaiting_trust:
-        return {
+    if awaiting_trust and not trust_answered:
+        pending = {
             "ok": False,
             "status": "pending",
             "reason": "awaiting_trust_prompt",
@@ -179,6 +195,7 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
             "details_log": str(details_log),
             "readiness": readiness,
         }
+        return pending
     return {
         "ok": ok,
         "summary": "workers ready" if ok else "workers not fully ready before timeout",
@@ -186,6 +203,67 @@ def wait_ready(workspace: Path, timeout: int = 120) -> dict[str, Any]:
         "details_log": str(details_log),
         "readiness": readiness,
     }
+
+
+def _auto_answer_ready_wait_trust_prompt(workspace: Path, status_result: dict[str, Any]) -> bool:
+    from team_agent.messaging.leader_panes import attempt_trust_auto_answer
+    from team_agent.runtime import run_cmd
+
+    state = load_runtime_state(workspace)
+    session_name = status_result.get("session_name") or state.get("session_name")
+    event_log = EventLog(workspace)
+    state["workspace_root"] = str(workspace)
+    state["trust_auto_answer_stage"] = "quick_start_ready_wait"
+    answered = False
+    for agent_id, agent in (status_result.get("agents") or {}).items():
+        if not isinstance(agent, dict) or agent.get("status") != "awaiting_trust_prompt":
+            continue
+        state_agent = state.get("agents", {}).get(agent_id, {}) if isinstance(state.get("agents"), dict) else {}
+        display = agent.get("display") if isinstance(agent.get("display"), dict) else {}
+        state_display = state_agent.get("display") if isinstance(state_agent.get("display"), dict) else {}
+        pane_id = (
+            agent.get("pane_id")
+            or display.get("pane_id")
+            or agent.get("target")
+            or agent.get("tmux_target")
+            or state_agent.get("pane_id")
+            or state_display.get("pane_id")
+            or state_agent.get("target")
+            or state_agent.get("tmux_target")
+            or status_result.get("pane_id")
+            or status_result.get("target")
+            or status_result.get("tmux_target")
+        )
+        window = agent.get("window") or state_agent.get("window") or agent_id
+        agent_session = session_name or agent.get("session_name") or state_agent.get("session_name")
+        if pane_id:
+            target = str(pane_id)
+        elif agent_session:
+            target = f"{agent_session}:{window}"
+        else:
+            target = str(window)
+        if not str(target).startswith("%"):
+            panes = run_cmd(["tmux", "list-panes", "-a", "-F", "#{pane_id}\t#{window_name}"], timeout=5)
+            if panes.returncode == 0:
+                for line in panes.stdout.splitlines():
+                    pane_id_text, _, window_name = line.partition("\t")
+                    if window_name == window and pane_id_text:
+                        target = pane_id_text
+                        break
+        pane = run_cmd(["tmux", "display-message", "-p", "-t", target, "#{pane_id}"], timeout=5)
+        if pane.returncode == 0 and pane.stdout.strip():
+            target = pane.stdout.strip()
+        capture_tail = str(agent.get("pane_capture_tail") or agent.get("capture_tail") or "")
+        if not capture_tail:
+            capture = run_cmd(["tmux", "capture-pane", "-p", "-t", target], timeout=5)
+            if capture.returncode != 0:
+                event_log.write("quick_start.trust_auto_answer_capture_failed", agent_id=agent_id, target=target, error=capture.stderr.strip())
+                continue
+            capture_tail = capture.stdout
+        result = attempt_trust_auto_answer(workspace, target, capture_tail, event_log, state=state)
+        event_log.write("quick_start.trust_auto_answer_attempted", agent_id=agent_id, target=target, **result)
+        answered = answered or bool(result.get("answered"))
+    return answered
 
 
 def settle(workspace: Path) -> dict[str, Any]:
