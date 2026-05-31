@@ -245,34 +245,48 @@ def adaptive_blocked(
     return displays
 
 
-def close_adaptive_display(state: dict[str, Any], event_log: EventLog) -> None:
+def close_adaptive_display(state: dict[str, Any], event_log: EventLog) -> dict[str, Any]:
     displays = [
         (agent_id, agent_state.get("display") or {})
         for agent_id, agent_state in state.get("agents", {}).items()
         if (agent_state.get("display") or {}).get("backend") == "adaptive"
     ]
     if not displays:
-        return
+        return {"windows": [], "linked_sessions": [], "orphans_detected": {}}
     killed_windows: list[str] = []
     linked_sessions: list[str] = []
+    session_name = str(state.get("session_name") or "")
+    leader_session = _adaptive_leader_session(state, displays)
+    needs_named_fallback = False
     for _agent_id, display in displays:
         linked = display.get("linked_session")
         if linked:
             linked_sessions.append(str(linked))
+        if not linked or not display.get("leader_session") or not (display.get("workspace_window") or display.get("window")):
+            needs_named_fallback = True
     seen_targets: set[str] = set()
     for _agent_id, display in displays:
-        leader_session = str(display.get("leader_session") or "")
+        display_leader_session = str(display.get("leader_session") or "")
         window_name = str(display.get("workspace_window") or display.get("window") or "")
-        if not leader_session or not window_name:
+        if not display_leader_session or not window_name:
             continue
-        target = f"{leader_session}:{window_name}"
+        target = f"{display_leader_session}:{window_name}"
         if target in seen_targets:
             continue
         seen_targets.add(target)
         if kill_adaptive_window(target):
             killed_windows.append(target)
-    linked_closed = kill_ghostty_workspace_linked_sessions(linked_sessions)
-    event_log.write("display.adaptive_closed", windows=killed_windows, linked_sessions=linked_closed)
+    if needs_named_fallback and leader_session and session_name:
+        killed_windows.extend(close_adaptive_windows(leader_session, session_name, event_log))
+        linked_closed = kill_ghostty_workspace_linked_sessions(linked_sessions)
+        named_closed, named_failed = _kill_adaptive_named_display_sessions(session_name, [agent_id for agent_id, _display in displays])
+        linked_closed.extend(named_closed)
+    else:
+        named_failed = []
+        linked_closed = kill_ghostty_workspace_linked_sessions(linked_sessions)
+    orphans = _adaptive_orphans(session_name, leader_session, [agent_id for agent_id, _display in displays], named_failed) if needs_named_fallback else {}
+    event_log.write("display.adaptive_closed", windows=killed_windows, linked_sessions=linked_closed, orphans_detected=orphans)
+    return {"windows": killed_windows, "linked_sessions": linked_closed, "orphans_detected": orphans}
 
 
 def close_adaptive_windows(leader_session: str, session_name: str, event_log: EventLog | None = None) -> list[str]:
@@ -291,6 +305,66 @@ def close_adaptive_windows(leader_session: str, session_name: str, event_log: Ev
     if event_log is not None and killed:
         event_log.write("display.adaptive_stale_windows_closed", leader_session=leader_session, windows=killed)
     return killed
+
+
+def _adaptive_leader_session(state: dict[str, Any], displays: list[tuple[str, dict[str, Any]]]) -> str:
+    for _agent_id, display in displays:
+        if display.get("leader_session"):
+            return str(display["leader_session"])
+    receiver = state.get("leader_receiver") if isinstance(state.get("leader_receiver"), dict) else {}
+    return str(receiver.get("session_name") or "")
+
+
+def _adaptive_named_display_sessions(session_name: str, agent_ids: list[str], fallback_exact: bool = True) -> list[str]:
+    from team_agent.runtime import run_cmd
+    if not session_name or not agent_ids:
+        return []
+    exact = [ghostty_display_session_name(session_name, agent_id) for agent_id in agent_ids]
+    proc = run_cmd(["tmux", "list-sessions", "-F", "#{session_name}"], timeout=10)
+    if proc.returncode != 0:
+        return exact if fallback_exact else []
+    prefixes = [ghostty_display_session_name(session_name, agent_id).rsplit("__", 1)[0] + "__" for agent_id in agent_ids]
+    matched = [name for name in proc.stdout.splitlines() if any(name.startswith(prefix) for prefix in prefixes)]
+    return matched or (exact if fallback_exact else [])
+
+
+def _kill_adaptive_named_display_sessions(session_name: str, agent_ids: list[str]) -> tuple[list[str], list[str]]:
+    from team_agent.runtime import run_cmd
+    killed: list[str] = []
+    failed: list[str] = []
+    for display_session in _adaptive_named_display_sessions(session_name, agent_ids):
+        proc = run_cmd(["tmux", "kill-session", "-t", display_session], timeout=10)
+        if proc.returncode == 0:
+            killed.append(display_session)
+        else:
+            failed.append(display_session)
+    return killed, failed
+
+
+def _adaptive_orphans(session_name: str, leader_session: str, agent_ids: list[str], failed_sessions: list[str]) -> dict[str, list[str]]:
+    display_sessions = sorted(set([*_adaptive_named_display_sessions(session_name, agent_ids, fallback_exact=False), *failed_sessions]))
+    windows: list[str] = []
+    if leader_session and session_name:
+        windows = _adaptive_window_orphans(leader_session, session_name)
+    if not display_sessions and not windows:
+        return {}
+    return {
+        "adaptive_display_sessions": sorted(set(display_sessions)),
+        "adaptive_overview_windows": sorted(set(windows)),
+    }
+
+
+def _adaptive_window_orphans(leader_session: str, session_name: str) -> list[str]:
+    from team_agent.runtime import run_cmd
+    prefix = f"team-agent:{session_name}:overview"
+    proc = run_cmd(["tmux", "list-windows", "-t", leader_session, "-F", "#{window_name}"], timeout=10)
+    if proc.returncode != 0:
+        return []
+    return [
+        f"{leader_session}:{window_name}"
+        for window_name in proc.stdout.splitlines()
+        if window_name == prefix or window_name.startswith(f"{prefix}-")
+    ]
 
 
 def kill_adaptive_window(target: str) -> bool:

@@ -527,7 +527,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             if proc.returncode == 0:
                 log_path.write_text(proc.stdout, encoding="utf-8")
                 captured.append(str(log_path))
-        _close_team_display_backends(state, event_log)
+        display_cleanup = _close_team_display_backends(state, event_log)
         for agent_id, agent_state in state.get("agents", {}).items():
             _close_ghostty_display(agent_id, agent_state, event_log)
             closed_displays.add(agent_id)
@@ -541,7 +541,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
             event_log.write("shutdown.kill_session", session=session_name, keep_logs=keep_logs, captured=captured)
     else:
         event_log.write("shutdown.idempotent", session=session_name, reason="session missing")
-        _close_team_display_backends(state, event_log)
+        display_cleanup = _close_team_display_backends(state, event_log)
     for agent_id, agent_state in state.get("agents", {}).items():
         if agent_id not in closed_displays:
             _close_ghostty_display(agent_id, agent_state, event_log)
@@ -573,7 +573,7 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
     archive_path, teams_remaining, new_active = _commit_shutdown_cleanup(
         workspace, str(resolved_team_id or ""), session_name, event_log
     )
-    return {
+    result = {
         "ok": True,
         "session_name": session_name,
         "team": resolved_team_id,
@@ -584,6 +584,20 @@ def shutdown(workspace: Path, keep_logs: bool = True, team: str | None = None) -
         "new_active_team_key": new_active,
         "cleanup_mode": "synchronous_committed",
     }
+    orphans = (display_cleanup or {}).get("orphans_detected") or []
+    if orphans:
+        result["cleanup_mode"] = "synchronous_with_orphans"
+        result["orphans_detected"] = orphans
+        result["warning"] = "Adaptive display tmux objects remain after shutdown cleanup."
+        event_log.write(
+            "shutdown.orphans_detected",
+            warning=result["warning"],
+            message=result["warning"],
+            orphans_detected=orphans,
+            adaptive_display_sessions=orphans.get("adaptive_display_sessions", []),
+            adaptive_overview_windows=orphans.get("adaptive_overview_windows", []),
+        )
+    return result
 
 
 def _commit_shutdown_cleanup(
