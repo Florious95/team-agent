@@ -22,6 +22,7 @@ from team_agent.state import save_runtime_state
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "bug_085_compatible_api_claude" / "compatible_api_claude_idle_bad_first_line.jsonl"
+REAL_CLAUDE_IDLE_FIXTURE = Path(__file__).parent / "fixtures" / "idle_takeover" / "claude_end_turn_with_metadata_tail.real.jsonl"
 
 
 class Bug085CompatibleApiClaudeAcceptanceTests(unittest.TestCase):
@@ -90,6 +91,67 @@ class Bug085CompatibleApiClaudeAcceptanceTests(unittest.TestCase):
 
             self.assertEqual(nodes[0]["node_id"], "compatible_worker")
             self.assertEqual(nodes[0]["state"], "idle")
+
+    def test_native_claude_code_idle_transcript_counts_for_takeover_after_capture(self) -> None:
+        state = {
+            "agents": {
+                "claude_worker": {
+                    "provider": "claude_code",
+                    "auth_mode": None,
+                    "status": "running",
+                    "session_id": "e4cc5db3-b70e-4c64-8263-73cb9dcc86db",
+                    "rollout_path": str(REAL_CLAUDE_IDLE_FIXTURE),
+                    "captured_via": "fs_watch",
+                    "attribution_confidence": "high",
+                    "first_send_at": "2026-06-01T18:03:20+00:00",
+                },
+                "codex_worker": {
+                    "provider": "codex",
+                    "status": "running",
+                    "session_id": "codex-session",
+                    "rollout_path": str(Path(__file__).parent / "fixtures" / "idle_takeover" / "codex_task_complete.real.jsonl"),
+                    "captured_via": "fs_watch",
+                    "attribution_confidence": "high",
+                    "first_send_at": "2026-06-01T18:03:20+00:00",
+                },
+            }
+        }
+
+        nodes = build_idle_nodes(state)
+
+        self.assertEqual({node["node_id"]: node["state"] for node in nodes}, {"claude_worker": "idle", "codex_worker": "idle"})
+        events: list[tuple[str, dict]] = []
+        result = evaluate_takeover_reminder(
+            nodes,
+            monitor_state={"opened_worker_turn_since_ack": True, "all_idle_since": 0.0},
+            now_monotonic=90.0,
+            debounce_seconds=60.0,
+            event_sink=lambda name, fields: events.append((name, fields)),
+        )
+        self.assertTrue(result["should_ping"], result)
+        self.assertIn("idle_takeover.ping", [name for name, _fields in events])
+
+    def test_missing_claude_code_rollout_path_remains_unknown_and_never_counts_as_idle(self) -> None:
+        nodes = build_idle_nodes({
+            "agents": {
+                "claude_worker": {
+                    "provider": "claude_code",
+                    "status": "running",
+                    "session_id": None,
+                    "rollout_path": None,
+                }
+            }
+        })
+
+        self.assertEqual(nodes[0]["state"], "unknown")
+        result = evaluate_takeover_reminder(
+            nodes,
+            monitor_state={"opened_worker_turn_since_ack": True, "all_idle_since": 0.0},
+            now_monotonic=90.0,
+            debounce_seconds=60.0,
+        )
+        self.assertFalse(result["should_ping"], result)
+        self.assertEqual(result["reason"], "node_unknown")
 
     def test_half_state_resume_restart_reset_and_status_consumers_are_safe(self) -> None:
         with tempfile.TemporaryDirectory(prefix="team-agent-bug085-half-state-") as tmp:

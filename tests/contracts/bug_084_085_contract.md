@@ -35,6 +35,8 @@ Required behavior:
 - Strict `find_claude_transcript` still wins when it can produce a true `session_id`.
 - The half-state `session_id=None` and `rollout_path=set` is legal: idle classification uses `rollout_path`, resume refuses cleanly with `ResumeUnavailable`, restart/reset/status/idle consumers do not crash.
 - `build_idle_nodes` classifies the fixture tail as idle, not unknown.
+- Native Claude Code (`provider="claude_code"`) and compatible-api Claude (`provider="claude"`, `auth_mode="compatible_api"`) both use the same Claude transcript turn-state reader for idle/take-over. A real Claude Code transcript with `message.stop_reason="end_turn"` and metadata tail must classify as idle when `rollout_path` is present.
+- If `rollout_path` is still missing, the node remains unknown and must not count as idle. This preserves the bug-071/bug-077 false-IDLE boundary; the fix must remove provider/capture-path divergence, not treat unknown as idle.
 - `evaluate_takeover_reminder` emits `idle_takeover.no_ping` only when the no-ping reason changes.
 - Long-term unknown nodes do not count as idle and do not ping. Starting at 60 consecutive ticks, the coordinator emits `idle_takeover.unknown_persistent` every 12 ticks with `node_id`, `provider`, `auth_mode`, `consecutive_ticks`, and `rollout_path`.
 - The fallback helper must not call strict `find_claude_transcript`.
