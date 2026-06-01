@@ -1,0 +1,129 @@
+{
+  "session_name": "team-bug084",
+  "active_team_key": "team-bug084",
+  "team_dir": "/tmp/team-bug084/.team",
+  "spec_path": "/tmp/team-bug084/.team/team.spec.yaml",
+  "leader": {
+    "id": "leader",
+    "provider": "codex"
+  },
+  "leader_receiver": {
+    "mode": "direct_tmux",
+    "session_name": "team-bug084",
+    "pane_id": "%42",
+    "provider": "codex",
+    "status": "alive"
+  },
+  "agents": {
+    "developer": {
+      "agent_id": "developer",
+      "provider": "codex",
+      "status": "running",
+      "session_name": "team-bug084",
+      "window": "developer",
+      "pane_id": "%43",
+      "session_id": "codex-session-developer",
+      "rollout_path": "/tmp/team-bug084/.team/runtime/sessions/developer.jsonl",
+      "captured_at": "2026-06-02T00:00:00+00:00",
+      "captured_via": "fs_watch",
+      "attribution_confidence": "high",
+      "spawn_cwd": "/tmp/team-bug084"
+    },
+    "realistic_tester": {
+      "agent_id": "realistic_tester",
+      "provider": "claude",
+      "auth_mode": "compatible_api",
+      "status": "running",
+      "session_name": "team-bug084",
+      "window": "realistic_tester",
+      "pane_id": "%44",
+      "session_id": null,
+      "rollout_path": "/tmp/team-bug084/.team/runtime/sessions/realistic_tester.jsonl",
+      "captured_at": "2026-06-02T00:00:01+00:00",
+      "captured_via": "fs_mtime_fallback",
+      "attribution_confidence": "low",
+      "spawn_cwd": "/tmp/team-bug084"
+    },
+    "constitution_reviewer": {
+      "agent_id": "constitution_reviewer",
+      "provider": "claude_code",
+      "status": "paused",
+      "session_name": "team-bug084",
+      "window": "constitution_reviewer",
+      "pane_id": "%45",
+      "session_id": "claude-session-cr",
+      "rollout_path": "/tmp/team-bug084/.claude/projects/-tmp-team-bug084/cr.jsonl",
+      "captured_at": "2026-06-02T00:00:02+00:00",
+      "captured_via": "fs_watch",
+      "attribution_confidence": "high",
+      "spawn_cwd": "/tmp/team-bug084"
+    }
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "title": "write red contracts",
+      "status": "done",
+      "assignee": "test-engineer",
+      "deps": [],
+      "last_result_summary": "contracts committed"
+    },
+    {
+      "id": "t2",
+      "title": "implement hotfix",
+      "status": "pending",
+      "assignee": "developer",
+      "deps": ["t1"]
+    },
+    {
+      "id": "t3",
+      "title": "real machine verification",
+      "status": "pending",
+      "assignee": "realistic_tester",
+      "deps": ["t2"]
+    }
+  ],
+  "coordinator": {
+    "idle_takeover_monitor": {
+      "opened_worker_turn_since_ack": true,
+      "suppressed": false,
+      "all_idle_since": 123.0,
+      "pinged_for_episode": null
+    },
+    "unknown_ticks": {
+      "legacy_worker": 12
+    }
+  },
+  "teams": {
+    "team-bug084": {
+      "session_name": "team-bug084",
+      "team_dir": "/tmp/team-bug084/.team",
+      "agents": {
+        "developer": {
+          "provider": "codex",
+          "status": "running"
+        },
+        "realistic_tester": {
+          "provider": "claude",
+          "auth_mode": "compatible_api",
+          "status": "running"
+        },
+        "constitution_reviewer": {
+          "provider": "claude_code",
+          "status": "paused"
+        }
+      },
+      "tasks": [
+        {
+          "id": "t1",
+          "status": "done"
+        },
+        {
+          "id": "t2",
+          "status": "pending"
+        }
+      ],
+      "status": "alive"
+    }
+  }
+}

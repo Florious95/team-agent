@@ -1,0 +1,3 @@
+not-json-compatible-api-header-without-session-id
+{"type":"user","cwd":"__WORKSPACE__","timestamp":"2026-06-02T00:00:00.000Z","message":{"content":[{"type":"text","text":"TEAM_AGENT_ID=compatible_worker please inspect the current task."}]}}
+{"type":"assistant","cwd":"__WORKSPACE__","timestamp":"2026-06-02T00:00:01.000Z","requestId":"req-compatible-idle-1","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"Ready for the next instruction."}]}}
