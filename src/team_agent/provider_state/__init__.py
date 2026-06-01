@@ -63,6 +63,7 @@ def read_fault_facts(provider: str, records: list[dict[str, Any]]) -> list[dict[
 
 
 def _reader_for(provider: str, registry: Any = None) -> Any:
+    provider = _reader_provider(provider)
     if provider in _READER_CACHE:
         return _READER_CACHE[provider]
     entry = None
@@ -81,6 +82,10 @@ def _reader_for(provider: str, registry: Any = None) -> Any:
         return None
     _READER_CACHE[provider] = module
     return module
+
+
+def _reader_provider(provider: str) -> str:
+    return "claude" if provider == "claude_code" else provider
 
 
 __all__ = ["read_turn_state", "read_fault_facts", "get_provider_registry"]
