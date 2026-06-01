@@ -104,6 +104,10 @@ class ClaudeCodeAdapter(ProviderAdapter):
                     "attribution_confidence": match["confidence"],
                     "spawn_cwd": str(cwd),
                 }
+            if spawn_context.get("auth_mode") == "compatible_api":
+                fallback = find_compatible_api_claude_transcript_fallback(root, Path(str(cwd)), start, agent_id)
+                if fallback:
+                    return fallback
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.2)
@@ -325,6 +329,48 @@ def find_claude_transcript(
         return None
     candidates.sort(key=lambda item: (item["score"], item["timestamp"]), reverse=True)
     return candidates[0]
+
+
+def find_compatible_api_claude_transcript_fallback(
+    root: Path,
+    cwd: Path,
+    spawn_time: datetime,
+    agent_id: str,
+) -> dict[str, Any] | None:
+    _ = agent_id
+    if not root.exists():
+        return None
+    lower_bound = spawn_time - timedelta(seconds=5)
+    upper_bound = datetime.now(timezone.utc)
+    candidates: list[Path] = []
+    for directory in claude_project_dirs(root, cwd):
+        try:
+            candidates.extend(path for path in directory.glob("*.jsonl") if path.is_file())
+        except OSError:
+            continue
+    try:
+        ordered = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+    except OSError:
+        return None
+    for path in ordered:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_size <= 0:
+            continue
+        timestamp = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+        if timestamp < lower_bound or timestamp > upper_bound:
+            continue
+        return {
+            "session_id": None,
+            "rollout_path": str(path),
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "captured_via": "fs_mtime_fallback",
+            "attribution_confidence": "low",
+            "spawn_cwd": str(cwd),
+        }
+    return None
 
 
 def claude_project_dirs(root: Path, cwd: Path) -> list[Path]:

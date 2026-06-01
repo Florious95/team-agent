@@ -36,6 +36,9 @@ def build_idle_nodes(state: dict[str, Any]) -> list[dict[str, Any]]:
             "state": classification.get("state"),
             "turn_id": classification.get("turn_id"),
             "annotations": classification.get("annotations"),
+            "provider": provider,
+            "auth_mode": agent_state.get("auth_mode"),
+            "rollout_path": agent_state.get("rollout_path"),
         })
     leader_node = _leader_node(state)
     if leader_node is not None:

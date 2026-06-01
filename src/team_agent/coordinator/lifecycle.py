@@ -288,14 +288,18 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
     # Gap 32: the take-over reminder is driven by file-fact turn-state via the
     # idle_takeover predicate (the legacy screen-scrape obligation path is retired).
     _coord_meta = state.setdefault("coordinator", {})
+    idle_nodes = build_idle_nodes(state)
+    _record_unknown_idle_nodes(state, idle_nodes, event_log)
     idle_eval = evaluate_takeover_reminder(
-        build_idle_nodes(state),
+        idle_nodes,
         monitor_state=_coord_meta.get("idle_takeover_monitor"),
         now_monotonic=_time.monotonic(),
         debounce_seconds=IDLE_DEBOUNCE_SECONDS,
+        event_sink=lambda name, fields: event_log.write(name, **fields),
     )
     _coord_meta["idle_takeover_monitor"] = idle_eval.get("monitor_state")
-    push_idle_reminder(workspace, state, event_log, idle_eval)
+    if idle_eval.get("should_ping"):
+        push_idle_reminder(workspace, state, event_log, idle_eval)
     idle_alerts = (
         [{"alert_type": "idle_takeover", "message": idle_eval.get("message"),
           "reason": idle_eval.get("reason"), "interrupted": idle_eval.get("interrupted_nodes")}]
@@ -338,7 +342,25 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         if drift:
             drift_results.append(drift)
     api_errors = detect_leader_api_errors(workspace, state, store, event_log)
-    save_runtime_state(workspace, state)
+    try:
+        save_runtime_state(workspace, state)
+    except Exception as exc:
+        event_log.write("runtime.state.save_failed", phase="tick_end", error=str(exc), exc_type=type(exc).__name__)
+        return {
+            "ok": False,
+            "stop": False,
+            "reason": "persistence_degraded",
+            "persisted": False,
+            "error": str(exc),
+            "delivered": delivered,
+            "scheduled": fired,
+            "stuck": stuck,
+            "idle_alerts": idle_alerts,
+            "deadlock_alerts": deadlock_alerts,
+            "compaction": compaction_results,
+            "session_drift": drift_results,
+            "api_errors": api_errors,
+        }
     results = _collect_results_and_notify_watchers(workspace, event_log)
     # Stage 12: prune the dedupe log every tick — cheap O(n) delete bounded by 24h window.
     from team_agent.message_store.leader_notification_log import prune_leader_notification_log
@@ -361,3 +383,29 @@ def coordinator_tick(workspace: Path) -> dict[str, Any]:
         "api_errors": api_errors,
         "results": results,
     }
+
+
+def _record_unknown_idle_nodes(state: dict[str, Any], nodes: list[dict[str, Any]], event_log: EventLog) -> None:
+    coordinator = state.setdefault("coordinator", {})
+    unknown_ticks = coordinator.setdefault("unknown_ticks", {})
+    current_unknown: set[str] = set()
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        if not node_id:
+            continue
+        if node.get("state") == "unknown":
+            current_unknown.add(node_id)
+            count = int(unknown_ticks.get(node_id) or 0) + 1
+            unknown_ticks[node_id] = count
+            if count >= 60 and count % 12 == 0:
+                event_log.write(
+                    "idle_takeover.unknown_persistent",
+                    node_id=node_id,
+                    provider=node.get("provider"),
+                    auth_mode=node.get("auth_mode"),
+                    consecutive_ticks=count,
+                    rollout_path=node.get("rollout_path"),
+                )
+    for node_id in list(unknown_ticks):
+        if node_id not in current_unknown:
+            unknown_ticks.pop(node_id, None)

@@ -46,10 +46,10 @@ def evaluate_takeover_reminder(
         if node_state not in _IDLE_STATES:
             state["all_idle_since"] = None
             state["pinged_for_episode"] = None
-            return _result(False, None, f"node_{node_state or 'unknown'}", _interrupted(nodes), state)
+            return _result(False, None, f"node_{node_state or 'unknown'}", _interrupted(nodes), state, event_sink=event_sink, node=node)
 
     if not nodes:
-        return _result(False, None, "no_nodes", [], state)
+        return _result(False, None, "no_nodes", [], state, event_sink=event_sink)
 
     if state.get("all_idle_since") is None:
         state["all_idle_since"] = now_monotonic
@@ -58,18 +58,18 @@ def evaluate_takeover_reminder(
     interrupted = _interrupted(nodes)
 
     if not state.get(_ARM_KEY):
-        return _result(False, None, "not_armed_no_worker_turn", interrupted, state)
+        return _result(False, None, "not_armed_no_worker_turn", interrupted, state, event_sink=event_sink)
     if state.get(_SUPPRESS_KEY):
-        return _result(False, None, "acknowledged", interrupted, state)
+        return _result(False, None, "acknowledged", interrupted, state, event_sink=event_sink)
     if elapsed < debounce_seconds:
-        return _result(False, None, "debounce_active", interrupted, state)
+        return _result(False, None, "debounce_active", interrupted, state, event_sink=event_sink)
     if state.get("pinged_for_episode") == state.get("all_idle_since"):
-        return _result(False, None, "already_pinged_this_episode", interrupted, state)
+        return _result(False, None, "already_pinged_this_episode", interrupted, state, event_sink=event_sink)
 
     state["pinged_for_episode"] = state["all_idle_since"]
     message = _neutral_message(len(nodes), elapsed, interrupted)
     _emit(event_sink, "idle_takeover.ping", nodes=len(nodes), elapsed_seconds=int(elapsed), interrupted=[i["node_id"] for i in interrupted])
-    return _result(True, message, "all_idle_debounce_elapsed", interrupted, state)
+    return _result(True, message, "all_idle_debounce_elapsed", interrupted, state, event_sink=event_sink)
 
 
 def record_turn_open_after_delivery(
@@ -174,7 +174,25 @@ def _neutral_message(node_count: int, elapsed: float, interrupted: list[dict[str
     return base
 
 
-def _result(should_ping: bool, message: str | None, reason: str, annotations: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any]:
+def _result(
+    should_ping: bool,
+    message: str | None,
+    reason: str,
+    annotations: list[dict[str, Any]],
+    state: dict[str, Any],
+    *,
+    event_sink: Any = None,
+    node: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not should_ping and state.get("last_no_ping_reason") != reason:
+        state["last_no_ping_reason"] = reason
+        _emit(
+            event_sink,
+            "idle_takeover.no_ping",
+            reason=reason,
+            node_id=(node or {}).get("node_id"),
+            armed=bool(state.get(_ARM_KEY)),
+        )
     return {
         "should_ping": should_ping,
         "message": message,

@@ -950,17 +950,20 @@ def _runtime_lock(workspace: Path, name: str, timeout: float = 5.0):
     lock_path = runtime_dir(workspace) / f"{name}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     event_log = EventLog(workspace)
+    log_lock_events = name != "state-save"
     start = time.monotonic()
     with lock_path.open("w", encoding="utf-8") as lock_file:
         while True:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 waited = time.monotonic() - start
-                event_log.write("runtime.lock_acquired", lock=name, waited_sec=round(waited, 3))
+                if log_lock_events:
+                    event_log.write("runtime.lock_acquired", lock=name, waited_sec=round(waited, 3))
                 break
             except BlockingIOError:
                 if time.monotonic() - start >= timeout:
-                    event_log.write("runtime.lock_busy", lock=name, timeout_sec=timeout)
+                    if log_lock_events:
+                        event_log.write("runtime.lock_busy", lock=name, timeout_sec=timeout)
                     raise RuntimeError(
                         f"{name} is locked by another team-agent process; serialize team-agent {name} calls and retry"
                     )
@@ -969,7 +972,8 @@ def _runtime_lock(workspace: Path, name: str, timeout: float = 5.0):
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            event_log.write("runtime.lock_released", lock=name)
+            if log_lock_events:
+                event_log.write("runtime.lock_released", lock=name)
 
 
 def _leader_id(state: dict[str, Any], spec: dict[str, Any]) -> str:

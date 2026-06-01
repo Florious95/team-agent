@@ -170,7 +170,11 @@ def detect_compaction_degradation(
     team_counts = state.setdefault("coordinator", {}).setdefault("compaction_counts", {}).setdefault(owner_team_id, {})
     current = max(int(team_counts.get(agent_id) or 0), count)
     team_counts[agent_id] = current
-    save_runtime_state(workspace, state)
+    try:
+        save_runtime_state(workspace, state)
+    except Exception as exc:
+        event_log.write("runtime.state.save_failed", phase="compaction_detect", error=str(exc), exc_type=type(exc).__name__)
+        return {"ok": False, "event": "compaction_threshold_crossed.unpersisted", "agent_id": agent_id, "compaction_count": current}
     if current <= 0:
         return {"ok": True, "event": "compaction_threshold_crossed.none", "compaction_count": current}
     event_log.write(
@@ -206,7 +210,11 @@ def _reset_or_recommend(
     if reset.get("ok"):
         team_counts = state.setdefault("coordinator", {}).setdefault("compaction_counts", {}).setdefault(owner_team_id, {})
         team_counts[agent_id] = 0
-        save_runtime_state(workspace, state)
+        try:
+            save_runtime_state(workspace, state)
+        except Exception as exc:
+            event_log.write("runtime.state.save_failed", phase="compaction_detect", error=str(exc), exc_type=type(exc).__name__)
+            return {"ok": False, "event": "compaction_threshold_crossed.unpersisted", "agent_id": agent_id, "compaction_count": compaction_count}
         event = "compaction_threshold_crossed.auto_reset"
         event_log.write(event, agent_id=agent_id, provider=provider, team=owner_team_id, compaction_count=compaction_count, threshold=threshold)
         return {"ok": True, "event": event, "agent_id": agent_id, "compaction_count": compaction_count, "threshold": threshold, "reset": reset}

@@ -82,6 +82,7 @@ def capture_agent_session(
         "predetermined_session_id": agent_state.get("_pending_session_id"),
         "exclude_session_ids": sorted(exclude_session_ids or set()),
         "claude_projects_root": agent_state.get("claude_projects_root"),
+        "auth_mode": agent_state.get("auth_mode"),
     }
     deadline = time.monotonic() + max(timeout_s, 0.0)
     while True:
@@ -89,7 +90,7 @@ def capture_agent_session(
         # outer loop owns the polling budget so behaviour stays consistent
         # whether or not the adapter has its own internal sleep.
         result = adapter.capture_session_id(agent_id, spawn_context, timeout_s=0)
-        if isinstance(result, dict) and result.get("session_id"):
+        if isinstance(result, dict) and (result.get("session_id") or result.get("rollout_path")):
             copy_session_metadata(agent_state, result)
             agent_state.pop("_pending_session_id", None)
             event_log.write(

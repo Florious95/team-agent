@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import copy
 import subprocess
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -488,16 +490,105 @@ def validate_leader_uuid_from_targets(receiver: dict[str, Any], targets: dict[st
 
 
 def save_runtime_state(workspace: Path, state: dict[str, Any]) -> None:
-    _migrate_state_identity(state, workspace)
     path = runtime_state_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    cached = _RUNTIME_STATE_CACHE.get(str(path))
+    if cached is not None and state == cached:
+        return
+    _migrate_state_identity(state, workspace)
+    cached = _RUNTIME_STATE_CACHE.get(str(path))
+    if cached is not None and state == cached:
+        return
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            normalize_agent_session_state(existing)
+            _migrate_state_identity(existing, workspace)
+            if state == existing:
+                _RUNTIME_STATE_CACHE[str(path)] = copy.deepcopy(state)
+                return
+        except Exception:
+            pass
+    from team_agent.runtime import _runtime_lock
+    with _runtime_lock(workspace, "state-save", timeout=2.0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(state, indent=2, ensure_ascii=False)
+        delays = [0.05, 0.2, 0.5]
+        for attempt in range(len(delays) + 1):
+            tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp_path.write_text(payload, encoding="utf-8")
+                os.replace(tmp_path, path)
+                _RUNTIME_STATE_CACHE[str(path)] = copy.deepcopy(state)
+                return
+            except (PermissionError, OSError) as exc:
+                if not _retryable_replace_error(exc) or attempt >= len(delays):
+                    if _retryable_replace_error(exc):
+                        _self_heal_runtime_state(workspace, path, payload, state, attempt + 1, exc)
+                        return
+                    raise
+                from team_agent.events import EventLog
+                EventLog(workspace).write(
+                    "runtime.state.save_retry",
+                    attempt=attempt + 1,
+                    errno=getattr(exc, "errno", None),
+                    errno_name=errno.errorcode.get(getattr(exc, "errno", 0), None),
+                    error=str(exc),
+                )
+                time.sleep(delays[attempt])
+            finally:
+                tmp_path.unlink(missing_ok=True)
+
+
+def _retryable_replace_error(exc: BaseException) -> bool:
+    return isinstance(exc, PermissionError) or (
+        isinstance(exc, OSError) and getattr(exc, "errno", None) in {errno.EACCES, errno.EPERM, errno.EBUSY}
+    )
+
+
+def _self_heal_runtime_state(
+    workspace: Path,
+    path: Path,
+    payload: str,
+    state: dict[str, Any],
+    attempts_used: int,
+    original_exc: BaseException,
+) -> None:
+    from team_agent.events import EventLog
+    event_log = EventLog(workspace)
+    heal_tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.heal.tmp")
+    backup = path.with_name(f"{path.name}.bak.{os.getpid()}")
+    backup_created = False
     try:
-        tmp_path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp_path, path)
+        heal_tmp.write_text(payload, encoding="utf-8")
+        try:
+            os.replace(path, backup)
+            backup_created = True
+        except FileNotFoundError:
+            backup_created = False
+        os.replace(heal_tmp, path)
         _RUNTIME_STATE_CACHE[str(path)] = copy.deepcopy(state)
+        event_log.write(
+            "runtime.state.self_healed",
+            inode_rebuilt=True,
+            attempts_used=attempts_used,
+            replace_retries=max(0, attempts_used - 1),
+        )
+    except Exception as exc:
+        if backup_created:
+            try:
+                os.replace(backup, path)
+            except Exception as restore_exc:
+                event_log.write("runtime.state.self_heal_restore_failed", error=str(restore_exc))
+        event_log.write(
+            "runtime.state.save_failed",
+            phase="save_runtime_state",
+            final_errno=getattr(exc, "errno", getattr(original_exc, "errno", None)),
+            error=str(exc),
+            retries_used=max(0, attempts_used - 1),
+        )
+        raise
     finally:
-        tmp_path.unlink(missing_ok=True)
+        heal_tmp.unlink(missing_ok=True)
 
 
 def save_team_scoped_state(workspace: Path, team_state: dict[str, Any]) -> None:

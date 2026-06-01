@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> None:
 
     interval = args.tick_interval if args.tick_interval is not None else _tick_interval(workspace)
     initial_ppid = os.getppid()
+    failure_count = 0
+    last_failure_signature: tuple[str, str] | None = None
     while not STOP:
         # Stage 14 (Gap 37b) — orphan self-detection. If our original parent (test harness,
         # shell, or supervisor) died, our ppid is reparented to 1 (or to a launchd shim on
@@ -55,7 +57,41 @@ def main(argv: list[str] | None = None) -> None:
                 workspace=str(workspace),
             )
             break
-        result = runtime.coordinator_tick(workspace)
+        try:
+            result = runtime.coordinator_tick(workspace)
+        except Exception as exc:
+            failure_count += 1
+            signature = (type(exc).__name__, str(exc)[:200])
+            sleep_sec = min(interval * (2 ** min(failure_count - 1, 5)), 60.0)
+            if signature != last_failure_signature:
+                last_failure_signature = signature
+                event_log.write(
+                    "coordinator.tick_error",
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                    consecutive_failures=failure_count,
+                    next_sleep_sec=sleep_sec,
+                )
+            elif failure_count == 1 or failure_count % 12 == 0 or sleep_sec in {40.0, 60.0}:
+                event_log.write(
+                    "coordinator.tick_error",
+                    error=str(exc),
+                    exc_type=type(exc).__name__,
+                    consecutive_failures=failure_count,
+                    next_sleep_sec=sleep_sec,
+                )
+            else:
+                event_log.write(
+                    "coordinator.tick_error.suppressed",
+                    consecutive_failures=failure_count,
+                    next_sleep_sec=sleep_sec,
+                )
+            time.sleep(sleep_sec)
+            continue
+        if failure_count:
+            event_log.write("coordinator.tick_recovered", consecutive_failures=failure_count)
+            failure_count = 0
+            last_failure_signature = None
         if result.get("stop") or args.once:
             break
         time.sleep(interval)
