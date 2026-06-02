@@ -37,6 +37,9 @@ Required behavior:
 - `build_idle_nodes` classifies the fixture tail as idle, not unknown.
 - Native Claude Code (`provider="claude_code"`) and compatible-api Claude (`provider="claude"`, `auth_mode="compatible_api"`) both use the same Claude transcript turn-state reader for idle/take-over. A real Claude Code transcript with `message.stop_reason="end_turn"` and metadata tail must classify as idle when `rollout_path` is present.
 - If `rollout_path` is still missing, the node remains unknown and must not count as idle. This preserves the bug-071/bug-077 false-IDLE boundary; the fix must remove provider/capture-path divergence, not treat unknown as idle.
+- A successful coordinator-delivered leader-to-worker message is the C3 turn-open edge. The delivery path must call `record_turn_open_after_delivery` and persist the returned monitor state under `state["coordinator"]["idle_takeover_monitor"]`; tests must not pre-seed `opened_worker_turn_since_ack=True`.
+- The expected live sequence is: leader-to-worker delivery arms the monitor, the worker may be temporarily `unknown` while capture lags, and after `rollout_path` is captured and all workers classify idle, the normal debounce window emits `idle_takeover.ping`.
+- A team with no leader-to-worker delivery remains `not_armed_no_worker_turn` and must not ping even when all known nodes are idle.
 - `evaluate_takeover_reminder` emits `idle_takeover.no_ping` only when the no-ping reason changes.
 - Long-term unknown nodes do not count as idle and do not ping. Starting at 60 consecutive ticks, the coordinator emits `idle_takeover.unknown_persistent` every 12 ticks with `node_id`, `provider`, `auth_mode`, `consecutive_ticks`, and `rollout_path`.
 - The fallback helper must not call strict `find_claude_transcript`.

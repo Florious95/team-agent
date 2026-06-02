@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,8 @@ from team_agent.coordinator import lifecycle
 from team_agent.events import EventLog
 from team_agent.idle_predicate import evaluate_takeover_reminder
 from team_agent.idle_takeover_wiring import build_idle_nodes
+from team_agent.message_store import MessageStore
+from team_agent.messaging import delivery
 from team_agent.provider_cli.adapter import ResumeUnavailable
 from team_agent.provider_cli.claude import ClaudeCodeAdapter, claude_project_dir
 from team_agent.restart.selection import state_has_restart_context
@@ -130,6 +133,71 @@ class Bug085CompatibleApiClaudeAcceptanceTests(unittest.TestCase):
         )
         self.assertTrue(result["should_ping"], result)
         self.assertIn("idle_takeover.ping", [name for name, _fields in events])
+
+    def test_leader_to_worker_delivery_arms_idle_takeover_monitor_via_record_turn_open(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-bug085-arm-wiring-") as tmp:
+            workspace = Path(tmp)
+            state = _state_for_arm_delivery()
+            message_id = MessageStore(workspace).create_message(None, "leader", "claude_worker", "please work")
+
+            with _patched_delivery_success(), _patched_record_turn_open() as recorders:
+                delivered = delivery._deliver_pending_messages(workspace, state, EventLog(workspace))
+
+            self.assertEqual(delivered, [message_id])
+            self.assertGreater(sum(recorder.call_count for recorder in recorders), 0)
+            monitor = state.get("coordinator", {}).get("idle_takeover_monitor") or {}
+            self.assertTrue(monitor.get("opened_worker_turn_since_ack"), monitor)
+            self.assertEqual(monitor.get("last_turn_open", {}).get("node_id"), "claude_worker")
+            self.assertEqual(monitor.get("last_turn_open", {}).get("delivered_message_id"), message_id)
+
+    def test_delivery_arm_survives_unknown_work_window_then_pings_after_capture_and_debounce(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="team-agent-bug085-arm-e2e-") as tmp:
+            workspace = Path(tmp)
+            state = _state_for_arm_delivery()
+            MessageStore(workspace).create_message(None, "leader", "claude_worker", "please work")
+
+            with _patched_delivery_success():
+                delivery._deliver_pending_messages(workspace, state, EventLog(workspace))
+
+            monitor = state.get("coordinator", {}).get("idle_takeover_monitor")
+            unknown_nodes = build_idle_nodes(state)
+            self.assertEqual({node["node_id"]: node["state"] for node in unknown_nodes}, {"claude_worker": "unknown", "codex_worker": "idle"})
+            unknown_result = evaluate_takeover_reminder(
+                unknown_nodes,
+                monitor_state=monitor,
+                now_monotonic=1.0,
+                debounce_seconds=60.0,
+            )
+            self.assertFalse(unknown_result["should_ping"], unknown_result)
+            self.assertEqual(unknown_result["reason"], "node_unknown")
+
+            state["agents"]["claude_worker"].update({
+                "session_id": "e4cc5db3-b70e-4c64-8263-73cb9dcc86db",
+                "rollout_path": str(REAL_CLAUDE_IDLE_FIXTURE),
+                "captured_via": "fs_watch",
+                "attribution_confidence": "high",
+            })
+            idle_nodes = build_idle_nodes(state)
+            self.assertEqual({node["node_id"]: node["state"] for node in idle_nodes}, {"claude_worker": "idle", "codex_worker": "idle"})
+            first_idle = evaluate_takeover_reminder(
+                idle_nodes,
+                monitor_state=unknown_result["monitor_state"],
+                now_monotonic=10.0,
+                debounce_seconds=60.0,
+            )
+            self.assertFalse(first_idle["should_ping"], first_idle)
+
+            events: list[tuple[str, dict]] = []
+            ping = evaluate_takeover_reminder(
+                idle_nodes,
+                monitor_state=first_idle["monitor_state"],
+                now_monotonic=71.0,
+                debounce_seconds=60.0,
+                event_sink=lambda name, fields: events.append((name, fields)),
+            )
+
+            self.assertTrue(ping["should_ping"], ping)
+            self.assertIn("idle_takeover.ping", [name for name, _fields in events])
 
     def test_missing_claude_code_rollout_path_remains_unknown_and_never_counts_as_idle(self) -> None:
         nodes = build_idle_nodes({
@@ -312,6 +380,64 @@ def _agent_state(workspace: Path, root: Path, *, auth_mode: str | None) -> dict:
     }
 
 
+def _state_for_arm_delivery() -> dict:
+    return {
+        "session_name": "team-bug085-arm",
+        "leader": {"id": "leader"},
+        "agents": {
+            "claude_worker": {
+                "provider": "claude_code",
+                "status": "running",
+                "window": "claude_worker",
+                "session_id": None,
+                "rollout_path": None,
+            },
+            "codex_worker": {
+                "provider": "codex",
+                "status": "running",
+                "window": "codex_worker",
+                "session_id": "codex-session",
+                "rollout_path": str(Path(__file__).parent / "fixtures" / "idle_takeover" / "codex_task_complete.real.jsonl"),
+            },
+        },
+        "coordinator": {},
+    }
+
+
+def _patched_delivery_success():
+    return _PatchStack(
+        patch("team_agent.messaging.delivery._tmux_window_exists", return_value=True),
+        patch(
+            "team_agent.messaging.delivery._tmux_inject_text",
+            return_value={
+                "ok": True,
+                "verification": "visible",
+                "submit_verification": "submitted",
+                "turn_verification": "submitted",
+                "attempts": [],
+                "submit_attempts": [],
+            },
+        ),
+    )
+
+
+def _patched_record_turn_open():
+    import team_agent.idle_predicate as idle_predicate
+
+    stack = ExitStack()
+    recorders = []
+    recorders.append(stack.enter_context(patch(
+        "team_agent.idle_predicate.record_turn_open_after_delivery",
+        wraps=idle_predicate.record_turn_open_after_delivery,
+    )))
+    if hasattr(delivery, "record_turn_open_after_delivery"):
+        recorders.append(stack.enter_context(patch(
+            "team_agent.messaging.delivery.record_turn_open_after_delivery",
+            wraps=delivery.record_turn_open_after_delivery,
+        )))
+    return _RecordPatch(stack, recorders)
+
+
 def _events(workspace: Path) -> list[dict]:
     path = workspace / ".team" / "logs" / "events.jsonl"
     if not path.exists():
@@ -355,6 +481,19 @@ class _PatchStack:
     def __exit__(self, exc_type, exc, tb):
         for patcher in reversed(self.patchers):
             patcher.stop()
+        return False
+
+
+class _RecordPatch:
+    def __init__(self, stack: ExitStack, recorders: list[MagicMock]):
+        self.stack = stack
+        self.recorders = recorders
+
+    def __enter__(self):
+        return self.recorders
+
+    def __exit__(self, exc_type, exc, tb):
+        self.stack.close()
         return False
 
 
