@@ -9,10 +9,12 @@ from team_agent.messaging.deps import (
     _tmux_window_exists,
     core_render_message,
 )
+from team_agent.idle_predicate import record_turn_open_after_delivery
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+import time
 
 
 def _tmux_pane_width(target: str) -> dict[str, Any]:
@@ -163,6 +165,7 @@ def _deliver_pending_message(
         store.mark(message_id, "submitted")
         send_event_log = EventLog(workspace)
         _stamp_first_send_at_if_leader_to_worker(state, row, send_event_log)
+        _record_turn_open_if_leader_to_worker(state, row, send_event_log)
         send_event_log.write(
             "send.submitted",
             message_id=message_id,
@@ -422,6 +425,34 @@ def _stamp_first_send_at_if_leader_to_worker(
             first_send_at=stamp,
             message_id=str(row.get("message_id") or ""),
         )
+
+
+def _record_turn_open_if_leader_to_worker(
+    state: dict[str, Any],
+    row: dict[str, Any],
+    event_log: EventLog,
+) -> None:
+    sender = str(row.get("sender") or "")
+    recipient = str(row.get("recipient") or "")
+    if not recipient:
+        return
+    leader_id = str((state.get("leader") or {}).get("id") or "leader")
+    if sender not in {"leader", "Leader", leader_id}:
+        return
+    agents = state.get("agents")
+    if not isinstance(agents, dict) or not isinstance(agents.get(recipient), dict):
+        return
+    coordinator = state.setdefault("coordinator", {})
+    message_id = str(row.get("message_id") or "")
+    task_id = str(row.get("task_id") or "")
+    coordinator["idle_takeover_monitor"] = record_turn_open_after_delivery(
+        coordinator.get("idle_takeover_monitor"),
+        node_id=recipient,
+        turn_id=task_id or message_id or None,
+        delivered_message_id=message_id or None,
+        now_monotonic=time.monotonic(),
+        event_sink=lambda name, fields: event_log.write(name, **fields),
+    )
 
 
 def _wait_for_trust_prompt_dismissal(target: str, *, timeout: float = 3.0, poll_interval: float = 0.1) -> bool:
