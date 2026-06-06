@@ -1,6 +1,6 @@
 {
   "name": "@team-agent/installer",
-  "version": "0.2.11",
+  "version": "0.3.0",
   "description": "npx installer for Team Agent",
   "keywords": [
     "codex",
@@ -19,33 +19,35 @@
   "bin": {
     "team-agent-installer": "npm/install.mjs"
   },
+  "optionalDependencies": {
+    "@team-agent/cli-darwin-arm64": "0.3.0",
+    "@team-agent/cli-darwin-x64": "0.3.0",
+    "@team-agent/cli-linux-x64": "0.3.0"
+  },
   "scripts": {
     "postinstall": "node npm/bincheck.mjs",
-    "test": "PYTHONPATH=src python3 tests/run_tests.py",
-    "test:regression": "PYTHONPATH=src python3 scripts/run_regression_tests.py --iterations 3",
-    "test:rust": "cargo test --manifest-path crates/team-agent-core/Cargo.toml",
+    "test": "cargo test --workspace --locked",
+    "build:release": "cargo build --release --bin team-agent --locked",
     "pack:dry-run": "npm pack --dry-run"
   },
   "files": [
-    "npm",
-    "scripts",
-    "src",
+    "npm/bincheck.mjs",
+    "npm/install.mjs",
     "skills",
     "templates",
     "examples",
     "schemas",
-    "crates/team-agent-core/Cargo.toml",
-    "crates/team-agent-core/src",
-    "pyproject.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/team-agent/Cargo.toml",
+    "crates/team-agent/src",
     "README.md",
     "README.zh.md",
     "LICENSE",
-    "!**/__pycache__/**",
-    "!**/*.pyc",
     "!**/target/**"
   ],
   "engines": {
     "node": ">=18"
   },
-  "license": "AGPL-3.0-or-later"
+  "license": "AGPL-3.0"
 }

@@ -1,0 +1,33 @@
+[package]
+name = "team-agent"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "team_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "team-agent"
+path = "src/main.rs"
+
+# step 2 (model) 已落地: serde/serde_json/thiserror/sha2。
+# rusqlite 仍留 workspace 调色板,step 3 (db) 再加(且需联网先 fetch)。
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+chrono.workspace = true
+libc.workspace = true
+rusqlite.workspace = true       # step 3 db(bundled SQLite,静态链接)
+
+[dev-dependencies]
+serial_test = "3"
+
+[lints]
+workspace = true

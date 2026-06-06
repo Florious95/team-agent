@@ -1,0 +1,37 @@
+{
+  "input": {
+    "team": "ft-free-a",
+    "agent_id": "w1",
+    "discard_session": true
+  },
+  "result": {
+    "status": "ok",
+    "event": "reset_agent.complete"
+  },
+  "state_before": {
+    "team": "ft-free-a",
+    "roster": ["w1", "w2"],
+    "agent_sessions": {
+      "w1": "sess-old-1",
+      "w2": "sess-live-2"
+    }
+  },
+  "state_after": {
+    "team": "ft-free-a",
+    "roster": ["w1", "w2"],
+    "agent_sessions": {
+      "w1": "sess-new-2",
+      "w2": "sess-live-2"
+    },
+    "discard": {
+      "session_tombstone": "sess-old-1"
+    }
+  },
+  "events": [
+    {
+      "event": "reset_agent.complete",
+      "agent_id": "w1",
+      "discard_session": true
+    }
+  ]
+}

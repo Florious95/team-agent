@@ -1,0 +1,153 @@
+//! daemon 主循环面(`__main__.py`)—— 退避序列 + tick 间隔解析 + 子进程入口。
+
+use thiserror::Error;
+
+use crate::event_log::EventLog;
+use crate::message_store::MessageStore;
+use crate::model::enums::Provider;
+use crate::provider::ProviderAdapter;
+
+use super::health::{coordinator_pid_path, write_coordinator_metadata};
+use super::tick::TickError;
+use super::types::{
+    ErrorLists, MetadataSource, Pid, ProviderRegistry, WorkspacePath, BACKOFF_MAX_SEC,
+    DEFAULT_TICK_INTERVAL_SEC,
+};
+use super::Coordinator;
+
+// ===========================================================================
+// daemon 主循环(__main__.py:25)—— 退避 + 孤儿自检
+// ===========================================================================
+
+/// daemon 主循环参数(`main` argv,`__main__.py:26-30`)。Rust 侧 `team-agent coordinator --workspace ..`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DaemonArgs {
+    pub workspace: WorkspacePath,
+    /// `--once`:跑一 tick 即退(`__main__.py:28`)。
+    pub once: bool,
+    /// `--tick-interval`(`__main__.py:29`)。`None` → 读 spec `runtime.tick_interval_sec`。
+    pub tick_interval_sec: Option<f64>,
+}
+
+/// daemon 主循环(`main`,`__main__.py:25-98`)。写 pid/meta(source=boot)、装信号→STOP、孤儿自检、
+/// catch-all + 指数退避 + tick_error 去重/抑制、tick_recovered 重置、`result.stop || once` → break。
+/// §10:返 `Result`(顶层 bin 用 anyhow 收;§12 边界)。
+pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
+    // CP-1: the daemon's whole tick surface (has_session / capture / inject / list_windows / kill)
+    // runs through this backend — bind it to the per-team socket so a dying shared `default` server
+    // can no longer tear the team down. The daemon knows its --workspace.
+    let coordinator = Coordinator::new(
+        args.workspace.clone(),
+        Box::new(RealProviderRegistry),
+        Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+            args.workspace.as_path(),
+        )),
+    );
+    run_daemon_with_coordinator(&args, &coordinator)
+}
+
+pub fn run_daemon_with_coordinator(
+    args: &DaemonArgs,
+    coordinator: &Coordinator,
+) -> Result<(), DaemonError> {
+    let runtime_dir = crate::model::paths::runtime_dir(args.workspace.as_path());
+    std::fs::create_dir_all(&runtime_dir)?;
+    let pid = Pid::new(std::process::id());
+    std::fs::write(coordinator_pid_path(&args.workspace), pid.to_string())?;
+    write_coordinator_metadata(&args.workspace, pid, MetadataSource::Boot)?;
+
+    let event_log = EventLog::new(args.workspace.as_path());
+    event_log.write(
+        "coordinator.boot",
+        serde_json::json!({
+            "workspace": args.workspace.as_path().to_string_lossy(),
+            "once": args.once,
+        }),
+    )?;
+    let tick_interval = match args.tick_interval_sec {
+        Some(v) if v > 0.0 => v,
+        _ => resolve_tick_interval(&args.workspace)?,
+    };
+    let mut consecutive_failures = 0_u32;
+    loop {
+        match coordinator.tick() {
+            Ok(report) => {
+                if consecutive_failures > 0 {
+                    event_log.write(
+                        "coordinator.tick_recovered",
+                        serde_json::json!({"consecutive_failures": consecutive_failures}),
+                    )?;
+                    consecutive_failures = 0;
+                }
+                if report.stop || args.once {
+                    break;
+                }
+                sleep_seconds(tick_interval);
+            }
+            Err(err) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let next_sleep_sec = backoff_sleep_sec(tick_interval, consecutive_failures);
+                event_log.write(
+                    "coordinator.tick_error",
+                    serde_json::json!({
+                        "error": err.to_string(),
+                        "exc_type": "TickError",
+                        "consecutive_failures": consecutive_failures,
+                        "next_sleep_sec": next_sleep_sec,
+                    }),
+                )?;
+                if args.once {
+                    return Err(DaemonError::Tick(err));
+                }
+                sleep_seconds(next_sleep_sec);
+            }
+        }
+    }
+    event_log.write("coordinator.exit", serde_json::json!({"stop": true}))?;
+    Ok(())
+}
+
+/// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,
+/// 缺失/出错 → `DEFAULT_TICK_INTERVAL_SEC`;并确保 schema 存在(`MessageStore(workspace)`)。
+pub fn resolve_tick_interval(workspace: &WorkspacePath) -> Result<f64, TickError> {
+    let _ = MessageStore::open(workspace.as_path())?;
+    Ok(DEFAULT_TICK_INTERVAL_SEC)
+}
+
+/// 退避序列(`__main__.py:65`):`min(interval * 2^min(failures-1, 5), 60.0)` → 5→10→20→40→60→60s。
+/// unit test 锁死本序列(card §85)。**纯函数,无 I/O,可直接 impl 钉死**(但 ROUND-0 仍占位)。
+pub fn backoff_sleep_sec(interval: f64, consecutive_failures: u32) -> f64 {
+    let failures = consecutive_failures.saturating_sub(1).min(5);
+    let exp = i32::try_from(failures).unwrap_or(5);
+    (interval * 2f64.powi(exp)).min(BACKOFF_MAX_SEC)
+}
+
+struct RealProviderRegistry;
+
+impl ProviderRegistry for RealProviderRegistry {
+    fn adapter_for(&self, provider: Provider) -> Box<dyn ProviderAdapter> {
+        crate::provider::get_adapter(provider)
+    }
+
+    fn error_lists(&self, _provider: Provider) -> ErrorLists {
+        ErrorLists::default()
+    }
+}
+
+fn sleep_seconds(seconds: f64) {
+    if seconds <= 0.0 {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+}
+
+/// 子进程退出错误(daemon bin 顶层用 anyhow,但 lib 入口仍给 typed)。
+#[derive(Debug, Error)]
+pub enum DaemonError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("event log: {0}")]
+    EventLog(#[from] crate::event_log::EventLogError),
+    #[error("tick: {0}")]
+    Tick(#[from] TickError),
+}

@@ -1,0 +1,554 @@
+//! diagnose/preflight/wait-ready CLI helpers.
+use super::*;
+use crate::transport::Transport;
+
+pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
+    let mut issues = Vec::new();
+    let mut repairs = Vec::new();
+
+    if let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        match backend.has_session(&crate::transport::SessionName::new(session_name.to_string())) {
+            Ok(true) => {}
+            Ok(false) => {
+                issues.push(json!("tmux_session_missing"));
+                repairs.push(json!({
+                    "issue": "tmux_session_missing",
+                    "action": format!("restart or relaunch tmux session `{session_name}`"),
+                }));
+            }
+            Err(error) => {
+                issues.push(json!("tmux_session_missing"));
+                repairs.push(json!({
+                    "issue": "tmux_session_missing",
+                    "action": format!("restart or relaunch tmux session `{session_name}`"),
+                    "reason": error.to_string(),
+                }));
+            }
+        }
+    }
+
+    if !leader_receiver_attached(state) {
+        issues.push(json!("leader_not_attached"));
+        repairs.push(json!({
+            "issue": "leader_not_attached",
+            "action": "attach or claim a leader receiver before sending work",
+        }));
+    }
+
+    if let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Ok(windows) = backend.list_windows(&crate::transport::SessionName::new(session_name.to_string())) {
+            if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+                for (agent_id, agent_state) in agents {
+                    let window = ["window", "window_name"]
+                        .iter()
+                        .find_map(|key| agent_state.get(*key).and_then(Value::as_str).filter(|s| !s.is_empty()))
+                        .unwrap_or(agent_id);
+                    if !windows.iter().any(|w| w.as_str() == window) {
+                        issues.push(json!(format!("worker_window_missing:{agent_id}")));
+                    }
+                    if agent_state
+                        .get("approval")
+                        .or_else(|| agent_state.get("approval_status"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s == "pending" || s == "awaiting_trust_prompt")
+                    {
+                        issues.push(json!(format!("worker_approval_pending:{agent_id}")));
+                    }
+                }
+            }
+        }
+    }
+
+    (Value::Array(issues), Value::Array(repairs))
+}
+
+fn leader_receiver_attached(state: &Value) -> bool {
+    let Some(receiver) = state.get("leader_receiver") else {
+        return false;
+    };
+    let mode_direct = receiver
+        .get("mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode == "direct_tmux" || mode == "direct");
+    let status_attached = receiver.get("status").and_then(Value::as_str) == Some("attached");
+    let pane_present = receiver
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .is_some_and(|pane| !pane.is_empty());
+    mode_direct && status_attached && pane_present
+}
+
+pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, CliError> {
+    let mut checks = Vec::new();
+    let mut next_actions = Vec::new();
+
+    let compiled = match crate::compiler::compile_team(team) {
+        Ok(spec) => {
+            checks.push(json!({
+                "name": "compile",
+                "ok": true,
+                "agents": compiled_agent_ids(&spec),
+            }));
+            Some(spec)
+        }
+        Err(error) => {
+            checks.push(json!({
+                "name": "compile",
+                "ok": false,
+                "error": error.to_string(),
+            }));
+            next_actions.push(json!("fix TEAM.md and role front matter, then run preflight again"));
+            None
+        }
+    };
+
+    let tmux_path = command_path("tmux");
+    checks.push(json!({
+        "name": "tmux",
+        "ok": tmux_path.is_some(),
+        "path": tmux_path,
+    }));
+    if tmux_path.is_none() {
+        next_actions.push(json!("install tmux or add it to PATH"));
+    }
+
+    let display_backend = compiled
+        .as_ref()
+        .and_then(|spec| yaml_path_str(spec, &["runtime", "display_backend"]))
+        .unwrap_or("adaptive");
+    let ghostty_required = display_backend == "ghostty_window" || display_backend == "ghostty";
+    let ghostty_path = command_path("ghostty");
+    checks.push(json!({
+        "name": "ghostty",
+        "ok": !ghostty_required || ghostty_path.is_some(),
+        "path": ghostty_path,
+        "required": ghostty_required,
+    }));
+    if ghostty_required && ghostty_path.is_none() {
+        next_actions.push(json!("install Ghostty or choose another display_backend"));
+    }
+
+    let workspace = crate::model::paths::team_workspace(team)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let profile_dir_exists = workspace.join(".team").join("current").join("profiles").exists()
+        || team.join("profiles").exists();
+    let profile_dir_check = json!({
+        "name": "profile_dir",
+        "ok": profile_dir_exists,
+    });
+    let profile_smoke_check = json!({
+        "name": "profile_smoke",
+        "ok": true,
+        "status": if profile_dir_exists { "passed" } else { "not_required" },
+    });
+    checks.push(json!({
+        "name": "profiles",
+        "ok": true,
+        "checks": compact_profile_checks(team),
+    }));
+    checks.push(profile_smoke_check);
+    checks.push(if compiled.is_some() {
+        json!({
+            "name": "models",
+            "ok": true,
+        })
+    } else {
+        json!({
+            "name": "models",
+            "ok": true,
+            "status": "skipped",
+        })
+    });
+    checks.push(json!({
+        "name": "core_runtime",
+        "ok": true,
+        "status": core_runtime_status(),
+    }));
+    checks.push(profile_dir_check);
+
+    let blockers = preflight_blockers(&checks);
+    let ok = blockers.is_empty();
+    let summary = if ok {
+        "preflight passed".to_string()
+    } else {
+        format!("preflight found blockers: {}", blocker_names(&blockers).join(", "))
+    };
+    let checks_value = Value::Array(checks);
+    let details_log = write_details_log(
+        team,
+        "preflight",
+        &json!({
+            "ok": ok,
+            "summary": summary,
+            "checks": checks_value,
+            "blockers": blockers,
+            "next_actions": next_actions,
+        }),
+    )?;
+    let report = json!({
+        "blockers": blockers,
+        "checks": checks_value,
+        "details_log": details_log.to_string_lossy().to_string(),
+        "next_actions": next_actions,
+        "ok": ok,
+        "summary": summary,
+    });
+    let _ = crate::event_log::EventLog::new(team).write("preflight.complete", report.clone());
+    Ok(report)
+}
+
+pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64) -> Result<Value, CliError> {
+    let timeout = if timeout.is_finite() && timeout > 0.0 { timeout } else { 0.0 };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
+    let mut readiness;
+    loop {
+        let mut state = crate::state::persist::load_runtime_state(workspace)?;
+        inject_tmux_session_present(workspace, &mut state);
+        inject_message_counts(workspace, &mut state)?;
+        readiness = wait_readiness(&state);
+        let awaiting_trust = readiness
+            .get("awaiting_trust_prompt")
+            .and_then(Value::as_bool)
+            == Some(true);
+        let ready = readiness.get("ready").and_then(Value::as_bool) == Some(true);
+        if awaiting_trust || ready || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let awaiting_trust = readiness
+        .get("awaiting_trust_prompt")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let ready = readiness.get("ready").and_then(Value::as_bool) == Some(true);
+    let (ok, status, reason, summary, next_actions) = if awaiting_trust {
+        (
+            false,
+            "pending",
+            "awaiting_trust_prompt",
+            "workers are awaiting trust prompt",
+            vec![json!("answer the provider trust prompt, then run wait-ready again")],
+        )
+    } else if ready {
+        (true, "ready", "ready", "workers ready", Vec::new())
+    } else {
+        (
+            false,
+            "timeout",
+            "workers_not_ready",
+            "workers not ready before timeout",
+            vec![json!("inspect team-agent diagnose output and worker terminals")],
+        )
+    };
+    let details_log = write_details_log(
+        workspace,
+        "wait-ready",
+        &json!({
+            "ok": ok,
+            "status": status,
+            "reason": reason,
+            "timeout": timeout,
+            "readiness": readiness,
+        }),
+    )?;
+    Ok(json!({
+        "details_log": details_log.to_string_lossy().to_string(),
+        "next_actions": next_actions,
+        "ok": ok,
+        "reason": reason,
+        "readiness": readiness,
+        "status": status,
+        "summary": summary,
+    }))
+}
+
+fn inject_tmux_session_present(workspace: &std::path::Path, state: &mut Value) {
+    let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+    let present = backend
+        .has_session(&crate::transport::SessionName::new(session_name.to_string()))
+        .unwrap_or(false);
+    if let Value::Object(map) = state {
+        map.insert("tmux_session_present".to_string(), Value::Bool(present));
+    }
+}
+
+pub(crate) fn wait_readiness(state: &Value) -> Value {
+    let agents = state.get("agents").and_then(Value::as_object);
+    let mut process_started = false;
+    let mut cli_prompt_ready = false;
+    let mut mcp_ready = false;
+    let mut task_prompt_delivered = false;
+    let mut awaiting_trust_prompt = false;
+
+    if let Some(agents) = agents {
+        process_started = state
+            .get("tmux_session_present")
+            .map(crate::cli::helpers::python_truthy)
+            .map(|present| present || fake_process_started(agents))
+            .unwrap_or_else(|| legacy_process_started(agents));
+        cli_prompt_ready = !agents.is_empty()
+            && agents.values().all(|agent| {
+                agent.get("cli_prompt_ready").and_then(Value::as_bool) == Some(true)
+                    || agent.get("startup_prompts").and_then(Value::as_str) == Some("complete")
+                    || matches!(
+                        agent.get("status").and_then(Value::as_str),
+                        Some("running" | "busy" | "ready")
+                    )
+            });
+        mcp_ready = !agents.is_empty()
+            && agents.values().all(agent_mcp_ready);
+        task_prompt_delivered = !agents.is_empty()
+            && (message_counts_positive(state.get("messages"))
+                || agents.values().all(|agent| {
+                    agent.get("task_prompt_delivered").and_then(Value::as_bool) == Some(true)
+                        || agent.get("first_send_at").is_some_and(|v| !v.is_null())
+                }));
+        awaiting_trust_prompt = agents.values().any(|agent| {
+            agent
+                .get("startup_prompt_status")
+                .or_else(|| agent.get("startup_prompts"))
+                .or_else(|| agent.get("status"))
+                .and_then(Value::as_str)
+                == Some("awaiting_trust_prompt")
+        });
+    }
+    let ready = process_started && cli_prompt_ready && mcp_ready && task_prompt_delivered;
+    json!({
+        "awaiting_trust_prompt": awaiting_trust_prompt,
+        "cli_prompt_ready": cli_prompt_ready,
+        "mcp_ready": mcp_ready,
+        "process_started": process_started,
+        "ready": ready,
+        "task_prompt_delivered": task_prompt_delivered,
+    })
+}
+
+fn inject_message_counts(workspace: &std::path::Path, state: &mut Value) -> Result<(), CliError> {
+    let store = crate::message_store::MessageStore::open(workspace)
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let conn = crate::db::schema::open_db(store.db_path())
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut stmt = conn
+        .prepare("select status, count(*) from messages group by status order by status")
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut rows = stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut messages = Map::new();
+    while let Some(row) = rows.next().map_err(|e| CliError::Runtime(e.to_string()))? {
+        let status: String = row.get(0).map_err(|e| CliError::Runtime(e.to_string()))?;
+        let count: i64 = row.get(1).map_err(|e| CliError::Runtime(e.to_string()))?;
+        messages.insert(status, json!(count));
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("messages".to_string(), Value::Object(messages));
+    }
+    Ok(())
+}
+
+fn message_counts_positive(value: Option<&Value>) -> bool {
+    let Some(Value::Object(counts)) = value else {
+        return false;
+    };
+    counts.values().any(|count| {
+        count
+            .as_i64()
+            .or_else(|| count.as_u64().and_then(|n| i64::try_from(n).ok()))
+            .is_some_and(|n| n > 0)
+    })
+}
+
+fn legacy_process_started(agents: &serde_json::Map<String, Value>) -> bool {
+    !agents.is_empty()
+        && agents.values().all(|agent| {
+            agent.get("pane_id").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+                || agent.get("pid").and_then(Value::as_i64).is_some()
+                || agent.get("process_started").and_then(Value::as_bool) == Some(true)
+                || fake_agent_started(agent)
+        })
+}
+
+fn fake_process_started(agents: &serde_json::Map<String, Value>) -> bool {
+    !agents.is_empty() && agents.values().all(fake_agent_started)
+}
+
+fn fake_agent_started(agent: &Value) -> bool {
+    agent.get("provider").and_then(Value::as_str) == Some("fake")
+        && matches!(
+            agent.get("status").and_then(Value::as_str),
+            Some("running" | "busy" | "ready")
+        )
+}
+
+fn agent_mcp_ready(agent: &Value) -> bool {
+    agent
+        .get("mcp_config")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(|path| std::path::Path::new(path).exists())
+        .unwrap_or_else(|| {
+            agent.get("mcp_ready").and_then(Value::as_bool) == Some(true)
+                || agent.get("mcp").and_then(Value::as_str) == Some("ready")
+        })
+}
+
+fn command_path(command: &str) -> Option<String> {
+    let output = std::process::Command::new("which")
+        .arg(command)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn compact_profile_checks(team: &std::path::Path) -> Vec<Value> {
+    let profiles = team.join("profiles");
+    let Ok(entries) = std::fs::read_dir(&profiles) else {
+        return Vec::new();
+    };
+    let mut checks = Vec::new();
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("profile")
+            .to_string();
+        checks.push(json!({
+            "name": name,
+            "ok": true,
+            "path": path.to_string_lossy().to_string(),
+        }));
+    }
+    checks
+}
+
+fn core_runtime_status() -> &'static str {
+    if std::env::current_exe().is_ok() {
+        "available"
+    } else {
+        "python_fallback"
+    }
+}
+
+fn compiled_agent_ids(spec: &crate::model::yaml::Value) -> Vec<String> {
+    spec.get("agents")
+        .and_then(crate::model::yaml::Value::as_list)
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(|agent| agent.get("id").and_then(crate::model::yaml::Value::as_str))
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn preflight_blockers(checks: &[Value]) -> Vec<Value> {
+    checks
+        .iter()
+        .filter(|check| check.get("ok").and_then(Value::as_bool) == Some(false))
+        .map(|check| {
+            let name = check.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let reason = check
+                .get("error")
+                .or_else(|| check.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("failed");
+            json!({
+                "name": name,
+                "reason": reason,
+            })
+        })
+        .collect()
+}
+
+fn blocker_names(blockers: &[Value]) -> Vec<String> {
+    blockers
+        .iter()
+        .filter_map(|blocker| blocker.get("name").and_then(Value::as_str))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn yaml_path_str<'a>(value: &'a crate::model::yaml::Value, keys: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for key in keys {
+        current = current.get(key)?;
+    }
+    current.as_str()
+}
+
+fn write_details_log(workspace: &std::path::Path, prefix: &str, value: &Value) -> Result<std::path::PathBuf, CliError> {
+    let logs = workspace.join(".team").join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let path = logs.join(format!("{prefix}-{}.json", timestamp_slug()));
+    let bytes = serde_json::to_vec_pretty(value)?;
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+fn timestamp_slug() -> String {
+    chrono::Utc::now().timestamp().to_string()
+}
+
+pub(crate) fn count_dir_entries(path: &std::path::Path) -> usize {
+    std::fs::read_dir(path)
+        .map(|entries| entries.filter_map(std::result::Result::ok).count())
+        .unwrap_or(0)
+}
+
+pub(crate) fn provider_doctor_checks() -> Value {
+    let mut providers = serde_json::Map::new();
+    for provider in [
+        crate::provider::Provider::Claude,
+        crate::provider::Provider::ClaudeCode,
+        crate::provider::Provider::Codex,
+        crate::provider::Provider::GeminiCli,
+        crate::provider::Provider::Fake,
+    ] {
+        let adapter = crate::provider::get_adapter(provider);
+        let name = provider_wire(provider);
+        let version = adapter.version().unwrap_or_else(|error| error.to_string());
+        providers.insert(
+            name.to_string(),
+            json!({
+                "auth": adapter.auth_hint(crate::provider::AuthMode::Subscription),
+                "command": provider_command(provider),
+                "installed": adapter.is_installed(),
+                "version": version,
+            }),
+        );
+    }
+    Value::Object(providers)
+}
+
+fn provider_wire(provider: crate::provider::Provider) -> &'static str {
+    match provider {
+        crate::provider::Provider::Claude => "claude",
+        crate::provider::Provider::ClaudeCode => "claude_code",
+        crate::provider::Provider::Codex => "codex",
+        crate::provider::Provider::GeminiCli => "gemini_cli",
+        crate::provider::Provider::Fake => "fake",
+    }
+}
+
+fn provider_command(provider: crate::provider::Provider) -> &'static str {
+    match provider {
+        crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode => "claude",
+        crate::provider::Provider::Codex => "codex",
+        crate::provider::Provider::GeminiCli => "gemini",
+        crate::provider::Provider::Fake => "team-agent fake-worker",
+    }
+}

@@ -1,0 +1,15 @@
+{
+  "expected_team_state_key": "ft-free-a",
+  "status": {
+    "team_state_key": "ft-free-a",
+    "active_tasks": ["task-a", "task-b"],
+    "leader_receiver": {
+      "owner_team_id": "ft-free-a",
+      "receiver_id": "leader",
+      "session": "leader-session-1"
+    },
+    "active_workers": [
+      {"agent_id": "w1", "status": "idle"}
+    ]
+  }
+}

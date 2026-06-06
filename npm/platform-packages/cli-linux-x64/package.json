@@ -1,0 +1,15 @@
+{
+  "name": "@team-agent/cli-linux-x64",
+  "version": "0.3.0",
+  "description": "Team Agent CLI binary for Linux x64",
+  "license": "AGPL-3.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin"
+  ]
+}

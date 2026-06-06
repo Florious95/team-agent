@@ -1,0 +1,9 @@
+{
+  "max_depth": 3,
+  "cases": [
+    {"team": "ft-free-a", "target_depth": 1, "result": "ok", "reason": "within_limit"},
+    {"team": "ft-free-a/child-1", "target_depth": 2, "result": "ok", "reason": "within_limit"},
+    {"team": "ft-free-a/child-1/child-2", "target_depth": 3, "result": "ok", "reason": "within_limit"},
+    {"team": "ft-free-a/child-1/child-2/child-3", "target_depth": 4, "result": "error", "reason": "team_depth_limit_exceeded"}
+  ]
+}

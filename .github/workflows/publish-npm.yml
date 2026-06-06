@@ -2,36 +2,82 @@ name: Publish npm
 
 on:
   push:
+    branches:
+      - release/0.3.x
     tags:
       - "v*.*.*"
+  workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
 
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: "24"
+  RUST_TOOLCHAIN: "1.95.0"
+
 jobs:
-  publish:
+  verify:
+    name: Verify workspace
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
 
-      - name: Verify npm trusted publishing support
-        run: npm --version
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustc --version
+          cargo --version
+
+      - name: Verify package metadata
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const cargo = fs.readFileSync("Cargo.toml", "utf8");
+          const expected = {
+            version: "0.3.0",
+            license: "AGPL-3.0",
+            platforms: [
+              ["cli-darwin-arm64", "@team-agent/cli-darwin-arm64", "darwin", "arm64"],
+              ["cli-darwin-x64", "@team-agent/cli-darwin-x64", "darwin", "x64"],
+              ["cli-linux-x64", "@team-agent/cli-linux-x64", "linux", "x64"],
+            ],
+          };
+          function fail(message) {
+            console.error(message);
+            process.exit(1);
+          }
+          if (root.name !== "@team-agent/installer") fail(`unexpected package name ${root.name}`);
+          if (root.version !== expected.version) fail(`unexpected package version ${root.version}`);
+          if (root.license !== expected.license) fail(`unexpected package license ${root.license}`);
+          if (!cargo.includes(`version = "${expected.version}"`)) fail("Cargo.toml version mismatch");
+          if (!cargo.includes(`license = "${expected.license}"`)) fail("Cargo.toml license mismatch");
+          for (const [dir, name, os, cpu] of expected.platforms) {
+            const pkg = JSON.parse(fs.readFileSync(`npm/platform-packages/${dir}/package.json`, "utf8"));
+            if (pkg.name !== name) fail(`${dir}: unexpected name ${pkg.name}`);
+            if (pkg.version !== expected.version) fail(`${dir}: unexpected version ${pkg.version}`);
+            if (pkg.license !== expected.license) fail(`${dir}: unexpected license ${pkg.license}`);
+            if (pkg.os?.[0] !== os) fail(`${dir}: unexpected os ${pkg.os}`);
+            if (pkg.cpu?.[0] !== cpu) fail(`${dir}: unexpected cpu ${pkg.cpu}`);
+            if (root.optionalDependencies?.[name] !== expected.version) {
+              fail(`${name}: missing optionalDependency ${expected.version}`);
+            }
+          }
+          NODE
 
       - name: Check tag matches package version
+        if: github.ref_type == 'tag'
         run: |
           package_version="$(node -p "require('./package.json').version")"
           tag_version="${GITHUB_REF_NAME#v}"
@@ -40,14 +86,131 @@ jobs:
             exit 1
           fi
 
-      - name: Run Python tests
-        run: npm test
-
       - name: Run Rust tests
-        run: npm run test:rust
+        run: cargo test --workspace --locked
 
-      - name: Verify package contents
-        run: npm run pack:dry-run
+      - name: Build Rust CLI
+        run: cargo build --release --bin team-agent --locked
 
-      - name: Publish package
+      - name: Verify CLI help
+        run: ./target/release/team-agent --help >/tmp/team-agent-help.txt
+
+      - name: Verify package dry runs
+        run: |
+          npm pack --dry-run
+          for package_dir in npm/platform-packages/*; do
+            (cd "$package_dir" && npm pack --dry-run)
+          done
+
+  build-platform:
+    name: Build ${{ matrix.package_name }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            package_dir: cli-darwin-arm64
+            package_name: "@team-agent/cli-darwin-arm64"
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            package_dir: cli-darwin-x64
+            package_name: "@team-agent/cli-darwin-x64"
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            package_dir: cli-linux-x64
+            package_name: "@team-agent/cli-linux-x64"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+          rustup default "${RUST_TOOLCHAIN}"
+          rustup target add "${{ matrix.target }}"
+          rustc --version
+          cargo --version
+
+      - name: Build binary
+        run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
+
+      - name: Fill platform package
+        run: |
+          binary="target/${{ matrix.target }}/release/team-agent"
+          package_bin="npm/platform-packages/${{ matrix.package_dir }}/bin/team-agent"
+          test -x "$binary"
+          cp "$binary" "$package_bin"
+          chmod 755 "$package_bin"
+          "$package_bin" --help >/tmp/team-agent-help.txt
+          (cd "npm/platform-packages/${{ matrix.package_dir }}" && npm pack --dry-run)
+
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}
+          path: npm/platform-packages/${{ matrix.package_dir }}
+          if-no-files-found: error
+
+  publish-platform:
+    name: Publish ${{ matrix.package_name }}
+    if: github.ref_type == 'tag'
+    needs: build-platform
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_dir: cli-darwin-arm64
+            package_name: "@team-agent/cli-darwin-arm64"
+          - package_dir: cli-darwin-x64
+            package_name: "@team-agent/cli-darwin-x64"
+          - package_dir: cli-linux-x64
+            package_name: "@team-agent/cli-linux-x64"
+
+    steps:
+      - name: Download platform package
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}
+          path: dist/${{ matrix.package_dir }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Publish platform package
+        run: npm publish --access public --provenance
+        working-directory: dist/${{ matrix.package_dir }}
+
+  publish-main:
+    name: Publish @team-agent/installer
+    if: github.ref_type == 'tag'
+    needs: publish-platform
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Publish main package
         run: npm publish --access public --provenance

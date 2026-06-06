@@ -1,0 +1,8 @@
+{"provider":"claude","expected":"idle","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/claude_end_turn.real.jsonl"}
+{"provider":"claude","expected":"working","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/claude_tool_use.real.jsonl"}
+{"provider":"claude","expected":"idle_interrupted","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/claude_interrupted.real.jsonl"}
+{"provider":"compatible_api","expected":"idle","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/bug_085_compatible_api_claude/compatible_api_claude_idle_bad_first_line.jsonl"}
+{"provider":"codex","expected":"working","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/codex_task_started.real.jsonl"}
+{"provider":"codex","expected":"idle","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/codex_task_complete.real.jsonl"}
+{"provider":"codex","expected":"idle_interrupted","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/codex_turn_aborted_interrupted.real.jsonl"}
+{"provider":"codex","expected":"abnormal","fixture":"/Users/alauda/Documents/code/team-agent-rs/snapshot/fixtures/idle_takeover/codex_app_server_turn_failed.schema-derived.jsonl"}

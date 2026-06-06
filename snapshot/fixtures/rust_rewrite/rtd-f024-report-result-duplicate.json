@@ -1,0 +1,19 @@
+{
+  "task_id": "task-rtd-024",
+  "state_before": {
+    "task_id": "task-rtd-024",
+    "status": "queued",
+    "notification_status": "queued",
+    "coordinator_tick_iteration_count": 14
+  },
+  "state_after": {
+    "task_id": "task-rtd-024",
+    "status": "queued",
+    "notification_status": "queued",
+    "coordinator_tick_iteration_count": 15
+  },
+  "events": [
+    {"event": "result.ready", "task_id": "task-rtd-024", "result_id": "r1"},
+    {"event": "result.duplicate_ignored", "task_id": "task-rtd-024", "result_id": "r1"}
+  ]
+}

@@ -1,0 +1,34 @@
+# Team Agent — Rust full rewrite.
+#
+# §12 措辞纪律: 先分 module,不一上来按子系统拆 crate。这是一个 *虚拟 workspace*,
+# 当前只有单一成员 `team-agent`(lib + bin)。子系统稳定后,再把 daemon/coordinator
+# 等抽成独立成员 crate(届时各自顶上 §10 的 deny 锁 + cargo-deny ban)。
+[workspace]
+resolver = "2"
+members = ["crates/team-agent"]
+
+[workspace.package]
+edition = "2021"
+version = "0.3.0"
+license = "AGPL-3.0"
+rust-version = "1.95"
+
+# §12: thiserror(lib crate 错误) / anyhow(bin·顶层) 边界钉死。
+# §8 : SQLite 默认 rusqlite(bundled),静态链接,下载即跑。
+[workspace.dependencies]
+thiserror = "1"            # 离线缓存只有 1.0.69;有网后可升 2
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# preserve_order: Value 用 IndexMap(插入序),匹配 Python dict/json.loads 迭代序 —— 校验
+# 错误顺序、序列化字段序与 Python 字节一致(§7)。indexmap 已缓存,离线 OK。
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"              # derive_leader_session_uuid 身份公式(§3)
+regex = "1"                # routing 的 when 表达式 + fnmatch.translate 忠实复刻 Python re
+chrono = "0.4"             # UTC 时间戳(events.jsonl ts / db created_at / 备份名戳 等)
+libc = "0.2"               # _runtime_lock 的 POSIX flock(bug-084 state-save 串行化)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 基线 lint。daemon/coordinator/lifecycle 模块会在各自模块顶 *额外* 加
+# deny(clippy::unwrap_used / expect_used / panic)(§10 守护进程不崩)。
+[workspace.lints.clippy]
+all = "warn"

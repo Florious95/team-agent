@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
+const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
 
 const command = process.argv[2] || "install";
@@ -17,16 +19,21 @@ if (["-h", "--help", "help"].includes(command)) {
   process.exit(0);
 }
 
-if (command === "install" || command === "update") {
-  install(args);
-} else if (command === "doctor") {
-  runDoctor(args);
-} else if (command === "uninstall") {
-  uninstall(args);
-} else {
-  console.error(`unknown command: ${command}`);
-  printHelp();
-  process.exit(2);
+try {
+  if (command === "install" || command === "update") {
+    install(args);
+  } else if (command === "doctor") {
+    runDoctor(args);
+  } else if (command === "uninstall") {
+    uninstall(args);
+  } else {
+    console.error(`unknown command: ${command}`);
+    printHelp();
+    process.exit(2);
+  }
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
 }
 
 function printHelp() {
@@ -40,14 +47,12 @@ Usage:
 Options:
   --prefix <dir>       wrapper install prefix, default ~/.local
   --runtime-dir <dir>  stable runtime root, default ~/.team-agent/runtime
-  --python <path>      Python executable, otherwise TEAM_AGENT_PYTHON, python3, python
   --purge-runtime      uninstall also removes the runtime root
 `);
 }
 
 function install(argv) {
   const opts = parseOptions(argv);
-  const python = resolvePython(opts.python);
   const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
   const binDir = path.join(prefix, "bin");
   const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
@@ -55,35 +60,31 @@ function install(argv) {
   const dest = path.join(runtimeRoot, version);
   const tmp = path.join(runtimeRoot, `.${version}.${process.pid}.tmp`);
   const backup = path.join(runtimeRoot, `.${version}.previous`);
+  const platformBinary = resolvePlatformBinary();
 
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.rmSync(tmp, { recursive: true, force: true });
-  copyTree(packageRoot, tmp);
+  fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
+  copyExecutable(platformBinary.path, path.join(tmp, "bin", "team-agent"));
+
   fs.rmSync(backup, { recursive: true, force: true });
   if (fs.existsSync(dest)) {
     fs.renameSync(dest, backup);
   }
   fs.renameSync(tmp, dest);
 
+  const runtimeBinary = path.join(dest, "bin", "team-agent");
   fs.mkdirSync(binDir, { recursive: true });
-  writeWrapper(path.join(binDir, "team-agent"), dest, "team_agent", python);
-  writeWrapper(path.join(binDir, "team_orchestrator"), dest, "team_agent.mcp_server", python);
-  writeWrapper(path.join(binDir, "team-agent-coordinator"), dest, "team_agent.coordinator", python);
+  writeExecWrapper(path.join(binDir, "team-agent"), runtimeBinary, []);
+  writeExecWrapper(path.join(binDir, "team_orchestrator"), runtimeBinary, ["mcp-server"]);
+  writeExecWrapper(path.join(binDir, "team-agent-coordinator"), runtimeBinary, ["coordinator"]);
+  installSkills();
 
   const teamAgent = path.join(binDir, "team-agent");
-  const skill = spawnSync(teamAgent, ["install-skill", "--target", "all"], {
-    text: true,
-    encoding: "utf8",
-  });
-  if (skill.status !== 0) {
-    process.stderr.write(skill.stderr || skill.stdout || "team-agent install-skill failed\n");
-    process.exit(skill.status || 1);
-  }
-
   console.log(`installed: ${teamAgent}`);
   console.log(`runtime: ${dest}`);
-  console.log(`python: ${python}`);
-  console.log(`skill: installed for Codex and Claude`);
+  console.log(`binary: ${platformBinary.packageName}`);
+  console.log("skill: installed for Codex and Claude");
   console.log(`PATH: ensure ${binDir} is on PATH`);
 
   const doctor = spawnSync(teamAgent, ["doctor", "--json"], { text: true, encoding: "utf8" });
@@ -103,7 +104,7 @@ function runDoctor(argv) {
     process.exit(1);
   }
   const proc = spawnSync(teamAgent, ["doctor"], { stdio: "inherit" });
-  process.exit(proc.status || 0);
+  process.exit(proc.status ?? 1);
 }
 
 function uninstall(argv) {
@@ -112,10 +113,7 @@ function uninstall(argv) {
   for (const name of ["team-agent", "team_orchestrator", "team-agent-coordinator"]) {
     fs.rmSync(path.join(prefix, "bin", name), { force: true });
   }
-  for (const skillDir of [
-    path.join(os.homedir(), ".codex", "skills", "team-agent"),
-    path.join(os.homedir(), ".claude", "skills", "team-agent"),
-  ]) {
+  for (const skillDir of skillDestinations()) {
     fs.rmSync(skillDir, { recursive: true, force: true });
   }
   console.log(`removed wrappers from ${path.join(prefix, "bin")}`);
@@ -135,16 +133,12 @@ function parseOptions(argv) {
     const item = argv[i];
     if (item === "--prefix") {
       opts.prefix = argv[++i];
-    } else if (item.startsWith("--prefix=")) {
+    } else if (item?.startsWith("--prefix=")) {
       opts.prefix = item.slice("--prefix=".length);
     } else if (item === "--runtime-dir") {
       opts.runtimeDir = argv[++i];
-    } else if (item.startsWith("--runtime-dir=")) {
+    } else if (item?.startsWith("--runtime-dir=")) {
       opts.runtimeDir = item.slice("--runtime-dir=".length);
-    } else if (item === "--python") {
-      opts.python = argv[++i];
-    } else if (item.startsWith("--python=")) {
-      opts.python = item.slice("--python=".length);
     } else if (item === "--purge-runtime") {
       opts.purgeRuntime = true;
     } else {
@@ -154,88 +148,78 @@ function parseOptions(argv) {
   return opts;
 }
 
-function resolvePython(explicit) {
-  const candidates = pythonCandidates(explicit);
-  for (const candidate of candidates) {
-    const resolved = path.isAbsolute(candidate) ? candidate : which(candidate) || candidate;
-    if (!resolved) {
-      continue;
-    }
-    const proc = spawnSync(resolved, ["-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"], {
-      text: true,
-      encoding: "utf8",
-    });
-    if (proc.status === 0) {
-      return resolved;
-    }
+function resolvePlatformBinary() {
+  const packageName = platformPackageName();
+  if (!packageName) {
+    printUnsupportedPlatform();
+    process.exit(1);
   }
-  console.error("No usable Python >= 3.10 found. Set TEAM_AGENT_PYTHON or pass --python.");
-  process.exit(1);
+  const binarySpec = `${packageName}/bin/team-agent`;
+  try {
+    return {
+      packageName,
+      path: require.resolve(binarySpec),
+    };
+  } catch {
+    console.error(`ERROR: Team Agent binary package not installed for ${process.platform}/${process.arch}`);
+    console.error("ACTION: rerun without --no-optional, or use a supported macOS/Linux/WSL platform.");
+    console.error(`LOG: package=${packageName} node=${process.version} platform=${process.platform} arch=${process.arch}`);
+    process.exit(1);
+  }
 }
 
-function pythonCandidates(explicit) {
-  const candidates = [explicit, process.env.TEAM_AGENT_PYTHON, "python3", "python"];
-  const commonPaths = [
-    "/opt/homebrew/bin/python3",
-    "/usr/local/bin/python3",
-    "/usr/bin/python3",
-    "/opt/homebrew/opt/python@3/bin/python3",
-    "/usr/local/opt/python@3/bin/python3",
-  ];
-  candidates.push(...commonPaths);
-  for (const root of ["/opt/homebrew/opt", "/usr/local/opt"]) {
-    try {
-      for (const entry of fs.readdirSync(root)) {
-        if (!entry.startsWith("python@")) {
-          continue;
-        }
-        const bin = path.join(root, entry, "bin");
-        for (const name of fs.readdirSync(bin)) {
-          if (/^python3(\.\d+)?$/.test(name)) {
-            candidates.push(path.join(bin, name));
-          }
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-  return [...new Set(candidates.filter(Boolean))];
+function platformPackageName() {
+  const key = `${process.platform}-${process.arch}`;
+  const packages = {
+    "darwin-arm64": "@team-agent/cli-darwin-arm64",
+    "darwin-x64": "@team-agent/cli-darwin-x64",
+    "linux-x64": "@team-agent/cli-linux-x64",
+  };
+  return packages[key] || null;
 }
 
-function which(commandName) {
-  for (const directory of (process.env.PATH || "").split(path.delimiter)) {
-    if (!directory) {
-      continue;
-    }
-    const candidate = path.join(directory, commandName);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+function printUnsupportedPlatform() {
+  console.error(`ERROR: unsupported Team Agent platform ${process.platform}/${process.arch}.`);
+  console.error("ACTION: supported platforms are darwin/arm64, darwin/x64, and linux/x64.");
+  console.error(`LOG: node=${process.version} platform=${process.platform} arch=${process.arch}`);
 }
 
-function writeWrapper(file, runtimeDir, moduleName, python) {
+function copyExecutable(src, dest) {
+  fs.copyFileSync(src, dest);
+  fs.chmodSync(dest, 0o755);
+}
+
+function writeExecWrapper(file, binary, fixedArgs) {
+  const args = fixedArgs.map(shellQuote).join(" ");
+  const argPrefix = args ? `${args} ` : "";
   const content = `#!/usr/bin/env sh
-PYTHON_BIN="\${TEAM_AGENT_PYTHON:-${doubleQuoteValue(python)}}"
-PYTHONPATH="${doubleQuoteValue(path.join(runtimeDir, "src"))}" exec "$PYTHON_BIN" -m ${moduleName} "$@"
+exec ${shellQuote(binary)} ${argPrefix}"$@"
 `;
   fs.writeFileSync(file, content, { mode: 0o755 });
   fs.chmodSync(file, 0o755);
 }
 
+function installSkills() {
+  const source = path.join(packageRoot, "skills", "team-agent");
+  if (!fs.existsSync(source)) {
+    throw new Error(`skill source not found: ${source}`);
+  }
+  for (const dest of skillDestinations()) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    copyTree(source, dest);
+  }
+}
+
+function skillDestinations() {
+  return [
+    path.join(os.homedir(), ".codex", "skills", "team-agent"),
+    path.join(os.homedir(), ".claude", "skills", "team-agent"),
+  ];
+}
+
 function copyTree(src, dest) {
-  const ignored = new Set([".git", ".team", "node_modules", "__pycache__", ".pytest_cache", ".venv"]);
   const stat = fs.lstatSync(src);
   if (stat.isDirectory()) {
-    const name = path.basename(src);
-    if (ignored.has(name) || src.endsWith(path.join("team-agent-core", "target"))) {
-      return;
-    }
     fs.mkdirSync(dest, { recursive: true, mode: stat.mode });
     for (const entry of fs.readdirSync(src)) {
       if (entry === ".DS_Store") {
@@ -261,6 +245,6 @@ function expandHome(value) {
   return value;
 }
 
-function doubleQuoteValue(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\$/g, "\\$").replace(/`/g, "\\`");
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
 }

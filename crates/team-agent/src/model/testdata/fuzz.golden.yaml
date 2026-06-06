@@ -1,0 +1,43 @@
+version: 2
+name: "edge-fixture"
+empty_map: {}
+empty_list: []
+nullval: null
+boolt: true
+boolf: "no"
+n1: 42
+n2: 0
+n3: 17
+not_int: "3.14"
+not_int2: "0xFF"
+quoted_d: "he said \"hi\""
+quoted_s: "plain"
+unquoted_list: "[x, y, z]"
+quoted_list: "['a', \"b\", 3, true, null]"
+inline_comment: "value # not a comment"
+nested:
+  deep:
+    deeper:
+      x: 1
+      y: "two"
+list_of_maps:
+  - id: "a"
+    tags: "[p, q]"
+    meta:
+      kind: "leaf"
+  - id: "b"
+    nested_list:
+      - "one"
+      - "two"
+scalars:
+  - 1
+  - "hello"
+  - false
+block:
+  text: |
+    first line
+    second line
+    
+    after blank
+empty_after_key: null
+trailing: "end"

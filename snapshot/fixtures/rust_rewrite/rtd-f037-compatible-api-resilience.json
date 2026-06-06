@@ -1,0 +1,24 @@
+{
+  "provider": "compatible_api",
+  "rollout_path": "/tmp/rt-compatible-rollout",
+  "session_id": null,
+  "runtime_sanity": {
+    "no_panic": true
+  },
+  "cases": [
+    {
+      "label": "idle_with_end_turn",
+      "expected": "idle",
+      "records": [
+        {"type": "assistant", "message": {"stop_reason": "end_turn"}}
+      ]
+    },
+    {
+      "label": "unknown_missing_state",
+      "expected": "unknown",
+      "records": [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "ping"}]}}
+      ]
+    }
+  ]
+}

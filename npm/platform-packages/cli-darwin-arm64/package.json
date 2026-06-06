@@ -1,0 +1,15 @@
+{
+  "name": "@team-agent/cli-darwin-arm64",
+  "version": "0.3.0",
+  "description": "Team Agent CLI binary for macOS arm64",
+  "license": "AGPL-3.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin"
+  ]
+}

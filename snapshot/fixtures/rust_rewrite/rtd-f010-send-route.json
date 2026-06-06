@@ -1,0 +1,22 @@
+{
+  "explicit_route": {
+    "command": "send --team ft-free-a --to wrk2 --content hello",
+    "team": "ft-free-a",
+    "to": "wrk2",
+    "result": "ok"
+  },
+  "implicit_routes": [
+    {
+      "command": "send --to wrk2 --content hello",
+      "team": "ft-free-b",
+      "expected_result": "error",
+      "expected_reason": "requires_team"
+    },
+    {
+      "command": "send --content hello",
+      "team": "ft-free-b",
+      "expected_result": "error",
+      "expected_reason": "ambiguous_current_team"
+    }
+  ]
+}

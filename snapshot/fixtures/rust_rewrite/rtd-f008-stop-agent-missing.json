@@ -1,0 +1,26 @@
+{
+  "input": {
+    "team": "ft-free-a",
+    "agent_id": "missing-agent"
+  },
+  "result": {
+    "return_code": 1,
+    "reason": "agent_not_found"
+  },
+  "state_before": {
+    "team": "ft-free-a",
+    "agents": [
+      {"agent_id": "w1", "status": "idle"}
+    ],
+    "roster": ["w1"],
+    "active_tasks": ["task-001"]
+  },
+  "state_after": {
+    "team": "ft-free-a",
+    "agents": [
+      {"agent_id": "w1", "status": "idle"}
+    ],
+    "roster": ["w1"],
+    "active_tasks": ["task-001"]
+  }
+}

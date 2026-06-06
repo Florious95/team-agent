@@ -1,0 +1,3 @@
+{"event":"routing.rejected","reason":"routing_ambiguous"}
+{"event":"messages.skipped","reason":"leader_not_in_team"}
+{"event":"result.filtered","reason":"invalid_status"}

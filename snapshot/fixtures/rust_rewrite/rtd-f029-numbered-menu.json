@@ -1,0 +1,16 @@
+{
+  "tmux_targets": [
+    {"command": "tmux -L foo has-session -t ft-free-a", "target": "ft-free-a", "expected": true},
+    {"command": "tmux -L foo capture-pane -t %12", "target": "%12", "expected": true},
+    {"command": "tmux -L foo display-message -t @3a7", "target": "@3a7", "expected": true},
+    {"command": "tmux -L foo capture-pane -t .", "target": ".", "expected": false},
+    {"command": "tmux -L foo list-panes", "target": "", "expected": false}
+  ],
+  "numbered_menu_samples": [
+    {"text": "1) 重启 all workers", "expected": true},
+    {"text": "2) 查看状态", "expected": true},
+    {"text": "1. 这是 markdown 正文段落", "expected": false},
+    {"text": "10. 这是更深层 markdown", "expected": false},
+    {"text": "- 1) 混合缩进", "expected": false}
+  ]
+}
