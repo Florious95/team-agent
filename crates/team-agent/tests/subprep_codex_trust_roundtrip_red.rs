@@ -116,6 +116,31 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn truncated_workspace_token(canonical_teamdir: &Path) -> String {
+    let tail = canonical_teamdir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("teamdir");
+    let head = canonical_teamdir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| canonical_teamdir.parent().unwrap_or(canonical_teamdir));
+    let mut head = head.to_string_lossy().to_string();
+    if !head.ends_with(std::path::MAIN_SEPARATOR) {
+        head.push(std::path::MAIN_SEPARATOR);
+    }
+    format!("{head}…/{tail}")
+}
+
+fn foreign_workspace_path(canonical_teamdir: &Path) -> PathBuf {
+    canonical_teamdir
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| canonical_teamdir.parent().unwrap_or(canonical_teamdir))
+        .join("foreign-team")
+        .join(canonical_teamdir.file_name().unwrap_or_else(|| std::ffi::OsStr::new("teamdir")))
+}
+
 #[test]
 fn contract_a_subroot_full_pane_trust_menu_still_actionable_despite_bottom_ready_prompt() {
     use team_agent::provider::{classify_codex_startup_screen, StartupScreenDecision};
@@ -322,21 +347,25 @@ fn contract_a_own_workspace_trust_is_actionable_not_ready_and_foreign_is_pending
     let teamdir = root.join("teamdir");
     std::fs::create_dir_all(&teamdir).unwrap();
     let canonical_teamdir = std::fs::canonicalize(&teamdir).unwrap();
-    let own_tail = "Do you trust the contents of this directory?\n  directory: /private/tmp/…/teamdir";
+    let own_tail = format!(
+        "Do you trust the contents of this directory?\n  directory: {}",
+        truncated_workspace_token(&canonical_teamdir)
+    );
     let own_transport = RecordingTransport::new(vec![own_tail.to_string()]);
     let own_log = EventLog::new(&root);
     let own = attempt_trust_auto_answer(
         &canonical_teamdir,
         &own_transport,
         Some(&PaneId::new("%7")),
-        own_tail,
+        &own_tail,
         &PaneWidthQuery::Ok { pane_width: 80 },
         &own_log,
     )
     .unwrap();
     assert!(
         own.answered,
-        "Contract A/#167: own-workspace matcher must accept real Codex truncated `/private/tmp/.../teamdir` display via the shared realpath/truncation matcher; got {own:?}"
+        "Contract A/#167: own-workspace matcher must accept platform-local Codex truncated directory display via the shared realpath/truncation matcher; canonical_teamdir={} tail={own_tail:?} got {own:?}",
+        canonical_teamdir.display()
     );
     assert_eq!(
         own_transport.inject_count(),
@@ -349,7 +378,10 @@ fn contract_a_own_workspace_trust_is_actionable_not_ready_and_foreign_is_pending
         &canonical_teamdir,
         &foreign_transport,
         Some(&PaneId::new("%8")),
-        "Do you trust the contents of this directory?\n> You are in /private/tmp/foreign-team/teamdir",
+        &format!(
+            "Do you trust the contents of this directory?\n> You are in {}",
+            foreign_workspace_path(&canonical_teamdir).display()
+        ),
         &PaneWidthQuery::Ok { pane_width: 120 },
         &own_log,
     )
