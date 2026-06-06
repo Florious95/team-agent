@@ -424,7 +424,8 @@ fn claim_lease_no_incident_with_target(
         ));
     }
     let non_empty_caller_pane = NonEmptyPaneId::try_from_pane(caller_pane)?;
-    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) {
+    let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
+    if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
         return Ok(LeaseResult {
             ok: true,
             status: LeaseStatus::AlreadyBound,
@@ -438,7 +439,12 @@ fn claim_lease_no_incident_with_target(
     }
     let owner_live = bound_pane_id
         .as_deref()
-        .is_some_and(|pane| liveness.liveness(pane) == PaneLiveness::Live);
+        .is_some_and(|pane| {
+            if pane == caller_pane.as_str() && !bound_endpoint_matches_caller {
+                return false;
+            }
+            liveness.liveness(pane) == PaneLiveness::Live
+        });
     if owner_live && !confirm {
         emit_lease_refusal(
             event_log,
@@ -594,6 +600,20 @@ fn bound_pane(state: &Value) -> Option<String> {
     get_path_str(state, &["leader_receiver", "pane_id"])
         .filter(|v| !v.is_empty())
         .or_else(|| get_path_str(state, &["team_owner", "pane_id"]).filter(|v| !v.is_empty()))
+}
+
+fn bound_endpoint_matches_current_process(state: &Value) -> bool {
+    let Some(bound) = get_path_str(state, &["leader_receiver", "tmux_socket"]).filter(|v| !v.is_empty()) else {
+        return true;
+    };
+    let Some(current) = crate::tmux_backend::socket_name_from_tmux_env() else {
+        return false;
+    };
+    tmux_endpoints_match(&bound, &current)
+}
+
+fn tmux_endpoints_match(bound: &str, current: &str) -> bool {
+    bound == current
 }
 
 fn prior_provider(state: &Value) -> Provider {
@@ -844,6 +864,7 @@ fn make_receiver(
         pane_index: target.as_ref().and_then(|t| t.pane_index.map(|v| v.to_string())),
         pane_tty: target.as_ref().and_then(|t| t.tty.clone()),
         pane_current_command: target.as_ref().and_then(|t| t.current_command.clone()),
+        tmux_socket: crate::tmux_backend::socket_name_from_tmux_env(),
         fingerprint: target.as_ref().map(receiver_fingerprint),
         leader_session_uuid: Some(uuid.clone()),
         owner_epoch: Some(epoch),

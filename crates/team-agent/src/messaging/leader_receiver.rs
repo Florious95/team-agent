@@ -10,7 +10,7 @@ use crate::model::ids::{OwnerEpoch, TaskId};
 use crate::transport::Transport;
 
 use super::helpers::MessageStatusShadow;
-use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
+use super::{DeliveryOutcome, DeliveryStatus, MessagingError};
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
 /// caller(send_message(to=leader) / report_result / request_human / idle reminder /
@@ -105,40 +105,6 @@ pub fn send_to_leader_receiver(
             "result_id": result_id,
         }),
     )?;
-    // I-4: unbound leader pane → rebind_required (not the legacy diagnostic success).
-    // The row IS persisted (caller / rebind audit / future replay need the message_id),
-    // but marked `failed` so `deliver_pending_messages` does NOT pick it up — pane stays
-    // untouched, ok=false, channel=rebind_required. #231 auto-reclaim's
-    // requeue_after_claim_leader flips this row back to `accepted` after rebind, and
-    // deliver_pending replays it through the same pipeline (same message_id, exactly once).
-    let pane_attached = leader_pane_id(state)
-        .filter(|pane_id| leader_pane_is_live(workspace, pane_id))
-        .is_some();
-    if !pane_attached {
-        let _ = store.mark(&message_id, "failed", Some("leader_not_attached"));
-        event_log.write(
-            "leader_receiver.delivery_blocked",
-            serde_json::json!({
-                "message_id": message_id,
-                "sender": sender,
-                "leader_id": leader_id,
-                "owner_team_id": owner_team,
-                "reason": "leader_not_attached",
-                "channel": "rebind_required",
-                "action": "run team-agent claim-leader or team-agent takeover",
-            }),
-        )?;
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Blocked,
-            message_status: MessageStatusShadow("blocked".to_string()),
-            message_id: Some(message_id),
-            verification: None,
-            stage: None,
-            reason: Some(DeliveryRefusal::LeaderNotAttached),
-            channel: Some("rebind_required".to_string()),
-        });
-    }
     event_log.write(
         "leader_receiver.queued",
         serde_json::json!({
@@ -221,6 +187,15 @@ pub fn claim_leader_receiver(
         copy_candidate_field(receiver, candidate, "pane_id");
         copy_candidate_field(receiver, candidate, "provider");
         copy_candidate_field(receiver, candidate, "leader_session_uuid");
+        if let Some(socket) = candidate
+            .get("tmux_socket")
+            .and_then(Value::as_str)
+            .filter(|socket| std::path::Path::new(socket).is_absolute())
+            .map(str::to_string)
+            .or_else(crate::tmux_backend::socket_name_from_tmux_env)
+        {
+            receiver.insert("tmux_socket".to_string(), serde_json::json!(socket));
+        }
     }
     crate::state::persist::save_runtime_state(workspace, state)?;
     event_log.write(
@@ -310,10 +285,17 @@ fn leader_session_uuid(state: &Value) -> Option<&str> {
 
 pub(crate) fn leader_pane_bound_but_not_live(workspace: &Path, state: &Value) -> bool {
     leader_pane_id(state)
-        .is_some_and(|pane_id| !leader_pane_is_live(workspace, pane_id))
+        .is_some_and(|pane_id| !leader_pane_is_live(workspace, state, pane_id))
 }
 
-fn leader_pane_is_live(workspace: &Path, pane_id: &str) -> bool {
+fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
+    if let Some(socket) = leader_tmux_socket(state) {
+        return crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket)
+            .list_targets()
+            .unwrap_or_default()
+            .iter()
+            .any(|target| target.pane_id.as_str() == pane_id);
+    }
     let mut targets = crate::tmux_backend::TmuxBackend::for_workspace(workspace)
         .list_targets()
         .unwrap_or_default();
@@ -327,6 +309,13 @@ fn leader_pane_is_live(workspace: &Path, pane_id: &str) -> bool {
 
 fn leader_pane_id(state: &Value) -> Option<&str> {
     leader_record_field(state, "pane_id").and_then(Value::as_str)
+}
+
+fn leader_tmux_socket(state: &Value) -> Option<&str> {
+    leader_record_field(state, "tmux_socket")
+        .and_then(Value::as_str)
+        .filter(|socket| !socket.is_empty())
+        .filter(|socket| std::path::Path::new(socket).is_absolute())
 }
 
 fn copy_candidate_field(

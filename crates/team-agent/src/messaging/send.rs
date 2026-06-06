@@ -8,7 +8,7 @@ use crate::model::enums::PaneLiveness;
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
-use super::leader_receiver::{leader_pane_bound_but_not_live, send_to_leader_receiver};
+use super::leader_receiver::send_to_leader_receiver;
 use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
 
 /// 发件目标:单 target / 广播 `*` / 扇出 list (`send.py:36` `target: str|list[str]|None`)。
@@ -86,25 +86,9 @@ pub fn send_message(
         .map(|team| crate::state::projection::project_top_level_view(&raw_state, team.as_str()))
         .unwrap_or_else(|| raw_state.clone());
     backfill_leader_binding_for_delivery_view(&mut state, &raw_state);
-    let target_is_leader = matches!(target, MessageTarget::Single(target) if target == "leader");
-    if target_is_leader
-        && sender_is_leader(&state, &opts.sender)
-        && leader_pane_bound_but_not_live(workspace, &state)
-    {
-        event_log.write(
-            "leader_receiver.delivery_blocked",
-            serde_json::json!({
-                "sender": opts.sender,
-                "reason": "leader_not_attached",
-                "channel": "rebind_required",
-                "action": "run team-agent claim-leader or team-agent takeover",
-            }),
-        )?;
-        return Ok(rebind_required_outcome(None));
-    }
     let recipient = match target {
         MessageTarget::Single(target) if target == "leader" => {
-            return send_to_leader_receiver(
+            let outcome = send_to_leader_receiver(
                 workspace,
                 &state,
                 "leader",
@@ -114,7 +98,19 @@ pub fn send_message(
                 opts.requires_ack,
                 None,
                 &event_log,
-            );
+            )?;
+            if matches!(outcome.status, DeliveryStatus::Queued) && owner_pane_is_dead(&state) {
+                if let Some(message_id) = outcome.message_id.clone() {
+                    let team_key = owner_gate_hint_team_key(&state);
+                    if !explicit_claim_applied(workspace, &team_key, "") {
+                        return Ok(rebind_required_outcome_with_verification(
+                            Some(message_id),
+                            format!("team-agent claim-leader --team {team_key}"),
+                        ));
+                    }
+                }
+            }
+            return Ok(outcome);
         }
         MessageTarget::Single(target) if target.is_empty() => {
             return Ok(refused_outcome(DeliveryRefusal::UnknownRecipient));

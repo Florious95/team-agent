@@ -121,6 +121,50 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
     }
 }
 
+const DISPATCH_COMMANDS: &[&str] = &[
+    "init",
+    "quick-start",
+    "compile",
+    "send",
+    "allow-peer-talk",
+    "status",
+    "stop",
+    "shutdown",
+    "restart",
+    "restart-agent",
+    "start-agent",
+    "stop-agent",
+    "reset-agent",
+    "add-agent",
+    "fork-agent",
+    "remove-agent",
+    "stuck-list",
+    "stuck-cancel",
+    "acknowledge-idle",
+    "takeover",
+    "claim-leader",
+    "identity",
+    "approvals",
+    "inbox",
+    "doctor",
+    "watch",
+    "sessions",
+    "validate",
+    "profile",
+    "validate-result",
+    "collect",
+    "settle",
+    "repair-state",
+    "diagnose",
+    "preflight",
+    "wait-ready",
+    "e2e",
+    "peek",
+    "coordinator",
+];
+
+const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start", "purge-agent", "attach-leader"];
+
 fn emit_missing_subcommand_usage() -> ExitCode {
     emit_usage_error("the following arguments are required: {codex,claude,...,doctor}");
     ExitCode::Usage
@@ -131,65 +175,62 @@ fn emit_missing_subcommand_usage() -> ExitCode {
 /// Used by the `--help` short-circuit gate so unknown commands keep falling through
 /// to the argparse invalid-choice path.
 fn is_known_subcommand(command: &str) -> bool {
-    matches!(
-        command,
-        "init"
-            | "quick-start"
-            | "compile"
-            | "send"
-            | "allow-peer-talk"
-            | "status"
-            | "start"
-            | "stop"
-            | "shutdown"
-            | "restart"
-            | "restart-agent"
-            | "start-agent"
-            | "stop-agent"
-            | "reset-agent"
-            | "add-agent"
-            | "fork-agent"
-            | "remove-agent"
-            | "purge-agent"
-            | "stuck-list"
-            | "stuck-cancel"
-            | "acknowledge-idle"
-            | "takeover"
-            | "claim-leader"
-            | "attach-leader"
-            | "identity"
-            | "approvals"
-            | "inbox"
-            | "doctor"
-            | "watch"
-            | "sessions"
-            | "validate"
-            | "profile"
-            | "validate-result"
-            | "collect"
-            | "settle"
-            | "repair-state"
-            | "diagnose"
-            | "preflight"
-            | "wait-ready"
-            | "e2e"
-            | "peek"
-            | "coordinator"
-    )
+    DISPATCH_COMMANDS.contains(&command) || SPEC_ONLY_HELP_COMMANDS.contains(&command)
 }
 
 fn command_help(command: Option<&str>) -> String {
     match command {
-        None => "usage: team-agent <command> [options]\n\nCommands: quick-start, status, send, collect, start, stop, shutdown, restart, restart-agent, start-agent, stop-agent, reset-agent, add-agent, remove-agent, purge-agent".to_string(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--name NAME] [--team-id TEAM] [--yes] [--fresh] [--json]".to_string(),
+        None => {
+            let mut commands = vec!["codex", "claude"];
+            commands.extend_from_slice(DISPATCH_COMMANDS);
+            commands.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
+            format!(
+                "usage: team-agent <command> [options]\n\nCommands: {}\n\nRun `team-agent <command> --help` for command flags.",
+                commands.join(", ")
+            )
+        }
+        Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--json]".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
-        Some("stop") | Some("shutdown") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
-        Some("restart-agent") => "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
-        Some("purge-agent") => "usage: team-agent purge-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--json]".to_string(),
-        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--json]".to_string(),
+        Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
+        Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
+        Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--summary|--json] [--detail]".to_string(),
-        Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
+        Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
+        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--json]".to_string(),
+        Some("restart-agent") => "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
+        Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
+        Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
+        Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
+        Some("purge-agent") => "usage: team-agent purge-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--json]".to_string(),
+        Some("stuck-list") => "usage: team-agent stuck-list [--workspace WORKSPACE] [--json]".to_string(),
+        Some("stuck-cancel") => "usage: team-agent stuck-cancel AGENT [--workspace WORKSPACE] [--alert-type stuck|idle_fallback|cross_worker_deadlock|all] [--json]".to_string(),
+        Some("acknowledge-idle") => "usage: team-agent acknowledge-idle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
+        Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
+        Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
+        Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
+        Some("approvals") => "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--json]".to_string(),
+        Some("inbox") => "usage: team-agent inbox AGENT [--workspace WORKSPACE] [--limit N] [--since CURSOR] [--json]".to_string(),
+        Some("doctor") => "usage: team-agent doctor [SPEC] [--workspace WORKSPACE] [--team TEAM] [--gate orphans|comms] [--comms] [--fix] [--fix-schema] [--cleanup-orphans] [--confirm] [--json]".to_string(),
+        Some("watch") => "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]".to_string(),
+        Some("sessions") => "usage: team-agent sessions [--workspace WORKSPACE] [--json]".to_string(),
+        Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
+        Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
+        Some("validate-result") => "usage: team-agent validate-result [ENVELOPE] [--file FILE|--result JSON] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--result-file FILE] [--json]".to_string(),
+        Some("settle") => "usage: team-agent settle [--workspace WORKSPACE] [--json]".to_string(),
+        Some("repair-state") => "usage: team-agent repair-state --task TASK --status STATUS [SUMMARY] [--assignee AGENT] [--workspace WORKSPACE] [--json]".to_string(),
+        Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--json]".to_string(),
+        Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
+        Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--timeout SECONDS] [--json]".to_string(),
+        Some("e2e") => "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]".to_string(),
+        Some("peek") => "usage: team-agent peek AGENT [--workspace WORKSPACE] [--tail N] [--allow-raw-screen] [--json]".to_string(),
+        Some("coordinator") => "usage: team-agent coordinator [--workspace WORKSPACE] [--once] [--tick-interval SECONDS]".to_string(),
         Some(other) => format!("usage: team-agent {other} [options]"),
     }
 }
@@ -1054,6 +1095,92 @@ mod tests {
 
     fn cli_argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn source_dispatch_commands() -> Vec<&'static str> {
+        let source = include_str!("emit.rs");
+        let after_start = source.split_once("fn dispatch(").unwrap().1;
+        let dispatch_source = after_start.split_once("const DISPATCH_COMMANDS").unwrap().0;
+        let mut commands = Vec::new();
+        for line in dispatch_source.lines() {
+            let line = line.trim_start();
+            let Some(rest) = line.strip_prefix('"') else {
+                continue;
+            };
+            let Some((command, after_command)) = rest.split_once('"') else {
+                continue;
+            };
+            let after_command = after_command.trim_start();
+            if (after_command.starts_with("=>") || after_command.starts_with("if "))
+                && !commands.contains(&command)
+            {
+                commands.push(command);
+            }
+        }
+        commands
+    }
+
+    #[test]
+    fn t0_help_catalog_tracks_dispatch_commands() {
+        let source_commands = source_dispatch_commands();
+        for command in &source_commands {
+            assert!(
+                DISPATCH_COMMANDS.contains(command),
+                "dispatch command `{command}` is missing from DISPATCH_COMMANDS"
+            );
+        }
+        for command in DISPATCH_COMMANDS {
+            assert!(
+                source_commands.contains(command),
+                "DISPATCH_COMMANDS contains `{command}` but dispatch has no matching arm"
+            );
+        }
+
+        let top_help = command_help(None);
+        for command in DISPATCH_COMMANDS {
+            assert!(
+                top_help.contains(command),
+                "top-level --help is missing dispatch command `{command}`"
+            );
+            let command_help = command_help(Some(command));
+            assert!(
+                command_help.contains("usage: team-agent") && command_help.contains(command),
+                "`team-agent {command} --help` must show command-specific usage, got {command_help:?}"
+            );
+        }
+        for command in SPEC_ONLY_HELP_COMMANDS {
+            assert!(
+                top_help.contains(command),
+                "top-level --help is missing spec-only help command `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn t0_help_catalog_lists_command_flags() {
+        for (command, flags) in [
+            ("quick-start", &["--workspace", "--team-id", "--yes", "--fresh", "--json"][..]),
+            ("send", &["--workspace", "--team", "--targets", "--watch-result", "--timeout", "--json"][..]),
+            ("status", &["--workspace", "--summary", "--json", "--detail"][..]),
+            ("shutdown", &["--workspace", "--team", "--keep-logs", "--json"][..]),
+            ("restart", &["--team", "--allow-fresh", "--json"][..]),
+            ("start-agent", &["--workspace", "--team", "--force", "--allow-fresh", "--no-display", "--json"][..]),
+            ("reset-agent", &["--workspace", "--team", "--discard-session", "--no-display", "--json"][..]),
+            ("add-agent", &["--role-file", "--workspace", "--team", "--no-display", "--json"][..]),
+            ("fork-agent", &["--as", "--label", "--workspace", "--team", "--no-display", "--json"][..]),
+            ("remove-agent", &["--workspace", "--team", "--from-spec", "--confirm", "--force", "--json"][..]),
+            ("doctor", &["--workspace", "--team", "--gate", "--fix-schema", "--cleanup-orphans", "--json"][..]),
+            ("collect", &["--workspace", "--result-file", "--json"][..]),
+            ("repair-state", &["--task", "--status", "--assignee", "--workspace", "--json"][..]),
+            ("wait-ready", &["--workspace", "--timeout", "--json"][..]),
+            ("peek", &["--workspace", "--tail", "--allow-raw-screen", "--json"][..]),
+            ("coordinator", &["--workspace", "--once", "--tick-interval"][..]),
+        ] {
+            let help = command_help(Some(command));
+            for flag in flags {
+                assert!(help.contains(flag), "`team-agent {command} --help` is missing {flag}");
+            }
+        }
     }
 
     #[test]

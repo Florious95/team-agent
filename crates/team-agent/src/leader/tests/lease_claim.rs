@@ -140,6 +140,163 @@ use super::*;
         assert!(r.reason.is_none(), "already-bound path carries no acquire reason");
     }
 
+    #[test]
+    #[serial_test::serial(env)]
+    fn claim_leader_persists_full_tmux_endpoint_when_tmux_tmpdir_differs_from_coordinator() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let leader_socket = "/tmp/ta-leader-root/tmux-501/dl2f";
+        let _e = EnvGuard::apply(&[
+            ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
+            ("TMUX", Some("/tmp/ta-leader-root/tmux-501/dl2f,12345,0")),
+            ("TMUX_TMPDIR", Some("/tmp/ta-coordinator-root")),
+        ]);
+        let ws = p2_temp_ws("claim_full_endpoint");
+        let team_id = TeamKey::new("current");
+        let caller = PaneId::new("%5");
+        let mut state = serde_json::json!({"session_name": "team-agent-x"});
+        let event_log = crate::event_log::EventLog::new(&ws);
+        let live = seeded_liveness(&["%5"]);
+
+        let r = claim_lease_no_incident(
+            &ws, &mut state, None, &team_id, &caller, false, &event_log, &live,
+        )
+        .unwrap();
+
+        assert!(r.ok);
+        assert_eq!(r.status, LeaseStatus::Claimed);
+        assert_eq!(
+            r.receiver.as_ref().and_then(|receiver| receiver.tmux_socket.as_deref()),
+            Some(leader_socket),
+            "claim-leader must persist the full $TMUX socket path, not only the -L short name"
+        );
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["leader_receiver"]["tmux_socket"],
+            serde_json::json!(leader_socket),
+            "state.json must carry enough endpoint information for later delivery to use tmux -S"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn claim_leader_already_bound_requires_same_delivery_endpoint_not_only_same_pane_id() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let current_socket = "/tmp/ta-current-leader-root/tmux-501/dl2f";
+        let stale_socket = "/tmp/ta-stale-leader-root/tmux-501/dl2f";
+        let _e = EnvGuard::apply(&[
+            ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
+            ("TMUX", Some("/tmp/ta-current-leader-root/tmux-501/dl2f,12345,0")),
+            ("TMUX_TMPDIR", Some("/tmp/ta-coordinator-root")),
+        ]);
+        let ws = p2_temp_ws("claim_bound_endpoint");
+        let team_id = TeamKey::new("current");
+        let caller = PaneId::new("%5");
+        let mut state = serde_json::json!({
+            "session_name": "team-agent-x",
+            "team_owner": {
+                "pane_id":"%5",
+                "provider":"codex",
+                "machine_fingerprint":"fp",
+                "leader_session_uuid":"U",
+                "owner_epoch":1,
+                "claimed_at":"t",
+                "claimed_via":"claim-leader",
+                "tmux_socket": stale_socket
+            },
+            "leader_receiver": {
+                "pane_id":"%5",
+                "owner_epoch":1,
+                "leader_session_uuid":"U",
+                "tmux_socket": stale_socket
+            },
+        });
+        let event_log = crate::event_log::EventLog::new(&ws);
+        let live = seeded_liveness(&["%5"]);
+
+        let r = claim_lease_no_incident(
+            &ws, &mut state, None, &team_id, &caller, false, &event_log, &live,
+        )
+        .unwrap();
+
+        assert_ne!(
+            r.status,
+            LeaseStatus::AlreadyBound,
+            "already_bound must verify the same delivery endpoint is reachable; matching bare pane \
+             ids are not sufficient because different tmux socket roots can both have %5"
+        );
+        assert_eq!(
+            r.receiver.as_ref().and_then(|receiver| receiver.tmux_socket.as_deref()),
+            Some(current_socket),
+            "claim should refresh the receiver to the caller's current full tmux endpoint"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn claim_leader_already_bound_normalizes_short_tmux_endpoint_to_full_path() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let current_socket = "/tmp/ta-current-leader-root/tmux-501/dl9aa40c88";
+        let short_socket = "dl9aa40c88";
+        let _e = EnvGuard::apply(&[
+            ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
+            ("TMUX", Some("/tmp/ta-current-leader-root/tmux-501/dl9aa40c88,12345,0")),
+            ("TMUX_TMPDIR", Some("/tmp/ta-coordinator-root")),
+        ]);
+        let ws = p2_temp_ws("claim_bound_short_endpoint");
+        let team_id = TeamKey::new("current");
+        let caller = PaneId::new("%5");
+        let mut state = serde_json::json!({
+            "session_name": "team-agent-x",
+            "team_owner": {
+                "pane_id":"%5",
+                "provider":"codex",
+                "machine_fingerprint":"fp",
+                "leader_session_uuid":"U",
+                "owner_epoch":1,
+                "claimed_at":"t",
+                "claimed_via":"claim-leader",
+                "tmux_socket": short_socket
+            },
+            "leader_receiver": {
+                "pane_id":"%5",
+                "owner_epoch":1,
+                "leader_session_uuid":"U",
+                "tmux_socket": short_socket
+            },
+        });
+        let event_log = crate::event_log::EventLog::new(&ws);
+        let live = seeded_liveness(&["%5"]);
+
+        let r = claim_lease_no_incident(
+            &ws, &mut state, None, &team_id, &caller, false, &event_log, &live,
+        )
+        .unwrap();
+
+        assert_ne!(
+            r.status,
+            LeaseStatus::AlreadyBound,
+            "claim already_bound must not treat a stored short socket name as equivalent to the \
+             caller's full $TMUX endpoint by basename; it must refresh/normalize the receiver"
+        );
+        assert_eq!(
+            r.receiver.as_ref().and_then(|receiver| receiver.tmux_socket.as_deref()),
+            Some(current_socket),
+            "claim should rewrite any legacy short leader_receiver.tmux_socket to the full physical endpoint"
+        );
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted["leader_receiver"]["tmux_socket"],
+            serde_json::json!(current_socket),
+            "state must not preserve a short endpoint after explicit claim; state={persisted}"
+        );
+    }
+
     // RED — NOT-IN-TMUX-PANE: empty caller pane → refused not_in_tmux_pane with
     // the EXACT golden action string (differs from the current claim_leader stub
     // string). golden /tmp/probe_claim.py _lease_refused("not_in_tmux_pane",...).

@@ -394,7 +394,7 @@ pub fn report_result(
     let content = format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
     let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(serde_json::json!({}));
     let event_log = EventLog::new(workspace);
-    let outcome = super::leader_receiver::send_to_leader_receiver(
+    let mut outcome = super::leader_receiver::send_to_leader_receiver(
         workspace,
         &state,
         "leader",
@@ -405,10 +405,26 @@ pub fn report_result(
         Some(&result_id),
         &event_log,
     )?;
+    if matches!(outcome.status, crate::messaging::DeliveryStatus::Queued) {
+        if let Some(message_id) = outcome.message_id.clone() {
+            let store = MessageStore::open(workspace)?;
+            let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+            outcome = super::delivery::deliver_pending_message(
+                workspace,
+                &store,
+                &transport,
+                &message_id,
+                &event_log,
+                &state,
+            )?;
+        }
+    }
     let leader_notified = outcome.ok;
     let notification_status_wire = if outcome.ok {
         "delivered"
-    } else if matches!(outcome.status, crate::messaging::DeliveryStatus::Blocked) {
+    } else if outcome.channel.as_deref() == Some("rebind_required")
+        || matches!(outcome.status, crate::messaging::DeliveryStatus::Blocked)
+    {
         "rebind_required"
     } else {
         "refused"

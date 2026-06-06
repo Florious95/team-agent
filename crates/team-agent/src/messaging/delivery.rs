@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
-use crate::model::enums::Provider;
+use crate::model::enums::{PaneLiveness, Provider};
 use crate::model::ids::TeamKey;
 use crate::transport::{InjectPayload, Key, PaneId, SessionName, Target, Transport, WindowName};
 
@@ -135,6 +135,61 @@ pub fn deliver_pending_message(
             channel: None,
         });
     };
+    if message.recipient == "leader" && leader_receiver_has_noncanonical_tmux_socket(state) {
+        store.mark(message_id, "failed", Some("leader_not_attached"))?;
+        event_log.write(
+            "leader_receiver.delivery_blocked",
+            serde_json::json!({
+                "message_id": message_id,
+                "sender": message.sender,
+                "reason": "leader_not_attached",
+                "channel": "rebind_required",
+                "action": "run team-agent claim-leader or team-agent takeover",
+                "error": "leader_receiver.tmux_socket is not a canonical full socket path",
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Refused,
+            message_status: MessageStatusShadow("failed".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some(
+                "run team-agent claim-leader or team-agent takeover".to_string(),
+            ),
+            stage: None,
+            reason: Some(DeliveryRefusal::LeaderNotAttached),
+            channel: Some("rebind_required".to_string()),
+        });
+    }
+    let delivery_transport =
+        delivery_transport_for_recipient(workspace, transport, state, &message.recipient);
+    let transport = delivery_transport.as_transport();
+    // Do not inject queued leader messages into a synthetic "leader" window.
+    if message.recipient == "leader" && !leader_receiver_pane_is_usable(transport, state) {
+        store.mark(message_id, "failed", Some("leader_not_attached"))?;
+        event_log.write(
+            "leader_receiver.delivery_blocked",
+            serde_json::json!({
+                "message_id": message_id,
+                "sender": message.sender,
+                "reason": "leader_not_attached",
+                "channel": "rebind_required",
+                "action": "run team-agent claim-leader or team-agent takeover",
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Refused,
+            message_status: MessageStatusShadow("failed".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some(
+                "run team-agent claim-leader or team-agent takeover".to_string(),
+            ),
+            stage: None,
+            reason: Some(DeliveryRefusal::LeaderNotAttached),
+            channel: Some("rebind_required".to_string()),
+        });
+    }
     let target = resolve_inject_target(state, &message.recipient);
     // Contract B / MUST-10 / N31/N32: physical paste+Enter into a startup trust/update
     // menu is NOT provider delivery — the menu consumes the Enter and the task text
@@ -170,12 +225,40 @@ pub fn deliver_pending_message(
         &message.content,
         message_id,
     );
-    transport.inject(
+    if let Err(error) = transport.inject(
         &target,
         &InjectPayload::Text(rendered),
         Key::Enter,
         true,
-    )?;
+    ) {
+        if message.recipient == "leader" {
+            store.mark(message_id, "failed", Some("leader_not_attached"))?;
+            event_log.write(
+                "leader_receiver.delivery_blocked",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": message.sender,
+                    "reason": "leader_not_attached",
+                    "channel": "rebind_required",
+                    "action": "run team-agent claim-leader or team-agent takeover",
+                    "error": error.to_string(),
+                }),
+            )?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Refused,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(
+                    "run team-agent claim-leader or team-agent takeover".to_string(),
+                ),
+                stage: None,
+                reason: Some(DeliveryRefusal::LeaderNotAttached),
+                channel: Some("rebind_required".to_string()),
+            });
+        }
+        return Err(error.into());
+    }
     store.mark(message_id, "delivered", None)?;
     event_log.write(
         "message.delivered",
@@ -220,7 +303,15 @@ fn render_message(sender: &str, task_id: Option<&str>, content: &str, message_id
 /// else a session-qualified `SessionWindow` (state.session_name + the agent's window, defaulting to the
 /// id). NEVER the bare agent-id as a pane — a clientless coordinator cannot resolve that
 /// ("can't find pane: w1", rt-host-a loop #3). Mirrors `coordinator/tick.rs::capture_target`.
+///
+/// Leader delivery uses the bound leader receiver pane. The leader is not a worker agent and
+/// must not fall through to a synthetic `SessionWindow{window="leader"}` target.
 fn resolve_inject_target(state: &serde_json::Value, recipient: &str) -> Target {
+    if recipient == "leader" {
+        if let Some(pane_id) = leader_receiver_pane_id(state) {
+            return Target::Pane(PaneId::new(pane_id));
+        }
+    }
     let agent = state.get("agents").and_then(|a| a.get(recipient));
     if let Some(pane_id) = agent
         .and_then(|a| a.get("pane_id"))
@@ -241,6 +332,116 @@ fn resolve_inject_target(state: &serde_json::Value, recipient: &str) -> Target {
     Target::SessionWindow {
         session: SessionName::new(session),
         window: WindowName::new(window),
+    }
+}
+
+/// Read the bound leader pane id off the projected or team-scoped runtime state.
+fn leader_receiver_pane_id(state: &serde_json::Value) -> Option<&str> {
+    leader_receiver_pane_id_in_state(state)
+        .or_else(|| active_team_entry(state).and_then(leader_receiver_pane_id_in_state))
+        .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_id_in_state))
+}
+
+fn leader_receiver_pane_is_usable(transport: &dyn Transport, state: &serde_json::Value) -> bool {
+    let Some(pane_id) = leader_receiver_pane_id(state) else {
+        return false;
+    };
+    if transport
+        .list_targets()
+        .unwrap_or_default()
+        .iter()
+        .any(|target| target.pane_id.as_str() == pane_id)
+    {
+        return true;
+    }
+    !matches!(transport.liveness(&PaneId::new(pane_id)), Ok(PaneLiveness::Dead))
+}
+
+enum DeliveryTransport<'a> {
+    Borrowed(&'a dyn Transport),
+    Owned(crate::tmux_backend::TmuxBackend),
+}
+
+impl<'a> DeliveryTransport<'a> {
+    fn as_transport(&'a self) -> &'a dyn Transport {
+        match self {
+            Self::Borrowed(transport) => *transport,
+            Self::Owned(transport) => transport,
+        }
+    }
+}
+
+fn delivery_transport_for_recipient<'a>(
+    workspace: &Path,
+    product_transport: &'a dyn Transport,
+    state: &serde_json::Value,
+    recipient: &str,
+) -> DeliveryTransport<'a> {
+    if recipient != "leader" {
+        return DeliveryTransport::Borrowed(product_transport);
+    }
+    let Some(socket) = leader_receiver_tmux_socket(state) else {
+        return DeliveryTransport::Borrowed(product_transport);
+    };
+    if socket == crate::tmux_backend::socket_name_for_workspace(workspace) {
+        DeliveryTransport::Borrowed(product_transport)
+    } else {
+        DeliveryTransport::Owned(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket))
+    }
+}
+
+fn leader_receiver_pane_id_in_state(state: &serde_json::Value) -> Option<&str> {
+    ["leader_receiver", "team_owner"].into_iter().find_map(|key| {
+        state
+            .get(key)
+            .and_then(|r| r.get("pane_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+fn leader_receiver_tmux_socket(state: &serde_json::Value) -> Option<&str> {
+    leader_receiver_field(state, "tmux_socket")
+}
+
+fn leader_receiver_has_noncanonical_tmux_socket(state: &serde_json::Value) -> bool {
+    leader_receiver_tmux_socket(state)
+        .is_some_and(|socket| {
+            socket != "default" && !std::path::Path::new(socket).is_absolute()
+        })
+}
+
+fn leader_receiver_field<'a>(state: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    leader_receiver_field_in_state(state, field)
+        .or_else(|| active_team_entry(state).and_then(|team| leader_receiver_field_in_state(team, field)))
+        .or_else(|| only_team_entry(state).and_then(|team| leader_receiver_field_in_state(team, field)))
+}
+
+fn leader_receiver_field_in_state<'a>(
+    state: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a str> {
+    state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get(field))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn active_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {
+    let team = state.get("active_team_key").and_then(serde_json::Value::as_str)?;
+    state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(team))
+}
+
+fn only_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {
+    let teams = state.get("teams").and_then(serde_json::Value::as_object)?;
+    if teams.len() == 1 {
+        teams.values().next()
+    } else {
+        None
     }
 }
 

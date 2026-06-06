@@ -298,11 +298,91 @@ fn tool_contract(tool: McpTool) -> Value {
         "description": description,
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": tool_properties(tool),
             "required": required,
             "additionalProperties": false
         }
     })
+}
+
+fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
+    let mut properties = serde_json::Map::new();
+    match tool {
+        McpTool::AssignTask => {
+            insert_property(&mut properties, "task", object_property("Task object to add or update."));
+            insert_property(&mut properties, "message", string_property("Optional message to deliver with the task."));
+        }
+        McpTool::SendMessage => {
+            insert_property(&mut properties, "to", string_property("Target agent id, 'leader', or '*' for broadcast."));
+            insert_property(&mut properties, "content", string_property("Message body."));
+            insert_property(&mut properties, "task_id", string_property("Optional task id to associate with the message."));
+            insert_property(&mut properties, "sender", string_property("Optional sender override."));
+            insert_property(&mut properties, "requires_ack", boolean_property("Whether the recipient should acknowledge delivery."));
+            insert_property(&mut properties, "scope", string_property("Optional delivery scope: team or workspace."));
+        }
+        McpTool::ReportResult => {
+            insert_property(&mut properties, "envelope", object_property("Optional full result envelope."));
+            insert_property(&mut properties, "summary", string_property("Short result summary."));
+            insert_property(&mut properties, "status", string_property("Result status."));
+            insert_property(&mut properties, "changes", array_property("Changed files or artifacts."));
+            insert_property(&mut properties, "tests", array_property("Tests or checks performed."));
+            insert_property(&mut properties, "risks", array_property("Risks or blockers."));
+            insert_property(&mut properties, "artifacts", array_property("Artifact references."));
+            insert_property(&mut properties, "next_actions", array_property("Suggested next actions."));
+            insert_property(&mut properties, "task_id", string_property("Optional task id override."));
+            insert_property(&mut properties, "agent_id", string_property("Optional reporting agent id override."));
+        }
+        McpTool::UpdateState => {
+            insert_property(&mut properties, "note", string_property("Note to append to team state."));
+        }
+        McpTool::GetTeamStatus | McpTool::StuckList => {}
+        McpTool::StopAgent => {
+            insert_property(&mut properties, "agent_id", string_property("Agent id to stop."));
+        }
+        McpTool::ResetAgent => {
+            insert_property(&mut properties, "agent_id", string_property("Agent id to reset."));
+            insert_property(&mut properties, "discard_session", boolean_property("Whether to discard the existing provider session."));
+        }
+        McpTool::AddAgent => {
+            insert_property(&mut properties, "new_agent_id", string_property("New agent id."));
+            insert_property(&mut properties, "role_file_path", string_property("Workspace-relative role file path."));
+        }
+        McpTool::ForkAgent => {
+            insert_property(&mut properties, "source_agent_id", string_property("Agent id to fork from."));
+            insert_property(&mut properties, "as_agent_id", string_property("Agent id for the forked worker."));
+            insert_property(&mut properties, "label", string_property("Optional display label."));
+        }
+        McpTool::RequestHuman => {
+            insert_property(&mut properties, "question", string_property("Question to ask the human."));
+            insert_property(&mut properties, "task_id", string_property("Optional related task id."));
+            insert_property(&mut properties, "agent_id", string_property("Optional requesting agent id."));
+        }
+        McpTool::StuckCancel => {
+            insert_property(&mut properties, "agent_id", string_property("Agent id whose stuck alerts should be suppressed."));
+            insert_property(&mut properties, "alert_type", string_property("Alert type to suppress, or all."));
+        }
+    }
+    properties
+}
+
+fn insert_property(properties: &mut serde_json::Map<String, Value>, name: &str, schema: Value) {
+    properties.insert(name.to_string(), schema);
+}
+
+fn string_property(description: &str) -> Value {
+    serde_json::json!({"type": "string", "description": description})
+}
+
+fn boolean_property(description: &str) -> Value {
+    serde_json::json!({"type": "boolean", "description": description})
+}
+
+fn object_property(description: &str) -> Value {
+    serde_json::json!({"type": "object", "description": description, "additionalProperties": true})
+}
+
+fn array_property(description: &str) -> Value {
+    serde_json::json!({"type": "array", "description": description, "items": {"type": "object", "additionalProperties": true}})
 }
 
 pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: &Value) -> ToolResult {

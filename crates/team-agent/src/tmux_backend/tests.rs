@@ -98,6 +98,185 @@
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
+    struct EnvGuard {
+        saved: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn apply(vars: &[(&str, Option<&str>)]) -> Self {
+            let saved = vars.iter().map(|(k, _)| ((*k).to_string(), std::env::var(k).ok())).collect();
+            for (k, v) in vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn leader_receiver_endpoint_from_tmux_env_preserves_full_socket_path() {
+        let leader_socket = "/tmp/ta-leader-root/tmux-501/dl2f";
+        let _env = EnvGuard::apply(&[
+            ("TMUX", Some("/tmp/ta-leader-root/tmux-501/dl2f,12345,0")),
+            ("TMUX_TMPDIR", Some("/tmp/ta-coordinator-root")),
+        ]);
+
+        assert_eq!(
+            super::socket_name_from_tmux_env().as_deref(),
+            Some(leader_socket),
+            "leader receivers must persist the exact tmux endpoint from $TMUX; a short -L socket \
+             name is re-rooted under the coordinator's TMUX_TMPDIR and cannot reach an external \
+             leader pane"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn leader_receiver_endpoint_from_tmux_env_rejects_short_socket_name() {
+        let _env = EnvGuard::apply(&[
+            ("TMUX", Some("dl9aa40c88,12345,0")),
+            ("TMUX_TMPDIR", Some("/tmp/ta-coordinator-root")),
+        ]);
+
+        assert_eq!(
+            super::socket_name_from_tmux_env(),
+            None,
+            "leader_receiver.tmux_socket is a durable physical endpoint: a short socket name from \
+             $TMUX must not be persisted because tmux -L <short> is re-rooted under the coordinator"
+        );
+    }
+
+    #[test]
+    fn leader_receiver_delivery_uses_full_socket_endpoint_not_short_l_reconstruction() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let delivery = std::fs::read_to_string(manifest.join("src/messaging/delivery.rs")).unwrap();
+        let leader_receiver =
+            std::fs::read_to_string(manifest.join("src/messaging/leader_receiver.rs")).unwrap();
+        let tmux_backend = std::fs::read_to_string(manifest.join("src/tmux_backend.rs")).unwrap();
+
+        assert!(
+            tmux_backend.contains("\"-S\""),
+            "tmux backend must support `tmux -S <full-socket-path>` for persisted external leader \
+             endpoints; `-L <short-name>` is not enough when leader and coordinator TMUX_TMPDIR differ"
+        );
+        assert!(
+            !delivery.contains("TmuxBackend::for_socket_name(socket)"),
+            "worker->leader delivery must not reconstruct an external leader endpoint with \
+             `tmux -L <short-name>`; it must use the persisted full socket path endpoint"
+        );
+        assert!(
+            !leader_receiver.contains("TmuxBackend::for_socket_name(socket)"),
+            "leader_receiver live checks must verify the same full socket endpoint used by delivery, \
+            not a short socket name resolved under the coordinator's socket root"
+        );
+    }
+
+    #[test]
+    fn leader_receiver_full_endpoint_liveness_list_and_inject_use_s_path_command_shape() {
+        let endpoint = "/private/tmp/tmux-501/default";
+        let stdout = "%7\tteam-x\t0\tleader\t0\t/dev/ttys003\tbash\t1\t/Users/me/work\t1\t0\n";
+        let (be, rec, _stdin) = {
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let stdin_recorded = Arc::new(Mutex::new(Vec::new()));
+            let runner = MockCommandRunner {
+                recorded: Arc::clone(&recorded),
+                stdin_recorded: Arc::clone(&stdin_recorded),
+                queue: Mutex::new(
+                    vec![
+                        MockResp::Out(ok(stdout)),
+                        MockResp::Out(ok("%7\n")),
+                        MockResp::Out(ok("")),
+                        MockResp::Out(ok("")),
+                        MockResp::Out(ok("")),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                default: MockResp::Out(ok("")),
+            };
+            (
+                TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), endpoint),
+                recorded,
+                stdin_recorded,
+            )
+        };
+
+        let _ = be.list_targets().expect("list_targets via endpoint");
+        let _ = be.liveness(&PaneId::new("%7")).expect("liveness via endpoint");
+        let _ = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text("hello leader".to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject via endpoint");
+
+        let calls = rec.lock().unwrap().clone();
+        assert!(
+            calls.len() >= 5,
+            "fixture must exercise list-panes, display-message, buffer/paste, and send-keys; got {calls:?}"
+        );
+        for call in &calls {
+            assert!(
+                call.starts_with(&["tmux".to_string(), "-S".to_string(), endpoint.to_string()]),
+                "leader receiver list/liveness/inject must use tmux -S <full socket path>; got {call:?}"
+            );
+            assert!(
+                !call.windows(2).any(|w| w == ["-L".to_string(), endpoint.to_string()]),
+                "leader receiver full endpoint must never be reconstructed with -L; got {call:?}"
+            );
+        }
+        assert!(
+            calls.iter().any(|call| call.iter().any(|arg| arg == "list-panes"))
+                && calls.iter().any(|call| call.iter().any(|arg| arg == "display-message"))
+                && calls.iter().any(|call| call.iter().any(|arg| arg == "paste-buffer"))
+                && calls.iter().any(|call| call.iter().any(|arg| arg == "send-keys")),
+            "contract must cover liveness/list/inject command shapes; got {calls:?}"
+        );
+    }
+
+    #[test]
+    fn leader_receiver_short_endpoint_must_not_reconstruct_tmux_l_socket() {
+        let endpoint = "dl9aa40c88";
+        let (be, rec) = {
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let runner = MockCommandRunner {
+                recorded: Arc::clone(&recorded),
+                stdin_recorded: Arc::new(Mutex::new(Vec::new())),
+                queue: Mutex::new(vec![MockResp::Out(ok(""))].into_iter().collect()),
+                default: MockResp::Out(ok("")),
+            };
+            (
+                TmuxBackend::with_runner_for_tmux_endpoint(Box::new(runner), endpoint),
+                recorded,
+            )
+        };
+
+        let _ = be.list_targets().expect("short endpoint should not become -L");
+
+        let calls = rec.lock().unwrap().clone();
+        assert!(
+            calls.iter().all(|call| !call.windows(2).any(|w| w == ["-L".to_string(), endpoint.to_string()])),
+            "non-canonical leader endpoints must be rejected or left unbound, never reconstructed as \
+             tmux -L <short> under the coordinator socket root; calls={calls:?}"
+        );
+    }
+
     // ── 1. has_session: exit 0 -> true, exit 1 -> false; argv = `tmux has-session -t <s>` ──────────
     #[test]
     fn has_session_argv_and_exit_code_maps_to_bool() {

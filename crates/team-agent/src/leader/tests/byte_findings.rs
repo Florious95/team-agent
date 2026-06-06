@@ -18,7 +18,7 @@ use super::*;
             "golden new_owner includes os_user");
     }
 
-    // D2 [BLOCK] — claim-path leader_receiver is golden's 14 keys in golden order; NO
+    // D2 [BLOCK] — claim-path leader_receiver is golden's 15 keys in golden order; NO
     // fingerprint/requested_provider/warning. Golden _receiver_from_claim_target (__init__.py:861-877).
     // Rust LeaderReceiver serializes all 17 (no skip_serializing_if) -> 3 always-null extras leak. RED.
     // (The POPULATED tmux values session_name/window_*/pane_* come from the caller-target scan — a
@@ -26,9 +26,12 @@ use super::*;
     // locked here are unchanged by that scan.)
     #[test]
     #[serial_test::serial(env)]
-    fn d2_claim_leader_receiver_is_fourteen_golden_keys_in_order_no_extras() {
+    fn d2_claim_leader_receiver_is_fifteen_golden_keys_in_order_no_extras() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
+        let _e = EnvGuard::apply(&[
+            ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
+            ("TMUX", Some("/tmp/tmux-501/default,123,0")),
+        ]);
         let ws = p2_temp_ws("d2_recv_keys");
         let mut state = serde_json::json!({"session_name": "team-agent-x"});
         let r = claim_lease_no_incident(&ws, &mut state, None, &TeamKey::new("current"),
@@ -42,9 +45,9 @@ use super::*;
         let keys: Vec<&str> = recv.keys().map(String::as_str).collect();
         assert_eq!(keys, vec![
             "mode","status","provider","pane_id","session_name","window_index","window_name",
-            "pane_index","pane_tty","pane_current_command","leader_session_uuid","owner_epoch",
-            "attached_at","discovery",
-        ], "golden _receiver_from_claim_target 14-key set + ORDER (__init__.py:861-877)");
+            "pane_index","pane_tty","pane_current_command","tmux_socket","leader_session_uuid",
+            "owner_epoch","attached_at","discovery",
+        ], "golden _receiver_from_claim_target 15-key set + ORDER (__init__.py:861-877 + BUG-4 socket-qualified receiver)");
     }
 
     // D2 seam — the caller-target SCAN that fills session_name/window_index/window_name/pane_index/

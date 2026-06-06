@@ -161,7 +161,12 @@ pub struct TmuxBackend {
     runner: Box<dyn CommandRunner>,
     /// `Some(name)` for a per-team socket -> every `tmux` argv gets `-L <name>` injected after the
     /// leading "tmux" token; `None` (default) -> bare `tmux` on the shared default socket.
-    socket: Option<String>,
+    socket: Option<TmuxSocketEndpoint>,
+}
+
+enum TmuxSocketEndpoint {
+    Name(String),
+    Path(String),
 }
 
 impl TmuxBackend {
@@ -177,7 +182,25 @@ impl TmuxBackend {
     pub fn for_workspace(workspace: &Path) -> Self {
         Self {
             runner: Box::new(RealCommandRunner),
-            socket: Some(socket_name_for_workspace(workspace)),
+            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))),
+        }
+    }
+
+    pub(crate) fn for_socket_name(socket: &str) -> Self {
+        if socket.is_empty() || socket == "default" {
+            Self::new()
+        } else {
+            Self { runner: Box::new(RealCommandRunner), socket: Some(TmuxSocketEndpoint::Name(socket.to_string())) }
+        }
+    }
+
+    pub(crate) fn for_tmux_endpoint(endpoint: &str) -> Self {
+        if endpoint.is_empty() || endpoint == "default" {
+            Self::new()
+        } else if Path::new(endpoint).is_absolute() {
+            Self { runner: Box::new(RealCommandRunner), socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())) }
+        } else {
+            Self::new()
         }
     }
 
@@ -189,7 +212,17 @@ impl TmuxBackend {
     /// Backend with an injected runner bound to a per-workspace socket (tests: assert the `-L` is in
     /// the recorded argv for a workspace-bound backend).
     pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {
-        Self { runner, socket: Some(socket_name_for_workspace(workspace)) }
+        Self { runner, socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))) }
+    }
+
+    pub(crate) fn with_runner_for_tmux_endpoint(runner: Box<dyn CommandRunner>, endpoint: &str) -> Self {
+        if Path::new(endpoint).is_absolute() {
+            Self { runner, socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())) }
+        } else if endpoint.is_empty() || endpoint == "default" {
+            Self { runner, socket: None }
+        } else {
+            Self { runner, socket: None }
+        }
     }
 
     /// THE RUN CHOKEPOINT: every executed `tmux` argv is funneled through here. When a per-team
@@ -197,11 +230,19 @@ impl TmuxBackend {
     /// through unchanged. Non-`tmux` argv (e.g. the spawned provider command) is never rewritten.
     fn tmux_argv(&self, argv: &[String]) -> Vec<String> {
         match &self.socket {
-            Some(socket) if argv.first().map(String::as_str) == Some("tmux") => {
+            Some(endpoint) if argv.first().map(String::as_str) == Some("tmux") => {
                 let mut out = Vec::with_capacity(argv.len() + 2);
                 out.push("tmux".to_string());
-                out.push("-L".to_string());
-                out.push(socket.clone());
+                match endpoint {
+                    TmuxSocketEndpoint::Name(socket) => {
+                        out.push("-L".to_string());
+                        out.push(socket.clone());
+                    }
+                    TmuxSocketEndpoint::Path(socket) => {
+                        out.push("-S".to_string());
+                        out.push(socket.clone());
+                    }
+                }
                 out.extend(argv.iter().skip(1).cloned());
                 out
             }
@@ -235,6 +276,17 @@ pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
     let mut hasher = Fnv1a::default();
     canonical.as_os_str().hash(&mut hasher);
     format!("ta-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
+}
+
+pub(crate) fn socket_name_from_tmux_env() -> Option<String> {
+    let tmux = std::env::var("TMUX")
+        .ok()
+        .filter(|value| !value.is_empty())?;
+    let socket_path = tmux.split(',').next().unwrap_or("").trim();
+    if socket_path.is_empty() || !Path::new(socket_path).is_absolute() {
+        return None;
+    }
+    Some(socket_path.to_string())
 }
 
 /// Deterministic FNV-1a (64-bit) — std `DefaultHasher` is NOT stable across releases, so a fixed

@@ -238,6 +238,8 @@ pub struct LeaderReceiver {
     pub pane_index: Option<String>,
     pub pane_tty: Option<String>,
     pub pane_current_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmux_socket: Option<String>,
     /// `_target_fingerprint(pane_info)`。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,

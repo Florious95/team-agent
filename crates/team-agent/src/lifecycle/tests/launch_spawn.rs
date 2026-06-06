@@ -67,6 +67,58 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
     }
 }
 
+#[test]
+fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
+    let workspace = temp_ws();
+    let team = workspace.join(".team").join("current");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+
+    let transport = OfflineTransport::new();
+    let result = quick_start_with_transport(&team, None, true, true, None, &transport);
+    assert!(matches!(result, Ok(QuickStartReport::Ready { .. })), "quick-start failed: {result:?}");
+
+    let state_path = crate::state::persist::runtime_state_path(&workspace);
+    assert!(state_path.exists(), "quick-start .team/current must persist runtime state under project root");
+    assert!(
+        !workspace.join(".team").join(".team").join("runtime").join("state.json").exists(),
+        "quick-start .team/current must not create nested .team/.team runtime state"
+    );
+
+    for input in [&workspace, &team] {
+        let selected = crate::state::selector::resolve_active_team(
+            input,
+            None,
+            crate::state::selector::SelectorMode::RuntimeOnly,
+        )
+        .expect("status/collect selector should resolve project root");
+        assert_eq!(selected.run_workspace, workspace, "input={}", input.display());
+        assert_eq!(
+            selected.spec_path.as_deref().map(std::fs::canonicalize).transpose().unwrap(),
+            Some(std::fs::canonicalize(team.join("team.spec.yaml")).unwrap()),
+            "input={}",
+            input.display()
+        );
+    }
+
+    let status = crate::cli::cmd_status(&crate::cli::StatusArgs {
+        agent: None,
+        workspace: team.clone(),
+        detail: false,
+        summary: false,
+        json: true,
+    });
+    assert!(status.is_ok(), "status should normalize teamdir to project-root runtime state: {status:?}");
+
+    let collect = crate::cli::cmd_collect(&crate::cli::CollectArgs {
+        result_file: None,
+        workspace: team.clone(),
+        json: true,
+    });
+    assert!(collect.is_ok(), "collect should normalize teamdir to the same project-root state/spec: {collect:?}");
+}
+
 // P0 — quick_start over an INVALID role doc (missing `provider`) must surface the REAL compile
 // error, distinct from the stub's hardcoded "no role docs found". Golden: compile_team raises
 // "missing front matter field provider" (compiler.py:_validate_role_doc), before preflight.

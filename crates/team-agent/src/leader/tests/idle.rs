@@ -197,6 +197,7 @@ use super::*;
             pane_index: Some("2".into()),
             pane_tty: Some("/dev/ttys001".into()),
             pane_current_command: Some("claude".into()),
+            tmux_socket: None,
             fingerprint: Some("fp".into()),
             leader_session_uuid: Some(uuid("fp", "/ws", "u", "default")),
             owner_epoch: Some(OwnerEpoch(3)),

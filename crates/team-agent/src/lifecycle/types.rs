@@ -445,6 +445,24 @@ pub struct PermissionSummary {
     pub raw: serde_json::Value,
 }
 
+/// BUG-7 (0.3.1): quick-start cannot honestly report "ready" before the workers'
+/// MCP tool sets have actually loaded — provider-side schema rejections (codex
+/// invalid_function_parameters etc.) happen AFTER spawn and silently disable the
+/// worker. The report must therefore carry a readiness verdict so the CLI surface
+/// never emits bare "ready" while worker capability is unverified or already known
+/// to be degraded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickStartReadiness {
+    /// At least one agent already failed to materialize a live tmux window (BUG-2
+    /// observable). The team is *not* ready; user must inspect / restart.
+    Degraded { unhealthy_agents: Vec<String> },
+    /// All spawned agents have live windows but their MCP tool set load has NOT
+    /// been verified yet — provider-side schema/auth failures could still leave
+    /// the worker unable to call team_orchestrator tools. CLI must label this
+    /// `pending` / `unverified`, NOT bare `ready`.
+    PendingToolLoad,
+}
+
 /// `quick_start(...)` 报告(`diagnose/quick_start.py:103` typed 版)。`Refused` 区分
 /// existing-context(需 restart 或 --fresh)与 preflight 失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +472,13 @@ pub enum QuickStartReport {
         session_name: SessionName,
         launch: Box<LaunchReport>,
         next_actions: Vec<String>,
+        /// BUG-7: real readiness verdict. `Ready` ⇒ the wrapper completed AND the
+        /// caller already verified tool-set availability; the framework itself
+        /// never emits this without an external observable confirming worker
+        /// tool calls succeeded. quick_start_with_transport always defaults to
+        /// [`QuickStartReadiness::PendingToolLoad`] (or `Degraded` if any agent
+        /// failed to spawn) so the CLI surface cannot lie about availability.
+        worker_readiness: QuickStartReadiness,
     },
     /// 已有 runtime state,非 --fresh → 引导用 restart(`quick_start.py:42`)。
     ExistingRuntime {

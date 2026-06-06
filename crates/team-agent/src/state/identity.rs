@@ -332,6 +332,9 @@ pub fn apply_first_time_leader_binding(
         r.insert("leader_session_uuid".to_string(), id_uuid.clone());
         r.insert("machine_fingerprint".to_string(), id_fp.clone());
         r.insert("owner_epoch".to_string(), json!(0));
+        if let Some(socket) = crate::tmux_backend::socket_name_from_tmux_env() {
+            r.insert("tmux_socket".to_string(), json!(socket));
+        }
     }
     let owner = json!({
         "pane_id": receiver.get("pane_id").cloned().unwrap_or(Value::Null),

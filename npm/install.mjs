@@ -10,6 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+const DOCTOR_TIMEOUT_MS = 5000;
 
 const command = process.argv[2] || "install";
 const args = process.argv.slice(3);
@@ -87,11 +88,20 @@ function install(argv) {
   console.log("skill: installed for Codex and Claude");
   console.log(`PATH: ensure ${binDir} is on PATH`);
 
-  const doctor = spawnSync(teamAgent, ["doctor", "--json"], { text: true, encoding: "utf8" });
-  if (doctor.status === 0) {
-    console.log("doctor: ok");
-  } else {
-    console.log("doctor: has blockers; run `team-agent doctor` after updating PATH");
+  const doctorWorkspace = makeDoctorWorkspace();
+  try {
+    const doctor = spawnSync(teamAgent, ["doctor", "--json", "--workspace", doctorWorkspace], {
+      text: true,
+      encoding: "utf8",
+      timeout: DOCTOR_TIMEOUT_MS,
+    });
+    if (doctor.status === 0) {
+      console.log("doctor: ok");
+    } else {
+      console.log("doctor: has blockers; run `team-agent doctor` after updating PATH");
+    }
+  } finally {
+    fs.rmSync(doctorWorkspace, { recursive: true, force: true });
   }
 }
 
@@ -103,8 +113,16 @@ function runDoctor(argv) {
     console.error(`team-agent wrapper not found: ${teamAgent}`);
     process.exit(1);
   }
-  const proc = spawnSync(teamAgent, ["doctor"], { stdio: "inherit" });
-  process.exit(proc.status ?? 1);
+  const doctorWorkspace = makeDoctorWorkspace();
+  try {
+    const proc = spawnSync(teamAgent, ["doctor", "--workspace", doctorWorkspace], {
+      stdio: "inherit",
+      timeout: DOCTOR_TIMEOUT_MS,
+    });
+    process.exit(proc.status ?? 1);
+  } finally {
+    fs.rmSync(doctorWorkspace, { recursive: true, force: true });
+  }
 }
 
 function uninstall(argv) {
@@ -215,6 +233,10 @@ function skillDestinations() {
     path.join(os.homedir(), ".codex", "skills", "team-agent"),
     path.join(os.homedir(), ".claude", "skills", "team-agent"),
   ];
+}
+
+function makeDoctorWorkspace() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "team-agent-doctor-"));
 }
 
 function copyTree(src, dest) {

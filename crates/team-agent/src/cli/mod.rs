@@ -28,6 +28,7 @@
 // §10:CLI 命令实现层禁 unwrap/expect/panic(unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -137,10 +138,12 @@ pub mod lifecycle_port {
         team: Option<&str>,
         transport: &dyn crate::transport::Transport,
     ) -> Result<Value, CliError> {
-        let wp = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+        let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
         let stopped = crate::coordinator::stop_coordinator(&wp)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut state = crate::state::persist::load_runtime_state(workspace)?;
+        let mut state = crate::state::persist::load_runtime_state(&run_workspace)?;
         let session_name = state
             .get("session_name")
             .and_then(Value::as_str)
@@ -156,8 +159,8 @@ pub mod lifecycle_port {
             false
         };
         mark_agents_stopped(&mut state);
-        crate::state::persist::save_runtime_state(workspace, &state)?;
-        let _event = crate::event_log::EventLog::new(workspace)
+        crate::state::persist::save_runtime_state(&run_workspace, &state)?;
+        let _event = crate::event_log::EventLog::new(&run_workspace)
             .write(
                 "lifecycle.shutdown",
                 json!({
@@ -459,13 +462,46 @@ pub mod lifecycle_port {
                 session_name,
                 launch,
                 next_actions,
-            } => json!({
-                "ok": true,
-                "summary": format!("quick-start ready: {}", session_name.as_str()),
-                "session_name": session_name.as_str(),
-                "dry_run": launch.dry_run,
-                "next_actions": next_actions,
-            }),
+                worker_readiness,
+            } => {
+                // BUG-7: never emit bare "ready" while worker tool-load is unverified.
+                // The summary string + a structured `worker_readiness` block tell the
+                // caller exactly which agents are unhealthy (Degraded) or that the
+                // tool-set load has not been confirmed yet (PendingToolLoad).
+                let (summary, ok, readiness_json) = match &worker_readiness {
+                    crate::lifecycle::QuickStartReadiness::Degraded { unhealthy_agents } => (
+                        format!(
+                            "quick-start degraded: {}; unhealthy: {}",
+                            session_name.as_str(),
+                            unhealthy_agents.join(",")
+                        ),
+                        false,
+                        json!({
+                            "state": "degraded",
+                            "unhealthy_agents": unhealthy_agents,
+                        }),
+                    ),
+                    crate::lifecycle::QuickStartReadiness::PendingToolLoad => (
+                        format!(
+                            "quick-start launched (worker tool load unverified): {}",
+                            session_name.as_str()
+                        ),
+                        true,
+                        json!({
+                            "state": "pending_tool_load",
+                            "reason": "worker MCP tool set load not yet confirmed; run `team-agent doctor` or wait for first worker turn",
+                        }),
+                    ),
+                };
+                json!({
+                    "ok": ok,
+                    "summary": summary,
+                    "session_name": session_name.as_str(),
+                    "dry_run": launch.dry_run,
+                    "next_actions": next_actions,
+                    "worker_readiness": readiness_json,
+                })
+            }
             crate::lifecycle::QuickStartReport::ExistingRuntime {
                 team,
                 session_name,
@@ -595,35 +631,65 @@ pub mod diagnose_port {
 
     fn secret_scan(workspace: &Path) -> Value {
         let mut findings = Vec::new();
-        scan_secret_dir(workspace, workspace, &mut findings);
+        let mut scanned = 0usize;
+        scan_secret_dir(workspace, workspace, 0, &mut scanned, &mut findings);
         json!({
             "ok": findings.is_empty(),
             "findings": findings,
         })
     }
 
-    fn scan_secret_dir(root: &Path, dir: &Path, findings: &mut Vec<Value>) {
+    const SECRET_SCAN_MAX_DEPTH: usize = 4;
+    const SECRET_SCAN_MAX_ENTRIES: usize = 512;
+    const SECRET_SCAN_MAX_FILE_BYTES: u64 = 128 * 1024;
+
+    fn scan_secret_dir(root: &Path, dir: &Path, depth: usize, scanned: &mut usize, findings: &mut Vec<Value>) {
+        if depth > SECRET_SCAN_MAX_DEPTH || *scanned >= SECRET_SCAN_MAX_ENTRIES {
+            return;
+        }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
+            if *scanned >= SECRET_SCAN_MAX_ENTRIES {
+                return;
+            }
+            *scanned = scanned.saturating_add(1);
             let path = entry.path();
             let name = path.file_name().map(|s| s.to_string_lossy());
             if name.as_deref() == Some(".team") || name.as_deref() == Some(".git") {
                 continue;
             }
-            if path.is_dir() {
-                scan_secret_dir(root, &path, findings);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                scan_secret_dir(root, &path, depth.saturating_add(1), scanned, findings);
                 continue;
             }
-            scan_secret_file(root, &path, findings);
+            if file_type.is_file() {
+                scan_secret_file(root, &path, findings);
+            }
         }
     }
 
     fn scan_secret_file(root: &Path, path: &Path, findings: &mut Vec<Value>) {
-        let Ok(text) = std::fs::read_to_string(path) else {
+        let Ok(metadata) = std::fs::metadata(path) else {
             return;
         };
+        if !metadata.is_file() || metadata.len() > SECRET_SCAN_MAX_FILE_BYTES {
+            return;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            return;
+        };
+        let mut text = String::new();
+        if std::io::Read::take(file, SECRET_SCAN_MAX_FILE_BYTES)
+            .read_to_string(&mut text)
+            .is_err()
+        {
+            return;
+        }
         for (idx, line) in text.lines().enumerate() {
             if line.contains("OPENAI_API_KEY=") || line.contains("ANTHROPIC_API_KEY=") {
                 let rel = path.strip_prefix(root).unwrap_or(path);

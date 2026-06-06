@@ -68,6 +68,34 @@
         assert_eq!(send["inputSchema"]["required"], json!(["to", "content"]));
     }
 
+    #[test]
+    fn tools_contract_input_schemas_are_openai_strict_top_level_objects() {
+        let forbidden = ["oneOf", "anyOf", "allOf", "enum", "not"];
+        for tool in tools_contract() {
+            let schema = tool["inputSchema"].as_object().unwrap();
+            assert_eq!(schema.get("type"), Some(&json!("object")), "schema must be a top-level object: {tool}");
+            for key in forbidden {
+                assert!(
+                    !schema.contains_key(key),
+                    "OpenAI rejects top-level `{key}` in MCP tool schema: {tool}"
+                );
+            }
+            let properties = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("schema properties must be an object: {tool}"));
+            for required in schema.get("required").and_then(Value::as_array).into_iter().flatten() {
+                let Some(name) = required.as_str() else {
+                    panic!("required entries must be strings: {tool}");
+                };
+                assert!(
+                    properties.contains_key(name),
+                    "required property `{name}` must be declared in properties: {tool}"
+                );
+            }
+        }
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // handle_mcp — JSON-RPC routing (server.py:46-91)
     // ════════════════════════════════════════════════════════════════════════

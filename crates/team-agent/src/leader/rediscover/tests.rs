@@ -31,6 +31,7 @@ fn receiver(pane: &str, uuid: &str, epoch: u64) -> LeaderReceiver {
         pane_index: None,
         pane_tty: None,
         pane_current_command: None,
+        tmux_socket: None,
         fingerprint: None,
         leader_session_uuid: serde_json::from_value(Value::String(uuid.to_string())).ok(),
         owner_epoch: Some(OwnerEpoch(epoch)),

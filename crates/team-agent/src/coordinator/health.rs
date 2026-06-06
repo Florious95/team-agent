@@ -3,6 +3,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -119,6 +120,9 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
 pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopError> {
     let pid_path = coordinator_pid_path(workspace);
     if !pid_path.exists() {
+        if let Some(report) = stop_discovered_coordinators(workspace)? {
+            return Ok(report);
+        }
         return Ok(StopReport {
             ok: true,
             status: StopOutcome::Missing,
@@ -156,6 +160,123 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
         status: StopOutcome::Stopped,
         pid: Some(pid),
     })
+}
+
+fn stop_discovered_coordinators(
+    workspace: &WorkspacePath,
+) -> Result<Option<StopReport>, StopError> {
+    let pids = discover_coordinator_pids(workspace);
+    if pids.is_empty() {
+        return Ok(None);
+    }
+
+    let mut stopped = None;
+    let mut failed = None;
+    for pid in pids {
+        if terminate_pid(pid) {
+            stopped.get_or_insert(pid);
+        } else {
+            failed.get_or_insert(pid);
+        }
+    }
+    remove_file_if_exists(&coordinator_meta_path(workspace))?;
+
+    if let Some(pid) = stopped {
+        Ok(Some(StopReport {
+            ok: true,
+            status: StopOutcome::Stopped,
+            pid: Some(pid),
+        }))
+    } else {
+        Ok(Some(StopReport {
+            ok: false,
+            status: StopOutcome::KillFailed,
+            pid: failed,
+        }))
+    }
+}
+
+fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
+    let output = match Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let candidates = workspace_match_candidates(workspace.as_path());
+    text.lines()
+        .filter_map(|line| parse_ps_command_line(line))
+        .filter(|(pid, command)| {
+            *pid != std::process::id()
+                && coordinator_command_matches_workspace(command, &candidates)
+        })
+        .map(|(pid, _)| Pid::new(pid))
+        .collect()
+}
+
+fn parse_ps_command_line(line: &str) -> Option<(u32, &str)> {
+    let line = line.trim_start();
+    let split = line
+        .find(char::is_whitespace)
+        .unwrap_or(line.len());
+    let pid = line.get(..split)?.trim().parse::<u32>().ok()?;
+    let command = line.get(split..)?.trim();
+    Some((pid, command))
+}
+
+fn workspace_match_candidates(workspace: &Path) -> Vec<String> {
+    let mut candidates = vec![workspace.to_string_lossy().to_string()];
+    if let Ok(canonical) = workspace.canonicalize() {
+        let text = canonical.to_string_lossy().to_string();
+        if !candidates.iter().any(|candidate| candidate == &text) {
+            candidates.push(text);
+        }
+    }
+    candidates
+}
+
+fn coordinator_command_matches_workspace(command: &str, workspaces: &[String]) -> bool {
+    command
+        .split_whitespace()
+        .any(|token| token == "team-agent" || token.ends_with("/team-agent"))
+        && command.split_whitespace().any(|token| token == "coordinator")
+        && command.contains("--workspace")
+        && workspaces.iter().any(|workspace| command.contains(workspace))
+}
+
+fn terminate_pid(pid: Pid) -> bool {
+    if pid_is_running(pid).ok() == Some(false) {
+        return true;
+    }
+    if !send_signal(pid, libc::SIGTERM) {
+        return false;
+    }
+    if wait_until_not_running(pid, Duration::from_millis(750)) {
+        return true;
+    }
+    send_signal(pid, libc::SIGKILL) && wait_until_not_running(pid, Duration::from_millis(750))
+}
+
+fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
+    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
+        return false;
+    };
+    unsafe { libc::kill(pid_t, signal) == 0 }
+}
+
+fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if pid_is_running(pid).ok() != Some(true) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 // ===========================================================================
