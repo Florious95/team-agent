@@ -192,8 +192,10 @@ jobs:
           package-manager-cache: false
 
       - name: Publish platform package
-        run: npm publish --access public --provenance
+        run: npm publish --access public
         working-directory: dist/${{ matrix.package_dir }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-main:
     name: Publish @team-agent/installer
@@ -213,4 +215,6 @@ jobs:
           package-manager-cache: false
 
       - name: Publish main package
-        run: npm publish --access public --provenance
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
