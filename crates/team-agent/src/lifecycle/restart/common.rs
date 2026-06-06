@@ -8,6 +8,7 @@ pub(super) fn spawn_agent_window(
     resume_session_id: Option<&SessionId>,
     into_existing_session: bool,
     transport: &dyn crate::transport::Transport,
+    safety: Option<&DangerousApproval>,
 ) -> Result<crate::transport::SpawnResult, LifecycleError> {
     let provider = agent_provider(agent);
     let auth_mode = agent_auth_mode(agent);
@@ -22,8 +23,14 @@ pub(super) fn spawn_agent_window(
     // a restarted worker must come back up with the SAME callable MCP capability + role
     // prompt as a fresh launch, else `report_result` becomes unreachable after every restart.
     let role = agent.get("role").and_then(|v| v.as_str());
-    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
-    let tools = crate::lifecycle::launch::worker_tool_refs(agent_tool_strings(agent), &safety);
+    let detected_safety;
+    let safety = if let Some(safety) = safety {
+        safety
+    } else {
+        detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
+        &detected_safety
+    };
+    let tools = crate::lifecycle::launch::worker_tool_refs(agent_tool_strings(agent), safety);
     let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     let mcp_config = adapter
         .mcp_config(auth_mode)

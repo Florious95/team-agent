@@ -133,6 +133,7 @@ pub(crate) fn start_agent_at_paths(
         spawn_session_id,
         into_existing_session,
         transport,
+        None,
     )?;
     write_start_agent_start_event(
         workspace,

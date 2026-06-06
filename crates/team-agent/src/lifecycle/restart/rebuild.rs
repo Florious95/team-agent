@@ -49,6 +49,12 @@ pub fn restart_with_transport(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     let state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
+    let spec_workspace = selected
+        .spec_workspace
+        .as_ref()
+        .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
+    let spec = load_team_spec(spec_workspace)?;
+    let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
     let plan = classify_restart_plan(&state, allow_fresh)?;
     write_restart_resume_decision_events(&selected.run_workspace, &state, allow_fresh, &plan.decisions)?;
     if !plan.corrupt_entries.is_empty() {
@@ -94,6 +100,7 @@ pub fn restart_with_transport(
             session_id,
             idx > 0,
             transport,
+            Some(&safety),
         )?;
     }
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
