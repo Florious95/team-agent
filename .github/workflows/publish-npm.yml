@@ -195,7 +195,7 @@ jobs:
         run: npm publish --access public
         working-directory: dist/${{ matrix.package_dir }}
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.PUBLISH }}
 
   publish-main:
     name: Publish @team-agent/installer
@@ -217,4 +217,4 @@ jobs:
       - name: Publish main package
         run: npm publish --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.PUBLISH }}
