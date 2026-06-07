@@ -31,6 +31,12 @@ pub fn restart_with_transport(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<RestartReport, LifecycleError> {
+    if crate::lifecycle::restart::input_has_no_local_team_context(workspace) {
+        return Err(LifecycleError::TeamSelect(format!(
+            "missing spec for restart: {}",
+            workspace.join("team.spec.yaml").display()
+        )));
+    }
     let run_candidate = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     if !workspace.join("team.spec.yaml").exists()
@@ -47,7 +53,7 @@ pub fn restart_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    let state = selected.state;
+    let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
     let spec_workspace = selected
         .spec_workspace
@@ -55,6 +61,10 @@ pub fn restart_with_transport(
         .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
     let spec = load_team_spec(spec_workspace)?;
     let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
+    if refresh_missing_provider_sessions(&mut state)? {
+        crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    }
     let plan = classify_restart_plan(&state, allow_fresh)?;
     write_restart_resume_decision_events(&selected.run_workspace, &state, allow_fresh, &plan.decisions)?;
     if !plan.corrupt_entries.is_empty() {
@@ -117,7 +127,6 @@ fn write_restart_resume_decision_events(
     allow_fresh: bool,
     decisions: &[RestartedAgent],
 ) -> Result<(), LifecycleError> {
-    let log = crate::event_log::EventLog::new(workspace);
     for decision in decisions {
         let agent = state
             .get("agents")
@@ -134,21 +143,54 @@ fn write_restart_resume_decision_events(
             ResumeDecision::FreshStart => "fresh_start",
             ResumeDecision::Refuse => "refuse",
         };
-        log.write(
-            crate::lifecycle::types::event_names::RESTART_RESUME_DECISION,
-            serde_json::json!({
-                "worker_id": decision.agent_id.as_str(),
-                "has_first_send_at": first_send_at.is_some(),
-                "has_session_id": session_id.is_some(),
-                "allow_fresh": allow_fresh,
-                "decision": decision_wire,
-                "first_send_at": first_send_at,
-                "session_id": session_id,
-            }),
-        )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        write_restart_resume_decision_event(
+            workspace,
+            decision.agent_id.as_str(),
+            first_send_at,
+            session_id,
+            allow_fresh,
+            decision_wire,
+        )?;
     }
     Ok(())
+}
+
+fn write_restart_resume_decision_event(
+    workspace: &Path,
+    worker_id: &str,
+    first_send_at: Option<String>,
+    session_id: Option<String>,
+    allow_fresh: bool,
+    decision: &str,
+) -> Result<(), LifecycleError> {
+    use std::io::Write as _;
+
+    let path = workspace.join(".team").join("logs").join("events.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    }
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "event": crate::lifecycle::types::event_names::RESTART_RESUME_DECISION,
+        "worker_id": worker_id,
+        "has_first_send_at": first_send_at.is_some(),
+        "has_session_id": session_id.is_some(),
+        "allow_fresh": allow_fresh,
+        "decision": decision,
+        "first_send_at": first_send_at,
+        "session_id": session_id,
+    });
+    let line = serde_json::to_string(&event)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 /// `restart_candidates(workspace)`(`restart/selection.py:12`)。从 snapshot + active

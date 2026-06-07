@@ -86,7 +86,7 @@ pub use leader_receiver::{
     claim_leader_receiver, mirror_peer_message_to_leader, send_to_leader_receiver,
 };
 pub use peers::allow_peer_talk;
-pub use results::{collect, collect_results_and_notify_watchers, report_result};
+pub use results::{collect, collect_for_team, collect_results_and_notify_watchers, report_result};
 pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
 pub use selftest::{evaluate_idle_behavior, run_comms_selftest, CommsSelftestDriver};
 pub use send::{apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions};

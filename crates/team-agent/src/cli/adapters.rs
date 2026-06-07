@@ -85,7 +85,7 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
     let value = lifecycle_port::quick_start(
-        &args.agents_dir,
+        &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
         args.team_id.as_deref(),
@@ -123,6 +123,10 @@ pub fn cmd_compile(args: &CompileArgs) -> Result<CmdResult, CliError> {
 /// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;
 /// `--json`→`status_port::status(compact=!detail)`;else→`status_port::format_status(agent)`。
 pub fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
+    cmd_status_for_team(args, None)
+}
+
+pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdResult, CliError> {
     if args.summary && args.json {
         return Err(CliError::Runtime(
             "--summary and --json are mutually exclusive".to_string(),
@@ -135,7 +139,7 @@ pub fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
     }
     let selected = match crate::state::selector::resolve_active_team(
         &args.workspace,
-        None,
+        team,
         crate::state::selector::SelectorMode::RuntimeOnly,
     ) {
         Ok(selected) => selected,
@@ -147,15 +151,29 @@ pub fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
         }
     };
     if args.summary {
-        let value = status_port::status(&selected.run_workspace, true, false)?;
+        let value = status_port::status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            true,
+            false,
+        )?;
         return Ok(CmdResult::human(format_status_summary(&value)));
     }
     if args.json {
-        let value = status_port::status(&selected.run_workspace, status_compact_flag(args.detail), args.detail)?;
+        let value = status_port::status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            status_compact_flag(args.detail),
+            args.detail,
+        )?;
         return Ok(CmdResult::from_json(value, true));
     }
-    Ok(CmdResult::human(status_port::format_status(
+    Ok(CmdResult::human(status_port::format_status_scoped(
         &selected.run_workspace,
+        &selected.state,
+        Some(&selected.team_key),
         args.agent.as_deref(),
     )?))
 }
@@ -252,9 +270,13 @@ pub fn cmd_validate_result(args: &ValidateResultArgs) -> Result<CmdResult, CliEr
 
 /// `cmd_collect`(`parser.py:292`)。
 pub fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
+    cmd_collect_for_team(args, None)
+}
+
+pub fn cmd_collect_for_team(args: &CollectArgs, team: Option<&str>) -> Result<CmdResult, CliError> {
     let selected = match crate::state::selector::resolve_active_team(
         &args.workspace,
-        None,
+        team,
         crate::state::selector::SelectorMode::RuntimeOnly,
     ) {
         Ok(selected) => selected,
@@ -269,7 +291,16 @@ pub fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
             ));
         }
     };
-    let value = match messaging::collect(&selected.run_workspace, args.result_file.as_deref(), false) {
+    let value = match if team.is_some() {
+        messaging::collect_for_team(
+            &selected.run_workspace,
+            args.result_file.as_deref(),
+            false,
+            Some(&selected.team_key),
+        )
+    } else {
+        messaging::collect(&selected.run_workspace, args.result_file.as_deref(), false)
+    } {
         Ok(value) => value,
         Err(error) => {
             return Ok(CmdResult::from_json(

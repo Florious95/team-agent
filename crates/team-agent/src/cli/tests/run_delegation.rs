@@ -152,6 +152,7 @@ fn current_uid() -> Option<String> {
         let ws = crate::model::paths::team_workspace(&team).unwrap();
         let _guard = TeamSocketGuard { ws };
         let args = QuickStartArgs {
+            workspace: crate::model::paths::team_workspace(&team).unwrap(),
             agents_dir: team.clone(),
             name: None,
             team_id: None,
@@ -177,6 +178,7 @@ fn current_uid() -> Option<String> {
         std::fs::write(team.join("TEAM.md"), DELEG_TEAM_MD).unwrap();
         std::fs::write(team.join("agents").join("broken.md"), DELEG_INVALID_ROLE).unwrap();
         let args = QuickStartArgs {
+            workspace: crate::model::paths::team_workspace(&team).unwrap(),
             agents_dir: team,
             name: None,
             team_id: None,

@@ -33,6 +33,7 @@ mod team_state;
 
 pub use agent::{reset_agent, reset_agent_with_transport, start_agent, start_agent_with_transport, stop_agent, stop_agent_with_transport};
 pub(crate) use agent::start_agent_at_paths;
+pub(crate) use common::refresh_missing_provider_sessions;
 pub use orchestrator::{halt_plan, plan_status};
 pub use rebuild::{restart, restart_candidates, restart_with_transport, select_restart_state};
 pub use remove::{remove_agent, remove_agent_with_transport};
@@ -45,6 +46,13 @@ pub(crate) fn lifecycle_run_workspace(workspace: &Path) -> Result<std::path::Pat
 }
 
 fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePaths, LifecycleError> {
+    if input_has_no_local_team_context(workspace) {
+        return Err(LifecycleError::TeamSelect(format!(
+            "active team spec not found: input_workspace={} expected_spec_path={}",
+            workspace.display(),
+            workspace.join("team.spec.yaml").display()
+        )));
+    }
     let selected = crate::state::selector::resolve_active_team(
         workspace,
         team,
@@ -58,6 +66,18 @@ fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePath
         run_workspace: selected.run_workspace,
         spec_workspace,
     })
+}
+
+pub(crate) fn input_has_no_local_team_context(workspace: &Path) -> bool {
+    !workspace.join("team.spec.yaml").exists()
+        && !workspace.join(".team").exists()
+        && !crate::state::persist::runtime_state_path(workspace).exists()
+        && workspace.file_name().and_then(|s| s.to_str()) != Some(".team")
+        && workspace
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            != Some(".team")
 }
 
 fn selected_state_spec_workspace(state: &serde_json::Value) -> Option<std::path::PathBuf> {

@@ -79,7 +79,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "compile" => cmd_compile(&compile_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
         "allow-peer-talk" => cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result),
-        "status" => cmd_status(&status_args(args, cwd)).map(emit_result),
+        "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref()).map(emit_result),
         "stop" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
         "restart" => cmd_restart(&restart_args(args, cwd)).map(emit_result),
@@ -108,7 +108,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
             Ok(ExitCode::Usage)
         }
         "validate-result" => cmd_validate_result(&validate_result_args(args)?).map(emit_result),
-        "collect" => cmd_collect(&collect_args(args, cwd)).map(emit_result),
+        "collect" => cmd_collect_for_team(&collect_args(args, cwd), parse_args(args).team.as_deref()).map(emit_result),
         "settle" => cmd_settle(&settle_args(args, cwd)).map(emit_result),
         "repair-state" => cmd_repair_state(&repair_state_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
@@ -195,7 +195,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--summary|--json] [--detail]".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]".to_string(),
         Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--json]".to_string(),
@@ -222,7 +222,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
         Some("validate-result") => "usage: team-agent validate-result [ENVELOPE] [--file FILE|--result JSON] [--json]".to_string(),
-        Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--result-file FILE] [--json]".to_string(),
+        Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
         Some("settle") => "usage: team-agent settle [--workspace WORKSPACE] [--json]".to_string(),
         Some("repair-state") => "usage: team-agent repair-state --task TASK --status STATUS [SUMMARY] [--assignee AGENT] [--workspace WORKSPACE] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--json]".to_string(),
@@ -565,6 +565,7 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         workspace.join(agents_dir)
     };
     Ok(QuickStartArgs {
+        workspace,
         agents_dir,
         name: parsed.name,
         team_id: parsed.team_id.or(parsed.team),
@@ -1161,7 +1162,7 @@ mod tests {
         for (command, flags) in [
             ("quick-start", &["--workspace", "--team-id", "--yes", "--fresh", "--json"][..]),
             ("send", &["--workspace", "--team", "--targets", "--watch-result", "--timeout", "--json"][..]),
-            ("status", &["--workspace", "--summary", "--json", "--detail"][..]),
+            ("status", &["--workspace", "--team", "--summary", "--json", "--detail"][..]),
             ("shutdown", &["--workspace", "--team", "--keep-logs", "--json"][..]),
             ("restart", &["--team", "--allow-fresh", "--json"][..]),
             ("start-agent", &["--workspace", "--team", "--force", "--allow-fresh", "--no-display", "--json"][..]),
@@ -1170,7 +1171,7 @@ mod tests {
             ("fork-agent", &["--as", "--label", "--workspace", "--team", "--no-display", "--json"][..]),
             ("remove-agent", &["--workspace", "--team", "--from-spec", "--confirm", "--force", "--json"][..]),
             ("doctor", &["--workspace", "--team", "--gate", "--fix-schema", "--cleanup-orphans", "--json"][..]),
-            ("collect", &["--workspace", "--result-file", "--json"][..]),
+            ("collect", &["--workspace", "--team", "--result-file", "--json"][..]),
             ("repair-state", &["--task", "--status", "--assignee", "--workspace", "--json"][..]),
             ("wait-ready", &["--workspace", "--timeout", "--json"][..]),
             ("peek", &["--workspace", "--tail", "--allow-raw-screen", "--json"][..]),

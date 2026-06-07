@@ -45,6 +45,26 @@ pub fn launch_with_transport(
     skip_profile_smoke: bool,
     transport: &dyn Transport,
 ) -> Result<LaunchReport, LifecycleError> {
+    let team_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    let workspace = team_workspace(team_dir);
+    launch_with_transport_in_workspace(
+        &workspace,
+        spec_path,
+        dry_run,
+        auto_approve,
+        skip_profile_smoke,
+        transport,
+    )
+}
+
+pub fn launch_with_transport_in_workspace(
+    workspace: &Path,
+    spec_path: &Path,
+    dry_run: bool,
+    auto_approve: bool,
+    skip_profile_smoke: bool,
+    transport: &dyn Transport,
+) -> Result<LaunchReport, LifecycleError> {
     let _ = skip_profile_smoke;
     if !spec_path.exists() {
         return Err(LifecycleError::Compile(format!(
@@ -76,13 +96,13 @@ pub fn launch_with_transport(
             raw: serde_json::json!({"source": "compiled_spec"}),
         })
         .collect::<Vec<_>>();
-    write_launch_permission_audit(&team_workspace(spec_path.parent().unwrap_or_else(|| Path::new("."))), &safety)?;
+    write_launch_permission_audit(workspace, &safety)?;
     let routes = spec_routes(&spec);
     let started = if dry_run {
         Vec::new()
     } else {
-        let started = spawn_agents(spec_path, &spec, &session_name, &safety, transport)?;
-        persist_spawn_agent_state(spec_path, &spec, &session_name, transport, &started)?;
+        let started = spawn_agents(workspace, spec_path, &spec, &session_name, &safety, transport)?;
+        persist_spawn_agent_state(workspace, spec_path, &spec, &session_name, transport, &started)?;
         started
     };
     Ok(LaunchReport {
@@ -97,6 +117,7 @@ pub fn launch_with_transport(
 }
 
 fn spawn_agents(
+    workspace: &Path,
     spec_path: &Path,
     spec: &Value,
     session_name: &SessionName,
@@ -104,7 +125,6 @@ fn spawn_agents(
     transport: &dyn Transport,
 ) -> Result<Vec<StartedAgent>, LifecycleError> {
     let team_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let workspace = team_workspace(team_dir);
     let mut started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
@@ -135,13 +155,12 @@ fn spawn_agents(
         let tools = worker_tool_refs(agent_tool_strings(agent), safety);
         let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
         let mcp_team_id =
-            runtime_active_team_key_for_spawn(&workspace, spec_path, spec, session_name);
-        let process_team_id = process_team_id_for_spawn(&workspace, spec);
+            runtime_active_team_key_for_spawn(workspace, spec_path, spec, session_name);
         let mcp_config = adapter
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-        let mcp_config = resolve_mcp_config(mcp_config, &workspace, agent_id_raw, &mcp_team_id);
-        let mcp_config_path = write_worker_mcp_config(&workspace, agent_id_raw, &mcp_config)?;
+        let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
+        let mcp_config_path = write_worker_mcp_config(workspace, agent_id_raw, &mcp_config)?;
         let mut argv = adapter
             .build_command_with_tools(
                 auth_mode,
@@ -154,15 +173,15 @@ fn spawn_agents(
         point_native_mcp_config_at_file(&mut argv, provider, &mcp_config_path);
         fill_spawn_placeholders_full(
             &mut argv,
-            &workspace,
+            workspace,
             agent_id_raw,
-            process_team_id.as_deref(),
+            Some(&mcp_team_id),
         );
         let window = WindowName::new(agent_id_raw);
         let env = inherited_env_with_team_overrides(
-            &workspace,
+            workspace,
             agent_id_raw,
-            process_team_id.as_deref(),
+            Some(&mcp_team_id),
         );
         let spawn = if started.is_empty() {
             transport.spawn_first(session_name, &window, &argv, team_dir, &env)
@@ -194,15 +213,14 @@ fn spawn_agents(
 }
 
 fn persist_spawn_agent_state(
+    workspace: &Path,
     spec_path: &Path,
     spec: &Value,
     session_name: &SessionName,
     transport: &dyn Transport,
     started: &[StartedAgent],
 ) -> Result<(), LifecycleError> {
-    let team_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let workspace = team_workspace(team_dir);
-    let state_path = crate::state::persist::runtime_state_path(&workspace);
+    let state_path = crate::state::persist::runtime_state_path(workspace);
     let mut state = if state_path.exists() {
         let text = std::fs::read_to_string(&state_path)
             .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", state_path.display())))?;
@@ -213,7 +231,7 @@ fn persist_spawn_agent_state(
     };
     let team_id = explicit_active_team_key(&state)
         .unwrap_or_else(|| runtime_team_key_for_spec(spec_path, spec, session_name));
-    let worker_tmux_socket = launched_worker_tmux_socket(transport, &workspace);
+    let worker_tmux_socket = launched_worker_tmux_socket(transport, workspace);
     drop_worker_pane_seeded_owner(
         &mut state,
         &team_id,
@@ -231,6 +249,7 @@ fn persist_spawn_agent_state(
         .iter()
         .map(|agent| agent.agent_id.as_str().to_string())
         .collect();
+    let pane_pids_by_agent = pane_pids_by_started_agent(transport, started);
     let mut agents = serde_json::Map::new();
     let spawned_at = spawn_timestamp();
     for agent in spec_agent_values(spec) {
@@ -265,9 +284,10 @@ fn persist_spawn_agent_state(
             agents.insert(id.to_string(), serde_json::Value::Object(failed));
             continue;
         }
+        let pane_pid = pane_pids_by_agent.get(id).copied();
         agents.insert(
             id.to_string(),
-            running_agent_state(agent, id, provider, &workspace, &spawned_at, &team_id)?,
+            running_agent_state(agent, id, provider, workspace, &spawned_at, &team_id, pane_pid)?,
         );
     }
     if let Some(obj) = state.as_object_mut() {
@@ -277,19 +297,106 @@ fn persist_spawn_agent_state(
         obj.insert("agents".to_string(), serde_json::Value::Object(agents));
         state = serde_json::Value::Object(obj);
     }
-    save_launched_team_state(&workspace, &state)
+    save_launched_team_state_for_key(workspace, &state, Some(&team_id))
+}
+
+fn pane_pids_by_started_agent(
+    transport: &dyn Transport,
+    started: &[StartedAgent],
+) -> BTreeMap<String, u32> {
+    let panes = transport.list_targets().unwrap_or_default();
+    started
+        .iter()
+        .filter_map(|agent| {
+            panes
+                .iter()
+                .find(|pane| pane.pane_id.as_str() == agent.target)
+                .and_then(|pane| pane.pane_pid)
+                .map(|pid| (agent.agent_id.as_str().to_string(), pid))
+        })
+        .collect()
 }
 
 fn save_launched_team_state(workspace: &Path, launched: &serde_json::Value) -> Result<(), LifecycleError> {
+    save_launched_team_state_for_key(workspace, launched, None)
+}
+
+fn save_launched_team_state_for_key(
+    workspace: &Path,
+    launched: &serde_json::Value,
+    team_key: Option<&str>,
+) -> Result<(), LifecycleError> {
     let existing = load_runtime_state(workspace).unwrap_or_else(|_| serde_json::json!({}));
-    let launched_key = crate::state::projection::team_state_key(launched);
+    let launched_key = team_key
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::state::projection::team_state_key(launched));
     let mut launched = launched.clone();
+    if let Some(obj) = launched.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::Value::String(launched_key.clone()),
+        );
+    }
     promote_launched_binding_from_team_entry(&mut launched, &launched_key);
     drop_foreign_seeded_owner(&existing, &launched_key, &mut launched);
-    let merged = crate::state::projection::merge_workspace_team_state(&existing, &launched);
+    let merged = if team_key.is_some() {
+        merge_workspace_team_state_with_key(&existing, &launched, &launched_key)
+    } else {
+        crate::state::projection::merge_workspace_team_state(&existing, &launched)
+    };
     let mut projected = crate::state::projection::project_top_level_view(&merged, &launched_key);
     drop_unbound_top_level_owner(&mut projected);
     save_runtime_state(workspace, &projected).map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn merge_workspace_team_state_with_key(
+    existing: &serde_json::Value,
+    launched: &serde_json::Value,
+    launched_key: &str,
+) -> serde_json::Value {
+    let mut launched_obj = launched.as_object().cloned().unwrap_or_default();
+    let mut teams = launched
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let launched_entry = crate::state::projection::compact_team_state(launched);
+    if !existing
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|session| !session.is_empty())
+    {
+        teams.insert(launched_key.to_string(), launched_entry);
+        launched_obj.insert("teams".to_string(), serde_json::Value::Object(teams));
+        return serde_json::Value::Object(launched_obj);
+    }
+
+    let existing_key = explicit_active_team_key(existing)
+        .unwrap_or_else(|| crate::state::projection::team_state_key(existing));
+    if existing_key == launched_key {
+        let mut teams = existing
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        teams.insert(launched_key.to_string(), launched_entry);
+        launched_obj.insert("teams".to_string(), serde_json::Value::Object(teams));
+        return serde_json::Value::Object(launched_obj);
+    }
+
+    let mut merged = existing.as_object().cloned().unwrap_or_default();
+    let mut teams = merged
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    teams
+        .entry(existing_key)
+        .or_insert_with(|| crate::state::projection::compact_team_state(existing));
+    teams.insert(launched_key.to_string(), launched_entry);
+    merged.insert("teams".to_string(), serde_json::Value::Object(teams));
+    serde_json::Value::Object(merged)
 }
 
 fn promote_launched_binding_from_team_entry(launched: &mut serde_json::Value, launched_key: &str) {
@@ -448,6 +555,7 @@ fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &
         "status": "attached",
         "provider": provider,
         "pane_id": "__team_agent_unbound__",
+        "pane": "__team_agent_unbound__",
         "leader_session_uuid": uuid.as_str(),
         "owner_epoch": owner_epoch,
         "discovery": "quick_start",
@@ -482,6 +590,7 @@ fn running_agent_state(
     workspace: &Path,
     spawned_at: &str,
     team_id: &str,
+    pane_pid: Option<u32>,
 ) -> Result<serde_json::Value, LifecycleError> {
     let model = agent.get("model").and_then(Value::as_str);
     let auth_mode = agent
@@ -523,6 +632,9 @@ fn running_agent_state(
         serde_json::json!(workspace.to_string_lossy().to_string()),
     );
     state.insert("spawned_at".to_string(), serde_json::json!(spawned_at));
+    if let Some(pane_pid) = pane_pid {
+        state.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+    }
     Ok(serde_json::Value::Object(state))
 }
 
@@ -769,13 +881,6 @@ fn runtime_active_team_key_for_spawn(
         .unwrap_or_else(|| runtime_team_key_for_spec(spec_path, spec, session_name))
 }
 
-fn process_team_id_for_spawn(workspace: &Path, spec: &Value) -> Option<String> {
-    load_runtime_state(workspace)
-        .ok()
-        .and_then(|state| explicit_active_team_key(&state))
-        .or_else(|| spec_team_id(spec))
-}
-
 fn explicit_active_team_key(state: &serde_json::Value) -> Option<String> {
     state
         .get("active_team_key")
@@ -824,6 +929,43 @@ fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     }
 }
 
+fn quick_start_requested_team_key<'a>(team_id: Option<&'a str>, name: Option<&'a str>) -> Option<&'a str> {
+    team_id.or(name).filter(|team| !team.is_empty())
+}
+
+fn runtime_state_has_quick_start_team(state: &serde_json::Value, team: &str) -> bool {
+    explicit_active_team_key(state).as_deref() == Some(team)
+        || state
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|teams| {
+                teams.contains_key(team)
+                    || teams
+                        .values()
+                        .any(|entry| json_team_identity_matches(entry, team))
+            })
+        || crate::state::projection::team_state_key(state) == team
+        || json_team_identity_matches(state, team)
+        || state
+            .get("session_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|session| {
+                session == team || session.strip_prefix("team-") == Some(team)
+            })
+}
+
+fn json_team_identity_matches(state: &serde_json::Value, team: &str) -> bool {
+    state
+        .get("team")
+        .and_then(|value| value.get("id").or_else(|| value.get("name")))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value == team)
+        || state
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value == team)
+}
+
 /// `quick_start(agents_dir, name, yes, fresh, team_id)`(`diagnose/quick_start.py:18`)。
 /// 面向用户的零配置入口:编译 team_dir → `launch` → autobind leader receiver → 起
 /// coordinator → `wait_ready` 轮询就绪。归入 lifecycle module(不与 diagnose 混)。
@@ -834,14 +976,29 @@ pub fn quick_start(
     fresh: bool,
     team_id: Option<&str>,
 ) -> Result<QuickStartReport, LifecycleError> {
-    quick_start_with_transport(
+    let workspace = team_workspace(agents_dir);
+    quick_start_in_workspace(&workspace, agents_dir, name, yes, fresh, team_id)
+}
+
+pub fn quick_start_in_workspace(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    fresh: bool,
+    team_id: Option<&str>,
+) -> Result<QuickStartReport, LifecycleError> {
+    let workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    quick_start_with_transport_in_workspace(
+        &workspace,
         agents_dir,
         name,
         yes,
         fresh,
         team_id,
-        // CP-1: per-team socket bound to the run workspace (team_workspace(agents_dir)).
-        &crate::tmux_backend::TmuxBackend::for_workspace(&team_workspace(agents_dir)),
+        // CP-1: per-team socket bound to the selected run workspace.
+        &crate::tmux_backend::TmuxBackend::for_workspace(&workspace),
     )
 }
 
@@ -855,40 +1012,62 @@ pub fn quick_start_with_transport(
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
+    let workspace = team_workspace(agents_dir);
+    quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, fresh, team_id, transport)
+}
+
+pub fn quick_start_with_transport_in_workspace(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    fresh: bool,
+    team_id: Option<&str>,
+    transport: &dyn Transport,
+) -> Result<QuickStartReport, LifecycleError> {
     if !agents_dir.exists() {
         return Err(LifecycleError::Compile(format!(
             "agents dir not found: {}",
             agents_dir.display()
         )));
     }
-    let workspace = team_workspace(agents_dir);
+    let workspace = workspace.to_path_buf();
+    let mut spec = crate::compiler::compile_team(agents_dir)
+        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    let requested_team = quick_start_requested_team_key(team_id, name)
+        .map(str::to_string)
+        .or_else(|| spec_team_id(&spec));
+    let explicit_team_key = quick_start_requested_team_key(team_id, name).map(str::to_string);
     if !fresh {
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         if state_path.exists() {
             let state = crate::state::persist::load_runtime_state(&workspace)
                 .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-            return Ok(QuickStartReport::ExistingRuntime {
-                team: team_id.map(str::to_string),
-                session_name: state
-                    .get("session_name")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(SessionName::new),
-                state_path: Some(state_path),
-                next_actions: vec![
-                    "run restart to resume the existing team or pass --fresh to replace it".to_string(),
-                ],
-            });
+            if requested_team
+                .as_deref()
+                .is_none_or(|team| runtime_state_has_quick_start_team(&state, team))
+            {
+                return Ok(QuickStartReport::ExistingRuntime {
+                    team: requested_team.clone(),
+                    session_name: state
+                        .get("session_name")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(SessionName::new),
+                    state_path: Some(state_path),
+                    next_actions: vec![
+                        "run restart to resume the existing team or pass --fresh to replace it".to_string(),
+                    ],
+                });
+            }
         }
     }
-    let mut spec = crate::compiler::compile_team(agents_dir)
-        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     // CR-040/042: repeated quick-start from one template with distinct --team-id/--name
     // must NOT collide on the template-derived tmux session. Override the compiled
     // spec's runtime.session_name with one derived from the REQUESTED team identity
     // so launch_with_transport (which reads runtime.session_name) spawns into an
     // isolated session per requested team.
-    if let Some(requested) = team_id.or(name).filter(|s| !s.is_empty()) {
+    if let Some(requested) = requested_team.as_deref() {
         override_spec_session_name(&mut spec, &format!("team-{requested}"));
     }
     let spec_path = agents_dir.join("team.spec.yaml");
@@ -900,11 +1079,13 @@ pub fn quick_start_with_transport(
     let session_name = spec_session_name(&spec);
     let resolved_spec_path = std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
-    save_launched_team_state(&workspace, &state)?;
+    let state_team_key = explicit_team_key
+        .unwrap_or_else(|| runtime_team_key_for_spec(&resolved_spec_path, &spec, &session_name));
+    save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
     // FIX (rt-host-a real-machine finding): dry_run=false so launch_with_transport calls spawn_agents
     // and really creates the tmux session + worker windows (was hardcoded true → never spawned, which
     // also starved the coordinator: no session → first tick TmuxSessionMissing → run_daemon loop exits).
-    let launch = launch_with_transport(&spec_path, false, yes, true, transport)?;
+    let launch = launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
     let coordinator_started = crate::coordinator::start_coordinator(&coordinator_workspace)
         .map(|report| report.ok)
@@ -1178,7 +1359,8 @@ pub fn add_agent(
     let team_dir = selected
         .spec_workspace
         .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
-    add_agent_with_transport(
+    add_agent_with_transport_at_paths(
+        &selected.run_workspace,
         &team_dir,
         agent_id,
         role_file_path,
@@ -1200,11 +1382,31 @@ pub fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    add_agent_with_transport_at_paths(
+        &run_workspace,
+        workspace,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+    )
+}
+
+fn add_agent_with_transport_at_paths(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
     let owner_state = if team.is_some() {
-        crate::state::projection::select_runtime_state(&run_workspace, team)
+        crate::state::projection::select_runtime_state(run_workspace, team)
             .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?
     } else {
-        load_runtime_state(&run_workspace).map_err(|e| LifecycleError::StatePersist(e.to_string()))?
+        load_runtime_state(run_workspace).map_err(|e| LifecycleError::StatePersist(e.to_string()))?
     };
     ensure_owner_allowed_for_state(&owner_state, Some(agent_id))?;
     if !role_file_path.exists() {
@@ -1213,7 +1415,6 @@ pub fn add_agent_with_transport(
             role_file_path.display()
         )));
     }
-    let team_dir = workspace;
     if agent_id_exists_in_team_dir(team_dir, agent_id) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent id already exists: {agent_id}"
@@ -1228,10 +1429,9 @@ pub fn add_agent_with_transport(
     })?;
     let (meta, _) = crate::compiler::read_front_matter(&dynamic_role_file)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    let run_ws = team_workspace(team_dir);
-    upsert_agent_state_from_role(&run_ws, agent_id, &meta, &dynamic_role_file)?;
+    upsert_agent_state_from_role(run_workspace, team, agent_id, &meta, &dynamic_role_file)?;
     let started = crate::lifecycle::restart::start_agent_at_paths(
-        &run_ws,
+        run_workspace,
         team_dir,
         agent_id,
         false,
@@ -1260,12 +1460,18 @@ pub fn add_agent_with_transport(
 
 fn upsert_agent_state_from_role(
     workspace: &Path,
+    team: Option<&str>,
     agent_id: &AgentId,
     meta: &Value,
     dynamic_role_file: &Path,
 ) -> Result<(), LifecycleError> {
-    let mut state = crate::state::persist::load_runtime_state(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let mut state = if team.is_some() {
+        crate::state::projection::select_runtime_state(workspace, team)
+            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?
+    } else {
+        crate::state::persist::load_runtime_state(workspace)
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?
+    };
     if !state.is_object() {
         state = serde_json::json!({});
     }
@@ -1310,7 +1516,13 @@ fn upsert_agent_state_from_role(
         }
     }
     agent_map.insert(agent_id.as_str().to_string(), entry);
-    save_runtime_state(workspace, &state).map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    if team.is_some() {
+        let team_key = explicit_active_team_key(&state)
+            .or_else(|| team.filter(|key| !key.is_empty()).map(str::to_string));
+        save_launched_team_state_for_key(workspace, &state, team_key.as_deref())
+    } else {
+        save_runtime_state(workspace, &state).map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    }
 }
 
 fn materialize_added_role_file(
@@ -1863,6 +2075,7 @@ fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> bool {
         "status": "attached",
         "provider": provider,
         "pane_id": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
+        "pane": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
         "leader_session_uuid": owner.get("leader_session_uuid").cloned().unwrap_or(serde_json::Value::Null),
         "owner_epoch": owner_epoch,
         "discovery": "quick_start",

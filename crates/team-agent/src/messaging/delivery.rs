@@ -9,13 +9,17 @@ use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::model::ids::TeamKey;
-use crate::transport::{InjectPayload, Key, PaneId, SessionName, Target, Transport, WindowName};
+use crate::transport::{
+    submit_verification_wire, InjectPayload, InjectReport, Key, PaneId, SessionName,
+    SubmitVerification, Target, Transport, WindowName,
+};
 
 use super::helpers::{message_exists, MessageStatusShadow};
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError,
     PaneWidthQuery, TrustRetryPayload,
 };
+use crate::state::projection::OwnerTeamResolution;
 
 // ===========================================================================
 // internal_delivery.py — coordinator/调度器侧 thin wrapper (card §65)
@@ -135,6 +139,21 @@ pub fn deliver_pending_message(
             channel: None,
         });
     };
+    let mut canonical_owner_team_id = message.owner_team_id.clone();
+    let scoped_state;
+    let state = match message.owner_team_id.as_deref() {
+        Some(team) if !team.is_empty() => {
+            match project_state_for_owner_team(workspace, team, state, Some(store), Some(message_id), Some(event_log))? {
+                OwnerTeamProjection::Projected { state, canonical_team } => {
+                    canonical_owner_team_id = Some(canonical_team);
+                    scoped_state = state;
+                    &scoped_state
+                }
+                OwnerTeamProjection::Refused(outcome) => return Ok(outcome),
+            }
+        }
+        _ => state,
+    };
     if message.recipient == "leader" && leader_receiver_has_noncanonical_tmux_socket(state) {
         store.mark(message_id, "failed", Some("leader_not_attached"))?;
         event_log.write(
@@ -225,39 +244,69 @@ pub fn deliver_pending_message(
         &message.content,
         message_id,
     );
-    if let Err(error) = transport.inject(
+    let rendered_len = rendered.len();
+    let inject_report = match transport.inject(
         &target,
         &InjectPayload::Text(rendered),
         Key::Enter,
         true,
     ) {
-        if message.recipient == "leader" {
-            store.mark(message_id, "failed", Some("leader_not_attached"))?;
-            event_log.write(
-                "leader_receiver.delivery_blocked",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "sender": message.sender,
-                    "reason": "leader_not_attached",
-                    "channel": "rebind_required",
-                    "action": "run team-agent claim-leader or team-agent takeover",
-                    "error": error.to_string(),
-                }),
-            )?;
-            return Ok(DeliveryOutcome {
-                ok: false,
-                status: DeliveryStatus::Refused,
-                message_status: MessageStatusShadow("failed".to_string()),
-                message_id: Some(message_id.to_string()),
-                verification: Some(
-                    "run team-agent claim-leader or team-agent takeover".to_string(),
-                ),
-                stage: None,
-                reason: Some(DeliveryRefusal::LeaderNotAttached),
-                channel: Some("rebind_required".to_string()),
-            });
+        Ok(report) => report,
+        Err(error) => {
+            if message.recipient == "leader" {
+                store.mark(message_id, "failed", Some("leader_not_attached"))?;
+                event_log.write(
+                    "leader_receiver.delivery_blocked",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "sender": message.sender,
+                        "reason": "leader_not_attached",
+                        "channel": "rebind_required",
+                        "action": "run team-agent claim-leader or team-agent takeover",
+                        "error": error.to_string(),
+                    }),
+                )?;
+                return Ok(DeliveryOutcome {
+                    ok: false,
+                    status: DeliveryStatus::Refused,
+                    message_status: MessageStatusShadow("failed".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some(
+                        "run team-agent claim-leader or team-agent takeover".to_string(),
+                    ),
+                    stage: None,
+                    reason: Some(DeliveryRefusal::LeaderNotAttached),
+                    channel: Some("rebind_required".to_string()),
+                });
+            }
+            return Err(error.into());
         }
-        return Err(error.into());
+    };
+    if !inject_submit_verified(&inject_report, rendered_len, &message.sender, &message.recipient) {
+        let reason = format!(
+            "submit_unverified:{}",
+            submit_verification_wire(inject_report.submit_verification)
+        );
+        store.mark(message_id, "submitted_unverified", Some(&reason))?;
+        event_log.write(
+            "send.unverified",
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": message.recipient,
+                "reason": reason,
+                "attempts": inject_report.attempts,
+            }),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Failed,
+            message_status: MessageStatusShadow("submitted_unverified".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some(reason),
+            stage: Some(DeliveryStage::Submit),
+            reason: None,
+            channel: None,
+        });
     }
     store.mark(message_id, "delivered", None)?;
     event_log.write(
@@ -274,16 +323,37 @@ pub fn deliver_pending_message(
         reason: None,
         channel: None,
     };
-    stamp_first_send_at_if_leader_to_worker(workspace, state, &message.sender, &message.recipient)?;
-    record_turn_open_if_leader_to_worker(
+    stamp_first_send_at_if_leader_to_worker_scoped(
         workspace,
-        state,
+        &message.sender,
+        &message.recipient,
+        canonical_owner_team_id.as_deref(),
+    )?;
+    record_turn_open_if_leader_to_worker_scoped(
+        workspace,
         &message.sender,
         &message.recipient,
         &outcome,
         event_log,
+        canonical_owner_team_id.as_deref(),
     )?;
     Ok(outcome)
+}
+
+fn inject_submit_verified(
+    report: &InjectReport,
+    payload_len: usize,
+    sender: &str,
+    recipient: &str,
+) -> bool {
+    match report.submit_verification {
+        SubmitVerification::SendKeysFailed => false,
+        SubmitVerification::PastedContentPromptAbsentAfterSubmit => true,
+        SubmitVerification::KeySentAfterVisibleToken { .. } => true,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck => {
+            recipient == "leader" || matches!(sender, "leader" | "Leader") || payload_len < 80
+        }
+    }
 }
 
 /// Render a message into the worker-facing protocol block (port of `rust_core.py:render_message`,
@@ -467,6 +537,19 @@ pub fn deliver_pending_messages(
     let mut delivered = Vec::new();
     for message_id in message_ids {
         if let Some(message) = message_for_delivery(&store, &message_id)? {
+            let scoped_state;
+            let state = match message.owner_team_id.as_deref() {
+                Some(team) if !team.is_empty() => {
+                    match project_state_for_owner_team(workspace, team, state, Some(&store), Some(&message_id), Some(event_log))? {
+                        OwnerTeamProjection::Projected { state, .. } => {
+                            scoped_state = state;
+                            &scoped_state
+                        }
+                        OwnerTeamProjection::Refused(_) => continue,
+                    }
+                }
+                _ => state,
+            };
             if recipient_is_busy(state, &message.recipient) {
                 event_log.write(
                     "send.deferred_busy",
@@ -493,6 +576,7 @@ struct PendingMessage {
     recipient: String,
     content: String,
     task_id: Option<String>,
+    owner_team_id: Option<String>,
 }
 
 fn message_for_delivery(
@@ -502,7 +586,7 @@ fn message_for_delivery(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let message = conn
         .query_row(
-            "select sender, recipient, content, task_id from messages where message_id = ?1",
+            "select sender, recipient, content, task_id, owner_team_id from messages where message_id = ?1",
             params![message_id],
             |row| {
                 Ok(PendingMessage {
@@ -510,6 +594,7 @@ fn message_for_delivery(
                     recipient: row.get::<_, String>(1)?,
                     content: row.get::<_, String>(2)?,
                     task_id: row.get::<_, Option<String>>(3)?,
+                    owner_team_id: row.get::<_, Option<String>>(4)?,
                 })
             },
         )
@@ -666,10 +751,28 @@ pub fn record_turn_open_if_leader_to_worker(
     event_log: &EventLog,
 ) -> Result<(), MessagingError> {
     let _ = state;
+    record_turn_open_if_leader_to_worker_scoped(
+        workspace,
+        sender,
+        recipient,
+        delivered,
+        event_log,
+        None,
+    )
+}
+
+fn record_turn_open_if_leader_to_worker_scoped(
+    workspace: &Path,
+    sender: &str,
+    recipient: &str,
+    delivered: &DeliveryOutcome,
+    event_log: &EventLog,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
     if !delivered.ok || !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
     }
-    let mut state = crate::state::persist::load_runtime_state(workspace)?;
+    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
     let Some(root) = state.as_object_mut() else {
         return Ok(());
     };
@@ -682,7 +785,7 @@ pub fn record_turn_open_if_leader_to_worker(
             serde_json::json!({"armed": true, "node_id": recipient, "turn_id": delivered.message_id}),
         );
     }
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    save_scoped_state(workspace, &state, owner_team_id)?;
     event_log.write(
         "turn_open.armed_after_delivery",
         serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id}),
@@ -699,10 +802,19 @@ pub fn stamp_first_send_at_if_leader_to_worker(
     recipient: &str,
 ) -> Result<(), MessagingError> {
     let _ = state;
+    stamp_first_send_at_if_leader_to_worker_scoped(workspace, sender, recipient, None)
+}
+
+fn stamp_first_send_at_if_leader_to_worker_scoped(
+    workspace: &Path,
+    sender: &str,
+    recipient: &str,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
     if !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
     }
-    let mut state = crate::state::persist::load_runtime_state(workspace)?;
+    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(agent) = state
         .get_mut("agents")
@@ -712,10 +824,259 @@ pub fn stamp_first_send_at_if_leader_to_worker(
     {
         if !agent.contains_key("first_send_at") || agent.get("first_send_at").is_some_and(serde_json::Value::is_null) {
             agent.insert("first_send_at".to_string(), serde_json::Value::String(now));
-            crate::state::persist::save_runtime_state(workspace, &state)?;
+            save_scoped_state(workspace, &state, owner_team_id)?;
         }
     }
     Ok(())
+}
+
+fn scoped_state_for_write(
+    workspace: &Path,
+    owner_team_id: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
+    match owner_team_id.filter(|team| !team.is_empty()) {
+        Some(team) => {
+            let raw = crate::state::persist::load_runtime_state(workspace)?;
+            match project_state_for_owner_team_value(&raw, team) {
+                Some(projected) => Ok(projected),
+                None => Ok(raw),
+            }
+        }
+        None => Ok(crate::state::persist::load_runtime_state(workspace)?),
+    }
+}
+
+fn save_scoped_state(
+    workspace: &Path,
+    state: &serde_json::Value,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
+    if owner_team_id.filter(|team| !team.is_empty()).is_some() {
+        if state
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|teams| {
+                owner_team_id
+                    .and_then(|team| crate::state::projection::resolve_owner_team_id(state, team).canonical_key().map(str::to_string))
+                    .is_some_and(|team| teams.contains_key(&team))
+            })
+        {
+            crate::state::projection::save_team_scoped_state(workspace, state)?;
+        } else {
+            crate::state::persist::save_runtime_state(workspace, state)?;
+        }
+    } else {
+        crate::state::persist::save_runtime_state(workspace, state)?;
+    }
+    Ok(())
+}
+
+enum OwnerTeamProjection {
+    Projected { state: serde_json::Value, canonical_team: String },
+    Refused(DeliveryOutcome),
+}
+
+fn project_state_for_owner_team(
+    workspace: &Path,
+    team: &str,
+    fallback: &serde_json::Value,
+    store: Option<&MessageStore>,
+    message_id: Option<&str>,
+    event_log: Option<&EventLog>,
+) -> Result<OwnerTeamProjection, MessagingError> {
+    let raw = crate::state::persist::load_runtime_state(workspace)?;
+    let fallback_has_teams = fallback
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|teams| !teams.is_empty());
+    let (mut projection_source, mut resolution) = if fallback_has_teams {
+        (fallback, crate::state::projection::resolve_owner_team_id(fallback, team))
+    } else {
+        (&raw, crate::state::projection::resolve_owner_team_id(&raw, team))
+    };
+    if !fallback_has_teams && matches!(resolution, OwnerTeamResolution::Unresolved { .. }) {
+        let fallback_resolution = crate::state::projection::resolve_owner_team_id(fallback, team);
+        if !matches!(fallback_resolution, OwnerTeamResolution::Unresolved { .. }) {
+            resolution = fallback_resolution;
+            projection_source = fallback;
+        }
+    }
+    let canonical_team = match resolution {
+        OwnerTeamResolution::Canonical(canonical) => canonical,
+        OwnerTeamResolution::LegacyAlias { requested, canonical } => {
+            normalize_owner_team_id_rows(workspace, &requested, &canonical, message_id, event_log)?;
+            canonical
+        }
+        OwnerTeamResolution::Unresolved { requested } => {
+            let outcome = refuse_owner_team_resolution(
+                store,
+                message_id,
+                event_log,
+                "owner_team_unresolved",
+                serde_json::json!({"owner_team_id": requested}),
+                DeliveryRefusal::UnknownRecipient,
+            )?;
+            return Ok(OwnerTeamProjection::Refused(outcome));
+        }
+        OwnerTeamResolution::Ambiguous { requested, matches } => {
+            let outcome = refuse_owner_team_resolution(
+                store,
+                message_id,
+                event_log,
+                "owner_team_ambiguous",
+                serde_json::json!({"owner_team_id": requested, "matches": matches}),
+                DeliveryRefusal::Ambiguous,
+            )?;
+            return Ok(OwnerTeamProjection::Refused(outcome));
+        }
+    };
+    if top_level_state_matches_owner_team(fallback, &canonical_team) {
+        let mut state = fallback.clone();
+        carry_top_level_leader_binding(&mut state, &raw);
+        return Ok(OwnerTeamProjection::Projected {
+            state,
+            canonical_team,
+        });
+    }
+    if top_level_state_matches_owner_team(&raw, &canonical_team) {
+        return Ok(OwnerTeamProjection::Projected {
+            state: raw,
+            canonical_team,
+        });
+    }
+    if state_has_no_team_entries(projection_source) {
+        let mut state = projection_source.clone();
+        carry_top_level_leader_binding(&mut state, &raw);
+        return Ok(OwnerTeamProjection::Projected {
+            state,
+            canonical_team,
+        });
+    }
+    let mut state = project_state_for_owner_team_value(projection_source, &canonical_team)
+        .ok_or_else(|| MessagingError::Routing(format!("owner_team_unresolved: {canonical_team}")))?;
+    carry_top_level_leader_binding(&mut state, projection_source);
+    carry_top_level_leader_binding(&mut state, &raw);
+    Ok(OwnerTeamProjection::Projected { state, canonical_team })
+}
+
+fn carry_top_level_leader_binding(projected: &mut serde_json::Value, raw: &serde_json::Value) {
+    let Some(projected_obj) = projected.as_object_mut() else {
+        return;
+    };
+    for key in ["leader_receiver", "team_owner", "owner_epoch"] {
+        if projected_obj.contains_key(key) {
+            continue;
+        }
+        if let Some(value) = raw.get(key) {
+            projected_obj.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn state_has_no_team_entries(state: &serde_json::Value) -> bool {
+    state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .is_none_or(serde_json::Map::is_empty)
+}
+
+pub(crate) fn normalize_owner_team_id_rows(
+    workspace: &Path,
+    requested: &str,
+    canonical: &str,
+    message_id: Option<&str>,
+    event_log: Option<&EventLog>,
+) -> Result<(), MessagingError> {
+    if requested == canonical {
+        return Ok(());
+    }
+    let store = MessageStore::open(workspace)?;
+    let conn = crate::db::schema::open_db(store.db_path())?;
+    for table in [
+        "messages",
+        "results",
+        "scheduled_events",
+        "agent_health",
+        "result_watchers",
+        "leader_notification_log",
+    ] {
+        let sql = format!("update or ignore {table} set owner_team_id = ?1 where owner_team_id = ?2");
+        conn.execute(&sql, params![canonical, requested])?;
+    }
+    if let Some(event_log) = event_log {
+        event_log.write(
+            "owner_team_id.compatibility_alias_migrated",
+            serde_json::json!({
+                "requested_owner_team_id": requested,
+                "canonical_owner_team_id": canonical,
+                "message_id": message_id,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+fn refuse_owner_team_resolution(
+    store: Option<&MessageStore>,
+    message_id: Option<&str>,
+    event_log: Option<&EventLog>,
+    error: &str,
+    details: serde_json::Value,
+    refusal: DeliveryRefusal,
+) -> Result<DeliveryOutcome, MessagingError> {
+    if let (Some(store), Some(message_id)) = (store, message_id) {
+        store.mark(message_id, "failed", Some(error))?;
+    }
+    if let Some(event_log) = event_log {
+        event_log.write(
+            "owner_team_id.resolution_failed",
+            serde_json::json!({
+                "message_id": message_id,
+                "error": error,
+                "details": details,
+            }),
+        )?;
+    }
+    Ok(DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Refused,
+        message_status: MessageStatusShadow("failed".to_string()),
+        message_id: message_id.map(str::to_string),
+        verification: Some(error.to_string()),
+        stage: None,
+        reason: Some(refusal),
+        channel: Some("owner_team_resolution".to_string()),
+    })
+}
+
+fn project_state_for_owner_team_value(
+    raw: &serde_json::Value,
+    team: &str,
+) -> Option<serde_json::Value> {
+    if let Some(projected) = raw
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|teams| teams.contains_key(team))
+        .then(|| crate::state::projection::project_top_level_view(raw, team))
+    {
+        return Some(projected);
+    }
+    if top_level_state_matches_owner_team(raw, team) {
+        return None;
+    }
+    None
+}
+
+fn top_level_state_matches_owner_team(state: &serde_json::Value, team: &str) -> bool {
+    state
+        .get("active_team_key")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value == team)
+        || crate::state::projection::team_state_key(state) == team
+        || state
+            .get("session_name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
 }
 
 /// `retry_injection_after_trust_auto_answer` (`trust_auto_answer.py`):leader 路径 trust 应答

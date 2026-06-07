@@ -253,6 +253,7 @@ pub struct InteractionCounts {
 /// `quick-start`(`parser.py:105`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuickStartArgs {
+    pub workspace: PathBuf,
     pub agents_dir: PathBuf,
     pub name: Option<String>,
     pub team_id: Option<String>,

@@ -277,13 +277,17 @@ impl ProviderAdapter for BasicProviderAdapter {
         spawn_cwd: &Path,
         _timeout_s: u64,
     ) -> Result<Option<CapturedSession>, ProviderError> {
-        let candidates = candidate_session_files(spawn_cwd, agent_id)?;
-        for path in candidates {
+        let candidates = candidate_session_files(self.provider, spawn_cwd, agent_id)?;
+        for candidate in candidates {
+            let path = candidate.path;
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let records = parse_jsonl_records(&text);
+            let records = parse_session_records(&text);
             if records.is_empty() {
+                continue;
+            }
+            if candidate.requires_cwd_match && !provider_home_records_match_spawn_cwd(&records, spawn_cwd) {
                 continue;
             }
             let session_id = records.iter().find_map(find_session_id);
@@ -518,18 +522,56 @@ fn command_on_path(name: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
 }
 
-fn candidate_session_files(spawn_cwd: &Path, agent_id: &str) -> Result<Vec<PathBuf>, ProviderError> {
+struct SessionCandidate {
+    path: PathBuf,
+    requires_cwd_match: bool,
+}
+
+fn candidate_session_files(
+    provider: Provider,
+    spawn_cwd: &Path,
+    agent_id: &str,
+) -> Result<Vec<SessionCandidate>, ProviderError> {
     let mut out = Vec::new();
-    collect_candidate_files(spawn_cwd, agent_id, 0, &mut out)?;
-    out.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    collect_candidate_files(spawn_cwd, agent_id, 0, false, &mut out)?;
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        match provider {
+            Provider::Codex => {
+                collect_optional_candidate_files(&home.join(".codex").join("sessions"), agent_id, &mut out)?;
+            }
+            Provider::Claude | Provider::ClaudeCode => {
+                collect_optional_candidate_files(&home.join(".claude").join("sessions"), agent_id, &mut out)?;
+                collect_optional_candidate_files(&home.join(".claude").join("projects"), agent_id, &mut out)?;
+            }
+            Provider::GeminiCli | Provider::Fake => {}
+        }
+    }
+    out.sort_by(|a, b| {
+        a.requires_cwd_match
+            .cmp(&b.requires_cwd_match)
+            .then_with(|| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()))
+    });
+    out.dedup_by(|a, b| a.path == b.path && a.requires_cwd_match == b.requires_cwd_match);
     Ok(out)
+}
+
+fn collect_optional_candidate_files(
+    dir: &Path,
+    agent_id: &str,
+    out: &mut Vec<SessionCandidate>,
+) -> Result<(), ProviderError> {
+    if dir.exists() {
+        let _ = collect_candidate_files(dir, agent_id, 0, true, out);
+    }
+    Ok(())
 }
 
 fn collect_candidate_files(
     dir: &Path,
     agent_id: &str,
     depth: usize,
-    out: &mut Vec<PathBuf>,
+    requires_cwd_match: bool,
+    out: &mut Vec<SessionCandidate>,
 ) -> Result<(), ProviderError> {
     if depth > 4 {
         return Ok(());
@@ -545,9 +587,12 @@ fn collect_candidate_files(
         };
         let path = entry.path();
         if path.is_dir() {
-            collect_candidate_files(&path, agent_id, depth.saturating_add(1), out)?;
+            collect_candidate_files(&path, agent_id, depth.saturating_add(1), requires_cwd_match, out)?;
         } else if looks_like_session_file(&path, agent_id) {
-            out.push(path);
+            out.push(SessionCandidate {
+                path,
+                requires_cwd_match,
+            });
         }
     }
     Ok(())
@@ -570,6 +615,46 @@ fn looks_like_session_file(path: &Path, agent_id: &str) -> bool {
         || name.contains("session")
         || name.contains("rollout")
         || (!agent_id.is_empty() && name.contains(agent_id))
+}
+
+fn parse_session_records(text: &str) -> Vec<serde_json::Value> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Array(items)) => items,
+        Ok(value) => vec![value],
+        Err(_) => parse_jsonl_records(text),
+    }
+}
+
+fn provider_home_records_match_spawn_cwd(records: &[serde_json::Value], spawn_cwd: &Path) -> bool {
+    let cwd_values: Vec<String> = records.iter().filter_map(record_cwd).collect();
+    !cwd_values.is_empty()
+        && cwd_values
+            .iter()
+            .any(|cwd| paths_equivalent(Path::new(cwd), spawn_cwd))
+}
+
+fn record_cwd(record: &serde_json::Value) -> Option<String> {
+    record
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            record
+                .get("session_meta")
+                .and_then(|v| v.get("payload"))
+                .or_else(|| record.get("payload"))
+                .and_then(|v| v.get("cwd"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .map(ToString::to_string)
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right || left.starts_with(&right)
 }
 
 /// `true` iff any path component is `.team` (the Team Agent runtime/logs root) — used
@@ -790,7 +875,7 @@ fn current_team_agent_command() -> String {
 }
 
 fn has_cwd_field(record: &serde_json::Value) -> bool {
-    record.get("cwd").and_then(serde_json::Value::as_str).is_some()
+    record_cwd(record).is_some()
 }
 
 fn next_session_token() -> String {

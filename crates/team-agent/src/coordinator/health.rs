@@ -138,6 +138,15 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
             pid: None,
         });
     };
+    if pid_is_running(pid).ok() == Some(false) {
+        remove_file_if_exists(&pid_path)?;
+        remove_file_if_exists(&coordinator_meta_path(workspace))?;
+        return Ok(StopReport {
+            ok: true,
+            status: StopOutcome::Missing,
+            pid: Some(pid),
+        });
+    }
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
         return Ok(StopReport {
             ok: false,

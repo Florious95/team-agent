@@ -494,6 +494,14 @@ fn submit_verification_for_key(key: Key) -> SubmitVerification {
     }
 }
 
+fn capture_has_pasted_content_prompt(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("pasted content") || lower.contains("pasted text")
+}
+
+const PASTED_CONTENT_APPEAR_POLLS: u32 = 5;
+const PASTED_CONTENT_SUBMIT_ATTEMPTS: u32 = 3;
+
 fn shell_command(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>) -> String {
     let mut parts = Vec::new();
     parts.push("cd".to_string());
@@ -579,7 +587,40 @@ impl Transport for TmuxBackend {
                         self.run_inject_stage(&argv, stage)?;
                     }
                 }
+                let mut saw_pasted_prompt = false;
+                for _ in 0..PASTED_CONTENT_APPEAR_POLLS {
+                    let captured = self.capture(target, CaptureRange::Tail(80))?;
+                    if capture_has_pasted_content_prompt(&captured.text) {
+                        saw_pasted_prompt = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
                 let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
+                if saw_pasted_prompt {
+                    let mut attempts = 0;
+                    let mut cleared = false;
+                    for _ in 0..PASTED_CONTENT_SUBMIT_ATTEMPTS {
+                        attempts += 1;
+                        self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
+                        let captured = self.capture(target, CaptureRange::Tail(80))?;
+                        if !capture_has_pasted_content_prompt(&captured.text) {
+                            cleared = true;
+                            break;
+                        }
+                    }
+                    return Ok(InjectReport {
+                        stage_reached: InjectStage::Submit,
+                        inject_verification: InjectVerification::CaptureContainsNewPastedContentPrompt,
+                        submit_verification: if cleared {
+                            SubmitVerification::PastedContentPromptAbsentAfterSubmit
+                        } else {
+                            submit_verification_for_key(submit)
+                        },
+                        turn_verification: TurnVerification::NotYetObserved,
+                        attempts,
+                    });
+                }
                 self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
             }
         }
@@ -674,7 +715,10 @@ impl Transport for TmuxBackend {
         }
         let mut panes = Vec::new();
         for line in output.stdout.lines().filter(|line| !line.is_empty()) {
-            if let Some(pane) = parse_pane_info_line(line) {
+            if let Some(mut pane) = parse_pane_info_line(line) {
+                if pane.pane_pid.is_none() {
+                    pane.pane_pid = query_pane_pid(self, &pane.pane_id)?;
+                }
                 panes.push(pane);
             }
         }
@@ -737,22 +781,22 @@ impl Transport for TmuxBackend {
     }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
-        let argv = vec![
+        let argv = self.tmux_argv(&[
             "tmux".to_string(),
             "kill-session".to_string(),
             "-t".to_string(),
             session.as_str().to_string(),
-        ];
+        ]);
         self.run_ok(&argv)
     }
 
     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
-        let argv = vec![
+        let argv = self.tmux_argv(&[
             "tmux".to_string(),
             "kill-window".to_string(),
             "-t".to_string(),
             target_name(target),
-        ];
+        ]);
         self.run_ok(&argv)
     }
 
@@ -771,6 +815,22 @@ impl Transport for TmuxBackend {
     }
 }
 
+fn query_pane_pid(backend: &TmuxBackend, pane: &PaneId) -> Result<Option<u32>, TransportError> {
+    let argv = backend.tmux_argv(&[
+        "tmux".to_string(),
+        "display-message".to_string(),
+        "-p".to_string(),
+        "-t".to_string(),
+        pane.as_str().to_string(),
+        "#{pane_pid}".to_string(),
+    ]);
+    let output = backend.runner.run(&argv)?;
+    if !output.success {
+        return Ok(None);
+    }
+    Ok(parse_optional_u32(output.stdout.trim()))
+}
+
 fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
     let fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() < 11 {
@@ -786,7 +846,7 @@ fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
         current_command: non_empty(fields[6]).map(str::to_string),
         active: fields[7] == "1",
         current_path: non_empty(fields[8]).map(PathBuf::from),
-        pane_pid: None,
+        pane_pid: fields.get(11).and_then(|raw| parse_optional_u32(raw)),
         leader_env: BTreeMap::new(),
     })
 }

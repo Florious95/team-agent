@@ -1,11 +1,25 @@
 //! status_port extracted from cli::mod inline placeholder.
 use super::*;
+use crate::state::projection::OwnerTeamResolution;
 use crate::transport::Transport;
+use rusqlite::params;
 
     /// `status.status(workspace, as_json, compact)`(`queries.py:33`,**有副作用**:capture→refresh→save)。
     pub fn status(workspace: &Path, compact: bool, detail: bool) -> Result<Value, CliError> {
-        let _ = detail;
         let state = read_runtime_state(workspace);
+        status_scoped(workspace, &state, None, compact, detail)
+    }
+
+    pub fn status_scoped(
+        workspace: &Path,
+        state: &Value,
+        owner_team_id: Option<&str>,
+        compact: bool,
+        detail: bool,
+    ) -> Result<Value, CliError> {
+        let _ = detail;
+        let resolved_owner_team_id = resolve_status_owner_team(workspace, owner_team_id)?;
+        let owner_team_id = resolved_owner_team_id.as_deref().or(owner_team_id);
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
@@ -30,11 +44,11 @@ use crate::transport::Transport;
             "leader_receiver": leader_receiver,
             "teams": state.get("teams").cloned().unwrap_or_else(|| json!({})),
             "agents": agents,
-            "agent_health": agent_health(&conn)?,
+            "agent_health": agent_health(&conn, owner_team_id)?,
             "tasks": tasks,
-            "messages": message_counts(&conn)?,
-            "queued_messages": queued_messages(&conn, 8)?,
-            "results": result_counts(&conn)?,
+            "messages": message_counts(&conn, owner_team_id)?,
+            "queued_messages": queued_messages(&conn, owner_team_id, 8)?,
+            "results": result_counts(&conn, owner_team_id)?,
             "latest_results": json!([]),
             "coordinator": coordinator_health_value(health),
             "last_events": Value::Array(
@@ -51,7 +65,17 @@ use crate::transport::Transport;
     }
     /// `status.format_status(workspace, agent)`(人读)。
     pub fn format_status(workspace: &Path, agent: Option<&str>) -> Result<String, CliError> {
-        let status = status(workspace, true, false)?;
+        let state = read_runtime_state(workspace);
+        format_status_scoped(workspace, &state, None, agent)
+    }
+
+    pub fn format_status_scoped(
+        workspace: &Path,
+        state: &Value,
+        owner_team_id: Option<&str>,
+        agent: Option<&str>,
+    ) -> Result<String, CliError> {
+        let status = status_scoped(workspace, state, owner_team_id, true, false)?;
         Ok(match agent {
             Some(agent) => format!("agent {agent}: {}", status.pointer("/agents").is_some()),
             None => crate::cli::format_status_summary(&status),
@@ -165,6 +189,32 @@ use crate::transport::Transport;
             .unwrap_or_else(|| json!({}))
     }
 
+    fn resolve_status_owner_team(
+        workspace: &Path,
+        owner_team_id: Option<&str>,
+    ) -> Result<Option<String>, CliError> {
+        let Some(requested) = owner_team_id.filter(|team| !team.is_empty()) else {
+            return Ok(None);
+        };
+        let state = read_runtime_state(workspace);
+        match crate::state::projection::resolve_owner_team_id(&state, requested) {
+            OwnerTeamResolution::Canonical(canonical) => Ok(Some(canonical)),
+            OwnerTeamResolution::LegacyAlias { requested, canonical } => {
+                let log = crate::event_log::EventLog::new(workspace);
+                crate::messaging::delivery::normalize_owner_team_id_rows(
+                    workspace,
+                    &requested,
+                    &canonical,
+                    None,
+                    Some(&log),
+                )
+                .map_err(CliError::from)?;
+                Ok(Some(canonical))
+            }
+            OwnerTeamResolution::Unresolved { .. } | OwnerTeamResolution::Ambiguous { .. } => Ok(None),
+        }
+    }
+
     fn agent_window(agent_id: &str, agent_state: &Value) -> String {
         ["window", "window_name"]
             .iter()
@@ -224,15 +274,15 @@ use crate::transport::Transport;
             .unwrap_or(false)
     }
 
-    fn message_counts(conn: &rusqlite::Connection) -> Result<Value, CliError> {
-        status_counts(conn, "messages")
+    fn message_counts(conn: &rusqlite::Connection, owner_team_id: Option<&str>) -> Result<Value, CliError> {
+        status_counts(conn, "messages", owner_team_id)
     }
 
-    fn result_counts(conn: &rusqlite::Connection) -> Result<Value, CliError> {
-        let by_status = result_status_counts(conn)?;
-        let total = count_rows(conn, "results")?;
-        let invalid = count_where_status(conn, "results", "invalid")?;
-        let collected = count_where_status(conn, "results", "collected")?;
+    fn result_counts(conn: &rusqlite::Connection, owner_team_id: Option<&str>) -> Result<Value, CliError> {
+        let by_status = result_status_counts(conn, owner_team_id)?;
+        let total = count_rows(conn, "results", owner_team_id)?;
+        let invalid = count_where_status(conn, "results", owner_team_id, "invalid")?;
+        let collected = count_where_status(conn, "results", owner_team_id, "collected")?;
         let uncollected = total.saturating_sub(collected).saturating_sub(invalid);
         Ok(json!({
             "total": total,
@@ -243,10 +293,24 @@ use crate::transport::Transport;
         }))
     }
 
-    fn status_counts(conn: &rusqlite::Connection, table: &str) -> Result<Value, CliError> {
-        let sql = format!("select status, count(*) from {table} group by status order by status");
+    fn status_counts(
+        conn: &rusqlite::Connection,
+        table: &str,
+        owner_team_id: Option<&str>,
+    ) -> Result<Value, CliError> {
+        let sql = match owner_team_id {
+            Some(_) => format!(
+                "select status, count(*) from {table}
+                 where owner_team_id = ?1
+                 group by status order by status"
+            ),
+            None => format!("select status, count(*) from {table} group by status order by status"),
+        };
         let mut stmt = conn.prepare(&sql).map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut rows = stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?;
+        let mut rows = match owner_team_id {
+            Some(team) => stmt.query(params![team]).map_err(|e| CliError::Runtime(e.to_string()))?,
+            None => stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?,
+        };
         let mut out = Map::new();
         while let Some(row) = rows.next().map_err(|e| CliError::Runtime(e.to_string()))? {
             let status: String = row.get(0).map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -256,16 +320,28 @@ use crate::transport::Transport;
         Ok(Value::Object(out))
     }
 
-    fn result_status_counts(conn: &rusqlite::Connection) -> Result<Value, CliError> {
-        let mut stmt = conn
-            .prepare(
+    fn result_status_counts(conn: &rusqlite::Connection, owner_team_id: Option<&str>) -> Result<Value, CliError> {
+        let sql = match owner_team_id {
+            Some(_) => {
+                "select status, count(*) from results
+                 where status not in ('collected', 'invalid') and owner_team_id = ?1
+                 group by status
+                 order by status"
+            }
+            None => {
                 "select status, count(*) from results
                  where status not in ('collected', 'invalid')
                  group by status
-                 order by status",
-            )
+                 order by status"
+            }
+        };
+        let mut stmt = conn
+            .prepare(sql)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut rows = stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?;
+        let mut rows = match owner_team_id {
+            Some(team) => stmt.query(params![team]).map_err(|e| CliError::Runtime(e.to_string()))?,
+            None => stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?,
+        };
         let mut out = Map::new();
         while let Some(row) = rows.next().map_err(|e| CliError::Runtime(e.to_string()))? {
             let status: String = row.get(0).map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -275,19 +351,32 @@ use crate::transport::Transport;
         Ok(Value::Object(out))
     }
 
-    fn queued_messages(conn: &rusqlite::Connection, limit: usize) -> Result<Value, CliError> {
+    fn queued_messages(
+        conn: &rusqlite::Connection,
+        owner_team_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, CliError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut stmt = conn
-            .prepare(
+        let sql = match owner_team_id {
+            Some(_) => {
+                "select message_id, recipient, status, created_at, delivery_attempts
+                 from messages
+                 where status like 'queued%' and owner_team_id = ?1
+                 order by created_at desc
+                 limit ?2"
+            }
+            None => {
                 "select message_id, recipient, status, created_at, delivery_attempts
                  from messages
                  where status like 'queued%'
                  order by created_at desc
-                 limit ?1",
-            )
+                 limit ?1"
+            }
+        };
+        let mut stmt = conn
+            .prepare(sql)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let rows = stmt
-            .query_map([limit], |row| {
+        let map_row = |row: &rusqlite::Row<'_>| {
                 Ok(json!({
                     "message_id": row.get::<_, String>(0)?,
                     "recipient": row.get::<_, Option<String>>(1)?,
@@ -295,8 +384,12 @@ use crate::transport::Transport;
                     "created_at": row.get::<_, Option<String>>(3)?,
                     "delivery_attempts": row.get::<_, i64>(4)?,
                 }))
-            })
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
+            };
+        let rows = match owner_team_id {
+            Some(team) => stmt.query_map(params![team, limit], map_row),
+            None => stmt.query_map(params![limit], map_row),
+        }
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
         let values = rows
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -410,30 +503,63 @@ use crate::transport::Transport;
         Value::Array(items.iter().skip(start).cloned().collect())
     }
 
-    fn count_rows(conn: &rusqlite::Connection, table: &str) -> Result<i64, CliError> {
-        let sql = format!("select count(*) from {table}");
-        conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
-            .map_err(|e| CliError::Runtime(e.to_string()))
+    fn count_rows(
+        conn: &rusqlite::Connection,
+        table: &str,
+        owner_team_id: Option<&str>,
+    ) -> Result<i64, CliError> {
+        match owner_team_id {
+            Some(team) => {
+                let sql = format!("select count(*) from {table} where owner_team_id = ?1");
+                conn.query_row(&sql, [team], |row| row.get::<_, i64>(0))
+                    .map_err(|e| CliError::Runtime(e.to_string()))
+            }
+            None => {
+                let sql = format!("select count(*) from {table}");
+                conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .map_err(|e| CliError::Runtime(e.to_string()))
+            }
+        }
     }
 
     fn count_where_status(
         conn: &rusqlite::Connection,
         table: &str,
+        owner_team_id: Option<&str>,
         status: &str,
     ) -> Result<i64, CliError> {
-        let sql = format!("select count(*) from {table} where status = ?1");
-        conn.query_row(&sql, [status], |row| row.get::<_, i64>(0))
-            .map_err(|e| CliError::Runtime(e.to_string()))
+        match owner_team_id {
+            Some(team) => {
+                let sql = format!("select count(*) from {table} where status = ?1 and owner_team_id = ?2");
+                conn.query_row(&sql, params![status, team], |row| row.get::<_, i64>(0))
+                    .map_err(|e| CliError::Runtime(e.to_string()))
+            }
+            None => {
+                let sql = format!("select count(*) from {table} where status = ?1");
+                conn.query_row(&sql, [status], |row| row.get::<_, i64>(0))
+                    .map_err(|e| CliError::Runtime(e.to_string()))
+            }
+        }
     }
 
-    fn agent_health(conn: &rusqlite::Connection) -> Result<Value, CliError> {
-        let mut stmt = conn
-            .prepare(
+    fn agent_health(conn: &rusqlite::Connection, owner_team_id: Option<&str>) -> Result<Value, CliError> {
+        let sql = match owner_team_id {
+            Some(_) => {
                 "select agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at, owner_team_id
-                 from agent_health order by agent_id",
-            )
+                 from agent_health where owner_team_id = ?1 order by agent_id"
+            }
+            None => {
+                "select agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at, owner_team_id
+                 from agent_health order by agent_id"
+            }
+        };
+        let mut stmt = conn
+            .prepare(sql)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut rows = stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?;
+        let mut rows = match owner_team_id {
+            Some(team) => stmt.query(params![team]).map_err(|e| CliError::Runtime(e.to_string()))?,
+            None => stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?,
+        };
         let mut out = Map::new();
         while let Some(row) = rows.next().map_err(|e| CliError::Runtime(e.to_string()))? {
             let agent_id: String = row.get(0).map_err(|e| CliError::Runtime(e.to_string()))?;

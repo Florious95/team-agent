@@ -25,6 +25,8 @@ use team_agent::transport::{
     TurnVerification, WindowName,
 };
 
+const RUNTIME_TEAM_KEY: &str = "teamdir";
+
 #[test]
 #[serial(env)]
 fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
@@ -128,7 +130,7 @@ fn spawn_env_contract_failures(surface: &str, command_line: &str, agent_id: &str
         "HTTP_PROXY=http://canary-proxy:1",
         "NODE_EXTRA_CA_CERTS=/canary/ca.pem",
         "TEAM_AGENT_WORKSPACE=",
-        "TEAM_AGENT_OWNER_TEAM_ID=envteam",
+        "TEAM_AGENT_OWNER_TEAM_ID=teamdir",
     ] {
         if !command_line.contains(expected) {
             failures.push(format!(
@@ -190,7 +192,7 @@ fn seed_restart_state(team: &Path, agent_id: &str) {
     team_agent::state::persist::save_runtime_state(
         team,
         &json!({
-            "active_team_key": "envteam",
+            "active_team_key": RUNTIME_TEAM_KEY,
             "team_dir": team.to_string_lossy().to_string(),
             "spec_path": team.join("team.spec.yaml").to_string_lossy().to_string(),
             "session_name": "team-envteam",
@@ -201,7 +203,7 @@ fn seed_restart_state(team: &Path, agent_id: &str) {
                     "role": "Restart Worker",
                     "tools": ["mcp_team"],
                     "window": agent_id,
-                    "owner_team_id": "envteam",
+                    "owner_team_id": RUNTIME_TEAM_KEY,
                     "session_id": "sess-worker-a",
                     "first_send_at": "2026-06-05T09:00:00+00:00"
                 }
@@ -217,7 +219,7 @@ fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
     team_agent::state::persist::save_runtime_state(
         &workspace,
         &json!({
-            "active_team_key": "envteam",
+            "active_team_key": RUNTIME_TEAM_KEY,
             "team_dir": team.to_string_lossy().to_string(),
             "spec_path": team.join("team.spec.yaml").to_string_lossy().to_string(),
             "session_name": "team-envteam",
@@ -228,7 +230,7 @@ fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
                     "role": "Existing Worker",
                     "tools": ["mcp_team"],
                     "window": agent_id,
-                    "owner_team_id": "envteam"
+                    "owner_team_id": RUNTIME_TEAM_KEY
                 }
             }
         }),

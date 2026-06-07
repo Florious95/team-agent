@@ -22,8 +22,17 @@ pub(crate) fn find_session_id(record: &serde_json::Value) -> Option<String> {
     if let Some(s) = record.get("sessionId").and_then(serde_json::Value::as_str) {
         return Some(s.to_string());
     }
-    record
+    if let Some(s) = record
         .get("session_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(s.to_string());
+    }
+    record
+        .get("session_meta")
+        .and_then(|v| v.get("payload"))
+        .or_else(|| record.get("payload"))
+        .and_then(|v| v.get("id"))
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
 }

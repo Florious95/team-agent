@@ -160,6 +160,71 @@ pub(super) fn agent_rollout_path(agent: &serde_json::Value) -> Option<RolloutPat
         .map(RolloutPath::new)
 }
 
+pub(crate) fn refresh_missing_provider_sessions(
+    state: &mut serde_json::Value,
+) -> Result<bool, LifecycleError> {
+    let Some(agents) = state.get_mut("agents").and_then(serde_json::Value::as_object_mut) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for (agent_id, agent) in agents {
+        let Some(agent_obj) = agent.as_object_mut() else {
+            continue;
+        };
+        if agent_obj
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|session| !session.is_empty())
+        {
+            continue;
+        }
+        let Some(spawn_cwd) = agent_obj
+            .get("spawn_cwd")
+            .and_then(serde_json::Value::as_str)
+            .filter(|cwd| !cwd.is_empty())
+        else {
+            continue;
+        };
+        let provider = agent_provider(&serde_json::Value::Object(agent_obj.clone()));
+        let adapter = crate::provider::get_adapter(provider);
+        let captured = adapter
+            .capture_session_id(agent_id, Path::new(spawn_cwd), 0)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+        let Some(captured) = captured else {
+            continue;
+        };
+        if let Some(session_id) = captured.session_id {
+            agent_obj.insert(
+                "session_id".to_string(),
+                serde_json::json!(session_id.as_str()),
+            );
+            changed = true;
+        }
+        if let Some(rollout_path) = captured.rollout_path {
+            agent_obj.insert(
+                "rollout_path".to_string(),
+                serde_json::json!(rollout_path.as_path().to_string_lossy()),
+            );
+            changed = true;
+        }
+        agent_obj.insert(
+            "captured_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+        agent_obj.insert(
+            "captured_via".to_string(),
+            serde_json::to_value(captured.captured_via)
+                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
+        );
+        agent_obj.insert(
+            "attribution_confidence".to_string(),
+            serde_json::to_value(captured.attribution_confidence)
+                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
+        );
+    }
+    Ok(changed)
+}
+
 /// Tools list off an agent's runtime state entry (`tools: [...]`). Restart paths
 /// don't have the full spec object, only the runtime state — so they read tools from
 /// the state row, falling back to an empty list. Contract C requires the worker

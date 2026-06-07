@@ -92,8 +92,7 @@ pub mod lifecycle_port {
         yes: bool,
         fresh: bool,
     ) -> Result<Value, CliError> {
-        let _ = workspace;
-        match crate::lifecycle::quick_start(agents_dir, name, yes, fresh, team_id) {
+        match crate::lifecycle::quick_start_in_workspace(workspace, agents_dir, name, yes, fresh, team_id) {
             Ok(report) => Ok(quick_start_value(report)),
             Err(e) => Ok(error_value(e)),
         }
@@ -122,13 +121,29 @@ pub mod lifecycle_port {
     }
     /// `runtime.shutdown`(`cmd_shutdown`)。
     pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>) -> Result<Value, CliError> {
-        // CP-1: workspace-bound backend so kill-session hits the per-team `tmux -L <socket>` server,
-        // then tear that server down so the per-team socket does not orphan (best-effort).
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let transport = crate::tmux_backend::TmuxBackend::for_workspace(&run_ws);
-        let result = shutdown_with_transport(workspace, keep_logs, team, &transport);
-        transport.kill_server();
+        let state = shutdown_state_for_team(&run_ws, team)?;
+        let endpoint = stored_tmux_endpoint(&state);
+        let transport = match endpoint {
+            Some(endpoint) if Path::new(endpoint).is_absolute() => {
+                crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+            }
+            Some(endpoint) if !endpoint.is_empty() => {
+                crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
+            }
+            _ => shutdown_workspace_transport(&run_ws),
+        };
+        let result = shutdown_with_transport_and_state(
+            workspace,
+            keep_logs,
+            team,
+            &transport,
+            Some(state),
+        );
+        if team.is_none() {
+            transport.kill_server();
+        }
         result
     }
 
@@ -138,28 +153,106 @@ pub mod lifecycle_port {
         team: Option<&str>,
         transport: &dyn crate::transport::Transport,
     ) -> Result<Value, CliError> {
+        shutdown_with_transport_and_state(workspace, keep_logs, team, transport, None)
+    }
+
+    fn shutdown_with_transport_and_state(
+        workspace: &Path,
+        keep_logs: bool,
+        team: Option<&str>,
+        transport: &dyn crate::transport::Transport,
+        state: Option<Value>,
+    ) -> Result<Value, CliError> {
         let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
-        let stopped = crate::coordinator::stop_coordinator(&wp)
+        let stopped = if team.is_none() {
+            let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
+            Some(
+                crate::coordinator::stop_coordinator(&wp)
+                    .map_err(|e| CliError::Runtime(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let mut state = match state {
+            Some(state) => state,
+            None => shutdown_state_for_team(&run_workspace, team)?,
+        };
+        let stored_transport = stored_tmux_endpoint(&state).map(tmux_transport_for_endpoint);
+        let transport = stored_transport
+            .as_ref()
+            .map(|transport| transport as &dyn crate::transport::Transport)
+            .unwrap_or(transport);
+        let captured_missing_sessions = crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let mut state = crate::state::persist::load_runtime_state(&run_workspace)?;
         let session_name = state
             .get("session_name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(crate::transport::SessionName::new);
-        let session_killed = if let Some(session) = session_name.as_ref() {
-            match transport.kill_session(session) {
-                Ok(()) => true,
-                Err(error) if tmux_absent_error(&error.to_string()) => false,
-                Err(error) => return Err(CliError::Runtime(error.to_string())),
+        let mut root_pids = state_process_roots(&state);
+        let pane_pids = session_name
+            .as_ref()
+            .map(|session| pane_pids_for_session(transport, session))
+            .unwrap_or_default();
+        root_pids.extend(pane_pids);
+        root_pids.sort_unstable();
+        root_pids.dedup();
+        let root_pgids = process_pgids(&root_pids);
+        for pid in &root_pids {
+            reap_process_tree(*pid);
+        }
+        reap_process_groups(&root_pgids);
+        let mut kill_error: Option<String> = None;
+        if let Some(session) = session_name.as_ref() {
+            if let Err(error) = transport.kill_session(session) {
+                if !tmux_absent_error(&error.to_string()) {
+                    kill_error = Some(error.to_string());
+                }
             }
+        }
+        reap_workspace_process_residuals(&run_workspace, &state, &root_pids, &root_pgids);
+        let session_residuals = if let Some(session) = session_name.as_ref() {
+            let (residuals, error) = session_residuals_after_reap(
+                transport,
+                &run_workspace,
+                session,
+                !captured_missing_sessions,
+            );
+            if let Some(error) = error {
+                kill_error.get_or_insert(error);
+            }
+            residuals
         } else {
-            false
+            Vec::new()
         };
+        let process_residuals = process_residuals(&run_workspace, &state, &root_pids, &root_pgids);
+        let session_killed = session_name.is_some()
+            && kill_error.is_none()
+            && session_residuals.is_empty()
+            && process_residuals.is_empty();
         mark_agents_stopped(&mut state);
-        crate::state::persist::save_runtime_state(&run_workspace, &state)?;
+        if team.is_some() {
+            crate::state::projection::save_team_scoped_state(&run_workspace, &state)?;
+        } else {
+            crate::state::persist::save_runtime_state(&run_workspace, &state)?;
+        }
+        let coordinator_status = stopped
+            .as_ref()
+            .map(|stopped| stop_status_wire(stopped.status))
+            .unwrap_or("not_stopped");
+        let coordinator_pid = stopped.as_ref().and_then(|stopped| stopped.pid.map(|p| p.get()));
+        let ok = stopped.as_ref().map(|stopped| stopped.ok).unwrap_or(true)
+            && kill_error.is_none()
+            && session_residuals.is_empty()
+            && process_residuals.is_empty();
+        let status = if ok {
+            "ok"
+        } else if kill_error.is_some() {
+            "failed"
+        } else {
+            "partial"
+        };
         let _event = crate::event_log::EventLog::new(&run_workspace)
             .write(
                 "lifecycle.shutdown",
@@ -168,21 +261,530 @@ pub mod lifecycle_port {
                     "team": team,
                     "session_name": session_name.as_ref().map(|s| s.as_str().to_string()),
                     "session_killed": session_killed,
-                    "coordinator_status": stop_status_wire(stopped.status),
+                    "coordinator_status": coordinator_status,
+                    "status": status,
                 }),
             )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         Ok(json!({
-            "ok": stopped.ok,
+            "ok": ok,
+            "status": status,
             "keep_logs": keep_logs,
             "team": team,
             "session_name": session_name.map(|s| s.as_str().to_string()),
             "session_killed": session_killed,
+            "residuals": {
+                "sessions": session_residuals,
+                "processes": process_residuals,
+            },
+            "error": kill_error,
             "coordinator": {
-                "status": stop_status_wire(stopped.status),
-                "pid": stopped.pid.map(|p| p.get()),
+                "status": coordinator_status,
+                "pid": coordinator_pid,
             }
         }))
+    }
+
+    fn shutdown_state_for_team(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
+        if let Some(team) = team {
+            crate::state::projection::select_runtime_state(workspace, Some(team)).map_err(CliError::from)
+        } else {
+            crate::state::persist::load_runtime_state(workspace).map_err(CliError::from)
+        }
+    }
+
+    fn shutdown_workspace_transport(workspace: &Path) -> crate::tmux_backend::TmuxBackend {
+        crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+    }
+
+    fn tmux_transport_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
+        if Path::new(endpoint).is_absolute() {
+            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+        } else {
+            crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
+        }
+    }
+
+    fn stored_tmux_endpoint(state: &Value) -> Option<&str> {
+        leader_receiver_tmux_socket(state)
+            .or_else(|| active_team_entry(state).and_then(leader_receiver_tmux_socket))
+            .or_else(|| only_team_entry(state).and_then(leader_receiver_tmux_socket))
+    }
+
+    fn leader_receiver_tmux_socket(state: &Value) -> Option<&str> {
+        state
+            .get("leader_receiver")
+            .and_then(|receiver| receiver.get("tmux_socket"))
+            .and_then(Value::as_str)
+            .filter(|socket| !socket.is_empty())
+    }
+
+    fn active_team_entry(state: &Value) -> Option<&Value> {
+        let active = state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .filter(|team| !team.is_empty())?;
+        state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(active))
+    }
+
+    fn only_team_entry(state: &Value) -> Option<&Value> {
+        let teams = state.get("teams").and_then(Value::as_object)?;
+        if teams.len() == 1 {
+            teams.values().next()
+        } else {
+            None
+        }
+    }
+
+    fn pane_pids_for_session(
+        transport: &dyn crate::transport::Transport,
+        session: &crate::transport::SessionName,
+    ) -> Vec<u32> {
+        transport
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pane| pane.session.as_str() == session.as_str())
+            .filter_map(|pane| pane.pane_pid)
+            .collect()
+    }
+
+    fn session_residuals_after_reap(
+        transport: &dyn crate::transport::Transport,
+        workspace: &Path,
+        session: &crate::transport::SessionName,
+        check_primary_transport: bool,
+    ) -> (Vec<String>, Option<String>) {
+        let mut residual = false;
+        let mut error = None;
+        if check_primary_transport {
+            match transport.has_session(session) {
+                Ok(true) => residual = true,
+                Ok(false) => {}
+                Err(err) if tmux_absent_error(&err.to_string()) => {}
+                Err(err) => {
+                    error = Some(err.to_string());
+                    residual = true;
+                }
+            }
+        }
+        let workspace_transport = shutdown_workspace_transport(workspace);
+        match crate::transport::Transport::has_session(&workspace_transport, session) {
+            Ok(true) => residual = true,
+            Ok(false) => {}
+            Err(err) if tmux_absent_error(&err.to_string()) => {}
+            Err(err) => {
+                error.get_or_insert_with(|| err.to_string());
+                residual = true;
+            }
+        }
+        let default_transport = crate::tmux_backend::TmuxBackend::new();
+        match crate::transport::Transport::has_session(&default_transport, session) {
+            Ok(true) => residual = true,
+            Ok(false) => {}
+            Err(err) if tmux_absent_error(&err.to_string()) => {}
+            Err(err) => {
+                error.get_or_insert_with(|| err.to_string());
+                residual = true;
+            }
+        }
+        let sessions = if residual {
+            vec![session.as_str().to_string()]
+        } else {
+            Vec::new()
+        };
+        (sessions, error)
+    }
+
+    fn state_process_roots(state: &Value) -> Vec<u32> {
+        let mut out = Vec::new();
+        collect_agent_process_roots(state, &mut out);
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            for team in teams.values() {
+                collect_agent_process_roots(team, &mut out);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn collect_agent_process_roots(state: &Value, out: &mut Vec<u32>) {
+        let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+            return;
+        };
+        for agent in agents.values() {
+            for key in ["provider_pid", "process_id", "pid", "child_pid", "pane_pid"] {
+                if let Some(pid) = agent.get(key).and_then(value_u32) {
+                    out.push(pid);
+                }
+            }
+        }
+    }
+
+    fn value_u32(value: &Value) -> Option<u32> {
+        value
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .or_else(|| value.as_str().and_then(|pid| pid.parse::<u32>().ok()))
+            .filter(|pid| *pid > 0)
+    }
+
+    fn reap_process_tree(root_pid: u32) {
+        let pids = process_tree_pids(root_pid);
+        for pid in pids.iter().rev() {
+            send_process_signal(*pid, libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        for pid in pids.iter().rev() {
+            send_process_signal(*pid, libc::SIGKILL);
+        }
+        wait_for_processes_gone(&pids, std::time::Duration::from_secs(1));
+    }
+
+    fn reap_process_groups(pgids: &[u32]) {
+        let current_pgid = unsafe { libc::getpgrp() };
+        for pgid in pgids {
+            let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
+                continue;
+            };
+            if pgid_t <= 1 || pgid_t == current_pgid {
+                continue;
+            }
+            send_process_signal_group(pgid_t, libc::SIGTERM);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        for pgid in pgids {
+            let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
+                continue;
+            };
+            if pgid_t <= 1 || pgid_t == current_pgid {
+                continue;
+            }
+            send_process_signal_group(pgid_t, libc::SIGKILL);
+        }
+    }
+
+    fn reap_workspace_process_residuals(
+        workspace: &Path,
+        state: &Value,
+        root_pids: &[u32],
+        root_pgids: &[u32],
+    ) {
+        for _ in 0..5 {
+            let residuals = matched_processes(workspace, state, root_pids, root_pgids);
+            if residuals.is_empty() {
+                return;
+            }
+            for process in &residuals {
+                reap_process_tree(process.pid);
+            }
+            let pgids = residuals
+                .iter()
+                .filter_map(|process| process.pgid)
+                .collect::<Vec<_>>();
+            reap_process_groups(&pgids);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn process_tree_pids(root_pid: u32) -> Vec<u32> {
+        if root_pid == 0 {
+            return Vec::new();
+        }
+        let pairs = process_parent_pairs();
+        let mut out = vec![root_pid];
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(root_pid);
+        let mut index = 0;
+        while index < out.len() {
+            let parent = out[index];
+            for (pid, ppid) in &pairs {
+                if *ppid == parent && seen.insert(*pid) {
+                    out.push(*pid);
+                }
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn process_parent_pairs() -> Vec<(u32, u32)> {
+        let output = match std::process::Command::new("ps")
+            .args(["-axo", "pid=,ppid="])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => return Vec::new(),
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?.parse::<u32>().ok()?;
+                let ppid = parts.next()?.parse::<u32>().ok()?;
+                Some((pid, ppid))
+            })
+            .collect()
+    }
+
+    fn process_table() -> Vec<ProcessInfo> {
+        let output = match std::process::Command::new("ps")
+            .args(["-axo", "pid=,ppid=,pgid=,command="])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            _ => return Vec::new(),
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(parse_process_info)
+            .collect()
+    }
+
+    fn parse_process_info(line: &str) -> Option<ProcessInfo> {
+        let mut parts = line.split_whitespace();
+        let pid = parts.next()?.parse::<u32>().ok()?;
+        let ppid = parts.next()?.parse::<u32>().ok()?;
+        let pgid = parts.next().and_then(|raw| raw.parse::<u32>().ok());
+        let command = parts.collect::<Vec<_>>().join(" ");
+        Some(ProcessInfo {
+            pid,
+            ppid,
+            pgid,
+            command,
+        })
+    }
+
+    #[derive(Clone, Debug)]
+    struct ProcessInfo {
+        pid: u32,
+        ppid: u32,
+        pgid: Option<u32>,
+        command: String,
+    }
+
+    fn send_process_signal(pid: u32, signal: libc::c_int) {
+        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        unsafe {
+            libc::kill(pid_t, signal);
+        }
+    }
+
+    fn send_process_signal_group(pgid: libc::pid_t, signal: libc::c_int) {
+        unsafe {
+            libc::kill(-pgid, signal);
+        }
+    }
+
+    fn wait_for_processes_gone(pids: &[u32], timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        loop {
+            for pid in pids {
+                reap_child_if_possible(*pid);
+            }
+            if !pids.iter().any(|pid| process_is_live(*pid)) || start.elapsed() >= timeout {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    fn reap_child_if_possible(pid: u32) {
+        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        let mut status = 0;
+        unsafe {
+            libc::waitpid(pid_t, &mut status, libc::WNOHANG);
+        }
+    }
+
+    fn process_is_live(pid: u32) -> bool {
+        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        let rc = unsafe { libc::kill(pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+
+    fn process_pgids(pids: &[u32]) -> Vec<u32> {
+        let table = process_table();
+        let current_pgid = unsafe { libc::getpgrp() };
+        let mut pgids = pids
+            .iter()
+            .filter_map(|pid| table.iter().find(|process| process.pid == *pid))
+            .filter_map(|process| process.pgid)
+            .filter(|pgid| {
+                libc::pid_t::try_from(*pgid)
+                    .map(|pgid| pgid > 1 && pgid != current_pgid)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        pgids.sort_unstable();
+        pgids.dedup();
+        pgids
+    }
+
+    fn process_residuals(
+        workspace: &Path,
+        state: &Value,
+        root_pids: &[u32],
+        root_pgids: &[u32],
+    ) -> Vec<Value> {
+        let mut residuals = matched_processes(workspace, state, root_pids, root_pgids);
+        let mut seen = residuals.iter().map(|process| process.pid).collect::<std::collections::BTreeSet<_>>();
+        for pid in root_pids {
+            if process_is_live(*pid) && seen.insert(*pid) {
+                residuals.push(ProcessInfo {
+                    pid: *pid,
+                    ppid: 0,
+                    pgid: None,
+                    command: String::new(),
+                });
+            }
+        }
+        residuals
+            .into_iter()
+            .map(|process| {
+                json!({
+                    "pid": process.pid,
+                    "ppid": process.ppid,
+                    "pgid": process.pgid,
+                    "command": process.command,
+                })
+            })
+            .collect()
+    }
+
+    fn matched_processes(
+        workspace: &Path,
+        state: &Value,
+        root_pids: &[u32],
+        root_pgids: &[u32],
+    ) -> Vec<ProcessInfo> {
+        let table = process_table();
+        let root_tree = root_pids
+            .iter()
+            .flat_map(|pid| process_tree_from_table(*pid, &table))
+            .collect::<std::collections::BTreeSet<_>>();
+        let root_pgids = root_pgids.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        let spawn_cwds = state_spawn_cwds(state);
+        let workspace_text = workspace.to_string_lossy().to_string();
+        let current_pid = std::process::id();
+        table
+            .into_iter()
+            .filter(|process| process.pid != current_pid)
+            .filter(|process| {
+                process_matches_workspace(process, &workspace_text, &spawn_cwds)
+                    || root_tree.contains(&process.pid)
+                    || process.pgid.is_some_and(|pgid| root_pgids.contains(&pgid))
+            })
+            .collect()
+    }
+
+    fn process_tree_from_table(root_pid: u32, table: &[ProcessInfo]) -> Vec<u32> {
+        if root_pid == 0 {
+            return Vec::new();
+        }
+        let mut out = vec![root_pid];
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(root_pid);
+        let mut index = 0;
+        while index < out.len() {
+            let parent = out[index];
+            for process in table {
+                if process.ppid == parent && seen.insert(process.pid) {
+                    out.push(process.pid);
+                }
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn state_spawn_cwds(state: &Value) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        collect_spawn_cwds(state, &mut out);
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            for team in teams.values() {
+                collect_spawn_cwds(team, &mut out);
+            }
+        }
+        out
+    }
+
+    fn collect_spawn_cwds(state: &Value, out: &mut Vec<PathBuf>) {
+        let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+            return;
+        };
+        for agent in agents.values() {
+            if let Some(spawn_cwd) = agent.get("spawn_cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()) {
+                out.push(PathBuf::from(spawn_cwd));
+            }
+        }
+    }
+
+    fn process_matches_workspace(
+        process: &ProcessInfo,
+        workspace_text: &str,
+        spawn_cwds: &[PathBuf],
+    ) -> bool {
+        let command = process.command.as_str();
+        if command.contains("mcp-server")
+            && command.contains("--workspace")
+            && command.contains(workspace_text)
+        {
+            return true;
+        }
+        let lower = command.to_ascii_lowercase();
+        let provider_like = lower.contains("codex")
+            || lower.contains("claude")
+            || lower.contains("node")
+            || lower.contains("mcp-server")
+            || lower.contains("team-agent");
+        if !provider_like {
+            return false;
+        }
+        if command.contains(workspace_text) {
+            return true;
+        }
+        let Some(cwd) = process_cwd(process.pid) else {
+            return false;
+        };
+        spawn_cwds.iter().any(|spawn_cwd| path_is_under(&cwd, spawn_cwd))
+    }
+
+    fn process_cwd(pid: u32) -> Option<PathBuf> {
+        let proc_cwd = PathBuf::from(format!("/proc/{pid}/cwd"));
+        if let Ok(path) = std::fs::read_link(proc_cwd) {
+            return Some(path);
+        }
+        let output = std::process::Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix('n').map(PathBuf::from))
+    }
+
+    fn path_is_under(path: &Path, root: &Path) -> bool {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        path == root || path.starts_with(root)
     }
     /// `runtime.restart`(`cmd_restart`)。
     pub fn restart(workspace: &Path, allow_fresh: bool, team: Option<&str>) -> Result<Value, CliError> {

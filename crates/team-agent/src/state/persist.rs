@@ -20,7 +20,7 @@
 //! (`identity::migrate_state_identity`,补 leader_session_uuid)→ `_migrate_active_team_key`
 //! (seed active 指针);任一改动 → `save_runtime_state` 回写。不存在且命中缓存 → 返回缓存 deepcopy。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -170,6 +170,14 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
+    save_runtime_state_with_deleted_agents(workspace, state, &[])
+}
+
+pub(crate) fn save_runtime_state_with_deleted_agents(
+    workspace: &Path,
+    state: &Value,
+    deleted_agent_ids: &[&str],
+) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     if cache_equals(&path, state) {
         return Ok(());
@@ -202,6 +210,15 @@ pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateEr
     let _lock = RuntimeLock::acquire(workspace, "state-save", 2.0)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if let Some(latest) = read_latest_state_under_lock(workspace, &path) {
+        let deleted = deleted_agent_ids
+            .iter()
+            .copied()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        preserve_latest_roster_entries(&mut migrated, &latest, &deleted);
     }
     // 字节对拍 Python json.dumps(indent=2, ensure_ascii=False)(无尾换行)。
     let payload = serde_json::to_string_pretty(&migrated)?;
@@ -241,6 +258,101 @@ pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateEr
         }
     }
     Err(StateError::SaveFailed("retry loop exhausted without return".to_string()))
+}
+
+fn read_latest_state_under_lock(workspace: &Path, path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut latest = serde_json::from_str::<Value>(&text).ok()?;
+    normalize_agent_session_state(&mut latest);
+    let _ = migrate_state_identity(&mut latest, &SystemEnv, workspace);
+    let _ = migrate_active_team_key(&mut latest);
+    Some(latest)
+}
+
+fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_agent_ids: &BTreeSet<String>) {
+    if !same_runtime_projection(incoming, latest) {
+        return;
+    }
+    preserve_missing_agents(incoming.get_mut("agents"), latest.get("agents"), deleted_agent_ids);
+
+    let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
+    if let Some(active_team) = active_team.as_deref() {
+        let latest_active_agents = latest
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(active_team))
+            .and_then(|entry| entry.get("agents"));
+        preserve_missing_agents(incoming.get_mut("agents"), latest_active_agents, deleted_agent_ids);
+    }
+
+    let latest_teams = latest.get("teams").and_then(Value::as_object);
+    let Some(incoming_teams) = incoming.get_mut("teams").and_then(Value::as_object_mut) else {
+        return;
+    };
+    if let Some(latest_teams) = latest_teams {
+        for (team, latest_entry) in latest_teams {
+            let Some(incoming_entry) = incoming_teams.get_mut(team) else {
+                continue;
+            };
+            preserve_missing_agents(
+                incoming_entry.get_mut("agents"),
+                latest_entry.get("agents"),
+                deleted_agent_ids,
+            );
+        }
+    }
+    if let Some(active_team) = active_team.as_deref() {
+        let latest_top_agents = latest.get("agents");
+        if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
+            preserve_missing_agents(incoming_entry.get_mut("agents"), latest_top_agents, deleted_agent_ids);
+        }
+    }
+}
+
+fn preserve_missing_agents(
+    incoming_agents: Option<&mut Value>,
+    latest_agents: Option<&Value>,
+    deleted_agent_ids: &BTreeSet<String>,
+) {
+    let Some(incoming_agents) = incoming_agents else {
+        return;
+    };
+    let Some(incoming_map) = incoming_agents.as_object_mut() else {
+        return;
+    };
+    let Some(latest_map) = latest_agents.and_then(Value::as_object) else {
+        return;
+    };
+    for (agent_id, latest_agent) in latest_map {
+        if deleted_agent_ids.contains(agent_id) {
+            continue;
+        }
+        incoming_map
+            .entry(agent_id.clone())
+            .or_insert_with(|| latest_agent.clone());
+    }
+}
+
+fn same_runtime_projection(left: &Value, right: &Value) -> bool {
+    let left_session = left.get("session_name").and_then(Value::as_str);
+    let right_session = right.get("session_name").and_then(Value::as_str);
+    if left_session.is_some() && right_session.is_some() && left_session != right_session {
+        return false;
+    }
+    let left_team = active_team_key(left);
+    let right_team = active_team_key(right);
+    if left_team.is_some() && right_team.is_some() && left_team != right_team {
+        return false;
+    }
+    true
+}
+
+fn active_team_key(state: &Value) -> Option<String> {
+    state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty() && *team != "current")
+        .map(str::to_string)
 }
 
 /// `_self_heal_runtime_state`:重建 inode(heal-tmp + backup-rename),绝不 in-place truncate。

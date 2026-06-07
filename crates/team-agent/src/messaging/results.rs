@@ -10,6 +10,7 @@ use crate::message_store::MessageStore;
 use super::helpers::{next_result_id, required_str, validate_result_envelope};
 use super::types::SEND_RETRY_MAX_ATTEMPTS;
 use crate::model::ids::TaskId;
+use crate::state::projection::OwnerTeamResolution;
 use super::watchers::retry_result_deliveries;
 use super::MessagingError;
 
@@ -20,25 +21,64 @@ pub fn collect(
     result_file: Option<&Path>,
     ensure_coordinator: bool,
 ) -> Result<serde_json::Value, MessagingError> {
+    collect_scoped(workspace, result_file, ensure_coordinator, None)
+}
+
+pub fn collect_for_team(
+    workspace: &Path,
+    result_file: Option<&Path>,
+    ensure_coordinator: bool,
+    owner_team_id: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
+    collect_scoped(workspace, result_file, ensure_coordinator, owner_team_id)
+}
+
+fn collect_scoped(
+    workspace: &Path,
+    result_file: Option<&Path>,
+    ensure_coordinator: bool,
+    owner_team_id: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
     let _ = ensure_coordinator;
     let paths = collect_paths(workspace)?;
-    let spec_path = paths.spec_workspace.join("team.spec.yaml");
+    let log = EventLog::new(&paths.run_workspace);
+    let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
+        Some(team) => Some(resolve_owner_team_for_read(&paths.run_workspace, team, Some(&log))?),
+        None => None,
+    };
+    let owner_team_id = resolved_owner_team_id.as_deref();
+    let mut state = match owner_team_id {
+        Some(team) => crate::state::projection::select_runtime_state(&paths.run_workspace, Some(team))?,
+        None => crate::state::persist::load_runtime_state(&paths.run_workspace)?,
+    };
+    let spec_workspace = owner_team_id
+        .and_then(|_| state_spec_workspace_from_value(&state))
+        .unwrap_or_else(|| paths.spec_workspace.clone());
+    let spec_path = spec_workspace.join("team.spec.yaml");
     if !spec_path.exists() {
         return Err(MessagingError::Validation(format!("Cannot read {}", spec_path.display())));
     }
     let store = MessageStore::open(&paths.run_workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
     if let Some(path) = result_file {
-        ingest_result_file(&conn, path)?;
+        ingest_result_file(&conn, path, owner_team_id)?;
     }
-    let mut stmt = conn.prepare(
-        "select result_id, task_id, agent_id, envelope, status, created_at
-         from results
-         where status not in ('collected', 'invalid')
-         order by created_at, result_id",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
+    let sql = match owner_team_id {
+        Some(_) => {
+            "select result_id, task_id, agent_id, envelope, status, created_at
+             from results
+             where status not in ('collected', 'invalid') and owner_team_id = ?1
+             order by created_at, result_id"
+        }
+        None => {
+            "select result_id, task_id, agent_id, envelope, status, created_at
+             from results
+             where status not in ('collected', 'invalid')
+             order by created_at, result_id"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let row_mapper = |row: &rusqlite::Row<'_>| {
             Ok(StoredResult {
                 result_id: row.get(0)?,
                 task_id: row.get(1)?,
@@ -47,16 +87,18 @@ pub fn collect(
                 status: row.get(4)?,
                 created_at: row.get(5)?,
             })
-        })?
+        };
+    let rows = match owner_team_id {
+        Some(team) => stmt.query_map(params![team], row_mapper),
+        None => stmt.query_map([], row_mapper),
+    }?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
-    let mut state = crate::state::persist::load_runtime_state(&paths.run_workspace)?;
     let mut collected = Vec::new();
     let mut collected_results = Vec::new();
     let mut invalid_results = Vec::new();
     let mut state_dirty = false;
-    let log = EventLog::new(&paths.run_workspace);
     for row in rows {
         let envelope: serde_json::Value = match serde_json::from_str(&row.envelope) {
             Ok(envelope) => envelope,
@@ -83,7 +125,7 @@ pub fn collect(
         }
         let scope = if task_exists(&state, &row.task_id) {
             "task"
-        } else if is_message_scoped_result(&conn, &row.task_id, &row.agent_id)? {
+        } else if is_message_scoped_result(&conn, &row.task_id, &row.agent_id, owner_team_id)? {
             "message"
         } else {
             record_invalid_result(
@@ -95,10 +137,20 @@ pub fn collect(
             )?;
             continue;
         };
-        conn.execute(
-            "update results set status = 'collected' where result_id = ?1",
-            params![row.result_id.as_str()],
-        )?;
+        match owner_team_id {
+            Some(team) => {
+                conn.execute(
+                    "update results set status = 'collected' where result_id = ?1 and owner_team_id = ?2",
+                    params![row.result_id.as_str(), team],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "update results set status = 'collected' where result_id = ?1",
+                    params![row.result_id.as_str()],
+                )?;
+            }
+        }
         if scope == "task" {
             mark_task_done(&mut state, &row.task_id, &row.result_id);
             state_dirty = true;
@@ -129,9 +181,13 @@ pub fn collect(
         collected_results.push(summary);
     }
     if state_dirty {
-        crate::state::persist::save_runtime_state(&paths.run_workspace, &state)?;
+        if owner_team_id.is_some() {
+            crate::state::projection::save_team_scoped_state(&paths.run_workspace, &state)?;
+        } else {
+            crate::state::persist::save_runtime_state(&paths.run_workspace, &state)?;
+        }
     }
-    let counts = result_counts(&conn)?;
+    let counts = result_counts(&conn, owner_team_id)?;
     Ok(serde_json::json!({
         "ok": invalid_results.is_empty(),
         "collected": collected,
@@ -139,12 +195,42 @@ pub fn collect(
         "delivered_messages": [],
         "invalid_results": invalid_results,
         "results": counts,
-        "state_file": paths.spec_workspace.join("team_state.md").to_string_lossy().to_string(),
+        "state_file": spec_workspace.join("team_state.md").to_string_lossy().to_string(),
         "coordinator": {
             "ok": false,
             "status": "not_required",
         },
     }))
+}
+
+fn resolve_owner_team_for_read(
+    workspace: &Path,
+    requested: &str,
+    event_log: Option<&EventLog>,
+) -> Result<String, MessagingError> {
+    let state = crate::state::persist::load_runtime_state(workspace)?;
+    match crate::state::projection::resolve_owner_team_id(&state, requested) {
+        OwnerTeamResolution::Canonical(canonical) => Ok(canonical),
+        OwnerTeamResolution::LegacyAlias { requested, canonical } => {
+            crate::messaging::delivery::normalize_owner_team_id_rows(
+                workspace,
+                &requested,
+                &canonical,
+                None,
+                event_log,
+            )?;
+            Ok(canonical)
+        }
+        OwnerTeamResolution::Unresolved { requested } => {
+            Err(MessagingError::Routing(format!("owner_team_unresolved: {requested}")))
+        }
+        OwnerTeamResolution::Ambiguous { requested, matches } => {
+            Err(MessagingError::Routing(format!(
+                "owner_team_ambiguous: {requested} matches {}",
+                matches.join(",")
+            )))
+        }
+    }
 }
 
 struct CollectPaths {
@@ -153,6 +239,12 @@ struct CollectPaths {
 }
 
 fn collect_paths(workspace: &Path) -> Result<CollectPaths, MessagingError> {
+    if collect_input_has_no_local_team_context(workspace) {
+        return Ok(CollectPaths {
+            run_workspace: workspace.to_path_buf(),
+            spec_workspace: workspace.to_path_buf(),
+        });
+    }
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| MessagingError::Routing(e.to_string()))?;
     let spec_workspace = if workspace.join("team.spec.yaml").exists() {
@@ -168,8 +260,24 @@ fn collect_paths(workspace: &Path) -> Result<CollectPaths, MessagingError> {
     })
 }
 
+fn collect_input_has_no_local_team_context(workspace: &Path) -> bool {
+    !workspace.join("team.spec.yaml").exists()
+        && !workspace.join(".team").exists()
+        && !crate::state::persist::runtime_state_path(workspace).exists()
+        && workspace.file_name().and_then(|s| s.to_str()) != Some(".team")
+        && workspace
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            != Some(".team")
+}
+
 fn state_spec_workspace(run_workspace: &Path) -> Option<PathBuf> {
     let state = crate::state::persist::load_runtime_state(run_workspace).ok()?;
+    state_spec_workspace_from_value(&state)
+}
+
+fn state_spec_workspace_from_value(state: &serde_json::Value) -> Option<PathBuf> {
     if let Some(spec_path) = state.get("spec_path").and_then(serde_json::Value::as_str) {
         return PathBuf::from(spec_path).parent().map(Path::to_path_buf);
     }
@@ -200,7 +308,11 @@ fn record_invalid_result(
     Ok(())
 }
 
-fn ingest_result_file(conn: &rusqlite::Connection, path: &Path) -> Result<(), MessagingError> {
+fn ingest_result_file(
+    conn: &rusqlite::Connection,
+    path: &Path,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
     let raw = std::fs::read_to_string(path)?;
     let mut envelope: serde_json::Value = serde_json::from_str(&raw)?;
     validate_result_envelope(&envelope)?;
@@ -226,7 +338,7 @@ fn ingest_result_file(conn: &rusqlite::Connection, path: &Path) -> Result<(), Me
         agent_id,
         &envelope.to_string(),
         status,
-        None,
+        owner_team_id,
     )?;
     Ok(())
 }
@@ -273,39 +385,55 @@ fn is_message_scoped_result(
     conn: &rusqlite::Connection,
     task_id: &str,
     agent_id: &str,
+    owner_team_id: Option<&str>,
 ) -> Result<bool, MessagingError> {
     if !task_id.starts_with("msg_") {
         return Ok(false);
     }
-    let count: i64 = conn.query_row(
-        "select count(*) from messages where message_id = ?1 and recipient = ?2",
-        params![task_id, agent_id],
-        |row| row.get(0),
-    )?;
+    let count: i64 = match owner_team_id {
+        Some(team) => conn.query_row(
+            "select count(*) from messages where message_id = ?1 and recipient = ?2 and owner_team_id = ?3",
+            params![task_id, agent_id, team],
+            |row| row.get(0),
+        )?,
+        None => conn.query_row(
+            "select count(*) from messages where message_id = ?1 and recipient = ?2",
+            params![task_id, agent_id],
+            |row| row.get(0),
+        )?,
+    };
     Ok(count > 0)
 }
 
-fn result_counts(conn: &rusqlite::Connection) -> Result<serde_json::Value, MessagingError> {
-    let total: i64 = conn.query_row("select count(*) from results", [], |row| row.get(0))?;
-    let collected: i64 = conn.query_row(
-        "select count(*) from results where status = 'collected'",
-        [],
-        |row| row.get(0),
-    )?;
-    let invalid: i64 = conn.query_row(
-        "select count(*) from results where status = 'invalid'",
-        [],
-        |row| row.get(0),
-    )?;
+fn result_counts(
+    conn: &rusqlite::Connection,
+    owner_team_id: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
+    let total: i64 = count_results(conn, owner_team_id, None)?;
+    let collected: i64 = count_results(conn, owner_team_id, Some("collected"))?;
+    let invalid: i64 = count_results(conn, owner_team_id, Some("invalid"))?;
     let uncollected = total - collected - invalid;
     let mut by_status = serde_json::Map::new();
-    let mut stmt = conn.prepare(
-        "select status, count(*) from results
-         where status not in ('collected', 'invalid')
-         group by status
-         order by status",
-    )?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    let sql = match owner_team_id {
+        Some(_) => {
+            "select status, count(*) from results
+             where status not in ('collected', 'invalid') and owner_team_id = ?1
+             group by status
+             order by status"
+        }
+        None => {
+            "select status, count(*) from results
+             where status not in ('collected', 'invalid')
+             group by status
+             order by status"
+        }
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let row_mapper = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?));
+    let rows = match owner_team_id {
+        Some(team) => stmt.query_map(params![team], row_mapper),
+        None => stmt.query_map([], row_mapper),
+    }?;
     for row in rows {
         let (status, count) = row?;
         by_status.insert(status, serde_json::Value::Number(count.into()));
@@ -317,6 +445,31 @@ fn result_counts(conn: &rusqlite::Connection) -> Result<serde_json::Value, Messa
         "invalid": invalid,
         "by_status": by_status,
     }))
+}
+
+fn count_results(
+    conn: &rusqlite::Connection,
+    owner_team_id: Option<&str>,
+    status: Option<&str>,
+) -> Result<i64, MessagingError> {
+    match (owner_team_id, status) {
+        (Some(team), Some(status)) => Ok(conn.query_row(
+            "select count(*) from results where owner_team_id = ?1 and status = ?2",
+            params![team, status],
+            |row| row.get(0),
+        )?),
+        (Some(team), None) => Ok(conn.query_row(
+            "select count(*) from results where owner_team_id = ?1",
+            params![team],
+            |row| row.get(0),
+        )?),
+        (None, Some(status)) => Ok(conn.query_row(
+            "select count(*) from results where status = ?1",
+            params![status],
+            |row| row.get(0),
+        )?),
+        (None, None) => Ok(conn.query_row("select count(*) from results", [], |row| row.get(0))?),
+    }
 }
 
 /// `report_result` (`results.py:191`):worker 报结果 —— 校验 envelope、存 result、ack 任务消息、

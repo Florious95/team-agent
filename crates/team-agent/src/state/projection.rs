@@ -14,7 +14,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::StateError;
-use crate::state::persist::{load_runtime_state, save_runtime_state};
+use crate::state::persist::{load_runtime_state, save_runtime_state_with_deleted_agents};
 
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
@@ -41,6 +41,122 @@ pub fn team_state_key(state: &Value) -> String {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map_or_else(|| "current".to_string(), str::to_string)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerTeamResolution {
+    Canonical(String),
+    LegacyAlias { requested: String, canonical: String },
+    Unresolved { requested: String },
+    Ambiguous { requested: String, matches: Vec<String> },
+}
+
+impl OwnerTeamResolution {
+    pub fn canonical_key(&self) -> Option<&str> {
+        match self {
+            OwnerTeamResolution::Canonical(key)
+            | OwnerTeamResolution::LegacyAlias { canonical: key, .. } => Some(key),
+            OwnerTeamResolution::Unresolved { .. } | OwnerTeamResolution::Ambiguous { .. } => None,
+        }
+    }
+}
+
+pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamResolution {
+    let requested = owner_team_id.trim();
+    if requested.is_empty() {
+        return OwnerTeamResolution::Unresolved { requested: owner_team_id.to_string() };
+    }
+    let teams = state.get("teams").and_then(Value::as_object);
+    if teams.is_some_and(|teams| teams.contains_key(requested)) {
+        if has_top_level_runtime_content(state) {
+            return OwnerTeamResolution::Canonical(requested.to_string());
+        }
+    }
+    if teams.is_none_or(Map::is_empty) {
+        let active = state.get("active_team_key").and_then(Value::as_str).unwrap_or("");
+        let derived = team_state_key(state);
+        if active == requested || derived == requested {
+            return OwnerTeamResolution::Canonical(requested.to_string());
+        }
+        if !active.is_empty() {
+            return OwnerTeamResolution::LegacyAlias {
+                requested: requested.to_string(),
+                canonical: active.to_string(),
+            };
+        }
+        if derived != "current" {
+            return OwnerTeamResolution::LegacyAlias {
+                requested: requested.to_string(),
+                canonical: derived,
+            };
+        }
+        return OwnerTeamResolution::Canonical(requested.to_string());
+    }
+    let Some(teams) = teams else {
+        return OwnerTeamResolution::Unresolved { requested: requested.to_string() };
+    };
+    let mut matches = Vec::new();
+    for (key, entry) in teams {
+        if legacy_owner_team_aliases(entry).any(|alias| alias == requested) {
+            matches.push(key.clone());
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    match matches.len() {
+        0 => OwnerTeamResolution::Unresolved { requested: requested.to_string() },
+        1 => OwnerTeamResolution::LegacyAlias {
+            requested: requested.to_string(),
+            canonical: matches.remove(0),
+        },
+        _ => OwnerTeamResolution::Ambiguous { requested: requested.to_string(), matches },
+    }
+}
+
+fn has_top_level_runtime_content(state: &Value) -> bool {
+    [
+        "session_name",
+        "team_dir",
+        "spec_path",
+        "workspace",
+        "agents",
+        "tasks",
+        "leader_receiver",
+        "team_owner",
+    ]
+    .into_iter()
+    .any(|key| state.get(key).is_some_and(super::json_truthy))
+}
+
+fn legacy_owner_team_aliases(entry: &Value) -> impl Iterator<Item = String> + '_ {
+    let scalar_paths = [
+        "/team/name",
+        "/team/id",
+        "/name",
+        "/team_name",
+        "/team_id",
+        "/spec_name",
+        "/legacy_owner_team_id",
+        "/legacy_team_id",
+        "/legacy_team_name",
+        "/legacy_alias",
+    ];
+    let list_paths = ["/legacy_aliases", "/legacy_team_aliases", "/legacy_owner_team_ids", "/aliases"];
+    let scalars = scalar_paths
+        .into_iter()
+        .filter_map(|path| entry.pointer(path).and_then(Value::as_str));
+    let lists = list_paths.into_iter().flat_map(|path| {
+        entry
+            .pointer(path)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    });
+    scalars
+        .chain(lists)
+        .filter(|alias| !alias.is_empty())
+        .map(str::to_string)
 }
 
 /// `compact_team_state`(`state.py:105`):剔除 `teams`(team entry 不嵌套全量 teams),保序。
@@ -339,6 +455,14 @@ pub fn resolve_team_scoped_state(
 /// 纯 `save_runtime_state`(字节等价);多 team 时把本 team 落到 `teams[target_key]=compact(...)`,顶层
 /// 视图按 golden 的 `existing_primary_key` 逻辑择 incoming/existing。§10:无 unwrap/panic。
 pub fn save_team_scoped_state(workspace: &Path, team_state: &Value) -> Result<(), StateError> {
+    save_team_scoped_state_with_deleted_agents(workspace, team_state, &[])
+}
+
+pub(crate) fn save_team_scoped_state_with_deleted_agents(
+    workspace: &Path,
+    team_state: &Value,
+    deleted_agent_ids: &[&str],
+) -> Result<(), StateError> {
     let target_key = team_state_key(team_state);
     let existing = load_runtime_state(workspace)?;
     // existing_primary_key = team_state_key(existing) if existing.get("session_name") else None
@@ -367,7 +491,7 @@ pub fn save_team_scoped_state(workspace: &Path, team_state: &Value) -> Result<()
     // not existing_teams and existing_primary_key == target_key → 纯 save(剔 teams)。
     if existing_teams.is_empty() && existing_primary_key.as_deref() == Some(target_key.as_str()) {
         let merged = compact_team_state(team_state);
-        return save_runtime_state(workspace, &merged);
+        return save_runtime_state_with_deleted_agents(workspace, &merged, deleted_agent_ids);
     }
     // teams = deepcopy(incoming_teams or existing_teams)
     let mut teams = match incoming_teams {
@@ -387,7 +511,7 @@ pub fn save_team_scoped_state(workspace: &Path, team_state: &Value) -> Result<()
     if merged.get("teams").and_then(Value::as_object).is_some_and(Map::is_empty) {
         merged.remove("teams");
     }
-    save_runtime_state(workspace, &Value::Object(merged))
+    save_runtime_state_with_deleted_agents(workspace, &Value::Object(merged), deleted_agent_ids)
 }
 
 // ---- helpers ----
