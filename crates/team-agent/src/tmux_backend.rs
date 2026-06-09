@@ -318,6 +318,60 @@ pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
     format!("ta-{:012x}", hasher.finish() & 0xffff_ffff_ffff)
 }
 
+pub(crate) fn socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
+    let socket_name = socket_name_for_workspace(workspace);
+    let roots = tmux_socket_roots();
+    for root in &roots {
+        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let candidate = root.join(&socket_name);
+        if candidate.exists() {
+            return Some(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+    let uid = unsafe { libc::geteuid() };
+    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
+    let default_root = default_root
+        .canonicalize()
+        .unwrap_or(default_root);
+    Some(default_root.join(socket_name))
+}
+
+pub(crate) fn attach_command_for_workspace(
+    workspace: &Path,
+    session_name: &SessionName,
+    window_name: &str,
+) -> Option<String> {
+    let socket_path = socket_path_for_workspace(workspace)?;
+    Some(format!(
+        "tmux -S {} attach -t {}:{}",
+        socket_path.display(),
+        session_name.as_str(),
+        window_name
+    ))
+}
+
+pub(crate) fn attach_commands_for_windows<'a>(
+    workspace: &Path,
+    session_name: &SessionName,
+    window_names: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    window_names
+        .into_iter()
+        .filter_map(|window_name| attach_command_for_workspace(workspace, session_name, window_name))
+        .collect()
+}
+
+fn tmux_socket_roots() -> Vec<PathBuf> {
+    let uid = unsafe { libc::geteuid() };
+    let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
+    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+        roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
 pub(crate) fn socket_name_from_tmux_env() -> Option<String> {
     let tmux = std::env::var("TMUX")
         .ok()

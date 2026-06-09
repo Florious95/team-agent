@@ -1,6 +1,6 @@
-use super::*;
 use super::common::*;
 use super::selection::classify_restart_plan;
+use super::*;
 
 // ── lifecycle::restart —— 整队 Route B resume-or-fresh 重建 ──────────────────
 
@@ -101,10 +101,9 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
-    let spec_workspace = selected
-        .spec_workspace
-        .as_ref()
-        .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
+    let spec_workspace = selected.spec_workspace.as_ref().ok_or_else(|| {
+        LifecycleError::TeamSelect("active team spec workspace not found".to_string())
+    })?;
     let spec = load_team_spec(spec_workspace)?;
     let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
     let mut convergence = converge_missing_provider_sessions(
@@ -236,10 +235,20 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
+    let attach_commands = crate::tmux_backend::attach_commands_for_windows(
+        &selected.run_workspace,
+        &session_name,
+        plan.decisions
+            .iter()
+            .map(|decision| decision.agent_id.as_str()),
+    );
+    let next_actions = attach_commands.clone();
     Ok(RestartReport::Restarted {
         session_name,
         agents: plan.decisions,
         coordinator_started,
+        next_actions,
+        attach_commands,
     })
 }
 
@@ -456,10 +465,7 @@ fn mark_leader_receiver_rebind_required(state: &mut serde_json::Value, session_n
         .and_then(|v| v.as_str())
         .is_some_and(|status| status == "attached")
     {
-        receiver.insert(
-            "status".to_string(),
-            serde_json::json!("rebind_required"),
-        );
+        receiver.insert("status".to_string(), serde_json::json!("rebind_required"));
     }
 }
 
@@ -520,11 +526,7 @@ fn mark_agent_respawned(
     if let Some(pane_pid) = pane_pid {
         agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
     }
-    crate::lifecycle::launch::persist_command_plan_state(
-        agent,
-        &spawn.plan,
-        &spawn.profile_launch,
-    );
+    crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
     persist_effective_approval_policy_for_restart(agent, safety);
     agent.remove("startup_prompts");
     agent.remove("startup_prompt_status");
@@ -583,8 +585,7 @@ fn write_restart_resume_decision_event(
 
     let path = workspace.join(".team").join("logs").join("events.jsonl");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     }
     let mut event = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
@@ -615,8 +616,8 @@ fn write_restart_resume_decision_event(
             }
         }
     }
-    let line = serde_json::to_string(&event)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let line =
+        serde_json::to_string(&event).map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -667,7 +668,10 @@ pub fn select_restart_state(
         .get("active_team_key")
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
-        .map_or_else(|| crate::state::projection::team_state_key(&selected), str::to_string);
+        .map_or_else(
+            || crate::state::projection::team_state_key(&selected),
+            str::to_string,
+        );
     Ok(restart_candidate_from_state(workspace, &key, &selected))
 }
 
@@ -733,12 +737,14 @@ fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_object)
         .is_some_and(|agents| {
             agents.values().any(|agent| {
-                ["session_id", "rollout_path", "first_send_at"].iter().any(|key| {
-                    agent
-                        .get(*key)
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|s| !s.is_empty())
-                })
+                ["session_id", "rollout_path", "first_send_at"]
+                    .iter()
+                    .any(|key| {
+                        agent
+                            .get(*key)
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|s| !s.is_empty())
+                    })
             })
         })
 }

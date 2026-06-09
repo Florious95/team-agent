@@ -72,9 +72,8 @@ pub fn launch_with_transport_in_workspace(
             spec_path.display()
         )));
     }
-    let text = std::fs::read_to_string(spec_path).map_err(|e| {
-        LifecycleError::Compile(format!("{}: {e}", spec_path.display()))
-    })?;
+    let text = std::fs::read_to_string(spec_path)
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
     let session_name = spec_session_name(&spec);
     let safety = effective_runtime_config(&spec)?;
@@ -101,8 +100,23 @@ pub fn launch_with_transport_in_workspace(
     let started = if dry_run {
         Vec::new()
     } else {
-        let started = spawn_agents(workspace, spec_path, &spec, &session_name, &safety, transport)?;
-        persist_spawn_agent_state(workspace, spec_path, &spec, &session_name, transport, &started, &safety)?;
+        let started = spawn_agents(
+            workspace,
+            spec_path,
+            &spec,
+            &session_name,
+            &safety,
+            transport,
+        )?;
+        persist_spawn_agent_state(
+            workspace,
+            spec_path,
+            &spec,
+            &session_name,
+            transport,
+            &started,
+            &safety,
+        )?;
         started
     };
     Ok(LaunchReport {
@@ -152,9 +166,19 @@ fn spawn_agents(
         // has both the role instruction AND the callable Team Agent MCP capability.
         // probe5 RED proved that `build_command(.., None, None, ..)` left the worker
         // without `report_result`; placeholders are substituted at spawn time.
-        let role = agent.get("role").and_then(Value::as_str);
-        let tools = worker_tool_refs(agent_tool_strings(agent), safety);
-        let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
+        let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
+            agent,
+            Some(agent_id_raw),
+            provider,
+        );
+        let system_prompt =
+            crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
+        let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
+            &command_agent,
+            provider,
+            safety,
+        )?;
+        let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
         let mcp_team_id =
             runtime_active_team_key_for_spawn(workspace, spec_path, spec, session_name);
         let mcp_config = adapter
@@ -163,43 +187,32 @@ fn spawn_agents(
         let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
         let mcp_config_path = write_worker_mcp_config(workspace, agent_id_raw, &mcp_config)?;
         let profile_dir = team_dir.join("profiles");
-        let profile_launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
-            workspace,
-            agent_id_raw,
-            agent,
-            Some(&profile_dir),
-            Some(&mcp_config),
-        )?;
-        let command_model = profile_launch
-            .command_overrides
-            .model
-            .as_deref()
-            .or(model);
+        let profile_launch =
+            crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
+                workspace,
+                agent_id_raw,
+                agent,
+                Some(&profile_dir),
+                Some(&mcp_config),
+            )?;
+        let command_model = profile_launch.command_overrides.model.as_deref().or(model);
         let mut plan = adapter
             .build_command_plan(crate::provider::ProviderCommandContext {
                 auth_mode,
                 mcp_config: Some(&mcp_config),
-                system_prompt: role,
+                system_prompt: Some(system_prompt.as_str()),
                 model: command_model,
-                tools: &tool_refs,
+                tools: &resolved_tool_refs,
                 profile_launch: Some(&profile_launch),
             })
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
             point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
         }
-        fill_spawn_placeholders_full(
-            &mut plan.argv,
-            workspace,
-            agent_id_raw,
-            Some(&mcp_team_id),
-        );
+        fill_spawn_placeholders_full(&mut plan.argv, workspace, agent_id_raw, Some(&mcp_team_id));
         let window = WindowName::new(agent_id_raw);
-        let mut env = inherited_env_with_team_overrides(
-            workspace,
-            agent_id_raw,
-            Some(&mcp_team_id),
-        );
+        let mut env =
+            inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
         apply_profile_launch_env(&mut env, &profile_launch);
         let spawn = if started.is_empty() {
             transport.spawn_first(session_name, &window, &plan.argv, team_dir, &env)
@@ -258,12 +271,7 @@ fn persist_spawn_agent_state(
     let team_id = explicit_active_team_key(&state)
         .unwrap_or_else(|| runtime_team_key_for_spec(spec_path, spec, session_name));
     let worker_tmux_socket = launched_worker_tmux_socket(transport, workspace);
-    drop_worker_pane_seeded_owner(
-        &mut state,
-        &team_id,
-        started,
-        worker_tmux_socket.as_deref(),
-    );
+    drop_worker_pane_seeded_owner(&mut state, &team_id, started, worker_tmux_socket.as_deref());
     // Only persist running state for agents whose spawn still has a live target.
     let live_windows: BTreeSet<String> = transport
         .list_windows(session_name)
@@ -276,10 +284,7 @@ fn persist_spawn_agent_state(
         .map(|agent| agent.agent_id.as_str().to_string())
         .collect();
     let pane_pids_by_agent = pane_pids_by_started_agent(transport, started);
-    let profile_dir = spec_path
-        .parent()
-        .unwrap_or(workspace)
-        .join("profiles");
+    let profile_dir = spec_path.parent().unwrap_or(workspace).join("profiles");
     let mut agents = serde_json::Map::new();
     let mut spawn_index = 0_u32;
     for agent in spec_agent_values(spec) {
@@ -317,9 +322,7 @@ fn persist_spawn_agent_state(
         let pane_pid = pane_pids_by_agent.get(id).copied();
         let spawned_at = spawn_timestamp_for_agent(spawn_index);
         spawn_index = spawn_index.saturating_add(1);
-        let started_agent = started
-            .iter()
-            .find(|agent| agent.agent_id.as_str() == id);
+        let started_agent = started.iter().find(|agent| agent.agent_id.as_str() == id);
         agents.insert(
             id.to_string(),
             running_agent_state(
@@ -373,7 +376,10 @@ fn agent_id_to_pane_id<'a>(started: &'a [StartedAgent], agent_id: &str) -> &'a s
         .unwrap_or("")
 }
 
-fn save_launched_team_state(workspace: &Path, launched: &serde_json::Value) -> Result<(), LifecycleError> {
+fn save_launched_team_state(
+    workspace: &Path,
+    launched: &serde_json::Value,
+) -> Result<(), LifecycleError> {
     save_launched_team_state_for_key(workspace, launched, None)
 }
 
@@ -404,7 +410,8 @@ fn save_launched_team_state_for_key(
     };
     let mut projected = crate::state::projection::project_top_level_view(&merged, &launched_key);
     drop_unbound_top_level_owner(&mut projected);
-    save_runtime_state(workspace, &projected).map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    save_runtime_state(workspace, &projected)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn drop_bare_worker_seeded_owner(launched: &mut serde_json::Value, launched_key: &str) {
@@ -506,7 +513,11 @@ fn drop_unbound_top_level_owner(state: &mut serde_json::Value) {
     }
 }
 
-fn drop_foreign_seeded_owner(existing: &serde_json::Value, launched_key: &str, launched: &mut serde_json::Value) {
+fn drop_foreign_seeded_owner(
+    existing: &serde_json::Value,
+    launched_key: &str,
+    launched: &mut serde_json::Value,
+) {
     let Some(pane) = launched
         .get("team_owner")
         .and_then(|owner| owner.get("pane_id"))
@@ -549,8 +560,7 @@ fn drop_worker_pane_seeded_owner(
         .ok()
         .filter(|value| !value.is_empty());
     let has_leader_identity_env = has_positive_caller_leader_env();
-    let seeded_from_bare_tmux =
-        !has_leader_identity_env && tmux_pane.as_deref() == Some(pane);
+    let seeded_from_bare_tmux = !has_leader_identity_env && tmux_pane.as_deref() == Some(pane);
     let caller_tmux_socket = crate::tmux_backend::socket_name_from_tmux_env();
     if seeded_from_bare_tmux
         && (tmux_sockets_match_or_unknown(caller_tmux_socket.as_deref(), worker_tmux_socket)
@@ -563,19 +573,14 @@ fn drop_worker_pane_seeded_owner(
 
 fn seeded_pane_looks_like_worker(pane: &str, started: &[StartedAgent]) -> bool {
     pane.ends_with("-first")
-        || started
-            .iter()
-            .any(|agent| {
-                pane == agent.target
-                    || pane.starts_with(agent.target.as_str())
-                    || agent.target.starts_with(pane)
-            })
+        || started.iter().any(|agent| {
+            pane == agent.target
+                || pane.starts_with(agent.target.as_str())
+                || agent.target.starts_with(pane)
+        })
 }
 
-fn launched_worker_tmux_socket(
-    transport: &dyn Transport,
-    workspace: &Path,
-) -> Option<String> {
+fn launched_worker_tmux_socket(transport: &dyn Transport, workspace: &Path) -> Option<String> {
     if matches!(transport.kind(), crate::transport::BackendKind::Tmux) {
         Some(crate::tmux_backend::socket_name_for_workspace(workspace))
     } else {
@@ -583,10 +588,7 @@ fn launched_worker_tmux_socket(
     }
 }
 
-fn tmux_sockets_match_or_unknown(
-    caller_socket: Option<&str>,
-    worker_socket: Option<&str>,
-) -> bool {
+fn tmux_sockets_match_or_unknown(caller_socket: Option<&str>, worker_socket: Option<&str>) -> bool {
     match (caller_socket, worker_socket) {
         (Some(caller), Some(worker)) => caller == worker,
         (Some(_), None) => false,
@@ -595,7 +597,9 @@ fn tmux_sockets_match_or_unknown(
 }
 
 fn env_nonempty(key: &str) -> bool {
-    std::env::var(key).ok().is_some_and(|value| !value.is_empty())
+    std::env::var(key)
+        .ok()
+        .is_some_and(|value| !value.is_empty())
 }
 
 fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &str) {
@@ -664,7 +668,11 @@ fn unbound_launched_owner(
     }))
 }
 
-fn owner_pane_belongs_to_other_team(existing: &serde_json::Value, launched_key: &str, pane: &str) -> bool {
+fn owner_pane_belongs_to_other_team(
+    existing: &serde_json::Value,
+    launched_key: &str,
+    pane: &str,
+) -> bool {
     existing
         .get("teams")
         .and_then(serde_json::Value::as_object)
@@ -700,7 +708,10 @@ fn running_agent_state(
         .and_then(Value::as_str)
         .and_then(parse_auth_mode)
         .unwrap_or(AuthMode::Subscription);
-    let profile = agent.get("profile").map(yaml_value_to_json).unwrap_or(serde_json::Value::Null);
+    let profile = agent
+        .get("profile")
+        .map(yaml_value_to_json)
+        .unwrap_or(serde_json::Value::Null);
     let window = agent.get("window").and_then(Value::as_str).unwrap_or(id);
     let mcp_config = crate::provider::get_adapter(provider)
         .mcp_config(auth_mode)
@@ -711,7 +722,10 @@ fn running_agent_state(
     state.insert("status".to_string(), serde_json::json!("running"));
     state.insert("provider".to_string(), serde_json::json!(provider));
     state.insert("agent_id".to_string(), serde_json::json!(id));
-    state.insert("model".to_string(), model.map_or(serde_json::Value::Null, |m| serde_json::json!(m)));
+    state.insert(
+        "model".to_string(),
+        model.map_or(serde_json::Value::Null, |m| serde_json::json!(m)),
+    );
     state.insert("auth_mode".to_string(), serde_json::json!(auth_mode));
     state.insert("profile".to_string(), profile);
     if agent.get("profile").is_some() {
@@ -737,7 +751,10 @@ fn running_agent_state(
     state.insert("rollout_path".to_string(), serde_json::Value::Null);
     state.insert("captured_at".to_string(), serde_json::Value::Null);
     state.insert("captured_via".to_string(), serde_json::Value::Null);
-    state.insert("attribution_confidence".to_string(), serde_json::Value::Null);
+    state.insert(
+        "attribution_confidence".to_string(),
+        serde_json::Value::Null,
+    );
     if let Some(started_agent) = started_agent {
         persist_started_agent_plan_state(&mut state, started_agent);
     }
@@ -847,7 +864,11 @@ pub(crate) fn write_worker_mcp_config(
     Ok(path)
 }
 
-pub(crate) fn point_native_mcp_config_at_file(argv: &mut [String], provider: Provider, path: &Path) {
+pub(crate) fn point_native_mcp_config_at_file(
+    argv: &mut [String],
+    provider: Provider,
+    path: &Path,
+) {
     if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
         return;
     }
@@ -874,13 +895,19 @@ fn permissions_json(
     let resolved = permissions::resolve_permissions(&AgentPermissionInput {
         id: Some(AgentId::new(id)),
         provider,
-        role: agent.get("role").and_then(Value::as_str).map(str::to_string),
+        role: agent
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         tools,
     })?;
     let mut out = serde_json::Map::new();
     out.insert("agent_id".to_string(), serde_json::json!(id));
     out.insert("provider".to_string(), serde_json::json!(provider));
-    out.insert("tools".to_string(), serde_json::json!(resolved.sorted_tool_strings()));
+    out.insert(
+        "tools".to_string(),
+        serde_json::json!(resolved.sorted_tool_strings()),
+    );
     out.insert(
         "resolved_tools".to_string(),
         serde_json::Value::Array(
@@ -896,7 +923,10 @@ fn permissions_json(
                 .collect(),
         ),
     );
-    out.insert("has_prompt_only".to_string(), serde_json::json!(resolved.has_prompt_only));
+    out.insert(
+        "has_prompt_only".to_string(),
+        serde_json::json!(resolved.has_prompt_only),
+    );
     Ok(serde_json::Value::Object(out))
 }
 
@@ -920,9 +950,10 @@ fn spawn_timestamp_for_agent(offset_micros: u32) -> String {
     match std::env::var("TEAM_AGENT_TEST_FIXED_SPAWNED_AT") {
         Ok(value) => chrono::DateTime::parse_from_rfc3339(&value)
             .map(|dt| {
-                (dt.with_timezone(&chrono::Utc) + chrono::Duration::microseconds(i64::from(offset_micros)))
-                    .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
-                    .to_string()
+                (dt.with_timezone(&chrono::Utc)
+                    + chrono::Duration::microseconds(i64::from(offset_micros)))
+                .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+                .to_string()
             })
             .unwrap_or(value),
         Err(_) => spawn_timestamp(),
@@ -1078,7 +1109,10 @@ pub(crate) fn fill_spawn_placeholders_full(
             *arg = workspace_text.clone();
         } else if arg == "{agent_id}" {
             *arg = agent_id.to_string();
-        } else if arg.contains("{workspace}") || arg.contains("{agent_id}") || arg.contains("{team_id}") {
+        } else if arg.contains("{workspace}")
+            || arg.contains("{agent_id}")
+            || arg.contains("{team_id}")
+        {
             *arg = arg
                 .replace("{workspace}", &workspace_text)
                 .replace("{agent_id}", agent_id)
@@ -1087,30 +1121,12 @@ pub(crate) fn fill_spawn_placeholders_full(
     }
 }
 
-fn agent_tool_strings(agent: &Value) -> Vec<String> {
-    agent
-        .get("tools")
-        .and_then(Value::as_list)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn spec_team_id(spec: &Value) -> Option<String> {
     spec.get("team")
         .and_then(|v| v.get("id").or_else(|| v.get("name")))
         .and_then(Value::as_str)
         .map(str::to_string)
-        .or_else(|| {
-            spec.get("name")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+        .or_else(|| spec.get("name").and_then(Value::as_str).map(str::to_string))
 }
 
 fn runtime_active_team_key_for_spawn(
@@ -1173,7 +1189,10 @@ fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     }
 }
 
-fn quick_start_requested_team_key<'a>(team_id: Option<&'a str>, name: Option<&'a str>) -> Option<&'a str> {
+fn quick_start_requested_team_key<'a>(
+    team_id: Option<&'a str>,
+    name: Option<&'a str>,
+) -> Option<&'a str> {
     team_id.or(name).filter(|team| !team.is_empty())
 }
 
@@ -1239,7 +1258,7 @@ fn quick_start_depth_guard(
     Ok(QuickStartDepth {
         parent_team_key: Some(parent_key),
         team_depth,
-        })
+    })
 }
 
 fn infer_parent_team_from_active_state(state: &serde_json::Value) -> Option<String> {
@@ -1255,9 +1274,7 @@ fn has_live_runtime_teams(state: &serde_json::Value) -> bool {
     state
         .get("teams")
         .and_then(serde_json::Value::as_object)
-        .is_some_and(|teams| {
-            teams.values().any(team_has_running_agent)
-        })
+        .is_some_and(|teams| teams.values().any(team_has_running_agent))
 }
 
 fn team_has_running_agent(team: &serde_json::Value) -> bool {
@@ -1265,20 +1282,18 @@ fn team_has_running_agent(team: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_object)
         .is_some_and(|agents| {
             agents.values().any(|agent| {
-                agent
-                    .get("status")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("running")
+                agent.get("status").and_then(serde_json::Value::as_str) == Some("running")
             })
         })
 }
 
 fn looks_ambiguous_child_team_key(team: &str) -> bool {
     let team = team.trim().to_ascii_lowercase();
-    team != "child" && (team.starts_with("child-")
-        || team.starts_with("child_")
-        || team.starts_with("child.")
-        || team.starts_with("child"))
+    team != "child"
+        && (team.starts_with("child-")
+            || team.starts_with("child_")
+            || team.starts_with("child.")
+            || team.starts_with("child"))
 }
 
 fn looks_grandchild_team_key(team: &str) -> bool {
@@ -1290,7 +1305,11 @@ fn looks_grandchild_team_key(team: &str) -> bool {
         || team.starts_with("grandchild")
 }
 
-fn annotate_team_depth(state: &mut serde_json::Value, parent_team_key: Option<&str>, team_depth: u64) {
+fn annotate_team_depth(
+    state: &mut serde_json::Value,
+    parent_team_key: Option<&str>,
+    team_depth: u64,
+) {
     let Some(obj) = state.as_object_mut() else {
         return;
     };
@@ -1337,9 +1356,7 @@ fn runtime_state_has_quick_start_team(state: &serde_json::Value, team: &str) -> 
         || state
             .get("session_name")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| {
-                session == team || session.strip_prefix("team-") == Some(team)
-            })
+            .is_some_and(|session| session == team || session.strip_prefix("team-") == Some(team))
 }
 
 fn json_team_identity_matches(state: &serde_json::Value, team: &str) -> bool {
@@ -1412,7 +1429,9 @@ pub fn quick_start_with_transport(
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = team_workspace(agents_dir);
-    quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, fresh, team_id, transport)
+    quick_start_with_transport_in_workspace(
+        &workspace, agents_dir, name, yes, fresh, team_id, transport,
+    )
 }
 
 pub fn quick_start_with_transport_in_workspace(
@@ -1468,11 +1487,12 @@ pub fn quick_start_with_transport_in_workspace(
                         .map(SessionName::new),
                     state_path: Some(state_path),
                     next_actions: vec![
-                        "run restart to resume the existing team or pass --fresh to replace it".to_string(),
+                        "run restart to resume the existing team or pass --fresh to replace it"
+                            .to_string(),
                     ],
-        });
-    }
-}
+                });
+            }
+        }
     }
     // CR-040/042: repeated quick-start from one template with distinct --team-id/--name
     // must NOT collide on the template-derived tmux session. Override the compiled
@@ -1488,12 +1508,12 @@ pub fn quick_start_with_transport_in_workspace(
         runtime_team_key_for_spec(&spec_path, &spec, &session_name)
     });
     let spec_path = agents_dir.join("team.spec.yaml");
-    std::fs::write(&spec_path, yaml::dumps(&spec)).map_err(|e| {
-        LifecycleError::StatePersist(format!("{}: {e}", spec_path.display()))
-    })?;
+    std::fs::write(&spec_path, yaml::dumps(&spec))
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
     let _store = crate::message_store::MessageStore::open(&workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let resolved_spec_path = std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
+    let resolved_spec_path =
+        std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
     save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
     annotate_persisted_team_depth(
@@ -1505,14 +1525,16 @@ pub fn quick_start_with_transport_in_workspace(
     // FIX (rt-host-a real-machine finding): dry_run=false so launch_with_transport calls spawn_agents
     // and really creates the tmux session + worker windows (was hardcoded true → never spawned, which
     // also starved the coordinator: no session → first tick TmuxSessionMissing → run_daemon loop exits).
-    let mut launch = launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
+    let mut launch =
+        launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
     annotate_persisted_team_depth(
         &workspace,
         &state_team_key,
         team_depth.parent_team_key.as_deref(),
         team_depth.team_depth,
     )?;
-    launch.leader_receiver_attached = launched_team_receiver_is_attached(&workspace, &state_team_key);
+    launch.leader_receiver_attached =
+        launched_team_receiver_is_attached(&workspace, &state_team_key);
     launch.session_capture_incomplete_agents =
         quick_start_session_capture_incomplete_agents(&workspace, &state_team_key);
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.clone());
@@ -1532,12 +1554,29 @@ pub fn quick_start_with_transport_in_workspace(
     //   asynchronously after spawn), so the verdict is PendingToolLoad — never
     //   bare Ready.
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
+    let attach_commands = crate::tmux_backend::attach_commands_for_windows(
+        &workspace,
+        &session_name,
+        launch
+            .started
+            .iter()
+            .map(|started| started.agent_id.as_str()),
+    );
+    let mut next_actions = vec![format!(
+        "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
+    )];
+    next_actions.extend(attach_commands.iter().cloned());
+    let display_backend = state
+        .get("display_backend")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none")
+        .to_string();
     Ok(QuickStartReport::Ready {
         session_name,
         launch: Box::new(launch),
-        next_actions: vec![format!(
-            "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
-        )],
+        next_actions,
+        attach_commands,
+        display_backend,
         worker_readiness,
     })
 }
@@ -1556,7 +1595,10 @@ fn quick_start_worker_readiness(workspace: &Path, team_key: &str) -> QuickStartR
         .and_then(serde_json::Value::as_object)
         .and_then(|teams| teams.get(team_key))
         .unwrap_or(&state);
-    let Some(agents) = team_state.get("agents").and_then(serde_json::Value::as_object) else {
+    let Some(agents) = team_state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+    else {
         return QuickStartReadiness::PendingToolLoad;
     };
     let all_spawned = !agents.is_empty();
@@ -1575,9 +1617,12 @@ fn quick_start_worker_readiness(workspace: &Path, team_key: &str) -> QuickStartR
     if !unhealthy.is_empty() {
         unhealthy.sort();
         unhealthy.dedup();
-        QuickStartReadiness::Degraded { unhealthy_agents: unhealthy }
+        QuickStartReadiness::Degraded {
+            unhealthy_agents: unhealthy,
+        }
     } else {
-        let incomplete_agents = crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state);
+        let incomplete_agents =
+            crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state);
         let all_resumable_have_session = incomplete_agents.is_empty();
         let _readiness_ready = all_spawned && all_attached_receiver && all_resumable_have_session;
         QuickStartReadiness::PendingToolLoad
@@ -1621,10 +1666,7 @@ fn team_uses_fake_model_harness(team_state: &serde_json::Value) -> bool {
         .is_some_and(|agents| {
             !agents.is_empty()
                 && agents.values().all(|agent| {
-                    agent
-                        .get("model")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("fake")
+                    agent.get("model").and_then(serde_json::Value::as_str) == Some("fake")
                 })
         })
 }
@@ -1649,9 +1691,11 @@ fn leader_receiver_is_attached(team_state: &serde_json::Value) -> bool {
 /// `--dangerously-*` flag,产出危险审批继承态。launch 在 inherited=false 且无 --yes 时拒。
 pub fn detect_dangerous_approval() -> Result<DangerousApproval, LifecycleError> {
     if let Ok(raw) = std::env::var("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON") {
-        let argv_tokens = serde_json::from_str::<Vec<String>>(&raw)
-            .map_err(|e| LifecycleError::StatePersist(format!("invalid test ancestry argv: {e}")))?;
-        return Ok(detect_dangerous_approval_in_argv(&argv_tokens).unwrap_or_else(disabled_dangerous_approval));
+        let argv_tokens = serde_json::from_str::<Vec<String>>(&raw).map_err(|e| {
+            LifecycleError::StatePersist(format!("invalid test ancestry argv: {e}"))
+        })?;
+        return Ok(detect_dangerous_approval_in_argv(&argv_tokens)
+            .unwrap_or_else(disabled_dangerous_approval));
     }
     for argv_tokens in process_ancestry_argv(std::process::id()) {
         if let Some(detected) = detect_dangerous_approval_in_argv(&argv_tokens) {
@@ -1667,7 +1711,8 @@ fn detect_dangerous_approval_in_argv(argv_tokens: &[String]) -> Option<Dangerous
     for token in argv_tokens {
         for (provider, flag) in dangerous_leader_flags() {
             if token == flag {
-                let unexpected_binary = !binary_matches_provider(provider, ancestry_binary_name.as_deref());
+                let unexpected_binary =
+                    !binary_matches_provider(provider, ancestry_binary_name.as_deref());
                 return Some(DangerousApproval {
                     enabled: true,
                     source: DangerousApprovalSource::LeaderProcess,
@@ -1857,9 +1902,9 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let team_dir = selected
-        .spec_workspace
-        .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
+    let team_dir = selected.spec_workspace.ok_or_else(|| {
+        LifecycleError::TeamSelect("active team spec workspace not found".to_string())
+    })?;
     add_agent_with_transport_at_paths(
         &selected.run_workspace,
         &team_dir,
@@ -1910,8 +1955,9 @@ fn add_agent_with_transport_at_paths(
         .map(str::to_string)
         .or_else(|| explicit_active_team_key(&runtime_state))
         .unwrap_or_else(|| crate::state::projection::team_state_key(&runtime_state));
-    let owner_state = crate::state::projection::select_runtime_state(run_workspace, Some(&canonical_team_key))
-        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let owner_state =
+        crate::state::projection::select_runtime_state(run_workspace, Some(&canonical_team_key))
+            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     ensure_owner_allowed_for_state(&owner_state, Some(agent_id))?;
     if !role_file_path.exists() {
         return Err(LifecycleError::Compile(format!(
@@ -1929,9 +1975,8 @@ fn add_agent_with_transport_at_paths(
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     let safety = effective_runtime_config(&spec)?;
     let spec_path = team_dir.join("team.spec.yaml");
-    std::fs::write(&spec_path, yaml::dumps(&spec)).map_err(|e| {
-        LifecycleError::StatePersist(format!("{}: {e}", spec_path.display()))
-    })?;
+    std::fs::write(&spec_path, yaml::dumps(&spec))
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
     let (meta, _) = crate::compiler::read_front_matter(&dynamic_role_file)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     upsert_agent_state_from_role(
@@ -1978,8 +2023,9 @@ fn upsert_agent_state_from_role(
     dynamic_role_file: &Path,
     safety: &DangerousApproval,
 ) -> Result<(), LifecycleError> {
-    let mut state = crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
-        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let mut state =
+        crate::state::projection::select_runtime_state(workspace, Some(canonical_team_key))
+            .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     if !state.is_object() {
         state = serde_json::json!({});
     }
@@ -2027,10 +2073,7 @@ fn upsert_agent_state_from_role(
     if let Some(profile) = meta.get("profile").and_then(Value::as_str) {
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("profile".to_string(), serde_json::json!(profile));
-            if let Some(team_dir) = dynamic_role_file
-                .parent()
-                .and_then(Path::parent)
-            {
+            if let Some(team_dir) = dynamic_role_file.parent().and_then(Path::parent) {
                 obj.insert(
                     "_profile_dir".to_string(),
                     serde_json::json!(team_dir.join("profiles").to_string_lossy().to_string()),
@@ -2111,9 +2154,9 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    let spec_workspace = selected
-        .spec_workspace
-        .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
+    let spec_workspace = selected.spec_workspace.ok_or_else(|| {
+        LifecycleError::TeamSelect("active team spec workspace not found".to_string())
+    })?;
     let workspace = selected.run_workspace;
     let state = selected.state;
     ensure_owner_allowed_for_state(&state, Some(source_agent_id))?;
@@ -2126,8 +2169,9 @@ pub fn fork_agent_with_transport(
             "agent id already exists: {as_agent_id}"
         )));
     }
-    let source_agent = find_spec_agent(&spec, source_agent_id)
-        .ok_or_else(|| LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}")))?;
+    let source_agent = find_spec_agent(&spec, source_agent_id).ok_or_else(|| {
+        LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
+    })?;
     let session_id = state
         .get("agents")
         .and_then(|v| v.get(source_agent_id.as_str()))
@@ -2162,8 +2206,9 @@ pub fn fork_agent_with_transport(
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     std::fs::write(&spec_path, yaml::dumps(&new_spec))
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
-    let new_agent = find_spec_agent(&new_spec, as_agent_id)
-        .ok_or_else(|| LifecycleError::RequirementUnmet(format!("unknown worker agent id: {as_agent_id}")))?;
+    let new_agent = find_spec_agent(&new_spec, as_agent_id).ok_or_else(|| {
+        LifecycleError::RequirementUnmet(format!("unknown worker agent id: {as_agent_id}"))
+    })?;
     let provider = new_agent
         .get("provider")
         .and_then(Value::as_str)
@@ -2185,18 +2230,26 @@ pub fn fork_agent_with_transport(
             "{provider_str} does not support native session fork"
         )));
     }
-    let role = new_agent.get("role").and_then(Value::as_str);
     let model = new_agent.get("model").and_then(Value::as_str);
     let safety = effective_runtime_config(&new_spec)?;
-    let tools = worker_tool_refs(agent_tool_strings(new_agent), &safety);
-    let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
+    let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_yaml(
+        new_agent,
+        Some(as_agent_id.as_str()),
+        provider,
+    );
+    let system_prompt =
+        crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
+    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
+        &command_agent,
+        provider,
+        &safety,
+    )?;
+    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     let fork_team = crate::messaging::leader_receiver::active_team_key(&workspace, &state);
-    let mcp_config = adapter
-        .mcp_config(auth_mode)
-        .map_err(|e| {
-            let _ = std::fs::write(&spec_path, text.as_bytes());
-            LifecycleError::Provider(e.to_string())
-        })?;
+    let mcp_config = adapter.mcp_config(auth_mode).map_err(|e| {
+        let _ = std::fs::write(&spec_path, text.as_bytes());
+        LifecycleError::Provider(e.to_string())
+    })?;
     let mcp_config = resolve_mcp_config(mcp_config, &workspace, as_agent_id.as_str(), &fork_team);
     let mcp_config_path = write_worker_mcp_config(&workspace, as_agent_id.as_str(), &mcp_config)
         .map_err(|e| {
@@ -2204,27 +2257,24 @@ pub fn fork_agent_with_transport(
             e
         })?;
     let profile_dir = spec_workspace.join("profiles");
-    let profile_launch = crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
-        &workspace,
-        as_agent_id.as_str(),
-        new_agent,
-        Some(&profile_dir),
-        Some(&mcp_config),
-    )?;
-    let command_model = profile_launch
-        .command_overrides
-        .model
-        .as_deref()
-        .or(model);
+    let profile_launch =
+        crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
+            &workspace,
+            as_agent_id.as_str(),
+            new_agent,
+            Some(&profile_dir),
+            Some(&mcp_config),
+        )?;
+    let command_model = profile_launch.command_overrides.model.as_deref().or(model);
     let mut plan = adapter
         .fork_plan(
             Some(&session_id),
             crate::provider::ProviderCommandContext {
                 auth_mode,
                 mcp_config: Some(&mcp_config),
-                system_prompt: role,
+                system_prompt: Some(system_prompt.as_str()),
                 model: command_model,
-                tools: &tool_refs,
+                tools: &resolved_tool_refs,
                 profile_launch: Some(&profile_launch),
             },
         )
@@ -2235,14 +2285,16 @@ pub fn fork_agent_with_transport(
     if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
         point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
     }
-    fill_spawn_placeholders_full(&mut plan.argv, &workspace, as_agent_id.as_str(), Some(&fork_team));
-    let window = WindowName::new(as_agent_id.as_str());
-    // fork inherits the parent agent's owner team via runtime state (`active_team_key`).
-    let mut env = inherited_env_with_team_overrides(
+    fill_spawn_placeholders_full(
+        &mut plan.argv,
         &workspace,
         as_agent_id.as_str(),
         Some(&fork_team),
     );
+    let window = WindowName::new(as_agent_id.as_str());
+    // fork inherits the parent agent's owner team via runtime state (`active_team_key`).
+    let mut env =
+        inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
     apply_profile_launch_env(&mut env, &profile_launch);
     // golden operations.py:336 -> _tmux_start_command_for_agent_window (runtime.py:1017-1020): branch on
     // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
@@ -2324,26 +2376,25 @@ pub fn fork_agent_with_transport(
         );
         return Err(e);
     }
-    let coordinator_started =
-        crate::coordinator::start_coordinator(&crate::coordinator::WorkspacePath::new(
-            workspace.to_path_buf(),
-        ))
-        .map(|report| report.ok)
-        .map_err(|e| {
-            rollback_fork_after_spawn(
-                &workspace,
-                &spec_path,
-                &text,
-                &old_state,
-                transport,
-                &session_name,
-                &window,
-                &mcp_config_path,
-                as_agent_id,
-                &profile_launch,
-            );
-            LifecycleError::StatePersist(e.to_string())
-        })?;
+    let coordinator_started = crate::coordinator::start_coordinator(
+        &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
+    )
+    .map(|report| report.ok)
+    .map_err(|e| {
+        rollback_fork_after_spawn(
+            &workspace,
+            &spec_path,
+            &text,
+            &old_state,
+            transport,
+            &session_name,
+            &window,
+            &mcp_config_path,
+            as_agent_id,
+            &profile_launch,
+        );
+        LifecycleError::StatePersist(e.to_string())
+    })?;
     Ok(ForkAgentReport {
         source_agent_id: source_agent_id.clone(),
         new_agent_id: as_agent_id.clone(),
@@ -2384,8 +2435,7 @@ fn maybe_fail_fork_after_spawn(step: &str) -> Result<(), LifecycleError> {
     if reason.is_empty() {
         return Ok(());
     }
-    let should_fail = reason == step
-        || (step == "start_coordinator" && reason == "coordinator");
+    let should_fail = reason == step || (step == "start_coordinator" && reason == "coordinator");
     if !should_fail {
         return Ok(());
     }
@@ -2429,16 +2479,13 @@ fn find_spec_agent<'a>(spec: &'a Value, agent_id: &AgentId) -> Option<&'a Value>
     if leader_is_agent {
         return None;
     }
-    spec.get("agents")?
-        .as_list()?
-        .iter()
-        .find(|agent| {
-            agent
-                .get("id")
-                .and_then(Value::as_str)
-                .map(|id| id == agent_id.as_str())
-                .unwrap_or(false)
-        })
+    spec.get("agents")?.as_list()?.iter().find(|agent| {
+        agent
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| id == agent_id.as_str())
+            .unwrap_or(false)
+    })
 }
 
 fn append_forked_agent(
@@ -2477,12 +2524,17 @@ fn append_forked_agent(
     )?;
 
     let Value::Map(pairs) = spec else {
-        return Err(LifecycleError::Compile("spec root is not a map".to_string()));
+        return Err(LifecycleError::Compile(
+            "spec root is not a map".to_string(),
+        ));
     };
     let mut out = Vec::new();
     for (key, value) in pairs {
         if key == "agents" {
-            let mut agents = value.as_list().map(|items| items.to_vec()).unwrap_or_default();
+            let mut agents = value
+                .as_list()
+                .map(|items| items.to_vec())
+                .unwrap_or_default();
             agents.push(new_agent.clone());
             out.push((key.clone(), Value::List(agents)));
         } else if key == "runtime" {
@@ -2496,7 +2548,9 @@ fn append_forked_agent(
 
 fn set_yaml_map_value(value: &mut Value, key: &str, next: Value) -> Result<(), LifecycleError> {
     let Value::Map(pairs) = value else {
-        return Err(LifecycleError::Compile("agent entry is not a map".to_string()));
+        return Err(LifecycleError::Compile(
+            "agent entry is not a map".to_string(),
+        ));
     };
     if let Some((_, existing)) = pairs.iter_mut().find(|(k, _)| k == key) {
         *existing = next;
@@ -2515,10 +2569,15 @@ fn runtime_with_startup_agent(runtime: &Value, agent_id: &AgentId) -> Value {
     for (key, value) in pairs {
         if key == "startup_order" {
             saw_startup = true;
-            let mut order = value.as_list().map(|items| items.to_vec()).unwrap_or_default();
-            let already_present = order
-                .iter()
-                .any(|item| item.as_str().map(|id| id == agent_id.as_str()).unwrap_or(false));
+            let mut order = value
+                .as_list()
+                .map(|items| items.to_vec())
+                .unwrap_or_default();
+            let already_present = order.iter().any(|item| {
+                item.as_str()
+                    .map(|id| id == agent_id.as_str())
+                    .unwrap_or(false)
+            });
             if !already_present {
                 order.push(Value::Str(agent_id.as_str().to_string()));
             }
@@ -2574,18 +2633,37 @@ fn upsert_forked_agent_state(
     let mut entry = serde_json::Map::new();
     entry.insert("status".to_string(), serde_json::json!("running"));
     entry.insert("provider".to_string(), serde_json::json!(provider));
-    entry.insert("agent_id".to_string(), serde_json::json!(as_agent_id.as_str()));
-    entry.insert("window".to_string(), serde_json::json!(as_agent_id.as_str()));
-    entry.insert("forked_from".to_string(), serde_json::json!(source_agent_id.as_str()));
+    entry.insert(
+        "agent_id".to_string(),
+        serde_json::json!(as_agent_id.as_str()),
+    );
+    entry.insert(
+        "window".to_string(),
+        serde_json::json!(as_agent_id.as_str()),
+    );
+    entry.insert(
+        "forked_from".to_string(),
+        serde_json::json!(source_agent_id.as_str()),
+    );
     entry.insert(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn_cwd.to_string_lossy().to_string()),
     );
-    entry.insert("pane_id".to_string(), serde_json::json!(spawn.pane_id.as_str()));
+    entry.insert(
+        "pane_id".to_string(),
+        serde_json::json!(spawn.pane_id.as_str()),
+    );
     if let Some(pid) = spawn.child_pid {
         entry.insert("pane_pid".to_string(), serde_json::json!(pid));
     }
-    for key in ["auth_mode", "model", "model_source", "profile", "_profile_dir", "role"] {
+    for key in [
+        "auth_mode",
+        "model",
+        "model_source",
+        "profile",
+        "_profile_dir",
+        "role",
+    ] {
         if let Some(value) = spec_agent.get(key) {
             entry.insert(key.to_string(), yaml_value_to_json(value));
         }
@@ -2602,9 +2680,15 @@ fn upsert_forked_agent_state(
     entry.insert("rollout_path".to_string(), serde_json::Value::Null);
     entry.insert("captured_at".to_string(), serde_json::Value::Null);
     entry.insert("captured_via".to_string(), serde_json::Value::Null);
-    entry.insert("attribution_confidence".to_string(), serde_json::Value::Null);
+    entry.insert(
+        "attribution_confidence".to_string(),
+        serde_json::Value::Null,
+    );
     persist_command_plan_state(&mut entry, plan, profile_launch);
-    agent_map.insert(as_agent_id.as_str().to_string(), serde_json::Value::Object(entry));
+    agent_map.insert(
+        as_agent_id.as_str().to_string(),
+        serde_json::Value::Object(entry),
+    );
     if let Some(entry) = agent_map
         .get_mut(as_agent_id.as_str())
         .and_then(serde_json::Value::as_object_mut)
@@ -2642,12 +2726,9 @@ pub(crate) fn ensure_owner_allowed_for_state(
         None,
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if let Some(refusal) = crate::state::owner_gate::check_team_owner(
-        state,
-        &caller,
-        false,
-        &NoopLiveness,
-    ) {
+    if let Some(refusal) =
+        crate::state::owner_gate::check_team_owner(state, &caller, false, &NoopLiveness)
+    {
         return Err(LifecycleError::OwnerRefused(refusal.to_string()));
     }
     Ok(())
@@ -2676,7 +2757,10 @@ fn initial_runtime_state(
         let Some(id) = agent.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let provider = agent.get("provider").and_then(Value::as_str).unwrap_or("codex");
+        let provider = agent
+            .get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("codex");
         let role = agent.get("role").and_then(Value::as_str).unwrap_or(id);
         let model = agent.get("model").and_then(Value::as_str);
         let auth_mode = agent.get("auth_mode").and_then(Value::as_str);
@@ -2698,7 +2782,9 @@ fn initial_runtime_state(
         .get("runtime")
         .and_then(|runtime| runtime.get("display_backend"))
         .and_then(Value::as_str)
-        .and_then(|backend| serde_json::from_value::<DisplayBackend>(serde_json::json!(backend)).ok());
+        .and_then(|backend| {
+            serde_json::from_value::<DisplayBackend>(serde_json::json!(backend)).ok()
+        });
     let display_backend =
         crate::lifecycle::display::resolve_display_backend(requested_display, None).backend;
     let mut state = serde_json::Map::new();
@@ -2720,11 +2806,16 @@ fn initial_runtime_state(
     );
     state.insert(
         "leader".to_string(),
-        spec.get("leader").map(yaml_value_to_json).unwrap_or(serde_json::Value::Null),
+        spec.get("leader")
+            .map(yaml_value_to_json)
+            .unwrap_or(serde_json::Value::Null),
     );
     state.insert("agents".to_string(), serde_json::Value::Object(agents));
     state.insert("tasks".to_string(), spec_tasks_json(spec));
-    state.insert("display_backend".to_string(), serde_json::json!(display_backend));
+    state.insert(
+        "display_backend".to_string(),
+        serde_json::json!(display_backend),
+    );
     let mut state = serde_json::Value::Object(state);
     if !seed_launched_owner_from_env(&mut state) {
         let team_id = crate::state::projection::team_state_key(&state);
@@ -2800,9 +2891,7 @@ fn has_positive_caller_leader_env() -> bool {
 fn spec_tasks_json(spec: &Value) -> serde_json::Value {
     spec.get("tasks")
         .and_then(Value::as_list)
-        .map(|tasks| {
-            serde_json::Value::Array(tasks.iter().map(yaml_value_to_json).collect())
-        })
+        .map(|tasks| serde_json::Value::Array(tasks.iter().map(yaml_value_to_json).collect()))
         .unwrap_or_else(|| serde_json::json!([]))
 }
 
@@ -2841,7 +2930,10 @@ fn override_spec_session_name(spec: &mut Value, session_name: &str) {
             if let Some((_, existing)) = runtime.iter_mut().find(|(k, _)| k == "session_name") {
                 *existing = Value::Str(session_name.to_string());
             } else {
-                runtime.push(("session_name".to_string(), Value::Str(session_name.to_string())));
+                runtime.push((
+                    "session_name".to_string(),
+                    Value::Str(session_name.to_string()),
+                ));
             }
         }
         Some(other) => {
@@ -2948,18 +3040,9 @@ fn disabled_dangerous_approval() -> DangerousApproval {
     }
 }
 
-pub(crate) fn effective_runtime_config_for_worker_spawn() -> Result<DangerousApproval, LifecycleError> {
+pub(crate) fn effective_runtime_config_for_worker_spawn(
+) -> Result<DangerousApproval, LifecycleError> {
     detect_dangerous_approval()
-}
-
-pub(crate) fn worker_tool_refs(
-    mut tools: Vec<String>,
-    safety: &DangerousApproval,
-) -> Vec<String> {
-    if safety.enabled && !tools.iter().any(|tool| tool == "dangerous_auto_approve") {
-        tools.push("dangerous_auto_approve".to_string());
-    }
-    tools
 }
 
 fn write_launch_permission_audit(
@@ -3018,7 +3101,6 @@ fn agent_id_exists_in_team_dir(team_dir: &Path, agent_id: &AgentId) -> bool {
         .join(format!("{}.md", agent_id.as_str()))
         .exists()
 }
-
 
 mod plan;
 pub use plan::{handle_report_result, start_plan};

@@ -483,6 +483,8 @@ pub enum QuickStartReport {
         session_name: SessionName,
         launch: Box<LaunchReport>,
         next_actions: Vec<String>,
+        attach_commands: Vec<String>,
+        display_backend: String,
         /// BUG-7: real readiness verdict. `Ready` ⇒ the wrapper completed AND the
         /// caller already verified tool-set availability; the framework itself
         /// never emits this without an external observable confirming worker
@@ -613,6 +615,8 @@ pub enum RestartReport {
         session_name: SessionName,
         agents: Vec<RestartedAgent>,
         coordinator_started: bool,
+        next_actions: Vec<String>,
+        attach_commands: Vec<String>,
     },
     /// atomic refusal(`reason=resume_atomicity`):某 interacted worker 不可 resume
     /// 且非 allow_fresh。**nothing created yet**,无需回滚。

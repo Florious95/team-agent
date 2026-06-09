@@ -200,7 +200,7 @@ fn command_help(command: Option<&str>) -> String {
             )
         }
         Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--json]".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--json]\n\ndefaults: display_backend=none; set display_backend: adaptive in TEAM.md to opt in to adaptive display windows.".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),

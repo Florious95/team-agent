@@ -451,10 +451,21 @@ fn write_start_agent_start_event(
     let adapter = crate::provider::get_adapter(provider);
     // Contract C / F6.4: event log must record the same context-aware argv that the
     // actual spawn used — so the role/tools/MCP context appears in `start_agent.agent_start`.
-    let role = agent.get("role").and_then(|v| v.as_str());
     let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
-    let tools = crate::lifecycle::launch::worker_tool_refs(agent_tool_strings(agent), &safety);
-    let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
+    let command_agent =
+        crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
+            agent,
+            Some(agent_id.as_str()),
+            provider,
+        );
+    let system_prompt =
+        crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
+    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
+        &command_agent,
+        provider,
+        &safety,
+    )?;
+    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     let mcp_config = adapter
         .mcp_config(auth_mode)
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
@@ -484,9 +495,9 @@ fn write_start_agent_start_event(
     let context = crate::provider::ProviderCommandContext {
         auth_mode,
         mcp_config: Some(&mcp_config),
-        system_prompt: role,
+        system_prompt: Some(system_prompt.as_str()),
         model: command_model,
-        tools: &tool_refs,
+        tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
     };
     let mut plan = match session_id {

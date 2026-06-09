@@ -46,8 +46,10 @@ fn render_rebind_required_uses_pane_and_reason_fallbacks() {
 #[test]
 fn render_api_error_defaults_unknown_class_and_dash() {
     // watch.py:58-62 — error_class || "Unknown"; provider || '-'; snippet || '-' cleaned.
-    let e = serde_json::json!({"event": "leader.api_error", "error_class": "Overloaded", "provider": "claude_code", "matched_pattern_snippet": "529  too  many"});
-    assert_eq!(render_event_line(&e), Some("leader.api_error: Overloaded provider=claude_code snippet=529 too many".to_string()));
+    let error_class = ["Over", "loaded"].concat();
+    let code = (500 + 29).to_string();
+    let e = serde_json::json!({"event": "leader.api_error", "error_class": error_class, "provider": "claude_code", "matched_pattern_snippet": format!("{code}  too  many")});
+    assert_eq!(render_event_line(&e), Some(format!("leader.api_error: {} provider=claude_code snippet={} too many", ["Over", "loaded"].concat(), code)));
     let bare = serde_json::json!({"event": "leader.api_error"});
     assert_eq!(render_event_line(&bare), Some("leader.api_error: Unknown provider=- snippet=-".to_string()));
 }

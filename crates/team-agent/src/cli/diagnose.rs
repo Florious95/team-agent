@@ -115,7 +115,7 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
     let display_backend = compiled
         .as_ref()
         .and_then(|spec| yaml_path_str(spec, &["runtime", "display_backend"]))
-        .unwrap_or("adaptive");
+        .unwrap_or("none");
     let ghostty_required = display_backend == "ghostty_window" || display_backend == "ghostty";
     let ghostty_path = command_path("ghostty");
     checks.push(json!({

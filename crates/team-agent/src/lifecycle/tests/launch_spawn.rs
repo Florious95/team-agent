@@ -886,8 +886,8 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
     );
     assert_eq!(
         state["display_backend"],
-        json!("adaptive"),
-        "golden resolve_display_backend(None, source='launch') defaults to adaptive"
+        json!("none"),
+        "golden resolve_display_backend(None, source='launch') defaults to none"
     );
 }
 

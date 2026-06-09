@@ -40,6 +40,7 @@ pub(crate) mod profile_launch;
 pub(crate) mod profile_smoke;
 pub mod restart;
 pub mod types;
+pub(crate) mod worker_command_context;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

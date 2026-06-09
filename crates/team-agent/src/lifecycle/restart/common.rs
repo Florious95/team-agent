@@ -29,7 +29,6 @@ pub(super) fn spawn_agent_window(
     // Contract C / F6.4: thread compiled role/tools/MCP context through restart as well —
     // a restarted worker must come back up with the SAME callable MCP capability + role
     // prompt as a fresh launch, else `report_result` becomes unreachable after every restart.
-    let role = agent.get("role").and_then(|v| v.as_str());
     let detected_safety;
     let safety = if let Some(safety) = safety {
         safety
@@ -37,8 +36,20 @@ pub(super) fn spawn_agent_window(
         detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
         &detected_safety
     };
-    let tools = crate::lifecycle::launch::worker_tool_refs(agent_tool_strings(agent), safety);
-    let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
+    let command_agent =
+        crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
+            agent,
+            Some(agent_id.as_str()),
+            provider,
+        );
+    let system_prompt =
+        crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
+    let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
+        &command_agent,
+        provider,
+        safety,
+    )?;
+    let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
     // owner_team_id resolution: prefer the runtime-state row's `owner_team_id` (set by
     // launch/restart); fall back to the active team key for paths that don't write the
     // row first (e.g. add-agent calls spawn before upserting team metadata).
@@ -78,9 +89,9 @@ pub(super) fn spawn_agent_window(
     let context = crate::provider::ProviderCommandContext {
         auth_mode,
         mcp_config: Some(&mcp_config),
-        system_prompt: role,
+        system_prompt: Some(system_prompt.as_str()),
         model: command_model,
-        tools: &tool_refs,
+        tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
     };
     let mut plan = match resume_session_id {
@@ -319,24 +330,6 @@ pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Val
     missing.sort();
     missing
 }
-/// Tools list off an agent's runtime state entry (`tools: [...]`). Restart paths
-/// don't have the full spec object, only the runtime state — so they read tools from
-/// the state row, falling back to an empty list. Contract C requires the worker
-/// command be built with the tool list, even on restart.
-pub(super) fn agent_tool_strings(agent: &serde_json::Value) -> Vec<String> {
-    agent
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub(super) fn agent_window(agent: &serde_json::Value, agent_id: &AgentId) -> String {
     agent
         .get("window")

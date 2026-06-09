@@ -185,14 +185,14 @@ fn plan_condition_rejects_out_of_grammar() {
 
 // ───────────────────────────────────────────────────────────────────────
 // resolve_display_backend — display/backend.py
-// 默认 adaptive;非默认非静默(non_default=true 触发 display.backend_resolved)。
+// 默认 none;非默认非静默(non_default=true 触发 display.backend_resolved)。
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
-fn resolve_backend_defaults_to_adaptive_when_none_requested() {
+fn resolve_backend_defaults_to_none_when_none_requested() {
     let r = resolve_display_backend(None, None);
-    assert_eq!(r.backend, DisplayBackend::Adaptive);
-    assert!(!r.non_default, "默认 adaptive 不应标记 non_default");
+    assert_eq!(r.backend, DisplayBackend::None);
+    assert!(!r.non_default, "默认 none 不应标记 non_default");
 }
 
 #[test]

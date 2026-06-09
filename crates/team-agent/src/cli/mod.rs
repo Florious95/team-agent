@@ -1336,6 +1336,8 @@ pub mod lifecycle_port {
                 session_name,
                 launch,
                 next_actions,
+                attach_commands,
+                display_backend,
                 worker_readiness,
             } => {
                 // BUG-7: never emit bare "ready" while worker tool-load is unverified.
@@ -1461,7 +1463,9 @@ pub mod lifecycle_port {
                     "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
                     "dry_run": launch.dry_run,
+                    "display_backend": display_backend,
                     "next_actions": next_actions,
+                    "attach_commands": attach_commands,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
                 })
@@ -1498,12 +1502,16 @@ pub mod lifecycle_port {
                 session_name,
                 agents,
                 coordinator_started,
+                next_actions,
+                attach_commands,
             } => json!({
                 "ok": true,
                 "status": "restarted",
                 "session_name": session_name.as_str(),
                 "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
                 "coordinator_started": coordinator_started,
+                "next_actions": next_actions,
+                "attach_commands": attach_commands,
             }),
             crate::lifecycle::RestartReport::RefusedResumeAtomicity {
                 unresumable,
