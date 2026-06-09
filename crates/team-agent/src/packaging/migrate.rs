@@ -13,8 +13,16 @@ pub fn doctor(opts: &DoctorOptions) -> Result<DoctorStatus, PackagingError> {
     if opts.fix && opts.gate.is_none() {
         return Err(PackagingError::InvalidOptions("--fix requires --gate".to_string()));
     }
-    if opts.fix && matches!(opts.gate, Some(DoctorGate::Orphans | DoctorGate::Comms)) {
-        return Ok(DoctorStatus::Ok);
+    let gate_blockers = crate::diagnose::doctor_gate_blockers(
+        &opts.workspace,
+        opts.gate,
+        opts.fix,
+        opts.confirm,
+    )?;
+    if !gate_blockers.is_empty() {
+        return Ok(DoctorStatus::HasBlockers {
+            blockers: gate_blockers,
+        });
     }
     let diagnosis = schema_diagnosis_workspace(&opts.workspace)?;
     if diagnosis.layout_diffs.is_empty() {

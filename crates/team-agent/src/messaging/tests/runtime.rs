@@ -957,16 +957,31 @@ fn run_comms_selftest_nonzero_provider_sdk_fails_gate() {
 }
 
 #[test]
-fn run_comms_selftest_contract_suite_is_deferred() {
-    // diagnose/comms.py:132-139 — contract_suite is always deferred (test files
-    // not shipped) and counts as a pass for the overall gate.
+fn run_comms_selftest_contract_suite_is_executable_zero_token() {
     let ws = tmp_ws("selftestdefer");
     let driver = ZeroSdkDriver {
         run_id: Some("r3".to_string()),
         calls: ProviderSdkCalls::default(),
     };
     let report = run_comms_selftest(&ws, None, &driver).unwrap();
-    assert_eq!(report.contract_suite.status, CheckStatus::Deferred);
+    assert_eq!(report.contract_suite.status, CheckStatus::Pass);
+    match &report.contract_suite.evidence {
+        CheckEvidence::ContractSuite { checks } => {
+            assert!(
+                checks.iter().all(|check| check.status == CheckStatus::Pass),
+                "contract suite subchecks must all pass: {checks:?}"
+            );
+            let names: Vec<&str> = checks.iter().map(|check| check.name.as_str()).collect();
+            assert!(
+                names.contains(&"message_store_schema")
+                    && names.contains(&"message_token_shape")
+                    && names.contains(&"result_notification_render")
+                    && names.contains(&"leader_projection_owner_team"),
+                "contract suite must cover schema, token, result notification, and leader projection: {names:?}"
+            );
+        }
+        other => panic!("expected ContractSuite evidence, got {other:?}"),
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════

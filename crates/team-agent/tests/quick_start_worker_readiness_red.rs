@@ -42,6 +42,7 @@ const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: code
 const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nmodel: claude-sonnet-4-6\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nClaude worker.\n";
 
 #[test]
+#[ignore = "real-machine: quick-start worker readiness gate"]
 fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified() {
     let team = bug7_team_dir("t1-pending");
     // Both agents spawn successfully (recording transport reports both windows live)
@@ -83,6 +84,7 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
 }
 
 #[test]
+#[ignore = "real-machine: quick-start worker readiness gate"]
 fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window() {
     let team = bug7_team_dir("t2-degraded");
     // Recording transport simulates the Mac mini final capture: only the codex

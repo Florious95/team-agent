@@ -115,18 +115,6 @@ pub fn deliver_pending_message(
         });
     }
     let message = message_for_delivery(store, message_id)?;
-    if !store.claim_for_delivery(message_id)? {
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Refused,
-            message_status: MessageStatusShadow("target_resolved".to_string()),
-            message_id: Some(message_id.to_string()),
-            verification: None,
-            stage: None,
-            reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
-            channel: None,
-        });
-    }
     let Some(message) = message else {
         return Ok(DeliveryOutcome {
             ok: false,
@@ -154,6 +142,18 @@ pub fn deliver_pending_message(
         }
         _ => state,
     };
+    if !store.claim_for_delivery(message_id)? && message.status != "target_resolved" {
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Refused,
+            message_status: MessageStatusShadow("target_resolved".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: None,
+            stage: None,
+            reason: Some(DeliveryRefusal::MessageAlreadyClaimed),
+            channel: None,
+        });
+    }
     if message.recipient == "leader" && leader_receiver_has_noncanonical_tmux_socket(state) {
         store.mark(message_id, "failed", Some("leader_not_attached"))?;
         event_log.write(
@@ -244,7 +244,6 @@ pub fn deliver_pending_message(
         &message.content,
         message_id,
     );
-    let rendered_len = rendered.len();
     let inject_report = match transport.inject(
         &target,
         &InjectPayload::Text(rendered),
@@ -282,7 +281,7 @@ pub fn deliver_pending_message(
             return Err(error.into());
         }
     };
-    if !inject_submit_verified(&inject_report, rendered_len, &message.sender, &message.recipient) {
+    if !inject_submit_verified(&inject_report) {
         let reason = format!(
             "submit_unverified:{}",
             submit_verification_wire(inject_report.submit_verification)
@@ -340,19 +339,13 @@ pub fn deliver_pending_message(
     Ok(outcome)
 }
 
-fn inject_submit_verified(
-    report: &InjectReport,
-    payload_len: usize,
-    sender: &str,
-    recipient: &str,
-) -> bool {
+fn inject_submit_verified(report: &InjectReport) -> bool {
     match report.submit_verification {
         SubmitVerification::SendKeysFailed => false,
+        SubmitVerification::PastedContentPromptStillPresentAfterSubmit => false,
         SubmitVerification::PastedContentPromptAbsentAfterSubmit => true,
         SubmitVerification::KeySentAfterVisibleToken { .. } => true,
-        SubmitVerification::EnterSentWithoutPlaceholderCheck => {
-            recipient == "leader" || matches!(sender, "leader" | "Leader") || payload_len < 80
-        }
+        SubmitVerification::EnterSentWithoutPlaceholderCheck => true,
     }
 }
 
@@ -450,13 +443,60 @@ fn delivery_transport_for_recipient<'a>(
     if recipient != "leader" {
         return DeliveryTransport::Borrowed(product_transport);
     }
+    let pane_id = leader_receiver_pane_id(state);
     let Some(socket) = leader_receiver_tmux_socket(state) else {
+        if let Some(pane_id) = pane_id {
+            let in_workspace = product_transport
+                .list_targets()
+                .unwrap_or_default()
+                .iter()
+                .any(|target| target.pane_id.as_str() == pane_id);
+            if !in_workspace {
+                let default_backend = crate::tmux_backend::TmuxBackend::new();
+                if default_backend
+                    .list_targets()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|target| target.pane_id.as_str() == pane_id)
+                {
+                    return DeliveryTransport::Owned(default_backend);
+                }
+            }
+        }
         return DeliveryTransport::Borrowed(product_transport);
     };
     if socket == crate::tmux_backend::socket_name_for_workspace(workspace) {
         DeliveryTransport::Borrowed(product_transport)
     } else {
-        DeliveryTransport::Owned(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket))
+        let endpoint_backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+        if let Some(pane_id) = pane_id {
+            if endpoint_backend
+                .list_targets()
+                .unwrap_or_default()
+                .iter()
+                .any(|target| target.pane_id.as_str() == pane_id)
+            {
+                return DeliveryTransport::Owned(endpoint_backend);
+            }
+            if product_transport
+                .list_targets()
+                .unwrap_or_default()
+                .iter()
+                .any(|target| target.pane_id.as_str() == pane_id)
+            {
+                return DeliveryTransport::Borrowed(product_transport);
+            }
+            let default_backend = crate::tmux_backend::TmuxBackend::new();
+            if default_backend
+                .list_targets()
+                .unwrap_or_default()
+                .iter()
+                .any(|target| target.pane_id.as_str() == pane_id)
+            {
+                return DeliveryTransport::Owned(default_backend);
+            }
+        }
+        DeliveryTransport::Owned(endpoint_backend)
     }
 }
 
@@ -466,7 +506,7 @@ fn leader_receiver_pane_id_in_state(state: &serde_json::Value) -> Option<&str> {
             .get(key)
             .and_then(|r| r.get("pane_id"))
             .and_then(serde_json::Value::as_str)
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && *s != "__team_agent_unbound__")
     })
 }
 
@@ -528,7 +568,7 @@ pub fn deliver_pending_messages(
         let conn = crate::db::schema::open_db(store.db_path())?;
         let mut stmt = conn.prepare(
             "select message_id from messages
-             where status in ('pending', 'accepted')
+             where status in ('pending', 'accepted', 'target_resolved')
              order by created_at, message_id",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -577,6 +617,7 @@ struct PendingMessage {
     content: String,
     task_id: Option<String>,
     owner_team_id: Option<String>,
+    status: String,
 }
 
 fn message_for_delivery(
@@ -586,7 +627,7 @@ fn message_for_delivery(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let message = conn
         .query_row(
-            "select sender, recipient, content, task_id, owner_team_id from messages where message_id = ?1",
+            "select sender, recipient, content, task_id, owner_team_id, status from messages where message_id = ?1",
             params![message_id],
             |row| {
                 Ok(PendingMessage {
@@ -595,6 +636,7 @@ fn message_for_delivery(
                     content: row.get::<_, String>(2)?,
                     task_id: row.get::<_, Option<String>>(3)?,
                     owner_team_id: row.get::<_, Option<String>>(4)?,
+                    status: row.get::<_, String>(5)?,
                 })
             },
         )
@@ -603,10 +645,11 @@ fn message_for_delivery(
 }
 
 /// Pre-inject gate (Contract B): peek the recipient pane and answer "is there an
-/// actionable Codex startup prompt right now (trust menu or update prompt)" using
-/// the SHARED provider/startup_prompt recognizer — no second classifier, no provider
-/// API calls. Returns `false` if capture fails so non-Codex providers (or any pane
-/// without the trust-menu shape) keep flowing through normal delivery.
+/// actionable provider startup prompt right now (trust menu or update prompt)" using
+/// the SHARED provider/startup_prompt recognizers — no second classifier, no provider
+/// API calls. Returns `false` if capture fails so providers without a startup
+/// recognizer (or any pane without the trust-menu shape) keep flowing through
+/// normal delivery.
 fn recipient_pane_has_actionable_startup_prompt(
     transport: &dyn Transport,
     state: &serde_json::Value,
@@ -620,7 +663,7 @@ fn recipient_pane_has_actionable_startup_prompt(
     let provider = agent
         .and_then(|agent| agent.get("provider"))
         .and_then(serde_json::Value::as_str);
-    if !matches!(provider, Some("codex")) {
+    if !matches!(provider, Some("codex" | "claude" | "claude_code")) {
         return false;
     }
     // step2-retry/scrollback root-cause (rt binary 6c9c6c1c): once the agent's
@@ -643,11 +686,18 @@ fn recipient_pane_has_actionable_startup_prompt(
         Ok(Ok(captured)) => captured.text,
         _ => return false,
     };
-    matches!(
-        crate::provider::classify_codex_startup_screen(&captured),
-        crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
-            | crate::provider::StartupScreenDecision::SkipUpdatePrompt
-    )
+    match provider {
+        Some("codex") => matches!(
+            crate::provider::classify_codex_startup_screen(&captured),
+            crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
+                | crate::provider::StartupScreenDecision::SkipUpdatePrompt
+        ),
+        Some("claude" | "claude_code") => matches!(
+            crate::provider::classify_claude_startup_screen(&captured),
+            crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
+        ),
+        _ => false,
+    }
 }
 
 fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {

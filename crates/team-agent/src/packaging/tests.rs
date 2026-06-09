@@ -270,6 +270,29 @@ fn doctor_on_clean_workspace_no_drift_is_ok() {
 }
 
 #[test]
+fn doctor_comms_gate_failure_maps_to_typed_blocker() {
+    let dir = std::env::temp_dir().join(format!("ta-doctor-comms-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut opts = doctor_opts(&dir);
+    opts.gate = Some(DoctorGate::Comms);
+    let status = doctor(&opts).expect("comms gate should return typed blockers");
+    match status {
+        DoctorStatus::HasBlockers { blockers } => {
+            let blocker = blockers
+                .iter()
+                .find(|blocker| blocker.source == BlockerSource::CommsGate)
+                .expect("must surface CommsGate blocker");
+            assert!(
+                blocker.detail.contains("receiver_binding"),
+                "blocker detail must name failing check: {}",
+                blocker.detail
+            );
+        }
+        DoctorStatus::Ok => panic!("missing receiver binding must not report Ok"),
+    }
+}
+
+#[test]
 fn doctor_drifted_db_emits_schema_layout_drift_blocker() {
     // STRENGTHENED (gate w59ds828k): the ONLY drift assertion previously
     // (doctor_status_has_blockers_carries_typed_source) was a pure serde test that hand-built

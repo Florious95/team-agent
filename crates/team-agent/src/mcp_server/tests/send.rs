@@ -154,22 +154,23 @@
         assert_eq!(env.get("reason"), Some(&json!("peer_not_in_scope")));
         assert_eq!(
             env.get("hint"),
-            Some(&json!("the requested peer is not part of your team. pass scope='workspace' to address peers in other teams."))
+            Some(&json!("the requested peer is not part of your team; worker-origin MCP cannot widen team scope."))
         );
     }
 
     #[test]
-    fn refuse_cross_team_peer_allows_workspace_scope_optin() {
+    fn refuse_cross_team_peer_rejects_workspace_scope_override_for_worker() {
         let tools = TeamOrchestratorTools::with_identity(
             Path::new("/tmp/ws"),
             Some(AgentId::new("worker-1")),
             Some(TeamKey::new("teamA")),
         );
-        // scope="workspace" → None (allowed to proceed)
-        assert!(tools.refuse_cross_team_peer(
+        // scope="workspace" is not worker consent to cross team boundaries.
+        let te = tools.refuse_cross_team_peer(
             &MessageTarget::Single("other-team-bob".to_string()),
             Some(Scope::Workspace),
-        ).is_none(), "workspace scope opts in to cross-team addressing");
+        ).expect("workspace scope override must still be refused for worker-origin MCP");
+        assert_eq!(te.reason, ToolErrorReason::McpScopeRefused);
     }
 
     #[test]

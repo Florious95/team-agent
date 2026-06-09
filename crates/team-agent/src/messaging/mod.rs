@@ -86,18 +86,21 @@ pub use leader_receiver::{
     claim_leader_receiver, mirror_peer_message_to_leader, send_to_leader_receiver,
 };
 pub use peers::allow_peer_talk;
-pub use results::{collect, collect_for_team, collect_results_and_notify_watchers, report_result};
+pub use results::{
+    collect, collect_for_team, collect_results_and_notify_watchers, report_result,
+    report_result_for_owner_team,
+};
 pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
 pub use selftest::{evaluate_idle_behavior, run_comms_selftest, CommsSelftestDriver};
 pub use send::{apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions};
 pub use trust::{attempt_trust_auto_answer, TrustAnswerOutcome};
 pub use types::{
     ActivityStatus, AgentActivity, AlertSnapshot, AlertSuppression, AlertType, CheckEvidence,
-    CheckKind, CheckStatus, DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus,
-    IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery, ProviderSdkCalls,
-    ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload, TrustRetryPayload,
-    WatcherNotice, RESULT_DELIVERY_MAX_ATTEMPTS, SEND_RETRY_MAX_ATTEMPTS, TRUST_RETRY_BACKOFF_SECONDS,
-    TRUST_RETRY_MAX_ATTEMPTS,
+    CheckKind, CheckStatus, ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage,
+    DeliveryStatus, IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
+    ProviderSdkCalls, ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,
+    TrustRetryPayload, WatcherNotice, RESULT_DELIVERY_MAX_ATTEMPTS, SEND_RETRY_MAX_ATTEMPTS,
+    TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
 };
 pub use watchers::{
     delivered_result_message, format_result_watcher_notification, notify_result_watchers,

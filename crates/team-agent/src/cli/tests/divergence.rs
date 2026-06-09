@@ -456,7 +456,7 @@ Hint: team-agent inbox leader";
     // Rust always does CmdResult::from_json -> CmdOutput::Json (wrong shape).
     #[test]
     fn red_cmd_doctor_comms_human_is_boundary_text_plus_sorted_json() {
-        const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency. Does NOT perform live runtime message round-trip. comms contract suite deferred to 0.2.9 (test files not shipped). (zero token, zero pollution)";
+        const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
         let args = DoctorArgs {
             spec: None,
             workspace: PathBuf::from("."),
@@ -506,4 +506,3 @@ Hint: team-agent inbox leader";
         assert_eq!(run(&["codex".to_string(), "-h".to_string()], Path::new(".")), ExitCode::Ok);
         assert_eq!(run(&["claude".to_string(), "-h".to_string()], Path::new(".")), ExitCode::Ok);
     }
-

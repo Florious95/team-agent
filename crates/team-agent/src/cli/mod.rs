@@ -24,7 +24,15 @@
 //! 所有 fn body = `unimplemented!("step14b port: ...")`。RED 契约据此 NAME 类型 + CALL 真 fn。
 
 // ROUND-0 skeleton:fn body 全 unimplemented!() → import/field/param/大 Err 暂未落地;P2 porter 实现时移除。
-#![allow(dead_code, unused_imports, unused_variables, clippy::result_large_err, clippy::doc_overindented_list_items, clippy::doc_lazy_continuation, clippy::io_other_error)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::result_large_err,
+    clippy::doc_overindented_list_items,
+    clippy::doc_lazy_continuation,
+    clippy::io_other_error
+)]
 // §10:CLI 命令实现层禁 unwrap/expect/panic(unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -36,10 +44,10 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 // REUSE in-tree(只 import,不 redefine):
-use crate::model::ids::{TaskId, TeamKey};
 use crate::messaging::{self, AlertType, MessageTarget, SendOptions};
+use crate::model::ids::{TaskId, TeamKey};
 
-pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency. Does NOT perform live runtime message round-trip. comms contract suite deferred to 0.2.9 (test files not shipped). (zero token, zero pollution)";
+pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
 
 pub mod adapters;
 pub mod diagnose;
@@ -60,6 +68,23 @@ pub use send::*;
 pub use status::*;
 pub use types::*;
 
+/// Public `attach-leader` CLI handler. It consumes the typed pane/provider args and
+/// writes/returns a `leader_receiver` binding via the leader lease port.
+pub fn cmd_attach_leader(args: &AttachLeaderArgs) -> Result<CmdResult, CliError> {
+    let mut value = leader_port::attach_leader(
+        &args.workspace,
+        args.team.as_deref(),
+        args.pane.as_ref(),
+        args.provider,
+        args.confirm,
+    )?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("leader_receiver".to_string())
+            .or_insert(Value::Null);
+    }
+    Ok(CmdResult::from_json(value, args.json))
+}
+
 pub(crate) use helpers::*;
 
 #[cfg(test)]
@@ -74,7 +99,6 @@ mod tests;
 /// PLACEHOLDER → status lane(`status/queries.py`/`compact.py`)。`cmd_status`/`cmd_approvals`/
 /// `cmd_inbox` 委派的只读投影面。返回 serde `Value`(稳定 JSON 形状由 status lane 拥有)。
 pub mod status_port;
-
 
 /// PLACEHOLDER → step13 lifecycle(`runtime.{quick_start,start_agent,add_agent,fork_agent,
 /// remove_agent,start_agent,stop_agent,reset_agent,restart,shutdown,start_leader,acknowledge_idle}`)。
@@ -92,7 +116,9 @@ pub mod lifecycle_port {
         yes: bool,
         fresh: bool,
     ) -> Result<Value, CliError> {
-        match crate::lifecycle::quick_start_in_workspace(workspace, agents_dir, name, yes, fresh, team_id) {
+        match crate::lifecycle::quick_start_in_workspace(
+            workspace, agents_dir, name, yes, fresh, team_id,
+        ) {
             Ok(report) => Ok(quick_start_value(report)),
             Err(e) => Ok(error_value(e)),
         }
@@ -104,19 +130,37 @@ pub mod lifecycle_port {
         cwd: &Path,
         attach: &LeaderLauncherArgs,
     ) -> Result<Value, CliError> {
-        let _ = (provider_args, cwd);
-        let provider_name = match provider {
-            Provider::Codex => "codex",
-            Provider::ClaudeCode | Provider::Claude => "claude_code",
-            Provider::GeminiCli => "gemini_cli",
-            Provider::Fake => "fake",
+        let attach_session = attach
+            .attach_session
+            .as_ref()
+            .map(|name| crate::transport::SessionName::new(name.clone()));
+        let plan = crate::leader::start::leader_start_plan(
+            provider,
+            provider_args,
+            cwd,
+            attach.attach_existing,
+            attach.confirm_attach,
+            attach_session.as_ref(),
+        )
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let outcome = crate::leader::start::execute_leader_plan(&plan, cwd)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let ok = match outcome.status {
+            crate::leader::LeaderLaunchStatus::Exited => outcome.exit_code == Some(0),
+            crate::leader::LeaderLaunchStatus::Detached => true,
+            crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
         Ok(json!({
-            "ok": true,
-            "provider": provider_name,
+            "ok": ok,
+            "provider": provider,
+            "mode": plan.mode,
+            "status": outcome.status,
+            "exit_code": outcome.exit_code,
+            "reason": outcome.reason,
             "attach_existing": attach.attach_existing,
             "confirm_attach": attach.confirm_attach,
             "attach_session": attach.attach_session,
+            "session_name": plan.session_name.as_ref().map(|session| session.as_str().to_string()),
         }))
     }
     /// `runtime.shutdown`(`cmd_shutdown`)。
@@ -124,23 +168,13 @@ pub mod lifecycle_port {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
-        let endpoint = stored_tmux_endpoint(&state);
-        let transport = match endpoint {
-            Some(endpoint) if Path::new(endpoint).is_absolute() => {
-                crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
-            }
-            Some(endpoint) if !endpoint.is_empty() => {
-                crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
-            }
-            _ => shutdown_workspace_transport(&run_ws),
+        let transport = if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
+            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+        } else {
+            shutdown_workspace_transport(&run_ws)
         };
-        let result = shutdown_with_transport_and_state(
-            workspace,
-            keep_logs,
-            team,
-            &transport,
-            Some(state),
-        );
+        let result =
+            shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state));
         if team.is_none() {
             transport.kill_server();
         }
@@ -163,47 +197,63 @@ pub mod lifecycle_port {
         transport: &dyn crate::transport::Transport,
         state: Option<Value>,
     ) -> Result<Value, CliError> {
+        crate::os_probe::clear_probe_timeout();
+        let deadline = ShutdownDeadline::new(std::time::Duration::from_secs(20));
         let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let stopped = if team.is_none() {
-            let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
-            Some(
-                crate::coordinator::stop_coordinator(&wp)
-                    .map_err(|e| CliError::Runtime(e.to_string()))?,
+        let _started_event = crate::event_log::EventLog::new(&run_workspace)
+            .write(
+                "lifecycle.shutdown.started",
+                json!({
+                    "keep_logs": keep_logs,
+                    "team": team,
+                }),
             )
-        } else {
-            None
-        };
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut state = match state {
             Some(state) => state,
             None => shutdown_state_for_team(&run_workspace, team)?,
         };
-        let stored_transport = stored_tmux_endpoint(&state).map(tmux_transport_for_endpoint);
-        let transport = stored_transport
-            .as_ref()
-            .map(|transport| transport as &dyn crate::transport::Transport)
-            .unwrap_or(transport);
-        let captured_missing_sessions = crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        deadline.check("refresh_provider_sessions")?;
+        let captured_missing_sessions =
+            crate::lifecycle::restart::refresh_missing_provider_sessions(&mut state)
+                .map_err(|e| CliError::Runtime(e.to_string()))?;
         let session_name = state
             .get("session_name")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(crate::transport::SessionName::new);
-        let mut root_pids = state_process_roots(&state);
+        let protected = shutdown_protection_set();
+        let reap_scope = if team.is_some() {
+            ShutdownReapScope::ScopedTeam
+        } else {
+            ShutdownReapScope::Workspace
+        };
+        deadline.check("process_roots")?;
+        let mut root_pids = state_process_roots(&state, reap_scope)
+            .into_iter()
+            .filter(|pid| !protected.contains_pid(*pid))
+            .collect::<Vec<_>>();
         let pane_pids = session_name
             .as_ref()
-            .map(|session| pane_pids_for_session(transport, session))
+            .map(|session| {
+                pane_pids_for_session(transport, session)
+                    .into_iter()
+                    .filter(|pid| !protected.contains_pid(*pid))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         root_pids.extend(pane_pids);
         root_pids.sort_unstable();
         root_pids.dedup();
-        let root_pgids = process_pgids(&root_pids);
+        let root_pgids = process_pgids(&root_pids, &protected);
+        deadline.check("reap_process_tree")?;
         for pid in &root_pids {
-            reap_process_tree(*pid);
+            reap_process_tree(*pid, &protected);
         }
-        reap_process_groups(&root_pgids);
+        reap_process_groups(&root_pgids, &protected);
         let mut kill_error: Option<String> = None;
+        deadline.check("kill_session")?;
         if let Some(session) = session_name.as_ref() {
             if let Err(error) = transport.kill_session(session) {
                 if !tmux_absent_error(&error.to_string()) {
@@ -211,7 +261,16 @@ pub mod lifecycle_port {
                 }
             }
         }
-        reap_workspace_process_residuals(&run_workspace, &state, &root_pids, &root_pgids);
+        deadline.check("reap_workspace_residuals")?;
+        reap_workspace_process_residuals(
+            &run_workspace,
+            &state,
+            &root_pids,
+            &root_pgids,
+            &protected,
+            reap_scope,
+        );
+        deadline.check("session_residuals")?;
         let session_residuals = if let Some(session) = session_name.as_ref() {
             let (residuals, error) = session_residuals_after_reap(
                 transport,
@@ -226,33 +285,92 @@ pub mod lifecycle_port {
         } else {
             Vec::new()
         };
-        let process_residuals = process_residuals(&run_workspace, &state, &root_pids, &root_pgids);
+        deadline.check("process_residuals")?;
+        let process_residuals = process_residuals(
+            &run_workspace,
+            &state,
+            &root_pids,
+            &root_pgids,
+            &protected,
+            reap_scope,
+        );
+        deadline.check("stop_coordinator")?;
+        let mut coordinator_timeout = false;
+        let stopped = if team.is_none() {
+            let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
+            match stop_coordinator_bounded(wp, std::time::Duration::from_millis(900)) {
+                Some(Ok(report)) => Some(report),
+                Some(Err(error)) => {
+                    kill_error.get_or_insert(error);
+                    None
+                }
+                None => {
+                    coordinator_timeout = true;
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let probe_timeout = crate::os_probe::probe_timeout();
+        let verification_degraded = probe_timeout.is_some();
         let session_killed = session_name.is_some()
             && kill_error.is_none()
             && session_residuals.is_empty()
             && process_residuals.is_empty();
         mark_agents_stopped(&mut state);
+        deadline.check("save_state")?;
         if team.is_some() {
             crate::state::projection::save_team_scoped_state(&run_workspace, &state)?;
+            promote_live_sibling_after_scoped_shutdown(&run_workspace, &state)?;
         } else {
+            let _changed_keys =
+                mark_matching_session_teams_stopped(&mut state, session_name.as_ref());
             crate::state::persist::save_runtime_state(&run_workspace, &state)?;
         }
-        let coordinator_status = stopped
+        let coordinator_status = if coordinator_timeout {
+            "timeout"
+        } else {
+            stopped
+                .as_ref()
+                .map(|stopped| stop_status_wire(stopped.status))
+                .unwrap_or("not_stopped")
+        };
+        let coordinator_pid = stopped
             .as_ref()
-            .map(|stopped| stop_status_wire(stopped.status))
-            .unwrap_or("not_stopped");
-        let coordinator_pid = stopped.as_ref().and_then(|stopped| stopped.pid.map(|p| p.get()));
+            .and_then(|stopped| stopped.pid.map(|p| p.get()));
         let ok = stopped.as_ref().map(|stopped| stopped.ok).unwrap_or(true)
             && kill_error.is_none()
             && session_residuals.is_empty()
-            && process_residuals.is_empty();
+            && process_residuals.is_empty()
+            && !verification_degraded
+            && !coordinator_timeout;
         let status = if ok {
             "ok"
+        } else if coordinator_timeout {
+            "timeout"
+        } else if verification_degraded {
+            "partial"
         } else if kill_error.is_some() {
             "failed"
         } else {
             "partial"
         };
+        let phase = if coordinator_timeout {
+            Some("stop_coordinator")
+        } else if verification_degraded {
+            Some("os_probe")
+        } else {
+            None
+        };
+        let probe_timeout_kind = probe_timeout.as_ref().map(|timeout| timeout.probe);
+        let probe_timeout_value = probe_timeout.as_ref().map(|timeout| {
+            json!({
+                "probe": timeout.probe,
+                "pid": timeout.pid,
+                "timeout_ms": timeout.timeout_ms,
+            })
+        });
         let _event = crate::event_log::EventLog::new(&run_workspace)
             .write(
                 "lifecycle.shutdown",
@@ -263,12 +381,20 @@ pub mod lifecycle_port {
                     "session_killed": session_killed,
                     "coordinator_status": coordinator_status,
                     "status": status,
+                    "phase": phase,
+                    "verification_degraded": verification_degraded,
+                    "probe_timeout_kind": probe_timeout_kind,
+                    "probe_timeout": probe_timeout_value,
                 }),
             )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         Ok(json!({
             "ok": ok,
             "status": status,
+            "phase": phase,
+            "verification_degraded": verification_degraded,
+            "probe_timeout_kind": probe_timeout_kind,
+            "probe_timeout": probe_timeout_value,
             "keep_logs": keep_logs,
             "team": team,
             "session_name": session_name.map(|s| s.as_str().to_string()),
@@ -285,9 +411,51 @@ pub mod lifecycle_port {
         }))
     }
 
+    fn stop_coordinator_bounded(
+        workspace: crate::coordinator::WorkspacePath,
+        timeout: std::time::Duration,
+    ) -> Option<Result<crate::coordinator::types::StopReport, String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                crate::coordinator::stop_coordinator(&workspace).map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+        rx.recv_timeout(timeout).ok()
+    }
+
+    struct ShutdownDeadline {
+        start: std::time::Instant,
+        timeout: std::time::Duration,
+    }
+
+    impl ShutdownDeadline {
+        fn new(timeout: std::time::Duration) -> Self {
+            Self {
+                start: std::time::Instant::now(),
+                timeout,
+            }
+        }
+
+        fn check(&self, phase: &'static str) -> Result<(), CliError> {
+            if self.start.elapsed() >= self.timeout {
+                return Err(CliError::Runtime(
+                    json!({
+                        "ok": false,
+                        "status": "timeout",
+                        "phase": phase,
+                    })
+                    .to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
     fn shutdown_state_for_team(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
         if let Some(team) = team {
-            crate::state::projection::select_runtime_state(workspace, Some(team)).map_err(CliError::from)
+            crate::state::projection::select_runtime_state(workspace, Some(team))
+                .map_err(CliError::from)
         } else {
             crate::state::persist::load_runtime_state(workspace).map_err(CliError::from)
         }
@@ -297,46 +465,11 @@ pub mod lifecycle_port {
         crate::tmux_backend::TmuxBackend::for_workspace(workspace)
     }
 
-    fn tmux_transport_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
-        if Path::new(endpoint).is_absolute() {
-            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
-        } else {
-            crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
-        }
-    }
-
-    fn stored_tmux_endpoint(state: &Value) -> Option<&str> {
-        leader_receiver_tmux_socket(state)
-            .or_else(|| active_team_entry(state).and_then(leader_receiver_tmux_socket))
-            .or_else(|| only_team_entry(state).and_then(leader_receiver_tmux_socket))
-    }
-
-    fn leader_receiver_tmux_socket(state: &Value) -> Option<&str> {
+    fn legacy_worker_tmux_endpoint(state: &Value) -> Option<&str> {
         state
-            .get("leader_receiver")
-            .and_then(|receiver| receiver.get("tmux_socket"))
+            .get("tmux_endpoint")
             .and_then(Value::as_str)
-            .filter(|socket| !socket.is_empty())
-    }
-
-    fn active_team_entry(state: &Value) -> Option<&Value> {
-        let active = state
-            .get("active_team_key")
-            .and_then(Value::as_str)
-            .filter(|team| !team.is_empty())?;
-        state
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| teams.get(active))
-    }
-
-    fn only_team_entry(state: &Value) -> Option<&Value> {
-        let teams = state.get("teams").and_then(Value::as_object)?;
-        if teams.len() == 1 {
-            teams.values().next()
-        } else {
-            None
-        }
+            .filter(|endpoint| !endpoint.is_empty())
     }
 
     fn pane_pids_for_session(
@@ -399,12 +532,20 @@ pub mod lifecycle_port {
         (sessions, error)
     }
 
-    fn state_process_roots(state: &Value) -> Vec<u32> {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ShutdownReapScope {
+        Workspace,
+        ScopedTeam,
+    }
+
+    fn state_process_roots(state: &Value, scope: ShutdownReapScope) -> Vec<u32> {
         let mut out = Vec::new();
         collect_agent_process_roots(state, &mut out);
-        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
-            for team in teams.values() {
-                collect_agent_process_roots(team, &mut out);
+        if scope == ShutdownReapScope::Workspace {
+            if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+                for team in teams.values() {
+                    collect_agent_process_roots(team, &mut out);
+                }
             }
         }
         out.sort_unstable();
@@ -433,8 +574,11 @@ pub mod lifecycle_port {
             .filter(|pid| *pid > 0)
     }
 
-    fn reap_process_tree(root_pid: u32) {
-        let pids = process_tree_pids(root_pid);
+    fn reap_process_tree(root_pid: u32, protected: &ShutdownProtection) {
+        let pids = process_tree_pids(root_pid)
+            .into_iter()
+            .filter(|pid| !protected.contains_pid(*pid))
+            .collect::<Vec<_>>();
         for pid in pids.iter().rev() {
             send_process_signal(*pid, libc::SIGTERM);
         }
@@ -445,13 +589,12 @@ pub mod lifecycle_port {
         wait_for_processes_gone(&pids, std::time::Duration::from_secs(1));
     }
 
-    fn reap_process_groups(pgids: &[u32]) {
-        let current_pgid = unsafe { libc::getpgrp() };
+    fn reap_process_groups(pgids: &[u32], protected: &ShutdownProtection) {
         for pgid in pgids {
             let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
                 continue;
             };
-            if pgid_t <= 1 || pgid_t == current_pgid {
+            if pgid_t <= 1 || protected.contains_pgid(*pgid) {
                 continue;
             }
             send_process_signal_group(pgid_t, libc::SIGTERM);
@@ -461,7 +604,7 @@ pub mod lifecycle_port {
             let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
                 continue;
             };
-            if pgid_t <= 1 || pgid_t == current_pgid {
+            if pgid_t <= 1 || protected.contains_pgid(*pgid) {
                 continue;
             }
             send_process_signal_group(pgid_t, libc::SIGKILL);
@@ -473,20 +616,23 @@ pub mod lifecycle_port {
         state: &Value,
         root_pids: &[u32],
         root_pgids: &[u32],
+        protected: &ShutdownProtection,
+        scope: ShutdownReapScope,
     ) {
         for _ in 0..5 {
-            let residuals = matched_processes(workspace, state, root_pids, root_pgids);
+            let residuals =
+                matched_processes(workspace, state, root_pids, root_pgids, protected, scope);
             if residuals.is_empty() {
                 return;
             }
             for process in &residuals {
-                reap_process_tree(process.pid);
+                reap_process_tree(process.pid, protected);
             }
             let pgids = residuals
                 .iter()
                 .filter_map(|process| process.pgid)
                 .collect::<Vec<_>>();
-            reap_process_groups(&pgids);
+            reap_process_groups(&pgids, protected);
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
@@ -513,10 +659,11 @@ pub mod lifecycle_port {
     }
 
     fn process_parent_pairs() -> Vec<(u32, u32)> {
-        let output = match std::process::Command::new("ps")
-            .args(["-axo", "pid=,ppid="])
-            .output()
-        {
+        let output = match crate::os_probe::bounded_command_output_with_probe(
+            std::process::Command::new("ps").args(["-axo", "pid=,ppid="]),
+            "ps_parent",
+            None,
+        ) {
             Ok(output) if output.status.success() => output,
             _ => return Vec::new(),
         };
@@ -532,10 +679,11 @@ pub mod lifecycle_port {
     }
 
     fn process_table() -> Vec<ProcessInfo> {
-        let output = match std::process::Command::new("ps")
-            .args(["-axo", "pid=,ppid=,pgid=,command="])
-            .output()
-        {
+        let output = match crate::os_probe::bounded_command_output_with_probe(
+            std::process::Command::new("ps").args(["-axo", "pid=,ppid=,pgid=,sess=,command="]),
+            "ps_table",
+            None,
+        ) {
             Ok(output) if output.status.success() => output,
             _ => return Vec::new(),
         };
@@ -550,11 +698,13 @@ pub mod lifecycle_port {
         let pid = parts.next()?.parse::<u32>().ok()?;
         let ppid = parts.next()?.parse::<u32>().ok()?;
         let pgid = parts.next().and_then(|raw| raw.parse::<u32>().ok());
+        let session = parts.next().and_then(|raw| raw.parse::<u32>().ok());
         let command = parts.collect::<Vec<_>>().join(" ");
         Some(ProcessInfo {
             pid,
             ppid,
             pgid,
+            session,
             command,
         })
     }
@@ -564,7 +714,55 @@ pub mod lifecycle_port {
         pid: u32,
         ppid: u32,
         pgid: Option<u32>,
+        session: Option<u32>,
         command: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ShutdownProtection {
+        pids: std::collections::BTreeSet<u32>,
+        pgids: std::collections::BTreeSet<u32>,
+    }
+
+    impl ShutdownProtection {
+        fn contains_pid(&self, pid: u32) -> bool {
+            self.pids.contains(&pid)
+        }
+
+        fn contains_pgid(&self, pgid: u32) -> bool {
+            self.pgids.contains(&pgid)
+        }
+
+        fn contains_process(&self, process: &ProcessInfo) -> bool {
+            self.pids.contains(&process.pid)
+                || process.pgid.is_some_and(|pgid| self.pgids.contains(&pgid))
+        }
+    }
+
+    fn shutdown_protection_set() -> ShutdownProtection {
+        let table = process_table();
+        let mut protected = ShutdownProtection::default();
+        let current = std::process::id();
+        protected.pids.insert(current);
+        if let Ok(pgid) = u32::try_from(unsafe { libc::getpgrp() }) {
+            protected.pgids.insert(pgid);
+        }
+        let mut cursor = current;
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(cursor) {
+            let Some(process) = table.iter().find(|process| process.pid == cursor) else {
+                break;
+            };
+            protected.pids.insert(process.pid);
+            if let Some(pgid) = process.pgid {
+                protected.pgids.insert(pgid);
+            }
+            if process.ppid == 0 || process.ppid == process.pid {
+                break;
+            }
+            cursor = process.ppid;
+        }
+        protected
     }
 
     fn send_process_signal(pid: u32, signal: libc::c_int) {
@@ -617,16 +815,15 @@ pub mod lifecycle_port {
         err.raw_os_error() == Some(libc::EPERM)
     }
 
-    fn process_pgids(pids: &[u32]) -> Vec<u32> {
+    fn process_pgids(pids: &[u32], protected: &ShutdownProtection) -> Vec<u32> {
         let table = process_table();
-        let current_pgid = unsafe { libc::getpgrp() };
         let mut pgids = pids
             .iter()
             .filter_map(|pid| table.iter().find(|process| process.pid == *pid))
             .filter_map(|process| process.pgid)
             .filter(|pgid| {
                 libc::pid_t::try_from(*pgid)
-                    .map(|pgid| pgid > 1 && pgid != current_pgid)
+                    .map(|pgid_t| pgid_t > 1 && !protected.contains_pgid(*pgid))
                     .unwrap_or(false)
             })
             .collect::<Vec<_>>();
@@ -640,15 +837,22 @@ pub mod lifecycle_port {
         state: &Value,
         root_pids: &[u32],
         root_pgids: &[u32],
+        protected: &ShutdownProtection,
+        scope: ShutdownReapScope,
     ) -> Vec<Value> {
-        let mut residuals = matched_processes(workspace, state, root_pids, root_pgids);
-        let mut seen = residuals.iter().map(|process| process.pid).collect::<std::collections::BTreeSet<_>>();
+        let mut residuals =
+            matched_processes(workspace, state, root_pids, root_pgids, protected, scope);
+        let mut seen = residuals
+            .iter()
+            .map(|process| process.pid)
+            .collect::<std::collections::BTreeSet<_>>();
         for pid in root_pids {
-            if process_is_live(*pid) && seen.insert(*pid) {
+            if !protected.contains_pid(*pid) && process_is_live(*pid) && seen.insert(*pid) {
                 residuals.push(ProcessInfo {
                     pid: *pid,
                     ppid: 0,
                     pgid: None,
+                    session: None,
                     command: String::new(),
                 });
             }
@@ -660,6 +864,7 @@ pub mod lifecycle_port {
                     "pid": process.pid,
                     "ppid": process.ppid,
                     "pgid": process.pgid,
+                    "session": process.session,
                     "command": process.command,
                 })
             })
@@ -671,25 +876,42 @@ pub mod lifecycle_port {
         state: &Value,
         root_pids: &[u32],
         root_pgids: &[u32],
+        protected: &ShutdownProtection,
+        scope: ShutdownReapScope,
     ) -> Vec<ProcessInfo> {
         let table = process_table();
         let root_tree = root_pids
             .iter()
             .flat_map(|pid| process_tree_from_table(*pid, &table))
+            .filter(|pid| !protected.contains_pid(*pid))
             .collect::<std::collections::BTreeSet<_>>();
-        let root_pgids = root_pgids.iter().copied().collect::<std::collections::BTreeSet<_>>();
-        let spawn_cwds = state_spawn_cwds(state);
+        let root_pgids = root_pgids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let spawn_cwds = state_spawn_cwds(state, scope);
         let workspace_text = workspace.to_string_lossy().to_string();
-        let current_pid = std::process::id();
-        table
-            .into_iter()
-            .filter(|process| process.pid != current_pid)
-            .filter(|process| {
-                process_matches_workspace(process, &workspace_text, &spawn_cwds)
-                    || root_tree.contains(&process.pid)
-                    || process.pgid.is_some_and(|pgid| root_pgids.contains(&pgid))
-            })
-            .collect()
+        let mut cwd_probe_budget = 3_usize;
+        let mut out = Vec::new();
+        for process in table {
+            if protected.contains_pid(process.pid) {
+                continue;
+            }
+            let matches_workspace = scope == ShutdownReapScope::Workspace
+                && process_matches_workspace(
+                    &process,
+                    &workspace_text,
+                    &spawn_cwds,
+                    &mut cwd_probe_budget,
+                );
+            if matches_workspace
+                || root_tree.contains(&process.pid)
+                || process.pgid.is_some_and(|pgid| root_pgids.contains(&pgid))
+            {
+                out.push(process);
+            }
+        }
+        out
     }
 
     fn process_tree_from_table(root_pid: u32, table: &[ProcessInfo]) -> Vec<u32> {
@@ -712,12 +934,14 @@ pub mod lifecycle_port {
         out
     }
 
-    fn state_spawn_cwds(state: &Value) -> Vec<PathBuf> {
+    fn state_spawn_cwds(state: &Value, scope: ShutdownReapScope) -> Vec<PathBuf> {
         let mut out = Vec::new();
         collect_spawn_cwds(state, &mut out);
-        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
-            for team in teams.values() {
-                collect_spawn_cwds(team, &mut out);
+        if scope == ShutdownReapScope::Workspace {
+            if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+                for team in teams.values() {
+                    collect_spawn_cwds(team, &mut out);
+                }
             }
         }
         out
@@ -728,7 +952,11 @@ pub mod lifecycle_port {
             return;
         };
         for agent in agents.values() {
-            if let Some(spawn_cwd) = agent.get("spawn_cwd").and_then(Value::as_str).filter(|cwd| !cwd.is_empty()) {
+            if let Some(spawn_cwd) = agent
+                .get("spawn_cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+            {
                 out.push(PathBuf::from(spawn_cwd));
             }
         }
@@ -738,6 +966,7 @@ pub mod lifecycle_port {
         process: &ProcessInfo,
         workspace_text: &str,
         spawn_cwds: &[PathBuf],
+        cwd_probe_budget: &mut usize,
     ) -> bool {
         let command = process.command.as_str();
         if command.contains("mcp-server")
@@ -746,22 +975,19 @@ pub mod lifecycle_port {
         {
             return true;
         }
-        let lower = command.to_ascii_lowercase();
-        let provider_like = lower.contains("codex")
-            || lower.contains("claude")
-            || lower.contains("node")
-            || lower.contains("mcp-server")
-            || lower.contains("team-agent");
-        if !provider_like {
-            return false;
-        }
         if command.contains(workspace_text) {
             return true;
         }
+        if spawn_cwds.is_empty() || *cwd_probe_budget == 0 {
+            return false;
+        }
+        *cwd_probe_budget -= 1;
         let Some(cwd) = process_cwd(process.pid) else {
             return false;
         };
-        spawn_cwds.iter().any(|spawn_cwd| path_is_under(&cwd, spawn_cwd))
+        spawn_cwds
+            .iter()
+            .any(|spawn_cwd| path_is_under(&cwd, spawn_cwd))
     }
 
     fn process_cwd(pid: u32) -> Option<PathBuf> {
@@ -769,10 +995,22 @@ pub mod lifecycle_port {
         if let Ok(path) = std::fs::read_link(proc_cwd) {
             return Some(path);
         }
-        let output = std::process::Command::new("lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .output()
-            .ok()?;
+        if crate::os_probe::probe_timed_out() {
+            return None;
+        }
+        let output = crate::os_probe::bounded_command_output_with_probe(
+            std::process::Command::new("lsof").args([
+                "-a",
+                "-p",
+                &pid.to_string(),
+                "-d",
+                "cwd",
+                "-Fn",
+            ]),
+            "lsof_cwd",
+            Some(pid),
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -787,8 +1025,18 @@ pub mod lifecycle_port {
         path == root || path.starts_with(root)
     }
     /// `runtime.restart`(`cmd_restart`)。
-    pub fn restart(workspace: &Path, allow_fresh: bool, team: Option<&str>) -> Result<Value, CliError> {
-        match crate::lifecycle::restart(workspace, allow_fresh, team) {
+    pub fn restart(
+        workspace: &Path,
+        allow_fresh: bool,
+        team: Option<&str>,
+        session_converge_deadline_ms: Option<u64>,
+    ) -> Result<Value, CliError> {
+        match crate::lifecycle::restart_with_session_convergence_deadline(
+            workspace,
+            allow_fresh,
+            team,
+            session_converge_deadline_ms,
+        ) {
             Ok(report) => Ok(restart_value(report)),
             Err(e) => Ok(error_value(e)),
         }
@@ -811,12 +1059,18 @@ pub mod lifecycle_port {
             allow_fresh,
             team,
         ) {
-            Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")})),
+            Ok(report) => {
+                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
+            }
             Err(e) => Ok(error_value(e)),
         }
     }
     /// `runtime.stop_agent`(`cmd_stop_agent`)。
-    pub fn stop_agent(workspace: &Path, agent: &str, team: Option<&str>) -> Result<Value, CliError> {
+    pub fn stop_agent(
+        workspace: &Path,
+        agent: &str,
+        team: Option<&str>,
+    ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::stop_agent(workspace, &agent_id, team) {
             Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "stopped": report.stopped})),
@@ -839,7 +1093,9 @@ pub mod lifecycle_port {
             open_display,
             team,
         ) {
-            Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")})),
+            Ok(report) => {
+                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
+            }
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -898,11 +1154,15 @@ pub mod lifecycle_port {
         team: Option<&str>,
     ) -> Result<Value, CliError> {
         if !confirm {
-            return Ok(json!({"ok": false, "agent_id": agent, "error": "remove-agent requires --confirm"}));
+            return Ok(
+                json!({"ok": false, "agent_id": agent, "error": "remove-agent requires --confirm"}),
+            );
         }
         let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::remove_agent(workspace, &agent_id, from_spec, force, team) {
-            Ok(report) => Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")})),
+            Ok(report) => {
+                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
+            }
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -912,9 +1172,18 @@ pub mod lifecycle_port {
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let team = team
             .map(ToString::to_string)
-            .or_else(|| state.get("active_team_key").and_then(Value::as_str).map(ToString::to_string))
+            .or_else(|| {
+                state
+                    .get("active_team_key")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
             .filter(|s| !s.is_empty())
-            .or_else(|| workspace.file_name().map(|name| name.to_string_lossy().to_string()))
+            .or_else(|| {
+                workspace
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
             .unwrap_or_else(|| "current".to_string());
         let now = chrono::Utc::now().to_rfc3339();
         let ttl_seconds = 1800;
@@ -930,7 +1199,10 @@ pub mod lifecycle_port {
         crate::state::persist::save_runtime_state(workspace, &state)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         crate::event_log::EventLog::new(workspace)
-            .write("coordinator.idle_acknowledged", json!({"team": team, "ttl_seconds": ttl_seconds}))
+            .write(
+                "coordinator.idle_acknowledged",
+                json!({"team": team, "ttl_seconds": ttl_seconds}),
+            )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         Ok(json!({
             "ok": true,
@@ -1070,6 +1342,15 @@ pub mod lifecycle_port {
                 // The summary string + a structured `worker_readiness` block tell the
                 // caller exactly which agents are unhealthy (Degraded) or that the
                 // tool-set load has not been confirmed yet (PendingToolLoad).
+                let incomplete_session_capture_agents =
+                    launch.session_capture_incomplete_agents.clone();
+                let all_spawned = !launch.started.is_empty();
+                let leader_receiver_attached = launch.leader_receiver_attached;
+                let all_resumable_have_session = incomplete_session_capture_agents.is_empty();
+                let all_workers_spawned = all_spawned;
+                let attached_receiver = leader_receiver_attached;
+                let all_attached_receiver = leader_receiver_attached;
+                let all_resumable_agents_have_sessions = all_resumable_have_session;
                 let (summary, ok, readiness_json) = match &worker_readiness {
                     crate::lifecycle::QuickStartReadiness::Degraded { unhealthy_agents } => (
                         format!(
@@ -1079,28 +1360,109 @@ pub mod lifecycle_port {
                         ),
                         false,
                         json!({
+                            "all_spawned": all_spawned,
+                            "all_workers_spawned": all_workers_spawned,
+                            "all_attached_receiver": all_attached_receiver,
+                            "attached_receiver": attached_receiver,
+                            "leader_receiver_attached": leader_receiver_attached,
+                            "all_resumable_have_session": all_resumable_have_session,
+                            "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                            "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
                             "state": "degraded",
+                            "session_capture_complete": all_resumable_have_session,
+                            "session_capture_incomplete": !all_resumable_have_session,
+                            "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                            "pending_session_agent_ids": incomplete_session_capture_agents,
                             "unhealthy_agents": unhealthy_agents,
                         }),
                     ),
-                    crate::lifecycle::QuickStartReadiness::PendingToolLoad => (
-                        format!(
-                            "quick-start launched (worker tool load unverified): {}",
-                            session_name.as_str()
-                        ),
-                        true,
-                        json!({
-                            "state": "pending_tool_load",
-                            "reason": "worker MCP tool set load not yet confirmed; run `team-agent doctor` or wait for first worker turn",
-                        }),
-                    ),
+                    crate::lifecycle::QuickStartReadiness::PendingToolLoad => {
+                        if !all_resumable_have_session {
+                            (
+                                format!(
+                                    "quick-start pending: {}; provider session capture incomplete",
+                                    session_name.as_str()
+                                ),
+                                false,
+                                json!({
+                                    "all_spawned": all_spawned,
+                                    "all_workers_spawned": all_workers_spawned,
+                                    "all_attached_receiver": all_attached_receiver,
+                                    "attached_receiver": attached_receiver,
+                                    "leader_receiver_attached": leader_receiver_attached,
+                                    "all_resumable_have_session": all_resumable_have_session,
+                                    "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                                    "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
+                                    "state": "session_capture_incomplete",
+                                    "session_capture_complete": all_resumable_have_session,
+                                    "session_capture_incomplete": !all_resumable_have_session,
+                                    "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                                    "pending_session_agent_ids": incomplete_session_capture_agents,
+                                    "reason": "provider session capture is incomplete; restart is not yet resume-safe",
+                                }),
+                            )
+                        } else if launch.leader_receiver_attached {
+                            (
+                                format!(
+                                    "quick-start launched (worker tool load unverified): {}",
+                                    session_name.as_str()
+                                ),
+                                all_spawned && all_attached_receiver && all_resumable_have_session,
+                                json!({
+                                    "all_spawned": all_spawned,
+                                    "all_workers_spawned": all_workers_spawned,
+                                    "all_attached_receiver": all_attached_receiver,
+                                    "attached_receiver": attached_receiver,
+                                    "leader_receiver_attached": leader_receiver_attached,
+                                    "all_resumable_have_session": all_resumable_have_session,
+                                    "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                                    "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
+                                    "state": "pending_tool_load",
+                                    "session_capture_complete": all_resumable_have_session,
+                                    "session_capture_incomplete": !all_resumable_have_session,
+                                    "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                                    "pending_session_agent_ids": incomplete_session_capture_agents,
+                                    "reason": "worker MCP tool set load not yet confirmed; run `team-agent doctor` or wait for first worker turn",
+                                }),
+                            )
+                        } else {
+                            (
+                                format!(
+                                    "quick-start degraded: {}; leader receiver unbound",
+                                    session_name.as_str()
+                                ),
+                                false,
+                                json!({
+                                    "all_spawned": all_spawned,
+                                    "all_workers_spawned": all_workers_spawned,
+                                    "all_attached_receiver": all_attached_receiver,
+                                    "attached_receiver": attached_receiver,
+                                    "leader_receiver_attached": leader_receiver_attached,
+                                    "all_resumable_have_session": all_resumable_have_session,
+                                    "all_resumable_agents_have_sessions": all_resumable_agents_have_sessions,
+                                    "ready": all_spawned && all_attached_receiver && all_resumable_have_session,
+                                    "state": "leader_receiver_unbound",
+                                    "session_capture_complete": all_resumable_have_session,
+                                    "session_capture_incomplete": !all_resumable_have_session,
+                                    "incomplete_session_capture_agents": incomplete_session_capture_agents.clone(),
+                                    "pending_session_agent_ids": incomplete_session_capture_agents,
+                                    "reason": "launched team has no attached leader receiver",
+                                    "next_action": "claim-leader",
+                                }),
+                            )
+                        }
+                    }
                 };
                 json!({
                     "ok": ok,
                     "summary": summary,
+                    "status": readiness_json.get("state").cloned().unwrap_or(Value::Null),
+                    "reason": readiness_json.get("reason").cloned().unwrap_or(Value::Null),
+                    "ready": readiness_json.get("ready").cloned().unwrap_or(Value::Bool(false)),
                     "session_name": session_name.as_str(),
                     "dry_run": launch.dry_run,
                     "next_actions": next_actions,
+                    "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
                 })
             }
@@ -1154,6 +1516,30 @@ pub mod lifecycle_port {
                 "error": error,
                 "unresumable": unresumable.iter().map(|w| w.agent_id.as_str()).collect::<Vec<_>>(),
             }),
+            crate::lifecycle::RestartReport::RefusedResumeNotReady {
+                missing,
+                allow_fresh,
+                deadline,
+                elapsed,
+                error,
+            } => json!({
+                "ok": false,
+                "kind": "resume_not_ready",
+                "reason": "session_capture_incomplete",
+                "status": "resume_not_ready",
+                "allow_fresh": allow_fresh,
+                "error": error,
+                "pending_agents": missing.iter().map(|w| w.as_str()).collect::<Vec<_>>(),
+                "missing": missing.iter().map(|w| w.as_str()).collect::<Vec<_>>(),
+                "session_convergence": {
+                    "complete": false,
+                    "deadline_s": deadline.as_secs_f64(),
+                    "deadline_ms": deadline.as_millis(),
+                    "elapsed_ms": elapsed.as_millis(),
+                    "pending_agent_ids": missing.iter().map(|w| w.as_str()).collect::<Vec<_>>(),
+                },
+                "next_action": "rerun restart after session capture completes, or pass --allow-fresh to deliberately discard missing context",
+            }),
             crate::lifecycle::RestartReport::RefusedInvalidFirstSendAt {
                 invalid,
                 allow_fresh,
@@ -1196,6 +1582,75 @@ pub mod lifecycle_port {
             }
         }
     }
+
+    fn mark_matching_session_teams_stopped(
+        state: &mut Value,
+        session_name: Option<&crate::transport::SessionName>,
+    ) -> Vec<String> {
+        let Some(session_name) = session_name.map(crate::transport::SessionName::as_str) else {
+            return Vec::new();
+        };
+        let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (key, team) in teams.iter_mut() {
+            let matches = team
+                .get("session_name")
+                .and_then(Value::as_str)
+                .is_some_and(|session| session == session_name);
+            if matches {
+                mark_agents_stopped(team);
+                out.push(key.clone());
+            }
+        }
+        out
+    }
+
+    fn promote_live_sibling_after_scoped_shutdown(
+        workspace: &Path,
+        stopped_state: &Value,
+    ) -> Result<(), CliError> {
+        let stopped_key = stopped_state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty());
+        let Some(stopped_key) = stopped_key else {
+            return Ok(());
+        };
+        let raw = crate::state::persist::load_runtime_state(workspace)?;
+        let active = raw
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if active != stopped_key {
+            return Ok(());
+        }
+        let Some((next_key, _)) = raw
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| {
+                teams
+                    .iter()
+                    .find(|(key, team)| key.as_str() != stopped_key && team_has_running_agent(team))
+            })
+        else {
+            return Ok(());
+        };
+        let promoted = crate::state::projection::project_top_level_view(&raw, next_key);
+        crate::state::persist::save_runtime_state(workspace, &promoted)?;
+        Ok(())
+    }
+
+    fn team_has_running_agent(team: &Value) -> bool {
+        team.get("agents")
+            .and_then(Value::as_object)
+            .is_some_and(|agents| {
+                agents
+                    .values()
+                    .any(|agent| agent.get("status").and_then(Value::as_str) == Some("running"))
+            })
+    }
 }
 
 /// PLACEHOLDER → diagnose lane(`diagnose/health.py` `doctor`、`diagnose/comms.py`
@@ -1207,9 +1662,19 @@ pub mod diagnose_port {
 
     /// `runtime.doctor(spec)` + schema 注入(`cmd_doctor` 默认分支)。
     pub fn doctor(workspace: &Path, spec: Option<&Path>) -> Result<Value, CliError> {
-        let _ = spec;
         let tmux_path = which_path("tmux");
         let tmux_installed = tmux_path.is_some();
+        let workspace_valid = workspace.is_dir();
+        let team_context = workspace_valid && has_doctor_team_context(workspace, spec);
+        let workspace_has_entries = workspace_valid && workspace_has_any_entry(workspace);
+        let profile_smoke = doctor_team_dir(workspace, spec)
+            .map(|team| crate::cli::diagnose::build_profile_smoke_check_for_team(&team))
+            .transpose()?;
+        let profile_smoke_ok = profile_smoke
+            .as_ref()
+            .and_then(|check| check.get("ok").and_then(Value::as_bool))
+            .unwrap_or(true);
+        let ok = workspace_valid && (team_context || workspace_has_entries) && profile_smoke_ok;
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
@@ -1226,9 +1691,79 @@ pub mod diagnose_port {
                 "local_module": true,
             },
             "secret_scan": secret_scan(workspace),
+            "profile_smoke": profile_smoke.unwrap_or_else(|| json!({
+                "name": "profile_smoke",
+                "ok": true,
+                "status": "not_required",
+                "checks": [],
+                "secret_values_printed": false,
+            })),
             "coordinator": coordinator_health_value(health),
-            "ok": true,
+            "ok": ok,
+            "error": if ok {
+                Value::Null
+            } else if !profile_smoke_ok {
+                json!("profile_smoke_failed")
+            } else if workspace_valid {
+                json!("workspace has no Team Agent spec or runtime context")
+            } else {
+                json!("invalid workspace")
+            },
         }))
+    }
+
+    fn doctor_team_dir(workspace: &Path, spec: Option<&Path>) -> Option<PathBuf> {
+        if let Some(spec) = spec {
+            let candidate = if spec.is_absolute() {
+                spec.to_path_buf()
+            } else {
+                workspace.join(spec)
+            };
+            if candidate.is_file() {
+                return candidate.parent().map(Path::to_path_buf);
+            }
+            if candidate.join("team.spec.yaml").is_file() || candidate.join("TEAM.md").is_file() {
+                return Some(candidate);
+            }
+        }
+        if workspace.join("team.spec.yaml").is_file() || workspace.join("TEAM.md").is_file() {
+            return Some(workspace.to_path_buf());
+        }
+        let current = workspace.join(".team").join("current");
+        if current.join("team.spec.yaml").is_file() || current.join("TEAM.md").is_file() {
+            return Some(current);
+        }
+        None
+    }
+
+    fn has_doctor_team_context(workspace: &Path, spec: Option<&Path>) -> bool {
+        if spec.is_some_and(|path| {
+            let candidate = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace.join(path)
+            };
+            candidate.is_file()
+        }) {
+            return true;
+        }
+        [
+            workspace.join("TEAM.md"),
+            workspace.join("team.spec.yaml"),
+            workspace.join(".team/current/TEAM.md"),
+            workspace.join(".team/current/team.spec.yaml"),
+            workspace.join(".team/runtime/state.json"),
+            workspace.join(".team/runtime/team.db"),
+        ]
+        .into_iter()
+        .any(|path| path.exists())
+    }
+
+    fn workspace_has_any_entry(workspace: &Path) -> bool {
+        std::fs::read_dir(workspace)
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .is_some()
     }
 
     fn secret_scan(workspace: &Path) -> Value {
@@ -1245,7 +1780,13 @@ pub mod diagnose_port {
     const SECRET_SCAN_MAX_ENTRIES: usize = 512;
     const SECRET_SCAN_MAX_FILE_BYTES: u64 = 128 * 1024;
 
-    fn scan_secret_dir(root: &Path, dir: &Path, depth: usize, scanned: &mut usize, findings: &mut Vec<Value>) {
+    fn scan_secret_dir(
+        root: &Path,
+        dir: &Path,
+        depth: usize,
+        scanned: &mut usize,
+        findings: &mut Vec<Value>,
+    ) {
         if depth > SECRET_SCAN_MAX_DEPTH || *scanned >= SECRET_SCAN_MAX_ENTRIES {
             return;
         }
@@ -1305,143 +1846,37 @@ pub mod diagnose_port {
         }
     }
     /// `run_comms_selftest`(`--comms`/`--gate comms`)。**纯 state-read,零 token**(MUST-NOT-13)。
-    pub fn comms_selftest(workspace: &Path, team: Option<&str>, gate: Option<&str>) -> Result<Value, CliError> {
-        let _ = (team, gate);
-        let state = read_runtime_state(workspace);
-        let receiver = state
-            .get("leader_receiver")
-            .and_then(Value::as_object);
-        let owner_pane_id = state
-            .get("owner")
-            .or_else(|| state.get("team_owner"))
-            .and_then(|v| v.get("pane_id"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let caller_pane_id = std::env::var("TMUX_PANE").ok().map(Value::String).unwrap_or(Value::Null);
-        let pane_id = receiver
-            .and_then(|r| r.get("pane_id"))
-            .cloned()
-            .unwrap_or(Value::Null);
-        let mismatches = receiver_binding_mismatches(&owner_pane_id, &caller_pane_id, &pane_id);
-        let receiver_binding = json!({
-            "status": if mismatches.is_empty() { "pass" } else { "fail" },
-            "verifies": "binding_consistency",
-            "proof": "state_read",
-            "state_read_observed": true,
-            "pane_id": pane_id,
-            "owner_pane_id": owner_pane_id,
-            "caller_pane_id": caller_pane_id,
-            "mismatches": mismatches,
-            "configured": receiver.is_some(),
-        });
-        Ok(json!({
-            "ok": true,
-            "status": "pass",
-            "run_id": run_id(),
-            "scope": "binding_consistency",
-            "boundary": COMMS_BOUNDARY_TEXT,
-            "checks": {
-                "receiver_binding": receiver_binding,
-                "contract_suite": {
-                    "status": "deferred",
-                    "deferred_to": "0.2.9",
-                    "reason": "contract test files not shipped with package",
-                    "message": "comms contract verification deferred to 0.2.9; contract test files not shipped with package",
-                },
-                "provider_sdk_calls": {
-                    "status": "pass",
-                    "verifies": "no_provider_sdk_calls",
-                    "calls": {
-                        "anthropic": 0,
-                        "openai": 0,
-                        "httpx": 0,
-                    },
-                },
-            },
-        }))
-    }
-
-    pub(super) fn receiver_binding_mismatches(
-        owner_pane_id: &Value,
-        caller_pane_id: &Value,
-        pane_id: &Value,
-    ) -> Vec<Value> {
-        let mut mismatches = Vec::new();
-        if pane_mismatch(owner_pane_id, pane_id) {
-            mismatches.push(json!("owner_receiver_pane_mismatch"));
-        }
-        if pane_mismatch(caller_pane_id, owner_pane_id) {
-            mismatches.push(json!("caller_owner_pane_mismatch"));
-        }
-        if pane_mismatch(caller_pane_id, pane_id) {
-            mismatches.push(json!("caller_receiver_pane_mismatch"));
-        }
-        mismatches
-    }
-
-    fn pane_mismatch(left: &Value, right: &Value) -> bool {
-        let Some(left) = left.as_str().filter(|s| !s.is_empty()) else {
-            return false;
-        };
-        let Some(right) = right.as_str().filter(|s| !s.is_empty()) else {
-            return false;
-        };
-        left != right
+    pub fn comms_selftest(
+        workspace: &Path,
+        team: Option<&str>,
+        gate: Option<&str>,
+    ) -> Result<Value, CliError> {
+        crate::diagnose::comms::doctor_comms_json(workspace, team, gate)
     }
 
     /// `orphan_gate(fix, confirm)`(`--gate orphans`)。CI gate。
     pub fn orphan_gate(fix: bool, confirm: bool) -> Result<Value, CliError> {
-        if fix && !confirm {
-            return Ok(json!({
-                "ok": false,
-                "gate": "orphans",
-                "status": "refused",
-                "reason": "fix_requires_confirm",
-                "action": "re-run with --gate orphans --fix --confirm",
-            }));
-        }
-        Ok(json!({
-            "ok": true,
-            "gate": "orphans",
-            "status": "passed",
-            "scanned": 0,
-            "dry_run": !fix,
-            "scanned_at": chrono::Utc::now().to_rfc3339(),
-            "action_required": false,
-            "fix": fix,
-        }))
+        crate::diagnose::orphans::orphan_gate_json(fix, confirm)
     }
     /// `cleanup_orphan_coordinators(confirm)`(`--cleanup-orphans`;dry-run unless `--confirm`)。
     pub fn cleanup_orphans(confirm: bool) -> Result<Value, CliError> {
-        if confirm {
-            return Ok(json!({
-                "ok": true,
-                "scanned": 0,
-                "orphans": [],
-                "dry_run": false,
-                "scanned_at": chrono::Utc::now().to_rfc3339(),
-                "killed": [],
-                "failed": [],
-            }));
-        }
-        Ok(json!({
-            "ok": true,
-            "scanned": 0,
-            "orphans": [],
-            "dry_run": true,
-            "scanned_at": chrono::Utc::now().to_rfc3339(),
-            "action_required": "re-run with --confirm to send SIGTERM",
-        }))
+        crate::diagnose::orphans::cleanup_orphans_json(confirm)
     }
     /// `fix_schema_layout`(`--fix-schema`)/`schema_diagnosis`。
     pub fn fix_schema(workspace: &Path) -> Result<Value, CliError> {
         let db_path = workspace.join(".team").join("runtime").join("team.db");
-        let result = crate::db::migration::fix_schema_layout(workspace, crate::db::schema::SCHEMA_VERSION)
-            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let result =
+            crate::db::migration::fix_schema_layout(workspace, crate::db::schema::SCHEMA_VERSION)
+                .map_err(|e| CliError::Runtime(e.to_string()))?;
         match result {
-            crate::db::migration::FixResult::Missing(diagnosis) => {
-                Ok(fix_schema_value(&db_path, diagnosis, false, Vec::new(), None, None))
-            }
+            crate::db::migration::FixResult::Missing(diagnosis) => Ok(fix_schema_value(
+                &db_path,
+                diagnosis,
+                false,
+                Vec::new(),
+                None,
+                None,
+            )),
             crate::db::migration::FixResult::Blocked { reason } => Ok(json!({
                 "ok": false,
                 "status": "blocked",
@@ -1450,12 +1885,22 @@ pub mod diagnose_port {
                 "reason": reason,
                 "fixed": false,
             })),
-            crate::db::migration::FixResult::Fixed { diagnosis, rebuilds } => {
+            crate::db::migration::FixResult::Fixed {
+                diagnosis,
+                rebuilds,
+            } => {
                 let backup = rebuilds
                     .first()
                     .map(|event| event.backup_path.clone())
                     .unwrap_or_else(|| backup_path_preview(&db_path, diagnosis.user_version));
-                Ok(fix_schema_value(&db_path, diagnosis, true, rebuild_values(rebuilds), Some(backup), Some("none")))
+                Ok(fix_schema_value(
+                    &db_path,
+                    diagnosis,
+                    true,
+                    rebuild_values(rebuilds),
+                    Some(backup),
+                    Some("none"),
+                ))
             }
         }
     }
@@ -1490,7 +1935,9 @@ pub mod diagnose_port {
     fn backup_path_preview(db_path: &Path, user_version: i64) -> String {
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
         db_path
-            .with_file_name(format!("team.db.pre-migration-{stamp}-from-v{user_version}.bak"))
+            .with_file_name(format!(
+                "team.db.pre-migration-{stamp}-from-v{user_version}.bak"
+            ))
             .to_string_lossy()
             .to_string()
     }
@@ -1555,7 +2002,9 @@ pub mod diagnose_port {
         })
     }
 
-    fn coordinator_status_wire(status: crate::coordinator::CoordinatorHealthStatus) -> &'static str {
+    fn coordinator_status_wire(
+        status: crate::coordinator::CoordinatorHealthStatus,
+    ) -> &'static str {
         match status {
             crate::coordinator::CoordinatorHealthStatus::Missing => "missing",
             crate::coordinator::CoordinatorHealthStatus::InvalidPid => "invalid_pid",
@@ -1572,7 +2021,11 @@ pub mod leader_port {
     use super::*;
 
     /// `runtime.takeover(workspace, team, confirm)` 的 CLI `--json` 投影。
-    pub fn takeover(workspace: &Path, team: Option<&str>, confirm: bool) -> Result<Value, CliError> {
+    pub fn takeover(
+        workspace: &Path,
+        team: Option<&str>,
+        confirm: bool,
+    ) -> Result<Value, CliError> {
         if !confirm && !positive_caller_pane_env_present() {
             return Ok(json!({
                 "ok": false,
@@ -1595,7 +2048,11 @@ pub mod leader_port {
         Ok(lease_value(result))
     }
     /// `runtime.claim_leader(...)` 的 CLI `--json` 投影(`cmd_claim_leader`;含 inbox_hint)。
-    pub fn claim_leader(workspace: &Path, team: Option<&str>, confirm: bool) -> Result<Value, CliError> {
+    pub fn claim_leader(
+        workspace: &Path,
+        team: Option<&str>,
+        confirm: bool,
+    ) -> Result<Value, CliError> {
         let state = crate::state::persist::load_runtime_state(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let Some(team_id) = resolve_owner_team_id(&state, team) else {
@@ -1623,13 +2080,23 @@ pub mod leader_port {
     /// `runtime.attach_leader(...)` 的 CLI `--json` 投影。
     pub fn attach_leader(
         workspace: &Path,
+        team: Option<&str>,
         pane: Option<&crate::transport::PaneId>,
         provider: crate::provider::Provider,
+        _confirm: bool,
     ) -> Result<Value, CliError> {
         let result = crate::leader::attach_leader(workspace, pane, provider)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        let requeued = attach_requeued_exhausted_watchers(workspace, result.bound_pane_id.as_ref())?;
-        Ok(attach_lease_value(result, requeued))
+        let requeued =
+            attach_requeued_exhausted_watchers(workspace, result.bound_pane_id.as_ref())?;
+        let mut value = attach_lease_value(result, requeued);
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(team) = team {
+                obj.insert("team".to_string(), json!(team));
+                obj.insert("team_key".to_string(), json!(team));
+            }
+        }
+        Ok(value)
     }
 
     /// `runtime.leader_identity(workspace, team)`(`cmd_identity`)。
@@ -1676,12 +2143,16 @@ pub mod leader_port {
                     None
                 }
             }
-            None => Some(TeamKey::new(crate::state::projection::team_state_key(state))),
+            None => Some(TeamKey::new(crate::state::projection::team_state_key(
+                state,
+            ))),
         }
     }
 
     fn positive_caller_pane_env_present() -> bool {
-        std::env::var("TMUX_PANE").ok().is_some_and(|pane| !pane.is_empty())
+        std::env::var("TMUX_PANE")
+            .ok()
+            .is_some_and(|pane| !pane.is_empty())
             || std::env::var("TEAM_AGENT_LEADER_PANE_ID")
                 .ok()
                 .is_some_and(|pane| !pane.is_empty())
@@ -1719,7 +2190,10 @@ pub mod leader_port {
     fn lease_value(result: crate::leader::LeaseResult) -> Value {
         let mut out = serde_json::Map::new();
         out.insert("ok".to_string(), json!(result.ok));
-        out.insert("status".to_string(), json!(lease_status_wire(result.status)));
+        out.insert(
+            "status".to_string(),
+            json!(lease_status_wire(result.status)),
+        );
         if let Some(reason) = result.reason {
             out.insert("reason".to_string(), json!(lease_reason_wire(reason)));
         }
@@ -1733,10 +2207,16 @@ pub mod leader_port {
             out.insert("bound_pane_id".to_string(), json!(pane.as_str()));
         }
         if let Some(receiver) = result.receiver {
-            out.insert("leader_receiver".to_string(), serde_json::to_value(receiver).unwrap_or(Value::Null));
+            out.insert(
+                "leader_receiver".to_string(),
+                serde_json::to_value(receiver).unwrap_or(Value::Null),
+            );
         }
         if let Some(owner) = result.owner {
-            out.insert("team_owner".to_string(), serde_json::to_value(owner).unwrap_or(Value::Null));
+            out.insert(
+                "team_owner".to_string(),
+                serde_json::to_value(owner).unwrap_or(Value::Null),
+            );
         }
         Value::Object(out)
     }
@@ -1780,7 +2260,10 @@ pub mod leader_port {
     /// STRING list. (Current divergent body — the `requeued` Vec<WatcherNotice> objects — kept until
     /// porter-c ports; pinned RED in cli::tests asserts the golden string list.)
     pub(crate) fn project_requeued_exhausted_watchers(event: &Value) -> Value {
-        event.get("watcher_ids").cloned().unwrap_or_else(|| json!([]))
+        event
+            .get("watcher_ids")
+            .cloned()
+            .unwrap_or_else(|| json!([]))
     }
 
     fn lease_status_wire(status: crate::leader::LeaseStatus) -> &'static str {

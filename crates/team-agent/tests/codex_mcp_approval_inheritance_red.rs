@@ -300,22 +300,59 @@ fn prompt_handler_does_not_raise_worker_above_leader() {
     let provider_sources = source_tree("src/provider");
     let coordinator_sources = source_tree("src/coordinator");
     let all = format!("{provider_sources}\n{coordinator_sources}");
+    let mut failures = Vec::new();
 
-    assert!(
-        all.contains("blocked_on_human") || all.contains("awaiting_approval"),
-        "AI-7: restricted approval prompts must be surfaced as blocked_on_human/awaiting_approval, not auto-consented"
-    );
+    if !all.contains("awaiting_human_confirm")
+        && !all.contains("runtime_approval.blocked_by_leader_safety")
+        && !all.contains("leader_restricted")
+    {
+        failures.push(
+            "AI-7: restricted approval prompts must be surfaced as awaiting_human_confirm / blocked_by_leader_safety / leader_restricted, not auto-consented"
+                .to_string(),
+        );
+    }
     let runtime_uses_approval_choice = coordinator_sources.contains("choose_internal_mcp_approval_choice")
         || source("src/provider/mod.rs").contains("choose_internal_mcp_approval_choice");
     if runtime_uses_approval_choice {
-        assert!(
-            all.contains("safety.enabled") || all.contains("DangerousApproval"),
-            "AI-7: any runtime MCP approval auto-answer must be gated by effective leader safety"
+        if !coordinator_sources.contains("runtime_approval_policy_from_agent") {
+            failures.push(
+                "AI-7/#232: coordinator auto-answer path must read persisted per-agent approval policy via runtime_approval_policy_from_agent, not re-detect leader process ancestry"
+                    .to_string(),
+            );
+        }
+        if !coordinator_sources.contains("effective_approval_policy") {
+            failures.push(
+                "AI-7/#232: auto-answer gate must be based on state.agents[*].effective_approval_policy"
+                    .to_string(),
+            );
+        }
+        if !coordinator_sources.contains("auto_answer_allowed") {
+            failures.push(
+                "AI-7/#232: persisted policy must expose an auto_answer_allowed gate before approval_choice_keys/send_keys can run"
+                    .to_string(),
+            );
+        }
+        if coordinator_sources.contains("detect_dangerous_approval()") {
+            failures.push(
+                "AI-7/#232: coordinator approval handling must not call detect_dangerous_approval(); coordinator process ancestry is not the worker's approval source"
+                    .to_string(),
+            );
+        }
+    }
+    if !provider_sources.contains("ApprovalKind::Command => Some(\"command_approval_requires_human\")") {
+        failures.push(
+            "AI-7/#232 C5: command approval must stay on the human-confirm path even when persisted policy allows MCP auto-approval"
+                .to_string(),
         );
     }
+    if all.contains("Automation is consent") {
+        failures.push("AI-2: automation is not consent; prompt handler must not encode the opposite policy".to_string());
+    }
+
     assert!(
-        !all.contains("Automation is consent"),
-        "AI-2: automation is not consent; prompt handler must not encode the opposite policy"
+        failures.is_empty(),
+        "AI-7 prompt handler approval ceiling contract failed:\n{}",
+        failures.join("\n")
     );
 }
 
@@ -325,7 +362,6 @@ fn approval_inheritance_static_guards_cover_ai_1_through_ai_9() {
     let launch = source("src/lifecycle/launch.rs");
     let adapter = source("src/provider/adapter.rs");
     let restart_common = source("src/lifecycle/restart/common.rs");
-    let fork_source = source("src/lifecycle/launch.rs");
     let mut failures = Vec::new();
 
     if function_body(&launch, "detect_dangerous_approval")
@@ -351,7 +387,7 @@ fn approval_inheritance_static_guards_cover_ai_1_through_ai_9() {
     for (surface, text) in [
         ("fresh launch", launch.as_str()),
         ("restart common", restart_common.as_str()),
-        ("fork", fork_source.as_str()),
+        ("fork", launch.as_str()),
     ] {
         if text.contains("agent_tool_strings(agent)")
             && !text.contains("effective_runtime_config")
@@ -362,8 +398,13 @@ fn approval_inheritance_static_guards_cover_ai_1_through_ai_9() {
             ));
         }
     }
-    if !fork_source.contains("fork_with_context") {
-        failures.push("AI-1/AI-8: fork path must use fork_with_context or equivalent context/policy path, not bare fork".to_string());
+    let fork_body_without_comments = function_body(&launch, "fork_agent_with_transport")
+        .map(strip_line_comments)
+        .unwrap_or_default();
+    if !(fork_body_without_comments.contains(".fork_plan(")
+        || fork_body_without_comments.contains(".fork_with_context("))
+    {
+        failures.push("AI-1/AI-8: fork path must call fork_plan or fork_with_context in executable code, not bare fork or comment-only guard text".to_string());
     }
 
     assert!(
@@ -630,6 +671,14 @@ fn function_body<'a>(source: &'a str, name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+fn strip_line_comments(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn event_or_source_contains(needle: &str) -> bool {

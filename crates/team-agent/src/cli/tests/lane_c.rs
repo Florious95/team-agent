@@ -216,27 +216,35 @@ use super::*;
     // the deterministic check sub-shapes (run_id is a random uuid; not value-locked). ────────────────
     #[test]
     fn comms_selftest_golden_boundary_scope_and_check_shapes() {
-        let boundary = "validates live pane binding consistency. Does NOT perform live runtime message \
-                        round-trip. comms contract suite deferred to 0.2.9 (test files not shipped). \
-                        (zero token, zero pollution)";
+        let boundary = "validates live pane binding consistency and zero-token comms contracts. \
+                        Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
         let ws = tmp_workspace();
         let v = diagnose_port::comms_selftest(&ws, None, None).expect("comms_selftest");
         let obj = v.as_object().expect("comms dict");
         assert_eq!(v["boundary"], json!(boundary), "golden COMMS_BOUNDARY_TEXT prefix (comms.py:11-14)");
         assert_eq!(v["scope"], json!("binding_consistency"), "golden scope");
-        assert_eq!(v["status"], json!("pass"), "empty-state selftest passes (all checks pass/deferred)");
+        assert_eq!(
+            v["status"],
+            json!("fail"),
+            "empty workspace has no runtime receiver binding, so comms gate must not pass"
+        );
         assert!(obj.contains_key("run_id"), "golden carries a run_id (uuid hex[:12])");
         assert!(!obj.contains_key("team"), "golden has NO `team` key");
         assert!(!obj.contains_key("gate"), "golden has NO `gate` key");
-        assert_eq!(
-            v["checks"]["contract_suite"],
-            json!({
-                "status": "deferred",
-                "deferred_to": "0.2.9",
-                "reason": "contract test files not shipped with package",
-                "message": "comms contract verification deferred to 0.2.9; contract test files not shipped with package",
-            }),
-            "golden contract_suite check (comms.py:132-139)"
+        assert_eq!(v["checks"]["contract_suite"]["status"], json!("pass"));
+        assert_eq!(v["checks"]["contract_suite"]["failed"], json!([]));
+        let suite_names: Vec<&str> = v["checks"]["contract_suite"]["checks"]
+            .as_array()
+            .expect("contract suite checks")
+            .iter()
+            .filter_map(|check| check.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(
+            suite_names.contains(&"message_store_schema")
+                && suite_names.contains(&"message_token_shape")
+                && suite_names.contains(&"result_notification_render")
+                && suite_names.contains(&"leader_projection_owner_team"),
+            "contract suite must be executable, not deferred: {suite_names:?}"
         );
         assert_eq!(
             v["checks"]["provider_sdk_calls"]["calls"],
@@ -271,6 +279,8 @@ use super::*;
     // {ok,scanned,orphans,dry_run:true,scanned_at,action_required}. RUST mod.rs:534-535 stub
     // {ok,confirm,cleaned}. scanned/scanned_at are machine/clock-derived; lock the deterministic ones. RED.
     #[test]
+    #[ignore = "real-machine: cleanup_orphans scans machine-wide ta-* tmux/process residue"]
+    #[serial_test::file_serial(tmux)]
     fn cleanup_orphans_dryrun_golden_envelope() {
         let v = diagnose_port::cleanup_orphans(/*confirm=*/ false).expect("cleanup_orphans");
         let obj = v.as_object().expect("cleanup dict");

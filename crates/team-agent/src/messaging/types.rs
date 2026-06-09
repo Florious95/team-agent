@@ -229,9 +229,17 @@ pub enum CheckEvidence {
     /// `no_provider_sdk_calls` 的机械证据 (§84):三 SDK 调用计数。
     ProviderSdkCalls(ProviderSdkCalls),
     /// binding 一致性比对结果 (mismatch 列表)。
-    Binding { mismatches: Vec<String> },
-    /// contract_suite deferred 占位。
-    Deferred { reason: String },
+    Binding { mismatches: Vec<String>, details: serde_json::Value },
+    /// executable zero-token comms contract suite evidence.
+    ContractSuite { checks: Vec<ContractSuiteCheck> },
+}
+
+/// One executable zero-token comms contract-suite subcheck.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractSuiteCheck {
+    pub name: String,
+    pub status: CheckStatus,
+    pub reason: Option<String>,
 }
 
 /// **机械门** (§84/MUST-NOT-13;`diagnose/comms.py:142`):selftest 路径 provider SDK 调用

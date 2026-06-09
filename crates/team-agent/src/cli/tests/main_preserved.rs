@@ -263,6 +263,8 @@ fn seed_team_spec(ws: &std::path::Path) {
             agent: "w1".to_string(),
             workspace: ws.clone(),
             tail: 20,
+            head: None,
+            search: None,
             allow_raw_screen: true,
             json: true,
         };

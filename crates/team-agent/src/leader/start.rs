@@ -1,8 +1,9 @@
 //! leader::start — leader_start_plan / start_leader / leader_session_name(派生 tmux session 名)。
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
@@ -12,7 +13,10 @@ use super::helpers::{
     provider_wire, resolve_workspace_for_hash, sanitize_session_folder, sha1_hex_prefix,
 };
 use super::owner_bind::leader_identity_context;
-use super::{LeaderError, LeaderStartMode, LeaderStartPlan};
+use super::{
+    LeaderError, LeaderLaunchOutcome, LeaderLaunchSocket, LeaderLaunchStatus, LeaderStartMode,
+    LeaderStartPlan,
+};
 
 // ── leader::start — leader_start_plan / start_leader / session 名 ──
 
@@ -27,10 +31,14 @@ pub fn leader_start_plan(
     attach_session: Option<&SessionName>,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
-        return Err(LeaderError::Start("--attach-session requires --confirm".to_string()));
+        return Err(LeaderError::Start(
+            "--attach-session requires --confirm".to_string(),
+        ));
     }
     if attach_existing && !confirm_attach {
-        return Err(LeaderError::Start("attach existing leader session requires confirm".to_string()));
+        return Err(LeaderError::Start(
+            "attach existing leader session requires confirm".to_string(),
+        ));
     }
     let adapter = get_adapter(provider);
     if !adapter.is_installed() {
@@ -65,7 +73,10 @@ pub fn leader_start_plan(
         LeaderStartMode::NewTmuxSession
     };
     let mut leader_env = BTreeMap::new();
-    leader_env.insert("TEAM_AGENT_LEADER_PROVIDER".to_string(), provider_wire(provider).to_string());
+    leader_env.insert(
+        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+        provider_wire(provider).to_string(),
+    );
     leader_env.insert(
         "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
         identity.leader_session_uuid.as_str().to_string(),
@@ -78,8 +89,18 @@ pub fn leader_start_plan(
         "TEAM_AGENT_WORKSPACE".to_string(),
         identity.workspace_abspath.to_string_lossy().into_owned(),
     );
-    leader_env.insert("TEAM_AGENT_TEAM_ID".to_string(), identity.team_id.as_str().to_string());
-    let argv = start_argv(mode, provider, provider_args, workspace, session_name.as_ref(), &leader_env)?;
+    leader_env.insert(
+        "TEAM_AGENT_TEAM_ID".to_string(),
+        identity.team_id.as_str().to_string(),
+    );
+    let argv = start_argv(
+        mode,
+        provider,
+        provider_args,
+        workspace,
+        session_name.as_ref(),
+        &leader_env,
+    )?;
     let plan_env = if mode == LeaderStartMode::ExecProvider {
         merged_exec_env(&leader_env)
     } else {
@@ -89,6 +110,7 @@ pub fn leader_start_plan(
         mode,
         provider,
         workspace: resolve_workspace_for_hash(workspace),
+        socket: LeaderLaunchSocket::Workspace,
         session_name,
         argv,
         leader_env: plan_env,
@@ -123,7 +145,46 @@ pub fn start_leader(
             "session_name": plan.session_name.as_ref().map(|s| s.as_str().to_string()),
         }),
     )?;
-    Ok(())
+    execute_leader_plan(&plan, workspace).map(|_| ())
+}
+
+/// Execute a precomputed leader launch plan.
+///
+/// S0 exposes the seam and return model only. Lane 2 owns the real provider/tmux
+/// execution and workspace-socket enforcement.
+pub fn execute_leader_plan(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
+    let mut argv = plan.argv.clone();
+    let detached = plan.mode == LeaderStartMode::NewTmuxSession
+        && !std::io::stdin().is_terminal()
+        && insert_detach_flag(&mut argv);
+    let status = run_leader_argv(&argv, &plan.leader_env)?;
+    let code = status.code();
+    if !status.success() {
+        return Err(LeaderError::Start(format!(
+            "leader launcher exited with status {}",
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        )));
+    }
+    if detached {
+        Ok(LeaderLaunchOutcome {
+            status: LeaderLaunchStatus::Detached,
+            exit_code: code,
+            session_name: plan.session_name.clone(),
+            reason: None,
+        })
+    } else {
+        let _ = workspace;
+        Ok(LeaderLaunchOutcome {
+            status: LeaderLaunchStatus::Exited,
+            exit_code: code,
+            session_name: plan.session_name.clone(),
+            reason: None,
+        })
+    }
 }
 
 /// `leader_session_name`(card §48;`__init__.py:186`)。确定派生 tmux session 名
@@ -161,12 +222,13 @@ fn start_argv(
             let Some(session) = session_name else {
                 return Err(LeaderError::Start("attach session missing".to_string()));
             };
-            Ok(vec![
+            let argv = vec![
                 "tmux".to_string(),
                 "attach-session".to_string(),
                 "-t".to_string(),
                 session.as_str().to_string(),
-            ])
+            ];
+            Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
         }
         LeaderStartMode::NewTmuxSession => {
             let Some(session) = session_name else {
@@ -185,7 +247,7 @@ fn start_argv(
                 exports.join(" "),
                 shell_join(&provider_argv)
             );
-            Ok(vec![
+            let argv = vec![
                 "tmux".to_string(),
                 "new-session".to_string(),
                 "-s".to_string(),
@@ -197,9 +259,40 @@ fn start_argv(
                 "sh".to_string(),
                 "-lc".to_string(),
                 shell,
-            ])
+            ];
+            Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
         }
     }
+}
+
+fn insert_detach_flag(argv: &mut Vec<String>) -> bool {
+    if argv.iter().any(|arg| arg == "-d") {
+        return false;
+    }
+    let Some(pos) = argv.iter().position(|arg| arg == "new-session") else {
+        return false;
+    };
+    argv.insert(pos + 1, "-d".to_string());
+    true
+}
+
+fn run_leader_argv(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+) -> Result<std::process::ExitStatus, LeaderError> {
+    let Some(program) = argv.first() else {
+        return Err(LeaderError::Start(
+            "leader launch argv is empty".to_string(),
+        ));
+    };
+    let mut child = Command::new(program)
+        .args(argv.iter().skip(1))
+        .envs(env)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    child.wait().map_err(LeaderError::Io)
 }
 
 fn ensure_tmux_installed() -> Result<(), LeaderError> {
@@ -246,25 +339,30 @@ fn leader_export_assignments(leader_env: &BTreeMap<String, String>) -> Vec<Strin
 
 fn merged_exec_env(leader_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let mut env: BTreeMap<String, String> = std::env::vars().collect();
-    env.extend(leader_env.iter().map(|(key, value)| (key.clone(), value.clone())));
+    env.extend(
+        leader_env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
     env
 }
 
 fn shell_join(args: &[String]) -> String {
-    args.iter().map(|arg| shlex_quote(arg)).collect::<Vec<_>>().join(" ")
+    args.iter()
+        .map(|arg| shlex_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn shlex_quote(raw: &str) -> String {
     if !raw.is_empty()
-        && raw
-            .bytes()
-            .all(|b| {
-                b.is_ascii_alphanumeric()
-                    || matches!(
-                        b,
-                        b'@' | b'%' | b'_' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
-                    )
-            })
+        && raw.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'@' | b'%' | b'_' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+                )
+        })
     {
         raw.to_string()
     } else {

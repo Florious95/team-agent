@@ -8,13 +8,19 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use serial_test::serial;
+use rusqlite::params;
+use serial_test::{file_serial, serial};
 use serde_json::Value;
+use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{quick_start_with_transport, QuickStartReport};
+use team_agent::message_store::MessageStore;
+use team_agent::messaging::deliver_pending_messages;
 use team_agent::state::persist::load_runtime_state;
+use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
@@ -23,6 +29,7 @@ use team_agent::transport::{
 };
 
 #[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
 #[serial(env)]
 fn quick_start_sibling_teamdir_in_same_workspace_starts_new_team_not_existing_runtime() {
     let _env = EnvGuard::unset([
@@ -84,6 +91,7 @@ fn quick_start_sibling_teamdir_in_same_workspace_starts_new_team_not_existing_ru
 }
 
 #[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
 #[serial(env)]
 fn quick_start_sibling_teamdir_without_team_arg_infers_compiled_spec_name() {
     let _env = EnvGuard::unset([
@@ -145,6 +153,7 @@ fn quick_start_sibling_teamdir_without_team_arg_infers_compiled_spec_name() {
 }
 
 #[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
 #[serial(env)]
 fn quick_start_sibling_teamdir_without_team_arg_same_spec_name_still_returns_existing_runtime() {
     let _env = EnvGuard::unset([
@@ -208,6 +217,7 @@ fn quick_start_sibling_teamdir_without_team_arg_same_spec_name_still_returns_exi
 }
 
 #[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
 #[serial(env)]
 fn quick_start_same_existing_team_still_returns_existing_runtime() {
     let _env = EnvGuard::unset([
@@ -271,6 +281,421 @@ fn quick_start_same_existing_team_still_returns_existing_runtime() {
     );
 }
 
+#[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
+#[serial(env)]
+fn quick_start_sibling_after_shutdown_is_allowed_not_nested() {
+    let _env = EnvGuard::unset([
+        "TMUX",
+        "TMUX_PANE",
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_TEAM_ID",
+        "TEAM_AGENT_LEADER_PANE_ID",
+        "TEAM_AGENT_LEADER_SESSION_UUID",
+        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+        "TEAM_AGENT_LEADER_PROVIDER",
+    ]);
+    let root = tmp_dir("sibling-after-shutdown");
+    seed_healthy_coordinator(&root);
+    let team_a = team_dir(&root, "teamA", "worker_a");
+    let team_b = team_dir(&root, "child-team", "worker_b");
+    let transport = SessionRecordingTransport::default();
+
+    let first = quick_start_with_transport(
+        &team_a,
+        Some("teamA"),
+        true,
+        false,
+        Some("teamA"),
+        &transport,
+    )
+    .expect("fixture: first teamA quick-start should succeed");
+    assert_ready_team("teamA first quick-start", &first, "team-teamA");
+
+    let shutdown = team_agent::cli::lifecycle_port::shutdown_with_transport(
+        &root,
+        true,
+        Some("teamA"),
+        &transport,
+    )
+    .expect("fixture: shutdown --team teamA should mark the old team stopped");
+    assert_eq!(
+        shutdown.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "fixture: shutdown must complete before sibling quick-start; shutdown={shutdown}"
+    );
+
+    let second = quick_start_with_transport(
+        &team_b,
+        None,
+        false,
+        false,
+        None,
+        &transport,
+    )
+    .expect(
+        "after a same-workspace team has been shut down, bare quick-start <child-teamdir> must be treated as a sibling team, not an ambiguous nested quick-start",
+    );
+
+    assert_ready_team(
+        "bare sibling child-like quick-start after shutdown",
+        &second,
+        "team-child-team",
+    );
+    let state = load_runtime_state(&root).expect("state after sibling quick-start");
+    assert_team_present(&state, "teamA", "team-teamA");
+    assert_team_present(&state, "child-team", "team-child-team");
+    assert_eq!(
+        state.get("active_team_key").and_then(Value::as_str),
+        Some("child-team"),
+        "bare quick-start after shutdown should activate sibling child-like team; state={state}"
+    );
+    assert_eq!(
+        state["teams"]["child-team"].get("parent_team_key").and_then(Value::as_str),
+        None,
+        "sibling child-like team after shutdown must not be persisted as a nested child; state={state}"
+    );
+    assert!(
+        transport
+            .spawned_sessions()
+            .iter()
+            .any(|session| session == "team-child-team"),
+        "bare sibling quick-start after shutdown must spawn its own team-child-team session; sessions={:?}",
+        transport.spawned_sessions()
+    );
+}
+
+#[test]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[serial(env)]
+#[file_serial(tmux)]
+fn dirty_sibling_quick_start_from_same_leader_pane_binds_receiver_and_delivers_to_leader() {
+    let case = RealSiblingCase::new("dirty-sibling-real");
+    let leader = case.spawn_leader_pane();
+    let leader_env = [
+        ("TEAM_AGENT_LEADER_PANE_ID", leader.as_str()),
+        ("TMUX_PANE", leader.as_str()),
+        ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
+    ];
+    let current = fake_team_dir(&case.root, "current", "current_worker");
+    let sibling = fake_team_dir(&case.root, "sibling", "sibling_worker");
+
+    let current_out = case.run_team_agent_json(
+        &[
+            "quick-start",
+            current.to_str().unwrap(),
+            "--workspace",
+            case.root.to_str().unwrap(),
+            "--team-id",
+            "current",
+            "--yes",
+            "--fresh",
+            "--json",
+        ],
+        &leader_env,
+    );
+    assert_eq!(
+        current_out.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "fixture sanity: current quick-start from leader pane must succeed; out={current_out}"
+    );
+
+    let before_sibling = load_runtime_state(&case.root).expect("state before sibling quick-start");
+    let current_receiver_before = before_sibling
+        .pointer("/teams/current/leader_receiver")
+        .cloned()
+        .expect("current receiver exists before sibling quick-start");
+
+    let sibling_out = case.run_team_agent_json(
+        &[
+            "quick-start",
+            sibling.to_str().unwrap(),
+            "--workspace",
+            case.root.to_str().unwrap(),
+            "--team-id",
+            "sibling",
+            "--yes",
+            "--json",
+        ],
+        &leader_env,
+    );
+    let state = load_runtime_state(&case.root).expect("state after sibling quick-start");
+    let receiver = state
+        .pointer("/teams/sibling/leader_receiver")
+        .unwrap_or_else(|| panic!("state.teams.sibling.leader_receiver must exist; state={state}"));
+    let mut failures = Vec::new();
+    if receiver.get("status").and_then(Value::as_str) != Some("attached") {
+        failures.push(format!(
+            "teams.sibling.leader_receiver.status must be attached when quick-start is run from a positive leader pane; receiver={receiver}"
+        ));
+    }
+    if receiver.get("pane_id").and_then(Value::as_str) != Some(leader.as_str()) {
+        failures.push(format!(
+            "the same physical pane may be leader receiver for current and sibling team scopes; expected sibling pane_id={}, receiver={receiver}",
+            leader.as_str()
+        ));
+    }
+    let current_receiver_after = state
+        .pointer("/teams/current/leader_receiver")
+        .cloned()
+        .expect("current receiver exists after sibling quick-start");
+    if current_receiver_after != current_receiver_before {
+        failures.push(format!(
+            "sibling quick-start must not rewrite current team's leader_receiver; before={current_receiver_before} after={current_receiver_after}"
+        ));
+    }
+    if receiver.get("status").and_then(Value::as_str) == Some("unbound")
+        && sibling_out.get("ok").and_then(Value::as_bool) == Some(true)
+    {
+        failures.push(format!(
+            "quick-start --json must not return ok=true after saving the launched team with leader_receiver.status=unbound; it must return degraded/ok=false with a claim-leader next action. out={sibling_out}"
+        ));
+    }
+
+    let token = format!("DIRTY_SIBLING_TO_LEADER_{}", std::process::id());
+    let send_raw = case.run_team_agent_status(
+        &[
+            "send",
+            "leader",
+            &token,
+            "--workspace",
+            case.root.to_str().unwrap(),
+            "--team",
+            "sibling",
+            "--sender",
+            "sibling_worker",
+            "--no-wait",
+            "--json",
+        ],
+        &[],
+    );
+    let send_out: Value = serde_json::from_slice(&send_raw.stdout).unwrap_or_else(|err| {
+        panic!(
+            "send stdout must be JSON even on delivery refusal: {err}; status={:?} stdout={} stderr={}",
+            send_raw.status.code(),
+            String::from_utf8_lossy(&send_raw.stdout),
+            String::from_utf8_lossy(&send_raw.stderr)
+        )
+    });
+    let _ = case.run_team_agent_status(
+        &[
+            "coordinator",
+            "--workspace",
+            case.root.to_str().unwrap(),
+            "--once",
+        ],
+        &[],
+    );
+    let row = message_row_for_token(&case.root, &token);
+    match row.as_ref() {
+        Some((status, delivered_at)) if status == "delivered" && delivered_at.is_some() => {}
+        other => failures.push(format!(
+            "sibling_worker -> leader must produce a delivered DB row with delivered_at after quick-start binds the leader receiver; send_out={send_out} row={other:?}"
+        )),
+    }
+    let leader_text = case.capture_pane(&leader);
+    if !leader_text.contains(&token) {
+        failures.push(format!(
+            "leader pane {} must visibly receive sibling worker token {token}; capture={leader_text:?}",
+            leader.as_str()
+        ));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "dirty sibling quick-start from the same leader pane must bind per-team receiver and make worker->leader delivery real, without delivery-time auto-claim:\n{}\nstate={state}\nsibling_out={sibling_out}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
+#[serial(env)]
+fn quick_start_returns_degraded_when_no_positive_caller_pane() {
+    let _env = EnvGuard::unset([
+        "TMUX",
+        "TMUX_PANE",
+        "TEAM_AGENT_ID",
+        "TEAM_AGENT_TEAM_ID",
+        "TEAM_AGENT_LEADER_PANE_ID",
+        "TEAM_AGENT_LEADER_SESSION_UUID",
+        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+        "TEAM_AGENT_LEADER_PROVIDER",
+    ]);
+    let root = tmp_dir("no-positive-caller-degraded");
+    let team = fake_team_dir(&root, "unbound", "worker_a");
+    let out = Command::new(env!("CARGO_BIN_EXE_team-agent"))
+        .args([
+            "quick-start",
+            team.to_str().unwrap(),
+            "--workspace",
+            root.to_str().unwrap(),
+            "--team-id",
+            "unbound",
+            "--yes",
+            "--json",
+        ])
+        .current_dir(&root)
+        .output()
+        .expect("run team-agent quick-start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let value: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|err| panic!("quick-start stdout must be JSON: {err}; stdout={stdout} stderr={}", String::from_utf8_lossy(&out.stderr)));
+    let state = load_runtime_state(&root).expect("state after unbound quick-start");
+    let receiver = state
+        .pointer("/teams/unbound/leader_receiver")
+        .or_else(|| state.pointer("/leader_receiver"))
+        .unwrap_or_else(|| panic!("leader_receiver must exist after quick-start; state={state}"));
+
+    assert_eq!(
+        receiver.get("status").and_then(Value::as_str),
+        Some("unbound"),
+        "fixture sanity: no positive caller pane should persist an unbound receiver; receiver={receiver} state={state}"
+    );
+    assert_ne!(
+        value.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "C1-C3: quick-start --json must not return ok=true when launched leader_receiver is unbound; value={value} state={state}"
+    );
+    assert!(
+        value
+            .get("state")
+            .and_then(Value::as_str)
+            .is_some_and(|state| state == "leader_receiver_unbound")
+            || value
+                .get("worker_readiness")
+                .and_then(|v| v.get("state"))
+                .and_then(Value::as_str)
+                .is_some_and(|state| state == "leader_receiver_unbound"),
+        "C2: unbound quick-start must return structured degraded state=leader_receiver_unbound; value={value}"
+    );
+    assert!(
+        value.to_string().contains("claim-leader"),
+        "C2: unbound quick-start must include a claim-leader recovery next action; value={value}"
+    );
+}
+
+#[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
+#[serial(env)]
+fn delivery_does_not_autobind_unbound_receiver() {
+    let root = tmp_dir("delivery-no-autobind");
+    seed_unbound_delivery_state(&root);
+    let before = load_runtime_state(&root).expect("state before delivery");
+    let store = MessageStore::open(&root).unwrap();
+    let message_id = store
+        .create_message(
+            Some("task-1"),
+            "sibling_worker",
+            "leader",
+            "delivery must not claim while sending to leader",
+            None,
+            false,
+            Some("sibling"),
+        )
+        .unwrap();
+    let event_log = EventLog::new(&root);
+    let transport = SessionRecordingTransport::default();
+
+    let delivered = deliver_pending_messages(&root, &before, &transport, &event_log)
+        .expect("delivery should return a rebind-required outcome, not panic");
+
+    let after = load_runtime_state(&root).expect("state after delivery");
+    assert!(
+        delivered.is_empty(),
+        "unbound leader receiver must not be delivered by auto-binding during delivery; delivered={delivered:?}"
+    );
+    assert_eq!(
+        before.pointer("/teams/sibling/leader_receiver"),
+        after.pointer("/teams/sibling/leader_receiver"),
+        "C8/C14: delivery must not mutate leader_receiver/team_owner/owner_epoch while handling rebind_required; message_id={message_id} before={before} after={after}"
+    );
+    let events = std::fs::read_to_string(root.join(".team/logs/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("leader_not_attached") || events.contains("rebind_required"),
+        "unbound delivery must emit leader_not_attached/rebind_required; events={events}"
+    );
+}
+
+#[test]
+fn delivery_grep_guard_no_owner_mutation() {
+    let delivery = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/delivery.rs"
+    ))
+    .unwrap();
+    let leader_receiver = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/leader_receiver.rs"
+    ))
+    .unwrap_or_default();
+    let send_to_leader_body = leader_receiver
+        .split("pub fn send_to_leader_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("/// `claim_leader_receiver`").next())
+        .unwrap_or("");
+    let send = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/send.rs")).unwrap();
+    let scheduler = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/scheduler.rs"
+    ))
+    .unwrap_or_default();
+    let tick = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/coordinator/tick.rs")).unwrap();
+    let global_delivery_guard = format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}\n{tick}");
+    for forbidden in [
+        "seed_launched_owner",
+        "seed_unbound_launched_owner",
+        "claim_lease",
+        "claim_leader_receiver(",
+    ] {
+        assert!(
+            !global_delivery_guard.contains(forbidden),
+            "C7/C14: delivery/send/scheduler/coordinator delivery paths must stay reclaim-neutral and must not write owner/receiver fields; forbidden={forbidden}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "real-machine: quick-start/session lifecycle gate"]
+#[serial(env)]
+fn worker_pane_seeded_as_leader_still_dropped() {
+    let _env = EnvGuard::set([
+        ("TMUX_PANE", "%1-first"),
+        ("TEAM_AGENT_LEADER_PANE_ID", ""),
+        ("TEAM_AGENT_ID", ""),
+        ("TEAM_AGENT_TEAM_ID", ""),
+        ("TEAM_AGENT_LEADER_SESSION_UUID", ""),
+        ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", ""),
+        ("TEAM_AGENT_LEADER_PROVIDER", ""),
+        ("TEAM_AGENT_OWNER_TEAM_ID", ""),
+    ]);
+    let root = tmp_dir("worker-pane-seeded-dropped");
+    let team = fake_team_dir(&root, "workerseed", "worker_a");
+    let transport = SessionRecordingTransport::default();
+
+    team_agent::lifecycle::quick_start_with_transport_in_workspace(
+        &root,
+        &team,
+        Some("workerseed"),
+        true,
+        true,
+        Some("workerseed"),
+        &transport,
+    )
+    .expect("quick-start should complete with recording transport");
+
+    let state = load_runtime_state(&root).expect("state after worker-pane quick-start");
+    let receiver = state
+        .pointer("/teams/workerseed/leader_receiver")
+        .or_else(|| state.pointer("/leader_receiver"))
+        .unwrap_or_else(|| panic!("leader_receiver must exist; state={state}"));
+    assert_eq!(
+        receiver.get("status").and_then(Value::as_str),
+        Some("unbound"),
+        "C6: bare worker pane seeding must still be dropped; only a positive caller leader pane can bind. receiver={receiver} state={state}"
+    );
+}
+
 fn assert_ready_team(label: &str, report: &QuickStartReport, expected_session: &str) {
     match report {
         QuickStartReport::Ready { session_name, .. } => assert_eq!(
@@ -295,6 +720,184 @@ fn assert_team_present(state: &Value, team_key: &str, expected_session: &str) {
         team.get("agents").and_then(Value::as_object).is_some_and(|agents| !agents.is_empty()),
         "state.teams.{team_key}.agents must be retained; team={team}"
     );
+}
+
+struct RealSiblingCase {
+    root: PathBuf,
+    backend: TmuxBackend,
+    leader_session: SessionName,
+}
+
+impl RealSiblingCase {
+    fn new(tag: &str) -> Self {
+        let root = tmp_dir(tag);
+        let backend = TmuxBackend::for_workspace(&root);
+        let leader_session = SessionName::new(format!(
+            "team-red2-leader-{}-{}",
+            std::process::id(),
+            root.file_name().and_then(|name| name.to_str()).unwrap_or("case")
+        ));
+        Self {
+            root,
+            backend,
+            leader_session,
+        }
+    }
+
+    fn spawn_leader_pane(&self) -> PaneId {
+        let result = self
+            .backend
+            .spawn_first(
+                &self.leader_session,
+                &WindowName::new("leader"),
+                &[
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    "stty -echo 2>/dev/null; exec cat".to_string(),
+                ],
+                &self.root,
+                &BTreeMap::new(),
+            )
+            .expect("spawn real tmux leader pane");
+        result.pane_id
+    }
+
+    fn run_team_agent_json(&self, args: &[&str], extra_env: &[(&str, &str)]) -> Value {
+        let output = self.run_team_agent_status(args, extra_env);
+        assert!(
+            output.status.success(),
+            "team-agent {:?} should exit 0; status={:?} stdout={} stderr={}",
+            args,
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|err| {
+            panic!(
+                "team-agent {:?} stdout must be JSON: {err}; stdout={} stderr={}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    fn run_team_agent_status(&self, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+        command.args(args);
+        command.current_dir(&self.root);
+        for key in [
+            "TEAM_AGENT_ID",
+            "TEAM_AGENT_TEAM_ID",
+            "TEAM_AGENT_OWNER_TEAM_ID",
+            "TEAM_AGENT_LEADER_PANE_ID",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+            "TEAM_AGENT_LEADER_PROVIDER",
+            "TMUX",
+            "TMUX_PANE",
+        ] {
+            command.env_remove(key);
+        }
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        command.output().expect("run team-agent binary")
+    }
+
+    fn capture_pane(&self, pane: &PaneId) -> String {
+        self.backend
+            .capture(&Target::Pane(pane.clone()), CaptureRange::Full)
+            .expect("capture leader pane")
+            .text
+    }
+}
+
+impl Drop for RealSiblingCase {
+    fn drop(&mut self) {
+        let _ = self.backend.kill_server();
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn message_row_for_token(workspace: &Path, token: &str) -> Option<(String, Option<String>)> {
+    let db = workspace.join(".team/runtime/team.db");
+    let conn = team_agent::db::schema::open_db(&db).ok()?;
+    conn.query_row(
+        "select status, delivered_at
+         from messages
+         where owner_team_id='sibling'
+           and sender='sibling_worker'
+           and recipient='leader'
+           and content like ?1
+         order by created_at desc
+         limit 1",
+        params![format!("%{token}%")],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )
+    .ok()
+}
+
+fn fake_team_dir(root: &Path, name: &str, agent_id: &str) -> PathBuf {
+    let team = root.join(name);
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        format!(
+            "---\nname: {name}\nobjective: Real sibling quick-start receiver binding contract.\nprovider: fake\n---\n\n{name} team.\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        team.join("agents").join(format!("{agent_id}.md")),
+        format!(
+            "---\nname: {agent_id}\nrole: Worker\nprovider: fake\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        ),
+    )
+    .unwrap();
+    team
+}
+
+fn seed_unbound_delivery_state(root: &Path) {
+    team_agent::state::persist::save_runtime_state(
+        root,
+        &serde_json::json!({
+            "active_team_key": "sibling",
+            "session_name": "team-sibling",
+            "agents": {
+                "sibling_worker": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "sibling_worker",
+                    "owner_team_id": "sibling"
+                }
+            },
+            "teams": {
+                "sibling": {
+                    "session_name": "team-sibling",
+                    "leader_receiver": {
+                        "mode": "direct_tmux",
+                        "status": "unbound",
+                        "provider": "codex",
+                        "owner_epoch": 1
+                    },
+                    "team_owner": {
+                        "provider": "codex",
+                        "owner_epoch": 1
+                    },
+                    "agents": {
+                        "sibling_worker": {
+                            "status": "running",
+                            "provider": "fake",
+                            "window": "sibling_worker",
+                            "owner_team_id": "sibling"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
 }
 
 fn team_dir(root: &Path, name: &str, agent_id: &str) -> PathBuf {
@@ -364,6 +967,23 @@ impl EnvGuard {
         for key in keys {
             unsafe {
                 std::env::remove_var(key);
+            }
+        }
+        Self { previous }
+    }
+
+    fn set(values: [(&'static str, &'static str); 8]) -> Self {
+        let previous = values
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for (key, value) in values {
+            unsafe {
+                if value.is_empty() {
+                    std::env::remove_var(key);
+                } else {
+                    std::env::set_var(key, value);
+                }
             }
         }
         Self { previous }
@@ -511,6 +1131,7 @@ impl Transport for SessionRecordingTransport {
     }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        self.sessions.lock().unwrap().remove(_session.as_str());
         Ok(())
     }
 

@@ -37,10 +37,24 @@ use rusqlite::params;
             .cloned()
             .unwrap_or_else(|| json!({}));
         let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
+        let tmux_present = tmux_session_present(workspace, session_name.as_str());
+        let mut readiness_state = state.clone();
+        if let Some(obj) = readiness_state.as_object_mut() {
+            obj.insert("tmux_session_present".to_string(), serde_json::json!(tmux_present));
+        }
+        let readiness = crate::cli::diagnose::wait_readiness(&readiness_state);
         let full = json!({
+            "ok": true,
             "team": state.pointer("/leader/id").cloned().unwrap_or_else(|| json!("leader")),
             "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
-            "tmux_session_present": tmux_session_present(workspace, session_name.as_str()),
+            "tmux_session_present": tmux_present,
+            "all_spawned": readiness.get("all_spawned").cloned().unwrap_or(Value::Bool(false)),
+            "all_attached_receiver": readiness.get("all_attached_receiver").cloned().unwrap_or(Value::Bool(true)),
+            "all_resumable_have_session": readiness.get("all_resumable_have_session").cloned().unwrap_or(Value::Bool(true)),
+            "session_capture_complete": readiness.get("session_capture_complete").cloned().unwrap_or(Value::Bool(true)),
+            "session_capture_incomplete": readiness.get("session_capture_incomplete").cloned().unwrap_or(Value::Bool(false)),
+            "incomplete_session_capture_agents": readiness.get("incomplete_session_capture_agents").cloned().unwrap_or_else(|| json!([])),
+            "pending_session_agent_ids": readiness.get("pending_session_agent_ids").cloned().unwrap_or_else(|| json!([])),
             "leader_receiver": leader_receiver,
             "teams": state.get("teams").cloned().unwrap_or_else(|| json!({})),
             "agents": agents,
@@ -50,6 +64,7 @@ use rusqlite::params;
             "queued_messages": queued_messages(&conn, owner_team_id, 8)?,
             "results": result_counts(&conn, owner_team_id)?,
             "latest_results": json!([]),
+            "readiness": readiness,
             "coordinator": coordinator_health_value(health),
             "last_events": Value::Array(
                 crate::event_log::EventLog::new(workspace)
@@ -401,6 +416,13 @@ use rusqlite::params;
             "team": full.get("team").cloned().unwrap_or(Value::Null),
             "session_name": full.get("session_name").cloned().unwrap_or(Value::Null),
             "tmux_session_present": full.get("tmux_session_present").cloned().unwrap_or(Value::Bool(false)),
+            "all_spawned": full.get("all_spawned").cloned().unwrap_or(Value::Bool(false)),
+            "all_attached_receiver": full.get("all_attached_receiver").cloned().unwrap_or(Value::Bool(true)),
+            "all_resumable_have_session": full.get("all_resumable_have_session").cloned().unwrap_or(Value::Bool(true)),
+            "session_capture_complete": full.get("session_capture_complete").cloned().unwrap_or(Value::Bool(true)),
+            "session_capture_incomplete": full.get("session_capture_incomplete").cloned().unwrap_or(Value::Bool(false)),
+            "incomplete_session_capture_agents": full.get("incomplete_session_capture_agents").cloned().unwrap_or_else(|| json!([])),
+            "pending_session_agent_ids": full.get("pending_session_agent_ids").cloned().unwrap_or_else(|| json!([])),
             "leader_receiver": compact_object(full.get("leader_receiver"), &[
                 "status", "provider", "mode", "session_name", "window_name", "pane_id", "pane_current_command",
             ]),
@@ -411,6 +433,7 @@ use rusqlite::params;
             "queued_messages": take_array(full.get("queued_messages"), 8),
             "results": full.get("results").cloned().unwrap_or_else(|| json!({})),
             "latest_results": take_array(full.get("latest_results"), 5),
+            "readiness": full.get("readiness").cloned().unwrap_or_else(|| json!({})),
             "coordinator": compact_object(full.get("coordinator"), &["status", "pid", "metadata_ok", "schema_ok"]),
             "last_events": take_array_tail(full.get("last_events"), 10),
         })
@@ -470,7 +493,7 @@ use rusqlite::params;
         };
         Value::Array(
             tasks.iter()
-                .map(|task| compact_object(Some(task), &["id", "title", "status", "assignee", "type"]))
+                .map(|task| compact_object(Some(task), &["id", "title", "status", "assignee", "type", "accepted_result_id"]))
                 .collect(),
         )
     }

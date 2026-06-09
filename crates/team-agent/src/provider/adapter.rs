@@ -5,8 +5,9 @@ use std::process::Command;
 
 use super::helpers::{find_session_id, parse_jsonl_records, patterns};
 use super::types::{
-    AuthHintStatus, CaptureVia, CapturedSession, Confidence, McpConfig, ProviderCaps,
-    ProviderError, RolloutPath, SessionId, StatusPatterns,
+    AuthHintStatus, CaptureVia, CapturedSession, CommandPlan, Confidence, McpConfig,
+    ProviderCaps, ProviderCommandContext, ProviderError, RolloutPath, SessionId,
+    StatusPatterns,
 };
 use super::{AuthMode, Provider};
 
@@ -57,6 +58,20 @@ pub trait ProviderAdapter {
         tools: &[&str],
     ) -> Result<Vec<String>, ProviderError>;
 
+    fn build_command_plan(
+        &self,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        self.build_command_with_tools(
+            ctx.auth_mode,
+            ctx.mcp_config,
+            ctx.system_prompt,
+            ctx.model,
+            ctx.tools,
+        )
+            .map(CommandPlan::argv_only)
+    }
+
     /// 启动后从 provider session 日志捕获 session_id + rollout_path
     /// (`claude.py:73`/`codex.py:62`)。fs watch / mtime fallback / repair。
     fn capture_session_id(
@@ -65,6 +80,25 @@ pub trait ProviderAdapter {
         spawn_cwd: &std::path::Path,
         timeout_s: u64,
     ) -> Result<Option<CapturedSession>, ProviderError>;
+
+    /// Internal capture surface for same-team multi-agent attribution: enumerate every
+    /// cwd-matching provider transcript candidate, then let the runtime allocate them
+    /// once per tick/restart pass using per-agent context.
+    fn capture_session_candidates(
+        &self,
+        context: &CaptureSessionContext,
+        timeout_s: u64,
+    ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+        Ok(self
+            .capture_session_id(&context.agent_id, &context.spawn_cwd, timeout_s)?
+            .into_iter()
+            .map(|captured| CapturedSessionCandidate {
+                captured,
+                positive_agent_id_match: false,
+                agent_path_match: false,
+            })
+            .collect())
+    }
 
     /// restart/reset 路径:从已存 transcript/rollout 回收 session_id
     /// (`claude.py:115`)。`None` 合法(找不到)。
@@ -100,6 +134,22 @@ pub trait ProviderAdapter {
         tools: &[&str],
     ) -> Result<Vec<String>, ProviderError>;
 
+    fn build_resume_command_plan(
+        &self,
+        session_id: Option<&SessionId>,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        self.build_resume_command_with_context(
+            session_id,
+            ctx.auth_mode,
+            ctx.mcp_config,
+            ctx.system_prompt,
+            ctx.model,
+            ctx.tools,
+        )
+        .map(CommandPlan::argv_only)
+    }
+
     /// 构造 fork 命令(`providers.py:99`)。fork 需 caps.fork ∧ auth_mode!=compatible_api;
     /// 不支持 → `Err`。
     fn fork(
@@ -119,6 +169,22 @@ pub trait ProviderAdapter {
         tools: &[&str],
     ) -> Result<Vec<String>, ProviderError>;
 
+    fn fork_plan(
+        &self,
+        session_id: Option<&SessionId>,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        self.fork_with_context(
+            session_id,
+            ctx.auth_mode,
+            ctx.mcp_config,
+            ctx.system_prompt,
+            ctx.model,
+            ctx.tools,
+        )
+            .map(CommandPlan::argv_only)
+    }
+
     /// 计算本 provider 该用的 MCP server 配置(`adapter.py` mcp_config;claude
     /// compatible_api 走 `ensure_compatible_claude_mcp_config`)。
     fn mcp_config(&self, auth_mode: AuthMode) -> Result<McpConfig, ProviderError>;
@@ -134,8 +200,9 @@ pub trait ProviderAdapter {
     /// 校验 model 名对本 provider 合法(`codex debug models` 等;doctor)。
     fn validate_model(&self, model: &str) -> Result<bool, ProviderError>;
 
-    /// Provider-specific startup prompt handling. Non-Codex adapters return an empty list; Codex
-    /// delegates to the provider-layer recognizer.
+    /// Provider-specific startup prompt handling. Codex and Claude delegate to
+    /// provider-layer recognizers; providers without startup prompts return an
+    /// empty list.
     fn handle_startup_prompts(
         &self,
         transport: &dyn crate::transport::Transport,
@@ -147,10 +214,33 @@ pub trait ProviderAdapter {
             Provider::Codex => {
                 super::startup_prompt::codex_handle_startup_prompts(transport, target, checks, sleep_s)
             }
+            Provider::Claude | Provider::ClaudeCode => {
+                super::startup_prompt::claude_handle_startup_prompts(
+                    transport, target, checks, sleep_s,
+                )
+            }
             _ => Vec::new(),
         }))
         .unwrap_or_default()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureSessionContext {
+    pub agent_id: String,
+    pub spawn_cwd: PathBuf,
+    pub pane_id: Option<String>,
+    pub pane_pid: Option<u32>,
+    pub spawned_at: Option<String>,
+    pub expected_session_id: Option<SessionId>,
+    pub provider_projects_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedSessionCandidate {
+    pub captured: CapturedSession,
+    pub positive_agent_id_match: bool,
+    pub agent_path_match: bool,
 }
 
 // ===========================================================================
@@ -230,9 +320,12 @@ impl ProviderAdapter for BasicProviderAdapter {
     }
 
     fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus {
-        match auth_mode {
-            AuthMode::Subscription => AuthHintStatus::Present,
-            AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
+        match self.provider {
+            Provider::Claude | Provider::ClaudeCode => claude_auth_hint(auth_mode),
+            _ => match auth_mode {
+                AuthMode::Subscription => AuthHintStatus::Present,
+                AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
+            },
         }
     }
 
@@ -256,7 +349,7 @@ impl ProviderAdapter for BasicProviderAdapter {
     ) -> Result<Vec<String>, ProviderError> {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => {
-                Ok(claude_launch_command(self, auth_mode, mcp_config, system_prompt, model)?)
+                Ok(claude_launch_command(self, auth_mode, mcp_config, system_prompt, model, tools)?)
             }
             Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools)),
             Provider::GeminiCli => {
@@ -271,51 +364,83 @@ impl ProviderAdapter for BasicProviderAdapter {
         }
     }
 
+    fn build_command_plan(
+        &self,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                let expected = next_session_token();
+                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.tools,
+                    managed,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(expected.clone());
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: projects_root,
+                    managed_mcp_config: managed,
+                })
+            }
+            _ => self
+                .build_command_with_tools(
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                )
+                .map(CommandPlan::argv_only),
+        }
+    }
+
     fn capture_session_id(
         &self,
         agent_id: &str,
         spawn_cwd: &Path,
-        _timeout_s: u64,
+        timeout_s: u64,
     ) -> Result<Option<CapturedSession>, ProviderError> {
-        let candidates = candidate_session_files(self.provider, spawn_cwd, agent_id)?;
-        for candidate in candidates {
-            let path = candidate.path;
-            let Ok(text) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let records = parse_session_records(&text);
-            if records.is_empty() {
-                continue;
+        let context = CaptureSessionContext {
+            agent_id: agent_id.to_string(),
+            spawn_cwd: spawn_cwd.to_path_buf(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        Ok(self
+            .capture_session_candidates(&context, timeout_s)?
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.captured))
+    }
+
+    fn capture_session_candidates(
+        &self,
+        context: &CaptureSessionContext,
+        timeout_s: u64,
+    ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_s);
+        loop {
+            let out = scan_session_candidates_once(self.provider, context)?;
+            if !out.is_empty() || timeout_s == 0 || std::time::Instant::now() >= deadline {
+                return Ok(out);
             }
-            if candidate.requires_cwd_match && !provider_home_records_match_spawn_cwd(&records, spawn_cwd) {
-                continue;
-            }
-            let session_id = records.iter().find_map(find_session_id);
-            if matches!(self.provider, Provider::Claude | Provider::ClaudeCode)
-                && session_id.is_some()
-                && !records.iter().any(has_cwd_field)
-            {
-                continue;
-            }
-            let captured_via = if session_id.is_some() {
-                CaptureVia::FsWatch
-            } else {
-                CaptureVia::FsMtimeFallback
-            };
-            let attribution_confidence = if session_id.is_some() {
-                Confidence::High
-            } else {
-                Confidence::Low
-            };
-            return Ok(Some(CapturedSession {
-                session_id: session_id.map(SessionId::new),
-                rollout_path: Some(RolloutPath::new(path)),
-                captured_via,
-                attribution_confidence,
-                spawn_cwd: spawn_cwd.to_path_buf(),
-            }));
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        Ok(None)
     }
 
     fn recover_session_id(
@@ -380,7 +505,8 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
-                let mut argv = claude_base_command(self, auth_mode, mcp_config, system_prompt, model)?;
+                let mut argv =
+                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false)?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -389,6 +515,49 @@ impl ProviderAdapter for BasicProviderAdapter {
                 "{} resume requires session_id",
                 provider_wire(self.provider)
             ))),
+        }
+    }
+
+    fn build_resume_command_plan(
+        &self,
+        session_id: Option<&SessionId>,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable("resume requires session_id".to_string()));
+                };
+                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.tools,
+                    managed,
+                )?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                let mut plan = CommandPlan::argv_only(argv);
+                plan.provider_projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                plan.managed_mcp_config = managed;
+                Ok(plan)
+            }
+            _ => self
+                .build_resume_command_with_context(
+                    session_id,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                )
+                .map(CommandPlan::argv_only),
         }
     }
 
@@ -433,7 +602,8 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
-                let mut argv = claude_base_command(self, auth_mode, mcp_config, system_prompt, model)?;
+                let mut argv =
+                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false)?;
                 argv.push("--session-id".to_string());
                 argv.push(next_session_token());
                 argv.push("--resume".to_string());
@@ -445,6 +615,62 @@ impl ProviderAdapter for BasicProviderAdapter {
                 "{} does not support native session fork",
                 provider_wire(self.provider)
             ))),
+        }
+    }
+
+    fn fork_plan(
+        &self,
+        session_id: Option<&SessionId>,
+        ctx: ProviderCommandContext<'_>,
+    ) -> Result<CommandPlan, ProviderError> {
+        match self.provider {
+            Provider::Claude | Provider::ClaudeCode => {
+                if !self.caps().fork || ctx.auth_mode == AuthMode::CompatibleApi {
+                    return Err(ProviderError::CapabilityUnsupported(format!(
+                        "{} does not support native session fork",
+                        provider_wire(self.provider)
+                    )));
+                }
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable("fork requires session_id".to_string()));
+                };
+                let expected = next_session_token();
+                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let projects_root = ctx
+                    .profile_launch
+                    .and_then(|profile| profile.claude_projects_root.clone());
+                let model = claude_context_model(ctx);
+                let mut argv = claude_base_command(
+                    self,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    model,
+                    ctx.tools,
+                    managed,
+                )?;
+                argv.push("--session-id".to_string());
+                argv.push(expected.clone());
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                argv.push("--fork-session".to_string());
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: projects_root,
+                    managed_mcp_config: managed,
+                })
+            }
+            _ => self
+                .fork_with_context(
+                    session_id,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                )
+                .map(CommandPlan::argv_only),
         }
     }
 
@@ -515,6 +741,101 @@ fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {
     }
 }
 
+fn claude_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
+    if auth_mode != AuthMode::Subscription {
+        return AuthHintStatus::MissingOrUnknown;
+    }
+    if !command_on_path("claude") {
+        return AuthHintStatus::Missing;
+    }
+    let output = match Command::new("claude").args(["auth", "status"]).output() {
+        Ok(output) => output,
+        Err(_) => return AuthHintStatus::MissingOrUnknown,
+    };
+    let text = if output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stderr).to_string()
+    } else {
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let status = serde_json::from_str::<serde_json::Value>(text.trim()).unwrap_or_default();
+    if status.get("loggedIn").and_then(serde_json::Value::as_bool) == Some(true)
+        || output.status.success()
+    {
+        AuthHintStatus::Present
+    } else {
+        AuthHintStatus::Missing
+    }
+}
+
+fn claude_context_model(ctx: ProviderCommandContext<'_>) -> Option<&str> {
+    ctx.profile_launch
+        .and_then(|profile| profile.command_overrides.model.as_deref())
+        .or(ctx.model)
+}
+
+fn scan_session_candidates_once(
+    provider: Provider,
+    context: &CaptureSessionContext,
+) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+    let candidates = candidate_session_files(provider, context)?;
+    let mut out = Vec::new();
+    for candidate in candidates {
+        let path = candidate.path;
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let records = parse_session_records(&text);
+        if records.is_empty() {
+            continue;
+        }
+        if candidate.requires_cwd_match
+            && !provider_home_records_match_spawn_cwd(&records, &context.spawn_cwd)
+        {
+            continue;
+        }
+        let session_id = records.iter().find_map(find_session_id);
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+            && session_id.is_some()
+            && !records.iter().any(has_cwd_field)
+        {
+            continue;
+        }
+        let captured_via = if session_id.is_some() {
+            CaptureVia::FsWatch
+        } else {
+            CaptureVia::FsMtimeFallback
+        };
+        let attribution_confidence = if session_id.is_some() {
+            Confidence::High
+        } else {
+            Confidence::Low
+        };
+        let positive_agent_id_match = candidate_text_has_team_agent_id(&text, context);
+        let agent_path_match = candidate_path_matches_agent_id(&path, context);
+        out.push(CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: session_id.map(SessionId::new),
+                rollout_path: Some(RolloutPath::new(path)),
+                captured_via,
+                attribution_confidence,
+                spawn_cwd: context.spawn_cwd.clone(),
+            },
+            positive_agent_id_match,
+            agent_path_match,
+        });
+    }
+    if let Some(expected) = context.expected_session_id.as_ref() {
+        out.sort_by_key(|candidate| {
+            candidate
+                .captured
+                .session_id
+                .as_ref()
+                .is_none_or(|session| session.as_str() != expected.as_str())
+        });
+    }
+    Ok(out)
+}
+
 fn command_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -529,19 +850,21 @@ struct SessionCandidate {
 
 fn candidate_session_files(
     provider: Provider,
-    spawn_cwd: &Path,
-    agent_id: &str,
+    context: &CaptureSessionContext,
 ) -> Result<Vec<SessionCandidate>, ProviderError> {
     let mut out = Vec::new();
-    collect_candidate_files(spawn_cwd, agent_id, 0, false, &mut out)?;
+    if let Some(root) = context.provider_projects_root.as_ref() {
+        collect_optional_candidate_files(root, &context.agent_id, &mut out)?;
+    }
+    collect_candidate_files(&context.spawn_cwd, &context.agent_id, 0, false, &mut out)?;
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         match provider {
             Provider::Codex => {
-                collect_optional_candidate_files(&home.join(".codex").join("sessions"), agent_id, &mut out)?;
+                collect_optional_candidate_files(&home.join(".codex").join("sessions"), &context.agent_id, &mut out)?;
             }
             Provider::Claude | Provider::ClaudeCode => {
-                collect_optional_candidate_files(&home.join(".claude").join("sessions"), agent_id, &mut out)?;
-                collect_optional_candidate_files(&home.join(".claude").join("projects"), agent_id, &mut out)?;
+                collect_optional_candidate_files(&home.join(".claude").join("sessions"), &context.agent_id, &mut out)?;
+                collect_optional_candidate_files(&home.join(".claude").join("projects"), &context.agent_id, &mut out)?;
             }
             Provider::GeminiCli | Provider::Fake => {}
         }
@@ -633,6 +956,37 @@ fn provider_home_records_match_spawn_cwd(records: &[serde_json::Value], spawn_cw
             .any(|cwd| paths_equivalent(Path::new(cwd), spawn_cwd))
 }
 
+fn candidate_text_has_team_agent_id(text: &str, context: &CaptureSessionContext) -> bool {
+    let id = context.agent_id.as_str();
+    if id.is_empty() {
+        return false;
+    }
+    [
+        format!("\"TEAM_AGENT_ID\":\"{id}\""),
+        format!("\"TEAM_AGENT_ID\": \"{id}\""),
+        format!("TEAM_AGENT_ID={id}"),
+        format!("env.TEAM_AGENT_ID=\"{id}\""),
+        format!("env.TEAM_AGENT_ID=\\\"{id}\\\""),
+        format!("\"TEAM_AGENT_AGENT_ID\":\"{id}\""),
+        format!("\"TEAM_AGENT_AGENT_ID\": \"{id}\""),
+        format!("TEAM_AGENT_AGENT_ID={id}"),
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn candidate_path_matches_agent_id(path: &Path, context: &CaptureSessionContext) -> bool {
+    let id = context.agent_id.as_str();
+    if id.is_empty() {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let dashed = id.replace('_', "-");
+    name.contains(id) || name.contains(&dashed)
+}
+
 fn record_cwd(record: &serde_json::Value) -> Option<String> {
     record
         .get("cwd")
@@ -654,7 +1008,7 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
     }
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
-    left == right || left.starts_with(&right)
+    left == right || left.parent().is_some_and(|parent| parent == right)
 }
 
 /// `true` iff any path component is `.team` (the Team Agent runtime/logs root) — used
@@ -686,8 +1040,9 @@ fn claude_launch_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
+    tools: &[&str],
 ) -> Result<Vec<String>, ProviderError> {
-    let mut argv = claude_base_command(adapter, auth_mode, mcp_config, system_prompt, model)?;
+    let mut argv = claude_base_command(adapter, auth_mode, mcp_config, system_prompt, model, tools, false)?;
     argv.push("--session-id".to_string());
     argv.push(next_session_token());
     Ok(argv)
@@ -699,12 +1054,16 @@ fn claude_base_command(
     mcp_config: Option<&McpConfig>,
     system_prompt: Option<&str>,
     model: Option<&str>,
+    tools: &[&str],
+    managed_mcp_config: bool,
 ) -> Result<Vec<String>, ProviderError> {
-    let mut argv = vec![
-        "claude".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-    ];
+    let mut argv = vec!["claude".to_string()];
+    if claude_dangerous_auto_approve(tools) {
+        argv.push("--dangerously-skip-permissions".to_string());
+    } else {
+        argv.push("--permission-mode".to_string());
+        argv.push("default".to_string());
+    }
     if let Some(model) = model {
         argv.push("--model".to_string());
         argv.push(model.to_string());
@@ -713,7 +1072,11 @@ fn claude_base_command(
         argv.push("--append-system-prompt".to_string());
         argv.push(prompt.to_string());
     }
-    if mcp_config.is_some() || auth_mode == AuthMode::CompatibleApi || system_prompt.is_some_and(prompt_needs_native_mcp) {
+    if !managed_mcp_config
+        && (mcp_config.is_some()
+            || auth_mode == AuthMode::CompatibleApi
+            || system_prompt.is_some_and(prompt_needs_native_mcp))
+    {
         let raw = if let Some(config) = mcp_config {
             serde_json::json!({"mcpServers": config.raw.clone()})
         } else {
@@ -722,10 +1085,10 @@ fn claude_base_command(
         argv.push("--mcp-config".to_string());
         argv.push(raw.to_string());
         argv.push("--strict-mcp-config".to_string());
-        for tool in ["Bash", "Grep"] {
-            argv.push("--disallowedTools".to_string());
-            argv.push(tool.to_string());
-        }
+    }
+    for tool in claude_disallowed_tools(tools) {
+        argv.push("--disallowedTools".to_string());
+        argv.push(tool.to_string());
     }
     Ok(argv)
 }
@@ -825,6 +1188,27 @@ fn codex_dangerous_auto_approve(tools: &[&str]) -> bool {
     tools.contains(&"dangerous_auto_approve")
 }
 
+fn claude_dangerous_auto_approve(tools: &[&str]) -> bool {
+    tools.contains(&"dangerous_auto_approve")
+}
+
+fn claude_disallowed_tools(tools: &[&str]) -> Vec<&'static str> {
+    let mut disallowed = Vec::new();
+    if !tools.contains(&"execute_bash") {
+        disallowed.push("Bash");
+    }
+    if !tools.contains(&"fs_read") {
+        disallowed.push("Read");
+    }
+    if !tools.contains(&"fs_write") {
+        disallowed.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+    }
+    if !tools.contains(&"fs_list") {
+        disallowed.extend(["Glob", "Grep"]);
+    }
+    disallowed
+}
+
 fn codex_sandbox_mode(tools: &[&str]) -> &'static str {
     if tools.iter().any(|tool| matches!(*tool, "fs_write" | "execute_bash")) {
         "workspace-write"
@@ -879,8 +1263,40 @@ fn has_cwd_field(record: &serde_json::Value) -> bool {
 }
 
 fn next_session_token() -> String {
+    use sha2::Digest;
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    format!("session-{nanos:x}")
+    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(nanos.to_le_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
 }

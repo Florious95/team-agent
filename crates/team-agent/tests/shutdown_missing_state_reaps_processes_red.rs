@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use serial_test::serial;
+use serial_test::file_serial;
 use team_agent::coordinator::{coordinator_meta_path, coordinator_pid_path, WorkspacePath};
 use team_agent::state::persist::{runtime_state_path, save_runtime_state};
 use team_agent::tmux_backend::TmuxBackend;
@@ -24,7 +24,8 @@ fn bin() -> &'static str {
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn shutdown_reaps_discovered_processes_when_state_file_is_missing() {
     let case = MissingStateCase::new("shutdown-missing-state");
     let session = SessionName::new("team-bug8-missing-state");

@@ -151,6 +151,24 @@ pub enum LeaderStartMode {
     AttachExisting,
 }
 
+/// Leader launcher tmux/socket selection. Managed launcher sessions must use the
+/// workspace tmux socket, never the user's default tmux server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderLaunchSocket {
+    Workspace,
+}
+
+/// Execution status for a leader launch plan. `NotStarted` is intentionally
+/// distinct so JSON callers cannot report `ok:true` for an unexecuted launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaderLaunchStatus {
+    Exited,
+    Detached,
+    NotStarted,
+}
+
 /// 全部 leader 审计事件名(card §34)。§3 typed event kinds + §40 JSON 名与 Python
 /// **字节级一致**。映射到 [`LeaderEvent::name`] 返回 `EventLog::write` 用的精确字符串。
 /// (既有 `EventLog::write(&str, Value)` 仍吃裸字符串;此 enum 是 type-safe 名表,
@@ -200,7 +218,9 @@ impl LeaderEvent {
             Self::ReceiverStateDivergenceRepaired => "leader_receiver.state_divergence_repaired",
             Self::ReceiverFirstTimeEnvSeeded => "leader_receiver.first_time_env_seeded",
             Self::ReceiverAutobindSkipped => "leader_receiver.autobind_skipped",
-            Self::ReceiverRequeuedExhaustedWatchers => "leader_receiver.requeued_exhausted_watchers",
+            Self::ReceiverRequeuedExhaustedWatchers => {
+                "leader_receiver.requeued_exhausted_watchers"
+            }
             Self::ReceiverAmbiguousCandidates => "leader_receiver.ambiguous_candidates",
             Self::ReceiverClaimRequeue => "leader_receiver.claim_requeue",
             Self::ReceiverClaimLeaderNotification => "leader_receiver.claim_leader_notification",
@@ -307,6 +327,7 @@ pub struct LeaderStartPlan {
     pub mode: LeaderStartMode,
     pub provider: Provider,
     pub workspace: PathBuf,
+    pub socket: LeaderLaunchSocket,
     pub session_name: Option<SessionName>,
     /// 要 exec 的 argv(provider argv 或 tmux argv)。
     pub argv: Vec<String>,
@@ -315,6 +336,28 @@ pub struct LeaderStartPlan {
     pub identity: Option<LeaderIdentity>,
     /// 非 tty 的 `new_tmux_session` → `-d` detached。
     pub detached: bool,
+}
+
+/// Result of executing a [`LeaderStartPlan`]. Interactive launches should carry
+/// the provider/tmux process exit code; detached launches carry the managed
+/// session when known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaderLaunchOutcome {
+    pub status: LeaderLaunchStatus,
+    pub exit_code: Option<i32>,
+    pub session_name: Option<SessionName>,
+    pub reason: Option<String>,
+}
+
+impl LeaderLaunchOutcome {
+    pub fn not_started(reason: impl Into<String>) -> Self {
+        Self {
+            status: LeaderLaunchStatus::NotStarted,
+            exit_code: None,
+            session_name: None,
+            reason: Some(reason.into()),
+        }
+    }
 }
 
 /// idle-takeover 的 node 分类行(`build_idle_nodes` / `_leader_node` 产物)。

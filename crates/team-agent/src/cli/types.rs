@@ -2,6 +2,8 @@
 //! 每子命令的 clap-style arg 结构 / 五行 summary 计数桶。
 
 use super::*;
+use crate::provider::Provider;
+use crate::transport::PaneId;
 
 // =============================================================================
 // ERRORS / EXIT(helpers.py `_emit_cli_error` / `_cli_error_payload`)
@@ -363,6 +365,18 @@ pub struct ClaimLeaderArgs {
     pub json: bool,
 }
 
+/// `attach-leader` public CLI args. `cmd_attach_leader` consumes the typed pane/provider
+/// fields and returns/writes a `leader_receiver` binding through the leader lease port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachLeaderArgs {
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub pane: Option<PaneId>,
+    pub provider: Provider,
+    pub confirm: bool,
+    pub json: bool,
+}
+
 /// `identity`(`parser.py:256`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityArgs {
@@ -386,6 +400,7 @@ pub struct RestartArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub allow_fresh: bool,
+    pub session_converge_deadline_ms: Option<u64>,
     pub json: bool,
 }
 
@@ -601,6 +616,8 @@ pub struct PeekArgs {
     pub agent: String,
     pub workspace: PathBuf,
     pub tail: usize,
+    pub head: Option<usize>,
+    pub search: Option<String>,
     pub allow_raw_screen: bool,
     pub json: bool,
 }

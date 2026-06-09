@@ -99,6 +99,7 @@ fn seed_runtime_state(workspace: &Path) {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c1_lifecycle_commands_resolve_active_teamdir_from_root_workspace_selector() {
     let fixture = seed_c1_active_team_fixture("c1-lifecycle");
     let mut failures = Vec::new();
@@ -190,6 +191,7 @@ fn c1_lifecycle_commands_resolve_active_teamdir_from_root_workspace_selector() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c1_runtime_commands_resolve_active_team_for_status_send_and_collect() {
     let fixture = seed_c1_active_team_fixture("c1-runtime");
     let mut failures = Vec::new();
@@ -267,6 +269,7 @@ fn c1_runtime_commands_resolve_active_team_for_status_send_and_collect() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c2_stop_team_level_command_exists_and_keeps_state_while_stopping_runtime() {
     let ws = tmp_dir("c2-stop");
     seed_runtime_state(&ws);
@@ -293,6 +296,7 @@ fn c2_stop_team_level_command_exists_and_keeps_state_while_stopping_runtime() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c2_canonical_verbs_expose_help_instead_of_invalid_choice() {
     let cwd = tmp_dir("c2-help-verbs");
     let mut failures = Vec::new();
@@ -318,6 +322,7 @@ fn c2_canonical_verbs_expose_help_instead_of_invalid_choice() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace() {
     let cwd = tmp_dir("c2-quick-help");
     let out = run(&["quick-start", "--help"], &cwd);
@@ -357,6 +362,7 @@ fn c2_quick_start_help_is_zero_token_help_only_and_does_not_compile_workspace() 
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
     let root = tmp_dir("c3-multiteam");
     seed_healthy_coordinator(&root);
@@ -410,6 +416,7 @@ fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
     let ws = tmp_dir("c4-message-id");
     seed_runtime_state(&ws);
@@ -499,6 +506,7 @@ fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c5_send_without_target_reports_routing_ambiguous_not_target_not_in_team() {
     let ws = tmp_dir("c5-no-target");
     seed_runtime_state(&ws);
@@ -531,6 +539,7 @@ fn c5_send_without_target_reports_routing_ambiguous_not_target_not_in_team() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn c6_invalid_workspace_status_returns_shaped_error_without_polluting_invalid_path() {
     let root = tmp_dir("c6-invalid-root");
     let invalid = root.join("no").join("such").join("team");

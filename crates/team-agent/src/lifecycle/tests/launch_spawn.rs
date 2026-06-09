@@ -649,8 +649,9 @@ pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
 }
 
 // 2 [P0] — restart_with_transport must drive the REAL Route-B resume spawn: one spawn per resumable
-// worker (first=spawn_first, rest=spawn_into), each carrying the provider build_command, + coordinator
-// started. Today the stub returns RequirementUnmet with ZERO spawns -> RED at recorded.len().
+// worker. The first resumed worker recreates the session with spawn_first; later workers may use
+// spawn_into only after a live-session check proves that recreated session still exists. Each spawn
+// carries the provider build_command, and the coordinator is started.
 #[test]
 fn restart_with_transport_spawns_resumable_workers_not_stub() {
     let ws = restart_ws_two_resumable_workers();
@@ -665,10 +666,13 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         "restart must spawn ONE worker per resumable agent (alpha, bravo); the rt-host-a stub returns \
          RequirementUnmet with ZERO spawns; got {recorded:?}"
     );
-    assert_eq!(recorded[0].0, "spawn_first", "the first resumed worker uses new-session (spawn_first); got {recorded:?}");
-    assert!(
-        recorded.iter().any(|(kind, _)| kind == "spawn_into"),
-        "subsequent resumed workers use new-window (spawn_into); got {recorded:?}"
+    assert_eq!(
+        recorded[0].0, "spawn_first",
+        "with has-session=false before alpha, restart must recreate the session with spawn_first; got {recorded:?}"
+    );
+    assert_eq!(
+        recorded[1].0, "spawn_into",
+        "with has-session=true after alpha spawn, restart may add bravo with spawn_into; this is liveness-based, not index-based; got {recorded:?}"
     );
     assert!(
         recorded.iter().all(|(_, argv)| argv.iter().any(|a| a == "codex")),
@@ -677,6 +681,25 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
     assert!(
         matches!(result, Ok(RestartReport::Restarted { coordinator_started: true, .. })),
         "restart must reach RestartReport::Restarted with coordinator_started=true (AlreadyRunning, seeded); got {result:?}"
+    );
+
+    let ws = restart_ws_two_resumable_workers();
+    let dead_after_first = OfflineTransport::new().with_session_absent_after_spawn_first();
+    let result = restart_with_transport(&ws, false, None, &dead_after_first);
+    let recorded = dead_after_first.spawn_records();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "if the session disappears after alpha, restart must stop before spawning bravo; got result={result:?} recorded={recorded:?}"
+    );
+    assert!(
+        recorded.iter().all(|(kind, _)| kind != "spawn_into"),
+        "restart must not call spawn_into/new-window for bravo against a dead server; result={result:?} recorded={recorded:?}"
+    );
+    let error = format!("{result:?}");
+    assert!(
+        error.contains("session_disappeared_after_spawn") || error.contains("provider_resume_exited"),
+        "restart must report the first resumed agent/session disappearance explicitly, not continue to a later no-server failure; result={result:?}"
     );
 }
 
@@ -899,6 +922,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "window",
             "mcp_config",
             "permissions",
+            "effective_approval_policy",
             "session_id",
             "rollout_path",
             "captured_at",
@@ -906,6 +930,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "attribution_confidence",
             "spawn_cwd",
             "spawned_at",
+            "pane_id",
         ],
         "running agent state key order must match golden launch/core.py:238-255; raw={raw}"
     );
@@ -935,8 +960,13 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert!(agent["captured_at"].is_null());
     assert!(agent["captured_via"].is_null());
     assert!(agent["attribution_confidence"].is_null());
-    assert_eq!(agent["spawn_cwd"], json!(workspace.to_string_lossy()));
+    assert_eq!(agent["spawn_cwd"], json!(team.to_string_lossy()));
     assert_eq!(agent["spawned_at"], json!(FIXED_SPAWNED_AT));
+    assert_eq!(
+        agent["pane_id"],
+        json!("%0"),
+        "#252 RC2: launch must persist the real pane_id returned by the transport, not drop it when pane_pid is unavailable"
+    );
 }
 
 // Stage B2 — golden launch/core.py:171-173 writes paused workers as exactly

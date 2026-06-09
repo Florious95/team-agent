@@ -35,7 +35,10 @@ pub use agent::{reset_agent, reset_agent_with_transport, start_agent, start_agen
 pub(crate) use agent::start_agent_at_paths;
 pub(crate) use common::refresh_missing_provider_sessions;
 pub use orchestrator::{halt_plan, plan_status};
-pub use rebuild::{restart, restart_candidates, restart_with_transport, select_restart_state};
+pub use rebuild::{
+    restart, restart_candidates, restart_with_session_convergence_deadline, restart_with_transport,
+    select_restart_state,
+};
 pub use remove::{remove_agent, remove_agent_with_transport};
 pub use selection::{classify_first_send_at, classify_restart_plan, decide_start_mode, python_type_name};
 pub(crate) use team_state::write_team_state;

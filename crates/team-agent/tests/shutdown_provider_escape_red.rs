@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use serial_test::serial;
+use serial_test::file_serial;
 use team_agent::state::persist::save_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{SessionName, Transport, WindowName};
@@ -28,7 +28,8 @@ fn bin() -> &'static str {
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn shutdown_real_tmux_list_targets_populates_pane_pid() {
     let case = RealTmuxCase::new("pane-pid");
     let session = SessionName::new("team-t248-pane-pid");
@@ -56,7 +57,8 @@ fn shutdown_real_tmux_list_targets_populates_pane_pid() {
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn shutdown_reaps_workspace_mcp_process_not_descended_from_pane_pid() {
     let workspace = tmp_dir("mcp-escape");
     let _cleanup = WorkspaceCleanup(workspace.clone());
@@ -77,7 +79,8 @@ fn shutdown_reaps_workspace_mcp_process_not_descended_from_pane_pid() {
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn shutdown_reaps_provider_process_by_pgid_or_workspace_when_ppid_escaped() {
     let workspace = tmp_dir("provider-pgid-escape");
     let _cleanup = WorkspaceCleanup(workspace.clone());
@@ -98,7 +101,8 @@ fn shutdown_reaps_provider_process_by_pgid_or_workspace_when_ppid_escaped() {
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn shutdown_session_killed_requires_post_reap_has_session_false() {
     let case = DefaultSocketSessionCase::new("session-still-live");
     let workspace = tmp_dir("session-still-live");

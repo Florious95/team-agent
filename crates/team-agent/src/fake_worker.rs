@@ -64,18 +64,19 @@ pub fn run(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
             let task_id = payload.get("task_id").and_then(serde_json::Value::as_str);
-            report_fake_result(workspace, agent_id, message_id, task_id, &mut output)?;
+            report_fake_result(workspace, agent_id, message_id, task_id, None, &mut output)?;
             block = None;
         } else if let Some(parsed) = parse_rendered_header(trimmed) {
             block = Some(parsed);
         } else if let Some(token) = parse_token(trimmed) {
             if let Some(current) = block.take() {
-                let _content = current.content();
+                let content = current.content();
                 report_fake_result(
                     workspace,
                     agent_id,
                     &token,
                     current.task_id.as_deref(),
+                    Some(&content),
                     &mut output,
                 )?;
             }
@@ -126,13 +127,155 @@ fn report_fake_result(
     agent_id: &str,
     message_id: &str,
     task_id: Option<&str>,
+    source_content: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), FakeWorkerError> {
     let envelope = fake_envelope(workspace, agent_id, message_id, task_id);
-    crate::messaging::report_result(workspace, &envelope)
+    let owner_team = std::env::var("TEAM_AGENT_OWNER_TEAM_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    mirror_fake_result_to_leader(workspace, owner_team.as_deref(), &envelope, source_content);
+    crate::messaging::report_result_for_owner_team(workspace, &envelope, owner_team.as_deref())
         .map_err(|e| FakeWorkerError::Report(e.to_string()))?;
+    mirror_fake_result_to_leader(workspace, owner_team.as_deref(), &envelope, source_content);
     writeln!(output, "{}", serde_json::to_string(&envelope)?)?;
     Ok(())
+}
+
+fn mirror_fake_result_to_leader(
+    workspace: &Path,
+    owner_team: Option<&str>,
+    envelope: &serde_json::Value,
+    source_content: Option<&str>,
+) {
+    let Ok(raw_state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let state = owner_team
+        .and_then(|team| crate::state::projection::resolve_owner_team_id(&raw_state, team).canonical_key().map(str::to_string))
+        .map(|team| crate::state::projection::project_top_level_view(&raw_state, &team))
+        .unwrap_or(raw_state);
+    let attached = state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("attached");
+    let pane_id = state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .map(str::to_string)
+        .or_else(|| owner_team.and_then(|team| claimed_pane_from_events(workspace, team)));
+    let Some(pane_id) = pane_id.filter(|_| attached || owner_team.is_some()) else {
+        return;
+    };
+    let summary = envelope
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Fake worker completed");
+    let result_id = envelope
+        .get("result_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let text = match source_content.filter(|content| !content.trim().is_empty()) {
+        Some(content) => format!(
+            "Fake worker result: {summary}\nMessage content: {}\nResult id: {result_id}",
+            content.trim()
+        ),
+        None => format!("Fake worker result: {summary}\nResult id: {result_id}"),
+    };
+    let target = crate::transport::Target::Pane(crate::transport::PaneId::new(&pane_id));
+    let payload = crate::transport::InjectPayload::Text(text.clone());
+    let key = crate::transport::Key::Enter;
+    if let Some(socket) = leader_receiver_full_socket(&state) {
+        let endpoint_backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+        if crate::transport::Transport::inject(&endpoint_backend, &target, &payload, key, true).is_ok() {
+            mirror_to_team_session_panes(&state, workspace, agent_id_from_envelope(envelope), &text);
+            return;
+        }
+    }
+    let workspace_backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+    let _ = crate::transport::Transport::inject(&workspace_backend, &target, &payload, key, true);
+    mirror_to_team_session_panes(&state, workspace, agent_id_from_envelope(envelope), &text);
+}
+
+fn leader_receiver_full_socket(state: &serde_json::Value) -> Option<&str> {
+    state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|socket| !socket.is_empty() && Path::new(socket).is_absolute())
+}
+
+fn claimed_pane_from_events(workspace: &Path, owner_team: &str) -> Option<String> {
+    crate::event_log::EventLog::new(workspace)
+        .tail(50)
+        .ok()?
+        .into_iter()
+        .rev()
+        .find_map(|event| {
+            if event.get("event").and_then(serde_json::Value::as_str)
+                != Some("leader_receiver.rebind_applied")
+            {
+                return None;
+            }
+            if event.get("team_id").and_then(serde_json::Value::as_str) != Some(owner_team) {
+                return None;
+            }
+            event
+                .get("new_pane_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|pane| !pane.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn agent_id_from_envelope(envelope: &serde_json::Value) -> Option<&str> {
+    envelope.get("agent_id").and_then(serde_json::Value::as_str)
+}
+
+fn mirror_to_team_session_panes(
+    state: &serde_json::Value,
+    workspace: &Path,
+    agent_id: Option<&str>,
+    text: &str,
+) {
+    let Some(session) = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|session| !session.is_empty())
+    else {
+        return;
+    };
+    let worker_pane = agent_id.and_then(|agent_id| {
+        state
+            .get("agents")
+            .and_then(|agents| agents.get(agent_id))
+            .and_then(|agent| agent.get("pane_id"))
+            .and_then(serde_json::Value::as_str)
+    });
+    if let Some(socket) = leader_receiver_full_socket(state) {
+        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+        for pane in crate::transport::Transport::list_targets(&backend).unwrap_or_default() {
+            if pane.session.as_str() != session || Some(pane.pane_id.as_str()) == worker_pane {
+                continue;
+            }
+            let target = crate::transport::Target::Pane(pane.pane_id);
+            let payload = crate::transport::InjectPayload::Text(text.to_string());
+            let _ = crate::transport::Transport::inject(&backend, &target, &payload, crate::transport::Key::Enter, true);
+        }
+    }
+    let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+    for pane in crate::transport::Transport::list_targets(&backend).unwrap_or_default() {
+        if pane.session.as_str() != session || Some(pane.pane_id.as_str()) == worker_pane {
+            continue;
+        }
+        let target = crate::transport::Target::Pane(pane.pane_id);
+        let payload = crate::transport::InjectPayload::Text(text.to_string());
+        let _ = crate::transport::Transport::inject(&backend, &target, &payload, crate::transport::Key::Enter, true);
+    }
 }
 
 fn fake_envelope(

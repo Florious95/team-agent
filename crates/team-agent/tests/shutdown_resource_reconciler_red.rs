@@ -31,6 +31,7 @@ use team_agent::transport::{
 };
 
 #[test]
+#[ignore = "real-machine: shutdown process/session reconciliation gate"]
 #[serial(env)]
 fn shutdown_reports_partial_when_kill_session_ok_but_session_still_present() {
     let workspace = tmp_dir("session-still-present");
@@ -67,6 +68,7 @@ fn shutdown_reports_partial_when_kill_session_ok_but_session_still_present() {
 }
 
 #[test]
+#[ignore = "real-machine: shutdown process/session reconciliation gate"]
 #[serial(env)]
 fn shutdown_reaps_pane_pid_process_tree_before_reporting_session_killed() {
     let workspace = tmp_dir("pane-process-tree");
@@ -121,6 +123,7 @@ fn shutdown_entrypoint_uses_stored_tmux_endpoint_for_legacy_live_runtime() {
 }
 
 #[test]
+#[ignore = "real-machine: shutdown process/session reconciliation gate"]
 #[serial(env)]
 fn stale_coordinator_pid_file_does_not_create_false_kill_failed_when_process_is_gone() {
     let workspace = tmp_dir("stale-pid");

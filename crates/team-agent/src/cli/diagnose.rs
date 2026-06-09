@@ -134,13 +134,18 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
         || team.join("profiles").exists();
     let profile_dir_check = json!({
         "name": "profile_dir",
-        "ok": profile_dir_exists,
-    });
-    let profile_smoke_check = json!({
-        "name": "profile_smoke",
         "ok": true,
-        "status": if profile_dir_exists { "passed" } else { "not_required" },
+        "status": if profile_dir_exists { "present" } else { "not_required" },
     });
+    let profile_smoke_check = build_profile_smoke_check_for_team(team)?;
+    if profile_smoke_check.get("ok").and_then(Value::as_bool) == Some(false) {
+        let reason = profile_smoke_check
+            .get("reason")
+            .or_else(|| profile_smoke_check.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("profile smoke failed");
+        next_actions.push(json!(format!("fix compatible_api profile smoke: {reason}")));
+    }
     checks.push(json!({
         "name": "profiles",
         "ok": true,
@@ -197,14 +202,110 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
     Ok(report)
 }
 
+pub(crate) fn build_profile_smoke_check_for_team(team: &std::path::Path) -> Result<Value, CliError> {
+    let workspace = crate::model::paths::team_workspace(team)
+        .map_err(|error| CliError::Runtime(error.to_string()))?;
+    let spec = match crate::compiler::compile_team(team) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return Ok(json!({
+                "name": "profile_smoke",
+                "ok": false,
+                "status": "profile_invalid",
+                "reason": error.to_string(),
+                "secret_values_printed": false,
+                "checks": [],
+            }));
+        }
+    };
+    let agents = spec
+        .get("agents")
+        .and_then(crate::model::yaml::Value::as_list)
+        .unwrap_or(&[]);
+    let checks = crate::lifecycle::profile_smoke::profile_smoke_checks_for_agents_with_profile_dir(
+        &workspace,
+        agents,
+        Some(&team.join("profiles")),
+        crate::lifecycle::profile_smoke::DEFAULT_PROFILE_SMOKE_TIMEOUT,
+    );
+    Ok(aggregate_profile_smoke_checks(checks))
+}
+
+fn aggregate_profile_smoke_checks(checks: Vec<Value>) -> Value {
+    let failed = checks
+        .iter()
+        .filter(|check| check.get("ok").and_then(Value::as_bool) == Some(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ok = failed.is_empty();
+    let status = if !ok {
+        failed
+            .first()
+            .and_then(|check| check.get("status").and_then(Value::as_str))
+            .unwrap_or("smoke_failed")
+    } else if checks
+        .iter()
+        .any(|check| check.get("status").and_then(Value::as_str) == Some("smoke_passed"))
+    {
+        "smoke_passed"
+    } else if checks
+        .iter()
+        .any(|check| check.get("status").and_then(Value::as_str) == Some("skipped_by_profile"))
+    {
+        "skipped_by_profile"
+    } else {
+        "not_required"
+    };
+    let mut out = json!({
+        "name": "profile_smoke",
+        "ok": ok,
+        "status": status,
+        "checks": checks,
+        "secret_values_printed": false,
+    });
+    if let Some(first) = failed.first() {
+        copy_optional_field(first, &mut out, "reason");
+        copy_optional_field(first, &mut out, "http_status");
+        copy_optional_field(first, &mut out, "endpoint");
+        copy_optional_field(first, &mut out, "error");
+    } else if let Some(first_passed) = checks
+        .iter()
+        .find(|check| check.get("status").and_then(Value::as_str) == Some("smoke_passed"))
+    {
+        copy_optional_field(first_passed, &mut out, "http_status");
+        copy_optional_field(first_passed, &mut out, "endpoint");
+    }
+    out
+}
+
+fn copy_optional_field(from: &Value, to: &mut Value, key: &str) {
+    let Some(value) = from.get(key).cloned() else {
+        return;
+    };
+    let Some(obj) = to.as_object_mut() else {
+        return;
+    };
+    obj.insert(key.to_string(), value);
+}
+
 pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64) -> Result<Value, CliError> {
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        None,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
     let timeout = if timeout.is_finite() && timeout > 0.0 { timeout } else { 0.0 };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
     let mut readiness;
     loop {
-        let mut state = crate::state::persist::load_runtime_state(workspace)?;
-        inject_tmux_session_present(workspace, &mut state);
-        inject_message_counts(workspace, &mut state)?;
+        let mut state = crate::state::projection::select_runtime_state(
+            &selected.run_workspace,
+            Some(&selected.team_key),
+        )
+        .unwrap_or_else(|_| selected.state.clone());
+        inject_tmux_session_present(&selected.run_workspace, &mut state);
+        inject_message_counts(&selected.run_workspace, &mut state)?;
         readiness = wait_readiness(&state);
         let awaiting_trust = readiness
             .get("awaiting_trust_prompt")
@@ -231,6 +332,14 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
         )
     } else if ready {
         (true, "ready", "ready", "workers ready", Vec::new())
+    } else if readiness.get("session_capture_complete").and_then(Value::as_bool) == Some(false) {
+        (
+            false,
+            "pending",
+            "session_capture_incomplete",
+            "provider session capture is incomplete",
+            vec![json!("wait for provider session capture before restart")],
+        )
     } else {
         (
             false,
@@ -241,7 +350,7 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
         )
     };
     let details_log = write_details_log(
-        workspace,
+        &selected.run_workspace,
         "wait-ready",
         &json!({
             "ok": ok,
@@ -282,6 +391,20 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
     let mut mcp_ready = false;
     let mut task_prompt_delivered = false;
     let mut awaiting_trust_prompt = false;
+    let mut incomplete_sessions = Vec::new();
+    let all_attached_receiver = state
+        .get("leader_receiver")
+        .and_then(Value::as_object)
+        .is_none_or(|receiver| {
+            receiver
+                .get("status")
+                .and_then(Value::as_str)
+                == Some("attached")
+                || receiver
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .is_some_and(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
+        });
 
     if let Some(agents) = agents {
         process_started = state
@@ -314,14 +437,25 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
                 .and_then(Value::as_str)
                 == Some("awaiting_trust_prompt")
         });
+        incomplete_sessions = crate::session_capture::incomplete_interacted_resumable_agent_ids(state);
     }
-    let ready = process_started && cli_prompt_ready && mcp_ready && task_prompt_delivered;
+    let all_resumable_have_session = incomplete_sessions.is_empty();
+    let session_capture_incomplete = !all_resumable_have_session;
+    let all_spawned = process_started && cli_prompt_ready && mcp_ready;
+    let ready = all_spawned && all_attached_receiver && all_resumable_have_session;
     json!({
+        "all_attached_receiver": all_attached_receiver,
+        "all_resumable_have_session": all_resumable_have_session,
+        "all_spawned": all_spawned,
         "awaiting_trust_prompt": awaiting_trust_prompt,
         "cli_prompt_ready": cli_prompt_ready,
+        "incomplete_session_capture_agents": incomplete_sessions.clone(),
         "mcp_ready": mcp_ready,
         "process_started": process_started,
         "ready": ready,
+        "session_capture_complete": all_resumable_have_session,
+        "session_capture_incomplete": session_capture_incomplete,
+        "pending_session_agent_ids": incomplete_sessions,
         "task_prompt_delivered": task_prompt_delivered,
     })
 }

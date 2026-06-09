@@ -104,6 +104,10 @@
             "pasted_content_prompt_absent_after_submit"
         );
         assert_eq!(
+            submit_verification_wire(SubmitVerification::PastedContentPromptStillPresentAfterSubmit),
+            "pasted_content_prompt_still_present_after_submit"
+        );
+        assert_eq!(
             submit_verification_wire(SubmitVerification::SendKeysFailed),
             "send_keys_failed"
         );

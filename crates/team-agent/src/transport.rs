@@ -165,6 +165,7 @@ pub enum Key {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureRange {
     Tail(u32),
+    Head(u32),
     Full,
 }
 
@@ -290,6 +291,8 @@ pub enum SubmitVerification {
     EnterSentWithoutPlaceholderCheck,
     /// `pasted_content_prompt_absent_after_submit`。
     PastedContentPromptAbsentAfterSubmit,
+    /// `pasted_content_prompt_still_present_after_submit`。
+    PastedContentPromptStillPresentAfterSubmit,
     /// `{key}_sent_after_visible_token`(key 由 variant 携带)。
     KeySentAfterVisibleToken { key: Key },
     /// `send_keys_failed`。
@@ -580,9 +583,10 @@ pub fn tmux_cancel_mode_argv(pane: &PaneId, mode: PaneMode) -> Vec<String> {
 pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
     let spec = match range {
         CaptureRange::Tail(lines) => format!("-{lines}"),
+        CaptureRange::Head(_) => "0".to_string(),
         CaptureRange::Full => "-".to_string(),
     };
-    vec![
+    let mut argv = vec![
         "tmux".to_string(),
         "capture-pane".to_string(),
         "-p".to_string(),
@@ -590,7 +594,11 @@ pub fn tmux_capture_argv(pane: &PaneId, range: CaptureRange) -> Vec<String> {
         spec,
         "-t".to_string(),
         pane.as_str().to_string(),
-    ]
+    ];
+    if let CaptureRange::Head(lines) = range {
+        argv.extend(["-E".to_string(), lines.saturating_sub(1).to_string()]);
+    }
+    argv
 }
 
 /// PaneField → `display-message -p -t <target> [-F] <fmt>`。
@@ -747,6 +755,9 @@ pub fn submit_verification_wire(v: SubmitVerification) -> String {
         }
         SubmitVerification::PastedContentPromptAbsentAfterSubmit => {
             "pasted_content_prompt_absent_after_submit".to_string()
+        }
+        SubmitVerification::PastedContentPromptStillPresentAfterSubmit => {
+            "pasted_content_prompt_still_present_after_submit".to_string()
         }
         SubmitVerification::KeySentAfterVisibleToken { key } => {
             format!("{}_sent_after_visible_token", tmux_key_name(key))

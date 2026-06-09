@@ -185,5 +185,5 @@
         assert_eq!(refused["scope"], json!("team"));
         assert_eq!(refused["sender_team_id"], json!("teamA"));
         assert_eq!(refused["hint"],
-            json!("the requested peer is not part of your team. pass scope='workspace' to address peers in other teams."));
+            json!("the requested peer is not part of your team; worker-origin MCP cannot widen team scope."));
     }

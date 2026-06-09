@@ -147,15 +147,7 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
             pid: Some(pid),
         });
     }
-    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
-        return Ok(StopReport {
-            ok: false,
-            status: StopOutcome::KillFailed,
-            pid: Some(pid),
-        });
-    };
-    let rc = unsafe { libc::kill(pid_t, libc::SIGTERM) };
-    if rc != 0 {
+    if !terminate_pid(pid) {
         return Ok(StopReport {
             ok: false,
             status: StopOutcome::KillFailed,
@@ -206,9 +198,11 @@ fn stop_discovered_coordinators(
 }
 
 fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
-    let output = match Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
+    let output = match crate::os_probe::bounded_command_output_with_probe(
+        Command::new("ps").args(["-axo", "pid=,command="]),
+        "ps_table",
+        None,
+    )
     {
         Ok(output) if output.status.success() => output,
         _ => return Vec::new(),
@@ -259,13 +253,86 @@ fn terminate_pid(pid: Pid) -> bool {
     if pid_is_running(pid).ok() == Some(false) {
         return true;
     }
-    if !send_signal(pid, libc::SIGTERM) {
-        return false;
+    let pids = process_tree_pids(pid);
+    for child in pids.iter().rev() {
+        let _ = send_signal(*child, libc::SIGTERM);
     }
-    if wait_until_not_running(pid, Duration::from_millis(750)) {
-        return true;
+    if !wait_until_all_not_running(&pids, Duration::from_secs(5)) {
+        for child in pids.iter().rev() {
+            let _ = send_signal(*child, libc::SIGKILL);
+        }
     }
-    send_signal(pid, libc::SIGKILL) && wait_until_not_running(pid, Duration::from_millis(750))
+    wait_until_all_not_running(&pids, Duration::from_secs(5))
+}
+
+/// Public wrapper for diagnostic cleanup paths that must reuse coordinator
+/// shutdown's SIGTERM-then-SIGKILL semantics.
+pub fn terminate_pid_tree(pid: Pid) -> bool {
+    terminate_pid(pid)
+}
+
+fn process_tree_pids(root: Pid) -> Vec<Pid> {
+    let root_pid = root.get();
+    let pairs = crate::os_probe::bounded_command_output_with_probe(
+        Command::new("ps").args(["-axo", "pid=,ppid="]),
+        "ps_parent",
+        None,
+    )
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next()?.parse::<u32>().ok()?;
+            let ppid = parts.next()?.parse::<u32>().ok()?;
+            Some((pid, ppid))
+        })
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    collect_child_pids(root_pid, &pairs, &mut out);
+    out.push(root_pid);
+    out.sort_unstable();
+    out.dedup();
+    out.into_iter().map(Pid::new).collect()
+}
+
+fn collect_child_pids(parent: u32, pairs: &[(u32, u32)], out: &mut Vec<u32>) {
+    for (pid, ppid) in pairs {
+        if *ppid == parent && !out.contains(pid) {
+            out.push(*pid);
+            collect_child_pids(*pid, pairs, out);
+        }
+    }
+}
+
+fn wait_until_all_not_running(pids: &[Pid], timeout: Duration) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        for pid in pids {
+            reap_child_if_possible(*pid);
+        }
+        if pids
+            .iter()
+            .all(|pid| pid_is_running(*pid).ok() != Some(true))
+        {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn reap_child_if_possible(pid: Pid) {
+    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
+        return;
+    };
+    let mut status = 0;
+    unsafe {
+        libc::waitpid(pid_t, &mut status, libc::WNOHANG);
+    }
 }
 
 fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
@@ -306,9 +373,11 @@ pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
             _ => Err(err),
         };
     }
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "stat="])
-        .output()?;
+    let out = crate::os_probe::bounded_command_output_with_probe(
+        Command::new("ps").args(["-p", &pid.to_string(), "-o", "stat="]),
+        "ps_table",
+        Some(pid.get()),
+    )?;
     if !out.status.success() {
         return Ok(false);
     }

@@ -21,6 +21,7 @@ pub struct SpawnRecord {
 #[derive(Debug, Clone, Default)]
 struct OfflineState {
     session_present: bool,
+    session_absent_after_spawn_first: bool,
     targets: Vec<PaneInfo>,
     windows: Vec<WindowName>,
     calls: Vec<&'static str>,
@@ -41,6 +42,11 @@ impl OfflineTransport {
 
     pub fn with_session_present(self, present: bool) -> Self {
         self.with_state(|state| state.session_present = present);
+        self
+    }
+
+    pub fn with_session_absent_after_spawn_first(self) -> Self {
+        self.with_state(|state| state.session_absent_after_spawn_first = true);
         self
     }
 
@@ -100,6 +106,9 @@ impl OfflineTransport {
         let pane_index = self.with_state(|state| {
             state.calls.push(kind);
             state.spawns.push(SpawnRecord { kind: kind.to_string(), argv: argv.to_vec() });
+            if kind == "spawn_first" && !state.session_absent_after_spawn_first {
+                state.session_present = true;
+            }
             state.spawns.len().saturating_sub(1)
         });
         SpawnResult {

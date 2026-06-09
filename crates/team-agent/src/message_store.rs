@@ -31,7 +31,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, OptionalExtension};
 use thiserror::Error;
@@ -100,8 +100,25 @@ impl MessageStore {
         let runtime_dir = workspace.join(".team").join("runtime");
         std::fs::create_dir_all(&runtime_dir)?;
         let path = runtime_dir.join("team.db");
+        let existed = path.exists();
         let conn = crate::db::schema::open_db(&path)?;
-        crate::db::schema::initialize_schema(&conn, Some(&path))?;
+        if existed {
+            conn.busy_timeout(Duration::from_millis(5))?;
+            let version = conn.query_row("pragma user_version", [], |row| row.get::<_, i64>(0));
+            conn.busy_timeout(Duration::from_millis(30_000))?;
+            match version {
+                Ok(version) if version == crate::db::schema::SCHEMA_VERSION => {}
+                Ok(_) => crate::db::schema::initialize_schema(&conn, Some(&path))?,
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if matches!(
+                        err.code,
+                        rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            crate::db::schema::initialize_schema(&conn, Some(&path))?;
+        }
         Ok(Self { path })
     }
 
@@ -220,12 +237,12 @@ impl MessageStore {
              end,
              updated_at = ?3,
              delivered_at = case
-                 when ?2 in ('injected', 'visible', 'submitted', 'submitted_unverified', 'delivered')
+                 when ?2 in ('injected', 'visible', 'submitted', 'delivered')
                  then ?3
                  else delivered_at
              end,
              acknowledged_at = case when ?2 = 'acknowledged' then ?3 else acknowledged_at end,
-             error = coalesce(?4, error)
+             error = case when ?2 = 'delivered' then null else coalesce(?4, error) end
              where message_id = ?1",
             params![message_id, status, now, error],
         )?;

@@ -220,9 +220,15 @@ pub enum WorkerDisplay {
     Adaptive {
         status: DisplayStatus,
         window: Option<WindowName>,
+        workspace_window: Option<WindowName>,
         pane_id: Option<PaneId>,
+        pane_title: Option<String>,
         target: Option<String>,
+        target_worker_session: Option<String>,
+        linked_session: Option<String>,
         leader_session: Option<SessionName>,
+        display_session: Option<SessionName>,
+        fallback: Option<String>,
     },
     GhosttyWindow {
         status: DisplayStatus,
@@ -415,6 +421,7 @@ pub struct LaunchReport {
     pub safety: DangerousApproval,
     /// leader receiver(attach 成功时;经 step10 leader::attach_leader_to_state)。
     pub leader_receiver_attached: bool,
+    pub session_capture_incomplete_agents: Vec<String>,
 }
 
 /// 单个已起 worker(`launch` 的 `agents[]` / `started`)。
@@ -425,6 +432,10 @@ pub struct StartedAgent {
     pub target: String,
     pub session_id: Option<SessionId>,
     pub rollout_path: Option<RolloutPath>,
+    pub pending_session_id: Option<SessionId>,
+    pub claude_config_dir: Option<PathBuf>,
+    pub provider_projects_root: Option<PathBuf>,
+    pub managed_mcp_config: bool,
     pub display: WorkerDisplay,
 }
 
@@ -608,6 +619,14 @@ pub enum RestartReport {
     RefusedResumeAtomicity {
         unresumable: Vec<UnresumableWorker>,
         allow_fresh: bool,
+        error: String,
+    },
+    /// session capture did not converge before destructive restart. No teardown/spawn occurred.
+    RefusedResumeNotReady {
+        missing: Vec<AgentId>,
+        allow_fresh: bool,
+        deadline: std::time::Duration,
+        elapsed: std::time::Duration,
         error: String,
     },
     /// first_send_at 损坏(`reason=invalid_first_send_at`):决策前 hard refuse。

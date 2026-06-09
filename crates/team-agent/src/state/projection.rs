@@ -19,6 +19,13 @@ use crate::state::persist::{load_runtime_state, save_runtime_state_with_deleted_
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
 pub fn team_state_key(state: &Value) -> String {
+    if let Some(team_key) = state
+        .get("team_key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+    {
+        return team_key.to_string();
+    }
     for field in ["team_dir", "spec_path"] {
         // Python `if not value: continue` —— None/空串 falsy 跳过。
         let value = match state.get(field).and_then(Value::as_str) {
@@ -68,9 +75,7 @@ pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamRes
     }
     let teams = state.get("teams").and_then(Value::as_object);
     if teams.is_some_and(|teams| teams.contains_key(requested)) {
-        if has_top_level_runtime_content(state) {
-            return OwnerTeamResolution::Canonical(requested.to_string());
-        }
+        return OwnerTeamResolution::Canonical(requested.to_string());
     }
     if teams.is_none_or(Map::is_empty) {
         let active = state.get("active_team_key").and_then(Value::as_str).unwrap_or("");
@@ -111,21 +116,6 @@ pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamRes
         },
         _ => OwnerTeamResolution::Ambiguous { requested: requested.to_string(), matches },
     }
-}
-
-fn has_top_level_runtime_content(state: &Value) -> bool {
-    [
-        "session_name",
-        "team_dir",
-        "spec_path",
-        "workspace",
-        "agents",
-        "tasks",
-        "leader_receiver",
-        "team_owner",
-    ]
-    .into_iter()
-    .any(|key| state.get(key).is_some_and(super::json_truthy))
 }
 
 fn legacy_owner_team_aliases(entry: &Value) -> impl Iterator<Item = String> + '_ {
@@ -357,11 +347,7 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         }
         let matches: Vec<&String> = alive
             .iter()
-            .filter(|(key, value)| {
-                let session = value.get("session_name").and_then(Value::as_str).unwrap_or("");
-                let dir = value.get("team_dir").and_then(Value::as_str).unwrap_or("");
-                team == key.as_str() || team == session || team == dir
-            })
+            .filter(|(key, value)| team_selector_matches(team, key, value))
             .map(|(k, _)| k)
             .collect();
         if matches.len() == 1 {
@@ -396,6 +382,29 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         "multiple teams found in this workspace; pass --team <team> to choose. ".to_string()
             + &format_team_candidates(&alive),
     ))
+}
+
+fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
+    if team == key {
+        return true;
+    }
+    let session = value.get("session_name").and_then(Value::as_str).unwrap_or("");
+    if team == session {
+        return true;
+    }
+    if let Some(stripped) = session.strip_prefix("team-") {
+        if team == stripped {
+            return true;
+        }
+    }
+    let dir = value.get("team_dir").and_then(Value::as_str).unwrap_or("");
+    if team == dir {
+        return true;
+    }
+    std::path::Path::new(dir)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| team == name)
 }
 
 /// `ambiguous_team_target_result`(`state.py:226`):无显式 team 且多候选 → 拒绝 dict;否则 None。

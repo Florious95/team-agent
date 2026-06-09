@@ -75,7 +75,8 @@ pub(crate) fn start_agent_at_paths(
     let agent = state
         .get("agents")
         .and_then(|v| v.get(agent_id.as_str()))
-        .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?;
+        .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?
+        .clone();
     if agent
         .get("paused")
         .and_then(serde_json::Value::as_bool)
@@ -84,7 +85,7 @@ pub(crate) fn start_agent_at_paths(
         return Ok(StartAgentOutcome::Paused { agent_id: agent_id.clone() });
     }
     let session_name = state_session_name(&state);
-    let window = agent_window(agent, agent_id);
+    let window = agent_window(&agent, agent_id);
     if !force && window_exists(transport, &session_name, &window) {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
         crate::state::projection::save_team_scoped_state(workspace, &state)
@@ -104,9 +105,9 @@ pub(crate) fn start_agent_at_paths(
             target,
         });
     }
-    let provider = agent_provider(agent);
-    let session_id = agent_session_id(agent);
-    let rollout_path = agent_rollout_path(agent);
+    let provider = agent_provider(&agent);
+    let session_id = agent_session_id(&agent);
+    let rollout_path = agent_rollout_path(&agent);
     let rollout_exists = rollout_path
         .as_ref()
         .map(|p| p.as_path().exists())
@@ -125,20 +126,25 @@ pub(crate) fn start_agent_at_paths(
     };
     let into_existing_session =
         session_live_or_default(transport, &session_name, session_name_present(&state));
+    let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
     let spawn = spawn_agent_window(
         workspace,
         &session_name,
         agent_id,
-        agent,
+        &agent,
         spawn_session_id,
         into_existing_session,
         transport,
+        Some(&safety),
         None,
     )?;
+    mark_agent_started(&mut state, agent_id, &window, &spawn, &safety)?;
+    crate::state::projection::save_team_scoped_state(workspace, &state)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     write_start_agent_start_event(
         workspace,
         agent_id,
-        agent,
+        &agent,
         provider,
         start_mode,
         &session_name,
@@ -154,7 +160,7 @@ pub(crate) fn start_agent_at_paths(
             coordinator_started,
         },
         start_mode,
-        target: spawn.pane_id.as_str().to_string(),
+        target: spawn.spawn.pane_id.as_str().to_string(),
         session_id,
         rollout_path,
     })
@@ -279,6 +285,43 @@ pub(super) fn resolve_team_scoped_state_or_refuse(
         return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
     }
     state.ok_or_else(|| LifecycleError::StatePersist("resolve_team_scoped_state returned no state".to_string()))
+}
+
+fn mark_agent_started(
+    state: &mut serde_json::Value,
+    agent_id: &AgentId,
+    window: &str,
+    spawn: &SpawnedAgentWindow,
+    safety: &DangerousApproval,
+) -> Result<(), LifecycleError> {
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(LifecycleError::StatePersist(format!(
+            "agent {} state is not an object",
+            agent_id
+        )));
+    };
+    agent.insert("status".to_string(), serde_json::json!("running"));
+    agent.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
+    agent.insert("window".to_string(), serde_json::json!(window));
+    agent.insert(
+        "pane_id".to_string(),
+        serde_json::json!(spawn.spawn.pane_id.as_str()),
+    );
+    if let Some(pane_pid) = spawn.spawn.child_pid {
+        agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+    }
+    crate::lifecycle::launch::persist_command_plan_state(
+        agent,
+        &spawn.plan,
+        &spawn.profile_launch,
+    );
+    crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
+    Ok(())
 }
 
 /// `reset_agent(workspace, agent_id, discard_session, open_display, team)`
@@ -415,25 +458,58 @@ fn write_start_agent_start_event(
     let mcp_config = adapter
         .mcp_config(auth_mode)
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-    let mut argv = match session_id {
-        Some(session_id) => adapter
-            .build_resume_command_with_context(
-                Some(session_id),
-                auth_mode,
-                Some(&mcp_config),
-                role,
-                model,
-                &tool_refs,
-            )
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_with_tools(auth_mode, Some(&mcp_config), role, model, &tool_refs)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-    };
     let team_id = agent
         .get("owner_team_id")
         .and_then(|v| v.as_str());
-    crate::lifecycle::launch::fill_spawn_placeholders_full(&mut argv, workspace, agent_id.as_str(), team_id);
+    let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
+        mcp_config,
+        workspace,
+        agent_id.as_str(),
+        team_id.unwrap_or(""),
+    );
+    let mcp_config_path =
+        crate::lifecycle::launch::write_worker_mcp_config(workspace, agent_id.as_str(), &mcp_config)?;
+    let profile_launch =
+        crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+            workspace,
+            agent_id.as_str(),
+            agent,
+            Some(&mcp_config),
+        )?;
+    let command_model = profile_launch
+        .command_overrides
+        .model
+        .as_deref()
+        .or(model);
+    let context = crate::provider::ProviderCommandContext {
+        auth_mode,
+        mcp_config: Some(&mcp_config),
+        system_prompt: role,
+        model: command_model,
+        tools: &tool_refs,
+        profile_launch: Some(&profile_launch),
+    };
+    let mut plan = match session_id {
+        Some(session_id) => adapter
+            .build_resume_command_plan(Some(session_id), context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        None => adapter
+            .build_command_plan(context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+    };
+    if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
+        crate::lifecycle::launch::point_native_mcp_config_at_file(
+            &mut plan.argv,
+            provider,
+            &mcp_config_path,
+        );
+    }
+    crate::lifecycle::launch::fill_spawn_placeholders_full(
+        &mut plan.argv,
+        workspace,
+        agent_id.as_str(),
+        team_id,
+    );
     let tmux_start_mode = if into_existing_session {
         "new-window"
     } else {
@@ -450,7 +526,7 @@ fn write_start_agent_start_event(
                 "session": session_name.as_str(),
                 "window": window,
                 "tmux_start_mode": tmux_start_mode,
-                "command": argv,
+                "command": plan.argv,
                 "mcp_config": agent.get("mcp_config").cloned().unwrap_or(serde_json::Value::Null),
             }),
         )

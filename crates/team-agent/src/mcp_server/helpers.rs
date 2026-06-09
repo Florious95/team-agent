@@ -60,6 +60,7 @@ pub(crate) fn tool_error_reason_wire(reason: ToolErrorReason) -> &'static str {
         ToolErrorReason::InvalidToolArguments => "invalid_tool_arguments",
         ToolErrorReason::InternalRuntimeError => "internal_runtime_error",
         ToolErrorReason::PeerNotInScope => "peer_not_in_scope",
+        ToolErrorReason::McpScopeRefused => "mcp.scope_refused",
     }
 }
 

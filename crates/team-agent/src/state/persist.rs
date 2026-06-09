@@ -274,6 +274,7 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
         return;
     }
     preserve_missing_agents(incoming.get_mut("agents"), latest.get("agents"), deleted_agent_ids);
+    preserve_latest_ownership_fields(incoming, latest);
 
     let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
     if let Some(active_team) = active_team.as_deref() {
@@ -299,14 +300,70 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
                 latest_entry.get("agents"),
                 deleted_agent_ids,
             );
+            preserve_latest_ownership_fields(incoming_entry, latest_entry);
         }
     }
     if let Some(active_team) = active_team.as_deref() {
         let latest_top_agents = latest.get("agents");
         if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
             preserve_missing_agents(incoming_entry.get_mut("agents"), latest_top_agents, deleted_agent_ids);
+            preserve_latest_ownership_fields(incoming_entry, latest);
         }
     }
+}
+
+fn preserve_latest_ownership_fields(incoming: &mut Value, latest: &Value) {
+    if !latest_has_preferable_ownership(incoming, latest) {
+        return;
+    }
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+    for key in ["leader_receiver", "team_owner", "owner_epoch"] {
+        if let Some(value) = latest.get(key).filter(|value| json_truthy(value)) {
+            incoming_obj.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn latest_has_preferable_ownership(incoming: &Value, latest: &Value) -> bool {
+    let latest_epoch = ownership_epoch(latest);
+    let incoming_epoch = ownership_epoch(incoming);
+    if latest_epoch > incoming_epoch {
+        return true;
+    }
+    latest_epoch == incoming_epoch
+        && !ownership_attached(incoming)
+        && ownership_attached(latest)
+}
+
+fn ownership_epoch(state: &Value) -> u64 {
+    state
+        .get("owner_epoch")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            state
+                .get("team_owner")
+                .and_then(|owner| owner.get("owner_epoch"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| {
+            state
+                .get("leader_receiver")
+                .and_then(|receiver| receiver.get("owner_epoch"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0)
+}
+
+fn ownership_attached(state: &Value) -> bool {
+    ["leader_receiver", "team_owner"].into_iter().any(|key| {
+        state
+            .get(key)
+            .and_then(|value| value.get("pane_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
+    })
 }
 
 fn preserve_missing_agents(

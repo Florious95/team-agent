@@ -20,6 +20,14 @@ const TRUST_MARKERS: &[&str] = &[
     "Do you trust this folder?",
 ];
 const UPDATE_MARKERS: &[&str] = &["Update available!", "Update now"];
+const CLAUDE_TRUST_MARKERS: &[&str] = &[
+    "Quick safety check",
+    "Is this a project you created or one you trust?",
+    "Yes, I trust this folder",
+    "No, exit",
+    "Enter to confirm",
+];
+const CLAUDE_READY_MARKERS: &[&str] = &["Claude Code"];
 /// Plain ready markers (not the bare `›` glyph — that glyph also indicates a
 /// numbered-menu selector and is handled by [`rightmost_input_prompt_glyph`] with
 /// shape gating per N15 / CR-063: detect by SHAPE, not a single Unicode codepoint).
@@ -87,6 +95,17 @@ pub fn classify_codex_startup_screen(output: &str) -> StartupScreenDecision {
     }
 }
 
+pub fn classify_claude_startup_screen(output: &str) -> StartupScreenDecision {
+    if has_active_claude_yes_trust_shape(output) {
+        return StartupScreenDecision::AnswerWorkspaceTrust;
+    }
+    if has_claude_ready_shape(output) {
+        StartupScreenDecision::Ready
+    } else {
+        StartupScreenDecision::KeepPolling
+    }
+}
+
 /// Actionable trust shape (N15): the captured text contains a trust phrase AND a
 /// numbered-menu selector line `› <digit>. `. This is the modal-still-active signal
 /// that survives Codex's pre-rendering of the banner/input prompt below the menu.
@@ -119,6 +138,51 @@ fn contains_numbered_menu_glyph(output: &str) -> bool {
         start = tail_start;
     }
     false
+}
+
+fn has_active_claude_yes_trust_shape(output: &str) -> bool {
+    if !CLAUDE_TRUST_MARKERS
+        .iter()
+        .all(|marker| output.contains(marker))
+    {
+        return false;
+    }
+    output
+        .lines()
+        .map(str::trim_start)
+        .any(|line| {
+            line == "❯ 1. Yes, I trust this folder"
+                || line == "> 1. Yes, I trust this folder"
+        })
+}
+
+fn has_claude_ready_shape(output: &str) -> bool {
+    max_rfind(output, CLAUDE_READY_MARKERS).is_some()
+        && rightmost_claude_input_prompt_glyph(output).is_some()
+}
+
+fn rightmost_claude_input_prompt_glyph(output: &str) -> Option<usize> {
+    let mut best = rightmost_input_prompt_for_glyph(output, '❯');
+    best = max_two(best, rightmost_input_prompt_for_glyph(output, '>'));
+    best
+}
+
+fn rightmost_input_prompt_for_glyph(output: &str, glyph: char) -> Option<usize> {
+    let glyph_len = glyph.len_utf8();
+    let mut best = None;
+    let mut start = 0;
+    while let Some(rel) = output[start..].find(glyph) {
+        let abs = start + rel;
+        let tail_start = abs + glyph_len;
+        if tail_start <= output.len() && !is_numbered_menu_tail(&output[tail_start..]) {
+            best = Some(abs);
+        }
+        start = tail_start;
+        if start > output.len() {
+            break;
+        }
+    }
+    best
 }
 
 /// Rightmost `›` whose tail is NOT a numbered-menu selector (` <digit>. `). A bare
@@ -199,6 +263,36 @@ pub fn codex_handle_startup_prompts(
             }
             StartupScreenDecision::Ready => break,
             StartupScreenDecision::KeepPolling => sleep_between_polls(sleep_s),
+        }
+    }
+    handled
+}
+
+pub fn claude_handle_startup_prompts(
+    transport: &dyn Transport,
+    target: &Target,
+    checks: usize,
+    sleep_s: f64,
+) -> Vec<HandledPrompt> {
+    let mut handled = Vec::new();
+    for _ in 0..checks {
+        let screen = match transport.capture(target, CaptureRange::Full) {
+            Ok(captured) => captured.text,
+            Err(_) => String::new(),
+        };
+        match classify_claude_startup_screen(&screen) {
+            StartupScreenDecision::AnswerWorkspaceTrust => {
+                let _ = transport.send_keys(target, &[Key::Enter]);
+                handled.push(HandledPrompt {
+                    prompt: "claude_workspace_trust".to_string(),
+                    action: "sent_enter".to_string(),
+                });
+                sleep_between_polls(sleep_s);
+            }
+            StartupScreenDecision::Ready => break,
+            StartupScreenDecision::SkipUpdatePrompt | StartupScreenDecision::KeepPolling => {
+                sleep_between_polls(sleep_s);
+            }
         }
     }
     handled

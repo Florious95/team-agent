@@ -88,13 +88,7 @@ pub fn awaiting_human_confirm_reason(
                 None
             }
         }
-        ApprovalKind::Command => {
-            if leader_auto_approval_allowed {
-                None
-            } else {
-                Some("leader_restricted")
-            }
-        }
+        ApprovalKind::Command => Some("command_approval_requires_human"),
         ApprovalKind::Unknown => Some("approval_requires_human"),
     }
 }

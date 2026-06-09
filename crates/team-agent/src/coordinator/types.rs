@@ -152,6 +152,10 @@ pub enum OrphanReason {
     WorkspaceAlive,
     /// 无法解析 cmdline → 无法判定 workspace。
     CmdlineUnparsed,
+    /// workspace 仍存在,但 coordinator metadata 不指向该 pid/schema。
+    MetadataMismatch,
+    /// ps 列表仍有命令残留,但 pid 已不再存活。
+    PidNotRunning,
 }
 
 // ===========================================================================
@@ -553,20 +557,28 @@ pub struct DeadlockAlert {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
     pub agent_id: AgentId,
-    pub raw: Value,
+    pub provider: Option<Provider>,
+    pub observed: bool,
+    pub reason: Option<String>,
+    pub recommendation: Option<String>,
 }
 
 /// `detect_session_drift` 结果(`messaging/session_drift.py`,step 11 拥有)。**PLACEHOLDER**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionDriftResult {
     pub agent_id: AgentId,
-    pub raw: Value,
+    pub stored_session_id: Option<String>,
+    pub observed_session_id: Option<String>,
+    pub status: String,
 }
 
 /// `detect_leader_api_errors` 结果(`messaging/leader_api_errors.py`,step 11 拥有)。**PLACEHOLDER**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaderApiError {
-    pub raw: Value,
+    pub provider: Option<Provider>,
+    pub pane_id: Option<String>,
+    pub fingerprint: String,
+    pub message: String,
 }
 
 /// `_collect_results_and_notify_watchers` 结果(`results.py:430`,step 11 拥有)。**PLACEHOLDER**。

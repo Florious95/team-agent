@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
-use serial_test::serial;
+use serial_test::{file_serial, serial};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{launch_with_transport, quick_start_with_transport, QuickStartReport};
 use team_agent::message_store::MessageStore;
@@ -246,7 +246,8 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
 }
 
 #[test]
-#[serial(tmux)]
+#[ignore = "real-machine: needs real tmux/coordinator/binary"]
+#[file_serial(tmux)]
 fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default_socket() {
     let workspace = temp_ws("leader-default-socket-e2e");
     let leader_pane = PaneId::new("%default-leader");

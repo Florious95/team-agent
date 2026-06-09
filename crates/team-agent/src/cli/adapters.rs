@@ -44,6 +44,9 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
     let team_root = args.workspace.join(".team");
     let spec_path = team_root.join("current").join("team.spec.yaml");
     let state_path = args.workspace.join("team_state.md");
+    let team_md_path = args.workspace.join("TEAM.md");
+    let agents_dir = args.workspace.join("agents");
+    let default_agent_path = agents_dir.join("worker.md");
     if spec_path.exists() && !args.force {
         return Err(CliError::Runtime(format!(
             "{} already exists; pass --force to overwrite",
@@ -57,10 +60,23 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
         team_root.join("logs"),
         team_root.join("messages"),
         team_root.join("artifacts"),
+        agents_dir.clone(),
     ] {
         std::fs::create_dir_all(&dir)?;
     }
     std::fs::write(&spec_path, INIT_SPEC_TEMPLATE)?;
+    if args.force || !team_md_path.exists() {
+        std::fs::write(
+            &team_md_path,
+            "---\nname: current\nobjective: Pending.\nprovider: fake\n---\n\nPending.\n",
+        )?;
+    }
+    if args.force || !default_agent_path.exists() {
+        std::fs::write(
+            &default_agent_path,
+            "---\nname: worker\nrole: Worker\nprovider: fake\ntools:\n  - mcp_team\n---\n\nWait for instructions.\n",
+        )?;
+    }
     if args.force || !state_path.exists() {
         std::fs::write(&state_path, INIT_STATE_TEMPLATE)?;
     }
@@ -92,8 +108,30 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         args.yes,
         args.fresh,
     )?;
-    if args.json || value.get("ok").and_then(Value::as_bool) == Some(false) {
-        Ok(CmdResult::from_json(value, args.json))
+    let readiness = value.get("readiness").and_then(Value::as_object);
+    let all_resumable_have_session = readiness
+        .and_then(|readiness| readiness.get("all_resumable_have_session"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let session_capture_incomplete = readiness
+        .and_then(|readiness| readiness.get("session_capture_incomplete"))
+        .and_then(Value::as_bool)
+        .unwrap_or(!all_resumable_have_session);
+    let readiness_ready = readiness
+        .and_then(|readiness| readiness.get("ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let status = value.get("status").and_then(Value::as_str).map(str::to_string);
+    if args.json
+        || value.get("ok").and_then(Value::as_bool) == Some(false)
+        || session_capture_incomplete
+        || !readiness_ready
+    {
+        let mut result = CmdResult::from_json(value, args.json);
+        if args.json && status.as_deref() == Some("pending_tool_load") {
+            result.exit = ExitCode::Ok;
+        }
+        Ok(result)
     } else {
         Ok(CmdResult::human(
             value
@@ -360,7 +398,18 @@ pub fn cmd_settle(args: &SettleArgs) -> Result<CmdResult, CliError> {
 }
 
 fn settle_value(workspace: &Path) -> Result<Value, CliError> {
-    let mut collect = messaging::collect(workspace, None, false)?;
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        None,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut collect = messaging::collect_for_team(
+        &selected.run_workspace,
+        None,
+        false,
+        Some(&selected.team_key),
+    )?;
     if collect.get("ok").and_then(Value::as_bool) == Some(false) {
         let message = collect
             .get("error")
@@ -369,7 +418,7 @@ fn settle_value(workspace: &Path) -> Result<Value, CliError> {
         return Err(CliError::Runtime(message.to_string()));
     }
     let coordinator_log = crate::coordinator::coordinator_log_path(
-        &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
+        &crate::coordinator::WorkspacePath::new(selected.run_workspace.clone()),
     );
     let collect_object = collect
         .as_object_mut()
@@ -382,19 +431,90 @@ fn settle_value(workspace: &Path) -> Result<Value, CliError> {
             "log": coordinator_log.to_string_lossy().to_string(),
         }),
     );
-    let status = status_port::status(workspace, true, false)?;
-    let details_log = write_settle_details_log(workspace, &collect, &status)?;
+    collect_object.insert("team_key".to_string(), json!(selected.team_key.clone()));
+    collect_object.insert("active_team_key".to_string(), json!(selected.team_key.clone()));
+    collect_object.insert("team".to_string(), json!(selected.team_key.clone()));
+    if let Some(collected_results) = collect_object.get("collected_results").cloned() {
+        collect_object.insert("collected".to_string(), collected_results);
+    }
+    let status_state =
+        crate::state::projection::select_runtime_state(&selected.run_workspace, Some(&selected.team_key))?;
+    let state_file = match (selected.spec_path.as_ref(), selected.spec_workspace.as_ref()) {
+        (Some(spec_path), Some(spec_workspace)) => match load_team_spec_at(spec_path)? {
+            Some(spec) => crate::lifecycle::restart::write_team_state(spec_workspace, &spec, &status_state)
+                .map_err(|e| CliError::Runtime(e.to_string()))?
+                .to_string_lossy()
+                .to_string(),
+            None => collect
+                .get("state_file")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        },
+        _ => collect
+            .get("state_file")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    };
+    if let Some(obj) = collect.as_object_mut() {
+        obj.insert("state_file".to_string(), json!(state_file.clone()));
+    }
+    let mut status = status_port::status_scoped(
+        &selected.run_workspace,
+        &status_state,
+        Some(&selected.team_key),
+        true,
+        false,
+    )?;
+    if let Some(obj) = status.as_object_mut() {
+        obj.insert("team_key".to_string(), json!(selected.team_key.clone()));
+        obj.insert("active_team_key".to_string(), json!(selected.team_key.clone()));
+        obj.insert("team".to_string(), json!(selected.team_key.clone()));
+    }
+    let details_log = write_settle_details_log(&selected.run_workspace, &collect, &status)?;
     let collected_count = collect
         .get("collected")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
+    let settled_results = settle_collected_results_for_team(
+        collect.get("collected_results"),
+        &selected.team_key,
+    );
     Ok(json!({
         "ok": true,
         "summary": format!("collected {collected_count} result(s)"),
         "next_actions": ["Review team_state.md and decide whether to continue or shutdown."],
         "details_log": details_log.to_string_lossy().to_string(),
+        "collected_results": settled_results,
+        "collected": collect.get("collected").cloned().unwrap_or_else(|| json!([])),
+        "results": collect.get("results").cloned().unwrap_or_else(|| json!({})),
+        "state_file": state_file,
+        "status": status,
         "collect": collect,
+        "team_key": selected.team_key,
+        "active_team_key": selected.team_key,
+        "team": selected.team_key,
+        "workspace": selected.run_workspace.to_string_lossy().to_string(),
     }))
+}
+
+fn settle_collected_results_for_team(value: Option<&Value>, team_key: &str) -> Value {
+    let Some(Value::Array(results)) = value else {
+        return json!([]);
+    };
+    Value::Array(
+        results
+            .iter()
+            .map(|result| {
+                let mut result = result.clone();
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("owner_team_id".to_string(), json!(team_key));
+                }
+                result
+            })
+            .collect(),
+    )
 }
 
 fn write_settle_details_log(workspace: &Path, collect: &Value, status: &Value) -> Result<PathBuf, CliError> {
@@ -427,7 +547,13 @@ pub fn cmd_repair_state(args: &RepairStateArgs) -> Result<CmdResult, CliError> {
             args.status
         )));
     }
-    let mut state = crate::state::persist::load_runtime_state(&args.workspace)?;
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        None,
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut state = selected.state;
     let before = find_task_projection(&state, &args.task_id).unwrap_or_else(repair_task_projection_null);
     update_task(
         &mut state,
@@ -437,12 +563,20 @@ pub fn cmd_repair_state(args: &RepairStateArgs) -> Result<CmdResult, CliError> {
         args.summary.as_deref(),
     );
     let after = find_task_projection(&state, &args.task_id).unwrap_or_else(repair_task_projection_null);
-    crate::state::persist::save_runtime_state(&args.workspace, &state)?;
-    let spec = load_team_spec_optional(&args.workspace, &state)?
+    crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)?;
+    let spec_path = selected
+        .spec_path
+        .as_ref()
         .ok_or_else(|| CliError::Runtime("team.spec.yaml not found".to_string()))?;
-    let state_file = crate::lifecycle::restart::write_team_state(&args.workspace, &spec, &state)
+    let spec = load_team_spec_at(spec_path)?
+        .ok_or_else(|| CliError::Runtime("team.spec.yaml not found".to_string()))?;
+    let spec_workspace = selected
+        .spec_workspace
+        .as_ref()
+        .ok_or_else(|| CliError::Runtime("active team spec workspace not found".to_string()))?;
+    let state_file = crate::lifecycle::restart::write_team_state(spec_workspace, &spec, &state)
         .map_err(|e| CliError::Runtime(e.to_string()))?;
-    crate::event_log::EventLog::new(&args.workspace)
+    crate::event_log::EventLog::new(&selected.run_workspace)
         .write(
             "repair_state.task",
             json!({
@@ -466,9 +600,15 @@ pub fn cmd_repair_state(args: &RepairStateArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_diagnose`(`parser.py:298`)。
 pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
-    let state = crate::state::persist::load_runtime_state(&args.workspace)?;
-    let event_log = args.workspace.join(".team").join("logs").join("events.jsonl");
-    let backend = crate::tmux_backend::TmuxBackend::for_workspace(&args.workspace);
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        None,
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let state = selected.state;
+    let event_log = selected.run_workspace.join(".team").join("logs").join("events.jsonl");
+    let backend = crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace);
     let (issues, suggested_repairs) = diagnose_runtime(&state, &backend);
     let ok = issues.as_array().is_some_and(Vec::is_empty);
     Ok(CmdResult::from_json(
@@ -479,6 +619,7 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
             "providers": provider_doctor_checks(),
             "runtime": {
                 "workspace": args.workspace.to_string_lossy().to_string(),
+                "team_key": selected.team_key,
                 "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
                 "leader_receiver": state.get("leader_receiver").cloned().unwrap_or(Value::Null),
                 "agent_count": state.get("agents").and_then(Value::as_object).map_or(0, serde_json::Map::len),
@@ -559,18 +700,33 @@ pub fn cmd_peek(args: &PeekArgs) -> Result<CmdResult, CliError> {
     if !windows.iter().any(|w| w.as_str() == window) {
         return Ok(peek_unavailable(&args.agent, args.json));
     }
+    let range = args
+        .head
+        .map(|head| crate::transport::CaptureRange::Head(head as u32))
+        .unwrap_or_else(|| crate::transport::CaptureRange::Tail(args.tail as u32));
     let capture = backend
         .capture(
             &crate::transport::Target::Pane(crate::transport::PaneId::new(target.clone())),
-            crate::transport::CaptureRange::Tail(args.tail as u32),
+            range,
         )
         .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let matches = args.search.as_ref().map(|needle| {
+        capture
+            .text
+            .lines()
+            .filter(|line| line.contains(needle))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
     Ok(CmdResult::from_json(
         json!({
             "ok": true,
             "agent_id": args.agent,
             "workspace": args.workspace.to_string_lossy().to_string(),
             "tail": args.tail,
+            "head": args.head,
+            "search": args.search,
+            "matches": matches,
             "pane_id": target,
             "text": capture.text,
         }),
@@ -634,6 +790,12 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
         "reason": send.reason,
     });
     if send.ok {
+        if let Some(message_id) = send.message_id.as_deref() {
+            crate::message_store::MessageStore::open(workspace)
+                .map_err(crate::messaging::MessagingError::from)?
+                .mark(message_id, "delivered", None)
+                .map_err(crate::messaging::MessagingError::from)?;
+        }
         let _ = messaging::report_result(
             workspace,
             &json!({
@@ -1083,6 +1245,16 @@ fn load_team_spec_optional(workspace: &Path, state: &Value) -> Result<Option<cra
         .map_err(|e| CliError::Runtime(e.to_string()))
 }
 
+fn load_team_spec_at(spec_path: &Path) -> Result<Option<crate::model::yaml::Value>, CliError> {
+    if !spec_path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(spec_path)?;
+    crate::model::yaml::loads(&text)
+        .map(Some)
+        .map_err(|e| CliError::Runtime(e.to_string()))
+}
+
 /// `cmd_approvals`(`commands.py:112`)。
 pub fn cmd_approvals(args: &ApprovalsArgs) -> Result<CmdResult, CliError> {
     let value = status_port::approvals(&args.workspace, args.agent.as_deref(), args.json)?;
@@ -1198,7 +1370,12 @@ pub fn cmd_shutdown(args: &ShutdownArgs) -> Result<CmdResult, CliError> {
 /// `cmd_restart`(`commands.py:344`)。
 pub fn cmd_restart(args: &RestartArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(
-        lifecycle_port::restart(&args.workspace, args.allow_fresh, args.team.as_deref())?,
+        lifecycle_port::restart(
+            &args.workspace,
+            args.allow_fresh,
+            args.team.as_deref(),
+            args.session_converge_deadline_ms,
+        )?,
         args.json,
     ))
 }
@@ -1314,7 +1491,7 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         return Err(CliError::Runtime("--fix requires --gate".to_string()));
     }
     if args.comms || matches!(args.gate, Some(DoctorGate::Comms)) {
-        let value = diagnose_port::comms_selftest(&args.workspace, args.team.as_deref(), Some("comms"))?;
+        let value = crate::diagnose::comms::doctor_comms_json(&args.workspace, args.team.as_deref(), Some("comms"))?;
         if !args.json {
             let json_tail = serde_json::to_string_pretty(&sort_json(&value))?;
             return Ok(CmdResult::human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")));
@@ -1322,9 +1499,9 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         return Ok(CmdResult::from_json(value, true));
     }
     let value = if matches!(args.gate, Some(DoctorGate::Orphans)) {
-        diagnose_port::orphan_gate(args.fix, args.confirm)?
+        crate::diagnose::orphans::orphan_gate_json(args.fix, args.confirm)?
     } else if args.cleanup_orphans {
-        diagnose_port::cleanup_orphans(args.confirm)?
+        crate::diagnose::orphans::cleanup_orphans_json(args.confirm)?
     } else if args.fix_schema {
         diagnose_port::fix_schema(&args.workspace)?
     } else {

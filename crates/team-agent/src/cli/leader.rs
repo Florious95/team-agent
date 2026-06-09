@@ -47,21 +47,48 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
     Ok(out)
 }
 
+fn leader_launcher_json(values: &[String]) -> bool {
+    values
+        .iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--json")
+}
+
+fn without_leader_json(values: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut provider_remainder = false;
+    for value in values {
+        if provider_remainder || value != "--json" {
+            out.push(value.clone());
+        }
+        if value == "--" {
+            provider_remainder = true;
+        }
+    }
+    out
+}
+
 /// `codex`/`claude` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
 /// **不**进 subparser。`-h`/`--help` 打 usage 直接返回 [`CmdResult::none`]。否则解析 attach
-/// 旗标 + `lifecycle_port::start_leader`。`command` ∈ {codex, claude_code}。
-pub fn cmd_leader_passthrough(command: &str, provider_args: &[String], cwd: &Path) -> Result<CmdResult, CliError> {
+/// 旗标 + `lifecycle_port::start_leader`。`command` ∈ {codex, claude}。
+pub fn cmd_leader_passthrough(
+    command: &str,
+    provider_args: &[String],
+    cwd: &Path,
+) -> Result<CmdResult, CliError> {
     if provider_args == ["-h"] || provider_args == ["--help"] {
         return Ok(CmdResult::none());
     }
-    let attach = leader_launcher_args(provider_args)?;
+    let as_json = leader_launcher_json(provider_args);
+    let launcher_args = without_leader_json(provider_args);
+    let attach = leader_launcher_args(&launcher_args)?;
     let provider = if command == "codex" {
         crate::model::enums::Provider::Codex
     } else {
         crate::model::enums::Provider::ClaudeCode
     };
     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;
-    Ok(CmdResult::from_json(value, false))
+    Ok(CmdResult::from_json(value, as_json))
 }
 
 // =============================================================================
@@ -143,7 +170,11 @@ fn parse_inbox_entries(text: impl AsRef<str>) -> Vec<String> {
 }
 
 fn render_inbox_summary(entries: &[String], budget: usize) -> String {
-    let noun = if entries.len() == 1 { "entry" } else { "entries" };
+    let noun = if entries.len() == 1 {
+        "entry"
+    } else {
+        "entries"
+    };
     let header = format!("Leader inbox: {} new fallback {noun}", entries.len());
     let hint = "Hint: team-agent inbox leader";
     let footer = "Truncated: more fallback entries available; run team-agent inbox leader";
@@ -173,9 +204,7 @@ fn render_inbox_summary(entries: &[String], budget: usize) -> String {
     };
     if char_len(&summary) > budget {
         let keep = budget.saturating_sub(char_len(footer)).saturating_sub(6);
-        let body = prefix_chars(&lines.join("\n"), keep)
-            .trim_end()
-            .to_string();
+        let body = prefix_chars(&lines.join("\n"), keep).trim_end().to_string();
         summary = format!("{body} ...\n{footer}");
     }
     summary

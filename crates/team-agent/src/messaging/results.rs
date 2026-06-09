@@ -6,6 +6,7 @@ use rusqlite::params;
 
 use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
+use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
 
 use super::helpers::{next_result_id, required_str, validate_result_envelope};
 use super::types::SEND_RETRY_MAX_ATTEMPTS;
@@ -98,11 +99,13 @@ fn collect_scoped(
     let mut collected = Vec::new();
     let mut collected_results = Vec::new();
     let mut invalid_results = Vec::new();
+    let mut fatal_invalid_results = 0usize;
     let mut state_dirty = false;
     for row in rows {
         let envelope: serde_json::Value = match serde_json::from_str(&row.envelope) {
             Ok(envelope) => envelope,
             Err(error) => {
+                fatal_invalid_results = fatal_invalid_results.saturating_add(1);
                 record_invalid_result(
                     &conn,
                     &mut invalid_results,
@@ -114,6 +117,7 @@ fn collect_scoped(
             }
         };
         if let Err(error) = validate_result_envelope(&envelope) {
+            fatal_invalid_results = fatal_invalid_results.saturating_add(1);
             record_invalid_result(
                 &conn,
                 &mut invalid_results,
@@ -128,6 +132,9 @@ fn collect_scoped(
         } else if is_message_scoped_result(&conn, &row.task_id, &row.agent_id, owner_team_id)? {
             "message"
         } else {
+            if result_file.is_some() || row.task_id != "manual" {
+                fatal_invalid_results = fatal_invalid_results.saturating_add(1);
+            }
             record_invalid_result(
                 &conn,
                 &mut invalid_results,
@@ -189,7 +196,7 @@ fn collect_scoped(
     }
     let counts = result_counts(&conn, owner_team_id)?;
     Ok(serde_json::json!({
-        "ok": invalid_results.is_empty(),
+        "ok": fatal_invalid_results == 0,
         "collected": collected,
         "collected_results": collected_results,
         "delivered_messages": [],
@@ -479,6 +486,14 @@ pub fn report_result(
     workspace: &Path,
     envelope: &serde_json::Value,
 ) -> Result<serde_json::Value, MessagingError> {
+    report_result_for_owner_team(workspace, envelope, None)
+}
+
+pub fn report_result_for_owner_team(
+    workspace: &Path,
+    envelope: &serde_json::Value,
+    explicit_owner_team: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
     validate_result_envelope(envelope)?;
     let store = MessageStore::open(workspace)?;
     let result_id = envelope
@@ -497,7 +512,10 @@ pub fn report_result(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let state_for_owner = crate::state::persist::load_runtime_state(workspace)
         .unwrap_or(serde_json::json!({}));
-    let owner_team = super::leader_receiver::active_team_key(workspace, &state_for_owner);
+    let owner_team = explicit_owner_team
+        .filter(|team| !team.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| super::leader_receiver::active_team_key(workspace, &state_for_owner));
     let inserted = insert_result_if_absent(
         &conn,
         &result_id,
@@ -513,7 +531,7 @@ pub fn report_result(
             "mcp.report_result_duplicate_ignored",
             serde_json::json!({
                 "notification_status": "duplicate_ignored",
-                "owner_team_id": null,
+                "owner_team_id": owner_team,
                 "result_id": result_id,
             }),
         )?;
@@ -545,7 +563,7 @@ pub fn report_result(
     // legacy path was MUST-8 / I-3 violating (the deferred notification status was returned
     // to the caller as "success" while leader actually never saw the result text).
     let content = format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
-    let state = crate::state::persist::load_runtime_state(workspace).unwrap_or(serde_json::json!({}));
+    let state = report_owner_state(&state_for_owner, &owner_team);
     let event_log = EventLog::new(workspace);
     let mut outcome = super::leader_receiver::send_to_leader_receiver(
         workspace,
@@ -558,19 +576,72 @@ pub fn report_result(
         Some(&result_id),
         &event_log,
     )?;
-    if matches!(outcome.status, crate::messaging::DeliveryStatus::Queued) {
-        if let Some(message_id) = outcome.message_id.clone() {
+    if let Some(message_id) = outcome.message_id.clone() {
             let store = MessageStore::open(workspace)?;
             let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-            outcome = super::delivery::deliver_pending_message(
-                workspace,
-                &store,
-                &transport,
-                &message_id,
-                &event_log,
-                &state,
-            )?;
-        }
+            let delivery_state_raw = crate::state::persist::load_runtime_state(workspace)
+                .unwrap_or_else(|_| state_for_owner.clone());
+            let delivery_state = report_owner_state(&delivery_state_raw, &owner_team);
+            for attempt in 0..3 {
+                let _ = store.mark(&message_id, "accepted", None);
+                outcome = super::delivery::deliver_pending_message(
+                    workspace,
+                    &store,
+                    &transport,
+                    &message_id,
+                    &event_log,
+                    &delivery_state,
+                )?;
+                if outcome.ok {
+                    break;
+                }
+                let delivered = super::delivery::deliver_pending_messages(
+                    workspace,
+                    &delivery_state,
+                    &transport,
+                    &event_log,
+                )?;
+                if delivered.iter().any(|delivered_id| delivered_id == &message_id) {
+                    outcome = crate::messaging::DeliveryOutcome {
+                        ok: true,
+                        status: crate::messaging::DeliveryStatus::Delivered,
+                        message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
+                        message_id: Some(message_id.clone()),
+                        verification: None,
+                        stage: None,
+                        reason: None,
+                        channel: Some("leader_receiver".to_string()),
+                    };
+                    break;
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            match inject_leader_notification_direct(workspace, &delivery_state, &content, &message_id) {
+                Ok(()) => {
+                    store.mark(&message_id, "delivered", None)?;
+                    outcome = crate::messaging::DeliveryOutcome {
+                        ok: true,
+                        status: crate::messaging::DeliveryStatus::Delivered,
+                        message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
+                        message_id: Some(message_id),
+                        verification: None,
+                        stage: None,
+                        reason: None,
+                        channel: Some("leader_receiver".to_string()),
+                    };
+                }
+                Err(reason) => {
+                    event_log.write(
+                        "leader_receiver.direct_inject_skipped",
+                        serde_json::json!({
+                            "message_id": message_id,
+                            "reason": reason,
+                        }),
+                    )?;
+                }
+            }
     }
     let leader_notified = outcome.ok;
     let notification_status_wire = if outcome.ok {
@@ -590,7 +661,7 @@ pub fn report_result(
             "notification_channel": channel,
             "notification_message_id": outcome.message_id,
             "notification_status": notification_status_wire,
-            "owner_team_id": null,
+            "owner_team_id": owner_team,
             "result_id": result_id,
         }),
     )?;
@@ -622,6 +693,72 @@ pub fn report_result(
     }
     out.insert("notification_event_id".to_string(), serde_json::Value::Null);
     Ok(serde_json::Value::Object(out))
+}
+
+fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
+    let mut state = match crate::state::projection::resolve_owner_team_id(state, owner_team)
+        .canonical_key()
+    {
+        Some(team) => crate::state::projection::project_top_level_view(state, team),
+        None => state.clone(),
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::Value::String(owner_team.to_string()),
+        );
+    }
+    state
+}
+
+fn inject_leader_notification_direct(
+    workspace: &Path,
+    state: &serde_json::Value,
+    content: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    let Some(pane_id) = state
+        .get("leader_receiver")
+        .or_else(|| state.get("team_owner"))
+        .and_then(|receiver| receiver.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty() && *pane != "__team_agent_unbound__")
+    else {
+        return Err("leader_direct_inject_failed:no_bound_pane".to_string());
+    };
+    let rendered = format!(
+        "Team Agent message from leader_receiver:\n\n{content}\n\n[team-agent-token:{message_id}]"
+    );
+    let target = Target::Pane(PaneId::new(pane_id));
+    if let Some(socket) = state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|socket| !socket.is_empty())
+    {
+        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+        if backend
+            .inject(&target, &InjectPayload::Text(rendered.clone()), Key::Enter, true)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    let workspace_backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+    if workspace_backend
+        .inject(&target, &InjectPayload::Text(rendered.clone()), Key::Enter, true)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let default_backend = crate::tmux_backend::TmuxBackend::new();
+    if default_backend
+        .inject(&target, &InjectPayload::Text(rendered), Key::Enter, true)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    Err(format!("leader_direct_inject_failed:pane={pane_id}"))
 }
 
 fn insert_result_if_absent(

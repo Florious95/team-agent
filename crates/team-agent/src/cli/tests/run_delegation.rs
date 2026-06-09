@@ -4,6 +4,39 @@ struct TeamSocketGuard {
     ws: std::path::PathBuf,
 }
 
+struct EnvGuard {
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvGuard {
+    fn unset(keys: &[&'static str]) -> Self {
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.previous.drain(..).rev() {
+            unsafe {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+    }
+}
+
 impl Drop for TeamSocketGuard {
     fn drop(&mut self) {
         crate::tmux_backend::TmuxBackend::for_workspace(&self.ws).kill_server();
@@ -122,7 +155,18 @@ fn current_uid() -> Option<String> {
     #[ignore = "real-machine: quick-start --yes spawns a real team (tmux) + coordinator daemon"]
     fn run_dispatches_quick_start_compiles_spec() {
         // The full quick-start path spawns workers + the coordinator; on a real machine we assert it
-        // dispatched to cmd_quick_start (team.spec.yaml compiled under the team dir) + ExitCode::Ok.
+        // dispatched to cmd_quick_start (team.spec.yaml compiled under the team dir). With no positive
+        // caller pane, honest-readiness reports leader_receiver_unbound and exits nonzero.
+        let _env = EnvGuard::unset(&[
+            "TMUX",
+            "TMUX_PANE",
+            "TEAM_AGENT_ID",
+            "TEAM_AGENT_TEAM_ID",
+            "TEAM_AGENT_LEADER_PANE_ID",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+            "TEAM_AGENT_LEADER_PROVIDER",
+        ]);
         let dir = std::env::temp_dir().join(format!("ta-cli-qs-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         std::fs::write(dir.join("TEAM.md"), "---\nname: t\nobjective: o\nprovider: codex\n---\n\nteam.\n").unwrap();
@@ -134,7 +178,11 @@ fn current_uid() -> Option<String> {
         let argv = vec!["quick-start".to_string(), dir.to_string_lossy().to_string(), "--yes".to_string()];
         let exit = run(&argv, Path::new("."));
         assert!(dir.join("team.spec.yaml").exists(), "quick-start must compile the spec under the team dir");
-        assert_eq!(exit, ExitCode::Ok);
+        assert_eq!(
+            exit,
+            ExitCode::Error,
+            "quick-start must still dispatch and compile, but an unbound leader receiver is an honest-readiness failure, not ExitCode::Ok"
+        );
     }
 
     // =========================================================================
@@ -200,7 +248,13 @@ fn current_uid() -> Option<String> {
     #[test]
     fn cli_restart_missing_spec_surfaces_real_teamselect() {
         let ws = deleg_uniq_dir("restart"); // no team.spec.yaml
-        let args = RestartArgs { workspace: ws, team: None, allow_fresh: false, json: true };
+        let args = RestartArgs {
+            workspace: ws,
+            team: None,
+            allow_fresh: false,
+            session_converge_deadline_ms: None,
+            json: true,
+        };
         let text = outcome_text(cmd_restart(&args));
         assert!(
             text.contains("missing spec for restart"),

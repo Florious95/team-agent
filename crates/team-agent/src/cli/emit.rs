@@ -40,19 +40,18 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("{}", command_help(None));
         return ExitCode::Ok;
     }
-    // CR-063/G4: every REGISTERED subcommand's `--help` must short-circuit BEFORE dispatch —
-    // before argument validation, leader-pane checks, or runtime-state writes. The prior
-    // `command_has_help` whitelist (quick-start/start/stop/...) silently dropped `--help`
-    // for add-agent / stop-agent / reset-agent / claim-leader / attach-leader, so those
-    // fell into handlers that emitted "missing agent" or "caller_not_leader_shaped" and
-    // created `.team/logs/cli-error-*.log` under cwd.
+    // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
+    // before argument validation, leader-pane checks, or runtime-state writes.
     //
     // The gate stays on KNOWN subcommands so an unknown command still falls through to
     // the argparse-style invalid-choice path (golden parser.py:84; covered by
     // `cli_unknown_command_red` and the `claude_code` divergence guard which would
     // otherwise be silently passthrough-shaped).
     if is_known_subcommand(command)
-        && argv.iter().skip(1).any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        && argv
+            .iter()
+            .skip(1)
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
     {
         println!("{}", command_help(Some(command)));
         return ExitCode::Ok;
@@ -78,8 +77,11 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
         "compile" => cmd_compile(&compile_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
-        "allow-peer-talk" => cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result),
-        "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref()).map(emit_result),
+        "allow-peer-talk" => {
+            cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result)
+        }
+        "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
+            .map(emit_result),
         "stop" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
         "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
         "restart" => cmd_restart(&restart_args(args, cwd)).map(emit_result),
@@ -92,9 +94,13 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "remove-agent" => cmd_remove_agent(&remove_agent_args(args, cwd)?).map(emit_result),
         "stuck-list" => cmd_stuck_list(&stuck_list_args(args, cwd)).map(emit_result),
         "stuck-cancel" => cmd_stuck_cancel(&stuck_cancel_args(args, cwd)?).map(emit_result),
-        "acknowledge-idle" => cmd_acknowledge_idle(&acknowledge_idle_args(args, cwd)).map(emit_result),
+        "acknowledge-idle" => {
+            cmd_acknowledge_idle(&acknowledge_idle_args(args, cwd)).map(emit_result)
+        }
         "takeover" => cmd_takeover(&takeover_args(args, cwd)).map(emit_result),
         "claim-leader" => cmd_claim_leader(&claim_leader_args(args, cwd)).map(emit_result),
+        // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
+        "attach-leader" => cmd_attach_leader(&attach_leader_args(args, cwd)?).map(emit_result),
         "identity" => cmd_identity(&identity_args(args, cwd)).map(emit_result),
         "approvals" => cmd_approvals(&approvals_args(args, cwd)).map(emit_result),
         "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_result),
@@ -108,7 +114,10 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
             Ok(ExitCode::Usage)
         }
         "validate-result" => cmd_validate_result(&validate_result_args(args)?).map(emit_result),
-        "collect" => cmd_collect_for_team(&collect_args(args, cwd), parse_args(args).team.as_deref()).map(emit_result),
+        "collect" => {
+            cmd_collect_for_team(&collect_args(args, cwd), parse_args(args).team.as_deref())
+                .map(emit_result)
+        }
         "settle" => cmd_settle(&settle_args(args, cwd)).map(emit_result),
         "repair-state" => cmd_repair_state(&repair_state_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
@@ -143,6 +152,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "acknowledge-idle",
     "takeover",
     "claim-leader",
+    "attach-leader",
     "identity",
     "approvals",
     "inbox",
@@ -163,15 +173,15 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "coordinator",
 ];
 
-const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start", "purge-agent", "attach-leader"];
+const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start", "purge-agent"];
 
 fn emit_missing_subcommand_usage() -> ExitCode {
     emit_usage_error("the following arguments are required: {codex,claude,...,doctor}");
     ExitCode::Usage
 }
 
-/// Registered subcommands (the dispatch table) PLUS spec-only verbs that have no
-/// dispatch arm yet but must still respond to `--help` per CR-063/G4 (`attach-leader`).
+/// Registered subcommands (the dispatch table) plus spec-only verbs that have no
+/// dispatch arm yet but must still respond to `--help` per CR-063/G4.
 /// Used by the `--help` short-circuit gate so unknown commands keep falling through
 /// to the argparse invalid-choice path.
 fn is_known_subcommand(command: &str) -> bool {
@@ -198,7 +208,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]".to_string(),
         Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
-        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--json]".to_string(),
+        Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]".to_string(),
         Some("restart-agent") => "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
         Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
@@ -212,7 +222,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("acknowledge-idle") => "usage: team-agent acknowledge-idle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
         Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
-        Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
+        Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]".to_string(),
         Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("approvals") => "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--json]".to_string(),
         Some("inbox") => "usage: team-agent inbox AGENT [--workspace WORKSPACE] [--limit N] [--since CURSOR] [--json]".to_string(),
@@ -223,13 +233,13 @@ fn command_help(command: Option<&str>) -> String {
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
         Some("validate-result") => "usage: team-agent validate-result [ENVELOPE] [--file FILE|--result JSON] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
-        Some("settle") => "usage: team-agent settle [--workspace WORKSPACE] [--json]".to_string(),
+        Some("settle") => "usage: team-agent settle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("repair-state") => "usage: team-agent repair-state --task TASK --status STATUS [SUMMARY] [--assignee AGENT] [--workspace WORKSPACE] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--timeout SECONDS] [--json]".to_string(),
         Some("e2e") => "usage: team-agent e2e [--workspace WORKSPACE] [--providers LIST] [--real] [--json]".to_string(),
-        Some("peek") => "usage: team-agent peek AGENT [--workspace WORKSPACE] [--tail N] [--allow-raw-screen] [--json]".to_string(),
+        Some("peek") => "usage: team-agent peek AGENT [--workspace WORKSPACE] [--tail N|--head N] [--search TEXT] [--allow-raw-screen] [--json]".to_string(),
         Some("coordinator") => "usage: team-agent coordinator [--workspace WORKSPACE] [--once] [--tick-interval SECONDS]".to_string(),
         Some(other) => format!("usage: team-agent {other} [options]"),
     }
@@ -261,8 +271,8 @@ pub fn cmd_validate(args: &ValidateArgs) -> Result<CmdResult, CliError> {
 fn validate_spec_file(spec_path: &Path) -> Result<Value, CliError> {
     let text = std::fs::read_to_string(spec_path)?;
     let base_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let spec = crate::model::spec::load_and_validate_spec(&text, base_dir)
-        .map_err(model_error_to_cli)?;
+    let spec =
+        crate::model::spec::load_and_validate_spec(&text, base_dir).map_err(model_error_to_cli)?;
     let team = spec
         .get("team")
         .and_then(|team| team.get("name"))
@@ -381,12 +391,28 @@ fn cli_error_log_path(workspace: &Path) -> PathBuf {
 struct PythonCompactFormatter;
 
 impl serde_json::ser::Formatter for PythonCompactFormatter {
-    fn begin_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
-        if first { Ok(()) } else { w.write_all(b", ") }
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            w.write_all(b", ")
+        }
     }
 
-    fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
-        if first { Ok(()) } else { w.write_all(b", ") }
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        if first {
+            Ok(())
+        } else {
+            w.write_all(b", ")
+        }
     }
 
     fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W) -> std::io::Result<()> {
@@ -430,6 +456,7 @@ struct ParsedArgs {
     summary: bool,
     keep_logs: bool,
     allow_fresh: bool,
+    session_converge_deadline_ms: Option<u64>,
     force: bool,
     no_display: bool,
     discard_session: bool,
@@ -452,6 +479,8 @@ struct ParsedArgs {
     providers: Option<String>,
     allow_raw_screen: bool,
     tail: Option<usize>,
+    head: Option<usize>,
+    search: Option<String>,
     result_file: Option<PathBuf>,
     file: Option<PathBuf>,
     result: Option<String>,
@@ -459,6 +488,8 @@ struct ParsedArgs {
     assignee: Option<String>,
     out: Option<PathBuf>,
     auth_mode: Option<String>,
+    pane: Option<String>,
+    provider: Option<String>,
     message_id: Option<String>,
 }
 
@@ -486,12 +517,18 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--requires-ack" => parsed.requires_ack = true,
             "--no-ack" => parsed.no_ack = true,
             "--no-wait" => parsed.no_wait = true,
-            "--timeout" => parsed.timeout = next_arg(args, &mut i).and_then(|v| v.parse::<f64>().ok()),
+            "--timeout" => {
+                parsed.timeout = next_arg(args, &mut i).and_then(|v| v.parse::<f64>().ok())
+            }
             "--confirm-human" => parsed.confirm_human = true,
             "--detail" => parsed.detail = true,
             "--summary" => parsed.summary = true,
             "--keep-logs" => parsed.keep_logs = true,
             "--allow-fresh" => parsed.allow_fresh = true,
+            "--session-converge-deadline" => {
+                parsed.session_converge_deadline_ms =
+                    next_arg(args, &mut i).and_then(|v| parse_seconds_ms(&v));
+            }
             "--force" => parsed.force = true,
             "--no-display" => parsed.no_display = true,
             "--discard-session" => parsed.discard_session = true,
@@ -501,7 +538,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--from-spec" => parsed.from_spec = true,
             "--confirm" => parsed.confirm = true,
             "--alert-type" => parsed.alert_type = next_arg(args, &mut i),
-            "--limit" => parsed.limit = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
+            "--limit" => {
+                parsed.limit = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok())
+            }
             "--since" => parsed.since = next_arg(args, &mut i),
             "--gate" => parsed.gate = next_arg(args, &mut i),
             "--comms" => parsed.comms = true,
@@ -509,11 +548,15 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--fix-schema" => parsed.fix_schema = true,
             "--cleanup-orphans" => parsed.cleanup_orphans = true,
             "--once" => parsed.once = true,
-            "--tick-interval" => parsed.tick_interval = next_arg(args, &mut i).and_then(|v| v.parse::<f64>().ok()),
+            "--tick-interval" => {
+                parsed.tick_interval = next_arg(args, &mut i).and_then(|v| v.parse::<f64>().ok())
+            }
             "--status" => parsed.status_value = next_arg(args, &mut i),
             "--providers" => parsed.providers = next_arg(args, &mut i),
             "--allow-raw-screen" => parsed.allow_raw_screen = true,
             "--tail" => parsed.tail = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
+            "--head" => parsed.head = next_arg(args, &mut i).and_then(|v| v.parse::<usize>().ok()),
+            "--search" => parsed.search = next_arg(args, &mut i),
             "--result-file" => parsed.result_file = next_arg(args, &mut i).map(PathBuf::from),
             "--file" => parsed.file = next_arg(args, &mut i).map(PathBuf::from),
             "--result" => parsed.result = next_arg(args, &mut i),
@@ -521,10 +564,18 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--assignee" => parsed.assignee = next_arg(args, &mut i),
             "--out" => parsed.out = next_arg(args, &mut i).map(PathBuf::from),
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
+            "--pane" => parsed.pane = next_arg(args, &mut i),
+            "--provider" => parsed.provider = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
             "-h" | "--help" => {}
             other if other.starts_with("--team=") => {
                 parsed.team = Some(other.trim_start_matches("--team=").to_string());
+            }
+            other if other.starts_with("--pane=") => {
+                parsed.pane = Some(other.trim_start_matches("--pane=").to_string());
+            }
+            other if other.starts_with("--provider=") => {
+                parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
             }
             other if other.starts_with('-') => {}
             other => parsed.positionals.push(other.to_string()),
@@ -539,8 +590,26 @@ fn next_arg(args: &[String], index: &mut usize) -> Option<String> {
     args.get(*index).cloned()
 }
 
+fn parse_seconds_ms(raw: &str) -> Option<u64> {
+    let seconds = raw.parse::<f64>().ok()?;
+    if seconds.is_finite() && seconds >= 0.0 {
+        Some((seconds * 1000.0).round() as u64)
+    } else {
+        None
+    }
+}
+
+fn parse_cli_provider(raw: Option<&str>) -> Result<crate::provider::Provider, CliError> {
+    let raw = raw.unwrap_or("codex");
+    serde_json::from_value::<crate::provider::Provider>(serde_json::json!(raw))
+        .map_err(|_| CliError::Runtime(format!("unknown provider: {raw}")))
+}
+
 fn workspace(parsed: &ParsedArgs, cwd: &Path) -> PathBuf {
-    parsed.workspace.clone().unwrap_or_else(|| cwd.to_path_buf())
+    parsed
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cwd.to_path_buf())
 }
 
 fn required_pos(parsed: &ParsedArgs, index: usize, name: &str) -> Result<String, CliError> {
@@ -591,7 +660,9 @@ fn compile_args(args: &[String], cwd: &Path) -> Result<CompileArgs, CliError> {
         .as_deref()
         .map(PathBuf::from)
         .ok_or_else(|| CliError::Usage("missing --team".to_string()))?;
-    let out = parsed.out.unwrap_or_else(|| PathBuf::from("team.spec.yaml"));
+    let out = parsed
+        .out
+        .unwrap_or_else(|| PathBuf::from("team.spec.yaml"));
     Ok(CompileArgs {
         team: resolve_cli_path(cwd, &team),
         out: resolve_cli_path(cwd, &out),
@@ -618,7 +689,12 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     let workspace = workspace(&parsed, cwd);
     Ok(SendArgs {
         target,
-        message: parsed.positionals.iter().skip(message_start).cloned().collect(),
+        message: parsed
+            .positionals
+            .iter()
+            .skip(message_start)
+            .cloned()
+            .collect(),
         targets: parsed.targets,
         workspace,
         team: parsed.team,
@@ -703,6 +779,21 @@ fn claim_leader_args(args: &[String], cwd: &Path) -> ClaimLeaderArgs {
     }
 }
 
+fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, CliError> {
+    let parsed = parse_args(args);
+    Ok(AttachLeaderArgs {
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        pane: parsed
+            .pane
+            .filter(|pane| !pane.is_empty())
+            .map(crate::transport::PaneId::new),
+        provider: parse_cli_provider(parsed.provider.as_deref())?,
+        confirm: parsed.confirm,
+        json: parsed.json,
+    })
+}
+
 fn identity_args(args: &[String], cwd: &Path) -> IdentityArgs {
     let parsed = parse_args(args);
     IdentityArgs {
@@ -732,6 +823,7 @@ fn restart_args(args: &[String], cwd: &Path) -> RestartArgs {
             .unwrap_or_else(|| workspace(&parsed, cwd)),
         team: parsed.team,
         allow_fresh: parsed.allow_fresh,
+        session_converge_deadline_ms: parsed.session_converge_deadline_ms,
         json: parsed.json,
     }
 }
@@ -777,7 +869,9 @@ fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError>
         agent: required_pos(&parsed, 0, "agent")?,
         workspace: workspace(&parsed, cwd),
         team: parsed.team,
-        role_file: parsed.role_file.ok_or_else(|| CliError::Usage("missing --role-file".to_string()))?,
+        role_file: parsed
+            .role_file
+            .ok_or_else(|| CliError::Usage("missing --role-file".to_string()))?,
         no_display: parsed.no_display,
         json: parsed.json,
     })
@@ -789,7 +883,9 @@ fn fork_agent_args(args: &[String], cwd: &Path) -> Result<ForkAgentArgs, CliErro
         source_agent: required_pos(&parsed, 0, "source_agent")?,
         workspace: workspace(&parsed, cwd),
         team: parsed.team,
-        as_agent: parsed.as_agent.ok_or_else(|| CliError::Usage("missing --as".to_string()))?,
+        as_agent: parsed
+            .as_agent
+            .ok_or_else(|| CliError::Usage("missing --as".to_string()))?,
         label: parsed.label,
         no_display: parsed.no_display,
         json: parsed.json,
@@ -935,7 +1031,9 @@ fn repair_state_args(args: &[String], cwd: &Path) -> Result<RepairStateArgs, Cli
     let parsed = parse_args(args);
     Ok(RepairStateArgs {
         workspace: workspace(&parsed, cwd),
-        task_id: parsed.task.ok_or_else(|| CliError::Usage("missing --task".to_string()))?,
+        task_id: parsed
+            .task
+            .ok_or_else(|| CliError::Usage("missing --task".to_string()))?,
         assignee: parsed.assignee,
         status: parsed
             .status_value
@@ -1025,6 +1123,8 @@ fn peek_args(args: &[String], cwd: &Path) -> Result<PeekArgs, CliError> {
         agent: required_pos(&parsed, 0, "agent")?,
         workspace: workspace(&parsed, cwd),
         tail: parsed.tail.unwrap_or(80),
+        head: parsed.head,
+        search: parsed.search,
         allow_raw_screen: parsed.allow_raw_screen,
         json: parsed.json,
     })
@@ -1062,13 +1162,23 @@ fn json_dumps_like(value: &Value) -> String {
             Err(_) => "\"\"".to_string(),
         },
         Value::Array(arr) => {
-            let inner = arr.iter().map(json_dumps_like).collect::<Vec<_>>().join(", ");
+            let inner = arr
+                .iter()
+                .map(json_dumps_like)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("[{inner}]")
         }
         Value::Object(obj) => {
             let inner = obj
                 .iter()
-                .map(|(k, v)| format!("{}: {}", json_dumps_like(&Value::String(k.clone())), json_dumps_like(v)))
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        json_dumps_like(&Value::String(k.clone())),
+                        json_dumps_like(v)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{{{inner}}}")
@@ -1160,26 +1270,144 @@ mod tests {
     #[test]
     fn t0_help_catalog_lists_command_flags() {
         for (command, flags) in [
-            ("quick-start", &["--workspace", "--team-id", "--yes", "--fresh", "--json"][..]),
-            ("send", &["--workspace", "--team", "--targets", "--watch-result", "--timeout", "--json"][..]),
-            ("status", &["--workspace", "--team", "--summary", "--json", "--detail"][..]),
-            ("shutdown", &["--workspace", "--team", "--keep-logs", "--json"][..]),
-            ("restart", &["--team", "--allow-fresh", "--json"][..]),
-            ("start-agent", &["--workspace", "--team", "--force", "--allow-fresh", "--no-display", "--json"][..]),
-            ("reset-agent", &["--workspace", "--team", "--discard-session", "--no-display", "--json"][..]),
-            ("add-agent", &["--role-file", "--workspace", "--team", "--no-display", "--json"][..]),
-            ("fork-agent", &["--as", "--label", "--workspace", "--team", "--no-display", "--json"][..]),
-            ("remove-agent", &["--workspace", "--team", "--from-spec", "--confirm", "--force", "--json"][..]),
-            ("doctor", &["--workspace", "--team", "--gate", "--fix-schema", "--cleanup-orphans", "--json"][..]),
-            ("collect", &["--workspace", "--team", "--result-file", "--json"][..]),
-            ("repair-state", &["--task", "--status", "--assignee", "--workspace", "--json"][..]),
+            (
+                "quick-start",
+                &["--workspace", "--team-id", "--yes", "--fresh", "--json"][..],
+            ),
+            (
+                "send",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--targets",
+                    "--watch-result",
+                    "--timeout",
+                    "--json",
+                ][..],
+            ),
+            (
+                "status",
+                &["--workspace", "--team", "--summary", "--json", "--detail"][..],
+            ),
+            (
+                "shutdown",
+                &["--workspace", "--team", "--keep-logs", "--json"][..],
+            ),
+            (
+                "restart",
+                &[
+                    "--team",
+                    "--allow-fresh",
+                    "--session-converge-deadline",
+                    "--json",
+                ][..],
+            ),
+            (
+                "start-agent",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--force",
+                    "--allow-fresh",
+                    "--no-display",
+                    "--json",
+                ][..],
+            ),
+            (
+                "reset-agent",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--discard-session",
+                    "--no-display",
+                    "--json",
+                ][..],
+            ),
+            (
+                "add-agent",
+                &[
+                    "--role-file",
+                    "--workspace",
+                    "--team",
+                    "--no-display",
+                    "--json",
+                ][..],
+            ),
+            (
+                "fork-agent",
+                &[
+                    "--as",
+                    "--label",
+                    "--workspace",
+                    "--team",
+                    "--no-display",
+                    "--json",
+                ][..],
+            ),
+            (
+                "remove-agent",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--from-spec",
+                    "--confirm",
+                    "--force",
+                    "--json",
+                ][..],
+            ),
+            (
+                "doctor",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--gate",
+                    "--fix-schema",
+                    "--cleanup-orphans",
+                    "--json",
+                ][..],
+            ),
+            (
+                "attach-leader",
+                &[
+                    "--workspace",
+                    "--team",
+                    "--pane",
+                    "--provider",
+                    "--confirm",
+                    "--json",
+                ][..],
+            ),
+            (
+                "collect",
+                &["--workspace", "--team", "--result-file", "--json"][..],
+            ),
+            (
+                "repair-state",
+                &["--task", "--status", "--assignee", "--workspace", "--json"][..],
+            ),
             ("wait-ready", &["--workspace", "--timeout", "--json"][..]),
-            ("peek", &["--workspace", "--tail", "--allow-raw-screen", "--json"][..]),
-            ("coordinator", &["--workspace", "--once", "--tick-interval"][..]),
+            (
+                "peek",
+                &[
+                    "--workspace",
+                    "--tail",
+                    "--head",
+                    "--search",
+                    "--allow-raw-screen",
+                    "--json",
+                ][..],
+            ),
+            (
+                "coordinator",
+                &["--workspace", "--once", "--tick-interval"][..],
+            ),
         ] {
             let help = command_help(Some(command));
             for flag in flags {
-                assert!(help.contains(flag), "`team-agent {command} --help` is missing {flag}");
+                assert!(
+                    help.contains(flag),
+                    "`team-agent {command} --help` is missing {flag}"
+                );
             }
         }
     }
@@ -1189,7 +1417,13 @@ mod tests {
         let cwd = tmp_workspace();
         let ws = tmp_workspace();
         let args = quick_start_args(
-            &cli_argv(&["--workspace", &ws.to_string_lossy(), "agents", "--yes", "--json"]),
+            &cli_argv(&[
+                "--workspace",
+                &ws.to_string_lossy(),
+                "agents",
+                "--yes",
+                "--json",
+            ]),
             &cwd,
         )
         .unwrap();

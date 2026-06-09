@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+run_start_epoch="$(date +%s)"
+cleanup_tmux_residue_on_exit() {
+  local rc=$?
+  local cleanup_rc=0
+  "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
+  if [[ "$cleanup_rc" -ne 0 ]]; then
+    echo "test-real-serial: cleanup-tmux-residue failed rc=$cleanup_rc" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup_tmux_residue_on_exit EXIT
+
+rm -rf "${TMPDIR:-/tmp}/.team"
+
+set +e
+cargo test -p team-agent --all-targets -- --ignored --test-threads=1
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 ]]; then
+  echo "test-real-serial: FAILED rc=$rc" >&2
+  exit "$rc"
+fi
+
+echo "test-real-serial: ok"

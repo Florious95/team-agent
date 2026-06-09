@@ -31,8 +31,8 @@
 //! 铁律 (card §11, Rust 绝不重蹈 Python 坑):
 //!   - **scope 锚 env, 禁候选扫描** (C13-C17/bug-064/082): sender identity =
 //!     spawn-time `TEAM_AGENT_ID`; scope = `TEAM_AGENT_OWNER_TEAM_ID`. `to="*"`
-//!     defaults to the sender team; `scope="workspace"` is the only cross-team
-//!     opt-in. A peer not in scope → typed [`ToolError`] with
+//!     defaults to the sender team; worker-origin RPC arguments cannot widen
+//!     that scope. A peer not in scope → typed [`ToolError`] with
 //!     [`ToolErrorReason::PeerNotInScope`] — never leak other-team peer names.
 //!   - **错误信封冗余键** (server.py:98-106): `reason == error_code` and
 //!     `message == error` are byte-stable downstream contracts — preserved verbatim
@@ -83,6 +83,7 @@ use crate::state::persist::{load_runtime_state, save_runtime_state};
 use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions};
 
 pub mod helpers;
+pub(crate) mod lifecycle_tools;
 pub mod normalize;
 pub mod tools;
 pub mod types;
@@ -106,78 +107,6 @@ pub(crate) use normalize::{
     normalize_artifacts, normalize_changes, normalize_next_actions, normalize_risks, normalize_tests,
 };
 pub(crate) use wire::dispatch_tool;
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CROSS-DEP PLACEHOLDERS — step 13 lifecycle / team_state surface not yet in tree.
-// The 13/15 sibling lanes are in flight; do NOT guess their authoritative names.
-// Leader reconciles these at integration.
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// **PLACEHOLDER** — step 13 lifecycle `runtime.{stop,reset,add,fork}_agent`. The
-/// lifecycle lane is not yet in the tree; these tool handlers delegate to it. Minimal
-/// local stubs so the handler signatures compile and contracts can name the
-/// delegation. Leader swaps for the authoritative step-13 surface at integration.
-pub mod lifecycle_placeholder {
-    use super::*;
-
-    /// `runtime.stop_agent(workspace, agent_id)` (step 13).
-    pub fn stop_agent(workspace: &Path, agent_id: &str) -> Result<Value, McpError> {
-        let _ = workspace;
-        Ok(serde_json::json!({"ok": true, "status": "stopped", "agent_id": agent_id}))
-    }
-
-    /// `runtime.reset_agent(workspace, agent_id, discard_session)` (step 13).
-    pub fn reset_agent(workspace: &Path, agent_id: &str, discard_session: bool) -> Result<Value, McpError> {
-        let _ = workspace;
-        Ok(serde_json::json!({"ok": true, "status": "reset", "agent_id": agent_id, "discard_session": discard_session}))
-    }
-
-    /// `runtime.add_agent(workspace, new_agent_id, role_file_path)` (step 13).
-    pub fn add_agent(workspace: &Path, new_agent_id: &str, role_file_path: &str) -> Result<Value, McpError> {
-        let _ = workspace;
-        Ok(serde_json::json!({"ok": true, "status": "added", "agent_id": new_agent_id, "role_file_path": role_file_path}))
-    }
-
-    /// `runtime.fork_agent(workspace, source_agent_id, as_agent_id, label)` (step 13).
-    pub fn fork_agent(workspace: &Path, source_agent_id: &str, as_agent_id: &str, label: Option<&str>) -> Result<Value, McpError> {
-        let _ = workspace;
-        Ok(serde_json::json!({"ok": true, "status": "forked", "source_agent_id": source_agent_id, "agent_id": as_agent_id, "label": label}))
-    }
-
-    /// `runtime.status(workspace, as_json=true, compact=true)` (step 13 status
-    /// projection; `tools.py:328`).
-    pub fn runtime_status(workspace: &Path, compact: bool) -> Result<Value, McpError> {
-        let _ = (workspace, compact);
-        Ok(serde_json::json!({"ok": true, "status": "ok"}))
-    }
-
-    /// `state.write_team_state(workspace, spec, state)` (step 5/13 team_state.md
-    /// rewrite; `tools.py:324`). Step 5 persist exists, but this writer is not yet
-    /// exported; placeholder until the persist/lifecycle lane lands it.
-    pub fn write_team_state(workspace: &Path, spec: &Value, state: &Value) -> Result<PathBuf, McpError> {
-        let rel = spec
-            .get("context")
-            .and_then(|v| v.get("state_file"))
-            .and_then(Value::as_str)
-            .unwrap_or("team_state.md");
-        let path = workspace.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut text = String::from("# Team State\n\n## Notes\n\n");
-        if let Some(notes) = state.get("notes").and_then(Value::as_array) {
-            for note in notes {
-                if let Some(note) = note.as_str() {
-                    text.push_str("- ");
-                    text.push_str(note);
-                    text.push('\n');
-                }
-            }
-        }
-        std::fs::write(&path, text)?;
-        Ok(path)
-    }
-}
 
 #[cfg(test)]
 mod tests;

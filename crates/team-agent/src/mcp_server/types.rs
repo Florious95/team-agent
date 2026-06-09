@@ -152,13 +152,15 @@ pub enum ToolErrorReason {
     InvalidToolArguments,
     /// Any other exception caught (`server.py:71-72`).
     InternalRuntimeError,
-    /// Cross-team peer addressed without `scope="workspace"` (`tools.py:211`).
+    /// Cross-team peer addressed outside the worker's spawn-time owner scope.
     PeerNotInScope,
+    /// Worker-origin RPC attempted to widen spawn-time owner scope.
+    #[serde(rename = "mcp.scope_refused")]
+    McpScopeRefused,
 }
 
-/// Send scope (`tools.py:165-173`). `Workspace` is the only cross-team opt-in;
-/// absent/`team` resolves to the spawn-time owner team. The `scope` field on
-/// `mcp.scope_resolved` is one of these.
+/// Send scope (`tools.py:165-173`). Worker-origin MCP calls resolve to the
+/// spawn-time owner team; RPC scope arguments are refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {

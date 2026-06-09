@@ -318,7 +318,6 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
             insert_property(&mut properties, "task_id", string_property("Optional task id to associate with the message."));
             insert_property(&mut properties, "sender", string_property("Optional sender override."));
             insert_property(&mut properties, "requires_ack", boolean_property("Whether the recipient should acknowledge delivery."));
-            insert_property(&mut properties, "scope", string_property("Optional delivery scope: team or workspace."));
         }
         McpTool::ReportResult => {
             insert_property(&mut properties, "envelope", object_property("Optional full result envelope."));
@@ -386,23 +385,21 @@ fn array_property(description: &str) -> Value {
 }
 
 pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: &Value) -> ToolResult {
+    if scope_ceiling_tool(tool) {
+        tools.validate_rpc_scope_args(tool.wire_name(), args)?;
+    }
     match tool {
         McpTool::AssignTask => tools.assign_task(args.get("task").unwrap_or(args), args.get("message").and_then(Value::as_str)),
         McpTool::SendMessage => {
             let target = message_target_from_value(args.get("to"));
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
-            let scope = match args.get("scope").and_then(Value::as_str) {
-                Some("workspace") => Some(Scope::Workspace),
-                Some("team") => Some(Scope::Team),
-                _ => None,
-            };
             let outcome = tools.send_message(
                 &target,
                 content,
                 args.get("task_id").and_then(Value::as_str),
                 args.get("sender").and_then(Value::as_str),
                 args.get("requires_ack").and_then(Value::as_bool),
-                scope,
+                None,
             )?;
             match outcome {
                 SendOutcome::WorkerAccepted { .. } => Ok(ToolOk {
@@ -450,6 +447,21 @@ pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: 
             args.get("alert_type").and_then(Value::as_str).unwrap_or("all"),
         ),
     }
+}
+
+fn scope_ceiling_tool(tool: McpTool) -> bool {
+    matches!(
+        tool,
+        McpTool::SendMessage
+            | McpTool::ReportResult
+            | McpTool::RequestHuman
+            | McpTool::AssignTask
+            | McpTool::UpdateState
+            | McpTool::GetTeamStatus
+            | McpTool::StopAgent
+            | McpTool::ResetAgent
+            | McpTool::ForkAgent
+    )
 }
 
 fn message_target_from_value(value: Option<&Value>) -> MessageTarget {

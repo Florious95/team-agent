@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) struct SpawnedAgentWindow {
+    pub spawn: crate::transport::SpawnResult,
+    pub plan: crate::provider::CommandPlan,
+    pub profile_launch: crate::provider::ProviderProfileLaunch,
+}
+
 pub(super) fn spawn_agent_window(
     workspace: &Path,
     session_name: &SessionName,
@@ -9,7 +15,8 @@ pub(super) fn spawn_agent_window(
     into_existing_session: bool,
     transport: &dyn crate::transport::Transport,
     safety: Option<&DangerousApproval>,
-) -> Result<crate::transport::SpawnResult, LifecycleError> {
+    spawn_cwd_override: Option<&Path>,
+) -> Result<SpawnedAgentWindow, LifecycleError> {
     let provider = agent_provider(agent);
     let auth_mode = agent_auth_mode(agent);
     let model = agent.get("model").and_then(|v| v.as_str());
@@ -32,24 +39,6 @@ pub(super) fn spawn_agent_window(
     };
     let tools = crate::lifecycle::launch::worker_tool_refs(agent_tool_strings(agent), safety);
     let tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-    let mcp_config = adapter
-        .mcp_config(auth_mode)
-        .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-    let mut argv = match resume_session_id {
-        Some(session_id) => adapter
-            .build_resume_command_with_context(
-                Some(session_id),
-                auth_mode,
-                Some(&mcp_config),
-                role,
-                model,
-                &tool_refs,
-            )
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-        None => adapter
-            .build_command_with_tools(auth_mode, Some(&mcp_config), role, model, &tool_refs)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
-    };
     // owner_team_id resolution: prefer the runtime-state row's `owner_team_id` (set by
     // launch/restart); fall back to the active team key for paths that don't write the
     // row first (e.g. add-agent calls spawn before upserting team metadata).
@@ -63,22 +52,78 @@ pub(super) fn spawn_agent_window(
             let key = crate::messaging::leader_receiver::active_team_key(workspace, &state_for_team);
             (!key.is_empty()).then_some(key)
         });
+    let mcp_config = adapter
+        .mcp_config(auth_mode)
+        .map_err(|e| LifecycleError::Provider(e.to_string()))?;
+    let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
+        mcp_config,
+        workspace,
+        agent_id.as_str(),
+        team_id.as_deref().unwrap_or(""),
+    );
+    let mcp_config_path =
+        crate::lifecycle::launch::write_worker_mcp_config(workspace, agent_id.as_str(), &mcp_config)?;
+    let profile_launch =
+        crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
+            workspace,
+            agent_id.as_str(),
+            agent,
+            Some(&mcp_config),
+        )?;
+    let command_model = profile_launch
+        .command_overrides
+        .model
+        .as_deref()
+        .or(model);
+    let context = crate::provider::ProviderCommandContext {
+        auth_mode,
+        mcp_config: Some(&mcp_config),
+        system_prompt: role,
+        model: command_model,
+        tools: &tool_refs,
+        profile_launch: Some(&profile_launch),
+    };
+    let mut plan = match resume_session_id {
+        Some(session_id) => adapter
+            .build_resume_command_plan(Some(session_id), context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+        None => adapter
+            .build_command_plan(context)
+            .map_err(|e| LifecycleError::Provider(e.to_string()))?,
+    };
+    if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
+        crate::lifecycle::launch::point_native_mcp_config_at_file(
+            &mut plan.argv,
+            provider,
+            &mcp_config_path,
+        );
+    }
     crate::lifecycle::launch::fill_spawn_placeholders_full(
-        &mut argv,
+        &mut plan.argv,
         workspace,
         agent_id.as_str(),
         team_id.as_deref(),
     );
     let window = WindowName::new(agent_id.as_str());
-    let env = crate::lifecycle::launch::inherited_env_with_team_overrides(
+    let mut env = crate::lifecycle::launch::inherited_env_with_team_overrides(
         workspace,
         agent_id.as_str(),
         team_id.as_deref(),
     );
+    crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
+    let spawn_cwd = spawn_cwd_override
+        .or_else(|| {
+            agent
+                .get("spawn_cwd")
+                .and_then(|v| v.as_str())
+                .filter(|cwd| !cwd.is_empty())
+                .map(Path::new)
+        })
+        .unwrap_or(workspace);
     let result = if into_existing_session {
-        transport.spawn_into(session_name, &window, &argv, workspace, &env)
+        transport.spawn_into(session_name, &window, &plan.argv, spawn_cwd, &env)
     } else {
-        transport.spawn_first(session_name, &window, &argv, workspace, &env)
+        transport.spawn_first(session_name, &window, &plan.argv, spawn_cwd, &env)
     };
     let spawn = result.map_err(|e| LifecycleError::Transport(e.to_string()))?;
     let _ = adapter.handle_startup_prompts(
@@ -87,7 +132,11 @@ pub(super) fn spawn_agent_window(
         30,
         0.5,
     );
-    Ok(spawn)
+    Ok(SpawnedAgentWindow {
+        spawn,
+        plan,
+        profile_launch,
+    })
 }
 
 pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, LifecycleError> {
@@ -95,6 +144,13 @@ pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, 
     crate::coordinator::start_coordinator(&workspace)
         .map(|report| report.ok)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+pub(super) fn persist_effective_approval_policy_for_restart(
+    agent: &mut serde_json::Map<String, serde_json::Value>,
+    safety: &DangerousApproval,
+) {
+    crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
 }
 
 pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
@@ -163,68 +219,106 @@ pub(super) fn agent_rollout_path(agent: &serde_json::Value) -> Option<RolloutPat
 pub(crate) fn refresh_missing_provider_sessions(
     state: &mut serde_json::Value,
 ) -> Result<bool, LifecycleError> {
-    let Some(agents) = state.get_mut("agents").and_then(serde_json::Value::as_object_mut) else {
-        return Ok(false);
-    };
-    let mut changed = false;
-    for (agent_id, agent) in agents {
-        let Some(agent_obj) = agent.as_object_mut() else {
-            continue;
-        };
-        if agent_obj
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|session| !session.is_empty())
-        {
-            continue;
-        }
-        let Some(spawn_cwd) = agent_obj
-            .get("spawn_cwd")
-            .and_then(serde_json::Value::as_str)
-            .filter(|cwd| !cwd.is_empty())
-        else {
-            continue;
-        };
-        let provider = agent_provider(&serde_json::Value::Object(agent_obj.clone()));
-        let adapter = crate::provider::get_adapter(provider);
-        let captured = adapter
-            .capture_session_id(agent_id, Path::new(spawn_cwd), 0)
-            .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-        let Some(captured) = captured else {
-            continue;
-        };
-        if let Some(session_id) = captured.session_id {
-            agent_obj.insert(
-                "session_id".to_string(),
-                serde_json::json!(session_id.as_str()),
-            );
-            changed = true;
-        }
-        if let Some(rollout_path) = captured.rollout_path {
-            agent_obj.insert(
-                "rollout_path".to_string(),
-                serde_json::json!(rollout_path.as_path().to_string_lossy()),
-            );
-            changed = true;
-        }
-        agent_obj.insert(
-            "captured_at".to_string(),
-            serde_json::json!(chrono::Utc::now().to_rfc3339()),
-        );
-        agent_obj.insert(
-            "captured_via".to_string(),
-            serde_json::to_value(captured.captured_via)
-                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-        );
-        agent_obj.insert(
-            "attribution_confidence".to_string(),
-            serde_json::to_value(captured.attribution_confidence)
-                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
-        );
-    }
-    Ok(changed)
+    crate::session_capture::capture_missing_provider_sessions_once(
+        state,
+        &mut crate::provider::get_adapter,
+        false,
+        0,
+    )
+    .map(|report| report.changed)
+    .map_err(|e| LifecycleError::Provider(e.to_string()))
 }
 
+pub(crate) fn converge_missing_provider_sessions(
+    state: &mut serde_json::Value,
+    deadline: std::time::Duration,
+    poll_interval: std::time::Duration,
+    workspace: &Path,
+    allow_fresh: bool,
+) -> Result<crate::session_capture::SessionConvergence, LifecycleError> {
+    crate::session_capture::converge_missing_provider_sessions(
+        state,
+        &mut crate::provider::get_adapter,
+        deadline,
+        poll_interval,
+        restart_required_missing_session_agent_ids,
+        |progress| {
+            let pending_agent_ids = progress.pending_agent_ids.clone();
+            write_session_convergence_progress_event(
+                workspace,
+                serde_json::json!({
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "event": "provider.session.converging",
+                    "iteration": progress.iteration,
+                    "elapsed_ms": progress.elapsed_ms,
+                    "deadline_ms": progress.deadline_ms,
+                    "changed": progress.changed,
+                    "assigned": progress.assigned,
+                    "missing": progress.missing,
+                    "required_missing": progress.required_missing_agent_ids.clone(),
+                    "required_missing_agent_ids": progress.required_missing_agent_ids,
+                    "pending": pending_agent_ids,
+                    "pending_agent_ids": progress.pending_agent_ids,
+                    "candidate_count_by_agent": progress.candidate_count_by_agent,
+                    "remaining_ms": progress.remaining_ms,
+                    "allow_fresh": allow_fresh,
+                }),
+            )
+        },
+    )
+    .map_err(LifecycleError::StatePersist)
+}
+
+fn write_session_convergence_progress_event(
+    workspace: &Path,
+    event: serde_json::Value,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    let path = workspace.join(".team").join("logs").join("events.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Value) -> Vec<String> {
+    let mut missing = crate::session_capture::incomplete_resumable_agent_ids(state)
+        .into_iter()
+        .filter(|agent_id| {
+            let Some(agent) = state.get("agents").and_then(|agents| agents.get(agent_id)) else {
+                return false;
+            };
+            let missing_session_id = agent
+                .get("session_id")
+                .and_then(|value| value.as_str())
+                .is_none_or(|session| session.is_empty());
+            let is_running = agent
+                .get("status")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| status == "running");
+            let has_live_pane_binding = agent
+                .get("pane_id")
+                .and_then(|value| value.as_str())
+                .is_some_and(|pane| !pane.is_empty());
+            let has_interaction_marker = agent
+                .get("first_send_at")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.is_empty());
+            missing_session_id && is_running && (has_live_pane_binding || has_interaction_marker)
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing
+}
 /// Tools list off an agent's runtime state entry (`tools: [...]`). Restart paths
 /// don't have the full spec object, only the runtime state — so they read tools from
 /// the state row, falling back to an empty list. Contract C requires the worker

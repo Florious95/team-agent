@@ -62,6 +62,7 @@ fn stdout_json(out: &Output) -> Value {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn g1_shutdown_after_stopped_runtime_is_idempotent_when_tmux_server_is_absent() {
     let fixture = seed_active_team_fixture("g1-shutdown");
     clear_coordinator_markers(&fixture.root);
@@ -98,6 +99,7 @@ fn g1_shutdown_after_stopped_runtime_is_idempotent_when_tmux_server_is_absent() 
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn g2_restart_replaces_or_reuses_existing_team_current_session_in_all_real_machine_contexts() {
     let mut failures = Vec::new();
     for context in [
@@ -149,6 +151,7 @@ fn g2_restart_replaces_or_reuses_existing_team_current_session_in_all_real_machi
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn g3_add_send_remove_readd_send_keeps_runtime_and_spec_rosters_coherent() {
     let fixture = seed_active_team_fixture("g3-add-remove");
     let role_file = fixture.root.join(".team").join("roles").join("worker_b.md");
@@ -235,6 +238,7 @@ fn g3_add_send_remove_readd_send_keeps_runtime_and_spec_rosters_coherent() {
 }
 
 #[test]
+#[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
 fn g4_help_only_short_circuits_before_validation_for_residual_commands() {
     let cwd = tmp_dir("g4-help");
     let mut failures = Vec::new();

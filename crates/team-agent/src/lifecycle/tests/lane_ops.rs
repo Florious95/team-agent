@@ -496,10 +496,10 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
 
 // ── FORK (fork-gate-error-text) [RED] + (fork-incomplete-rollback, adapter arm) — golden gate text + spec rollback
 // Golden operations.py:329-330 raises f"{provider} does not support native session fork" when the native
-// fork gate fails (auth_mode==compatible_api). Rust relies on adapter.fork() -> CapabilityUnsupported
+// fork gate fails (auth_mode==compatible_api). Rust relies on adapter.fork_plan() -> CapabilityUnsupported
 // ("Codex:fork") (adapter.rs:310) -> a different observable. AND golden wraps the post-spec-write steps
 // in try/except restoring the spec on ANY failure (operations.py:384-394); Rust writes the spec
-// (launch.rs:443) then errors at adapter.fork (458-460) WITHOUT restoring it. RED on both: the message
+// (launch.rs:443) then errors at adapter.fork_plan (458-460) WITHOUT restoring it. RED on both: the message
 // text AND the spec must be rolled back to not contain the fork agent.
 #[test]
 fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
@@ -516,7 +516,7 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     assert!(
         !spec_text.contains("newfork"),
         "golden operations.py:384-394: on the gate failure the spec must be ROLLED BACK; Rust writes the spec \
-         then errors at adapter.fork without restoring it, leaving the fork agent 'newfork' in the spec"
+         then errors at adapter.fork_plan without restoring it, leaving the fork agent 'newfork' in the spec"
     );
 }
 
@@ -568,9 +568,9 @@ fn lanea_remove_rollback_restores_agent_health() {
 // (4) restores prior state. Rust only restores the spec on the spawn_into arm (launch.rs:481); the
 // save_runtime_state (486-487) and start_coordinator (488-493) failure arms leave the spec mutated, the
 // already-spawned window un-killed, and the state un-rolled-back; install_mcp/cleanup_mcp are absent.
-// The adapter.fork arm IS covered HARD above (lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm).
+// The adapter.fork_plan arm IS covered HARD above (lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm).
 // The post-SPAWN arms need a failure-injection seam after spawn_into (codex+subscription forks past
-// adapter.fork, so the spawn succeeds and there is no in-process way to fail save/coordinator cleanly).
+// adapter.fork_plan, so the spawn succeeds and there is no in-process way to fail save/coordinator cleanly).
 // PORTER: a Drop guard armed after the spec write, disarmed on success — kills the window, restores spec
 // + state, runs cleanup_mcp on every post-write error arm.
 #[test]

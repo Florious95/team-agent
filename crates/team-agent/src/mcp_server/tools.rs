@@ -10,7 +10,6 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 
 // ── REUSE: step 4 event_log / step 7 message_store ──────────────────────────
 use crate::event_log::EventLog;
-use crate::message_store::MessageStore;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
 use crate::state::persist::{load_runtime_state, save_runtime_state};
@@ -24,7 +23,7 @@ use super::helpers::{
     requires_ack_for_target, tool_runtime_error,
 };
 use super::normalize::{compact_tool_result, normalize_report_envelope};
-use super::types::{McpError, Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers};
+use super::types::{Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TeamOrchestratorTools (tools.py:72) — the 12 typed tool handlers.
@@ -75,6 +74,7 @@ impl TeamOrchestratorTools {
     /// field-updates the task in state, then delegates delivery to
     /// [`Self::send_message`] and compacts the result.
     pub fn assign_task(&self, task: &Value, message: Option<&str>) -> ToolResult {
+        self.validate_rpc_scope_args("assign_task", task)?;
         let Some(task_obj) = task.as_object() else {
             return Err(ToolError::new(
                 ToolErrorReason::InvalidToolArguments,
@@ -104,7 +104,10 @@ impl TeamOrchestratorTools {
         let task_value = Value::Object(task_obj.clone());
         let mut state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
         ensure_object(&mut state);
-        let team_key = assignment_team_key(&state, self.owner_team_id.as_ref());
+        let team_key = self
+            .canonical_owner_team_key()?
+            .map(|team| team.as_str().to_string())
+            .or_else(|| assignment_team_key(&state));
         reconcile_assigned_task(&mut state, team_key.as_deref(), &task_value);
         save_runtime_state(&self.workspace, &state).map_err(tool_runtime_error)?;
 
@@ -136,9 +139,17 @@ impl TeamOrchestratorTools {
         task_id: Option<&str>,
         sender: Option<&str>,
         requires_ack: Option<bool>,
-        scope: Option<Scope>,
+        scope_override: Option<Scope>,
     ) -> Result<SendOutcome, ToolError> {
-        if let Some(err) = self.refuse_cross_team_peer(to, scope) {
+        let canonical_owner_team = self.canonical_owner_team_key()?;
+        if matches!(scope_override, Some(Scope::Workspace)) {
+            return Err(self.rpc_scope_refused(
+                "send_message",
+                None,
+                scope_override.and_then(scope_override_name),
+            ));
+        }
+        if let Some(err) = self.refuse_cross_team_peer(to, None) {
             return Err(err);
         }
         let sender = sender
@@ -156,7 +167,7 @@ impl TeamOrchestratorTools {
                 serde_json::json!({
                     "tool": "send_message",
                     "sender": sender,
-                    "owner_team_id": self.owner_team_id.as_ref().map(TeamKey::as_str),
+                    "owner_team_id": canonical_owner_team.as_ref().map(TeamKey::as_str),
                     "to": match to {
                         MessageTarget::Single(t) => serde_json::Value::String(t.clone()),
                         MessageTarget::Broadcast => serde_json::Value::String("*".to_string()),
@@ -168,40 +179,75 @@ impl TeamOrchestratorTools {
                 }),
             )
             .map_err(tool_runtime_error)?;
-        if is_worker_recipient(to) {
-            let recipient = match to {
-                MessageTarget::Single(value) => value.as_str(),
-                MessageTarget::Broadcast | MessageTarget::Fanout(_) => "worker",
-            };
-            let store = MessageStore::open(&self.workspace).map_err(tool_runtime_error)?;
-            let message_id = store
-                .create_message(
-                    task_id,
-                    sender,
-                    recipient,
-                    content,
-                    None,
-                    ack,
-                    self.owner_team_id.as_ref().map(TeamKey::as_str),
-                )
-                .map_err(tool_runtime_error)?;
-            return Ok(SendOutcome::WorkerAccepted {
-                poll_via: format!("team-agent inbox {message_id}"),
-                message_id,
-            });
-        }
         let opts = SendOptions {
             task_id: task_id.map(TaskId::new),
             route_task_id: true,
             sender: sender.to_string(),
             requires_ack: ack,
-            team: self.owner_team_id.clone(),
+            team: canonical_owner_team,
             ..SendOptions::default()
         };
+        if is_worker_recipient(to) {
+            let out = messaging::send_message(&self.workspace, to, content, &opts).map_err(tool_runtime_error)?;
+            let message_id = match out.message_id {
+                Some(message_id) if out.ok => message_id,
+                None if self.owner_team_id.is_none() => {
+                    format!("mcp_{}", chrono::Utc::now().timestamp_micros())
+                }
+                _ => {
+                    let value = delivery_outcome_value(&out);
+                    let ok = compact_tool_result(&value)?;
+                    return Ok(SendOutcome::Direct(ok));
+                }
+            };
+            return Ok(SendOutcome::WorkerAccepted {
+                poll_via: format!("team-agent inbox {message_id}"),
+                message_id,
+            });
+        }
         let out = messaging::send_message(&self.workspace, to, content, &opts).map_err(tool_runtime_error)?;
         let value = delivery_outcome_value(&out);
         let ok = compact_tool_result(&value)?;
         Ok(SendOutcome::Direct(ok))
+    }
+
+    pub(crate) fn refuse_scope_override(&self) -> ToolError {
+        self.rpc_scope_refused("unknown", None, None)
+    }
+
+    pub(crate) fn validate_rpc_scope_args(&self, tool: &str, args: &Value) -> Result<(), ToolError> {
+        if let Some(nested) = args.get("task").or_else(|| args.get("envelope")) {
+            self.validate_rpc_scope_args(tool, nested)?;
+        }
+        let owner_team = self.canonical_owner_team_key()?;
+        let requested_team = requested_team_arg(args);
+        let requested_scope = requested_scope_arg(args);
+        let workspace_override = args.get("workspace").is_some();
+        let scope_widens = requested_scope
+            .as_deref()
+            .is_some_and(|scope| !scope.eq_ignore_ascii_case("team"));
+        let team_widens = match (owner_team.as_ref(), requested_team.as_deref()) {
+            (_, None) => false,
+            (Some(owner), Some(requested)) => {
+                let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+                let requested_canonical = crate::state::projection::resolve_owner_team_id(&state, requested)
+                    .canonical_key()
+                    .unwrap_or(requested)
+                    .to_string();
+                requested_canonical != owner.as_str()
+            }
+            (None, Some(_)) => true,
+        };
+        if workspace_override || scope_widens || team_widens {
+            return Err(self.rpc_scope_refused(
+                tool,
+                requested_team.as_deref(),
+                requested_scope
+                    .as_deref()
+                    .or_else(|| workspace_override.then_some("workspace")),
+            ));
+        }
+        Ok(())
     }
 
     /// `report_result` (`tools.py:249-279`): build & normalize the result envelope
@@ -221,6 +267,9 @@ impl TeamOrchestratorTools {
         task_id: Option<&str>,
         agent_id: Option<&str>,
     ) -> ToolResult {
+        if let Some(envelope) = envelope {
+            self.validate_rpc_scope_args("report_result", envelope)?;
+        }
         let mut base = envelope.cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         ensure_object(&mut base);
         if let Some(obj) = base.as_object_mut() {
@@ -267,93 +316,92 @@ impl TeamOrchestratorTools {
         }
         let normalized = normalize_report_envelope(&base);
         let env_value = normalized_envelope_value(&normalized);
-        messaging::report_result(&self.workspace, &env_value)
+        let owner_team = self.canonical_owner_team_key()?;
+        messaging::report_result_for_owner_team(
+            &self.workspace,
+            &env_value,
+            owner_team.as_ref().map(TeamKey::as_str),
+        )
             .map_err(tool_runtime_error)
             .and_then(|value| compact_tool_result(&value))
     }
 
-    /// `update_state` (`tools.py:316-325`): append a note to `state.notes`, save, then
-    /// rewrite `team_state.md` (delegated to step 13 [`write_team_state`]). Returns
-    /// `{ok:true, state_file:<path>}`.
-    ///
-    /// [`write_team_state`]: super::lifecycle_placeholder::write_team_state
+    /// `update_state` (`tools.py:316-325`): delegated through the lifecycle tools
+    /// facade. S0 preserves the old placeholder behavior.
     pub fn update_state(&self, note: &str) -> ToolResult {
-        let mut state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
-        ensure_object(&mut state);
-        if let Some(obj) = state.as_object_mut() {
-            let notes = obj
-                .entry("notes".to_string())
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if !notes.is_array() {
-                *notes = Value::Array(Vec::new());
-            }
-            if let Some(items) = notes.as_array_mut() {
-                items.push(Value::String(note.to_string()));
-            }
-        }
-        save_runtime_state(&self.workspace, &state).map_err(tool_runtime_error)?;
-        let path = super::lifecycle_placeholder::write_team_state(&self.workspace, &Value::Null, &state)
-            .map_err(tool_runtime_error)?;
-        let mut fields = serde_json::Map::new();
-        fields.insert("ok".to_string(), Value::Bool(true));
-        fields.insert("state_file".to_string(), Value::String(path.to_string_lossy().to_string()));
-        Ok(ToolOk { fields })
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::update_state(&self.workspace, owner_team.as_ref(), note)
     }
 
-    /// `get_team_status` (`tools.py:327-328`): machine-readable status —
-    /// `runtime.status(workspace, as_json=true, compact=true)` (delegated to step 13
-    /// [`runtime_status`]). Returns the compact status object verbatim.
-    ///
-    /// [`runtime_status`]: super::lifecycle_placeholder::runtime_status
+    /// `get_team_status` (`tools.py:327-328`): delegated through the lifecycle tools
+    /// facade. S0 preserves the old placeholder behavior.
     pub fn get_team_status(&self) -> ToolResult {
-        match super::lifecycle_placeholder::runtime_status(&self.workspace, true) {
-            Ok(value) => Ok(ToolOk { fields: object_fields(value) }),
-            Err(err) => Err(tool_runtime_error(err)),
-        }
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::get_team_status(&self.workspace, owner_team.as_ref())
     }
 
-    /// `stop_agent` (`tools.py:330-331`): delegate to step 13 [`stop_agent`], compact.
-    ///
-    /// [`stop_agent`]: super::lifecycle_placeholder::stop_agent
+    /// `stop_agent` (`tools.py:330-331`): delegated through the lifecycle tools facade.
     pub fn stop_agent(&self, agent_id: &str) -> ToolResult {
-        super::lifecycle_placeholder::stop_agent(&self.workspace, agent_id)
-            .map_err(tool_runtime_error)
-            .and_then(|v| compact_tool_result(&v))
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::stop_agent(&self.workspace, owner_team.as_ref(), agent_id)
     }
 
-    /// `reset_agent` (`tools.py:333-334`): delegate to step 13 [`reset_agent`]
-    /// (`discard_session`), compact.
-    ///
-    /// [`reset_agent`]: super::lifecycle_placeholder::reset_agent
+    /// `reset_agent` (`tools.py:333-334`): delegated through the lifecycle tools facade.
     pub fn reset_agent(&self, agent_id: &str, discard_session: bool) -> ToolResult {
-        super::lifecycle_placeholder::reset_agent(&self.workspace, agent_id, discard_session)
-            .map_err(tool_runtime_error)
-            .and_then(|v| compact_tool_result(&v))
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::reset_agent(&self.workspace, owner_team.as_ref(), agent_id, discard_session)
     }
 
-    /// `add_agent` (`tools.py:336-337`): delegate to step 13 [`add_agent`]
-    /// (workspace-relative role file), compact.
-    ///
-    /// [`add_agent`]: super::lifecycle_placeholder::add_agent
+    /// `add_agent` (`tools.py:336-337`): delegate to real lifecycle add-agent
+    /// under the spawn-time owner team.
     pub fn add_agent(&self, new_agent_id: &str, role_file_path: &str) -> ToolResult {
-        super::lifecycle_placeholder::add_agent(&self.workspace, new_agent_id, role_file_path)
-            .map_err(tool_runtime_error)
-            .and_then(|v| compact_tool_result(&v))
+        let owner_team = self
+            .canonical_owner_team_key()?
+            .ok_or_else(|| self.scope_refused("add_agent requires TEAM_AGENT_OWNER_TEAM_ID"))?;
+        let role_file = Path::new(role_file_path);
+        let role_file = if role_file.is_absolute() {
+            role_file.to_path_buf()
+        } else {
+            self.workspace.join(role_file)
+        };
+        crate::lifecycle::launch::add_agent(
+            &self.workspace,
+            &AgentId::new(new_agent_id.to_string()),
+            &role_file,
+            false,
+            Some(owner_team.as_str()),
+        )
+        .map_err(tool_runtime_error)
+        .and_then(|report| {
+            compact_tool_result(&serde_json::json!({
+                "ok": true,
+                "status": "added",
+                "agent_id": new_agent_id,
+                "state_file": report.env.state_file.to_string_lossy().to_string(),
+                "coordinator_started": report.env.coordinator_started,
+                "start_mode": format!("{:?}", report.start_mode),
+                "role_file": report.role_file.to_string_lossy().to_string(),
+            }))
+        })
     }
 
-    /// `fork_agent` (`tools.py:339-340`): delegate to step 13 [`fork_agent`], compact.
-    ///
-    /// [`fork_agent`]: super::lifecycle_placeholder::fork_agent
+    /// `fork_agent` (`tools.py:339-340`): delegated through the lifecycle tools facade.
     pub fn fork_agent(&self, source_agent_id: &str, as_agent_id: &str, label: Option<&str>) -> ToolResult {
-        super::lifecycle_placeholder::fork_agent(&self.workspace, source_agent_id, as_agent_id, label)
-            .map_err(tool_runtime_error)
-            .and_then(|v| compact_tool_result(&v))
+        let owner_team = self.canonical_owner_team_key()?;
+        super::lifecycle_tools::fork_agent(
+            &self.workspace,
+            owner_team.as_ref(),
+            source_agent_id,
+            as_agent_id,
+            label,
+        )
     }
 
     /// `request_human` (`tools.py:342-346`): create a `requires_ack` leader message via
-    /// [`MessageStore::create_message`]; sender = env / inferred / `"unknown"`. Returns
-    /// `{ok:true, message_id, status:"needs_human"}`.
+    /// the shared leader-delivery funnel; sender = env / inferred / `"unknown"`.
+    /// Returns `{ok:true, message_id, status:"needs_human"}`.
     pub fn request_human(&self, question: &str, task_id: Option<&str>, agent_id: Option<&str>) -> ToolResult {
+        let _owner_team = self.canonical_owner_team_key()?;
         let explicit_sender = agent_id.and_then(non_empty_string);
         let sender = explicit_sender
             .or_else(|| self.agent_id.as_ref().map(AgentId::as_str))
@@ -369,7 +417,7 @@ impl TeamOrchestratorTools {
         }
         // #230 N31/N32 funnel: request_human is a leader-bound caller and must go through
         // the same primitive as send_message(to=leader) / report_result / idle reminder.
-        // The legacy path was a raw `store.create_message(... recipient="leader" ...)` that
+        // The legacy path was a raw store insert for recipient="leader" that
         // bypassed the leader-delivery audit (no deliver_to_leader.submit emit, no rebind
         // guard, no leader_notification_log dedup). funnel it now.
         let state = crate::state::persist::load_runtime_state(&self.workspace)
@@ -400,6 +448,7 @@ impl TeamOrchestratorTools {
     /// `stuck_list` (`tools.py:348-349`): delegate to [`messaging::stuck_list`] (the
     /// team-scoped suppressed-alert projection).
     pub fn stuck_list(&self) -> ToolResult {
+        let _owner_team = self.canonical_owner_team_key()?;
         messaging::stuck_list(&self.workspace)
             .map_err(tool_runtime_error)
             .map(|v| ToolOk { fields: object_fields(v) })
@@ -408,6 +457,7 @@ impl TeamOrchestratorTools {
     /// `stuck_cancel` (`tools.py:351-352`): delegate to [`messaging::stuck_cancel`];
     /// `suppressed_by` = env agent_id / `"leader"`.
     pub fn stuck_cancel(&self, agent_id: &str, alert_type: &str) -> ToolResult {
+        let _owner_team = self.canonical_owner_team_key()?;
         let alert = match alert_type {
             "stuck" => Some(messaging::AlertType::Stuck),
             "idle_fallback" => Some(messaging::AlertType::IdleFallback),
@@ -424,10 +474,10 @@ impl TeamOrchestratorTools {
     /// `get_visible_peers` (`tools.py:226-247`): C16 scope-filtered peer list — live
     /// agents within the spawn-time owner-team scope only; other teams and dead/stopped
     /// agents are filtered server-side and never named.
-    pub fn get_visible_peers(&self) -> Result<VisiblePeers, McpError> {
+    pub fn get_visible_peers(&self) -> Result<VisiblePeers, ToolError> {
         let mut peers = Vec::new();
-        if let Some(team) = &self.owner_team_id {
-            let state = load_runtime_state(&self.workspace)?;
+        if let Some(team) = self.canonical_owner_team_key_for_mcp()? {
+            let state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
             if let Some(agents) = state
                 .get("teams")
                 .and_then(|v| v.get(team.as_str()))
@@ -451,7 +501,7 @@ impl TeamOrchestratorTools {
         peers.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(VisiblePeers {
             peers,
-            sender_team_id: self.owner_team_id.clone(),
+            sender_team_id: self.canonical_owner_team_key_for_mcp()?,
             scope: Scope::Team,
         })
     }
@@ -460,8 +510,19 @@ impl TeamOrchestratorTools {
     /// non-`*`/non-leader string target NOT in the visible-peer scope and not the
     /// sender itself, with `scope != workspace`, → `Some(ToolError{PeerNotInScope})`
     /// (also writes `mcp.send_message_refused`). `None` = allowed to proceed.
-    pub fn refuse_cross_team_peer(&self, to: &MessageTarget, scope: Option<Scope>) -> Option<ToolError> {
-        if scope == Some(Scope::Workspace) || self.owner_team_id.is_none() {
+    pub fn refuse_cross_team_peer(&self, to: &MessageTarget, scope_override: Option<Scope>) -> Option<ToolError> {
+        let owner_team = match self.canonical_owner_team_key() {
+            Ok(team) => team,
+            Err(error) => return Some(error),
+        };
+        if matches!(scope_override, Some(Scope::Workspace)) {
+            return Some(self.rpc_scope_refused(
+                "send_message",
+                None,
+                scope_override.and_then(scope_override_name),
+            ));
+        }
+        if owner_team.is_none() {
             return None;
         }
         let MessageTarget::Single(target) = to else {
@@ -480,12 +541,12 @@ impl TeamOrchestratorTools {
                 return None;
             }
         }
-        let hint = "the requested peer is not part of your team. pass scope='workspace' to address peers in other teams.";
+        let hint = "the requested peer is not part of your team; worker-origin MCP cannot widen team scope.";
         let _ = EventLog::new(&self.workspace).write(
             "mcp.send_message_refused",
             serde_json::json!({
                 "reason": "peer_not_in_scope",
-                "sender_team_id": self.owner_team_id.as_ref().map(TeamKey::as_str).unwrap_or(""),
+                "sender_team_id": owner_team.as_ref().map(TeamKey::as_str).unwrap_or(""),
                 "scope": "team",
                 "hint": hint
             }),
@@ -503,18 +564,151 @@ impl TeamOrchestratorTools {
             extra,
         })
     }
+
+    fn canonical_owner_team_key(&self) -> Result<Option<TeamKey>, ToolError> {
+        // Single worker MCP owner resolver: TEAM_AGENT_OWNER_TEAM_ID must resolve
+        // through state::projection::resolve_owner_team_id to the runtime team key.
+        // Unresolved/ambiguous owner scope emits mcp.scope_refused; never fallback
+        // to active/top-level/sibling teams in a multi-team state.
+        let Some(owner_team_id) = &self.owner_team_id else {
+            let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+            if state
+                .get("teams")
+                .and_then(Value::as_object)
+                .is_some_and(|teams| !teams.is_empty())
+            {
+                return Err(self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP"));
+            }
+            return Ok(None);
+        };
+        let state = load_runtime_state(&self.workspace)
+            .map_err(|_| self.scope_refused("owner team could not be resolved"))?;
+        match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
+            Some(team) => Ok(Some(TeamKey::new(team))),
+            None => Err(self.scope_refused("owner team could not be resolved")),
+        }
+    }
+
+    fn canonical_owner_team_key_for_mcp(&self) -> Result<Option<TeamKey>, ToolError> {
+        let Some(owner_team_id) = &self.owner_team_id else {
+            let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+            if state
+                .get("teams")
+                .and_then(Value::as_object)
+                .is_some_and(|teams| !teams.is_empty())
+            {
+                return Err(self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP"));
+            }
+            return Ok(None);
+        };
+        let state = load_runtime_state(&self.workspace)
+            .map_err(|_| self.scope_refused("owner team could not be resolved"))?;
+        match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
+            Some(team) => Ok(Some(TeamKey::new(team))),
+            None => Err(self.scope_refused("owner team could not be resolved")),
+        }
+    }
+
+    fn scope_refused(&self, message: &str) -> ToolError {
+        let canonical_owner_team_id = self.canonical_owner_team_key_for_event();
+        let _ = EventLog::new(&self.workspace).write(
+            "mcp.scope_refused",
+            serde_json::json!({
+                "reason": "scope_refused",
+                "requested_owner_team_id": self.owner_team_id.as_ref().map(TeamKey::as_str),
+                "owner_team_id": canonical_owner_team_id,
+                "canonical_owner_team_id": canonical_owner_team_id,
+                "message": message,
+            }),
+        );
+        let mut extra = serde_json::Map::new();
+        extra.insert("status".to_string(), Value::String("refused".to_string()));
+        extra.insert("hint".to_string(), Value::String(message.to_string()));
+        ToolError {
+            reason: ToolErrorReason::McpScopeRefused,
+            exc_type: "McpScopeRefused".to_string(),
+            message: "mcp.scope_refused".to_string(),
+            extra,
+        }
+    }
+
+    fn rpc_scope_refused(
+        &self,
+        tool: &str,
+        requested_team: Option<&str>,
+        requested_scope: Option<&str>,
+    ) -> ToolError {
+        let owner_team_id = self.canonical_owner_team_key_for_event();
+        let agent_id = self.agent_id.as_ref().map(AgentId::as_str).unwrap_or("unknown");
+        let _ = EventLog::new(&self.workspace).write(
+            "mcp.scope_refused",
+            serde_json::json!({
+                "reason": "rpc_scope_override",
+                "tool": tool,
+                "agent_id": agent_id,
+                "owner_team_id": owner_team_id,
+                "requested_team": requested_team,
+                "requested_scope": requested_scope,
+            }),
+        );
+        let mut extra = serde_json::Map::new();
+        extra.insert("status".to_string(), Value::String("refused".to_string()));
+        extra.insert("tool".to_string(), Value::String(tool.to_string()));
+        extra.insert("agent_id".to_string(), Value::String(agent_id.to_string()));
+        extra.insert(
+            "owner_team_id".to_string(),
+            owner_team_id.map_or(Value::Null, Value::String),
+        );
+        extra.insert(
+            "requested_team".to_string(),
+            requested_team.map_or(Value::Null, |team| Value::String(team.to_string())),
+        );
+        extra.insert(
+            "requested_scope".to_string(),
+            requested_scope.map_or(Value::Null, |scope| Value::String(scope.to_string())),
+        );
+        ToolError {
+            reason: ToolErrorReason::McpScopeRefused,
+            exc_type: "McpScopeRefused".to_string(),
+            message: "mcp.scope_refused".to_string(),
+            extra,
+        }
+    }
+
+    fn canonical_owner_team_key_for_event(&self) -> Option<String> {
+        let owner_team_id = self.owner_team_id.as_ref()?;
+        let state = load_runtime_state(&self.workspace).ok()?;
+        canonicalize_owner_team_id(&state, owner_team_id.as_str())
+    }
 }
 
-fn assignment_team_key(state: &Value, owner_team_id: Option<&TeamKey>) -> Option<String> {
-    owner_team_id
-        .map(|team| team.as_str().to_string())
-        .or_else(|| {
-            state
-                .get("active_team_key")
-                .and_then(Value::as_str)
-                .and_then(non_empty_string)
-                .map(ToString::to_string)
-        })
+fn canonicalize_owner_team_id(state: &Value, owner_team_id: &str) -> Option<String> {
+    crate::state::projection::resolve_owner_team_id(state, owner_team_id)
+        .canonical_key()
+        .map(ToString::to_string)
+}
+
+fn requested_team_arg(args: &Value) -> Option<String> {
+    ["team", "team_id", "owner_team_id", "owner_team", "target_team"]
+        .iter()
+        .find_map(|key| args.get(*key).and_then(Value::as_str).filter(|s| !s.is_empty()))
+        .map(ToString::to_string)
+}
+
+fn requested_scope_arg(args: &Value) -> Option<String> {
+    args.get("scope")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| args.get("workspace").map(|_| "workspace".to_string()))
+}
+
+fn assignment_team_key(state: &Value) -> Option<String> {
+    state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .and_then(non_empty_string)
+        .map(ToString::to_string)
 }
 
 fn reconcile_assigned_task(state: &mut Value, team_key: Option<&str>, task: &Value) {
@@ -600,4 +794,11 @@ fn assignment_message(task: &Value, explicit: Option<&str>) -> String {
         }
     }
     json_dumps_default(task)
+}
+
+fn scope_override_name(scope: Scope) -> Option<&'static str> {
+    match scope {
+        Scope::Team => Some("team"),
+        Scope::Workspace => Some("workspace"),
+    }
 }

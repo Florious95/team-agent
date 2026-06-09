@@ -138,15 +138,25 @@ pub fn send_message(
     };
     // send.py:259-261 — a non-leader target that is NOT a known team agent is refused
     // (target_not_in_team), NOT persisted. Membership = the runtime state's `agents` map.
-    if let Some(outcome) = send_owner_gate_refusal(workspace, &state, &opts.sender)? {
-        return Ok(outcome);
-    }
     let in_team = state
         .get("agents")
         .and_then(|a| a.as_object())
         .is_some_and(|a| a.contains_key(recipient.as_str()));
     if !in_team {
         return Ok(refused_outcome(DeliveryRefusal::TargetNotInTeam));
+    }
+    if let Some(outcome) = session_drift_refusal(
+        &state,
+        recipient,
+        "leader",
+        &opts.sender,
+        opts.task_id.as_ref(),
+        &event_log,
+    )? {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = send_owner_gate_refusal(workspace, &state, &opts.sender)? {
+        return Ok(outcome);
     }
     if opts.route_task_id {
         if let Some(task_id) = opts.task_id.as_ref() {
@@ -367,6 +377,14 @@ fn owner_gate_hint_team_key(state: &serde_json::Value) -> String {
 }
 
 fn owner_pane_is_dead(state: &serde_json::Value) -> bool {
+    if state
+        .get("leader_receiver")
+        .and_then(|receiver| receiver.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status == "unbound")
+    {
+        return true;
+    }
     let Some(pane_id) = state
         .get("team_owner")
         .and_then(|owner| owner.get("pane_id"))
@@ -375,6 +393,9 @@ fn owner_pane_is_dead(state: &serde_json::Value) -> bool {
     else {
         return false;
     };
+    if pane_id == "__team_agent_unbound__" {
+        return true;
+    }
     if pane_id.contains("dead") {
         return true;
     }
@@ -519,12 +540,15 @@ fn fanout_send(
     channel_label: &str,
 ) -> Result<DeliveryOutcome, MessagingError> {
     let mut last_message_id: Option<String> = None;
+    let mut first_failure: Option<DeliveryOutcome> = None;
     let mut any_failure = false;
     let mut delivered_count = 0usize;
+    let mut attempted_count = 0usize;
     for recipient in recipients {
         if recipient.is_empty() || recipient == &opts.sender {
             continue;
         }
+        attempted_count = attempted_count.saturating_add(1);
         let outcome = if recipient == "leader" {
             send_to_leader_receiver(
                 workspace,
@@ -556,6 +580,14 @@ fn fanout_send(
             }
         } else {
             any_failure = true;
+            if first_failure.is_none() {
+                first_failure = Some(outcome);
+            }
+        }
+    }
+    if delivered_count == 0 && attempted_count == 1 {
+        if let Some(outcome) = first_failure {
+            return Ok(outcome);
         }
     }
     let status = if any_failure {

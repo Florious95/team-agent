@@ -230,6 +230,7 @@ fn remove_agent_inner(
         "agent_health",
         None,
     )?;
+    maybe_fail_remove_after_agent_health_delete()?;
     Ok(RemoveSuccess {
         outcome: RemoveAgentOutcome::Removed {
             agent_id: agent_id.clone(),
@@ -585,15 +586,16 @@ fn select_agent_health(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let row = conn
         .query_row(
-            "select status, last_output_at, context_usage_pct, current_task_id \
+            "select owner_team_id, status, last_output_at, context_usage_pct, current_task_id \
              from agent_health where agent_id = ?1",
             [agent_id.as_str()],
             |r| {
                 Ok(CapturedHealth {
-                    status: r.get::<_, Option<String>>(0)?,
-                    last_output_at: r.get::<_, Option<String>>(1)?,
-                    context_usage_pct: r.get::<_, Option<i64>>(2)?,
-                    current_task_id: r.get::<_, Option<String>>(3)?,
+                    owner_team_id: r.get::<_, Option<String>>(0)?,
+                    status: r.get::<_, Option<String>>(1)?,
+                    last_output_at: r.get::<_, Option<String>>(2)?,
+                    context_usage_pct: r.get::<_, Option<i64>>(3)?,
+                    current_task_id: r.get::<_, Option<String>>(4)?,
                 })
             },
         )
@@ -622,8 +624,9 @@ fn restore_agent_health(
     // health (golden _restore_agent_health re-upserts status||"IDLE" + the captured columns).
     conn.execute(
         "insert into agent_health (owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at) \
-         values (null, ?1, ?2, ?3, ?4, ?5, ?6)",
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         rusqlite::params![
+            row.owner_team_id,
             agent_id.as_str(),
             status,
             row.last_output_at,
@@ -638,10 +641,23 @@ fn restore_agent_health(
 
 #[derive(Clone)]
 struct CapturedHealth {
+    owner_team_id: Option<String>,
     status: Option<String>,
     last_output_at: Option<String>,
     context_usage_pct: Option<i64>,
     current_task_id: Option<String>,
+}
+
+fn maybe_fail_remove_after_agent_health_delete() -> Result<(), LifecycleError> {
+    let Ok(reason) = std::env::var("TEAM_AGENT_TEST_FAIL_REMOVE_AFTER_AGENT_HEALTH_DELETE") else {
+        return Ok(());
+    };
+    if reason.is_empty() {
+        return Ok(());
+    }
+    Err(LifecycleError::StatePersist(format!(
+        "injected remove failure after agent_health delete: {reason}"
+    )))
 }
 
 struct RemoveRollback {

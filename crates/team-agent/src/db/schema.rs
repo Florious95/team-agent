@@ -5,6 +5,8 @@
 //! slice 2(待做):列**顺序**漂移的整表 rebuild(`ensure_table_layout`/`_rebuild_tables`)
 //! 与 `schema_diagnosis`,验 legacy_team_db_fixture + schema_migration 契约。
 
+use std::time::Duration;
+
 use rusqlite::Connection;
 
 use crate::db::DbError;
@@ -66,9 +68,42 @@ const LEADER_NOTIFICATION_LOG_COLUMNS: &[&str] = &[
 
 /// 打开 `team.db` 并设 pragmas(`core.py:60-61`:busy_timeout=30000 + WAL)。
 pub fn open_db(path: &std::path::Path) -> Result<Connection, DbError> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL;")?;
+    let existed = path.exists();
+    let conn = retry_sqlite(|| Connection::open(path))?;
+    conn.busy_timeout(Duration::from_millis(30_000))?;
+    if !existed {
+        retry_sqlite(|| conn.execute_batch("PRAGMA journal_mode=WAL;"))?;
+    }
     Ok(conn)
+}
+
+fn retry_sqlite<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> Result<T, DbError> {
+    let mut last_error = None;
+    for attempt in 0..8 {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if sqlite_busy_or_locked(&error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error.into()),
+        None => Err(DbError::Schema("sqlite retry exhausted without an error".to_string())),
+    }
+}
+
+fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(
+                err.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 /// `pragma table_info(table)` 的列名序(`schema_migration.py:table_layout`)。

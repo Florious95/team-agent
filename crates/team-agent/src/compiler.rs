@@ -158,7 +158,7 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
         let tools = required_tools(&meta, &path)?;
         let prompt_inline = non_empty_trimmed(&body).unwrap_or_else(|| role.clone());
         agent_ids.push(id.clone());
-        agents.push(map(vec![
+        let mut agent_items = vec![
             ("id", Value::Str(id.clone())),
             ("role", Value::Str(role.clone())),
             ("provider", Value::Str(provider)),
@@ -186,7 +186,11 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                     ),
                 ]),
             ),
-        ]));
+        ];
+        if let Some(profile) = string_field(&meta, "profile") {
+            agent_items.push(("profile", Value::Str(profile)));
+        }
+        agents.push(map(agent_items));
     }
 
     let default_assignee = agent_ids.first().cloned().unwrap_or_default();
@@ -409,10 +413,16 @@ fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value 
     if let Some(model) = string_field(role_meta, "model") {
         return Value::Str(model);
     }
-    provider_model(team_meta, provider)
+    if let Some(model) = provider_model(team_meta, provider)
         .or_else(|| string_field(team_meta, "default_model"))
-        .map(Value::Str)
-        .or_else(|| builtin_provider_model(provider).map(|m| Value::Str(m.to_string())))
+    {
+        return Value::Str(model);
+    }
+    if role_meta.get("profile").is_some() {
+        return Value::Null;
+    }
+    builtin_provider_model(provider)
+        .map(|m| Value::Str(m.to_string()))
         .unwrap_or(Value::Null)
 }
 

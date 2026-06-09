@@ -75,36 +75,86 @@ fn tmux_text_inject_waits_for_pasted_content_block_then_retries_enter_until_clea
 }
 
 #[test]
-fn delivery_does_not_mark_delivered_when_submit_verification_is_unverified() {
-    let ws = tmp_dir("delivery-unverified");
+fn tmux_text_inject_reports_unverified_when_pasted_content_block_still_present_after_retries() {
+    let runner = PastePromptRunner::new([
+        "[Pasted Content 4096 chars]",
+        "[Pasted Content 4096 chars]",
+        "[Pasted Content 4096 chars]",
+        "[Pasted Content 4096 chars]",
+        "[Pasted Content 4096 chars]",
+    ]);
+    let backend = TmuxBackend::with_runner(Box::new(runner));
+
+    let report = backend
+        .inject(
+            &Target::Pane(PaneId::new("%8")),
+            &InjectPayload::Text("structured payload line\n".repeat(16)),
+            Key::Enter,
+            true,
+        )
+        .expect("inject should return a diagnostic report even when submit verification fails");
+
+    assert_eq!(
+        report.inject_verification,
+        InjectVerification::CaptureContainsNewPastedContentPrompt,
+        "fixture sanity: this path must exercise the provider pasted-content block flow; report={report:?}"
+    );
+    assert!(
+        !matches!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+                | SubmitVerification::PastedContentPromptAbsentAfterSubmit
+                | SubmitVerification::KeySentAfterVisibleToken { .. }
+        ),
+        "when the pasted-content block remains visible after retries, transport must report a distinct unverified/failure state instead of the generic successful paste+Enter variant; report={report:?}"
+    );
+}
+
+#[test]
+fn delivery_marks_enter_sent_without_placeholder_check_as_delivered_after_successful_token_paste() {
+    let ws = tmp_dir("delivery-enter-sent-delivered");
     let store = MessageStore::open(&ws).unwrap();
     let event_log = EventLog::new(&ws);
     let message_id = store
-        .create_message(Some("task-1"), "worker_a", "worker_b", "please review", None, false, Some("team"))
+        .create_message(
+            Some("task-1"),
+            "worker_a",
+            "worker_b",
+            &"peer message payload with a rendered Team Agent token; no provider placeholder check is required "
+                .repeat(3),
+            None,
+            false,
+            Some("team"),
+        )
         .unwrap();
     let state = delivery_state();
-    let transport = ReportTransport::new(vec![unverified_report()]);
+    let transport = ReportTransport::new(vec![enter_sent_without_placeholder_report()]);
 
     let delivered = deliver_pending_messages(&ws, &state, &transport, &event_log)
-        .expect("delivery should classify unverified submit without throwing");
+        .expect("delivery should accept successful paste+Enter without requiring a placeholder probe");
 
-    assert!(
-        delivered.is_empty(),
-        "delivery must not count a message as delivered when InjectReport says Enter was unverified; delivered={delivered:?}"
+    assert_eq!(
+        delivered,
+        vec![message_id.clone()],
+        "MUST-10: EnterSentWithoutPlaceholderCheck means paste+Enter completed and no placeholder probe was needed; it must be delivered, not submitted_unverified"
     );
-    let status = message_status(&store, &message_id);
+    let (status, delivered_at) = message_status_and_delivered_at(&store, &message_id);
+    assert_eq!(
+        status, "delivered",
+        "successful paste+Enter without placeholder verification must not be downgraded to submitted_unverified"
+    );
     assert!(
-        matches!(status.as_str(), "submitted_unverified" | "failed"),
-        "unverified provider submit must be persisted as submitted_unverified or failed, not delivered; status={status}"
+        delivered_at.is_some(),
+        "delivered messages must have delivered_at set; status={status}"
     );
     let events = read_events(&ws);
     assert!(
-        !events.contains("\"message.delivered\""),
-        "unverified submit must not emit message.delivered; events={events}"
+        events.contains("\"message.delivered\""),
+        "successful paste+Enter must emit message.delivered; events={events}"
     );
     assert!(
-        events.contains("\"send.unverified\"") || events.contains("\"send.failed\""),
-        "unverified submit must emit send.unverified or send.failed with a diagnostic reason; events={events}"
+        !events.contains("\"send.unverified\""),
+        "successful paste+Enter must not emit send.unverified; events={events}"
     );
 }
 
@@ -120,7 +170,7 @@ fn delivery_verifies_each_peer_message_independently_so_second_paste_cannot_fake
         .create_message(Some("task-2"), "talker", "coder", "second large block", None, false, Some("team"))
         .unwrap();
     let state = delivery_state();
-    let transport = ReportTransport::new(vec![verified_report(2), unverified_report()]);
+    let transport = ReportTransport::new(vec![verified_report(2), failed_submit_report()]);
 
     let delivered = deliver_pending_messages(&ws, &state, &transport, &event_log)
         .expect("delivery should process both queued peer messages");
@@ -163,12 +213,26 @@ fn verified_report(attempts: u32) -> InjectReport {
 }
 
 fn unverified_report() -> InjectReport {
+    failed_submit_report()
+}
+
+fn enter_sent_without_placeholder_report() -> InjectReport {
     InjectReport {
         stage_reached: InjectStage::Submit,
         inject_verification: InjectVerification::CaptureContainsToken,
         submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
         turn_verification: TurnVerification::NotYetObserved,
         attempts: 1,
+    }
+}
+
+fn failed_submit_report() -> InjectReport {
+    InjectReport {
+        stage_reached: InjectStage::Submit,
+        inject_verification: InjectVerification::CaptureContainsToken,
+        submit_verification: SubmitVerification::SendKeysFailed,
+        turn_verification: TurnVerification::NotYetObserved,
+        attempts: 3,
     }
 }
 
@@ -197,11 +261,15 @@ fn delivery_state() -> Value {
 }
 
 fn message_status(store: &MessageStore, message_id: &str) -> String {
+    message_status_and_delivered_at(store, message_id).0
+}
+
+fn message_status_and_delivered_at(store: &MessageStore, message_id: &str) -> (String, Option<String>) {
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
     conn.query_row(
-        "select status from messages where message_id = ?1",
+        "select status, delivered_at from messages where message_id = ?1",
         params![message_id],
-        |row| row.get::<_, String>(0),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
     )
     .unwrap()
 }

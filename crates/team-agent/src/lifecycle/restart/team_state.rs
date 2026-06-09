@@ -150,6 +150,14 @@ pub(crate) fn write_team_state(
             lines.push(format!("- {id}: {summary}"));
         }
     }
+    if let Some(notes) = team_state_notes(state).filter(|notes| !notes.is_empty()) {
+        lines.push(String::new());
+        lines.push("## Notes".to_string());
+        lines.push(String::new());
+        for note in notes {
+            lines.push(format!("- {note}"));
+        }
+    }
     lines.push(String::new());
     lines.push("## Next Step".to_string());
     lines.push(String::new());
@@ -180,6 +188,17 @@ fn team_state_tasks(spec: &YamlValue, state: &serde_json::Value) -> Vec<TeamStat
         return tasks.iter().cloned().map(TeamStateTask::Yaml).collect();
     }
     Vec::new()
+}
+
+fn team_state_notes(state: &serde_json::Value) -> Option<Vec<String>> {
+    Some(
+        state
+            .get("notes")?
+            .as_array()?
+            .iter()
+            .filter_map(|note| note.as_str().filter(|text| !text.is_empty()).map(str::to_string))
+            .collect(),
+    )
 }
 
 fn task_field_str(task: &TeamStateTask, key: &str) -> String {

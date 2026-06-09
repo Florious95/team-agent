@@ -229,7 +229,11 @@ fn decide_state(fact: &LifecycleFact, process: ProcessLiveness) -> ClassifyResul
             ProcessLiveness::Alive => classify_result(
                 TurnState::Working,
                 fact.turn_id.clone(),
-                "open_turn",
+                if fact.reason == "assistant_in_flight" {
+                    &fact.reason
+                } else {
+                    "open_turn"
+                },
                 ClassifySource::SessionFile,
                 Vec::new(),
             ),
@@ -281,12 +285,55 @@ fn decide_state(fact: &LifecycleFact, process: ProcessLiveness) -> ClassifyResul
 
 fn claude_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
     let record_type = record.get("type").and_then(serde_json::Value::as_str);
+    if record_type == Some("system")
+        && record.get("subtype").and_then(serde_json::Value::as_str) == Some("api_error")
+        && record.get("level").and_then(serde_json::Value::as_str) == Some("error")
+    {
+        return Some(lifecycle(
+            FactKind::Error,
+            record
+                .get("sessionId")
+                .or_else(|| record.get("parentUuid"))
+                .or_else(|| record.get("uuid"))
+                .and_then(serde_json::Value::as_str)
+                .map(TurnId::new),
+            "api_error",
+            vec!["api_error".to_string()],
+        ));
+    }
+    if record_type == Some("user") && claude_record_has_error_tool_result(record) {
+        return Some(lifecycle(
+            FactKind::Error,
+            record
+                .get("parentUuid")
+                .or_else(|| record.get("uuid"))
+                .and_then(serde_json::Value::as_str)
+                .map(TurnId::new),
+            "tool_result_is_error",
+            vec!["tool_result_is_error".to_string()],
+        ));
+    }
     if record_type == Some("assistant") {
-        let stop_reason = record
+        let turn_id = record.get("requestId").and_then(serde_json::Value::as_str).map(TurnId::new);
+        let Some(stop_reason) = record
             .get("message")
             .and_then(|m| m.get("stop_reason"))
-            .and_then(serde_json::Value::as_str)?;
-        let turn_id = record.get("requestId").and_then(serde_json::Value::as_str).map(TurnId::new);
+            .and_then(serde_json::Value::as_str) else {
+                if record
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(serde_json::Value::as_array)
+                    .is_some()
+                {
+                    return Some(lifecycle(
+                        FactKind::TurnOpen,
+                        turn_id,
+                        "assistant_in_flight",
+                        vec!["assistant_in_flight".to_string()],
+                    ));
+                }
+                return None;
+            };
         return match stop_reason {
             "tool_use" => Some(lifecycle(FactKind::TurnOpen, turn_id, "open_turn", Vec::new())),
             "end_turn" => Some(lifecycle(FactKind::TurnComplete, turn_id, "end_turn", Vec::new())),

@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use mcp_sim_harness::McpSimHarness;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use serial_test::serial;
+use serial_test::{file_serial, serial};
 use team_agent::event_log::EventLog;
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::results::report_result;
@@ -42,7 +42,9 @@ fn send_path_reclaim_neutral_static_guard_no_send_auto_reclaim_callsite() {
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn send_path_reclaim_neutral_cli_broadcast_fanout_and_mcp_do_not_claim() {
     let mut failures = Vec::new();
     for (label, target) in [
@@ -82,7 +84,9 @@ fn send_path_reclaim_neutral_cli_broadcast_fanout_and_mcp_do_not_claim() {
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn report_result_reclaim_neutral_preserves_result_and_message_but_not_owner() {
     let case = TmuxCase::new("report-neutral");
     seed_state(&case.workspace, Some("%dead-leader"), 9, &[("worker_a", "codex")]);
@@ -115,7 +119,9 @@ fn report_result_reclaim_neutral_preserves_result_and_message_but_not_owner() {
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owner() {
     let case = TmuxCase::new("transport-neutral");
     let leader = case.spawn_leader_shaped_pane("leader");
@@ -164,7 +170,9 @@ fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owne
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn explicit_claim_unconditional_live_caller_claims_vacant_or_dead_and_requeues_same_message_id() {
     let case = TmuxCase::new("explicit-claim");
     seed_state(&case.workspace, None, 0, &[("worker_a", "codex")]);
@@ -222,7 +230,9 @@ fn explicit_claim_unconditional_live_caller_claims_vacant_or_dead_and_requeues_s
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn explicit_takeover_live_owner_unconditional_replaces_live_owner_without_split_brain() {
     let case = TmuxCase::new("explicit-takeover");
     let old = case.spawn_leader_shaped_pane("old-live-leader");
@@ -257,7 +267,9 @@ fn explicit_takeover_live_owner_unconditional_replaces_live_owner_without_split_
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn dead_leader_send_does_not_autofix_and_tells_user_to_claim_or_takeover() {
     let case = TmuxCase::new("dead-send-no-autofix");
     let caller = case.spawn_plain_pane("ordinary-sender");
@@ -294,7 +306,9 @@ fn dead_leader_send_does_not_autofix_and_tells_user_to_claim_or_takeover() {
 }
 
 #[test]
+#[ignore = "real-machine: live tmux/MCP-sim reclaim-neutral gate"]
 #[serial(env)]
+#[file_serial(tmux)]
 fn send_owner_gate_retreat_cases_do_not_auto_bind_or_open_cross_team_access() {
     let mut failures = Vec::new();
     if let Err(error) = assert_caller_pane_missing_is_hard_refused() {

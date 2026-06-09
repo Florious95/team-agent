@@ -1,5 +1,6 @@
 //! Coordinator core:daemon lifecycle 宿主 + 单次 tick 编排(19 步固定顺序)+ health/start/stop。
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -17,6 +18,7 @@ use super::health::{
     coordinator_log_path, coordinator_meta_path, coordinator_metadata_ok, coordinator_pid_path,
     pid_is_running, read_coordinator_metadata, write_coordinator_metadata,
 };
+use super::runtime_observation::{self, CapturedRuntimeFact};
 use super::types::{
     AgentId, CoordinatorHealthStatus, HealthReport, MetadataSource, Pid, ProviderRegistry,
     SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome, StopReport,
@@ -206,7 +208,7 @@ impl Coordinator {
         }
 
         self.record_step("capture_missing");
-        self.capture_missing_sessions(&mut state)?;
+        self.capture_missing_sessions(&mut state, &event_log)?;
 
         self.record_step("refresh_statuses");
         // TODO(spine slice 2b): split lightweight runtime status refresh from health sync.
@@ -230,7 +232,7 @@ impl Coordinator {
         self.handle_runtime_approval_prompts(&mut state, &event_log)?;
 
         self.record_step("sync_health");
-        self.sync_agent_health(&mut state, &store, &event_log)?;
+        let captures_by_agent = self.sync_agent_health(&mut state, &store, &event_log)?;
         self.detect_abnormal_exits(&mut state, &event_log)?;
 
         self.record_step("deliver_pending");
@@ -269,17 +271,34 @@ impl Coordinator {
         let idle_alerts: Vec<IdleAlert> = Vec::new();
         self.record_step("detect_deadlocks");
         let deadlock_alerts: Vec<DeadlockAlert> = Vec::new();
-        let _ = (&state, &store);
+        let _ = &store;
 
-        for step in ["detect_compaction", "detect_drift", "detect_api_errors"] {
-            self.record_step(step);
-            // TODO(spine slice 2): wire via capture seam.
-        }
+        self.record_step("detect_compaction");
+        self.record_step("detect_drift");
+        self.record_step("detect_api_errors");
+        let leader_capture = self.capture_leader_receiver(&state);
+        let observations = runtime_observation::observe(
+            self.workspace.as_path(),
+            &mut state,
+            captures_by_agent,
+            leader_capture,
+        );
+        let mut collections = TickCollections {
+            delivered,
+            scheduled,
+            stuck,
+            idle_alerts,
+            deadlock_alerts,
+            compaction: observations.compaction,
+            session_drift: observations.session_drift,
+            api_errors: observations.api_errors,
+            results: Vec::new(),
+        };
 
         self.record_step("atomic_save");
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
-            None => crate::state::persist::save_runtime_state(self.workspace.as_path(), &state),
+            None => crate::state::projection::save_team_scoped_state(self.workspace.as_path(), &state),
         };
         if saved.is_err() {
             return Ok(base_tick_report(
@@ -287,19 +306,12 @@ impl Coordinator {
                 false,
                 Some(TickStopReason::PersistenceDegraded),
                 Some(false),
-                TickCollections {
-                    delivered,
-                    scheduled,
-                    stuck,
-                    idle_alerts,
-                    deadlock_alerts,
-                    results: Vec::new(),
-                },
+                collections,
             ));
         }
 
         self.record_step("collect_results");
-        let results = collect_results(
+        collections.results = collect_results(
             crate::messaging::collect_results_and_notify_watchers(self.workspace.as_path(), &event_log)?,
         );
         self.record_step("prune_dedupe_log");
@@ -308,7 +320,7 @@ impl Coordinator {
             false,
             None,
             Some(true),
-            TickCollections { delivered, scheduled, stuck, idle_alerts, deadlock_alerts, results },
+            collections,
         ))
     }
 
@@ -317,44 +329,21 @@ impl Coordinator {
     // were removed by design. Delivery primitives still flow through the rest of
     // the tick body unchanged.
 
-    fn capture_missing_sessions(&self, state: &mut Value) -> Result<(), TickError> {
-        let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
-            return Ok(());
-        };
-        for (agent_id, agent) in agents {
-            let Some(agent_obj) = agent.as_object_mut() else {
-                continue;
-            };
-            if agent_obj.get("session_id").and_then(Value::as_str).is_some() {
-                continue;
-            }
-            let Some(spawn_cwd) = agent_obj.get("spawn_cwd").and_then(Value::as_str) else {
-                continue;
-            };
-            let Some(provider) = agent_obj
-                .get("provider")
-                .and_then(Value::as_str)
-                .and_then(parse_provider)
-            else {
-                continue;
-            };
-            let adapter = self.provider_registry.adapter_for(provider);
-            let captured = adapter.capture_session_id(
-                agent_id,
-                std::path::Path::new(spawn_cwd),
-                0,
+    fn capture_missing_sessions(&self, state: &mut Value, event_log: &EventLog) -> Result<(), TickError> {
+        let report = crate::session_capture::capture_missing_provider_sessions_once(
+            state,
+            &mut |provider| self.provider_registry.adapter_for(provider),
+            true,
+            0,
+        )?;
+        for ambiguous in report.ambiguous {
+            event_log.write(
+                "provider.session.attribution_ambiguous",
+                serde_json::json!({
+                    "agent_id": ambiguous.agent_id,
+                    "spawn_cwd": ambiguous.spawn_cwd,
+                }),
             )?;
-            if let Some(captured) = captured {
-                if let Some(session_id) = captured.session_id {
-                    agent_obj.insert("session_id".to_string(), serde_json::json!(session_id.as_str()));
-                }
-                if let Some(rollout_path) = captured.rollout_path {
-                    agent_obj.insert(
-                        "rollout_path".to_string(),
-                        serde_json::json!(rollout_path.as_path().to_string_lossy()),
-                    );
-                }
-            }
         }
         Ok(())
     }
@@ -364,12 +353,15 @@ impl Coordinator {
         state: &mut Value,
         store: &crate::message_store::MessageStore,
         event_log: &EventLog,
-    ) -> Result<(), TickError> {
+    ) -> Result<BTreeMap<AgentId, CapturedRuntimeFact>, TickError> {
+        let mut captures = BTreeMap::new();
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
+        let team_key = Some(crate::model::ids::TeamKey::new(team.clone()));
         let session_name = state.get("session_name").and_then(Value::as_str).map(str::to_string);
+        let pane_infos = self.transport.list_targets().unwrap_or_default();
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
-            return Ok(());
+            return Ok(captures);
         };
         for (agent_id, agent) in agents {
             let Some((session, window, target)) = capture_window_target(agent, session_name.as_deref()) else {
@@ -417,18 +409,72 @@ impl Coordinator {
                 .get("pane_current_command")
                 .or_else(|| agent.get("current_command"))
                 .and_then(Value::as_str);
-            let last_output_at = agent.get("last_output_at").and_then(Value::as_str);
+            let last_output_at_before = agent.get("last_output_at").and_then(Value::as_str);
             let activity = crate::messaging::classify_agent_activity(
                 &snapshot,
                 &captured.text,
                 pane_in_mode,
                 current_command,
-                last_output_at,
+                last_output_at_before,
             );
             let last_output_at = write_activity(agent, &activity, !captured.text.is_empty());
             write_agent_health(store, &team, agent_id, agent, &activity, last_output_at.as_deref())?;
+            let pane_info = matching_capture_pane_info(agent, &session, &window, &pane_infos);
+            let pane_id = pane_info
+                .as_ref()
+                .map(|info| info.pane_id.clone())
+                .or_else(|| agent_pane_id(agent));
+            let rollout_path = agent_rollout_path(agent).map(crate::provider::RolloutPath::new);
+            captures.insert(
+                AgentId::new(agent_id.clone()),
+                CapturedRuntimeFact {
+                    team_key: team_key.clone(),
+                    agent_id: AgentId::new(agent_id.clone()),
+                    provider: agent.get("provider").and_then(Value::as_str).and_then(parse_provider),
+                    session_name: Some(session),
+                    window: Some(window),
+                    pane_id,
+                    scrollback_tail: captured.text,
+                    pane_info,
+                    agent_state_snapshot: agent.clone(),
+                    stored_session_id: agent
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    last_output_at,
+                    rollout_path,
+                    process_liveness: explicit_process_liveness(agent),
+                },
+            );
         }
-        Ok(())
+        Ok(captures)
+    }
+
+    fn capture_leader_receiver(
+        &self,
+        state: &Value,
+    ) -> Option<runtime_observation::LeaderCaptureFact> {
+        let receiver = state.get("leader_receiver")?.clone();
+        let pane_id = receiver
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|pane_id| !pane_id.is_empty())
+            .map(crate::transport::PaneId::new)?;
+        let captured = self
+            .transport
+            .capture(
+                &crate::transport::Target::Pane(pane_id.clone()),
+                crate::transport::CaptureRange::Tail(40),
+            )
+            .ok()?;
+        Some(runtime_observation::LeaderCaptureFact {
+            team_key: Some(crate::model::ids::TeamKey::new(
+                crate::state::projection::team_state_key(state),
+            )),
+            leader_receiver: Some(receiver),
+            pane_id: Some(pane_id),
+            scrollback_tail: captured.text,
+        })
     }
 
     /// #236 `worker.abnormal_exit` watcher.
@@ -692,13 +738,14 @@ impl Coordinator {
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
         let session_name = snapshot.get("session_name").and_then(Value::as_str).map(str::to_string);
-        let auto_answer_allowed = runtime_approval_auto_answer_allowed();
         let mut dedup_updates = Vec::new();
         {
             let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
                 return Ok(());
             };
             for (agent_id, agent) in agents {
+                let approval_policy = runtime_approval_policy_from_agent(agent);
+                let auto_answer_allowed = approval_policy.auto_answer_allowed();
                 let Some(target) = runtime_approval_target(agent, session_name.as_deref()) else {
                     clear_awaiting_human_confirm(agent);
                     dedup_updates.push(AwaitingDedupUpdate::Clear {
@@ -753,13 +800,17 @@ impl Coordinator {
                     let cleared = after
                         .as_ref()
                         .is_none_or(|after| after.prompt != prompt.prompt || after.tool != prompt.tool);
-                    event_log.write(
+                        event_log.write(
                         "runtime_approval.auto_approved",
                         serde_json::json!({
                             "agent_id": agent_id,
                             "tool": prompt.tool,
                             "choice": choice,
                             "cleared": cleared,
+                            "policy_source": approval_policy.source,
+                            "inherited": approval_policy.inherited,
+                            "explicit_yes_confirmed": approval_policy.explicit_yes_confirmed,
+                            "worker_capability_above_leader": approval_policy.worker_capability_above_leader,
                         }),
                     )?;
                     }
@@ -811,6 +862,18 @@ impl Coordinator {
                         "leader_restricted" | "leader_safety_restricted" => {
                             event_log.write(
                                 "runtime_approval.blocked_by_leader_safety",
+                                serde_json::json!({
+                                    "agent_id": agent_id,
+                                    "tool": prompt.tool,
+                                    "command": prompt.command,
+                                    "kind": prompt.kind,
+                                    "prompt": prompt.prompt,
+                                }),
+                            )?;
+                        }
+                        "command_approval_requires_human" => {
+                            event_log.write(
+                                "runtime_approval.command_approval_requires_human",
                                 serde_json::json!({
                                     "agent_id": agent_id,
                                     "tool": prompt.tool,
@@ -963,9 +1026,9 @@ fn base_tick_report(
         stuck: collections.stuck,
         idle_alerts: collections.idle_alerts,
         deadlock_alerts: collections.deadlock_alerts,
-        compaction: Vec::new(),
-        session_drift: Vec::new(),
-        api_errors: Vec::new(),
+        compaction: collections.compaction,
+        session_drift: collections.session_drift,
+        api_errors: collections.api_errors,
         results: collections.results,
     }
 }
@@ -977,6 +1040,9 @@ struct TickCollections {
     stuck: Vec<AgentId>,
     idle_alerts: Vec<IdleAlert>,
     deadlock_alerts: Vec<DeadlockAlert>,
+    compaction: Vec<CompactionResult>,
+    session_drift: Vec<SessionDriftResult>,
+    api_errors: Vec<LeaderApiError>,
     results: Vec<CollectedResult>,
 }
 
@@ -1750,6 +1816,45 @@ fn capture_window_target(
     ))
 }
 
+fn matching_capture_pane_info(
+    agent: &Value,
+    session: &crate::transport::SessionName,
+    window: &crate::transport::WindowName,
+    pane_infos: &[crate::transport::PaneInfo],
+) -> Option<crate::transport::PaneInfo> {
+    if let Some(pane_id) = agent_pane_id(agent) {
+        if let Some(info) = pane_infos.iter().find(|info| info.pane_id == pane_id) {
+            return Some(info.clone());
+        }
+    }
+    pane_infos
+        .iter()
+        .find(|info| {
+            &info.session == session
+                && info
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|known_window| known_window == window)
+        })
+        .cloned()
+}
+
+fn agent_pane_id(agent: &Value) -> Option<crate::transport::PaneId> {
+    agent
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|pane_id| !pane_id.is_empty())
+        .map(crate::transport::PaneId::new)
+}
+
+fn agent_rollout_path(agent: &Value) -> Option<PathBuf> {
+    ["rollout_path", "transcript_path", "session_log_path"]
+        .into_iter()
+        .find_map(|key| agent.get(key).and_then(Value::as_str))
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 fn runtime_approval_target(agent: &Value, session_name: Option<&str>) -> Option<crate::transport::Target> {
     if let Some(pane_id) = agent
         .get("pane_id")
@@ -1780,10 +1885,58 @@ fn runtime_approval_key(raw: String) -> Option<crate::transport::Key> {
     }
 }
 
-fn runtime_approval_auto_answer_allowed() -> bool {
-    crate::lifecycle::launch::detect_dangerous_approval()
-        .map(|safety| safety.enabled && !safety.worker_capability_above_leader)
-        .unwrap_or(false)
+#[derive(Debug, Clone)]
+struct RuntimeApprovalPolicy {
+    enabled: bool,
+    source: String,
+    inherited: bool,
+    explicit_yes_confirmed: bool,
+    worker_capability_above_leader: bool,
+}
+
+impl RuntimeApprovalPolicy {
+    fn auto_answer_allowed(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let source_allows = match self.source.as_str() {
+            "leader_process" => self.inherited,
+            "runtime_config" => self.explicit_yes_confirmed,
+            _ => false,
+        };
+        source_allows
+            && (!self.worker_capability_above_leader
+                || (self.source == "runtime_config" && self.explicit_yes_confirmed))
+    }
+}
+
+fn runtime_approval_policy_from_agent(agent: &Value) -> RuntimeApprovalPolicy {
+    let policy = agent
+        .get("effective_approval_policy")
+        .and_then(Value::as_object);
+    RuntimeApprovalPolicy {
+        enabled: policy
+            .and_then(|p| p.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        source: policy
+            .and_then(|p| p.get("source"))
+            .and_then(Value::as_str)
+            .unwrap_or("disabled")
+            .to_string(),
+        inherited: policy
+            .and_then(|p| p.get("inherited"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        explicit_yes_confirmed: policy
+            .and_then(|p| p.get("explicit_yes_confirmed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        worker_capability_above_leader: policy
+            .and_then(|p| p.get("worker_capability_above_leader"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
 }
 
 fn awaiting_human_confirm_payload(

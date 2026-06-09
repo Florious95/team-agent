@@ -98,8 +98,11 @@ fn spec_workspace_from_state(state: &Value) -> Option<PathBuf> {
 }
 
 fn selected_team_key(state: &Value, team: Option<&str>) -> String {
-    team.filter(|s| !s.is_empty())
+    state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
         .map(ToString::to_string)
-        .or_else(|| state.get("active_team_key").and_then(Value::as_str).filter(|s| !s.is_empty()).map(ToString::to_string))
+        .or_else(|| team.filter(|s| !s.is_empty()).map(ToString::to_string))
         .unwrap_or_else(|| team_state_key(state))
 }

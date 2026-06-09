@@ -55,6 +55,8 @@ pub mod message_store;
 // step 8 (provider) — ProviderAdapter trait + typed provider/turn-state/liveness 等(ROUND-0 骨架;
 // fn body unimplemented!(),P2 porter 落实现)。MUST-NOT-13:provider 调用全走 trait。
 pub mod provider;
+pub mod session_capture;
+pub(crate) mod os_probe;
 
 // step 9 (transport) — Transport trait(控制面)+ Target/PaneId/InjectReport 等(ROUND-0 骨架;
 // fn body unimplemented!(),P2 porter 落实现)。tmux/WezTerm/ConPTY 三后端。
@@ -66,6 +68,7 @@ pub mod transport;
 pub mod leader;
 pub mod messaging;
 pub mod coordinator;
+pub mod diagnose;
 
 // step 13-15 (lifecycle/mcp_server/cli/packaging) — ROUND-0.5b behavioral-rich 骨架(entry-fn 签名 +
 // 富返回类型,fn body unimplemented!(),P2 porter 落实现)。lifecycle=quick-start/restart/display;

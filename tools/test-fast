@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+run_start_epoch="$(date +%s)"
+cleanup_tmux_residue_on_exit() {
+  local rc=$?
+  local cleanup_rc=0
+  "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
+  if [[ "$cleanup_rc" -ne 0 ]]; then
+    echo "test-fast: cleanup-tmux-residue failed rc=$cleanup_rc" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup_tmux_residue_on_exit EXIT
+
+rm -rf "${TMPDIR:-/tmp}/.team"
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+artifact_dir="${TEAM_AGENT_TEST_ARTIFACTS:-.team/artifacts/test-logs}"
+mkdir -p "$artifact_dir"
+artifact_dir="$(cd "$artifact_dir" && pwd)"
+json_log="$artifact_dir/test-fast-no-run-$stamp.jsonl"
+exec_list="$artifact_dir/test-fast-executables-$stamp.tsv"
+job_list="$artifact_dir/test-fast-jobs-$stamp.tsv"
+fail_log="$artifact_dir/test-fast-failures-$stamp.txt"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "test-fast requires jq to parse cargo --message-format=json output" >&2
+  exit 2
+fi
+
+if cargo test -p team-agent --all-targets --no-run --message-format=json-render-diagnostics >"$json_log"; then
+  :
+else
+  rc=$?
+  echo "test-fast: FAILED compile rc=$rc log=$json_log" >&2
+  exit "$rc"
+fi
+
+jq -r '
+  select(.reason == "compiler-artifact")
+  | select(.profile.test == true)
+  | select(.executable != null)
+  | [.target.name, (.target.kind | join(",")), .executable]
+  | @tsv
+' "$json_log" | sort -u >"$exec_list"
+
+split_targets="${TEAM_AGENT_FAST_SPLIT_TARGETS:-codex_mcp_approval_inheritance_red}"
+: >"$job_list"
+while IFS=$'\t' read -r target_name target_kind executable; do
+  if [[ " $split_targets " == *" $target_name "* ]]; then
+    (cd "$ROOT/crates/team-agent" && "$executable" --list --format terse) \
+      | awk -v target_name="$target_name" -v target_kind="$target_kind" -v executable="$executable" '
+          /: test$/ {
+            sub(/: test$/, "", $0)
+            print "case\t" target_name "\t" target_kind "\t" executable "\t" $0
+          }
+        ' >>"$job_list"
+  else
+    printf 'target\t%s\t%s\t%s\t-\n' "$target_name" "$target_kind" "$executable" >>"$job_list"
+  fi
+done <"$exec_list"
+
+jobs="${TEAM_AGENT_FAST_JOBS:-}"
+if [[ -z "$jobs" ]]; then
+  jobs="$(sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
+fi
+if [[ "$jobs" -lt 1 ]]; then
+  jobs=1
+fi
+
+: >"$fail_log"
+echo "test-fast: executables=$(wc -l <"$exec_list" | tr -d ' ') jobs=$jobs"
+echo "test-fast: work-items=$(wc -l <"$job_list" | tr -d ' ') split-targets=$split_targets"
+echo "test-fast: no-run log=$json_log"
+
+export TEAM_AGENT_FAST_ARTIFACT_DIR="$artifact_dir"
+export TEAM_AGENT_FAST_FAIL_LOG="$fail_log"
+export TEAM_AGENT_FAST_STAMP="$stamp"
+export TEAM_AGENT_FAST_PACKAGE_DIR="$ROOT/crates/team-agent"
+
+set +e
+xargs -L 1 -P "$jobs" bash -c '
+  set -euo pipefail
+  mode="$1"
+  name="$2"
+  kind="$3"
+  exe="$4"
+  test_name="$5"
+  safe_name="${name//[^A-Za-z0-9_.-]/_}"
+  if [[ "$mode" == "case" ]]; then
+    test_hash="$(printf "%s" "$test_name" | shasum | cut -d " " -f 1)"
+    log="$TEAM_AGENT_FAST_ARTIFACT_DIR/test-fast-${safe_name}-${test_hash}-$TEAM_AGENT_FAST_STAMP.log"
+    if {
+      printf "target=%s\nkind=%s\ntest=%s\nexe=%s\n\n" "$name" "$kind" "$test_name" "$exe"
+      cd "$TEAM_AGENT_FAST_PACKAGE_DIR"
+      "$exe" "$test_name" --exact
+    } >"$log" 2>&1; then
+      printf "ok\t%s\t%s\t%s\n" "$kind" "$name" "$test_name"
+      exit 0
+    else
+      rc=$?
+    fi
+  elif [[ "$mode" == "target" ]]; then
+    log="$TEAM_AGENT_FAST_ARTIFACT_DIR/test-fast-${safe_name}-$TEAM_AGENT_FAST_STAMP.log"
+    if (cd "$TEAM_AGENT_FAST_PACKAGE_DIR" && "$exe") >"$log" 2>&1; then
+      printf "ok\t%s\t%s\n" "$kind" "$name"
+      exit 0
+    else
+      rc=$?
+    fi
+  else
+    printf "fail\tinternal\t%s\tunknown work-item mode=%s\n" "$name" "$mode" | tee -a "$TEAM_AGENT_FAST_FAIL_LOG" >&2
+    exit 2
+  fi
+  if [[ "$mode" == "case" ]]; then
+    printf "fail\t%s\t%s\t%s\tlog=%s\n" "$kind" "$name" "$test_name" "$log" | tee -a "$TEAM_AGENT_FAST_FAIL_LOG" >&2
+  else
+    printf "fail\t%s\t%s\tlog=%s\n" "$kind" "$name" "$log" | tee -a "$TEAM_AGENT_FAST_FAIL_LOG" >&2
+  fi
+  tail -n 80 "$log" >&2
+  exit "$rc"
+' _ <"$job_list"
+rc=$?
+set -e
+
+if [[ "$rc" -ne 0 || -s "$fail_log" ]]; then
+  exit_rc="$rc"
+  if [[ "$exit_rc" -eq 0 ]]; then
+    exit_rc=1
+  fi
+  echo "test-fast: FAILED rc=$exit_rc failures=$fail_log" >&2
+  sed 's/^/test-fast: /' "$fail_log" >&2
+  exit "$exit_rc"
+fi
+
+doc_log="$artifact_dir/test-fast-doc-$stamp.log"
+if cargo test -p team-agent --doc >"$doc_log" 2>&1; then
+  :
+else
+  rc=$?
+  printf "fail\tdoc\tteam_agent\tlog=%s\n" "$doc_log" | tee -a "$fail_log" >&2
+  tail -n 80 "$doc_log" >&2
+  echo "test-fast: FAILED rc=$rc failures=$fail_log" >&2
+  sed 's/^/test-fast: /' "$fail_log" >&2
+  exit "$rc"
+fi
+cat "$doc_log"
+
+echo "test-fast: ok"

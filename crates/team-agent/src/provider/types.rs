@@ -1,9 +1,12 @@
 //! provider 共享类型:enums / newtypes / ProviderCaps / ProviderError / 捕获+classify payload / 占位结构。
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use super::AuthMode;
 
 // ===========================================================================
 // ENUMS (穷尽 + serde rename 到精确 Python 字符串)
@@ -303,6 +306,50 @@ pub struct ProviderCaps {
     pub fork: bool,
     pub native_mcp_config: bool,
     pub writes_global_settings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProviderCommandOverrides {
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ProviderProfileLaunch {
+    pub env_overlay: BTreeMap<String, String>,
+    pub env_unset: BTreeSet<String>,
+    pub command_overrides: ProviderCommandOverrides,
+    pub claude_config_dir: Option<PathBuf>,
+    pub claude_projects_root: Option<PathBuf>,
+    pub managed_mcp_config: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderCommandContext<'a> {
+    pub auth_mode: AuthMode,
+    pub mcp_config: Option<&'a McpConfig>,
+    pub system_prompt: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub tools: &'a [&'a str],
+    pub profile_launch: Option<&'a ProviderProfileLaunch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandPlan {
+    pub argv: Vec<String>,
+    pub expected_session_id: Option<SessionId>,
+    pub provider_projects_root: Option<PathBuf>,
+    pub managed_mcp_config: bool,
+}
+
+impl CommandPlan {
+    pub fn argv_only(argv: Vec<String>) -> Self {
+        Self {
+            argv,
+            expected_session_id: None,
+            provider_projects_root: None,
+            managed_mcp_config: false,
+        }
+    }
 }
 
 // ===========================================================================

@@ -27,8 +27,8 @@ use crate::transport::{
     normalize_capture, tmux_capture_argv, tmux_empty_inject_argv, tmux_inject_text_argv,
     tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
     CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
-    PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult, SubmitVerification,
-    Target, Transport, TransportError, TurnVerification, WindowName,
+    PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
+    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
 };
 
 /// Result of running an external command — the typed output of the OS edge.
@@ -91,22 +91,29 @@ impl RealCommandRunner {
         };
         let mut child = std::process::Command::new(program)
             .args(argv.iter().skip(1))
-            .stdin(if stdin_text.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin_text.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
         if let Some(text) = stdin_text {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                std::io::Error::other("stdin pipe missing")
-            })?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| std::io::Error::other("stdin pipe missing"))?;
             stdin.write_all(text.as_bytes())?;
         }
-        let stdout = child.stdout.take().ok_or_else(|| {
-            std::io::Error::other("stdout pipe missing")
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            std::io::Error::other("stderr pipe missing")
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("stdout pipe missing"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("stderr pipe missing"))?;
         let stdout_thread = std::thread::spawn(move || read_pipe(stdout));
         let stderr_thread = std::thread::spawn(move || read_pipe(stderr));
         let deadline = Instant::now() + COMMAND_TIMEOUT;
@@ -173,7 +180,10 @@ impl TmuxBackend {
     /// Backend bound to the real `tmux` subprocess on the SHARED default socket (no `-L`).
     /// Non-team callers + existing argv/unit tests stay unaffected.
     pub fn new() -> Self {
-        Self { runner: Box::new(RealCommandRunner), socket: None }
+        Self {
+            runner: Box::new(RealCommandRunner),
+            socket: None,
+        }
     }
 
     /// CP-1 team backend: bound to the real `tmux` subprocess on a PER-WORKSPACE socket, derived
@@ -182,7 +192,9 @@ impl TmuxBackend {
     pub fn for_workspace(workspace: &Path) -> Self {
         Self {
             runner: Box::new(RealCommandRunner),
-            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))),
+            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
+                workspace,
+            ))),
         }
     }
 
@@ -190,7 +202,10 @@ impl TmuxBackend {
         if socket.is_empty() || socket == "default" {
             Self::new()
         } else {
-            Self { runner: Box::new(RealCommandRunner), socket: Some(TmuxSocketEndpoint::Name(socket.to_string())) }
+            Self {
+                runner: Box::new(RealCommandRunner),
+                socket: Some(TmuxSocketEndpoint::Name(socket.to_string())),
+            }
         }
     }
 
@@ -198,7 +213,10 @@ impl TmuxBackend {
         if endpoint.is_empty() || endpoint == "default" {
             Self::new()
         } else if Path::new(endpoint).is_absolute() {
-            Self { runner: Box::new(RealCommandRunner), socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())) }
+            Self {
+                runner: Box::new(RealCommandRunner),
+                socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+            }
         } else {
             Self::new()
         }
@@ -206,23 +224,48 @@ impl TmuxBackend {
 
     /// Backend with an injected runner (tests: canned/recording tmux output). Shared default socket.
     pub fn with_runner(runner: Box<dyn CommandRunner>) -> Self {
-        Self { runner, socket: None }
+        Self {
+            runner,
+            socket: None,
+        }
     }
 
     /// Backend with an injected runner bound to a per-workspace socket (tests: assert the `-L` is in
     /// the recorded argv for a workspace-bound backend).
     pub fn with_runner_for_workspace(runner: Box<dyn CommandRunner>, workspace: &Path) -> Self {
-        Self { runner, socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(workspace))) }
+        Self {
+            runner,
+            socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
+                workspace,
+            ))),
+        }
     }
 
-    pub(crate) fn with_runner_for_tmux_endpoint(runner: Box<dyn CommandRunner>, endpoint: &str) -> Self {
+    pub(crate) fn with_runner_for_tmux_endpoint(
+        runner: Box<dyn CommandRunner>,
+        endpoint: &str,
+    ) -> Self {
         if Path::new(endpoint).is_absolute() {
-            Self { runner, socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())) }
+            Self {
+                runner,
+                socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+            }
         } else if endpoint.is_empty() || endpoint == "default" {
-            Self { runner, socket: None }
+            Self {
+                runner,
+                socket: None,
+            }
         } else {
-            Self { runner, socket: None }
+            Self {
+                runner,
+                socket: None,
+            }
         }
+    }
+
+    /// Build the exact argv that a workspace-bound tmux backend will execute.
+    pub fn argv_for_workspace(workspace: &Path, argv: &[String]) -> Vec<String> {
+        Self::for_workspace(workspace).tmux_argv(argv)
     }
 
     /// THE RUN CHOKEPOINT: every executed `tmux` argv is funneled through here. When a per-team
@@ -257,10 +300,7 @@ impl TmuxBackend {
         if self.socket.is_none() {
             return;
         }
-        let argv = self.tmux_argv(&[
-            "tmux".to_string(),
-            "kill-server".to_string(),
-        ]);
+        let argv = self.tmux_argv(&["tmux".to_string(), "kill-server".to_string()]);
         let _ = self.runner.run(&argv);
     }
 }
@@ -362,10 +402,13 @@ impl TmuxBackend {
 
     fn run_spawn(&self, argv: &[String]) -> Result<CommandOutput, TransportError> {
         let argv = self.tmux_argv(argv);
-        let output = self.runner.run(&argv).map_err(|source| TransportError::Spawn {
-            backend: BackendKind::Tmux,
-            source,
-        })?;
+        let output = self
+            .runner
+            .run(&argv)
+            .map_err(|source| TransportError::Spawn {
+                backend: BackendKind::Tmux,
+                source,
+            })?;
         if output.success {
             Ok(output)
         } else {
@@ -373,16 +416,12 @@ impl TmuxBackend {
         }
     }
 
-    fn run_inject_stage(
-        &self,
-        argv: &[String],
-        stage: InjectStage,
-    ) -> Result<(), TransportError> {
+    fn run_inject_stage(&self, argv: &[String], stage: InjectStage) -> Result<(), TransportError> {
         let argv = self.tmux_argv(argv);
-        let output = self.runner.run(&argv).map_err(|source| TransportError::Inject {
-            stage,
-            source,
-        })?;
+        let output = self
+            .runner
+            .run(&argv)
+            .map_err(|source| TransportError::Inject { stage, source })?;
         if output.success {
             Ok(())
         } else {
@@ -397,10 +436,10 @@ impl TmuxBackend {
         stdin: &str,
     ) -> Result<(), TransportError> {
         let argv = self.tmux_argv(argv);
-        let output = self.runner.run_with_stdin(&argv, stdin).map_err(|source| TransportError::Inject {
-            stage,
-            source,
-        })?;
+        let output = self
+            .runner
+            .run_with_stdin(&argv, stdin)
+            .map_err(|source| TransportError::Inject { stage, source })?;
         if output.success {
             Ok(())
         } else {
@@ -611,11 +650,12 @@ impl Transport for TmuxBackend {
                     }
                     return Ok(InjectReport {
                         stage_reached: InjectStage::Submit,
-                        inject_verification: InjectVerification::CaptureContainsNewPastedContentPrompt,
+                        inject_verification:
+                            InjectVerification::CaptureContainsNewPastedContentPrompt,
                         submit_verification: if cleared {
                             SubmitVerification::PastedContentPromptAbsentAfterSubmit
                         } else {
-                            submit_verification_for_key(submit)
+                            SubmitVerification::PastedContentPromptStillPresentAfterSubmit
                         },
                         turn_verification: TurnVerification::NotYetObserved,
                         attempts,
@@ -656,7 +696,10 @@ impl Transport for TmuxBackend {
     ) -> Result<CapturedText, TransportError> {
         let pane = pane_from_target(target);
         let argv = self.tmux_argv(&tmux_capture_argv(&pane, range));
-        let output = self.runner.run(&argv).map_err(|source| TransportError::Capture { source })?;
+        let output = self
+            .runner
+            .run(&argv)
+            .map_err(|source| TransportError::Capture { source })?;
         if !output.success {
             return Err(subprocess_error(argv, output));
         }
@@ -666,11 +709,7 @@ impl Transport for TmuxBackend {
         })
     }
 
-    fn query(
-        &self,
-        target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         let pane = pane_from_target(target);
         let argv = self.tmux_argv(&tmux_query_argv(&pane, field));
         let output = self.runner.run(&argv)?;
@@ -693,7 +732,11 @@ impl Transport for TmuxBackend {
         if output.success {
             return Ok(PaneLiveness::Live);
         }
-        if output.stderr.to_ascii_lowercase().contains("can't find pane") {
+        if output
+            .stderr
+            .to_ascii_lowercase()
+            .contains("can't find pane")
+        {
             Ok(PaneLiveness::Dead)
         } else {
             Ok(PaneLiveness::Unknown)
@@ -736,10 +779,7 @@ impl Transport for TmuxBackend {
         Ok(output.success)
     }
 
-    fn list_windows(
-        &self,
-        session: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError> {
+    fn list_windows(&self, session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         // golden runtime.py:1023-1029 `_tmux_window_exists`: `tmux list-windows -t <s> -F #{window_name}`;
         // returncode != 0 -> false (here: an empty window set), else the window names by line.
         let argv = self.tmux_argv(&[
@@ -800,10 +840,7 @@ impl Transport for TmuxBackend {
         self.run_ok(&argv)
     }
 
-    fn attach_session(
-        &self,
-        session: &SessionName,
-    ) -> Result<AttachOutcome, TransportError> {
+    fn attach_session(&self, session: &SessionName) -> Result<AttachOutcome, TransportError> {
         let argv = [
             "tmux".to_string(),
             "attach-session".to_string(),
