@@ -143,10 +143,17 @@ pub enum Confidence {
 }
 
 /// auth_hint 状态(`adapter.py:38` 等)。doctor 用。
+///
+/// `PresentWeak`(C-A-5 cr verdict v2):provider 无 auth-status 子命令(如 copilot
+/// — main-help Commands 节仅 completion/help/init/login/mcp/plugin/update/version,
+/// **无 status**)时,framework 只能弱检测(命令在 PATH + ~/.copilot/config.json
+/// 存在 等表层信号)。诚实 surface(MUST-NOT-13)— 不假报"已登录",doctor 文案
+/// 标"weak / no auth-status command available"。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthHintStatus {
     Present,
+    PresentWeak,
     Missing,
     MissingOrUnknown,
     Unknown,
@@ -311,6 +318,10 @@ pub struct ProviderCaps {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ProviderCommandOverrides {
     pub model: Option<String>,
+    /// Python `provider_env.py:62-65` — profile CODEX_PROFILE/NATIVE_PROFILE → `--profile <x>`.
+    pub codex_profile: Option<String>,
+    /// Python `provider_env.py:66-79` — compatible_api model_provider `-c` items, verbatim.
+    pub codex_config: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

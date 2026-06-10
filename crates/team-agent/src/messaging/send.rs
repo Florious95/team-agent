@@ -121,6 +121,8 @@ pub fn send_message(
             return fanout_send(workspace, &state, &recipients, content, opts, &event_log, "*");
         }
         MessageTarget::Fanout(recipients) if recipients.is_empty() => {
+            // swallow batch 3 ②: a failed send carries its reason (Python send error
+            // reason style) — "failed with no reason" is an unexplained exit.
             return Ok(DeliveryOutcome {
                 ok: false,
                 status: DeliveryStatus::Failed,
@@ -128,7 +130,7 @@ pub fn send_message(
                 message_id: None,
                 verification: None,
                 stage: None,
-                reason: None,
+                reason: Some(crate::messaging::DeliveryRefusal::EmptyTargetList),
                 channel: None,
             });
         }

@@ -169,6 +169,9 @@ pub struct TmuxBackend {
     /// `Some(name)` for a per-team socket -> every `tmux` argv gets `-L <name>` injected after the
     /// leading "tmux" token; `None` (default) -> bare `tmux` on the shared default socket.
     socket: Option<TmuxSocketEndpoint>,
+    /// swallow batch 2: workspace for failure-observability events (`tmux.*_failed`);
+    /// `None` for non-workspace-bound backends (no event log to write to).
+    event_workspace: Option<PathBuf>,
 }
 
 enum TmuxSocketEndpoint {
@@ -183,6 +186,7 @@ impl TmuxBackend {
         Self {
             runner: Box::new(RealCommandRunner),
             socket: None,
+            event_workspace: None,
         }
     }
 
@@ -195,6 +199,7 @@ impl TmuxBackend {
             socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
                 workspace,
             ))),
+            event_workspace: Some(workspace.to_path_buf()),
         }
     }
 
@@ -205,6 +210,7 @@ impl TmuxBackend {
             Self {
                 runner: Box::new(RealCommandRunner),
                 socket: Some(TmuxSocketEndpoint::Name(socket.to_string())),
+                event_workspace: None,
             }
         }
     }
@@ -216,6 +222,7 @@ impl TmuxBackend {
             Self {
                 runner: Box::new(RealCommandRunner),
                 socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+                event_workspace: None,
             }
         } else {
             Self::new()
@@ -227,6 +234,7 @@ impl TmuxBackend {
         Self {
             runner,
             socket: None,
+            event_workspace: None,
         }
     }
 
@@ -238,6 +246,7 @@ impl TmuxBackend {
             socket: Some(TmuxSocketEndpoint::Name(socket_name_for_workspace(
                 workspace,
             ))),
+            event_workspace: Some(workspace.to_path_buf()),
         }
     }
 
@@ -249,16 +258,19 @@ impl TmuxBackend {
             Self {
                 runner,
                 socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
+                event_workspace: None,
             }
         } else if endpoint.is_empty() || endpoint == "default" {
             Self {
                 runner,
                 socket: None,
+                event_workspace: None,
             }
         } else {
             Self {
                 runner,
                 socket: None,
+                event_workspace: None,
             }
         }
     }
@@ -420,9 +432,10 @@ impl TmuxBackend {
         argv: &[String],
         cwd: &Path,
         env: &BTreeMap<String, String>,
+        env_unset: &[String],
         first: bool,
     ) -> Result<SpawnResult, TransportError> {
-        let command = shell_command(argv, cwd, env);
+        let command = shell_command(argv, cwd, env, env_unset);
         let spawn_argv = tmux_spawn_argv(session, window, &command, first);
         self.run_spawn(&spawn_argv)?;
         let pane_argv = vec![
@@ -595,11 +608,24 @@ fn capture_has_pasted_content_prompt(text: &str) -> bool {
 const PASTED_CONTENT_APPEAR_POLLS: u32 = 5;
 const PASTED_CONTENT_SUBMIT_ATTEMPTS: u32 = 3;
 
-fn shell_command(argv: &[String], cwd: &Path, env: &BTreeMap<String, String>) -> String {
+fn shell_command(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    env_unset: &[String],
+) -> String {
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
     parts.push("&&".to_string());
+    // D9 (#264) / Python providers.py:142-145 + provider_env.py:86 — profile env_unset keys
+    // must be unset in the shell itself: the `sh -lc` line inherits the tmux SERVER's stale
+    // environment, which exec-prefix assignments cannot clear.
+    for key in env_unset {
+        parts.push("unset".to_string());
+        parts.push(key.clone());
+        parts.push("&&".to_string());
+    }
     for (key, value) in env {
         parts.push(format!("{key}={}", shell_quote(value)));
     }
@@ -643,7 +669,31 @@ impl Transport for TmuxBackend {
         cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn(session, window, argv, cwd, env, true)
+        self.spawn(session, window, argv, cwd, env, &[], true)
+    }
+
+    fn spawn_first_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.spawn(session, window, argv, cwd, env, env_unset, true)
+    }
+
+    fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.spawn(session, window, argv, cwd, env, env_unset, false)
     }
 
     fn spawn_into(
@@ -654,7 +704,7 @@ impl Transport for TmuxBackend {
         cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn(session, window, argv, cwd, env, false)
+        self.spawn(session, window, argv, cwd, env, &[], false)
     }
 
     fn inject(
@@ -798,7 +848,9 @@ impl Transport for TmuxBackend {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        const TMUX_PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}";
+        // P5 (C-P5-3): `#{pane_pid}` rides the single list-panes call (field index 11),
+        // killing the per-pane display-message N+1 fallback.
+        const TMUX_PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}\t#{pane_pid}";
         let argv = self.tmux_argv(&[
             "tmux".to_string(),
             "list-panes".to_string(),
@@ -813,8 +865,28 @@ impl Transport for TmuxBackend {
         let mut panes = Vec::new();
         for line in output.stdout.lines().filter(|line| !line.is_empty()) {
             if let Some(mut pane) = parse_pane_info_line(line) {
+                // 0.3.5 integration union: P5 (C-P5-3) makes `#{pane_pid}` ride the
+                // single list-panes call — on real tmux the fallback below never fires.
+                // swallow batch 2 ① keeps it as a RESILIENT degrade for panes whose pid
+                // field came back empty (e.g. older tmux without #{pane_pid}): a single
+                // pane's probe failure must not fail the WHOLE list — the pane degrades
+                // to pane_pid=None and the failure is observable.
                 if pane.pane_pid.is_none() {
-                    pane.pane_pid = query_pane_pid(self, &pane.pane_id)?;
+                    match query_pane_pid(self, &pane.pane_id) {
+                        Ok(pid) => pane.pane_pid = pid,
+                        Err(error) => {
+                            if let Some(workspace) = &self.event_workspace {
+                                let _ = crate::event_log::EventLog::new(workspace).write(
+                                    "tmux.pane_pid_query_failed",
+                                    serde_json::json!({
+                                        "pane_id": pane.pane_id.as_str(),
+                                        "session": pane.session.as_str(),
+                                        "error": error.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                    }
                 }
                 panes.push(pane);
             }
@@ -906,6 +978,8 @@ impl Transport for TmuxBackend {
     }
 }
 
+/// swallow batch 2 ① fallback probe (only fires when `#{pane_pid}` came back empty —
+/// see the P5 union note in `list_targets`).
 fn query_pane_pid(backend: &TmuxBackend, pane: &PaneId) -> Result<Option<u32>, TransportError> {
     let argv = backend.tmux_argv(&[
         "tmux".to_string(),

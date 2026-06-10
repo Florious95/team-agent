@@ -90,7 +90,7 @@ fn lanea_stop_agent_unknown_agent_is_unknown_worker_not_owner_refused() {
 #[test]
 fn lanea_fork_agent_unknown_source_is_unknown_worker_before_session_check() {
     let ws = lanea_team_ws("stopped");
-    let text = format!("{:?}", fork_agent(&ws, &aid("ghost"), &aid("newfork"), false, None));
+    let text = format!("{:?}", fork_agent(&ws, &aid("ghost"), &aid("newfork"), None, false, None));
     assert!(
         text.contains("unknown worker"),
         "fork_agent must reject an UNKNOWN source as 'unknown worker agent id: ghost' BEFORE the session-id \
@@ -105,7 +105,7 @@ fn lanea_fork_agent_unknown_source_is_unknown_worker_before_session_check() {
 fn lanea_fork_agent_duplicate_target_is_already_exists_before_session_check() {
     let ws = lanea_team_ws("stopped");
     // target 'bravo' already exists in the spec -> duplicate; source 'alpha' exists (its session_id is irrelevant).
-    let text = format!("{:?}", fork_agent(&ws, &aid("alpha"), &aid("bravo"), false, None));
+    let text = format!("{:?}", fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None));
     assert!(
         text.contains("already exists"),
         "fork_agent must reject a DUPLICATE target 'bravo' as 'agent id already exists' BEFORE the session-id \

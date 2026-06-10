@@ -88,12 +88,13 @@ pub(crate) fn fork_agent(
     as_agent_id: &str,
     label: Option<&str>,
 ) -> ToolResult {
-    let _ = label;
     let lifecycle_workspace = lifecycle_workspace(workspace, owner_team, false)?;
+    // operations.py:315 — the label becomes the forked agent's role.
     let report = crate::lifecycle::launch::fork_agent(
         &lifecycle_workspace,
         &AgentId::new(source_agent_id),
         &AgentId::new(as_agent_id),
+        label,
         false,
         owner_team.map(TeamKey::as_str),
     )

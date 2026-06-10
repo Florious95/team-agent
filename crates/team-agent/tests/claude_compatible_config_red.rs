@@ -80,6 +80,7 @@ fn managed_profile_command_plan_omits_mcp_config_even_when_mcp_config_is_availab
         env_unset: BTreeSet::from(["ANTHROPIC_API_KEY".to_string()]),
         command_overrides: ProviderCommandOverrides {
             model: Some("profile-effective-haiku".to_string()),
+            ..ProviderCommandOverrides::default()
         },
         claude_config_dir: Some(root.join("claude-config")),
         claude_projects_root: Some(root.join("claude-config").join("projects")),

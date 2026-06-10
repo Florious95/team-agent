@@ -202,6 +202,7 @@ fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {
         DeliveryRefusal::SessionDrift => "session_drift",
         DeliveryRefusal::Duplicate => "duplicate",
         DeliveryRefusal::RoutingAmbiguous => "routing_ambiguous",
+        DeliveryRefusal::EmptyTargetList => "empty_target_list",
     }
 }
 

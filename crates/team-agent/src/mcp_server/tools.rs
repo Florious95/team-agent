@@ -189,11 +189,12 @@ impl TeamOrchestratorTools {
         };
         if is_worker_recipient(to) {
             let out = messaging::send_message(&self.workspace, to, content, &opts).map_err(tool_runtime_error)?;
+            // tools.py:175-181 — accepted+poll_via ONLY for a REAL message_id; any other
+            // outcome falls back to the compacted direct result. Never invent an
+            // `mcp_<timestamp>` id: it does not exist in the store and makes the
+            // advertised `team-agent inbox <id>` poll a dead end.
             let message_id = match out.message_id {
                 Some(message_id) if out.ok => message_id,
-                None if self.owner_team_id.is_none() => {
-                    format!("mcp_{}", chrono::Utc::now().timestamp_micros())
-                }
                 _ => {
                     let value = delivery_outcome_value(&out);
                     let ok = compact_tool_result(&value)?;
@@ -229,7 +230,13 @@ impl TeamOrchestratorTools {
         let team_widens = match (owner_team.as_ref(), requested_team.as_deref()) {
             (_, None) => false,
             (Some(owner), Some(requested)) => {
-                let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+                // swallow batch 4 C6: an unreadable state cannot verify the requested
+                // team — fail closed (structured transient refusal), never compare
+                // against an empty substitute.
+                let state = match load_runtime_state(&self.workspace) {
+                    Ok(state) => state,
+                    Err(error) => return Err(self.scope_unverifiable(&error.to_string())),
+                };
                 let requested_canonical = crate::state::projection::resolve_owner_team_id(&state, requested)
                     .canonical_key()
                     .unwrap_or(requested)
@@ -463,7 +470,18 @@ impl TeamOrchestratorTools {
             "idle_fallback" => Some(messaging::AlertType::IdleFallback),
             "cross_worker_deadlock" => Some(messaging::AlertType::CrossWorkerDeadlock),
             "all" => None,
-            _ => None,
+            // scheduler.py:268-273 — an unknown alert_type refuses with the Python
+            // literal instead of silently widening to suppressing ALL alert families.
+            _ => {
+                return Ok(ToolOk {
+                    fields: object_fields(serde_json::json!({
+                        "ok": false,
+                        "status": "refused",
+                        "reason": "invalid_alert_type",
+                        "alert_type": alert_type,
+                    })),
+                });
+            }
         };
         let suppressed_by = self.agent_id.as_ref().map(AgentId::as_str).unwrap_or("leader");
         messaging::stuck_cancel(&self.workspace, agent_id, alert, suppressed_by)
@@ -571,7 +589,12 @@ impl TeamOrchestratorTools {
         // Unresolved/ambiguous owner scope emits mcp.scope_refused; never fallback
         // to active/top-level/sibling teams in a multi-team state.
         let Some(owner_team_id) = &self.owner_team_id else {
-            let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+            // swallow batch 4 C5-C8 (MUST-16 fail-closed): the runtime state is the
+            // scope truth source — when it cannot be read, the gate REFUSES with a
+            // structured transient scope_unverifiable instead of silently treating
+            // the workspace as legacy single-team (silent privilege widening).
+            let state = load_runtime_state(&self.workspace)
+                .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
             if state
                 .get("teams")
                 .and_then(Value::as_object)
@@ -582,7 +605,7 @@ impl TeamOrchestratorTools {
             return Ok(None);
         };
         let state = load_runtime_state(&self.workspace)
-            .map_err(|_| self.scope_refused("owner team could not be resolved"))?;
+            .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
         match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
             Some(team) => Ok(Some(TeamKey::new(team))),
             None => Err(self.scope_refused("owner team could not be resolved")),
@@ -591,7 +614,12 @@ impl TeamOrchestratorTools {
 
     fn canonical_owner_team_key_for_mcp(&self) -> Result<Option<TeamKey>, ToolError> {
         let Some(owner_team_id) = &self.owner_team_id else {
-            let state = load_runtime_state(&self.workspace).unwrap_or(serde_json::json!({}));
+            // swallow batch 4 C5-C8 (MUST-16 fail-closed): the runtime state is the
+            // scope truth source — when it cannot be read, the gate REFUSES with a
+            // structured transient scope_unverifiable instead of silently treating
+            // the workspace as legacy single-team (silent privilege widening).
+            let state = load_runtime_state(&self.workspace)
+                .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
             if state
                 .get("teams")
                 .and_then(Value::as_object)
@@ -602,10 +630,38 @@ impl TeamOrchestratorTools {
             return Ok(None);
         };
         let state = load_runtime_state(&self.workspace)
-            .map_err(|_| self.scope_refused("owner team could not be resolved"))?;
+            .map_err(|error| self.scope_unverifiable(&error.to_string()))?;
         match canonicalize_owner_team_id(&state, owner_team_id.as_str()) {
             Some(team) => Ok(Some(TeamKey::new(team))),
             None => Err(self.scope_refused("owner team could not be resolved")),
+        }
+    }
+
+    /// swallow batch 4 C5/C6/N38: the structured FAIL-CLOSED refusal for "the scope
+    /// could not be verified" (state read failed). Transient by design — the same call
+    /// passes once the state is readable again; the caller's self-reported scope is
+    /// never trusted as a fallback (MUST-16 ceiling).
+    fn scope_unverifiable(&self, io_error: &str) -> ToolError {
+        let _ = EventLog::new(&self.workspace).write(
+            "mcp.scope_state_read_failed",
+            serde_json::json!({
+                "reason": "scope_unverifiable",
+                "requested_owner_team_id": self.owner_team_id.as_ref().map(TeamKey::as_str),
+                "error": io_error,
+            }),
+        );
+        let mut extra = serde_json::Map::new();
+        extra.insert("status".to_string(), Value::String("refused".to_string()));
+        extra.insert("kind".to_string(), Value::String("scope_unverifiable".to_string()));
+        extra.insert(
+            "next_action".to_string(),
+            Value::String("retry shortly or check the runtime state path".to_string()),
+        );
+        ToolError {
+            reason: ToolErrorReason::McpScopeRefused,
+            exc_type: "McpScopeUnverifiable".to_string(),
+            message: format!("scope_unverifiable: state read failed: {io_error}"),
+            extra,
         }
     }
 

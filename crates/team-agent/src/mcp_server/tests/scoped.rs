@@ -1,7 +1,20 @@
     #[test]
     fn dispatch_send_message_worker_accepted_returned_verbatim() {
+        // A-7: accepted requires a REAL stored message_id (no fabricated ids), so the
+        // workspace seeds a running worker-1 the delivery layer can actually queue for.
+        let ws = unique_ws("dispatch-accepted");
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &serde_json::json!({
+                "session_name": "team-x",
+                "agents": {
+                    "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
+                },
+            }),
+        )
+        .unwrap();
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("dispatch-accepted"),
+            &ws,
             Some(AgentId::new("leader")), // legacy single-team bypasses cross-team refusal
             None,
         );

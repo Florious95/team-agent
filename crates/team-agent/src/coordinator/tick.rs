@@ -184,7 +184,7 @@ impl Coordinator {
         let mut state = crate::state::persist::load_runtime_state(self.workspace.as_path())?;
         let store = crate::message_store::MessageStore::open(self.workspace.as_path())?;
         let event_log = EventLog::new(self.workspace.as_path());
-        increment_coordinator_tick_iteration_count(&mut state);
+        increment_coordinator_tick_iteration_count(&self.workspace);
 
         self.record_step("tmux_session_gate");
         if let Some(session_name) = state
@@ -232,8 +232,37 @@ impl Coordinator {
         self.handle_runtime_approval_prompts(&mut state, &event_log)?;
 
         self.record_step("sync_health");
-        let captures_by_agent = self.sync_agent_health(&mut state, &store, &event_log)?;
-        self.detect_abnormal_exits(&mut state, &event_log)?;
+        // P5 (C-P5-1, N3): ONE pane snapshot per tick, shared by sync_health and the
+        // abnormal-exit pass (same-tick reuse only — the snapshot does not outlive
+        // this tick; every tick re-reads).
+        let pane_snapshot = self.transport.list_targets().unwrap_or_default();
+        let captures_by_agent =
+            self.sync_agent_health(&mut state, &store, &event_log, &pane_snapshot)?;
+        // C-3-4 cr verdict — copilot 一期 classify→None(Unknown);为防 silent,
+        // tick 每次发现 copilot agent(从 state.agents 直接扫,不依赖 captures —
+        // 离线/未起 tmux 场景仍能写)就发 `provider.classify.unsupported` 事件
+        // (字面 reason=`phase1_unknown_pending_sample`,含 provider="copilot" + "classify"
+        // 串)。二期接 sqlite turns 表后这条删/降级,届时改 reason 区分。
+        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+            for (agent_id, agent) in agents {
+                let is_copilot = agent
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .and_then(parse_provider)
+                    .is_some_and(|p| matches!(p, crate::model::enums::Provider::Copilot));
+                if is_copilot {
+                    let _ = event_log.write(
+                        "provider.classify.unsupported",
+                        serde_json::json!({
+                            "provider": "copilot",
+                            "agent_id": agent_id,
+                            "reason": "phase1_unknown_pending_sample",
+                        }),
+                    );
+                }
+            }
+        }
+        self.detect_abnormal_exits(&mut state, &event_log, &pane_snapshot)?;
 
         self.record_step("deliver_pending");
         let delivered = crate::messaging::deliver_pending_messages(
@@ -353,13 +382,17 @@ impl Coordinator {
         state: &mut Value,
         store: &crate::message_store::MessageStore,
         event_log: &EventLog,
+        pane_infos: &[crate::transport::PaneInfo],
     ) -> Result<BTreeMap<AgentId, CapturedRuntimeFact>, TickError> {
         let mut captures = BTreeMap::new();
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
         let team_key = Some(crate::model::ids::TeamKey::new(team.clone()));
         let session_name = state.get("session_name").and_then(Value::as_str).map(str::to_string);
-        let pane_infos = self.transport.list_targets().unwrap_or_default();
+        // P5 (C-P5-2): one list-windows per SESSION per tick — memoized across the
+        // agent loop instead of one fork per agent.
+        let mut windows_by_session: BTreeMap<String, Result<Vec<crate::transport::WindowName>, String>> =
+            BTreeMap::new();
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
             return Ok(captures);
         };
@@ -367,15 +400,21 @@ impl Coordinator {
             let Some((session, window, target)) = capture_window_target(agent, session_name.as_deref()) else {
                 continue;
             };
-            let windows = match self.transport.list_windows(&session) {
-                Ok(windows) => windows,
+            let windows = match windows_by_session
+                .entry(session.as_str().to_string())
+                .or_insert_with(|| {
+                    self.transport
+                        .list_windows(&session)
+                        .map_err(|error| error.to_string())
+                }) {
+                Ok(windows) => windows.clone(),
                 Err(error) => {
                     event_log.write(
                         "coordinator.agent_capture_failed",
                         serde_json::json!({
                             "agent_id": agent_id,
                             "target": format!("{target:?}"),
-                            "error": error.to_string(),
+                            "error": error.clone(),
                         }),
                     )?;
                     continue;
@@ -408,18 +447,38 @@ impl Coordinator {
             let current_command = agent
                 .get("pane_current_command")
                 .or_else(|| agent.get("current_command"))
-                .and_then(Value::as_str);
-            let last_output_at_before = agent.get("last_output_at").and_then(Value::as_str);
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Python approvals/status.py:68-73 — last_output_at advances ONLY when the
+            // scrollback sha256 digest changed (last_output_hash gate), and it is
+            // refreshed BEFORE classification (the classifier sees the updated value).
+            // A non-empty but UNCHANGED capture must not dirty the state every tick
+            // (P3 umbrella: steady second tick is a zero state write).
+            let output_advanced =
+                !captured.text.is_empty() && scrollback_digest_advanced(agent, &captured.text);
+            if output_advanced {
+                if let Some(agent_obj) = agent.as_object_mut() {
+                    agent_obj.insert(
+                        "last_output_at".to_string(),
+                        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                    );
+                }
+            }
+            let last_output_at_now = agent
+                .get("last_output_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let activity = crate::messaging::classify_agent_activity(
                 &snapshot,
                 &captured.text,
                 pane_in_mode,
-                current_command,
-                last_output_at_before,
+                current_command.as_deref(),
+                last_output_at_now.as_deref(),
             );
-            let last_output_at = write_activity(agent, &activity, !captured.text.is_empty());
+            write_activity(agent, &activity, false);
+            let last_output_at = last_output_at_now;
             write_agent_health(store, &team, agent_id, agent, &activity, last_output_at.as_deref())?;
-            let pane_info = matching_capture_pane_info(agent, &session, &window, &pane_infos);
+            let pane_info = matching_capture_pane_info(agent, &session, &window, pane_infos);
             let pane_id = pane_info
                 .as_ref()
                 .map(|info| info.pane_id.clone())
@@ -488,11 +547,11 @@ impl Coordinator {
         &self,
         state: &mut Value,
         event_log: &EventLog,
+        targets: &[crate::transport::PaneInfo],
     ) -> Result<(), TickError> {
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
         let session_name = snapshot.get("session_name").and_then(Value::as_str);
-        let targets = self.transport.list_targets().unwrap_or_default();
         for agent in abnormal_watch_agents(&snapshot) {
             let rollout_path = resolve_agent_rollout_path(self.workspace.as_path(), &agent.rollout_path);
             let metadata = match std::fs::metadata(&rollout_path) {
@@ -508,7 +567,21 @@ impl Coordinator {
             };
             let size = metadata.len();
             let mtime_ns = metadata_mtime_ns(&metadata);
-            let text = match std::fs::read_to_string(&rollout_path) {
+            // P1 (C-P1-2/3): (size, mtime_ns) pair gate — an unchanged transcript is not
+            // read at all (live sample: 332MB whole-file read per agent per 2s tick).
+            // ANY field change (including a size shrink / truncate) falls through to the
+            // re-read below.
+            if let (Some(mtime), Some(stored)) =
+                (mtime_ns, abnormal_watch_stored_metadata(&snapshot, &agent.agent_id))
+            {
+                if stored == (size, mtime) {
+                    continue;
+                }
+            }
+            // P1 (C-P1-1): bounded tail read — the abnormal decision only consumes the
+            // LATEST transcript record; window matches Python `_TAIL_BYTES` (131072,
+            // idle_takeover_wiring.py:13), never less.
+            let text = match read_tail_text(&rollout_path, ABNORMAL_TAIL_BYTES) {
                 Ok(text) => text,
                 Err(error) => {
                     upsert_abnormal_watch(
@@ -522,7 +595,7 @@ impl Coordinator {
             let liveness = agent_process_liveness(
                 &agent,
                 session_name,
-                &targets,
+                targets,
                 self.transport.as_ref(),
             );
             let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
@@ -643,7 +716,21 @@ impl Coordinator {
                 continue;
             };
             let adapter = self.provider_registry.adapter_for(provider);
-            let handled = adapter.handle_startup_prompts(self.transport.as_ref(), &target, 1, 0.0);
+            let outcome =
+                adapter.handle_startup_prompts_outcome(self.transport.as_ref(), &target, 1, 0.0);
+            // swallow batch 2 ② (A1): an unobservable pane is a surfaced failure, not a
+            // silent "no prompts" — the agent's startup_prompts state stays un-handled.
+            if let Some(error) = &outcome.capture_error {
+                let _ = event_log.write(
+                    "provider.startup_prompt_failed",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "target": format!("{target:?}"),
+                        "error": error,
+                    }),
+                );
+            }
+            let handled = outcome.handled;
             if handled.is_empty() {
                 continue;
             }
@@ -791,7 +878,21 @@ impl Coordinator {
                         .into_iter()
                         .filter_map(runtime_approval_key)
                         .collect::<Vec<_>>();
-                    self.transport.send_keys(&target, &keys)?;
+                    // A-6 / Python approvals/runtime_prompts.py:21-43: prompts are handled
+                    // per-agent with run_cmd(check=False) — one agent's tmux failure must
+                    // not abort the whole tick for the rest.
+                    if let Err(error) = self.transport.send_keys(&target, &keys) {
+                        event_log.write(
+                            "runtime_approval.send_keys_failed",
+                            serde_json::json!({
+                                "agent_id": agent_id,
+                                "target": format!("{target:?}"),
+                                "tool": prompt.tool,
+                                "error": error.to_string(),
+                            }),
+                        )?;
+                        continue;
+                    }
                     let after = self
                         .transport
                         .capture(&target, crate::transport::CaptureRange::Tail(80))
@@ -992,12 +1093,10 @@ impl Coordinator {
     /// `message_store_schema_health`(`lifecycle.py:197`)。DB 列兼容门:区分 pre-init 必需列缺失
     /// (拒启)vs migratable 列缺失(可迁移)。`advanced repair-state --schema` 用其 action hint。
     pub fn schema_health(&self) -> SchemaHealth {
-        SchemaHealth {
-            ok: true,
-            schema_version: crate::db::schema::SCHEMA_VERSION,
-            error: None,
-            action: None,
-        }
+        // A-8: the gate must inspect the REAL team.db (Python lifecycle.py:197+
+        // message_store_schema_health); a hardcoded ok:true left the card §89
+        // restart_incompatible door permanently dead.
+        super::health::message_store_schema_health(&self.workspace)
     }
 
     fn record_step(&self, step: &'static str) {
@@ -1092,27 +1191,27 @@ impl TurnStateClassifier for ProviderTurnClassifier {
     }
 }
 
-fn increment_coordinator_tick_iteration_count(state: &mut Value) {
-    let Some(state_obj) = state.as_object_mut() else {
-        return;
-    };
-    let coordinator = state_obj
-        .entry("coordinator".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !coordinator.is_object() {
-        *coordinator = serde_json::json!({});
-    }
-    let Some(coord_obj) = coordinator.as_object_mut() else {
-        return;
-    };
-    let next = coord_obj
-        .get("coordinator_tick_iteration_count")
-        .and_then(Value::as_u64)
+/// P3 (C-P3-1, N1): the tick counter is a transient diagnostic, NOT source-of-truth
+/// state — keeping it in state.json made EVERY tick dirty and defeated both save
+/// short-circuits. It lives in its own metadata file; old state files still carrying
+/// `coordinator.coordinator_tick_iteration_count` load fine (read-compat, C-P3-3) —
+/// new versions simply stop writing it.
+fn increment_coordinator_tick_iteration_count(workspace: &WorkspacePath) {
+    let path =
+        crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json");
+    let next = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("coordinator_tick_iteration_count")
+                .and_then(Value::as_u64)
+        })
         .unwrap_or(0)
         .saturating_add(1);
-    coord_obj.insert(
-        "coordinator_tick_iteration_count".to_string(),
-        serde_json::json!(next),
+    let _ = std::fs::write(
+        &path,
+        serde_json::json!({"coordinator_tick_iteration_count": next}).to_string(),
     );
 }
 
@@ -1143,6 +1242,7 @@ fn provider_wire(provider: crate::model::enums::Provider) -> &'static str {
         crate::model::enums::Provider::Claude => "claude",
         crate::model::enums::Provider::ClaudeCode => "claude_code",
         crate::model::enums::Provider::Codex => "codex",
+        crate::model::enums::Provider::Copilot => "copilot",
         crate::model::enums::Provider::GeminiCli => "gemini_cli",
         crate::model::enums::Provider::Fake => "fake",
     }
@@ -1430,6 +1530,7 @@ fn provider_command_matches(provider: crate::model::enums::Provider, command: &s
             lower.contains("claude")
         }
         crate::model::enums::Provider::Codex => lower.contains("codex"),
+        crate::model::enums::Provider::Copilot => lower.contains("copilot"),
         crate::model::enums::Provider::GeminiCli => lower.contains("gemini"),
         crate::model::enums::Provider::Fake => lower.contains("fake"),
     }
@@ -1557,6 +1658,35 @@ fn abnormal_last_suppressed_key(state: &Value, agent_id: &str) -> Option<String>
 
 fn abnormal_last_check_key(state: &Value, agent_id: &str) -> Option<String> {
     abnormal_watch_str(state, agent_id, "last_check_key")
+}
+
+/// P1: Python `_TAIL_BYTES` parity (idle_takeover_wiring.py:13) — RS must not read less.
+const ABNORMAL_TAIL_BYTES: u64 = 131_072;
+
+/// P1: bounded tail read; a partial first line is harmless (the consumer only parses
+/// the latest complete JSONL record) and lossy UTF-8 keeps a mid-codepoint seek safe.
+fn read_tail_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// P1: the previous tick's `(size, mtime_ns)` pair from the abnormal watch payload.
+fn abnormal_watch_stored_metadata(state: &Value, agent_id: &str) -> Option<(u64, u64)> {
+    let watch = state
+        .get("coordinator")?
+        .get("abnormal_exit_watch")?
+        .get(agent_id)?;
+    Some((
+        watch.get("size")?.as_u64()?,
+        watch.get("mtime_ns")?.as_u64()?,
+    ))
 }
 
 fn abnormal_watch_str(state: &Value, agent_id: &str, field: &str) -> Option<String> {
@@ -1791,6 +1921,7 @@ fn parse_provider(raw: &str) -> Option<crate::model::enums::Provider> {
         "claude" => Some(crate::model::enums::Provider::Claude),
         "claude_code" => Some(crate::model::enums::Provider::ClaudeCode),
         "codex" => Some(crate::model::enums::Provider::Codex),
+        "copilot" => Some(crate::model::enums::Provider::Copilot),
         "gemini_cli" => Some(crate::model::enums::Provider::GeminiCli),
         "fake" => Some(crate::model::enums::Provider::Fake),
         _ => None,
@@ -2079,6 +2210,27 @@ fn clear_awaiting_human_confirm(agent: &mut Value) {
     if let Some(agent_obj) = agent.as_object_mut() {
         agent_obj.remove("awaiting_human_confirm");
     }
+}
+
+/// Python approvals/status.py:68-72 — sha256 the scrollback, compare to the stored
+/// `last_output_hash`; only a CHANGED digest counts as advanced output (and stores
+/// the new digest).
+fn scrollback_digest_advanced(agent: &mut Value, text: &str) -> bool {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let unchanged = agent
+        .get("last_output_hash")
+        .and_then(Value::as_str)
+        .is_some_and(|stored| stored == digest);
+    if unchanged {
+        return false;
+    }
+    if let Some(obj) = agent.as_object_mut() {
+        obj.insert("last_output_hash".to_string(), serde_json::json!(digest));
+    }
+    true
 }
 
 fn write_activity(

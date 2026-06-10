@@ -39,7 +39,7 @@ pub enum DeliveryStatus {
 
 /// 投递/发件拒绝原因 (card §42)。Python 散裸字符串靠 `==` 比对易拼错;Rust 穷尽 enum。
 /// 值散落 `send.py`/`delivery.py`/`leader.py`/`session_drift.py`/`owner_gate`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryRefusal {
     TargetNotInTeam,
@@ -62,6 +62,20 @@ pub enum DeliveryRefusal {
     /// is content, not a target. Distinct from `TargetNotInTeam` (where caller
     /// did pick a target but it's unknown).
     RoutingAmbiguous,
+    /// swallow batch 3: an explicit empty `--to` target list (a failed send always
+    /// carries its reason; an unexplained `failed` is a swallowed error).
+    EmptyTargetList,
+}
+
+/// Debug 输出 = wire snake_case 字面(单一真相源 = serde rename),与事件/JSON 面一致,
+/// 测试与日志里的 `{:?}` 不再出现与 wire 不同的 CamelCase 第二形态。
+impl std::fmt::Debug for DeliveryRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(wire)) => write!(f, "{wire}"),
+            _ => write!(f, "delivery_refusal"),
+        }
+    }
 }
 
 /// 注入失败阶段 (审计用;`delivery.py:309` injection.stage)。card §43。

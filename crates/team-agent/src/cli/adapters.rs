@@ -1490,6 +1490,14 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
     if args.fix && args.gate.is_none() {
         return Err(CliError::Runtime("--fix requires --gate".to_string()));
     }
+    // swallow batch 3 ①: an unknown gate refuses explicitly (Python commands.py:234-235
+    // `unknown doctor gate`), never an empty default-doctor green.
+    if let Some(DoctorGate::Unknown(raw)) = &args.gate {
+        return Ok(CmdResult::from_json(
+            serde_json::json!({"ok": false, "status": "unknown_gate", "gate": raw}),
+            args.json,
+        ));
+    }
     if args.comms || matches!(args.gate, Some(DoctorGate::Comms)) {
         let value = crate::diagnose::comms::doctor_comms_json(&args.workspace, args.team.as_deref(), Some("comms"))?;
         if !args.json {

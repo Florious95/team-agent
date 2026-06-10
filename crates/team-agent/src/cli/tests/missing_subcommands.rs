@@ -320,7 +320,12 @@ tasks:
     // hinges solely on the cli_prompt_ready derivation.)
     #[test]
     fn contract_alive_worker_running_is_cli_prompt_ready_and_ready() {
-        let state = serde_json::json!({"agents": {"w1": {
+        // A-5: missing leader_receiver no longer counts as attached; this contract's
+        // subject is the cli_prompt_ready derivation, so the fixture carries an
+        // attached receiver to keep `ready` hinging on it alone.
+        let state = serde_json::json!({
+            "leader_receiver": {"status": "attached", "pane_id": "%9"},
+            "agents": {"w1": {
             "status": "running",
             "pane_id": "%1",
             "mcp_ready": true,
@@ -361,6 +366,8 @@ tasks:
         let state = serde_json::json!({
             "session_name": "ta-fake",
             "tmux_session_present": true, // golden status() top-level signal: the live tmux session exists
+            // A-5: missing leader_receiver no longer counts as attached (see above).
+            "leader_receiver": {"status": "attached", "pane_id": "%9"},
             "agents": { "w1": {
                 "status": "running",
                 "mcp_config": mcp.to_string_lossy(),

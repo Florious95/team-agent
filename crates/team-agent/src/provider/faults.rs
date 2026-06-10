@@ -17,7 +17,8 @@ pub fn explicit_error_fact(record: &serde_json::Value, provider: Provider) -> Op
     match provider {
         Provider::Codex => codex_explicit_error_fact(record),
         Provider::Claude | Provider::ClaudeCode => claude_explicit_error_fact(record),
-        Provider::GeminiCli | Provider::Fake => None,
+        // copilot 一期不接 jsonl 真相源(C-3-5)。
+        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
 
@@ -59,7 +60,7 @@ fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFac
     match provider {
         Provider::Claude | Provider::ClaudeCode => claude_fault_fact(record),
         Provider::Codex => codex_fault_fact(record),
-        Provider::GeminiCli | Provider::Fake => None,
+        Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
     }
 }
 

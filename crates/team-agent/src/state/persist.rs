@@ -270,20 +270,27 @@ fn read_latest_state_under_lock(workspace: &Path, path: &Path) -> Option<Value> 
 }
 
 fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_agent_ids: &BTreeSet<String>) {
-    if !same_runtime_projection(incoming, latest) {
-        return;
+    // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
+    // the top-level<->active-team cross projections depend on which team is active); the
+    // per-team `teams.<k>.agents` merge below is team-key self-identifying and must run
+    // even when another process flipped session_name/active_team_key between this
+    // writer's load and save.
+    let projection_matches = same_runtime_projection(incoming, latest);
+    if projection_matches {
+        preserve_missing_agents(incoming.get_mut("agents"), latest.get("agents"), deleted_agent_ids);
+        preserve_latest_ownership_fields(incoming, latest);
     }
-    preserve_missing_agents(incoming.get_mut("agents"), latest.get("agents"), deleted_agent_ids);
-    preserve_latest_ownership_fields(incoming, latest);
 
     let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
-    if let Some(active_team) = active_team.as_deref() {
-        let latest_active_agents = latest
-            .get("teams")
-            .and_then(Value::as_object)
-            .and_then(|teams| teams.get(active_team))
-            .and_then(|entry| entry.get("agents"));
-        preserve_missing_agents(incoming.get_mut("agents"), latest_active_agents, deleted_agent_ids);
+    if projection_matches {
+        if let Some(active_team) = active_team.as_deref() {
+            let latest_active_agents = latest
+                .get("teams")
+                .and_then(Value::as_object)
+                .and_then(|teams| teams.get(active_team))
+                .and_then(|entry| entry.get("agents"));
+            preserve_missing_agents(incoming.get_mut("agents"), latest_active_agents, deleted_agent_ids);
+        }
     }
 
     let latest_teams = latest.get("teams").and_then(Value::as_object);
@@ -303,11 +310,13 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
         }
     }
-    if let Some(active_team) = active_team.as_deref() {
-        let latest_top_agents = latest.get("agents");
-        if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
-            preserve_missing_agents(incoming_entry.get_mut("agents"), latest_top_agents, deleted_agent_ids);
-            preserve_latest_ownership_fields(incoming_entry, latest);
+    if projection_matches {
+        if let Some(active_team) = active_team.as_deref() {
+            let latest_top_agents = latest.get("agents");
+            if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
+                preserve_missing_agents(incoming_entry.get_mut("agents"), latest_top_agents, deleted_agent_ids);
+                preserve_latest_ownership_fields(incoming_entry, latest);
+            }
         }
     }
 }
@@ -384,9 +393,38 @@ fn preserve_missing_agents(
         if deleted_agent_ids.contains(agent_id) {
             continue;
         }
-        incoming_map
-            .entry(agent_id.clone())
-            .or_insert_with(|| latest_agent.clone());
+        match incoming_map.entry(agent_id.clone()) {
+            serde_json::map::Entry::Vacant(slot) => {
+                slot.insert(latest_agent.clone());
+            }
+            serde_json::map::Entry::Occupied(mut existing) => {
+                backfill_capture_fields(existing.get_mut(), latest_agent);
+            }
+        }
+    }
+}
+
+/// A0/R2: session-capture fields are written by another process (capture/update_state)
+/// between a writer's load and save; a stale incoming row must not regress them to null.
+/// Monotonic backfill ONLY for the capture field family (no generic deep-merge, so a
+/// deliberate field clear elsewhere is not masked).
+fn backfill_capture_fields(incoming_agent: &mut Value, latest_agent: &Value) {
+    const CAPTURE_FIELDS: [&str; 5] = [
+        "session_id",
+        "rollout_path",
+        "captured_at",
+        "captured_via",
+        "attribution_confidence",
+    ];
+    let Some(incoming_row) = incoming_agent.as_object_mut() else {
+        return;
+    };
+    for field in CAPTURE_FIELDS {
+        if incoming_row.get(field).is_none_or(Value::is_null) {
+            if let Some(value) = latest_agent.get(field).filter(|value| !value.is_null()) {
+                incoming_row.insert(field.to_string(), value.clone());
+            }
+        }
     }
 }
 
@@ -877,5 +915,43 @@ mod tests {
         // 但磁盘未被重写(字节恒等)。
         let after = std::fs::read_to_string(runtime_state_path(&ws)).unwrap();
         assert_eq!(after, before, "已是迁移等价形的 legacy 文件不得 spurious 重写");
+    }
+
+    // A0 GREEN 回归锁(.team/artifacts/a0-rs-lostupdate-locate.md §5.3):锁内 preserve 把磁盘
+    // latest 多出的 agent 补回 stale incoming(防 Python A0 lost-update),同时 deleted_agent_ids
+    // 豁免位必须让 remove-agent 的删除不被 merge 复活(persist.rs:383-385)。
+    #[test]
+    fn a0_green_lock_preserve_fills_missing_agents_but_deleted_ids_stay_dead() {
+        let ws = temp_ws();
+        std::fs::create_dir_all(runtime_dir(&ws)).unwrap();
+        std::fs::write(
+            runtime_state_path(&ws),
+            serde_json::to_string_pretty(&json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "w1": {"status": "running", "provider": "codex", "agent_id": "w1"},
+                    "kept": {"status": "running", "provider": "codex", "agent_id": "kept"},
+                    "gone": {"status": "running", "provider": "codex", "agent_id": "gone"},
+                },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": { "w1": {"status": "running", "provider": "codex", "agent_id": "w1"} },
+        });
+        save_runtime_state_with_deleted_agents(&ws, &incoming, &["gone"]).unwrap();
+        let saved = read_state(&ws);
+        assert!(
+            saved.pointer("/agents/kept").is_some_and(Value::is_object),
+            "锁内 preserve 必须把磁盘 latest 多出的 `kept` 补回 stale incoming;saved={saved}"
+        );
+        assert!(
+            saved.pointer("/agents/gone").is_none(),
+            "deleted_agent_ids 豁免:被 remove 的 `gone` 不得被 preserve 复活;saved={saved}"
+        );
     }
 }

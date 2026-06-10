@@ -140,6 +140,10 @@ fn spawn_agents(
     transport: &dyn Transport,
 ) -> Result<Vec<StartedAgent>, LifecycleError> {
     let team_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    let runtime_fast = matches!(
+        spec.get("runtime").and_then(|v| v.get("fast")),
+        Some(Value::Bool(true))
+    );
     let mut started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
@@ -185,7 +189,12 @@ fn spawn_agents(
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         let mcp_config = resolve_mcp_config(mcp_config, workspace, agent_id_raw, &mcp_team_id);
-        let mcp_config_path = write_worker_mcp_config(workspace, agent_id_raw, &mcp_config)?;
+        let mcp_config_path = write_worker_mcp_config_for_provider(
+            workspace,
+            agent_id_raw,
+            &mcp_config,
+            Some(provider),
+        )?;
         let profile_dir = team_dir.join("profiles");
         let profile_launch =
             crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
@@ -209,15 +218,119 @@ fn spawn_agents(
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
             point_native_mcp_config_at_file(&mut plan.argv, provider, &mcp_config_path);
         }
+        // C-A-4 cr verdict v2 — Copilot BYOK(compatible_api)硬性校验:
+        // "A model is required for BYOK"(help-providers 原文)。检查 agent
+        // 的 model 来源:角色 spec.model > profile COPILOT_MODEL(经 env_overlay)
+        // > --model 旗(本 worker 路径不在 argv 后追加用户 --model)。三者全空 → 报错
+        // 含 "model" 字面,失败信息透传给 leader。
+        if matches!(provider, Provider::Copilot) && auth_mode == AuthMode::CompatibleApi {
+            let has_model = model.is_some_and(|s| !s.is_empty())
+                || profile_launch.command_overrides.model.as_deref().is_some_and(|s| !s.is_empty())
+                || profile_launch
+                    .env_overlay
+                    .get("COPILOT_MODEL")
+                    .is_some_and(|v| !v.is_empty());
+            if !has_model {
+                return Err(LifecycleError::RequirementUnmet(
+                    "copilot BYOK profile requires a model (set COPILOT_MODEL, agent.model, or --model)"
+                        .to_string(),
+                ));
+            }
+        }
+        // §B1 + C-7-1 + C-6-2 + C-3-2 cr verdict v2 — Copilot launch-time argv 注入:
+        //   -n <agent_id>      会话命名(main-help:104)→ resume-by-name + 人查 双键
+        //   -C <workspace>     双保险 cwd(main-help:55-56),防 shell 包装意外
+        //   --log-dir <path>   per-worker 定向日志(help-logging)→ 故障期可读 + N18 隔离
+        //   --log-level info   配套日志级别
+        //   --disable-mcp-server <n>...  C-3-2 残留 MCP server 按名禁(扫 mcp list)
+        if matches!(provider, Provider::Copilot) {
+            plan.argv.push("-n".to_string());
+            plan.argv.push(agent_id_raw.to_string());
+            plan.argv.push("-C".to_string());
+            plan.argv.push(workspace.to_string_lossy().to_string());
+            let log_dir = workspace
+                .join(".team")
+                .join("logs")
+                .join("copilot")
+                .join(agent_id_raw);
+            std::fs::create_dir_all(&log_dir).map_err(|e| {
+                LifecycleError::StatePersist(format!("{}: {e}", log_dir.display()))
+            })?;
+            plan.argv.push("--log-dir".to_string());
+            plan.argv.push(log_dir.to_string_lossy().to_string());
+            plan.argv.push("--log-level".to_string());
+            plan.argv.push("info".to_string());
+            // C-3-2/C-3-3 cr verdict v2 — spawn 前扫 `copilot mcp list` 找用户全局/
+            // workspace 的 MCP 残留,对每个非 team_orchestrator server 追加
+            // --disable-mcp-server <name>,并落 mcp-residual.txt + event。
+            apply_copilot_mcp_residual_disables(
+                &workspace,
+                agent_id_raw,
+                &mut plan.argv,
+                &log_dir,
+            )?;
+        }
         fill_spawn_placeholders_full(&mut plan.argv, workspace, agent_id_raw, Some(&mcp_team_id));
         let window = WindowName::new(agent_id_raw);
         let mut env =
             inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
         apply_profile_launch_env(&mut env, &profile_launch);
+        // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker
+        // with cwd=workspace, same as the RS fork/add and restart paths.
+        let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
+        // BUG / C-1-2 / C-6-1 cr verdict — Copilot system_prompt 走 spawn env overlay +
+        // per-worker AGENTS.md(B2 灵魂件降级):写
+        //   <workspace>/.team/runtime/copilot-instructions/<agent_id>/AGENTS.md
+        // 全文 == compile_worker_system_prompt 输出,并通过 spawn env
+        // `COPILOT_CUSTOM_INSTRUCTIONS_DIRS=<该目录>` 让 copilot CLI 加载。
+        // **禁** silent 写 ~/.copilot/AGENTS.md(C-1-2)+ **禁** -i 作首条消息(C-1-5)。
+        if matches!(provider, Provider::Copilot) {
+            apply_copilot_instructions_overlay(
+                workspace,
+                agent_id_raw,
+                system_prompt.as_str(),
+                &mut env,
+            )?;
+            // C-A-6 cr verdict v2 — Copilot worker env 全量继承下,用户 shell 的
+            // COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN 会穿透 + 按 cmd-login 实证
+            // **优先于凭据库**(可能静默改变 auth 通道)。一期只观测不剥除(剥除是
+            // 行为变更,cr 裁);命中任一就发 warn event 让 user 可见。
+            let mut passthrough: Vec<String> = Vec::new();
+            for key in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
+                if env.get(key).is_some_and(|v| !v.is_empty()) {
+                    passthrough.push(key.to_string());
+                }
+            }
+            if !passthrough.is_empty() {
+                let event_log = crate::event_log::EventLog::new(workspace);
+                let _ = event_log.write(
+                    "provider.copilot.token_passthrough_warning",
+                    serde_json::json!({
+                        "agent_id": agent_id_raw,
+                        "tokens": passthrough,
+                        "reason": "user shell GITHUB_TOKEN family takes precedence over copilot credential store (cmd-login)",
+                    }),
+                );
+            }
+        }
         let spawn = if started.is_empty() {
-            transport.spawn_first(session_name, &window, &plan.argv, team_dir, &env)
+            transport.spawn_first_with_env_unset(
+                session_name,
+                &window,
+                &plan.argv,
+                workspace,
+                &env,
+                &env_unset,
+            )
         } else {
-            transport.spawn_into(session_name, &window, &plan.argv, team_dir, &env)
+            transport.spawn_into_with_env_unset(
+                session_name,
+                &window,
+                &plan.argv,
+                workspace,
+                &env,
+                &env_unset,
+            )
         }
         .map_err(|e| LifecycleError::Transport(e.to_string()))?;
         let _ = adapter.handle_startup_prompts(
@@ -226,6 +339,11 @@ fn spawn_agents(
             30,
             0.5,
         );
+        // Python launch/core.py:235-237 — runtime.fast toggles the provider's fast mode
+        // after spawn; provider specifics live behind the adapter (F032).
+        if runtime_fast {
+            let _ = adapter.enable_fast_mode(transport, &Target::Pane(spawn.pane_id.clone()));
+        }
         if matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Dead)) {
             continue;
         }
@@ -330,7 +448,7 @@ fn persist_spawn_agent_state(
                 id,
                 provider,
                 workspace,
-                spec_path.parent().unwrap_or(workspace),
+                workspace,
                 &spawned_at,
                 &team_id,
                 Some(agent_id_to_pane_id(started, id)),
@@ -717,7 +835,8 @@ fn running_agent_state(
         .mcp_config(auth_mode)
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
     let mcp_config = resolve_mcp_config(mcp_config, workspace, id, team_id);
-    let mcp_config_path = write_worker_mcp_config(workspace, id, &mcp_config)?;
+    let mcp_config_path =
+        write_worker_mcp_config_for_provider(workspace, id, &mcp_config, Some(provider))?;
     let mut state = serde_json::Map::new();
     state.insert("status".to_string(), serde_json::json!("running"));
     state.insert("provider".to_string(), serde_json::json!(provider));
@@ -850,6 +969,20 @@ pub(crate) fn write_worker_mcp_config(
     agent_id: &str,
     config: &crate::provider::McpConfig,
 ) -> Result<PathBuf, LifecycleError> {
+    write_worker_mcp_config_for_provider(workspace, agent_id, config, None)
+}
+
+/// C-3-4 cr verdict v2 — Copilot 的 mcp config schema 字段名是 `transport`
+/// (实测 cmd-mcp-add 原文取值 stdio|http|sse),不是 canonical 的 `type`。当
+/// provider==Copilot 时写出文件前先做 type→transport 翻译;其它 provider 不动。
+/// 文件路径同 canonical `<ws>/.team/runtime/mcp/<agent_id>.json`,因为 launch
+/// 路径会用 `--additional-mcp-config @<file>` 直指它。
+pub(crate) fn write_worker_mcp_config_for_provider(
+    workspace: &Path,
+    agent_id: &str,
+    config: &crate::provider::McpConfig,
+    provider: Option<Provider>,
+) -> Result<PathBuf, LifecycleError> {
     let path = workspace
         .join(".team/runtime/mcp")
         .join(format!("{agent_id}.json"));
@@ -857,11 +990,42 @@ pub(crate) fn write_worker_mcp_config(
         std::fs::create_dir_all(parent)
             .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
     }
-    let body = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": config.raw}))
+    let raw = if matches!(provider, Some(Provider::Copilot)) {
+        copilot_translate_mcp_servers(&config.raw)
+    } else {
+        config.raw.clone()
+    };
+    let body = serde_json::to_string_pretty(&serde_json::json!({"mcpServers": raw}))
         .map_err(|e| LifecycleError::StatePersist(format!("serialize mcp config: {e}")))?;
     std::fs::write(&path, body)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", path.display())))?;
     Ok(path)
+}
+
+/// C-3-4 cr verdict v2 — McpConfig.raw 是 `{name: {type, command, args, env}}` 形;
+/// copilot mcp add schema 取 `transport` 替 `type`(stdio|http|sse 同值)。仅
+/// 字段名变换,其余字段全保留。
+fn copilot_translate_mcp_servers(raw: &serde_json::Value) -> serde_json::Value {
+    let Some(servers) = raw.as_object() else {
+        return raw.clone();
+    };
+    let mut translated = serde_json::Map::new();
+    for (name, server) in servers {
+        let Some(obj) = server.as_object() else {
+            translated.insert(name.clone(), server.clone());
+            continue;
+        };
+        let mut out = serde_json::Map::new();
+        for (key, value) in obj {
+            if key == "type" {
+                out.insert("transport".to_string(), value.clone());
+            } else {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+        translated.insert(name.clone(), serde_json::Value::Object(out));
+    }
+    serde_json::Value::Object(translated)
 }
 
 pub(crate) fn point_native_mcp_config_at_file(
@@ -869,14 +1033,27 @@ pub(crate) fn point_native_mcp_config_at_file(
     provider: Provider,
     path: &Path,
 ) {
-    if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        return;
-    }
-    let Some(index) = argv.iter().position(|arg| arg == "--mcp-config") else {
-        return;
-    };
-    if let Some(value) = argv.get_mut(index.saturating_add(1)) {
-        *value = path.to_string_lossy().to_string();
+    match provider {
+        Provider::Claude | Provider::ClaudeCode => {
+            let Some(index) = argv.iter().position(|arg| arg == "--mcp-config") else {
+                return;
+            };
+            if let Some(value) = argv.get_mut(index.saturating_add(1)) {
+                *value = path.to_string_lossy().to_string();
+            }
+        }
+        // §C1 note: copilot `--additional-mcp-config` 接受 `@file`,直接指向既有
+        // `.team/runtime/mcp/<agent>.json`(launch 路径 write_worker_mcp_config 已写)。
+        // 既避免 inline JSON 包 mcpServers wrapper 的语义错位,也更利于 ps 验法。
+        Provider::Copilot => {
+            let Some(index) = argv.iter().position(|arg| arg == "--additional-mcp-config") else {
+                return;
+            };
+            if let Some(value) = argv.get_mut(index.saturating_add(1)) {
+                *value = format!("@{}", path.to_string_lossy());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -995,11 +1172,199 @@ pub(crate) fn inherited_env_with_team_overrides(
         "TEAM_AGENT_WORKSPACE".to_string(),
         workspace.to_string_lossy().to_string(),
     );
+    // Python providers.py:131 — TEAM_AGENT_ID must be the worker ITSELF, overriding any
+    // value inherited from the launching process (an add-agent/fork issued from another
+    // worker's MCP server carries the CALLER's TEAM_AGENT_ID in its environ).
+    env.insert("TEAM_AGENT_ID".to_string(), agent_id.to_string());
     env.insert("TEAM_AGENT_AGENT_ID".to_string(), agent_id.to_string());
     if let Some(tid) = team_id.filter(|s| !s.is_empty()) {
         env.insert("TEAM_AGENT_OWNER_TEAM_ID".to_string(), tid.to_string());
     }
     env
+}
+
+/// BUG / B2 灵魂件 + C-1-2 + C-6-1 cr verdict — Copilot per-worker AGENTS.md
+/// 写入 + `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` 注入。
+///
+/// 目录布局:`<workspace>/.team/runtime/copilot-instructions/<agent_id>/AGENTS.md`
+///   * 含 `<agent_id>` segment(C-6-2 per-agent isolation,N18 精神)
+///   * 文件内容 ≡ `compile_worker_system_prompt` 输出(B2 ps/文件双验法)
+///   * **禁** silent 写全局 `~/.copilot/AGENTS.md`(C-1-2 grep guard)
+///
+/// 失败回 `LifecycleError::StatePersist` 以与既有 state 持久化错误同源,
+/// 不 silent 吞(MUST-NOT-13 诚实)。
+pub(crate) fn apply_copilot_instructions_overlay(
+    workspace: &Path,
+    agent_id: &str,
+    system_prompt: &str,
+    env: &mut BTreeMap<String, String>,
+) -> Result<(), LifecycleError> {
+    let dir = workspace
+        .join(".team")
+        .join("runtime")
+        .join("copilot-instructions")
+        .join(agent_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
+    let agents_md = dir.join("AGENTS.md");
+    std::fs::write(&agents_md, system_prompt.as_bytes())
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", agents_md.display())))?;
+    env.insert(
+        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS".to_string(),
+        dir.to_string_lossy().to_string(),
+    );
+    // ★ C-4 P0(N39 红线 / MUST-12) — copilot config 默认 `updateTerminalTitle=true`
+    // 会改 tmux window 名(help-config 原文)。tmux window 名是框架定位 agent 的
+    // anchor(window==agent_id);copilot 静默改写 → 寻址 / kill / 保护集 三处同源
+    // 派生漂移 → B5 protected_set 误判、MUST-12 pane 身份失锚、N39 同源派生破。
+    // 漏关后果定级为【B5 leader 误杀同级 incident】,绝不允许 silent 跳过。
+    // 主案:env `COPILOT_DISABLE_TERMINAL_TITLE=1`(help-config 原文 "Can also be
+    // disabled via the COPILOT_DISABLE_TERMINAL_TITLE environment variable")。
+    env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
+    Ok(())
+}
+
+/// C-3-2/C-3-3 cr verdict v2 — Copilot spawn 前调 `copilot mcp list` 扫用户全局
+/// `~/.copilot/mcp-config.json` 与 workspace `.mcp.json` 的 MCP 残留;对每个非
+/// `team_orchestrator` server 追加 `--disable-mcp-server <name>`(main-help:72-73)
+/// 并落 `<log_dir>/mcp-residual.txt` + emit `provider.copilot.mcp_residual_detected`
+/// event(MUST-NOT-13 诚实记录,非 silent)。
+///
+/// 失败回 `LifecycleError::StatePersist`,不 silent 吞;`copilot mcp list` 自身
+/// 无法运行(命令缺失 / 退出码非零)时,仅记 `mcp-residual.txt` 的 unavailable
+/// 行,不阻断 spawn(provider 一期 subscription-only,工具链可能未完全就绪)。
+fn apply_copilot_mcp_residual_disables(
+    workspace: &Path,
+    agent_id: &str,
+    argv: &mut Vec<String>,
+    log_dir: &Path,
+) -> Result<(), LifecycleError> {
+    let listing = std::process::Command::new("copilot")
+        .arg("mcp")
+        .arg("list")
+        .output();
+    let residual_path = log_dir.join("mcp-residual.txt");
+    match listing {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            std::fs::write(&residual_path, &text).map_err(|e| {
+                LifecycleError::StatePersist(format!("{}: {e}", residual_path.display()))
+            })?;
+            let residual_servers = parse_copilot_mcp_list_server_names(&text);
+            let non_orchestrator: Vec<String> = residual_servers
+                .iter()
+                .filter(|name| name.as_str() != "team_orchestrator")
+                .cloned()
+                .collect();
+            for name in &non_orchestrator {
+                argv.push("--disable-mcp-server".to_string());
+                argv.push(name.clone());
+            }
+            if !non_orchestrator.is_empty() {
+                let event_log = crate::event_log::EventLog::new(workspace);
+                let _ = event_log.write(
+                    "provider.copilot.mcp_residual_detected",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "residual_servers": non_orchestrator,
+                        "log_path": residual_path.to_string_lossy(),
+                    }),
+                );
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            std::fs::write(
+                &residual_path,
+                format!("copilot mcp list exit={:?} stderr={stderr}\n", out.status.code()),
+            )
+            .map_err(|e| {
+                LifecycleError::StatePersist(format!("{}: {e}", residual_path.display()))
+            })?;
+        }
+        Err(e) => {
+            std::fs::write(
+                &residual_path,
+                format!("copilot mcp list unavailable: {e}\n"),
+            )
+            .map_err(|e| {
+                LifecycleError::StatePersist(format!("{}: {e}", residual_path.display()))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// 解析 `copilot mcp list` 输出取 server 名集合(te 真机实证 v2,1.0.59 形态):
+/// ```text
+/// User servers:
+///   foo (local)
+///   bar (http)
+/// Builtin servers:
+///   github-mcp-server (local)
+/// ```
+/// 或空集形态(te 真机实证 fake HOME 无 mcp-config.json):
+/// ```text
+/// No MCP servers configured.
+///
+/// Add a server with:
+///   copilot mcp add <name> -- <command> [args...]
+///   copilot mcp add --transport http <name> <url>
+/// ```
+///
+/// 规则:
+/// 1. 首行含 "No MCP servers configured" → 立即返空(避免把 "Add a server with"
+///    段下的 help 行误识为 server)
+/// 2. 段标题行(非缩进、以 `:` 结尾):只有 *servers:* 后缀的段(User/Builtin/
+///    Workspace servers:)才进 server-listing 模式;其余段(如 "Add a server with:")
+///    进 skip 模式直到下个 servers: 段或文档结束
+/// 3. servers: 段内的缩进行取首段 token,剥 ` (local)`/` (http)`/` (sse)` 后缀
+/// 4. 空行 / 不识别行容忍跳过(诚实降级:漏识 = silent 残留,在 mcp-residual.txt
+///    全量落盘留证)
+fn parse_copilot_mcp_list_server_names(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_servers_section = false;
+    for line in text.lines() {
+        let trimmed_end = line.trim_end();
+        if trimmed_end.is_empty() {
+            continue;
+        }
+        // C-3-2 fix(te 真机实证):空集 sentinel 立即返空。
+        if trimmed_end
+            .trim_start()
+            .starts_with("No MCP servers configured")
+        {
+            return Vec::new();
+        }
+        // 段标题行(非缩进):决定后续缩进行是否取 server 名。"*servers:" 是
+        // listing 段(User/Builtin/Workspace),其它段都 skip(如 "Add a server with:"
+        // 下面的 help 命令缩进行)。
+        if !(line.starts_with(' ') || line.starts_with('\t')) {
+            let lower = trimmed_end.to_ascii_lowercase();
+            in_servers_section = lower.trim_end_matches(':').ends_with("servers");
+            continue;
+        }
+        if !in_servers_section {
+            continue;
+        }
+        let trimmed = trimmed_end.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut token = trimmed.split_whitespace().next().unwrap_or("").to_string();
+        // 剥常见装饰后缀(实测形如 "(local)"/"(http)"/"(sse)" 是独立 whitespace
+        // 分隔的 token,首段 token 通常不带括号;若实际 copilot 把括号粘连首段
+        // token,这里多做一次后缀剥离守护)。
+        if let Some(idx) = token.find('(') {
+            token.truncate(idx);
+        }
+        token = token.trim_end_matches(':').trim().to_string();
+        if token.is_empty() {
+            continue;
+        }
+        out.push(token);
+    }
+    out
 }
 
 pub(crate) fn apply_profile_launch_env(
@@ -1174,6 +1539,7 @@ fn parse_provider(raw: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
         "codex" => Some(Provider::Codex),
+        "copilot" => Some(Provider::Copilot),
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,
@@ -2120,6 +2486,7 @@ pub fn fork_agent(
     workspace: &Path,
     source_agent_id: &AgentId,
     as_agent_id: &AgentId,
+    label: Option<&str>,
     open_display: bool,
     team: Option<&str>,
 ) -> Result<ForkAgentReport, LifecycleError> {
@@ -2133,6 +2500,7 @@ pub fn fork_agent(
         workspace,
         source_agent_id,
         as_agent_id,
+        label,
         open_display,
         team,
         &crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace),
@@ -2143,6 +2511,7 @@ pub fn fork_agent_with_transport(
     workspace: &Path,
     source_agent_id: &AgentId,
     as_agent_id: &AgentId,
+    label: Option<&str>,
     open_display: bool,
     team: Option<&str>,
     transport: &dyn Transport,
@@ -2201,7 +2570,7 @@ pub fn fork_agent_with_transport(
             as_agent_id.as_str()
         )));
     }
-    let new_spec = append_forked_agent(&spec, source_agent, source_agent_id, as_agent_id)?;
+    let new_spec = append_forked_agent(&spec, source_agent, source_agent_id, as_agent_id, label)?;
     crate::model::spec::validate_spec(&new_spec, &spec_workspace)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     std::fs::write(&spec_path, yaml::dumps(&new_spec))
@@ -2251,11 +2620,16 @@ pub fn fork_agent_with_transport(
         LifecycleError::Provider(e.to_string())
     })?;
     let mcp_config = resolve_mcp_config(mcp_config, &workspace, as_agent_id.as_str(), &fork_team);
-    let mcp_config_path = write_worker_mcp_config(&workspace, as_agent_id.as_str(), &mcp_config)
-        .map_err(|e| {
-            let _ = std::fs::write(&spec_path, text.as_bytes());
-            e
-        })?;
+    let mcp_config_path = write_worker_mcp_config_for_provider(
+        &workspace,
+        as_agent_id.as_str(),
+        &mcp_config,
+        Some(provider),
+    )
+    .map_err(|e| {
+        let _ = std::fs::write(&spec_path, text.as_bytes());
+        e
+    })?;
     let profile_dir = spec_workspace.join("profiles");
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
@@ -2300,10 +2674,25 @@ pub fn fork_agent_with_transport(
     // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
     // (spawn_into). The Rust restart seam (restart.rs spawn_agent_window) uses the same branch.
     let session_live = transport.has_session(&session_name).unwrap_or(false);
+    let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
     let spawn_result = if session_live {
-        transport.spawn_into(&session_name, &window, &plan.argv, &workspace, &env)
+        transport.spawn_into_with_env_unset(
+            &session_name,
+            &window,
+            &plan.argv,
+            &workspace,
+            &env,
+            &env_unset,
+        )
     } else {
-        transport.spawn_first(&session_name, &window, &plan.argv, &workspace, &env)
+        transport.spawn_first_with_env_unset(
+            &session_name,
+            &window,
+            &plan.argv,
+            &workspace,
+            &env,
+            &env_unset,
+        )
     };
     let spawn = spawn_result.map_err(|e| {
         let _ = std::fs::write(&spec_path, text.as_bytes());
@@ -2493,6 +2882,7 @@ fn append_forked_agent(
     source_agent: &Value,
     source_agent_id: &AgentId,
     as_agent_id: &AgentId,
+    label: Option<&str>,
 ) -> Result<Value, LifecycleError> {
     let mut new_agent = source_agent.clone();
     set_yaml_map_value(
@@ -2501,11 +2891,16 @@ fn append_forked_agent(
         Value::Str(as_agent_id.as_str().to_string()),
     )?;
     // golden operations.py:315 `str(label or new_agent.get("role") or as_agent_id)` — Python `or`
-    // falsiness: an EMPTY-string role is falsy and falls through to as_agent_id.
-    let role = new_agent
-        .get("role")
-        .and_then(Value::as_str)
+    // falsiness: an EMPTY-string label/role is falsy and falls through to the next tier.
+    // The label IS the forked agent's new role (it feeds the identity prompt — B2 family).
+    let role = label
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            new_agent
+                .get("role")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| as_agent_id.as_str())
         .to_string();
     set_yaml_map_value(&mut new_agent, "role", Value::Str(role.clone()))?;
@@ -2955,12 +3350,22 @@ fn override_spec_session_name(spec: &mut Value, session_name: &str) {
 }
 
 fn spec_session_name(spec: &Value) -> SessionName {
-    let name = spec
+    if let Some(name) = spec
         .get("runtime")
         .and_then(|v| v.get("session_name"))
         .and_then(Value::as_str)
-        .unwrap_or("team-agent");
-    SessionName::new(name)
+        .filter(|name| !name.is_empty())
+    {
+        return SessionName::new(name);
+    }
+    // Python launch/core.py:56 — fallback derives from the team name, not a constant.
+    let team_name = spec
+        .get("team")
+        .and_then(|team| team.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("agent");
+    SessionName::new(format!("team-{team_name}"))
 }
 
 fn spec_agents(spec: &Value) -> Vec<AgentId> {

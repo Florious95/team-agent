@@ -320,6 +320,54 @@ impl MessageStore {
         Ok(rows.into_iter().rev().collect())
     }
 
+    /// `latest_results` (`core.py:458-471`): newest non-invalid result rows, oldest
+    /// first (Python fetches `created_at desc limit ?` then reverses).
+    pub fn latest_results(
+        &self,
+        limit: usize,
+        owner_team_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, MessageStoreError> {
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let sql = match owner_team_id {
+            Some(_) => {
+                "select owner_team_id, result_id, task_id, agent_id, envelope, status, created_at
+                 from results
+                 where status != 'invalid' and owner_team_id = ?2
+                 order by created_at desc
+                 limit ?1"
+            }
+            None => {
+                "select owner_team_id, result_id, task_id, agent_id, envelope, status, created_at
+                 from results
+                 where status != 'invalid'
+                 order by created_at desc
+                 limit ?1"
+            }
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(serde_json::json!({
+                "owner_team_id": row.get::<_, Option<String>>(0)?,
+                "result_id": row.get::<_, String>(1)?,
+                "task_id": row.get::<_, Option<String>>(2)?,
+                "agent_id": row.get::<_, Option<String>>(3)?,
+                "envelope": row.get::<_, Option<String>>(4)?,
+                "status": row.get::<_, Option<String>>(5)?,
+                "created_at": row.get::<_, Option<String>>(6)?,
+            }))
+        };
+        let rows = match owner_team_id {
+            Some(team) => stmt
+                .query_map(params![limit, team], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map(params![limit], map_row)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        Ok(rows.into_iter().rev().collect())
+    }
+
     /// Allow direct peer messages in both directions. Golden stores `(a,b)` and
     /// `(b,a)` so either sender/recipient lookup can use a single ordered key.
     pub fn allow_peer(&self, a: &str, b: &str) -> Result<(), MessageStoreError> {
@@ -407,6 +455,38 @@ fn row_to_message_value(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json:
         "acknowledged_at": row.get::<_, Option<String>>(13)?,
         "error": row.get::<_, Option<String>>(14)?,
         "delivery_attempts": row.get::<_, Option<i64>>(15)?,
+    }))
+}
+
+/// `result_summary_from_row`(`status/queries.py:92-106`):解析 result 行的 envelope,
+/// 产出 status/watch 共用的 result 摘要;envelope 坏/非对象 → `None`。
+pub fn result_summary_from_row(row: &serde_json::Value) -> Option<serde_json::Value> {
+    let envelope = match row.get("envelope") {
+        Some(serde_json::Value::String(text)) => {
+            serde_json::from_str::<serde_json::Value>(text).ok()?
+        }
+        Some(value @ serde_json::Value::Object(_)) => value.clone(),
+        _ => return None,
+    };
+    if !envelope.is_object() {
+        return None;
+    }
+    // Python `envelope.get(k) or row.get(k)` — falsy (null/empty) falls through to the row.
+    let pick = |key: &str| {
+        envelope
+            .get(key)
+            .filter(|v| !v.is_null() && v.as_str() != Some(""))
+            .or_else(|| row.get(key))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    };
+    Some(serde_json::json!({
+        "result_id": row.get("result_id").cloned().unwrap_or(serde_json::Value::Null),
+        "task_id": pick("task_id"),
+        "agent_id": pick("agent_id"),
+        "status": pick("status"),
+        "summary": envelope.get("summary").cloned().unwrap_or(serde_json::Value::Null),
+        "created_at": row.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
     }))
 }
 

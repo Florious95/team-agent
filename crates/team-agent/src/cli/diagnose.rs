@@ -289,21 +289,46 @@ fn copy_optional_field(from: &Value, to: &mut Value, key: &str) {
 }
 
 pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64) -> Result<Value, CliError> {
-    let selected = crate::state::selector::resolve_active_team(
+    // swallow batch 3 ③: an unreadable runtime state must never read as "ready" — the
+    // read error is surfaced verbatim (state_read_error) with ready=false instead of
+    // silently degrading to an empty/stale state.
+    let selected = match crate::state::selector::resolve_active_team(
         workspace,
         None,
         crate::state::selector::SelectorMode::RuntimeOnly,
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    ) {
+        Ok(selected) => selected,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "status": "error",
+                "reason": "state_read_error",
+                "state_read_error": error.to_string(),
+                "readiness": {"ready": false},
+                "summary": "runtime state could not be read",
+                "next_actions": [json!("inspect .team/runtime/state.json (corrupt or unreadable) and retry")],
+            }));
+        }
+    };
     let timeout = if timeout.is_finite() && timeout > 0.0 { timeout } else { 0.0 };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
     let mut readiness;
+    let mut state_read_error: Option<String> = None;
     loop {
-        let mut state = crate::state::projection::select_runtime_state(
+        let mut state = match crate::state::projection::select_runtime_state(
             &selected.run_workspace,
             Some(&selected.team_key),
-        )
-        .unwrap_or_else(|_| selected.state.clone());
+        ) {
+            Ok(state) => {
+                state_read_error = None;
+                state
+            }
+            Err(error) => {
+                state_read_error = Some(error.to_string());
+                readiness = json!({"ready": false, "state_read_error": error.to_string()});
+                break;
+            }
+        };
         inject_tmux_session_present(&selected.run_workspace, &mut state);
         inject_message_counts(&selected.run_workspace, &mut state)?;
         readiness = wait_readiness(&state);
@@ -322,7 +347,15 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
         .and_then(Value::as_bool)
         == Some(true);
     let ready = readiness.get("ready").and_then(Value::as_bool) == Some(true);
-    let (ok, status, reason, summary, next_actions) = if awaiting_trust {
+    let (ok, status, reason, summary, next_actions) = if state_read_error.is_some() {
+        (
+            false,
+            "error",
+            "state_read_error",
+            "runtime state could not be read",
+            vec![json!("inspect .team/runtime/state.json (corrupt or unreadable) and retry")],
+        )
+    } else if awaiting_trust {
         (
             false,
             "pending",
@@ -360,7 +393,7 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
             "readiness": readiness,
         }),
     )?;
-    Ok(json!({
+    let mut report = json!({
         "details_log": details_log.to_string_lossy().to_string(),
         "next_actions": next_actions,
         "ok": ok,
@@ -368,7 +401,11 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
         "readiness": readiness,
         "status": status,
         "summary": summary,
-    }))
+    });
+    if let Some(error) = state_read_error {
+        report["state_read_error"] = json!(error);
+    }
+    Ok(report)
 }
 
 fn inject_tmux_session_present(workspace: &std::path::Path, state: &mut Value) {
@@ -392,10 +429,12 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
     let mut task_prompt_delivered = false;
     let mut awaiting_trust_prompt = false;
     let mut incomplete_sessions = Vec::new();
+    // A-5: a missing/unreadable leader_receiver must NOT count as attached —
+    // "unreadable is never ready" (doctor/wait-ready truthfulness rule).
     let all_attached_receiver = state
         .get("leader_receiver")
         .and_then(Value::as_object)
-        .is_none_or(|receiver| {
+        .is_some_and(|receiver| {
             receiver
                 .get("status")
                 .and_then(Value::as_str)
@@ -673,6 +712,7 @@ fn provider_wire(provider: crate::provider::Provider) -> &'static str {
         crate::provider::Provider::Claude => "claude",
         crate::provider::Provider::ClaudeCode => "claude_code",
         crate::provider::Provider::Codex => "codex",
+        crate::provider::Provider::Copilot => "copilot",
         crate::provider::Provider::GeminiCli => "gemini_cli",
         crate::provider::Provider::Fake => "fake",
     }
@@ -682,6 +722,7 @@ fn provider_command(provider: crate::provider::Provider) -> &'static str {
     match provider {
         crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode => "claude",
         crate::provider::Provider::Codex => "codex",
+        crate::provider::Provider::Copilot => "copilot",
         crate::provider::Provider::GeminiCli => "gemini",
         crate::provider::Provider::Fake => "team-agent fake-worker",
     }

@@ -144,9 +144,13 @@ impl WorkerCommandAgent {
 pub(crate) fn compile_worker_system_prompt(
     agent: &WorkerCommandAgent,
 ) -> Result<String, LifecycleError> {
+    // Python prompt.py:39 — chunks = [identity, TEAMMATE_SYSTEM_PROMPT, ...]: the worker
+    // identity line anchors the very first section (live Python worker argv confirms).
+    // C-1 cr verdict / B2 灵魂件 — identity 必须 FIRST(MUST-4 行为层守:空白上下文问
+    // "你是谁"必须先答 Team Agent worker 身份)。runtime contract 跟后。
     let mut chunks = vec![
-        runtime_contract_section(),
         identity_section(agent),
+        runtime_contract_section(),
         role_body(agent)?,
     ];
     if let Some(contract) = output_contract(agent) {
@@ -225,21 +229,40 @@ fn output_contract(agent: &WorkerCommandAgent) -> Option<String> {
 
 fn permission_notes(agent: &WorkerCommandAgent) -> Result<Option<String>, LifecycleError> {
     let permissions = resolve_agent_permissions(agent, agent.provider)?;
-    if !permissions.has_prompt_only {
-        return Ok(None);
-    }
-    let mut prompt_only: Vec<String> = permissions
+    // C-2-1/C-2-2 cr verdict — Copilot 一期 framework 不替决 fs_read/fs_list/git_diff/
+    // provider_builtin(provider prompt 控);为诚实(MUST-NOT-13)在 system prompt 内
+    // 总是声明这些 provider-level prompt_only 工具,即便角色未显式声明。
+    let provider_prompt_only_extras = provider_default_prompt_only_tools(agent.provider);
+    let mut prompt_only: std::collections::BTreeSet<String> = permissions
         .resolved_tools
         .iter()
         .filter(|tool| tool.enforcement == Enforcement::PromptOnly)
         .filter_map(|tool| serde_json::to_value(tool.tool).ok())
         .filter_map(|value| value.as_str().map(str::to_string))
         .collect();
-    prompt_only.sort();
+    for tool in provider_prompt_only_extras {
+        prompt_only.insert((*tool).to_string());
+    }
+    if prompt_only.is_empty() {
+        return Ok(None);
+    }
+    let prompt_only: Vec<String> = prompt_only.into_iter().collect();
     Ok(Some(format!(
         "Permission note: these tools are prompt-only for this provider and not hard-enforced: {}",
         prompt_only.join(", ")
     )))
+}
+
+/// C-2-1 cr verdict — provider-level prompt_only tools that the framework cannot
+/// hard-enforce. The system prompt declares them so the worker is honest about
+/// where consent gates actually live (provider prompt vs framework).
+fn provider_default_prompt_only_tools(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        // C-2-1: fs_read / fs_list / git_diff / provider_builtin 由 provider prompt
+        // 控制,framework 不替决(prompt_only 诚实声明)。
+        Provider::Copilot => &["fs_list", "fs_read", "git_diff", "provider_builtin"],
+        _ => &[],
+    }
 }
 
 #[cfg(test)]
@@ -298,7 +321,14 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_uses_runtime_contract_identity_role_output_permissions_order() {
+    fn system_prompt_uses_identity_then_runtime_contract_python_order() {
+        // #264 D6: Python truth source (prompt.py:39, live ps confirmed) builds
+        // chunks = [identity, TEAMMATE_SYSTEM_PROMPT, role_body, output, permissions].
+        // The previous assertion locked the inverted contract-first order with no
+        // Python evidence; this is the corrected golden.
+        // 0.3.5 union (copilot v2 C-1 / B2 MUST-4 行为层守): identity 必须 FIRST —
+        // 空白上下文问"你是谁"的第一行答案必须先答 Team Agent worker 身份;
+        // Copilot 适配的 C-1-3 行为层要求与其它 provider 同步。
         let agent = WorkerCommandAgent {
             id: Some("coder".to_string()),
             provider: Provider::Codex,
@@ -309,16 +339,21 @@ mod tests {
             output_contract_format: Some("result_envelope_v1".to_string()),
         };
         let prompt = compile_worker_system_prompt(&agent).unwrap();
+        assert!(
+            prompt.starts_with("You are Team Agent worker `coder` with role `Runtime Developer`."),
+            "compiled prompt must start with the identity section (Python prompt.py:39); head={:?}",
+            prompt.chars().take(120).collect::<String>()
+        );
+        let identity = prompt.find("worker `coder`").unwrap();
         let runtime = prompt
             .find(RUNTIME_CONTRACT_SECTION.lines().next().unwrap_or(""))
             .unwrap();
-        let identity = prompt.find("worker `coder`").unwrap();
         let role = prompt.find("Implement the assigned slice.").unwrap();
         let output = prompt
             .find("Final completion must call team_orchestrator.report_result exactly once")
             .unwrap();
         let permissions = prompt.find("Permission note:").unwrap();
-        assert!(runtime < identity && identity < role && role < output && output < permissions);
+        assert!(identity < runtime && runtime < role && role < output && output < permissions);
         let slowdown_phrase = format!("500/{}", 500 + 29);
         assert!(prompt.contains(&slowdown_phrase));
         assert!(prompt.contains("Runtime Developer"));

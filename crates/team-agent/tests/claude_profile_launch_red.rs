@@ -160,6 +160,7 @@ fn assert_s0_profile_launch_shape() {
         env_unset: BTreeSet::from(["ANTHROPIC_API_KEY".to_string()]),
         command_overrides: ProviderCommandOverrides {
             model: Some("profile-effective-haiku".to_string()),
+            ..ProviderCommandOverrides::default()
         },
         claude_config_dir: Some(PathBuf::from("/tmp/claude-config")),
         claude_projects_root: Some(PathBuf::from("/tmp/claude-config/projects")),

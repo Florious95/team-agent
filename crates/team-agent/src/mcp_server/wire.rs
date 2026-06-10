@@ -444,7 +444,8 @@ pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: 
         McpTool::StuckList => tools.stuck_list(),
         McpTool::StuckCancel => tools.stuck_cancel(
             args.get("agent_id").and_then(Value::as_str).unwrap_or(""),
-            args.get("alert_type").and_then(Value::as_str).unwrap_or("all"),
+            // tools.py:351 — the MCP default alert_type is "stuck", not "all".
+            args.get("alert_type").and_then(Value::as_str).unwrap_or("stuck"),
         ),
     }
 }

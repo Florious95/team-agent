@@ -963,7 +963,8 @@ fn doctor_gate(raw: Option<&str>) -> Option<DoctorGate> {
     match raw {
         Some("orphans") => Some(DoctorGate::Orphans),
         Some("comms") => Some(DoctorGate::Comms),
-        _ => None,
+        Some(other) => Some(DoctorGate::Unknown(other.to_string())),
+        None => None,
     }
 }
 

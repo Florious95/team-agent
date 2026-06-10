@@ -898,6 +898,7 @@ fn provider_wire(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }

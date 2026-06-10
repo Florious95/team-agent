@@ -464,7 +464,7 @@ fn lanea_remove_rollback_restores_via_spec_state_file_path() {
 fn lanea_fork_dup_target_leader_id_is_already_exists() {
     let ws = fork_ws(DELEG_ROLE_ALPHA);
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("leader"), false, None, &tx));
+    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("leader"), None, false, None, &tx));
     assert!(
         text.contains("already exists"),
         "golden operations.py:301-302 (_find_agent matches the leader): forking ONTO the leader id must raise \
@@ -481,7 +481,7 @@ fn lanea_fork_dup_target_leader_id_is_already_exists() {
 fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
     let ws = fork_ws(DELEG_ROLE_ALPHA);
     let tx = LaneTransport::new("team-laneateam", &["newfork"]); // the target window already exists
-    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), false, None, &tx));
+    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx));
     assert!(
         text.contains("tmux window already exists for fork target: team-laneateam:newfork"),
         "golden operations.py:310-312: a pre-existing target window must raise 'tmux window already exists for \
@@ -505,7 +505,7 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
 fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     let ws = fork_ws(DELEG_ROLE_ALPHA_COMPAT); // source alpha auth_mode=compatible_api -> native fork unsupported
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let result = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), false, None, &tx);
+    let result = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
     let text = format!("{result:?}");
     assert!(
         text.contains("codex does not support native session fork"),
@@ -530,7 +530,7 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
 fn lanea_fork_report_session_id_is_not_pane_id() {
     let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let report = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), false, None, &tx).expect("fork ok (codex subscription supports fork)");
+    let report = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx).expect("fork ok (codex subscription supports fork)");
     assert_ne!(
         report.session_id,
         Some(crate::provider::SessionId::new("%newfork")),

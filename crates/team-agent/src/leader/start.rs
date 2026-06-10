@@ -187,6 +187,10 @@ pub fn execute_leader_plan(
     }
 }
 
+/// B5: the deterministic leader-session naming prefix IS the ownership truth source —
+/// shutdown's socket teardown spares sessions carrying it (no separate registry).
+pub const LEADER_SESSION_PREFIX: &str = "team-agent-leader-";
+
 /// `leader_session_name`(card §48;`__init__.py:186`)。确定派生 tmux session 名
 /// `team-agent-leader-<provider>-<folder>-<sha1[:8]>`(workspace.resolve() 的 sha1 前 8 hex)。
 pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName {
@@ -198,7 +202,7 @@ pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName 
     let folder = sanitize_session_folder(folder_raw);
     let hash = sha1_hex_prefix(resolved.to_string_lossy().as_bytes(), 8);
     SessionName::new(format!(
-        "team-agent-leader-{}-{folder}-{hash}",
+        "{LEADER_SESSION_PREFIX}{}-{folder}-{hash}",
         provider_wire(provider)
     ))
 }
@@ -309,6 +313,10 @@ fn provider_command_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude | Provider::ClaudeCode => "claude",
         Provider::Codex => "codex",
+        // §B leader 入口接缝(设计 design.md line 40):`team-agent copilot` 启 leader
+        // 即 spawn 真 copilot 命令;B5 session 名前缀 `team-agent-leader-copilot-*`
+        // (leader/start.rs:192-204 派生)自动覆盖前缀保护。
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
         Provider::Fake => "fake",
     }

@@ -385,6 +385,31 @@ fn provider_env_exports(
                 exports.insert("GEMINI_API_KEY".to_string(), value.to_string());
             }
         }
+        // C-A-4 cr verdict v2 — copilot BYOK(== compatible_api 档,help-providers 原文
+        // "GitHub authentication is not required" when COPILOT_PROVIDER_BASE_URL set):
+        // profile 值经 env_overlay 落 COPILOT_PROVIDER_BASE_URL/TYPE/API_KEY/WIRE_API
+        // + COPILOT_MODEL。BYOK 必须含 MODEL("A model is required for BYOK")—
+        // 这一硬性校验在 launch 路径处理(profile compile 时无法判别 model 来源)。
+        // Subscription/OfficialApi 不导出 COPILOT_PROVIDER_*(避免误改 auth 通道)。
+        Provider::Copilot => {
+            if auth_mode == AuthMode::CompatibleApi {
+                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_BASE_URL", "BASE_URL") {
+                    exports.insert("COPILOT_PROVIDER_BASE_URL".to_string(), value.to_string());
+                }
+                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_TYPE", "PROVIDER_TYPE") {
+                    exports.insert("COPILOT_PROVIDER_TYPE".to_string(), value.to_string());
+                }
+                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_API_KEY", "API_KEY") {
+                    exports.insert("COPILOT_PROVIDER_API_KEY".to_string(), value.to_string());
+                }
+                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_WIRE_API", "WIRE_API") {
+                    exports.insert("COPILOT_PROVIDER_WIRE_API".to_string(), value.to_string());
+                }
+                if let Some(value) = value_or_alternate(values, "COPILOT_MODEL", "MODEL") {
+                    exports.insert("COPILOT_MODEL".to_string(), value.to_string());
+                }
+            }
+        }
         Provider::Fake => {}
     }
     exports
@@ -412,6 +437,9 @@ fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BTreeSet<Stri
                 unsets.insert("GEMINI_API_KEY".to_string());
             }
         }
+        // C-7-1 cr verdict: 一期 subscription-only(已登录态),exports/unsets 空;
+        // BYOK(COPILOT_PROVIDER_*)二期立项时单独 cr verdict 再开。
+        Provider::Copilot => {}
         Provider::Fake => {}
     }
     unsets
@@ -429,7 +457,48 @@ fn provider_command_overrides(
         _ if agent.model.is_some() => agent.model.clone(),
         _ => profile_model(values).map(str::to_string),
     };
-    ProviderCommandOverrides { model }
+    let mut codex_profile = None;
+    let mut codex_config = Vec::new();
+    // Python provider_env.py:62-79 (_provider_command_overrides codex branch).
+    match agent.provider {
+        Provider::Codex => {
+            codex_profile = value_or_alternate(values, "CODEX_PROFILE", "NATIVE_PROFILE")
+                .map(str::to_string);
+            let model_provider = values.get("MODEL_PROVIDER").filter(|v| !v.is_empty());
+            let base_url = values.get("BASE_URL").filter(|v| !v.is_empty());
+            if agent.auth_mode == AuthMode::CompatibleApi {
+                if let (Some(model_provider), Some(base_url)) = (model_provider, base_url) {
+                    if safe_codex_provider_id(model_provider) {
+                        codex_config.push(format!("model_provider=\"{model_provider}\""));
+                        let prefix = format!("model_providers.{model_provider}");
+                        codex_config.push(format!("{prefix}.base_url=\"{base_url}\""));
+                        codex_config
+                            .push(format!("{prefix}.env_key=\"TEAM_AGENT_PROVIDER_API_KEY\""));
+                        if let Some(wire_api) = values.get("WIRE_API").filter(|v| !v.is_empty()) {
+                            codex_config.push(format!("{prefix}.wire_api=\"{wire_api}\""));
+                        }
+                        if let Some(name) = values.get("PROVIDER_NAME").filter(|v| !v.is_empty()) {
+                            codex_config.push(format!("{prefix}.name=\"{name}\""));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    ProviderCommandOverrides {
+        model,
+        codex_profile,
+        codex_config,
+    }
+}
+
+/// Python helpers.py:33-34 `_safe_codex_provider_id`: `[A-Za-z0-9_-]+`.
+fn safe_codex_provider_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn write_runtime_env_file(
@@ -636,15 +705,48 @@ fn mcp_server_names(mcp_servers: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// swallow batch 4 C1-C4 (MUST-NOT-9/13): a CORRUPT provider-config JSON fails
+/// EXPLICITLY — the old `unwrap_or_default` turned a parse failure into an empty map
+/// that the subsequent write flattened back over the user's file (silent destructive
+/// rewrite). A missing file stays Ok(empty) — only an existing-but-unparseable file
+/// errors, naming the path + parse detail + next action; the file is never touched.
 fn read_json_object(
     path: &Path,
 ) -> Result<serde_json::Map<String, serde_json::Value>, LifecycleError> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(serde_json::Map::new());
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::Map::new());
+        }
+        Err(error) => {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "profile_invalid_json: {} could not be read: {error}; fix or remove the file (or restore a backup) and relaunch",
+                path.display()
+            )));
+        }
     };
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(serde_json::Value::Object(map)) => Ok(map),
-        Ok(_) | Err(_) => Ok(serde_json::Map::new()),
+        Ok(other) => Err(LifecycleError::RequirementUnmet(format!(
+            "profile_invalid_json: {} is not a JSON object (found {}); fix or remove the file (or restore a backup) and relaunch",
+            path.display(),
+            json_kind(&other)
+        ))),
+        Err(error) => Err(LifecycleError::RequirementUnmet(format!(
+            "profile_invalid_json: {} could not be parsed: {error}; fix or remove the file (or restore a backup) and relaunch",
+            path.display()
+        ))),
+    }
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
     }
 }
 
@@ -732,6 +834,9 @@ fn required_profile_keys(provider: Provider, auth_mode: AuthMode) -> &'static [&
             AuthMode::Subscription => &[],
         },
         Provider::GeminiCli => &["API_KEY"],
+        // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK required key 集合;
+        // 二期 BYOK 立项时填(向后兼容字段保留)。
+        Provider::Copilot => &[],
         Provider::Fake => &[],
     }
 }
@@ -794,6 +899,7 @@ pub(crate) fn parse_provider(raw: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
         "codex" => Some(Provider::Codex),
+        "copilot" => Some(Provider::Copilot),
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,

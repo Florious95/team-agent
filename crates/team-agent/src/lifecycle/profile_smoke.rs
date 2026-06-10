@@ -184,7 +184,9 @@ impl SmokeTarget {
                     kind: SmokeKind::OpenAi,
                 })
             }
-            Provider::GeminiCli | Provider::Fake => Err("unsupported_provider_smoke_skipped"),
+            // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK HTTP smoke
+            // 入口;同 GeminiCli/Fake 走 unsupported_provider_smoke_skipped。
+            Provider::Copilot | Provider::GeminiCli | Provider::Fake => Err("unsupported_provider_smoke_skipped"),
         }
     }
 
@@ -508,6 +510,7 @@ fn provider_wire(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }

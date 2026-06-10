@@ -175,7 +175,9 @@ fn result_schema_errors(envelope: &Value) -> Vec<String> {
 const ROOT_KEYS: &[&str] = &[
     "version", "team", "leader", "agents", "routing", "communication", "runtime", "context", "tasks",
 ];
-const SUPPORTED_PROVIDERS: &[&str] = &["claude", "claude_code", "codex", "gemini_cli", "fake"];
+// Copilot 一期加入白名单(design §B compiler.py:249-251 同位 + cr verdict 总裁,
+// MUST-NOT-7 跨厂商等价 — 设计 / cr 已落地 26 约束)。
+const SUPPORTED_PROVIDERS: &[&str] = &["claude", "claude_code", "codex", "copilot", "gemini_cli", "fake"];
 const AUTH_MODES: &[&str] = &["subscription", "official_api", "compatible_api"];
 const VALID_DISPLAY_BACKENDS: &[&str] = &[
     "none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace", "adaptive",

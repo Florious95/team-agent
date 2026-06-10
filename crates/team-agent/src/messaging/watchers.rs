@@ -298,46 +298,84 @@ pub fn retry_result_deliveries(
 ) -> Result<Vec<WatcherNotice>, MessagingError> {
     let store = MessageStore::open(workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
+    // result_delivery.py:19-35 — retries route through notify_result_watchers (the REAL
+    // delivery path with dedupe/attempt bounds); a watcher is never flipped to
+    // `notified` without a delivery. Missing result rows are skipped (still retryable).
     let mut stmt = conn.prepare(
-        "select watcher_id, result_id from result_watchers
-         where status in ('pending', 'notify_failed') and result_id is not null and notified_message_id is null
+        "select watcher_id, owner_team_id, task_id, agent_id, leader_id, status, created_at,
+                result_id, notified_message_id
+         from result_watchers
+         where status in ('pending', 'notify_failed')
          order by created_at, watcher_id",
     )?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let watchers = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({
+                "watcher_id": row.get::<_, String>(0)?,
+                "owner_team_id": row.get::<_, Option<String>>(1)?,
+                "task_id": row.get::<_, Option<String>>(2)?,
+                "agent_id": row.get::<_, Option<String>>(3)?,
+                "leader_id": row.get::<_, Option<String>>(4)?,
+                "status": row.get::<_, Option<String>>(5)?,
+                "created_at": row.get::<_, Option<String>>(6)?,
+                "result_id": row.get::<_, Option<String>>(7)?,
+                "notified_message_id": row.get::<_, Option<String>>(8)?,
+            }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
     let mut notices = Vec::new();
-    for row in rows {
-        let (watcher_id, result_id) = row?;
-        let result: Option<String> = conn
+    for watcher in watchers {
+        if watcher.get("status").and_then(|v| v.as_str()) != Some("notify_failed") {
+            continue;
+        }
+        let Some(result_id) = watcher
+            .get("result_id")
+            .and_then(|v| v.as_str())
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        let row: Option<(String, Option<String>)> = conn
             .query_row(
-                "select envelope from results where result_id = ?1",
+                "select envelope, created_at from results where result_id = ?1",
                 params![result_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(envelope) = result {
-            let parsed: serde_json::Value = serde_json::from_str(&envelope)?;
-            conn.execute(
-                "update result_watchers set status = 'notified', completed_at = ?2 where watcher_id = ?1",
-                params![watcher_id, chrono::Utc::now().to_rfc3339()],
-            )?;
-            event_log.write(
-                "result_watcher.retry_notified",
-                serde_json::json!({"watcher_id": watcher_id, "result_id": result_id}),
-            )?;
-            notices.push(WatcherNotice {
-                watcher_id,
-                result_id: Some(result_id),
-                ok: true,
-                status: Some("notified".to_string()),
-                notified_message_id: delivered_result_message(&store, parsed.get("result_id").and_then(|v| v.as_str()).unwrap_or(""), None, None)?
-                    .and_then(|v| v.get("message_id").and_then(|id| id.as_str()).map(ToString::to_string)),
-                primary_watcher_id: None,
-                prior_state: None,
-                error: None,
-            });
-        }
+        let Some((envelope, created_at)) = row else {
+            continue;
+        };
+        let result = result_entry_from_row(&result_id, &envelope, created_at.as_deref())?;
+        notices.extend(notify_result_watchers(
+            workspace,
+            &result,
+            event_log,
+            Some(std::slice::from_ref(&watcher)),
+            Some("rebind_retry"),
+        )?);
     }
     Ok(notices)
+}
+
+/// `_result_entry_from_row`(`result_delivery.py:365-377`)。
+fn result_entry_from_row(
+    result_id: &str,
+    envelope: &str,
+    created_at: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
+    let envelope: serde_json::Value = serde_json::from_str(envelope)?;
+    Ok(serde_json::json!({
+        "result_id": result_id,
+        "task_id": envelope.get("task_id").cloned().unwrap_or(serde_json::Value::Null),
+        "agent_id": envelope.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+        "status": envelope.get("status").cloned().unwrap_or(serde_json::Value::Null),
+        "summary": envelope.get("summary").cloned().unwrap_or(serde_json::Value::Null),
+        "tests": envelope.get("tests").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "created_at": created_at,
+        "scope": "task",
+    }))
 }
 
 /// `requeue_after_claim_leader` (`result_delivery.py:428`):Gap 26 —— 认领新 leader pane 后把

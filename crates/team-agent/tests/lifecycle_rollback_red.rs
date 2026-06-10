@@ -70,7 +70,7 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
     let transport = RecordingTransport::new("team-rollbackteam", &["alpha", "bravo"]);
 
     let result =
-        fork_agent_with_transport(&fixture.team, &aid("alpha"), &aid("newfork"), false, None, &transport);
+        fork_agent_with_transport(&fixture.team, &aid("alpha"), &aid("newfork"), None, false, None, &transport);
     let spec_after = fixture.spec_text();
     let state_after = load_runtime_state(&fixture.team).unwrap();
     let mcp_path = fixture.team.join(".team/runtime/mcp/newfork.json");

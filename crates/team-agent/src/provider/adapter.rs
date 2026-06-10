@@ -6,8 +6,8 @@ use std::process::Command;
 use super::helpers::{find_session_id, parse_jsonl_records, patterns};
 use super::types::{
     AuthHintStatus, CaptureVia, CapturedSession, CommandPlan, Confidence, McpConfig,
-    ProviderCaps, ProviderCommandContext, ProviderError, RolloutPath, SessionId,
-    StatusPatterns,
+    ProviderCaps, ProviderCommandContext, ProviderCommandOverrides, ProviderError, RolloutPath,
+    SessionId, StatusPatterns,
 };
 use super::{AuthMode, Provider};
 
@@ -210,6 +210,20 @@ pub trait ProviderAdapter {
         checks: usize,
         sleep_s: f64,
     ) -> Vec<crate::provider::HandledPrompt> {
+        self.handle_startup_prompts_outcome(transport, target, checks, sleep_s)
+            .handled
+    }
+
+    /// swallow batch 2 ② (A1): the structured variant — `capture_error` surfaces a pane
+    /// that could not even be captured, so callers can log the failure instead of
+    /// silently treating it as "no prompts" (CLAUDE.md §5).
+    fn handle_startup_prompts_outcome(
+        &self,
+        transport: &dyn crate::transport::Transport,
+        target: &crate::transport::Target,
+        checks: usize,
+        sleep_s: f64,
+    ) -> super::startup_prompt::StartupPromptOutcome {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self.provider() {
             Provider::Codex => {
                 super::startup_prompt::codex_handle_startup_prompts(transport, target, checks, sleep_s)
@@ -219,9 +233,31 @@ pub trait ProviderAdapter {
                     transport, target, checks, sleep_s,
                 )
             }
-            _ => Vec::new(),
+            _ => super::startup_prompt::StartupPromptOutcome::default(),
         }))
         .unwrap_or_default()
+    }
+
+    /// Python launch/core.py:235-237 + tmux_prompt.py:124-129 — `runtime.fast` toggles
+    /// codex fast mode by sending `/fast` + Enter to the worker pane after spawn.
+    /// Providers without a fast-mode toggle are a no-op so upper layers stay
+    /// provider-agnostic (F032). Returns whether a toggle was sent.
+    fn enable_fast_mode(
+        &self,
+        transport: &dyn crate::transport::Transport,
+        target: &crate::transport::Target,
+    ) -> bool {
+        match self.provider() {
+            Provider::Codex => {
+                let keys: Vec<crate::transport::Key> = "/fast"
+                    .chars()
+                    .map(crate::transport::Key::Char)
+                    .chain([crate::transport::Key::Enter])
+                    .collect();
+                transport.send_keys(target, &keys).is_ok()
+            }
+            _ => false,
+        }
     }
 }
 
@@ -278,6 +314,17 @@ impl ProviderAdapter for BasicProviderAdapter {
                 native_mcp_config: false,
                 writes_global_settings: false,
             },
+            // Copilot(C-4-1 cr verdict):resume 走 --resume <sid>;**无 fork** 旗标,
+            // session-store 不支持 branched continuation → caps.fork=false 显式拒。
+            // native_mcp_config=true(`--additional-mcp-config` 接 inline JSON 或 @file);
+            // writes_global_settings=false(session 走 --session-id 预定 UUID,不污染
+            // ~/.copilot/mcp-config.json,help 原文 "augments config for this session")。
+            Provider::Copilot => ProviderCaps {
+                resume: true,
+                fork: false,
+                native_mcp_config: true,
+                writes_global_settings: false,
+            },
             Provider::GeminiCli => ProviderCaps {
                 resume: false,
                 fork: false,
@@ -322,6 +369,13 @@ impl ProviderAdapter for BasicProviderAdapter {
     fn auth_hint(&self, auth_mode: AuthMode) -> AuthHintStatus {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => claude_auth_hint(auth_mode),
+            // C-A-5 cr verdict v2(诚实 MUST-NOT-13) — copilot 无 auth status 子命令
+            // (main-help Commands 节仅 completion/help/init/login/mcp/plugin/update/
+            // version)。framework 只能弱检测(命令在 PATH + ~/.copilot/config.json
+            // 存在),不能假报强 Present;Subscription 档返 PresentWeak,doctor 文案
+            // 标"weak / no auth-status command available";Compatible/Official 走 BYOK
+            // 路径,有 COPILOT_PROVIDER_BASE_URL 时已脱离 GitHub 登录通道。
+            Provider::Copilot => copilot_auth_hint(auth_mode),
             _ => match auth_mode {
                 AuthMode::Subscription => AuthHintStatus::Present,
                 AuthMode::OfficialApi | AuthMode::CompatibleApi => AuthHintStatus::MissingOrUnknown,
@@ -351,7 +405,16 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Claude | Provider::ClaudeCode => {
                 Ok(claude_launch_command(self, auth_mode, mcp_config, system_prompt, model, tools)?)
             }
-            Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools)),
+            Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools, None)),
+            // §C1 worker argv 形态 + C-1/C-5/C-6 cr verdict:
+            //   copilot --no-color --no-auto-update [<dangerous|granular>] [--model]
+            //          --additional-mcp-config <inline json> --session-id <expected_uuid> -C <cwd>
+            // system_prompt 经 spawn env(COPILOT_CUSTOM_INSTRUCTIONS_DIRS)+ per-worker
+            // AGENTS.md(launch 路径写文件,见 lifecycle/launch.rs)注入,**不入 argv**
+            // (B2 灵魂件降级,C-1-2 禁 silent 写全局)。
+            Provider::Copilot => Ok(copilot_base_command(
+                auth_mode, mcp_config, system_prompt, model, tools,
+            )),
             Provider::GeminiCli => {
                 let mut argv = vec!["gemini".to_string()];
                 if let Some(model) = model {
@@ -392,6 +455,40 @@ impl ProviderAdapter for BasicProviderAdapter {
                     expected_session_id: Some(SessionId::new(expected)),
                     provider_projects_root: projects_root,
                     managed_mcp_config: managed,
+                })
+            }
+            // codex.py:105-118 — the profile command overrides (codex_profile / codex_config)
+            // ride on `agent["_provider_profile"]`, which only the plan path carries.
+            Provider::Codex => Ok(CommandPlan::argv_only(codex_base_command(
+                None,
+                ctx.auth_mode,
+                ctx.mcp_config,
+                ctx.system_prompt,
+                ctx.model,
+                ctx.tools,
+                ctx.profile_launch.map(|profile| &profile.command_overrides),
+            ))),
+            // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
+            //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
+            //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
+            // mcp_config inline 形态由 build_command 写入,launch 路径会用
+            // point_native_mcp_config_at_file 重写为 @<file> 形(§C1 note)。
+            Provider::Copilot => {
+                let expected = next_session_token();
+                let mut argv = copilot_base_command(
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                );
+                argv.push("--session-id".to_string());
+                argv.push(expected.clone());
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: None,
+                    managed_mcp_config: false,
                 })
             }
             _ => self
@@ -500,6 +597,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     system_prompt,
                     model,
                     tools,
+                    None,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -507,6 +605,16 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Claude | Provider::ClaudeCode => {
                 let mut argv =
                     claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false)?;
+                argv.push("--resume".to_string());
+                argv.push(session_id.as_str().to_string());
+                Ok(argv)
+            }
+            // §C1 cr verdict:resume 同 base + `--resume <sid>`(去 --session-id,
+            // copilot --resume 接受 id|name)。
+            Provider::Copilot => {
+                let mut argv = copilot_base_command_resume(
+                    auth_mode, mcp_config, system_prompt, model, tools,
+                );
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -547,6 +655,30 @@ impl ProviderAdapter for BasicProviderAdapter {
                     .and_then(|profile| profile.claude_projects_root.clone());
                 plan.managed_mcp_config = managed;
                 Ok(plan)
+            }
+            Provider::Codex => {
+                if !self.session_is_resumable(session_id, ctx.auth_mode)? {
+                    return Err(ProviderError::ResumeUnavailable(format!(
+                        "{} resume requires session_id",
+                        provider_wire(self.provider)
+                    )));
+                }
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "resume requires session_id".to_string(),
+                    ));
+                };
+                let mut argv = codex_base_command(
+                    Some("resume"),
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch.map(|profile| &profile.command_overrides),
+                );
+                argv.push(session_id.as_str().to_string());
+                Ok(CommandPlan::argv_only(argv))
             }
             _ => self
                 .build_resume_command_with_context(
@@ -597,6 +729,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     system_prompt,
                     model,
                     tools,
+                    None,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -611,6 +744,13 @@ impl ProviderAdapter for BasicProviderAdapter {
                 argv.push("--fork-session".to_string());
                 Ok(argv)
             }
+            // C-4-2 cr verdict: copilot 无 fork 旗标 + session-store 不支持 branched
+            // continuation → 显式 CapabilityUnsupported,**绝不** silent fallback 到
+            // restart-from-scratch(MUST-NOT-13 诚实)。本分支理论上不可达(caps.fork=false
+            // 已在 fork_with_context 入口拦截,line 582),保留作 totality 守护。
+            Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
+                "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
+            )),
             Provider::GeminiCli | Provider::Fake => Err(ProviderError::CapabilityUnsupported(format!(
                 "{} does not support native session fork",
                 provider_wire(self.provider)
@@ -661,6 +801,30 @@ impl ProviderAdapter for BasicProviderAdapter {
                     managed_mcp_config: managed,
                 })
             }
+            Provider::Codex => {
+                if !self.caps().fork || ctx.auth_mode == AuthMode::CompatibleApi {
+                    return Err(ProviderError::CapabilityUnsupported(format!(
+                        "{} does not support native session fork",
+                        provider_wire(self.provider)
+                    )));
+                }
+                let Some(session_id) = session_id else {
+                    return Err(ProviderError::ResumeUnavailable(
+                        "fork requires session_id".to_string(),
+                    ));
+                };
+                let mut argv = codex_base_command(
+                    Some("fork"),
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch.map(|profile| &profile.command_overrides),
+                );
+                argv.push(session_id.as_str().to_string());
+                Ok(CommandPlan::argv_only(argv))
+            }
             _ => self
                 .fork_with_context(
                     session_id,
@@ -705,6 +869,9 @@ impl ProviderAdapter for BasicProviderAdapter {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback"),
             Provider::Codex => patterns(r"(›|❯|codex>)", r"•.*esc to interrupt", r"Error|Traceback|panic"),
+            // C-3-3 cr verdict: copilot 真值待用户真会话样本(§E3 line 105),一期占位
+            // 仅 error 行至少能识别;idle/processing 留 Unknown(N11 守,classify→None)。
+            Provider::Copilot => patterns(r">", r"working|processing", r"Error|panic"),
             Provider::GeminiCli | Provider::Fake => patterns(r">", r"working|processing", r"Error|Traceback"),
         }
     }
@@ -718,6 +885,7 @@ fn command_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude | Provider::ClaudeCode => "claude",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini",
         Provider::Fake => "team-agent",
     }
@@ -728,6 +896,7 @@ fn provider_wire(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }
@@ -738,6 +907,27 @@ fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {
         AuthMode::Subscription => "subscription",
         AuthMode::OfficialApi => "official_api",
         AuthMode::CompatibleApi => "compatible_api",
+    }
+}
+
+/// C-A-5 cr verdict v2 — copilot 弱检测(无 auth status 子命令)。
+/// 当 copilot 命令在 PATH 且 `~/.copilot/config.json` 存在 → PresentWeak;否则 Missing
+/// (PATH 缺)或 MissingOrUnknown(无 config 文件)。Compatible/Official 走 BYOK,
+/// 由 profile_launch 端校验(COPILOT_PROVIDER_BASE_URL 等),hint 层报 Unknown。
+fn copilot_auth_hint(auth_mode: AuthMode) -> AuthHintStatus {
+    if !matches!(auth_mode, AuthMode::Subscription) {
+        return AuthHintStatus::Unknown;
+    }
+    if !command_on_path("copilot") {
+        return AuthHintStatus::Missing;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return AuthHintStatus::MissingOrUnknown;
+    };
+    if home.join(".copilot").join("config.json").exists() {
+        AuthHintStatus::PresentWeak
+    } else {
+        AuthHintStatus::MissingOrUnknown
     }
 }
 
@@ -777,11 +967,22 @@ fn scan_session_candidates_once(
     provider: Provider,
     context: &CaptureSessionContext,
 ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+    // §C4 + cr verdict: copilot session 真相源是 ~/.copilot/session-store.db(sqlite),
+    // 不是 jsonl 流。点查 sessions(cwd==spawn_cwd)取最新行,**禁** 走目录扫描
+    // (PERF P2 不放大;sqlite 点查天然有界)。decoy 文件不进 parse_session_records,
+    // 不会"被毒文件炸"。
+    if matches!(provider, Provider::Copilot) {
+        return Ok(scan_copilot_session_store(context));
+    }
     let candidates = candidate_session_files(provider, context)?;
     let mut out = Vec::new();
     for candidate in candidates {
         let path = candidate.path;
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        // P2 (C-P2-1/4) / Python claude.py:432 — bounded HEAD read (session_meta / cwd /
+        // sessionId live in the file head; Python stops at 200 lines). A poisoned
+        // (invalid UTF-8) tail must not silently drop the candidate the way a
+        // whole-file read_to_string did.
+        let Ok(text) = read_head_text(&path, CAPTURE_HEAD_BYTES) else {
             continue;
         };
         let records = parse_session_records(&text);
@@ -836,6 +1037,54 @@ fn scan_session_candidates_once(
     Ok(out)
 }
 
+/// §C4 cr verdict — copilot session 真相源 sqlite 点查。
+///
+/// 路径:`<HOME>/.copilot/session-store.db`,sessions 表(id/cwd/created_at/updated_at)
+/// where `cwd == context.spawn_cwd` 取 updated_at 最新行。**绝不**全文件扫描、**绝不**
+/// 走 `parse_session_records`(jsonl)路径 → decoy 毒文件不会触碰任何解析器。
+///
+/// 失败(HOME 缺、db 缺、表缺、sqlite 错)统一返回空 candidate 列表,与既有
+/// `collect_optional_candidate_files` 同精神(absent → empty)。
+fn scan_copilot_session_store(context: &CaptureSessionContext) -> Vec<CapturedSessionCandidate> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let db_path = home.join(".copilot").join("session-store.db");
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return Vec::new();
+    };
+    let cwd = context.spawn_cwd.to_string_lossy().to_string();
+    let mut stmt = match conn.prepare(
+        "select id from sessions where cwd = ?1 order by updated_at desc, id desc limit 1",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Vec::new(),
+    };
+    let row: Option<String> = stmt
+        .query_row([cwd.as_str()], |row| row.get::<_, String>(0))
+        .ok();
+    let Some(session_id) = row else {
+        return Vec::new();
+    };
+    vec![CapturedSessionCandidate {
+        captured: CapturedSession {
+            session_id: Some(SessionId::new(session_id)),
+            rollout_path: Some(RolloutPath::new(db_path.clone())),
+            captured_via: CaptureVia::FsWatch,
+            attribution_confidence: Confidence::High,
+            spawn_cwd: context.spawn_cwd.clone(),
+        },
+        positive_agent_id_match: false,
+        agent_path_match: false,
+    }]
+}
+
 fn command_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -866,7 +1115,12 @@ fn candidate_session_files(
                 collect_optional_candidate_files(&home.join(".claude").join("sessions"), &context.agent_id, &mut out)?;
                 collect_optional_candidate_files(&home.join(".claude").join("projects"), &context.agent_id, &mut out)?;
             }
-            Provider::GeminiCli | Provider::Fake => {}
+            // §C4 cr verdict + 设计 §C: copilot session 真相源是 ~/.copilot/session-store.db
+            // (sqlite 点查 sessions.cwd==spawn_cwd 最新行)和 ~/.copilot/session-state/<uuid>/
+            // workspace.yaml — **不走全文件扫描**(PERF P2 禁不放大)。主路径是
+            // build_command_plan 预定 UUID(--session-id <expected>)→ pending_session_id
+            // 直接命中,这里只补 sqlite 查询的二期入口。一期返空,resume 走 caps 校验。
+            Provider::Copilot | Provider::GeminiCli | Provider::Fake => {}
         }
     }
     out.sort_by(|a, b| {
@@ -875,7 +1129,56 @@ fn candidate_session_files(
             .then_with(|| a.path.to_string_lossy().cmp(&b.path.to_string_lossy()))
     });
     out.dedup_by(|a, b| a.path == b.path && a.requires_cwd_match == b.requires_cwd_match);
+    cap_candidates_by_mtime(&mut out, CAPTURE_CANDIDATE_CAP);
     Ok(out)
+}
+
+/// P2 (C-P2-2/3) / Python claude.py:300 — candidates are capped to the newest `cap`
+/// by mtime (descending priority: old candidates must not crowd out new ones; the cap
+/// may be raised above Python's 300 but never lowered). The existing selection
+/// ordering of the survivors is preserved.
+const CAPTURE_CANDIDATE_CAP: usize = 300;
+
+/// P2 (C-P2-1): head window ≥ Python's 200-line read (meta fields live in the head).
+const CAPTURE_HEAD_BYTES: u64 = 65_536;
+
+fn cap_candidates_by_mtime(out: &mut Vec<SessionCandidate>, cap: usize) {
+    if out.len() <= cap {
+        return;
+    }
+    let mut ranked: Vec<(std::time::SystemTime, usize)> = out
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let mtime = std::fs::metadata(&candidate.path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (mtime, index)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    let keep: std::collections::BTreeSet<usize> =
+        ranked.into_iter().take(cap).map(|(_, index)| index).collect();
+    let mut index = 0;
+    out.retain(|_| {
+        let kept = keep.contains(&index);
+        index += 1;
+        kept
+    });
+}
+
+/// P2: bounded head read, truncated to the last complete line (a cut record must not
+/// reach the JSONL parser); lossy UTF-8 so a mid-codepoint boundary stays safe.
+fn read_head_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes).read_to_end(&mut bytes)?;
+    let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
+        Some(last_newline) => &bytes[..=last_newline],
+        None => &bytes[..],
+    };
+    Ok(String::from_utf8_lossy(complete).into_owned())
 }
 
 fn collect_optional_candidate_files(
@@ -1104,6 +1407,7 @@ fn codex_base_command(
     system_prompt: Option<&str>,
     model: Option<&str>,
     tools: &[&str],
+    overrides: Option<&ProviderCommandOverrides>,
 ) -> Vec<String> {
     let mut argv = vec![
         "codex".to_string(),
@@ -1118,6 +1422,11 @@ fn codex_base_command(
         "--disable".to_string(),
         "apps".to_string(),
     ]);
+    // codex.py:105-107 — profile CODEX_PROFILE before the sandbox/approval flags.
+    if let Some(profile) = overrides.and_then(|o| o.codex_profile.as_deref()) {
+        argv.push("--profile".to_string());
+        argv.push(profile.to_string());
+    }
     if codex_dangerous_auto_approve(tools) {
         argv.push("--dangerously-bypass-approvals-and-sandbox".to_string());
     } else {
@@ -1130,9 +1439,21 @@ fn codex_base_command(
         argv.push("--model".to_string());
         argv.push(model.to_string());
     }
+    // codex.py:117-118 — profile codex_config `-c` items before developer_instructions.
+    if let Some(overrides) = overrides {
+        for config in &overrides.codex_config {
+            argv.push("-c".to_string());
+            argv.push(config.clone());
+        }
+    }
     if let Some(prompt) = system_prompt {
+        // codex.py:120 — escape order matters: backslash first, then quote, then newline.
+        let escaped = prompt
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n");
         argv.push("-c".to_string());
-        argv.push(format!("developer_instructions=\"{}\"", prompt.replace('"', "\\\"")));
+        argv.push(format!("developer_instructions=\"{escaped}\""));
     }
     // Contract C / MUST-8: Codex CLI (2026-06) does NOT take Claude's `--mcp-config <json>` flag;
     // instead it uses `-c mcp_servers.<name>.<field>=...` overrides, the same pattern used by
@@ -1174,6 +1495,10 @@ fn append_codex_mcp_overrides(argv: &mut Vec<String>, raw: &serde_json::Value) {
             argv.push("-c".to_string());
             argv.push(format!("mcp_servers.{name}.{key}={}", json_inline(value)));
         }
+        // codex.py:129 — every MCP server gets a 600s tool timeout so long-running
+        // team_orchestrator calls (report_result etc.) survive the codex default.
+        argv.push("-c".to_string());
+        argv.push(format!("mcp_servers.{name}.tool_timeout_sec=600.0"));
     }
 }
 
@@ -1186,6 +1511,146 @@ fn json_inline(value: &serde_json::Value) -> String {
 
 fn codex_dangerous_auto_approve(tools: &[&str]) -> bool {
     tools.contains(&"dangerous_auto_approve")
+}
+
+// ---------------------------------------------------------------------------
+// COPILOT base command(v2 实证 + cr verdict v2 30 约束)
+// ---------------------------------------------------------------------------
+//
+// 设计 v2 §B argv 形态(每条带 help 出处,逐字落地):
+//   copilot --no-color --no-auto-update --no-remote     # C-1-2 噪音 + 禁远控
+//          --disable-builtin-mcps                       # C-3-1 P0 禁内建 github-mcp-server
+//          --additional-mcp-config @<file>              # C-3-4 用 @file 形,避 wrapper 语义
+//          --allow-tool 'team_orchestrator'             # C-3-5 mcp_team 免审批 (server 级)
+//          --session-id <uuid> -n <agent_id>            # C-7-1 plan/launch 加
+//          -C <workspace>                               # 双保险,launch 加
+//          [--allow-all | <granular deny>]              # C-5-1/C-5-2
+//          [--model <m>]
+//          [--log-dir <dir> --log-level info]           # C-6-2 launch 加
+// env: COPILOT_CUSTOM_INSTRUCTIONS_DIRS=<ws>/.../<agent_id>/  # C-2-1 launch 注入
+//      COPILOT_DISABLE_TERMINAL_TITLE=1                       # C-4 P0 N39 红线,launch 注入
+// banner 不入 argv(v1 错的 --banner=never 删除;banner 走 config 文件,非 CLI flag)。
+// `-i`/`-p`/`--share*`/`--no-ask-user` **绝不**入 argv(RC-1/RC-14/RC-16)。
+//
+// system_prompt(B2 灵魂件)**不进 argv**:走 spawn env COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+// + per-worker AGENTS.md(B2 单源,不另拼);本函数 system_prompt 参数静默忽略。
+fn copilot_base_command(
+    auth_mode: AuthMode,
+    mcp_config: Option<&McpConfig>,
+    system_prompt: Option<&str>,
+    model: Option<&str>,
+    tools: &[&str],
+) -> Vec<String> {
+    let _ = (auth_mode, system_prompt);
+    let mut argv = vec![
+        "copilot".to_string(),
+        // C-1-2 v2:噪音控制三件 + 禁远控(防 GitHub web 远控 worker)
+        "--no-color".to_string(),
+        "--no-auto-update".to_string(),
+        "--no-remote".to_string(),
+        // C-3-1 v2 (P0):禁内建 github-mcp-server(main-help:70-71);残留风险
+        // 通过 spawn 前 `copilot mcp list` 扫描 + 按名 `--disable-mcp-server <n>` 补
+        // (那一段在 launch 路径加,因为需要 spawn-time 探测)。
+        "--disable-builtin-mcps".to_string(),
+    ];
+    if copilot_dangerous_auto_approve(tools) {
+        // C-5-1 v2 实证:--allow-all == --yolo == 三件套(tools+paths+urls 等价),
+        // help-permissions Enabling All Permissions 节原文。**禁** --allow-all-tools
+        // (仅 tools 一档,语义不全,RC-13)。
+        argv.push("--allow-all".to_string());
+    } else {
+        // C-5-2 v2:角色缺某 canonical 能力 → 精细 deny(deny 恒优先,即便
+        // --allow-all-tools,help-permissions 原文);**禁** --allow-all/--yolo(RC-14)。
+        for flag in copilot_permission_flags(tools) {
+            argv.push(flag);
+        }
+    }
+    // C-3-5 v2:mcp_team ∈ canonical(team_orchestrator 是我们的 server)→ 免审批
+    // (模式 `<mcp-server-name>(tool-name?)` 省略 tool = 该 server 全工具集)。
+    argv.push("--allow-tool".to_string());
+    argv.push("team_orchestrator".to_string());
+    if let Some(model) = model {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    if let Some(config) = mcp_config {
+        // §C1 v2 + C-3-4 cr verdict v2(te 真机实证 cmd-mcp-add schema):
+        // copilot 的 mcp 配置 schema 字段名是 `transport`(取值 stdio|http|sse),
+        // 不是 codex/claude 的 `type`。McpConfig.raw 是 canonical(type),写
+        // --additional-mcp-config 时必须翻译 type→transport(仅 copilot 走此分支)。
+        argv.push("--additional-mcp-config".to_string());
+        argv.push(copilot_translate_mcp_config(&config.raw).to_string());
+    }
+    argv
+}
+
+/// C-3-4 cr verdict v2 — 把 McpConfig.raw 的 canonical schema(`type`)翻译成
+/// copilot mcp add/--additional-mcp-config 期望的 `transport` 字段(stdio|http|sse)。
+/// 仅 Copilot 适配走此翻译,claude/codex 路径不动。
+fn copilot_translate_mcp_config(raw: &serde_json::Value) -> serde_json::Value {
+    let Some(servers) = raw.as_object() else {
+        return raw.clone();
+    };
+    let mut translated = serde_json::Map::new();
+    for (name, server) in servers {
+        let Some(obj) = server.as_object() else {
+            translated.insert(name.clone(), server.clone());
+            continue;
+        };
+        let mut out = serde_json::Map::new();
+        for (key, value) in obj {
+            if key == "type" {
+                out.insert("transport".to_string(), value.clone());
+            } else {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+        translated.insert(name.clone(), serde_json::Value::Object(out));
+    }
+    serde_json::Value::Object(translated)
+}
+
+/// resume 路径同 base + `--resume <sid>`(去 --session-id);单列出
+/// 避免 plan 端误 push --session-id 与 --resume 同帧。
+fn copilot_base_command_resume(
+    auth_mode: AuthMode,
+    mcp_config: Option<&McpConfig>,
+    system_prompt: Option<&str>,
+    model: Option<&str>,
+    tools: &[&str],
+) -> Vec<String> {
+    copilot_base_command(auth_mode, mcp_config, system_prompt, model, tools)
+}
+
+fn copilot_dangerous_auto_approve(tools: &[&str]) -> bool {
+    tools.contains(&"dangerous_auto_approve")
+}
+
+/// C-5-2 v2 verdict — copilot 细粒度 deny 映射(canonical tool → copilot flag,
+/// 全部走 `--deny-tool <kind>`,help-permissions Tool Permissions 节四 kind:
+/// shell/write/mcp/url):
+///   execute_bash ∉ allowed → `--deny-tool 'shell'`
+///   fs_write     ∉ allowed → `--deny-tool 'write'`
+///   network      ∉ allowed → `--deny-tool 'url'`(help-permissions: "url(domain-or-url?)
+///                                                … If omitted, matches all URLs")
+/// fs_read/fs_list 在 copilot 上无对应 deny kind(C-5-3 prompt_only 诚实)。
+fn copilot_permission_flags(tools: &[&str]) -> Vec<String> {
+    let mut flags = Vec::new();
+    if !tools.contains(&"execute_bash") {
+        flags.push("--deny-tool".to_string());
+        flags.push("shell".to_string());
+    }
+    if !tools.contains(&"fs_write") {
+        flags.push("--deny-tool".to_string());
+        flags.push("write".to_string());
+    }
+    if !tools.contains(&"network") {
+        // v2 修正:`--deny-tool 'url'`(省略 domain 匹配全 URL),不是 `--deny-url '*'`
+        // (RC-19 反向 case 守 — 全 URL 拒绝走 deny-tool kind,不走 deny-url path)。
+        flags.push("--deny-tool".to_string());
+        flags.push("url".to_string());
+    }
+    flags
 }
 
 fn claude_dangerous_auto_approve(tools: &[&str]) -> bool {

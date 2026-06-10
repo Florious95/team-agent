@@ -96,8 +96,22 @@
         // refusal first (worker-1 not in visible peers) -> PeerNotInScope. owner_team_id=None
         // (legacy single-team) bypasses that, isolating the worker-recipient accepted path.
         // The cross-team refusal has its own tests (refuse_cross_team_peer_* / send_message_cross_team_*).
+        // A-7: the accepted path needs a REAL stored message_id (tools.py:175-181 —
+        // fabricated ids are gone), so the workspace seeds a running worker-1 the
+        // delivery layer can actually queue for.
+        let ws = unique_ws("send-worker");
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &serde_json::json!({
+                "session_name": "team-x",
+                "agents": {
+                    "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
+                },
+            }),
+        )
+        .unwrap();
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("send-worker"),
+            &ws,
             Some(AgentId::new("leader")),
             None,
         );

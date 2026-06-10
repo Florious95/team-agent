@@ -513,10 +513,14 @@ pub struct DoctorArgs {
 }
 
 /// `doctor --gate` 选择(`commands.py:218-236`;clap choices)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// swallow batch 3: an unrecognized gate is carried verbatim so the doctor exit can
+/// refuse with `unknown_gate` (Python commands.py:234-235 raises) instead of silently
+/// falling through to the default doctor (empty green).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DoctorGate {
     Orphans,
     Comms,
+    Unknown(String),
 }
 
 /// `sessions`(`parser.py:230`)。

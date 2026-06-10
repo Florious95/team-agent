@@ -95,3 +95,4 @@ mod verb_validate;
 mod verb_settle;
 mod verb_profile;
 mod main_preserved;
+mod shutdown_kill_plan;

@@ -660,15 +660,14 @@
     // ── 11. list_targets (TRANSPORT TRIO) — `list-panes -a -F TMUX_PANE_FORMAT` + per-line parse ────
     // Golden _legacy_pane_discovery.py:29-33 _tmux_list_panes: `tmux list-panes -a -F <TMUX_PANE_FORMAT>`
     // (returncode != 0 -> []), parse each tab line via _parse_tmux_pane_info. TMUX_PANE_FORMAT
-    // (runtime.py:456-460) is the byte-exact 11-field tab string locked below. RED today: list_targets is
-    // unimplemented!() -> PANIC. Porter: build the argv, split each stdout line on '\t', map the fields
-    // into PaneInfo (pane_active=="1" -> active). leader_env / pane_pid are the reverse-env real-machine
-    // bit (no field in TMUX_PANE_FORMAT) — out of this canned parse; the structured fields are locked here.
+    // (runtime.py:456-460) is the byte-exact tab string locked below; P5 (C-P5-3) appends
+    // `#{pane_pid}` as field 12 so pane pids ride the single list-panes call (the per-pane
+    // display-message N+1 fallback is gone). leader_env stays the reverse-env real-machine bit.
     #[test]
     fn list_targets_argv_and_parses_tmux_pane_format() {
-        const FMT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}";
-        let stdout = "%7\tteam-x\t0\twin0\t0\t/dev/ttys003\tcodex\t1\t/Users/me/work\t1\t0\n\
-                      %8\tteam-x\t1\twin1\t0\t/dev/ttys004\tnode\t0\t/Users/me/other\t0\t0\n";
+        const FMT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}\t#{pane_pid}";
+        let stdout = "%7\tteam-x\t0\twin0\t0\t/dev/ttys003\tcodex\t1\t/Users/me/work\t1\t0\t41001\n\
+                      %8\tteam-x\t1\twin1\t0\t/dev/ttys004\tnode\t0\t/Users/me/other\t0\t0\t41002\n";
         let (be, rec) = backend_with(MockResp::Out(ok(stdout)), vec![]);
         let panes = be.list_targets().expect("list_targets ok");
         assert_eq!(
@@ -692,6 +691,8 @@
             "field[8] -> pane_current_path"
         );
         assert!(!panes[1].active, "field[7] pane_active='0' -> active=false");
+        assert_eq!(p.pane_pid, Some(41001), "field[11] -> pane_pid (P5 C-P5-3, no N+1 fallback)");
+        assert_eq!(panes[1].pane_pid, Some(41002), "field[11] -> pane_pid (second pane)");
 
         // nonzero exit -> empty vec (golden returncode != 0 -> []).
         let (be, _r) = backend_with(MockResp::Out(fail(1, "no server running on /tmp/tmux-x/default")), vec![]);

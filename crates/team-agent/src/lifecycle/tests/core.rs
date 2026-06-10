@@ -841,7 +841,7 @@ fn close_team_display_empty_workspace_closes_nothing_not_error() {
 #[test]
 fn fork_agent_on_unowned_workspace_does_not_silently_fork() {
     let ws = temp_ws();
-    match fork_agent(&ws, &aid("src"), &aid("dst"), false, None) {
+    match fork_agent(&ws, &aid("src"), &aid("dst"), None, false, None) {
         // 允许:owner 门 / team 选择 / 缺 spec(provider 命令构造前的上游门)。
         Err(LifecycleError::OwnerRefused(_))
         | Err(LifecycleError::TeamSelect(_))

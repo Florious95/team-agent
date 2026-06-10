@@ -425,7 +425,7 @@ pub fn write_coordinator_metadata(
     std::fs::write(path, text)
 }
 
-fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHealth {
+pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHealth {
     match MessageStore::open(workspace.as_path()) {
         Ok(_) => SchemaHealth {
             ok: true,
@@ -490,7 +490,17 @@ pub fn collect_watch_lines(
     store: &MessageStore,
     team: Option<&str>,
 ) -> Result<Vec<String>, WatchError> {
-    let _ = (store, team);
+    let mut lines = collect_event_lines(workspace, cursor, team)?;
+    lines.extend(collect_result_lines(workspace, cursor, store, team)?);
+    Ok(lines)
+}
+
+/// `_collect_event_lines`(`watch.py:66-97`):tail events.jsonl,按 team 过滤。
+fn collect_event_lines(
+    workspace: &WorkspacePath,
+    cursor: &mut WatchCursor,
+    team: Option<&str>,
+) -> Result<Vec<String>, WatchError> {
     let logs = crate::model::paths::logs_dir(workspace.as_path());
     let events_path = logs.join("events.jsonl");
     let archive_path = logs.join("events.jsonl.1");
@@ -521,9 +531,62 @@ pub fn collect_watch_lines(
     cursor.initialized = true;
     for line in text.lines() {
         if let Ok(event) = serde_json::from_str::<Value>(line) {
+            // watch.py:91 — `if team and _event_team_id(event) != team: continue`.
+            if team.is_some() && event_team_id(&event).as_deref() != team {
+                continue;
+            }
             if let Some(rendered) = render_event_line(&event) {
                 lines.push(rendered);
             }
+        }
+    }
+    Ok(lines)
+}
+
+/// `_event_team_id`(`watch.py:132-134`)。
+fn event_team_id(event: &Value) -> Option<String> {
+    ["team_id", "owner_team_id", "team"]
+        .iter()
+        .find_map(|key| event.get(*key))
+        .and_then(|value| match value {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
+}
+
+/// `_collect_result_lines`(`watch.py:100-112`):store.latest_results(owner_team_id=team)
+/// 出 `result_received: {agent} -> {summary}` 行;按 cursor.seen_result_ids 去重。
+fn collect_result_lines(
+    workspace: &WorkspacePath,
+    cursor: &mut WatchCursor,
+    store: &MessageStore,
+    team: Option<&str>,
+) -> Result<Vec<String>, WatchError> {
+    let db_path = crate::model::paths::runtime_dir(workspace.as_path()).join("team.db");
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::new();
+    for row in store.latest_results(20, team)? {
+        let Some(result_id) = row
+            .get("result_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !cursor.seen_result_ids.insert(result_id) {
+            continue;
+        }
+        let mut summary = crate::message_store::result_summary_from_row(&row)
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(obj) = summary.as_object_mut() {
+            obj.insert("event".to_string(), Value::String("result_received".to_string()));
+        }
+        if let Some(rendered) = render_event_line(&summary) {
+            lines.push(rendered);
         }
     }
     Ok(lines)

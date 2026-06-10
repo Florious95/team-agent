@@ -176,9 +176,58 @@ pub mod lifecycle_port {
         let result =
             shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state));
         if team.is_none() {
-            transport.kill_server();
+            // B5/F1: the leader terminal (`team-agent claude`) lives on this same
+            // workspace socket by design (leader/start.rs); a bare shutdown must not
+            // `kill-server` it away. Spare `team-agent-leader-*` sessions and clear the
+            // remaining non-leader sessions individually; only an empty-of-leader socket
+            // gets the whole-server teardown (the original leak-cleanup intent).
+            let transport_dyn: &dyn crate::transport::Transport = &transport;
+            let sessions = socket_session_names(transport_dyn);
+            match sessions_to_kill_sparing_leader(&sessions) {
+                None => transport.kill_server(),
+                Some(non_leader_sessions) => {
+                    for session in &non_leader_sessions {
+                        let _ = transport_dyn.kill_session(session);
+                    }
+                }
+            }
         }
         result
+    }
+
+    fn socket_session_names(
+        transport: &dyn crate::transport::Transport,
+    ) -> Vec<crate::transport::SessionName> {
+        let mut seen = std::collections::BTreeSet::new();
+        transport
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pane| pane.session)
+            .filter(|session| seen.insert(session.as_str().to_string()))
+            .collect()
+    }
+
+    /// B5/F1 pure kill decision for the bare-shutdown socket teardown.
+    /// `None` => no `team-agent-leader-*` session on the socket → safe to kill the whole
+    /// server. `Some(rest)` => leader present → kill only the non-leader sessions.
+    pub(crate) fn sessions_to_kill_sparing_leader(
+        sessions: &[crate::transport::SessionName],
+    ) -> Option<Vec<crate::transport::SessionName>> {
+        let leader_present = sessions
+            .iter()
+            .any(|session| session.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX));
+        leader_present.then(|| {
+            sessions
+                .iter()
+                .filter(|session| {
+                    !session
+                        .as_str()
+                        .starts_with(crate::leader::LEADER_SESSION_PREFIX)
+                })
+                .cloned()
+                .collect()
+        })
     }
 
     pub fn shutdown_with_transport(
@@ -223,7 +272,14 @@ pub mod lifecycle_port {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(crate::transport::SessionName::new);
-        let protected = shutdown_protection_set();
+        // PERF-6 C-①-1: ONE process-table snapshot for the whole happy path; the
+        // protected / pgid / kill / wait sets all derive from it (N39 same-source).
+        // A probe failure is observable, not a silent empty table (swallow batch 1).
+        let mut probe_degraded = false;
+        let entry_table = shutdown_table_snapshot(&run_workspace, &mut probe_degraded, "entry");
+        let mut protected = shutdown_protection_set(&entry_table);
+        extend_protection_with_leader_panes(&mut protected, transport, &entry_table);
+        let protected = protected;
         let reap_scope = if team.is_some() {
             ShutdownReapScope::ScopedTeam
         } else {
@@ -246,11 +302,9 @@ pub mod lifecycle_port {
         root_pids.extend(pane_pids);
         root_pids.sort_unstable();
         root_pids.dedup();
-        let root_pgids = process_pgids(&root_pids, &protected);
+        let root_pgids = process_pgids(&root_pids, &protected, &entry_table);
         deadline.check("reap_process_tree")?;
-        for pid in &root_pids {
-            reap_process_tree(*pid, &protected);
-        }
+        reap_process_tree(&root_pids, &protected, &entry_table);
         reap_process_groups(&root_pgids, &protected);
         let mut kill_error: Option<String> = None;
         deadline.check("kill_session")?;
@@ -267,8 +321,9 @@ pub mod lifecycle_port {
             &state,
             &root_pids,
             &root_pgids,
-            &protected,
+            transport,
             reap_scope,
+            &mut probe_degraded,
         );
         deadline.check("session_residuals")?;
         let session_residuals = if let Some(session) = session_name.as_ref() {
@@ -286,6 +341,10 @@ pub mod lifecycle_port {
             Vec::new()
         };
         deadline.check("process_residuals")?;
+        // C-①: the post-verify gets ONE fresh verification snapshot (reaps changed
+        // the world; #248 post-verify facts must be current, not the entry view).
+        let verify_table =
+            shutdown_table_snapshot(&run_workspace, &mut probe_degraded, "post_verify");
         let process_residuals = process_residuals(
             &run_workspace,
             &state,
@@ -293,6 +352,7 @@ pub mod lifecycle_port {
             &root_pgids,
             &protected,
             reap_scope,
+            &verify_table,
         );
         deadline.check("stop_coordinator")?;
         let mut coordinator_timeout = false;
@@ -313,7 +373,9 @@ pub mod lifecycle_port {
             None
         };
         let probe_timeout = crate::os_probe::probe_timeout();
-        let verification_degraded = probe_timeout.is_some();
+        // swallow batch 1: a failed ps probe degrades verification truthfully — the
+        // empty table must never read as a clean "no residual processes".
+        let verification_degraded = probe_timeout.is_some() || probe_degraded;
         let session_killed = session_name.is_some()
             && kill_error.is_none()
             && session_residuals.is_empty()
@@ -393,6 +455,7 @@ pub mod lifecycle_port {
             "status": status,
             "phase": phase,
             "verification_degraded": verification_degraded,
+            "probe_degraded": probe_degraded,
             "probe_timeout_kind": probe_timeout_kind,
             "probe_timeout": probe_timeout_value,
             "keep_logs": keep_logs,
@@ -574,11 +637,29 @@ pub mod lifecycle_port {
             .filter(|pid| *pid > 0)
     }
 
-    fn reap_process_tree(root_pid: u32, protected: &ShutdownProtection) {
-        let pids = process_tree_pids(root_pid)
-            .into_iter()
-            .filter(|pid| !protected.contains_pid(*pid))
-            .collect::<Vec<_>>();
+    /// PERF-6 C-② batched signals: the UNION of all root trees gets SIGTERM, shares ONE
+    /// >=150ms grace window (no single pid's grace is shortened — the serial per-root
+    /// chain is what's removed), then the union gets SIGKILL (noop for already-dead
+    /// pids; Gap 37 escalation order TERM -> grace -> KILL preserved), then a single
+    /// bounded wait for the whole union. kill/wait sets derive from the SAME snapshot
+    /// as the protected set (N39).
+    fn reap_process_tree(
+        root_pids: &[u32],
+        protected: &ShutdownProtection,
+        table: &[ProcessInfo],
+    ) {
+        let mut pids = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for root in root_pids {
+            for pid in process_tree_from_table(*root, table) {
+                if !protected.contains_pid(pid) && seen.insert(pid) {
+                    pids.push(pid);
+                }
+            }
+        }
+        if pids.is_empty() {
+            return;
+        }
         for pid in pids.iter().rev() {
             send_process_signal(*pid, libc::SIGTERM);
         }
@@ -611,86 +692,83 @@ pub mod lifecycle_port {
         }
     }
 
+    /// PERF-6 C-①-2 + C-②-5: every residual round fetches ONE fresh snapshot (reap
+    /// changed the world) and re-derives the protected set from THAT snapshot; all
+    /// in-round consumers (match + tree walks) reuse it.
     fn reap_workspace_process_residuals(
         workspace: &Path,
         state: &Value,
         root_pids: &[u32],
         root_pgids: &[u32],
-        protected: &ShutdownProtection,
+        transport: &dyn crate::transport::Transport,
         scope: ShutdownReapScope,
+        probe_degraded: &mut bool,
     ) {
         for _ in 0..5 {
-            let residuals =
-                matched_processes(workspace, state, root_pids, root_pgids, protected, scope);
+            let round_table = shutdown_table_snapshot(workspace, probe_degraded, "residual_round");
+            let mut protected = shutdown_protection_set(&round_table);
+            extend_protection_with_leader_panes(&mut protected, transport, &round_table);
+            let residuals = matched_processes(
+                workspace, state, root_pids, root_pgids, &protected, scope, &round_table,
+            );
             if residuals.is_empty() {
                 return;
             }
-            for process in &residuals {
-                reap_process_tree(process.pid, protected);
-            }
+            let residual_pids = residuals.iter().map(|process| process.pid).collect::<Vec<_>>();
+            reap_process_tree(&residual_pids, &protected, &round_table);
             let pgids = residuals
                 .iter()
                 .filter_map(|process| process.pgid)
                 .collect::<Vec<_>>();
-            reap_process_groups(&pgids, protected);
+            reap_process_groups(&pgids, &protected);
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
-    fn process_tree_pids(root_pid: u32) -> Vec<u32> {
-        if root_pid == 0 {
-            return Vec::new();
-        }
-        let pairs = process_parent_pairs();
-        let mut out = vec![root_pid];
-        let mut seen = std::collections::BTreeSet::new();
-        seen.insert(root_pid);
-        let mut index = 0;
-        while index < out.len() {
-            let parent = out[index];
-            for (pid, ppid) in &pairs {
-                if *ppid == parent && seen.insert(*pid) {
-                    out.push(*pid);
-                }
-            }
-            index += 1;
-        }
-        out
-    }
-
-    fn process_parent_pairs() -> Vec<(u32, u32)> {
-        let output = match crate::os_probe::bounded_command_output_with_probe(
-            std::process::Command::new("ps").args(["-axo", "pid=,ppid="]),
-            "ps_parent",
-            None,
-        ) {
-            Ok(output) if output.status.success() => output,
-            _ => return Vec::new(),
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let pid = parts.next()?.parse::<u32>().ok()?;
-                let ppid = parts.next()?.parse::<u32>().ok()?;
-                Some((pid, ppid))
-            })
-            .collect()
-    }
-
-    fn process_table() -> Vec<ProcessInfo> {
-        let output = match crate::os_probe::bounded_command_output_with_probe(
+    /// swallow batch 1: the raw ps probe with an explicit error channel — a failed
+    /// probe must never masquerade as "no processes" (CLAUDE.md §5).
+    fn probed_process_table() -> Result<Vec<ProcessInfo>, String> {
+        match crate::os_probe::bounded_command_output_with_probe(
             std::process::Command::new("ps").args(["-axo", "pid=,ppid=,pgid=,sess=,command="]),
             "ps_table",
             None,
         ) {
-            Ok(output) if output.status.success() => output,
-            _ => return Vec::new(),
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(parse_process_info)
-            .collect()
+            Ok(output) if output.status.success() => Ok(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(parse_process_info)
+                .collect()),
+            Ok(output) => Err(format!("ps exited with status {:?}", output.status.code())),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    fn process_table() -> Vec<ProcessInfo> {
+        probed_process_table().unwrap_or_default()
+    }
+
+    /// PERF-6 C-①-1 / swallow batch 1: the shutdown-scope snapshot fetch. A probe
+    /// failure writes a `shutdown.process_probe_failed` event (non-null error) and
+    /// marks the run degraded instead of silently treating it as "no processes".
+    fn shutdown_table_snapshot(
+        workspace: &Path,
+        probe_degraded: &mut bool,
+        phase: &str,
+    ) -> Vec<ProcessInfo> {
+        match probed_process_table() {
+            Ok(table) => table,
+            Err(error) => {
+                *probe_degraded = true;
+                let _ = crate::event_log::EventLog::new(workspace).write(
+                    "shutdown.process_probe_failed",
+                    json!({
+                        "phase": phase,
+                        "probe": "ps_table",
+                        "error": error,
+                    }),
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn parse_process_info(line: &str) -> Option<ProcessInfo> {
@@ -739,8 +817,9 @@ pub mod lifecycle_port {
         }
     }
 
-    fn shutdown_protection_set() -> ShutdownProtection {
-        let table = process_table();
+    /// PERF-6 C-①-1/C-②-4 (N39): the protected set derives from the CALLER's snapshot —
+    /// the same table the kill/wait sets derive from.
+    fn shutdown_protection_set(table: &[ProcessInfo]) -> ShutdownProtection {
         let mut protected = ShutdownProtection::default();
         let current = std::process::id();
         protected.pids.insert(current);
@@ -763,6 +842,61 @@ pub mod lifecycle_port {
             cursor = process.ppid;
         }
         protected
+    }
+
+    /// B5/F2: the leader terminal's pane process tree joins the protected set (same
+    /// set, same mechanism as the invoker ancestry) so the workspace residual sweep's
+    /// cmdline/cwd matching cannot reap the leader — including when ANOTHER team's bare
+    /// shutdown runs, where the leader is never in the invoker's ancestry.
+    fn extend_protection_with_leader_panes(
+        protected: &mut ShutdownProtection,
+        transport: &dyn crate::transport::Transport,
+        table: &[ProcessInfo],
+    ) {
+        let leader_pane_pids: Vec<u32> = transport
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pane| {
+                pane.session
+                    .as_str()
+                    .starts_with(crate::leader::LEADER_SESSION_PREFIX)
+            })
+            .filter_map(|pane| pane.pane_pid)
+            .collect();
+        if leader_pane_pids.is_empty() {
+            return;
+        }
+        for root in &leader_pane_pids {
+            for pid in process_tree_from_table(*root, table) {
+                protected.pids.insert(pid);
+                if let Some(pgid) = table
+                    .iter()
+                    .find(|process| process.pid == pid)
+                    .and_then(|process| process.pgid)
+                {
+                    protected.pgids.insert(pgid);
+                }
+            }
+        }
+        // The tmux SERVER carrying the leader pane must survive too: its command line
+        // contains the workspace path (it was started with the worker spawn command), so
+        // the residual sweep matches it, and killing the server SIGHUPs every pane —
+        // including the protected leader — bypassing per-pid protection. Protect the
+        // server pid itself (NOT its tree: worker panes must still die).
+        for pane_pid in &leader_pane_pids {
+            if let Some(server) = table
+                .iter()
+                .find(|process| process.pid == *pane_pid)
+                .and_then(|pane| table.iter().find(|process| process.pid == pane.ppid))
+                .filter(|server| server.pid > 1)
+            {
+                protected.pids.insert(server.pid);
+                if let Some(pgid) = server.pgid {
+                    protected.pgids.insert(pgid);
+                }
+            }
+        }
     }
 
     fn send_process_signal(pid: u32, signal: libc::c_int) {
@@ -815,8 +949,11 @@ pub mod lifecycle_port {
         err.raw_os_error() == Some(libc::EPERM)
     }
 
-    fn process_pgids(pids: &[u32], protected: &ShutdownProtection) -> Vec<u32> {
-        let table = process_table();
+    fn process_pgids(
+        pids: &[u32],
+        protected: &ShutdownProtection,
+        table: &[ProcessInfo],
+    ) -> Vec<u32> {
         let mut pgids = pids
             .iter()
             .filter_map(|pid| table.iter().find(|process| process.pid == *pid))
@@ -839,9 +976,10 @@ pub mod lifecycle_port {
         root_pgids: &[u32],
         protected: &ShutdownProtection,
         scope: ShutdownReapScope,
+        table: &[ProcessInfo],
     ) -> Vec<Value> {
         let mut residuals =
-            matched_processes(workspace, state, root_pids, root_pgids, protected, scope);
+            matched_processes(workspace, state, root_pids, root_pgids, protected, scope, table);
         let mut seen = residuals
             .iter()
             .map(|process| process.pid)
@@ -878,11 +1016,11 @@ pub mod lifecycle_port {
         root_pgids: &[u32],
         protected: &ShutdownProtection,
         scope: ShutdownReapScope,
+        table: &[ProcessInfo],
     ) -> Vec<ProcessInfo> {
-        let table = process_table();
         let root_tree = root_pids
             .iter()
-            .flat_map(|pid| process_tree_from_table(*pid, &table))
+            .flat_map(|pid| process_tree_from_table(*pid, table))
             .filter(|pid| !protected.contains_pid(*pid))
             .collect::<std::collections::BTreeSet<_>>();
         let root_pgids = root_pgids
@@ -899,7 +1037,7 @@ pub mod lifecycle_port {
             }
             let matches_workspace = scope == ShutdownReapScope::Workspace
                 && process_matches_workspace(
-                    &process,
+                    process,
                     &workspace_text,
                     &spawn_cwds,
                     &mut cwd_probe_budget,
@@ -908,7 +1046,7 @@ pub mod lifecycle_port {
                 || root_tree.contains(&process.pid)
                 || process.pgid.is_some_and(|pgid| root_pgids.contains(&pgid))
             {
-                out.push(process);
+                out.push(process.clone());
             }
         }
         out
@@ -1132,10 +1270,9 @@ pub mod lifecycle_port {
         open_display: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
-        let _ = label;
         let source = crate::model::ids::AgentId::new(source_agent);
         let dest = crate::model::ids::AgentId::new(as_agent_id);
-        match crate::lifecycle::fork_agent(workspace, &source, &dest, open_display, team) {
+        match crate::lifecycle::fork_agent(workspace, &source, &dest, label, open_display, team) {
             Ok(report) => Ok(json!({
                 "ok": true,
                 "source_agent_id": report.source_agent_id.as_str(),

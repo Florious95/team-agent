@@ -130,7 +130,6 @@ pub fn evaluate_takeover_reminder(
     nodes: &[IdleNode],
     arm_state: &Value,
 ) -> Result<TakeoverReminderResult, LeaderError> {
-    let _ = arm_state;
     if nodes.is_empty() {
         return Ok(TakeoverReminderResult {
             should_ping: false,
@@ -145,6 +144,24 @@ pub fn evaluate_takeover_reminder(
             message: None,
             interrupted_nodes: Vec::new(),
             reason: Some(format!("node_{}", turn_state_wire(blocking.state))),
+        });
+    }
+    // idle_predicate.py:55-62 (C1): only a real worker turn-open arms the watch — an
+    // un-armed monitor must never ping. The facade honors both its own write-side key
+    // (`armed`, record_turn_open_after_delivery) and the classify-layer monitor_state
+    // key (`opened_worker_turn_since_ack`); debounce/episode tiers stay at the classify
+    // layer (provider/classify.rs evaluate_takeover_reminder).
+    let armed = arm_state.get("armed").and_then(Value::as_bool) == Some(true)
+        || arm_state
+            .get("opened_worker_turn_since_ack")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if !armed {
+        return Ok(TakeoverReminderResult {
+            should_ping: false,
+            message: None,
+            interrupted_nodes: Vec::new(),
+            reason: Some("not_armed_no_worker_turn".to_string()),
         });
     }
     let interrupted_nodes = nodes

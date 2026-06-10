@@ -226,6 +226,7 @@ fn fork_agent_proceeds_past_owner_gate_for_unowned_workspace() {
         &ws,
         &AgentId::new("w1"),
         &AgentId::new("w1-fork"),
+        None,
         false,
         None,
         &transport,
@@ -960,7 +961,8 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert!(agent["captured_at"].is_null());
     assert!(agent["captured_via"].is_null());
     assert!(agent["attribution_confidence"].is_null());
-    assert_eq!(agent["spawn_cwd"], json!(team.to_string_lossy()));
+    // D5 (#264) / Python launch/core.py:253 — fresh launch persists spawn_cwd=workspace.
+    assert_eq!(agent["spawn_cwd"], json!(workspace.to_string_lossy()));
     assert_eq!(agent["spawned_at"], json!(FIXED_SPAWNED_AT));
     assert_eq!(
         agent["pane_id"],

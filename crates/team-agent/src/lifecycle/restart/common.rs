@@ -131,10 +131,25 @@ pub(super) fn spawn_agent_window(
                 .map(Path::new)
         })
         .unwrap_or(workspace);
+    let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
     let result = if into_existing_session {
-        transport.spawn_into(session_name, &window, &plan.argv, spawn_cwd, &env)
+        transport.spawn_into_with_env_unset(
+            session_name,
+            &window,
+            &plan.argv,
+            spawn_cwd,
+            &env,
+            &env_unset,
+        )
     } else {
-        transport.spawn_first(session_name, &window, &plan.argv, spawn_cwd, &env)
+        transport.spawn_first_with_env_unset(
+            session_name,
+            &window,
+            &plan.argv,
+            spawn_cwd,
+            &env,
+            &env_unset,
+        )
     };
     let spawn = result.map_err(|e| LifecycleError::Transport(e.to_string()))?;
     let _ = adapter.handle_startup_prompts(
@@ -344,6 +359,7 @@ pub(super) fn parse_provider(raw: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
         "codex" => Some(Provider::Codex),
+        "copilot" => Some(Provider::Copilot),
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,
@@ -355,6 +371,7 @@ pub(super) fn provider_wire(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }

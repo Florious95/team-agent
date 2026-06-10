@@ -421,6 +421,38 @@ pub trait Transport: Send + Sync {
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError>;
 
+    /// D9 (#264): spawn + profile `env_unset` keys that must be REALLY unset in the worker
+    /// shell line (Python providers.py:142-145 sources an env file whose first lines are
+    /// `unset <KEY>`) — the tmux server environment can carry stale values that plain
+    /// env-map removal cannot clear. Default forwards to the plain spawn: backends without
+    /// an inherited-shell layer have nothing stale to unset.
+    fn spawn_first_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = env_unset;
+        self.spawn_first(session, window, argv, cwd, env)
+    }
+
+    /// 同 [`Transport::spawn_first_with_env_unset`],对应 `spawn_into`。
+    fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = env_unset;
+        self.spawn_into(session, window, argv, cwd, env)
+    }
+
     // —— INJECT / CAPTURE / QUERY(RIE):按稳定 Target 寻址 ——
 
     /// 归并 set/load-buffer + paste-buffer + send submit;空文本走纯 send-keys

@@ -232,17 +232,31 @@ fn max_two(a: Option<usize>, b: Option<usize>) -> Option<usize> {
 /// + push {prompt:"codex_update_available", action:"sent_skip"}; on `Ready` -> stop. Loops up to
 ///   `checks` (golden default 30), `sleep_s` (golden 0.5) between iterations. Returns the ordered
 ///   `handled` list. Capture is full scrollback (golden `tmux capture-pane -p -S - -t <target>`).
+/// swallow batch 2 ② (A1): the structured startup-prompt outcome — `handled` keeps the
+/// Python golden list shape; `capture_error` carries the FIRST capture failure so the
+/// caller can surface it (an unobservable pane must never be silently treated as
+/// "no prompts to handle").
+#[derive(Debug, Clone, Default)]
+pub struct StartupPromptOutcome {
+    pub handled: Vec<HandledPrompt>,
+    pub capture_error: Option<String>,
+}
+
 pub fn codex_handle_startup_prompts(
     transport: &dyn Transport,
     target: &Target,
     checks: usize,
     sleep_s: f64,
-) -> Vec<HandledPrompt> {
+) -> StartupPromptOutcome {
     let mut handled = Vec::new();
+    let mut capture_error: Option<String> = None;
     for _ in 0..checks {
         let screen = match transport.capture(target, CaptureRange::Full) {
             Ok(captured) => captured.text,
-            Err(_) => String::new(),
+            Err(error) => {
+                capture_error.get_or_insert_with(|| error.to_string());
+                String::new()
+            }
         };
         match classify_codex_startup_screen(&screen) {
             StartupScreenDecision::SkipUpdatePrompt => {
@@ -265,7 +279,7 @@ pub fn codex_handle_startup_prompts(
             StartupScreenDecision::KeepPolling => sleep_between_polls(sleep_s),
         }
     }
-    handled
+    StartupPromptOutcome { handled, capture_error }
 }
 
 pub fn claude_handle_startup_prompts(
@@ -273,12 +287,16 @@ pub fn claude_handle_startup_prompts(
     target: &Target,
     checks: usize,
     sleep_s: f64,
-) -> Vec<HandledPrompt> {
+) -> StartupPromptOutcome {
     let mut handled = Vec::new();
+    let mut capture_error: Option<String> = None;
     for _ in 0..checks {
         let screen = match transport.capture(target, CaptureRange::Full) {
             Ok(captured) => captured.text,
-            Err(_) => String::new(),
+            Err(error) => {
+                capture_error.get_or_insert_with(|| error.to_string());
+                String::new()
+            }
         };
         match classify_claude_startup_screen(&screen) {
             StartupScreenDecision::AnswerWorkspaceTrust => {
@@ -295,7 +313,7 @@ pub fn claude_handle_startup_prompts(
             }
         }
     }
-    handled
+    StartupPromptOutcome { handled, capture_error }
 }
 
 fn max_rfind(output: &str, needles: &[&str]) -> Option<usize> {
@@ -498,7 +516,7 @@ mod tests {
         };
         let target = Target::Pane(PaneId::new("%1"));
 
-        let handled = codex_handle_startup_prompts(&t, &target, 5, 0.0);
+        let handled = codex_handle_startup_prompts(&t, &target, 5, 0.0).handled;
 
         assert_eq!(
             handled,

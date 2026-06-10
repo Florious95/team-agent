@@ -40,7 +40,6 @@ fn collect_scoped(
     ensure_coordinator: bool,
     owner_team_id: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
-    let _ = ensure_coordinator;
     let paths = collect_paths(workspace)?;
     let log = EventLog::new(&paths.run_workspace);
     let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
@@ -195,6 +194,13 @@ fn collect_scoped(
         }
     }
     let counts = result_counts(&conn, owner_team_id)?;
+    // results.py:157 — ensure_coordinator=true runs the REAL ensure step; the
+    // `{ok:false,status:"not_required"}` literal is ONLY the ensure=false branch.
+    let coordinator = if ensure_coordinator {
+        ensure_coordinator_after_collect(&paths.run_workspace, &state, &log)
+    } else {
+        serde_json::json!({"ok": false, "status": "not_required"})
+    };
     Ok(serde_json::json!({
         "ok": fatal_invalid_results == 0,
         "collected": collected,
@@ -203,11 +209,76 @@ fn collect_scoped(
         "invalid_results": invalid_results,
         "results": counts,
         "state_file": spec_workspace.join("team_state.md").to_string_lossy().to_string(),
-        "coordinator": {
-            "ok": false,
-            "status": "not_required",
-        },
+        "coordinator": coordinator,
     }))
+}
+
+/// `_ensure_coordinator_after_collect`(`results.py:176-184`)。
+fn ensure_coordinator_after_collect(
+    workspace: &Path,
+    state: &serde_json::Value,
+    log: &EventLog,
+) -> serde_json::Value {
+    if !coordinator_should_run(state) {
+        return serde_json::json!({"ok": false, "status": "not_required"});
+    }
+    let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let coordinator = match crate::coordinator::start_coordinator(&workspace_path) {
+        Ok(report) => start_report_value(&report),
+        Err(e) => serde_json::json!({"ok": false, "status": "start_failed", "error": e.to_string()}),
+    };
+    let _ = log.write(
+        "collect.coordinator_checked",
+        serde_json::json!({"coordinator": coordinator.clone()}),
+    );
+    coordinator
+}
+
+/// `_coordinator_should_run`(`results.py:187-188`)。
+fn coordinator_should_run(state: &serde_json::Value) -> bool {
+    let has_session = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    has_session || leader_receiver_is_direct(state.get("leader_receiver"))
+}
+
+/// `_leader_receiver_is_direct`(`messaging/leader.py:449-450`)。
+fn leader_receiver_is_direct(receiver: Option<&serde_json::Value>) -> bool {
+    receiver.is_some_and(|receiver| {
+        receiver.get("mode").and_then(serde_json::Value::as_str) == Some("direct_tmux")
+            && receiver
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|pane| !pane.is_empty())
+    })
+}
+
+/// `start_coordinator` dict 形(`lifecycle.py:54/86/121` 的 JSON 面)。
+fn start_report_value(report: &crate::coordinator::StartReport) -> serde_json::Value {
+    let status = match report.status {
+        crate::coordinator::StartOutcome::AlreadyRunning => "already_running",
+        crate::coordinator::StartOutcome::RestartIncompatibleStopFailed => {
+            "restart_incompatible_stop_failed"
+        }
+        crate::coordinator::StartOutcome::SchemaIncompatible => "schema_incompatible",
+        crate::coordinator::StartOutcome::Started => "started",
+    };
+    let mut value = serde_json::json!({
+        "ok": report.ok,
+        "pid": report.pid.map(|p| p.get()),
+        "status": status,
+    });
+    if let Some(log) = &report.log {
+        value["log"] = serde_json::json!(log.to_string_lossy().to_string());
+    }
+    if let Some(error) = &report.schema_error {
+        value["schema_error"] = serde_json::json!(format!("{error:?}"));
+    }
+    if let Some(action) = &report.action {
+        value["action"] = serde_json::json!(action);
+    }
+    value
 }
 
 fn resolve_owner_team_for_read(

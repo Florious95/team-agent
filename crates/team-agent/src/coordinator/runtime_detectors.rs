@@ -54,18 +54,23 @@ fn detect_compaction(
         .as_ref()
         .map(|team| team.as_str().to_string())
         .unwrap_or_else(|| crate::state::projection::team_state_key(state));
-    let current = update_compaction_count(state, &team, &fact.agent_id, count);
+    let (previous, current) = update_compaction_count(state, &team, &fact.agent_id, count);
     let provider = fact.provider;
-    let _ = event_log.write(
-        "coordinator.compaction_observed",
-        json!({
-            "agent_id": fact.agent_id.as_str(),
-            "provider": provider.map(provider_name),
-            "team": team,
-            "compaction_count": current,
-            "stuck_loop": false,
-        }),
-    );
+    // P4 (C-P4-1, N35 anti-nag): the event is CHANGE-driven — an unchanged compaction
+    // count must not re-emit every tick (live sample: 1037 identical events / 19.5min).
+    // A changed value still emits (value-keyed dedup, not blanket suppression).
+    if current != previous {
+        let _ = event_log.write(
+            "coordinator.compaction_observed",
+            json!({
+                "agent_id": fact.agent_id.as_str(),
+                "provider": provider.map(provider_name),
+                "team": team,
+                "compaction_count": current,
+                "stuck_loop": false,
+            }),
+        );
+    }
     let threshold = compaction_reset_threshold(state);
     let recommendation = if provider == Some(Provider::Codex) && current >= threshold {
         let message = format!(
@@ -231,15 +236,21 @@ fn count_compaction_markers(scrollback: &str) -> i64 {
         + lower.matches("compaction occurred").count() as i64
 }
 
-fn update_compaction_count(state: &mut Value, team: &str, agent_id: &AgentId, count: i64) -> i64 {
+/// Returns `(previous, current)` so the caller can emit change-driven events (P4).
+fn update_compaction_count(
+    state: &mut Value,
+    team: &str,
+    agent_id: &AgentId,
+    count: i64,
+) -> (i64, i64) {
     let Some(coordinator) = coordinator_object_mut(state) else {
-        return count;
+        return (0, count);
     };
     let Some(counts) = object_field_mut(coordinator, "compaction_counts") else {
-        return count;
+        return (0, count);
     };
     let Some(team_counts) = object_field_mut(counts, team) else {
-        return count;
+        return (0, count);
     };
     let previous = team_counts
         .get(agent_id.as_str())
@@ -247,7 +258,7 @@ fn update_compaction_count(state: &mut Value, team: &str, agent_id: &AgentId, co
         .unwrap_or(0);
     let current = previous.max(count);
     team_counts.insert(agent_id.as_str().to_string(), json!(current));
-    current
+    (previous, current)
 }
 
 fn compaction_reset_threshold(state: &Value) -> i64 {
@@ -448,6 +459,7 @@ fn provider_name(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }

@@ -14,6 +14,7 @@ pub(crate) fn provider_wire(provider: Provider) -> &'static str {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",
         Provider::Codex => "codex",
+        Provider::Copilot => "copilot",
         Provider::GeminiCli => "gemini_cli",
         Provider::Fake => "fake",
     }
@@ -24,6 +25,7 @@ pub(crate) fn parse_provider(s: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
         "codex" => Some(Provider::Codex),
+        "copilot" => Some(Provider::Copilot),
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,

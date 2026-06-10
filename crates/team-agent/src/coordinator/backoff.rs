@@ -68,8 +68,25 @@ pub fn run_daemon_with_coordinator(
         Some(v) if v > 0.0 => v,
         _ => resolve_tick_interval(&args.workspace)?,
     };
+    // P7 (Gap 37b, Python __main__.py:44-59): capture the original parent BEFORE the
+    // loop; the orphan predicate fires only on the literal triple condition
+    // (ppid changed ∧ reparented to pid 1 ∧ workspace gone) — never wider.
+    let initial_ppid = current_ppid();
     let mut consecutive_failures = 0_u32;
+    let mut last_failure_signature: Option<String> = None;
     loop {
+        let ppid_now = current_ppid();
+        if super::should_orphan_self_terminate(initial_ppid, ppid_now, &args.workspace) {
+            let _ = event_log.write(
+                "coordinator.orphan_self_terminate",
+                serde_json::json!({
+                    "initial_ppid": initial_ppid,
+                    "current_ppid": ppid_now,
+                    "workspace": args.workspace.as_path().to_string_lossy(),
+                }),
+            );
+            break;
+        }
         match coordinator.tick() {
             Ok(report) => {
                 if consecutive_failures > 0 {
@@ -78,6 +95,7 @@ pub fn run_daemon_with_coordinator(
                         serde_json::json!({"consecutive_failures": consecutive_failures}),
                     )?;
                     consecutive_failures = 0;
+                    last_failure_signature = None;
                 }
                 if report.stop || args.once {
                     break;
@@ -87,15 +105,40 @@ pub fn run_daemon_with_coordinator(
             Err(err) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let next_sleep_sec = backoff_sleep_sec(tick_interval, consecutive_failures);
-                event_log.write(
-                    "coordinator.tick_error",
-                    serde_json::json!({
-                        "error": err.to_string(),
-                        "exc_type": "TickError",
-                        "consecutive_failures": consecutive_failures,
-                        "next_sleep_sec": next_sleep_sec,
-                    }),
-                )?;
+                // P7-F2 (Python __main__.py:66-89): identical-signature failures emit
+                // ONE full tick_error; repeats only write `.suppressed` companions,
+                // except the Python periodic re-emit tiers (failure #1, every 12th
+                // failure, or the 40s/60s backoff steps).
+                let signature: String = err.to_string().chars().take(200).collect();
+                let signature_changed =
+                    last_failure_signature.as_deref() != Some(signature.as_str());
+                if signature_changed {
+                    last_failure_signature = Some(signature);
+                }
+                if signature_changed
+                    || consecutive_failures == 1
+                    || consecutive_failures % 12 == 0
+                    || next_sleep_sec == 40.0
+                    || next_sleep_sec == 60.0
+                {
+                    event_log.write(
+                        "coordinator.tick_error",
+                        serde_json::json!({
+                            "error": err.to_string(),
+                            "exc_type": "TickError",
+                            "consecutive_failures": consecutive_failures,
+                            "next_sleep_sec": next_sleep_sec,
+                        }),
+                    )?;
+                } else {
+                    event_log.write(
+                        "coordinator.tick_error.suppressed",
+                        serde_json::json!({
+                            "consecutive_failures": consecutive_failures,
+                            "next_sleep_sec": next_sleep_sec,
+                        }),
+                    )?;
+                }
                 if args.once {
                     return Err(DaemonError::Tick(err));
                 }
@@ -105,6 +148,11 @@ pub fn run_daemon_with_coordinator(
     }
     event_log.write("coordinator.exit", serde_json::json!({"stop": true}))?;
     Ok(())
+}
+
+/// 当前 ppid(`os.getppid()`,孤儿自检输入)。
+fn current_ppid() -> u32 {
+    u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
 }
 
 /// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,

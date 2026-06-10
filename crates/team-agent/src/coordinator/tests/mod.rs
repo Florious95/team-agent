@@ -308,3 +308,4 @@ mod health_sync;
 mod takeover;
 mod daemon;
 mod main_preserved;
+mod a0_lostupdate;

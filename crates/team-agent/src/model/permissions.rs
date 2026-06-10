@@ -184,6 +184,13 @@ pub fn provider_enforcement(provider: Provider, tool: Tool) -> Enforcement {
             FsRead | FsWrite | FsList | ExecuteBash | GitDiff | ProviderBuiltin => Hard,
         },
         Provider::Fake => Hard,
+        // Copilot(C-2-1 cr verdict):execute_bash/fs_write/network/mcp_team = hard,
+        // fs_read/fs_list/git_diff/provider_builtin = prompt_only(诚实:copilot 无
+        // 对应 deny kind,framework 不替决,留给 provider prompt 控制;MUST-NOT-13)。
+        Provider::Copilot => match tool {
+            FsRead | FsList | GitDiff | ProviderBuiltin => PromptOnly,
+            Network | FsWrite | ExecuteBash | McpTeam => Hard,
+        },
         // codex: 全 prompt_only。claude: 不在表中 → 全 prompt_only(同 fallback)。
         Provider::Codex | Provider::Claude => PromptOnly,
     }

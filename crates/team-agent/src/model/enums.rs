@@ -15,6 +15,10 @@ pub enum Provider {
     Claude,
     ClaudeCode,
     Codex,
+    /// GitHub Copilot CLI(0.3.x 新增)。一期 subscription-only(已登录态),无 fork
+    /// 能力(caps.fork=false → CapabilityUnsupported),system prompt 走 per-worker
+    /// AGENTS.md + `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` env(B2 灵魂件降级,§C2)。
+    Copilot,
     GeminiCli,
     Fake,
 }
@@ -257,7 +261,9 @@ mod tests {
     #[test]
     fn unknown_provider_string_is_rejected() {
         // 与 receive_worker_outputs 不同:Provider 是封闭集,未知值必须 Err(不 passthrough)。
-        assert!(serde_json::from_str::<Provider>("\"copilot\"").is_err());
+        // NOTE: "copilot" 已 0.3.5 加入(design + cr verdict 全 APPROVE),改用一个
+        // 仍未注册的串验"封闭集"语义。
+        assert!(serde_json::from_str::<Provider>("\"gibberish\"").is_err());
     }
 
     #[test]

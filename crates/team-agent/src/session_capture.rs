@@ -609,6 +609,7 @@ fn parse_provider(raw: &str) -> Option<Provider> {
         "claude" => Some(Provider::Claude),
         "claude_code" => Some(Provider::ClaudeCode),
         "codex" => Some(Provider::Codex),
+        "copilot" => Some(Provider::Copilot),
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,
