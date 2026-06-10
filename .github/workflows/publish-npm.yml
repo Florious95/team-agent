@@ -154,19 +154,21 @@ jobs:
         run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
 
       # C-3 cr verdict — 静态断言发布前置门。Linux 包必须:
-      #   ① `file` 报告 "statically linked"(musl 主门);
+      #   ① `file` 报告 statically linked(musl 产物;接受 "statically linked"
+      #      或 "static-pie linked" — 新 Rust toolchain musl 默认 static PIE,
+      #      `file` 输出 "static-pie linked, ..." 同样是无 dynamic loader 的静态);
       #   ② `objdump -T` 取的动态符号表里 GLIBC_ 计数 == 0
       #   (musl 产物根本不应出现任何 GLIBC_ 版本符号)。
       # C-4 反向:把 publish-npm.yml 的 linux target 改回 x86_64-unknown-linux-gnu
-      # 再发,本步必失败(file 不报 statically linked / GLIBC_ 计数 > 0)→ 拦在
-      # publish 之前。
+      # 再发,本步必失败(file 不报 statically/static-pie linked / GLIBC_ 计数 > 0)
+      # → 拦在 publish 之前。
       - name: Assert linux binary is statically linked with no GLIBC_ symbols
         if: runner.os == 'Linux'
         run: |
           binary="target/${{ matrix.target }}/release/team-agent"
           file_info="$(file "$binary")"
           echo "file: $file_info"
-          if ! echo "$file_info" | grep -q 'statically linked'; then
+          if ! echo "$file_info" | grep -Eq 'statically linked|static-pie linked'; then
             echo "::error::linux binary is not statically linked: $file_info"
             exit 1
           fi
