@@ -17,6 +17,13 @@ pub fn runtime_dir(workspace: &Path) -> PathBuf {
     team_subdir(workspace, "runtime")
 }
 
+/// E5:**spec.yaml 的唯一落地点** = `<workspace>/.team/runtime/<team_key>/team.spec.yaml`。
+/// 用户终裁:角色定义(TEAM.md/agents/*.md)=第一真相源;spec=中间产物,**绝不落用户目录**。
+/// 所有 spec 读写经此单点,杜绝 `<user_dir>/team.spec.yaml`。
+pub fn runtime_spec_path(workspace: &Path, team_key: &str) -> PathBuf {
+    runtime_dir(workspace).join(team_key).join("team.spec.yaml")
+}
+
 /// `<workspace>/.team/logs`。
 pub fn logs_dir(workspace: &Path) -> PathBuf {
     team_subdir(workspace, "logs")

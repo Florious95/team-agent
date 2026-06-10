@@ -448,9 +448,21 @@ impl TmuxBackend {
         ];
         let output = self.run_spawn(&pane_argv)?;
         let pane = output.stdout.trim();
-        let pane_id = if pane.is_empty() { "%0" } else { pane };
+        // T3-5 (harvest §1): never fabricate a `%0` pane id on an empty reply — a fake
+        // pane id mis-addresses every later inject/capture/kill. Surface the miss.
+        if pane.is_empty() {
+            return Err(TransportError::Subprocess {
+                argv: pane_argv,
+                code: output.code,
+                stderr: format!(
+                    "tmux display-message returned no pane id for {}:{}",
+                    session.as_str(),
+                    window.as_str()
+                ),
+            });
+        }
         Ok(SpawnResult {
-            pane_id: PaneId::new(pane_id),
+            pane_id: PaneId::new(pane),
             session: session.clone(),
             window: window.clone(),
             child_pid: None,

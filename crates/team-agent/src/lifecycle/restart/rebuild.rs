@@ -101,10 +101,15 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
-    let spec_workspace = selected.spec_workspace.as_ref().ok_or_else(|| {
+    // E5 task#3 / RC-A6a + E4(leader 裁定:每次 restart 都从角色定义重建 runtime spec,覆盖):
+    // 角色定义=第一真相源。角色齐 → compile_team 重建 + 保留运行期 override(session_name)+
+    // 写 runtime spec。角色缺(TEAM.md/agents 不在)→ 显式拒(列缺哪些),旧 spec 原地保留不删不用。
+    let spec = rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
+    // 重建后 spec_workspace 恒为 runtime spec 的父目录(.team/runtime/<team_key>/)。
+    let runtime_spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
+    let spec_workspace = runtime_spec.parent().ok_or_else(|| {
         LifecycleError::TeamSelect("active team spec workspace not found".to_string())
     })?;
-    let spec = load_team_spec(spec_workspace)?;
     let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
     let mut convergence = converge_missing_provider_sessions(
         &mut state,
@@ -711,6 +716,74 @@ fn restart_candidate_from_state(
         has_context: restart_candidate_has_context(state),
         agents,
     }
+}
+
+/// E5 task#3 / RC-A6a:每次 restart 都以**角色定义**(team_dir 的 TEAM.md+agents/*.md)
+/// compile_team 重建 runtime spec(覆盖),保留运行期 override(session_name 必须延续,
+/// 否则 tmux session 对不上)。写到 .team/runtime/<team_key>/team.spec.yaml。
+///
+/// 角色定义缺(team_dir 未记 / TEAM.md 不在 / agents 不在)→ **显式拒**(LifecycleError,
+/// CLI N38 三行式),列出缺哪些;**旧 spec 原地保留不删不用**(T2 防数据销毁,无静默路径)。
+fn rebuild_runtime_spec_from_roles(
+    run_workspace: &Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> Result<YamlValue, LifecycleError> {
+    // team_dir(角色定义源)优先取 state.team_dir;缺则回落 run_workspace(自含 team-dir 布局,
+    // run_workspace 本身即角色目录)。两者都无角色定义则下面的齐全性检查会显式拒。
+    let team_dir = state
+        .get("team_dir")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| run_workspace.to_path_buf());
+    // 角色定义齐全性检查(显式拒,列缺哪些;旧 spec 不动)。
+    let mut missing: Vec<String> = Vec::new();
+    if !team_dir.join("TEAM.md").exists() {
+        missing.push(format!("{}/TEAM.md", team_dir.display()));
+    }
+    let agents_dir = team_dir.join("agents");
+    let has_role_doc = std::fs::read_dir(&agents_dir)
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.path().extension().and_then(|x| x.to_str()) == Some("md")
+            })
+        })
+        .unwrap_or(false);
+    if !has_role_doc {
+        missing.push(format!("{}/*.md (at least one role doc)", agents_dir.display()));
+    }
+    if !missing.is_empty() {
+        // N38 三行式:error / action / log。旧 runtime spec 原地保留(不删不用)。
+        return Err(LifecycleError::TeamSelect(format!(
+            "cannot restart: role definitions missing for team '{team_key}': {}. \
+             action: restore the listed role docs (TEAM.md + agents/*.md are the source of truth), \
+             then re-run restart; the previous runtime spec is left in place (not used). \
+             log: team_dir={}",
+            missing.join(", "),
+            team_dir.display(),
+        )));
+    }
+    // 重建:compile_team(角色定义) + 保留运行期 session_name override。
+    let mut spec = crate::compiler::compile_team(&team_dir)
+        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    if let Some(session_name) = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        crate::lifecycle::launch::override_spec_session_name(&mut spec, session_name);
+    }
+    // 写 runtime spec(覆盖,原子 tmp+rename;Bug2)。
+    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
+    crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
+    // RC-A6a:重建成功后清理用户目录的 legacy spec(中间产物不该留在角色目录)。
+    // 仅删 team_dir 下的 team.spec.yaml(角色定义 TEAM.md/agents 不动);失败不致命(best-effort)。
+    let legacy_spec = team_dir.join("team.spec.yaml");
+    if legacy_spec.exists() && legacy_spec != spec_path {
+        let _ = std::fs::remove_file(&legacy_spec);
+    }
+    Ok(spec)
 }
 
 fn restart_candidate_spec_path(workspace: &Path, state: &serde_json::Value) -> std::path::PathBuf {

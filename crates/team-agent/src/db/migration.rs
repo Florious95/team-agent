@@ -84,12 +84,16 @@ pub struct RebuildEvent {
 }
 
 /// `schema_diagnosis` 的只读结论。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Diagnosis {
     pub ok: bool,
     pub status: String,
     pub user_version: i64,
     pub layout_diffs: Vec<String>,
+    /// Python parity (`schema_migration.py:188/206`): the layered guidance line —
+    /// "missing" carries the initialize_schema first-use hint; drift carries the
+    /// fix-schema command; healthy carries "none".
+    pub recommended_action: String,
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool, DbError> {
@@ -316,11 +320,18 @@ pub fn ensure_table_layout(
 /// `schema_migration.py:schema_diagnosis`:只读判定(不变更 DB)。
 pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis, DbError> {
     if !db_path.exists() {
+        // T3-3 cr verdict (A parity lock, 2026-06-10): a missing db is the LEGAL
+        // first-use state — ok:true is layered with the explicit status axis and the
+        // recommended_action guidance (Python schema_migration.py:180-190 verbatim),
+        // never a silent fake-green.
         return Ok(Diagnosis {
             ok: true,
             status: "missing".to_string(),
             user_version: 0,
             layout_diffs: vec![],
+            recommended_action:
+                "No team.db exists yet; initialize_schema will create it on first use."
+                    .to_string(),
         });
     }
     let conn = Connection::open(db_path)?;
@@ -332,6 +343,11 @@ pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis
         ok,
         status: if ok { "ok".to_string() } else { "schema_repair_available".to_string() },
         user_version: uv,
+        recommended_action: if diff_tables.is_empty() {
+            "none".to_string()
+        } else {
+            "run team-agent doctor --fix-schema --json".to_string()
+        },
         layout_diffs: diff_tables,
     })
 }

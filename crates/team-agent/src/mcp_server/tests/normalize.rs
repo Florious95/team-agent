@@ -1,8 +1,11 @@
     #[test]
     fn result_status_alias_chain() {
-        // None / unknown → Success
+        // cr verdict (refined, 2026-06-10) three-way split: missing/null/empty stays
+        // the parity-locked implicit success (Python :107); a NON-EMPTY unknown
+        // literal is Partial, never silent success (MUST-NOT-13, diverges from :123).
         assert_eq!(normalize_result_status(None), ResultStatus::Success);
-        assert_eq!(normalize_result_status(Some("weird")), ResultStatus::Success);
+        assert_eq!(normalize_result_status(Some("")), ResultStatus::Success);
+        assert_eq!(normalize_result_status(Some("weird")), ResultStatus::Partial);
         // ok/done/complete/completed/passed/pass → success
         for a in ["ok", "DONE", "complete", "completed", "passed", "pass"] {
             assert_eq!(normalize_result_status(Some(a)), ResultStatus::Success, "alias {a}");

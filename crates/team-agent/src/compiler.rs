@@ -141,56 +141,9 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
     let mut agents = Vec::new();
     let mut agent_ids = Vec::new();
     for path in role_paths {
-        let (meta, body) = read_front_matter(&path)?;
-        let id = required_string(&meta, &path, "name")?;
-        let role = required_string(&meta, &path, "role")?;
-        let provider = required_string(&meta, &path, "provider")?;
-        let model = resolve_model(&meta, &team_meta, &provider);
-        let auth_mode = string_field(&meta, "auth_mode")
-            .or_else(|| string_field(&team_meta, "default_auth_mode"))
-            .unwrap_or_else(|| "subscription".to_string());
-        if auth_mode != "subscription" && meta.get("profile").is_none() {
-            return Err(ModelError::Validation(format!(
-                "{}: profile is required when auth_mode is '{auth_mode}'",
-                path.display(),
-            )));
-        }
-        let tools = required_tools(&meta, &path)?;
-        let prompt_inline = non_empty_trimmed(&body).unwrap_or_else(|| role.clone());
-        agent_ids.push(id.clone());
-        let mut agent_items = vec![
-            ("id", Value::Str(id.clone())),
-            ("role", Value::Str(role.clone())),
-            ("provider", Value::Str(provider)),
-            ("model", model),
-            ("auth_mode", Value::Str(auth_mode)),
-            ("working_directory", Value::Str(workspace_s.clone())),
-            (
-                "system_prompt",
-                map(vec![
-                    ("inline", Value::Str(prompt_inline)),
-                    ("file", Value::Null),
-                ]),
-            ),
-            ("tools", list_str(tools)),
-            ("permission_mode", Value::Str("restricted".to_string())),
-            ("preferred_for", list_str(vec![id, role])),
-            ("avoid_for", Value::List(Vec::new())),
-            (
-                "output_contract",
-                map(vec![
-                    ("format", Value::Str("result_envelope_v1".to_string())),
-                    (
-                        "required_fields",
-                        list_str(vec!["task_id", "status", "summary", "artifacts"]),
-                    ),
-                ]),
-            ),
-        ];
-        if let Some(profile) = string_field(&meta, "profile") {
-            agent_items.push(("profile", Value::Str(profile)));
-        }
-        agents.push(map(agent_items));
+        let compiled = compile_role_agent(&path, &team_meta, &workspace_s)?;
+        agent_ids.push(compiled.id);
+        agents.push(compiled.agent);
     }
 
     let default_assignee = agent_ids.first().cloned().unwrap_or_default();
@@ -325,6 +278,76 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
     ]);
     spec::validate_spec(&spec, &workspace)?;
     Ok(spec)
+}
+
+/// 单个角色文档 → 编译后的 agent spec 条目(从 [`compile_team`] 的 per-role 循环抽出)。
+/// E5 Bug1:add-agent 复用它**就地读** role 文件编译,不再 copy 进平台目录。
+pub struct CompiledRole {
+    pub id: String,
+    pub role: String,
+    pub agent: Value,
+}
+
+/// 把一份 role 文档编译成 agent spec 条目。`team_meta` 供 model/auth_mode 继承;
+/// `workspace_s` 是 working_directory。**纯读 `role_path`,无任何文件落地。**
+pub fn compile_role_agent(
+    role_path: &Path,
+    team_meta: &Value,
+    workspace_s: &str,
+) -> Result<CompiledRole, ModelError> {
+    let (meta, body) = read_front_matter(role_path)?;
+    let id = required_string(&meta, role_path, "name")?;
+    let role = required_string(&meta, role_path, "role")?;
+    let provider = required_string(&meta, role_path, "provider")?;
+    let model = resolve_model(&meta, team_meta, &provider);
+    let auth_mode = string_field(&meta, "auth_mode")
+        .or_else(|| string_field(team_meta, "default_auth_mode"))
+        .unwrap_or_else(|| "subscription".to_string());
+    if auth_mode != "subscription" && meta.get("profile").is_none() {
+        return Err(ModelError::Validation(format!(
+            "{}: profile is required when auth_mode is '{auth_mode}'",
+            role_path.display(),
+        )));
+    }
+    let tools = required_tools(&meta, role_path)?;
+    let prompt_inline = non_empty_trimmed(&body).unwrap_or_else(|| role.clone());
+    let mut agent_items = vec![
+        ("id", Value::Str(id.clone())),
+        ("role", Value::Str(role.clone())),
+        ("provider", Value::Str(provider)),
+        ("model", model),
+        ("auth_mode", Value::Str(auth_mode)),
+        ("working_directory", Value::Str(workspace_s.to_string())),
+        (
+            "system_prompt",
+            map(vec![
+                ("inline", Value::Str(prompt_inline)),
+                ("file", Value::Null),
+            ]),
+        ),
+        ("tools", list_str(tools)),
+        ("permission_mode", Value::Str("restricted".to_string())),
+        ("preferred_for", list_str(vec![id.clone(), role.clone()])),
+        ("avoid_for", Value::List(Vec::new())),
+        (
+            "output_contract",
+            map(vec![
+                ("format", Value::Str("result_envelope_v1".to_string())),
+                (
+                    "required_fields",
+                    list_str(vec!["task_id", "status", "summary", "artifacts"]),
+                ),
+            ]),
+        ),
+    ];
+    if let Some(profile) = string_field(&meta, "profile") {
+        agent_items.push(("profile", Value::Str(profile)));
+    }
+    Ok(CompiledRole {
+        id,
+        role,
+        agent: map(agent_items),
+    })
 }
 
 fn map(items: Vec<(&str, Value)>) -> Value {

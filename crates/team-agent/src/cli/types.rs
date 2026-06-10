@@ -86,10 +86,11 @@ impl CliError {
             payload.session_name = Some(session.clone());
             if command == "quick-start" {
                 payload.action = format!(
-                    "tmux session `{session}` already exists. It may be an active team. Do not terminate existing tmux sessions from quick-start; change `name:` in TEAM.md and run quick-start again."
+                    "tmux session `{session}` already exists. It may be your own existing team. To resume it use `team-agent restart` (NOT --fresh, which discards context). Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. Never terminate existing tmux sessions from quick-start."
                 );
                 payload.next_actions = Some(vec![
-                    "Change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
+                    "If this is your existing team, resume it with `team-agent restart`.".to_string(),
+                    "If you want a separate team, change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
                 ]);
             } else {
                 payload.action = format!(

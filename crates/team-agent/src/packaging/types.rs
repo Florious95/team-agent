@@ -40,24 +40,36 @@ pub enum InstallerCommand {
 pub enum SkillTarget {
     Codex,
     Claude,
+    /// GitHub Copilot CLI(0.3.x 新增 provider)。skill 落 `~/.copilot/skills/team-agent`
+    /// —— 实证:copilot bundle skill 源枚举含 `personal-copilot (~/.copilot/skills)`,
+    /// config dir = `~/.copilot`(可被 `$COPILOT_HOME` 覆盖),manifest 约定 `**/SKILL.md`
+    /// 同 claude/codex(见 `.team/artifacts/copilot-probe/`)。
+    Copilot,
     All,
 }
 
 impl SkillTarget {
+    /// `All` fan-out 的单目标全集(表驱动唯一真相源:新增 provider 只改这里,
+    /// install/uninstall/install-skill 三处共用,杜绝漏装/漏卸)。
+    pub const SINGLE_TARGETS: [SkillTarget; 3] =
+        [SkillTarget::Codex, SkillTarget::Claude, SkillTarget::Copilot];
+
     /// 单目标 → 对应 provider(`All` 无单一 provider → `None`)。与 [`Provider`] 对齐,防散字符串再生。
     pub fn provider(self) -> Option<Provider> {
         match self {
             Self::Codex => Some(Provider::Codex),
             Self::Claude => Some(Provider::ClaudeCode),
+            Self::Copilot => Some(Provider::Copilot),
             Self::All => None,
         }
     }
 
-    /// `_skill_dest_dir`:`~/.codex|.claude/skills/team-agent`(`All` 应 fan-out 到两者,非单 dir → None)。
+    /// `_skill_dest_dir`:`~/.codex|.claude|.copilot/skills/team-agent`(`All` fan-out 全集,非单 dir → None)。
     pub fn dest_dir(self, home: &Path) -> Option<SkillDestDir> {
         match self {
             Self::Codex => Some(SkillDestDir(home.join(".codex").join("skills").join("team-agent"))),
             Self::Claude => Some(SkillDestDir(home.join(".claude").join("skills").join("team-agent"))),
+            Self::Copilot => Some(SkillDestDir(home.join(".copilot").join("skills").join("team-agent"))),
             Self::All => None,
         }
     }

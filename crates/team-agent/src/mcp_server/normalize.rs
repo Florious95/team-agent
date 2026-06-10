@@ -16,14 +16,36 @@ use super::types::{
 // These are contract-callable: RED tests pass alias strings and assert the enum.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `_normalize_result_status` (`normalize.py:106-123`): map ok/done/passed/… aliases
-/// onto [`ResultStatus`]; anything unrecognized → `Success`.
+/// `_normalize_result_status` (`normalize.py:106-123`) — cr verdict (refined,
+/// 2026-06-10) three-way split:
+/// * status missing/null/empty → `Success` — **parity lock** (Python :107
+///   `or "success"`: the implicit-success convention, exit-code-0 equivalent).
+/// * recognized aliases → mapped (Python alias table verbatim).
+/// * a truly UNKNOWN non-empty literal → `Partial` (uncertain ≠ silent success;
+///   MUST-NOT-13 — deliberate divergence from Python :123's fallback "success",
+///   P7-type RS-first fix; the raw literal is observable via the `_observed` variant).
 pub fn normalize_result_status(value: Option<&str>) -> ResultStatus {
-    match normalize_token(value).as_str() {
-        "blocked" | "block" => ResultStatus::Blocked,
-        "failed" | "fail" | "error" => ResultStatus::Failed,
-        "partial" | "partially_done" => ResultStatus::Partial,
-        _ => ResultStatus::Success,
+    normalize_result_status_observed(value).0
+}
+
+/// The observed variant: `.1` carries the raw unrecognized literal so ingestion
+/// boundaries (wire report_result) can emit `provider.result.unknown_status_normalized`.
+pub fn normalize_result_status_observed(value: Option<&str>) -> (ResultStatus, Option<String>) {
+    let token = normalize_token(value);
+    if token.is_empty() {
+        return (ResultStatus::Success, None);
+    }
+    match token.as_str() {
+        "success" | "ok" | "done" | "complete" | "completed" | "passed" | "pass" => {
+            (ResultStatus::Success, None)
+        }
+        "blocked" | "block" => (ResultStatus::Blocked, None),
+        "failed" | "fail" | "error" => (ResultStatus::Failed, None),
+        "partial" | "partially_done" => (ResultStatus::Partial, None),
+        _ => (
+            ResultStatus::Partial,
+            Some(value.unwrap_or_default().to_string()),
+        ),
     }
 }
 

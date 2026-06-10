@@ -29,6 +29,15 @@ use rusqlite::params;
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let conn = crate::db::schema::open_db(store.db_path())
             .map_err(|e| CliError::Runtime(e.to_string()))?;
+        // B-5 / 036b N38 explicable — status 出口 runtime 块:把 coordinator_health
+        // (现状)+ undelivered backlog count 一起暴露;coordinator not running ∧
+        // backlog>0 才挂 down-hint(anti-nag)。auto-recovery 不做(user 已裁)。
+        let coordinator_running = coordinator_status_running(&health);
+        let undelivered_backlog = count_undelivered_backlog(&conn, owner_team_id)?;
+        let runtime_block = build_runtime_status_block(
+            coordinator_running,
+            undelivered_backlog,
+        );
         let agents = enrich_agents(state.get("agents"));
         let tasks = state
             .get("tasks")
@@ -68,6 +77,7 @@ use rusqlite::params;
             "latest_results": latest_result_summaries(&store, owner_team_id)?,
             "readiness": readiness,
             "coordinator": coordinator_health_value(health),
+            "runtime": runtime_block,
             "last_events": Value::Array(
                 crate::event_log::EventLog::new(workspace)
                     .tail(10)
@@ -746,6 +756,58 @@ use rusqlite::params;
         if let Some(value) = value {
             map.insert(key.to_string(), json!(value));
         }
+    }
+
+    /// B-5 / 036b N38 — status 出口的 runtime 块:把 coordinator_health 与
+    /// undelivered backlog 合体暴露。down-hint 只在【coordinator 不在跑 ∧ 有 backlog】
+    /// 两条件同时满足才挂(anti-nag);健康状态下不挂提示。auto-recovery 不做。
+    fn build_runtime_status_block(coordinator_running: bool, undelivered: i64) -> Value {
+        let mut runtime = serde_json::Map::new();
+        runtime.insert(
+            "coordinator".to_string(),
+            json!({"ok": coordinator_running}),
+        );
+        runtime.insert("undelivered".to_string(), json!(undelivered));
+        if !coordinator_running && undelivered > 0 {
+            runtime.insert(
+                "hint".to_string(),
+                json!(format!(
+                    "coordinator not running with {undelivered} undelivered — run team-agent restart"
+                )),
+            );
+        }
+        Value::Object(runtime)
+    }
+
+    /// Whether the coordinator HealthReport reflects a running tick loop. Used by the
+    /// runtime block + the hint gate.
+    fn coordinator_status_running(health: &crate::coordinator::HealthReport) -> bool {
+        matches!(health.status, crate::coordinator::CoordinatorHealthStatus::Running)
+    }
+
+    /// Count of messages currently sitting in delivery-able backlog
+    /// (accepted/pending/queued forms — not delivered / not failed / not refused).
+    /// owner_team_id scope honored when present.
+    fn count_undelivered_backlog(
+        conn: &rusqlite::Connection,
+        owner_team_id: Option<&str>,
+    ) -> Result<i64, CliError> {
+        // Backlog statuses chosen to mirror what `deliver_pending` would pick up.
+        let sql = match owner_team_id {
+            Some(_) => "select count(*) from messages
+                       where owner_team_id = ?1 and status in ('accepted','pending','queued','queued_until_trust')",
+            None => "select count(*) from messages
+                     where status in ('accepted','pending','queued','queued_until_trust')",
+        };
+        let count: i64 = match owner_team_id {
+            Some(team) => conn
+                .query_row(sql, params![team], |row| row.get(0))
+                .map_err(|e| CliError::Runtime(e.to_string()))?,
+            None => conn
+                .query_row(sql, [], |row| row.get(0))
+                .map_err(|e| CliError::Runtime(e.to_string()))?,
+        };
+        Ok(count)
     }
 
     fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {

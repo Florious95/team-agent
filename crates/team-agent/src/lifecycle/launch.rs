@@ -139,7 +139,20 @@ fn spawn_agents(
     safety: &DangerousApproval,
     transport: &dyn Transport,
 ) -> Result<Vec<StartedAgent>, LifecycleError> {
-    let team_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
+    // E5 解耦:team_dir(角色定义 + profiles 所在)≠ spec_path.parent()(spec 已迁出到 .team/runtime)。
+    // 优先取 state.team_dir(角色目录),回落 spec_path.parent()(legacy 同目录布局)。
+    let team_dir_buf = crate::state::persist::load_runtime_state(workspace)
+        .ok()
+        .and_then(|state| {
+            state
+                .get("team_dir")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        });
+    let team_dir = team_dir_buf
+        .as_deref()
+        .unwrap_or_else(|| spec_path.parent().unwrap_or_else(|| Path::new(".")));
     let runtime_fast = matches!(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
@@ -313,6 +326,28 @@ fn spawn_agents(
                 );
             }
         }
+        // E6 层1 实证3 + 诊断留痕:落最终 worker argv(spawn 前的真实形态)。
+        // 任何"--session-id 预定 UUID 没生效"必须能从 events.jsonl 回答:argv 里到底有没有它。
+        // 抽出 --session-id 值单列,方便和盘上 ~/.claude/projects/<cwd> 实际落的 UUID 对账。
+        {
+            let session_id_in_argv = plan
+                .argv
+                .iter()
+                .position(|a| a == "--session-id")
+                .and_then(|i| plan.argv.get(i + 1))
+                .cloned();
+            let event_log = crate::event_log::EventLog::new(workspace);
+            let _ = event_log.write(
+                "provider.worker.spawn_argv",
+                serde_json::json!({
+                    "agent_id": agent_id_raw,
+                    "provider": provider,
+                    "argv": plan.argv,
+                    "session_id_in_argv": session_id_in_argv,
+                    "expected_session_id": plan.expected_session_id.as_ref().map(|s| s.as_str()),
+                }),
+            );
+        }
         let spawn = if started.is_empty() {
             transport.spawn_first_with_env_unset(
                 session_name,
@@ -402,7 +437,14 @@ fn persist_spawn_agent_state(
         .map(|agent| agent.agent_id.as_str().to_string())
         .collect();
     let pane_pids_by_agent = pane_pids_by_started_agent(transport, started);
-    let profile_dir = spec_path.parent().unwrap_or(workspace).join("profiles");
+    // E5 解耦:profiles 随**角色定义**(team_dir),不随 spec(已迁出到 .team/runtime)。
+    // 优先 state.team_dir(角色目录),回落 spec_path.parent()(legacy 同目录布局)。
+    let profile_dir = state
+        .get("team_dir")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|dir| Path::new(dir).join("profiles"))
+        .unwrap_or_else(|| spec_path.parent().unwrap_or(workspace).join("profiles"));
     let mut agents = serde_json::Map::new();
     let mut spawn_index = 0_u32;
     for agent in spec_agent_values(spec) {
@@ -718,6 +760,34 @@ fn env_nonempty(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| !value.is_empty())
+}
+
+/// B-7 / 036b — TEAM_AGENT_LEADER_PANE_ID 主动路径 fail-fast helper。
+/// 入口形态(N38 三行式):
+///   error  : `TEAM_AGENT_LEADER_PANE_ID points at a dead/absent pane: %<id>`
+///   action : `unset TEAM_AGENT_LEADER_PANE_ID, or set it to a live tmux pane id`
+///   log    : `TEAM_AGENT_LEADER_PANE_ID=%<id>`
+/// env 未设(或空)→ Ok(())。
+/// env 设了但 transport.liveness(pane) 报 Dead → Err(RequirementUnmet)。
+/// liveness 返 Unknown 不挡(被动路径降级):本主动路径只对【显式 Dead】fail-fast,
+/// MUST-17 不过度设计 / unset 走 pass-through(b7_unset_leader_pane_env_passes_through 守)。
+pub(crate) fn validate_active_leader_pane_env(
+    transport: &dyn Transport,
+) -> Result<(), LifecycleError> {
+    let pane_id_raw = match std::env::var("TEAM_AGENT_LEADER_PANE_ID") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return Ok(()),
+    };
+    let probe = transport.liveness(&crate::transport::PaneId::new(&pane_id_raw));
+    let dead = matches!(probe, Ok(crate::transport::PaneLiveness::Dead));
+    if !dead {
+        return Ok(());
+    }
+    Err(LifecycleError::RequirementUnmet(format!(
+        "TEAM_AGENT_LEADER_PANE_ID points at a dead/absent pane: {pane_id_raw}\n\
+         action: unset TEAM_AGENT_LEADER_PANE_ID, or set it to a live tmux pane id\n\
+         log: TEAM_AGENT_LEADER_PANE_ID={pane_id_raw}"
+    )))
 }
 
 fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &str) {
@@ -1809,6 +1879,12 @@ pub fn quick_start_with_transport_in_workspace(
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
+    // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
+    // 入口验活;死/缺(Dead)的 pane 必须明确报错,不可 silent bind 到 spawner /
+    // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
+    // 降级+event,不在这里挡。错误三行式:error(含 pane id 字面)/action(unset
+    // 或修 env)/log(env var 名)。
+    validate_active_leader_pane_env(transport)?;
     if !agents_dir.exists() {
         return Err(LifecycleError::Compile(format!(
             "agents dir not found: {}",
@@ -1869,13 +1945,14 @@ pub fn quick_start_with_transport_in_workspace(
         override_spec_session_name(&mut spec, &format!("team-{requested}"));
     }
     let session_name = spec_session_name(&spec);
+    // team_key 身份源 = team_dir(agents_dir).name(角色定义目录),不依赖 spec 落点。
     let state_team_key = explicit_team_key.clone().unwrap_or_else(|| {
-        let spec_path = agents_dir.join("team.spec.yaml");
-        runtime_team_key_for_spec(&spec_path, &spec, &session_name)
+        runtime_team_key_for_spec(&agents_dir.join("team.spec.yaml"), &spec, &session_name)
     });
-    let spec_path = agents_dir.join("team.spec.yaml");
-    std::fs::write(&spec_path, yaml::dumps(&spec))
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
+    // E5 spec 迁移:spec 写到 .team/runtime/<team_key>/(中间产物,绝不落用户目录 agents_dir)。
+    // Bug2:原子写(tmp+rename),避免半截 spec。
+    let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);
+    write_spec_atomic(&spec_path, &spec)?;
     let _store = crate::message_store::MessageStore::open(&workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let resolved_spec_path =
@@ -2268,9 +2345,8 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
-    let team_dir = selected.spec_workspace.ok_or_else(|| {
-        LifecycleError::TeamSelect("active team spec workspace not found".to_string())
-    })?;
+    // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
+    let team_dir = selected.team_dir;
     add_agent_with_transport_at_paths(
         &selected.run_workspace,
         &team_dir,
@@ -2336,21 +2412,40 @@ fn add_agent_with_transport_at_paths(
             "agent id already exists: {agent_id}"
         )));
     }
-    let dynamic_role_file = materialize_added_role_file(team_dir, agent_id, role_file_path)?;
-    let spec = crate::compiler::compile_team(team_dir)
+    // E5 Bug1:不再 copy role 文件进 <team_dir>/agents(自拷贝 O_TRUNC 截断反模式)。
+    // 就地读外部 role 文档编译,注入 base team spec 的 agents/routing。role 文件留在原处。
+    let mut spec = crate::compiler::compile_team(team_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    let workspace_s = spec
+        .get("team")
+        .and_then(|team| team.get("workspace"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| team_dir.to_str().unwrap_or_default())
+        .to_string();
+    let team_meta = crate::compiler::read_front_matter(&team_dir.join("TEAM.md"))
+        .map(|(meta, _)| meta)
+        .unwrap_or(Value::Null);
+    let compiled = crate::compiler::compile_role_agent(role_file_path, &team_meta, &workspace_s)
+        .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    if compiled.id != agent_id.as_str() {
+        return Err(LifecycleError::Compile(format!(
+            "role file declares name '{}' but add-agent id is '{}'",
+            compiled.id, agent_id
+        )));
+    }
+    inject_agent_into_spec(&mut spec, compiled.agent, &compiled.id)?;
     let safety = effective_runtime_config(&spec)?;
-    let spec_path = team_dir.join("team.spec.yaml");
-    std::fs::write(&spec_path, yaml::dumps(&spec))
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
-    let (meta, _) = crate::compiler::read_front_matter(&dynamic_role_file)
+    // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
+    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
+    write_spec_atomic(&spec_path, &spec)?;
+    let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     upsert_agent_state_from_role(
         run_workspace,
         &canonical_team_key,
         agent_id,
         &meta,
-        &dynamic_role_file,
+        role_file_path,
         &safety,
     )?;
     let started = crate::lifecycle::restart::start_agent_at_paths(
@@ -2457,26 +2552,39 @@ fn upsert_agent_state_from_role(
     save_launched_team_state_for_key(workspace, &state, Some(canonical_team_key))
 }
 
-fn materialize_added_role_file(
-    team_dir: &Path,
-    agent_id: &AgentId,
-    role_file_path: &Path,
-) -> Result<PathBuf, LifecycleError> {
-    let agents_dir = team_dir.join("agents");
-    std::fs::create_dir_all(&agents_dir)
-        .map_err(|e| LifecycleError::StatePersist(format!("create agents dir: {e}")))?;
-    let target = agents_dir.join(format!("{}.md", agent_id.as_str()));
-    if role_file_path == target {
-        return Ok(target);
+/// E5 Bug1:把 add-agent 就地编译出的 agent 条目注入 base team spec(`agents` 列表 +
+/// `routing.rules` 加 `route-<id>`),复刻 [`compile_team`] 的路由规则形态。不落任何文件。
+fn inject_agent_into_spec(
+    spec: &mut Value,
+    agent: Value,
+    agent_id: &str,
+) -> Result<(), LifecycleError> {
+    let Value::Map(pairs) = spec else {
+        return Err(LifecycleError::Compile("spec is not a map".to_string()));
+    };
+    // agents 列表追加。
+    match pairs.iter_mut().find(|(k, _)| k == "agents") {
+        Some((_, Value::List(agents))) => agents.push(agent),
+        _ => return Err(LifecycleError::Compile("spec.agents missing or not a list".to_string())),
     }
-    std::fs::copy(role_file_path, &target).map_err(|e| {
-        LifecycleError::StatePersist(format!(
-            "copy role file {} -> {}: {e}",
-            role_file_path.display(),
-            target.display()
-        ))
-    })?;
-    Ok(target)
+    // routing.rules 追加 route-<id>(与 compile_team 同形)。
+    if let Some((_, Value::Map(routing))) = pairs.iter_mut().find(|(k, _)| k == "routing") {
+        if let Some((_, Value::List(rules))) = routing.iter_mut().find(|(k, _)| k == "rules") {
+            rules.push(Value::Map(vec![
+                ("id".to_string(), Value::Str(format!("route-{agent_id}"))),
+                (
+                    "match".to_string(),
+                    Value::Map(vec![(
+                        "assignee".to_string(),
+                        Value::List(vec![Value::Str(agent_id.to_string())]),
+                    )]),
+                ),
+                ("assign_to".to_string(), Value::Str(agent_id.to_string())),
+                ("priority".to_string(), Value::Int(10)),
+            ]));
+        }
+    }
+    Ok(())
 }
 
 /// `fork_agent(workspace, source_agent_id, as_agent_id, ...)`(`lifecycle/operations.py:284`)。
@@ -2523,15 +2631,18 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    let spec_workspace = selected.spec_workspace.ok_or_else(|| {
-        LifecycleError::TeamSelect("active team spec workspace not found".to_string())
+    // E5 §3:team_dir(角色定义+profiles)恒用户目录。spec 读用 selector 解析的 spec_path
+    // (读序 B:runtime 优先、legacy 回落),写恒走 runtime_spec_path(canonical 落点)。
+    let fork_team_dir = selected.team_dir.clone();
+    let read_spec_path = selected.spec_path.clone().ok_or_else(|| {
+        LifecycleError::TeamSelect("active team spec not found".to_string())
     })?;
     let workspace = selected.run_workspace;
     let state = selected.state;
     ensure_owner_allowed_for_state(&state, Some(source_agent_id))?;
-    let spec_path = spec_workspace.join("team.spec.yaml");
-    let text = std::fs::read_to_string(&spec_path)
-        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
+    let spec_path = crate::model::paths::runtime_spec_path(&workspace, &selected.team_key);
+    let text = std::fs::read_to_string(&read_spec_path)
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", read_spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
     if find_spec_agent(&spec, as_agent_id).is_some() || leader_id_matches(&spec, as_agent_id) {
         return Err(LifecycleError::RequirementUnmet(format!(
@@ -2571,10 +2682,12 @@ pub fn fork_agent_with_transport(
         )));
     }
     let new_spec = append_forked_agent(&spec, source_agent, source_agent_id, as_agent_id, label)?;
-    crate::model::spec::validate_spec(&new_spec, &spec_workspace)
+    // validate 用角色定义目录的 team_workspace(校验 working_directory),非 spec 落点。
+    let validate_ws = crate::model::paths::team_workspace(&fork_team_dir)
+        .unwrap_or_else(|_| workspace.clone());
+    crate::model::spec::validate_spec(&new_spec, &validate_ws)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    std::fs::write(&spec_path, yaml::dumps(&new_spec))
-        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", spec_path.display())))?;
+    write_spec_atomic(&spec_path, &new_spec)?;
     let new_agent = find_spec_agent(&new_spec, as_agent_id).ok_or_else(|| {
         LifecycleError::RequirementUnmet(format!("unknown worker agent id: {as_agent_id}"))
     })?;
@@ -2630,7 +2743,8 @@ pub fn fork_agent_with_transport(
         let _ = std::fs::write(&spec_path, text.as_bytes());
         e
     })?;
-    let profile_dir = spec_workspace.join("profiles");
+    // E5 §3:profiles 随角色定义目录(team_dir),不随已迁出的 spec。
+    let profile_dir = fork_team_dir.join("profiles");
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_with_profile_dir(
             &workspace,
@@ -3314,7 +3428,28 @@ fn yaml_value_to_json(value: &Value) -> serde_json::Value {
 /// `runtime` map and/or the `session_name` entry if absent. Used by quick-start to
 /// derive the tmux session from the REQUESTED team identity (CR-040/042) rather
 /// than the template's compiled-in name.
-fn override_spec_session_name(spec: &mut Value, session_name: &str) {
+/// E5 Bug2(atomic 真修):原子写 runtime spec —— 写 `<spec>.tmp-<pid>` 再 rename 覆盖,
+/// 避免崩溃/并发留下半截 spec(plain fs::write 会 in-place truncate 后逐字节写)。
+/// rename 失败时清理 tmp,原 spec(若有)不动。
+pub(crate) fn write_spec_atomic(spec_path: &Path, spec: &Value) -> Result<(), LifecycleError> {
+    if let Some(parent) = spec_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", parent.display())))?;
+    }
+    let tmp = spec_path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, yaml::dumps(spec))
+        .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", tmp.display())))?;
+    if let Err(e) = std::fs::rename(&tmp, spec_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(LifecycleError::StatePersist(format!(
+            "{}: {e}",
+            spec_path.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
     let Value::Map(root) = spec else { return };
     let runtime_slot = root
         .iter_mut()

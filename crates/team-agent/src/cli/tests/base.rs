@@ -400,15 +400,20 @@ latest result: none";
         let payload = err.to_payload(Path::new("/tmp/cli-error-123.log"), "quick-start");
         assert_eq!(payload.reason.as_deref(), Some("tmux_session_name_conflict"));
         assert_eq!(payload.session_name.as_deref(), Some("my-team"));
+        // E8 (N38): quick-start 撞已有 runtime 引导到 restart(resume),明确 --fresh 会丢上下文。
         assert_eq!(
             payload.action,
-            "tmux session `my-team` already exists. It may be an active team. \
-Do not terminate existing tmux sessions from quick-start; \
-change `name:` in TEAM.md and run quick-start again."
+            "tmux session `my-team` already exists. It may be your own existing team. \
+To resume it use `team-agent restart` (NOT --fresh, which discards context). \
+Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. \
+Never terminate existing tmux sessions from quick-start."
         );
         assert_eq!(
             payload.next_actions,
-            Some(vec!["Change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string()])
+            Some(vec![
+                "If this is your existing team, resume it with `team-agent restart`.".to_string(),
+                "If you want a separate team, change `name:` in TEAM.md and run `team-agent quick-start` again.".to_string(),
+            ])
         );
     }
 

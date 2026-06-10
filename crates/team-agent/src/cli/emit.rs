@@ -249,7 +249,47 @@ fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
     emit_usage_error(&format!(
         "argument {{codex,claude,...,doctor}}: invalid choice: '{command}' (choose from codex, claude, ..., doctor)"
     ));
+    // E8 (N38): 错路引导 —— 拼写近似时建议最接近的真子命令(additive,不改既有 golden 行)。
+    if let Some(suggestion) = nearest_subcommand(command) {
+        eprintln!("team-agent: did you mean `{suggestion}`?");
+    }
     ExitCode::Usage
+}
+
+/// 在已知子命令里找与 `input` 最接近的一个(Levenshtein ≤ 阈值)。无足够接近者 → None。
+fn nearest_subcommand(input: &str) -> Option<&'static str> {
+    let mut candidates: Vec<&'static str> = vec!["codex", "claude"];
+    candidates.extend_from_slice(DISPATCH_COMMANDS);
+    candidates.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
+    // 阈值随长度放宽,但短词收紧,避免 'x' 误配任何东西。
+    let max_distance = match input.chars().count() {
+        0..=3 => 1,
+        4..=6 => 2,
+        _ => 3,
+    };
+    candidates
+        .into_iter()
+        .map(|c| (c, levenshtein(input, c)))
+        .filter(|(_, d)| *d <= max_distance)
+        .min_by_key(|(_, d)| *d)
+        .map(|(c, _)| c)
+}
+
+/// 标准 Levenshtein 编辑距离(纯函数,无依赖;子命令建议用)。
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut curr = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b.len()]
 }
 
 fn emit_usage_error(message: &str) {
@@ -1436,5 +1476,28 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    // ── E8 (N38): 未知子命令 → 最近似建议(additive,不破坏 golden invalid-choice 行) ──
+    #[test]
+    fn e8_unknown_subcommand_suggests_nearest_known_command() {
+        // 'statu' typo → status; 'add-agen' → add-agent.
+        assert_eq!(nearest_subcommand("statu"), Some("status"));
+        assert_eq!(nearest_subcommand("add-agen"), Some("add-agent"));
+        assert_eq!(nearest_subcommand("start-agnet"), Some("start-agent"));
+    }
+
+    #[test]
+    fn e8_unknown_subcommand_no_suggestion_when_far() {
+        // 完全无关的串不应误配出任何建议。
+        assert_eq!(nearest_subcommand("zzzzzzzzzz"), None);
+        assert_eq!(nearest_subcommand("x"), None);
+    }
+
+    #[test]
+    fn e8_levenshtein_basic() {
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("status", "status"), 0);
+        assert_eq!(levenshtein("statu", "status"), 1);
     }
 }

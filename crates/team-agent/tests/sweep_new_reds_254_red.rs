@@ -200,7 +200,7 @@ fn quick_start_grandchild_depth_limit_refuses_before_state_or_spawn() {
             && quick_start_section.contains("parent_team_key")
             && quick_start_section.contains("> 2")
             && quick_start_section.find("team_depth").unwrap_or(usize::MAX)
-                < quick_start_section.find("std::fs::write(&spec_path").unwrap_or(0),
+                < quick_start_section.find("write_spec_atomic(&spec_path").unwrap_or(0),
         "quick-start must enforce nesting depth before writing spec/state or spawning; current quick-start path lacks the F11.4 depth guard. source={quick_start_section}"
     );
 }

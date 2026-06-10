@@ -22,7 +22,9 @@ use super::helpers::{
     json_dumps_default, latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
     requires_ack_for_target, tool_runtime_error,
 };
-use super::normalize::{compact_tool_result, normalize_report_envelope};
+use super::normalize::{
+    compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
+};
 use super::types::{Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -321,6 +323,14 @@ impl TeamOrchestratorTools {
                 insert_array(obj, "next_actions", next_actions);
             }
         }
+        // T3-1 cr verdict (refined): an unknown non-empty status literal normalizes to
+        // Partial and must be OBSERVABLE at this ingestion boundary (the envelope-borne
+        // path; the wire `status` arg path emits at dispatch). Never a silent swallow.
+        if let Some(raw) =
+            normalize_result_status_observed(base.get("status").and_then(Value::as_str)).1
+        {
+            self.note_unknown_result_status(&raw);
+        }
         let normalized = normalize_report_envelope(&base);
         let env_value = normalized_envelope_value(&normalized);
         let owner_team = self.canonical_owner_team_key()?;
@@ -331,6 +341,20 @@ impl TeamOrchestratorTools {
         )
             .map_err(tool_runtime_error)
             .and_then(|value| compact_tool_result(&value))
+    }
+
+    /// T3-1 cr verdict: the observable record of an unknown→Partial status
+    /// normalization (`provider.result.unknown_status_normalized`, raw literal
+    /// included) — MUST-NOT-13: the swallow is never silent.
+    pub(crate) fn note_unknown_result_status(&self, raw: &str) {
+        let _ = EventLog::new(&self.workspace).write(
+            "provider.result.unknown_status_normalized",
+            serde_json::json!({
+                "agent_id": self.agent_id.as_ref().map(AgentId::as_str),
+                "raw_status": raw,
+                "normalized": "partial",
+            }),
+        );
     }
 
     /// `update_state` (`tools.py:316-325`): delegated through the lifecycle tools

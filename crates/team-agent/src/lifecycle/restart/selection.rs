@@ -120,8 +120,8 @@ pub fn python_type_name(value: &serde_json::Value) -> &'static str {
 /// `_collect_corrupt_first_send_at`,`orchestration.py:430/467`)。读 fixture state 的
 /// `agents.<id>`,对每非 paused worker:
 /// (1) corrupt first_send_at → 收进 `corrupt_entries`(carry python type-name);
-/// (2) 算 resume 决策(`resumable→Resume` / `!resumable&&!interacted→FreshStart` /
-///     `!resumable&&interacted&&allow_fresh→FreshStart` / 否则 `Refuse`);
+/// (2) 算 resume 决策(`session_id→Resume` / `null session && allow_fresh→FreshStart` /
+///     否则 `Refuse`;E6 层2:null session 不再因 first_send_at=null 静默 fresh);
 /// (3) `Refuse` 的 worker(reason=`no_persisted_session_id`(无 session)|`session_unresumable`)
 ///     进 `unresumable`。
 /// restart() **先**调它再 teardown;corrupt 非空 → `RefusedInvalidFirstSendAt`,unresumable
@@ -171,10 +171,12 @@ pub fn classify_restart_plan(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(SessionId::new);
-        let interacted = matches!(first_send_at_state, FirstSendAtState::Valid);
+        // E6 层2 (C2, 用户裁定"绝不静默 fresh"): null session 只有显式 --allow-fresh 才 fresh,
+        // 否则 Refuse(→ resume_not_ready + 指引)。删 `!interacted` 短路 —— 自启动 worker
+        // (leader 从未发消息 → first_send_at=null → interacted=false)会被它静默 fresh 丢上下文。
         let decision = if session_id.is_some() {
             ResumeDecision::Resume
-        } else if !interacted || allow_fresh {
+        } else if allow_fresh {
             ResumeDecision::FreshStart
         } else {
             ResumeDecision::Refuse

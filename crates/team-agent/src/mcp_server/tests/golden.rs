@@ -83,12 +83,14 @@
         assert_eq!(normalize_change_kind(None, "inspected it"), ChangeKind::Observed);
     }
 
-    // ── #40 normalize_result_status: 'partiallydone' (no underscore) → Success ──
-    // GOLDEN (probe_mcp_red.py STATUS partiallydone): not in mapping/canonical set → success.
+    // ── #40 normalize_result_status: 'partiallydone' (no underscore) → Partial ──
+    // Re-anchored per cr verdict (refined, 2026-06-10): the old Python golden mapped
+    // an unmatched literal to success (probe_mcp_red.py STATUS); RS deliberately
+    // normalizes a NON-EMPTY unknown literal to Partial (MUST-NOT-13, P7-type fix).
     #[test]
-    fn result_status_partiallydone_no_underscore_is_success() {
-        assert_eq!(normalize_result_status(Some("partiallydone")), ResultStatus::Success);
-        assert_eq!(normalize_result_status(Some("PartiallyDone")), ResultStatus::Success);
+    fn result_status_partiallydone_no_underscore_is_partial() {
+        assert_eq!(normalize_result_status(Some("partiallydone")), ResultStatus::Partial);
+        assert_eq!(normalize_result_status(Some("PartiallyDone")), ResultStatus::Partial);
     }
 
     // ── #35/#46/#53 normalize_changes: full alias set + empty-path SKIP ─────────

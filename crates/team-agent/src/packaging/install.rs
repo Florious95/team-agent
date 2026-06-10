@@ -21,12 +21,22 @@ pub fn install(opts: &InstallOptions) -> Result<InstallReport, PackagingError> {
         dry_run: true,
         source: default_skill_source(),
     })?;
+    // T3-6 (harvest §1): never a hardcoded DoctorStatus::Ok with no check behind it —
+    // run the real packaging doctor (schema diagnosis + gates) for the invoking
+    // workspace so the report reflects an actual result.
+    let doctor = super::migrate::doctor(&super::types::DoctorOptions {
+        workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        gate: None,
+        fix: false,
+        cleanup_orphans: false,
+        confirm: false,
+    })?;
     Ok(InstallReport {
         installed_bin,
         version: Version::current(),
         replace: None,
         skills,
-        doctor: DoctorStatus::Ok,
+        doctor,
         path_hint: diagnose_path(&bin_dir)?,
     })
 }
@@ -58,7 +68,7 @@ pub fn uninstall(opts: &UninstallOptions) -> Result<UninstallOutcome, PackagingE
 
     let home = home_dir();
     let mut removed_skill_dirs = Vec::new();
-    for target in [SkillTarget::Codex, SkillTarget::Claude] {
+    for target in SkillTarget::SINGLE_TARGETS {
         if let Some(dest) = target.dest_dir(&home) {
             if dest.0.exists() {
                 std::fs::remove_dir_all(&dest.0)?;
@@ -102,7 +112,7 @@ pub fn install_skill(opts: &SkillInstallOptions) -> Result<Vec<SkillInstallOutco
         ));
     }
     let targets: Vec<SkillTarget> = match opts.target {
-        SkillTarget::All => vec![SkillTarget::Codex, SkillTarget::Claude],
+        SkillTarget::All => SkillTarget::SINGLE_TARGETS.to_vec(),
         target => vec![target],
     };
     let home = home_dir();
@@ -116,11 +126,27 @@ pub fn install_skill(opts: &SkillInstallOptions) -> Result<Vec<SkillInstallOutco
         };
         let mut removed_stale = Vec::new();
         if !opts.dry_run {
+            // T2-1 (harvest §1): NEVER pre-wipe the user's existing skill dir — stage
+            // the copy into a sibling temp dir and only swap after the copy succeeded
+            // (write_worker_mcp_config tmp+rename 范式). A failed copy leaves the
+            // user's dir byte-identical.
+            let staging = staging_dir_for(&dest.0)?;
+            let _ = std::fs::remove_dir_all(&staging);
+            if let Err(error) = copy_tree(&opts.source, &staging) {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(error);
+            }
             if dest.0.exists() {
                 removed_stale = collect_files(&dest.0)?;
                 std::fs::remove_dir_all(&dest.0)?;
             }
-            copy_tree(&opts.source, &dest.0)?;
+            if let Err(error) = std::fs::rename(&staging, &dest.0) {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(PackagingError::Io(std::io::Error::other(format!(
+                    "swap staged skill dir into {}: {error}",
+                    dest.0.display()
+                ))));
+            }
         }
         out.push(SkillInstallOutcome {
             target,
@@ -258,6 +284,18 @@ fn collect_files_inner(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), Packag
         }
     }
     Ok(())
+}
+
+/// T2-1: a sibling staging path for the atomic skill-dir swap (same parent so the
+/// final rename never crosses filesystems).
+fn staging_dir_for(dest: &Path) -> Result<PathBuf, PackagingError> {
+    let name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("skill");
+    let parent = dest.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&parent)?;
+    Ok(parent.join(format!(".{name}.ta-staging-{}", std::process::id())))
 }
 
 fn copy_tree(source: &Path, dest: &Path) -> Result<(), PackagingError> {

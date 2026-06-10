@@ -278,7 +278,7 @@ pub mod lifecycle_port {
         let mut probe_degraded = false;
         let entry_table = shutdown_table_snapshot(&run_workspace, &mut probe_degraded, "entry");
         let mut protected = shutdown_protection_set(&entry_table);
-        extend_protection_with_leader_panes(&mut protected, transport, &entry_table);
+        extend_protection_with_leader_panes(&mut protected, transport, &state, &entry_table);
         let protected = protected;
         let reap_scope = if team.is_some() {
             ShutdownReapScope::ScopedTeam
@@ -474,17 +474,42 @@ pub mod lifecycle_port {
         }))
     }
 
+    /// T5 (harvest §1 / A2): the bounded stop RETAINS the JoinHandle and reclaims the
+    /// worker thread — on a timely result it joins immediately; on timeout it gives the
+    /// thread one short grace join window instead of dropping it detached (repeated
+    /// shutdowns no longer accumulate leaked threads racing the same workspace).
     fn stop_coordinator_bounded(
         workspace: crate::coordinator::WorkspacePath,
         timeout: std::time::Duration,
     ) -> Option<Result<crate::coordinator::types::StopReport, String>> {
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let result =
                 crate::coordinator::stop_coordinator(&workspace).map_err(|error| error.to_string());
             let _ = tx.send(result);
         });
-        rx.recv_timeout(timeout).ok()
+        let outcome = rx.recv_timeout(timeout).ok();
+        if outcome.is_some() {
+            // The worker already sent its result; the join is immediate.
+            let _ = handle.join();
+            return outcome;
+        }
+        // Timeout: grant a short grace window for the worker to wind down, then join if
+        // it finished; a still-stuck stop is reported as timeout either way (the grace
+        // join keeps the common slightly-late case from leaking a detached thread).
+        match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(late) => {
+                let _ = handle.join();
+                let _ = late; // result arrived after the deadline: still a timeout to the caller
+                None
+            }
+            Err(_) => {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                }
+                None
+            }
+        }
     }
 
     struct ShutdownDeadline {
@@ -707,7 +732,7 @@ pub mod lifecycle_port {
         for _ in 0..5 {
             let round_table = shutdown_table_snapshot(workspace, probe_degraded, "residual_round");
             let mut protected = shutdown_protection_set(&round_table);
-            extend_protection_with_leader_panes(&mut protected, transport, &round_table);
+            extend_protection_with_leader_panes(&mut protected, transport, state, &round_table);
             let residuals = matched_processes(
                 workspace, state, root_pids, root_pgids, &protected, scope, &round_table,
             );
@@ -817,6 +842,71 @@ pub mod lifecycle_port {
         }
     }
 
+    /// E4 真机 grounded(任何 team 的 shutdown 都不杀任何 team 的 leader 锚 pane):
+    /// 扫 state.json 收集所有 leader-anchor pane_id(top-level team_owner /
+    /// leader_receiver + teams[<key>].* 嵌套形态)。返非空 BTreeSet 给
+    /// `extend_protection_with_leader_panes` 第二来源用。
+    ///
+    /// 覆盖场景:
+    /// - LeaderStartMode::ExecProvider:state.json team_owner.pane_id 指用户原 tmux
+    ///   pane(非 leader 前缀)→ shutdown 不杀(E4 真机复发修法)
+    /// - E4b team-in-team:子 team state 的 team_owner.pane_id 指父 team worker pane;
+    ///   父 team state 的 teams.<child>.team_owner.pane_id 同义(若有该字段)
+    ///   → 任一 team 的 shutdown 都不杀任何 team 的 leader 锚 pane
+    pub fn collect_state_leader_anchor_pane_ids(state: &Value) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        push_anchor_pane_id(state, &mut out);
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            for (_, team_state) in teams {
+                push_anchor_pane_id(team_state, &mut out);
+            }
+        }
+        out
+    }
+
+    /// 单帧扫 team_owner.pane_id + leader_receiver.pane_id → BTreeSet 累加。
+    fn push_anchor_pane_id(state: &Value, out: &mut std::collections::BTreeSet<String>) {
+        for key in &["team_owner", "leader_receiver"] {
+            if let Some(pane_id) = state
+                .get(*key)
+                .and_then(|v| v.get("pane_id"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                out.insert(pane_id.to_string());
+            }
+        }
+    }
+
+    /// E4 真机 grounded(cross-socket):收 state.json 中所有记录的 tmux_socket
+    /// endpoint(top-level + teams[<key>] 嵌套形态;team_owner / leader_receiver
+    /// 任一字段)。owner_bind 在 claim 时把 leader pane 所在 socket 记进
+    /// leader_receiver.tmux_socket(evidence:/测试rust版本/4 state.json),用作
+    /// 跨 socket 查 leader pane → pane_pid 的真相源。
+    fn collect_state_recorded_tmux_sockets(state: &Value) -> std::collections::BTreeSet<String> {
+        let mut out = std::collections::BTreeSet::new();
+        push_recorded_tmux_socket(state, &mut out);
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            for (_, team_state) in teams {
+                push_recorded_tmux_socket(team_state, &mut out);
+            }
+        }
+        out
+    }
+
+    fn push_recorded_tmux_socket(state: &Value, out: &mut std::collections::BTreeSet<String>) {
+        for key in &["team_owner", "leader_receiver"] {
+            if let Some(socket) = state
+                .get(*key)
+                .and_then(|v| v.get("tmux_socket"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                out.insert(socket.to_string());
+            }
+        }
+    }
+
     /// PERF-6 C-①-1/C-②-4 (N39): the protected set derives from the CALLER's snapshot —
     /// the same table the kill/wait sets derive from.
     fn shutdown_protection_set(table: &[ProcessInfo]) -> ShutdownProtection {
@@ -844,26 +934,72 @@ pub mod lifecycle_port {
         protected
     }
 
-    /// B5/F2: the leader terminal's pane process tree joins the protected set (same
-    /// set, same mechanism as the invoker ancestry) so the workspace residual sweep's
-    /// cmdline/cwd matching cannot reap the leader — including when ANOTHER team's bare
-    /// shutdown runs, where the leader is never in the invoker's ancestry.
-    fn extend_protection_with_leader_panes(
+    /// B5/F2 + E4 真机 grounded(任何 team 的 shutdown 都不杀任何 team 的 leader 锚 pane):
+    /// the leader terminal's pane process tree joins the protected set (same set, same
+    /// mechanism as the invoker ancestry) so the workspace residual sweep's cmdline/cwd
+    /// matching cannot reap the leader — including when ANOTHER team's bare shutdown
+    /// runs, where the leader is never in the invoker's ancestry.
+    ///
+    /// Two leader-pane sources(N39 双来源,真机 grounded):
+    /// 1. **Session prefix**: tmux session starts with `team-agent-leader-`(契约 grounded;
+    ///    覆盖 LeaderStartMode::NewTmuxSession / AttachExisting).
+    /// 2. **State.json anchors**(E4 修法):state.team_owner.pane_id / state.leader_receiver.pane_id
+    ///    在 top-level **和** teams[<key>].* 都扫(N39 任何 team 的 leader 锚 pane);
+    ///    覆盖 LeaderStartMode::ExecProvider(用户 in_tmux 直接 exec,session 名是用户原
+    ///    `main`/`0`/whatever,不带 leader 前缀 — 此前 B5 三犯保护集漏覆盖)+ E4b
+    ///    team-in-team(子 team 的 leader 锚 = 父 team worker pane,window 名是 agent id
+    ///    也不带 leader 前缀)。
+    pub(crate) fn extend_protection_with_leader_panes(
         protected: &mut ShutdownProtection,
         transport: &dyn crate::transport::Transport,
+        state: &Value,
         table: &[ProcessInfo],
     ) {
-        let leader_pane_pids: Vec<u32> = transport
-            .list_targets()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|pane| {
-                pane.session
-                    .as_str()
-                    .starts_with(crate::leader::LEADER_SESSION_PREFIX)
-            })
-            .filter_map(|pane| pane.pane_pid)
-            .collect();
+        let mut leader_pane_pids: Vec<u32> = Vec::new();
+        let pane_targets = transport.list_targets().unwrap_or_default();
+        // Source 1: session 前缀过滤(原 B5 实现)— per-workspace socket。
+        leader_pane_pids.extend(
+            pane_targets
+                .iter()
+                .filter(|pane| {
+                    pane.session
+                        .as_str()
+                        .starts_with(crate::leader::LEADER_SESSION_PREFIX)
+                })
+                .filter_map(|pane| pane.pane_pid),
+        );
+        // Source 2: state.json team_owner / leader_receiver 真锚 pane_id(top-level +
+        // teams[*]),per-workspace socket 命中。
+        let anchor_pane_ids: std::collections::BTreeSet<String> =
+            collect_state_leader_anchor_pane_ids(state);
+        leader_pane_pids.extend(
+            pane_targets
+                .iter()
+                .filter(|pane| anchor_pane_ids.contains(pane.pane_id.as_str()))
+                .filter_map(|pane| pane.pane_pid),
+        );
+        // Source 3 (E4 真机 grounded · cross-socket):leader 锚 pane 可能在【别的
+        // tmux socket】上 — LeaderStartMode::ExecProvider 真实场景里用户 in_tmux
+        // 起 `team-agent claude`,leader pane 留在用户【默认 socket】,而 shutdown
+        // 的 transport 走 per-workspace `ta-<hash>` socket,list_targets 看不见。
+        // 从 state.json 读 leader_receiver/team_owner.tmux_socket(claim 时
+        // owner_bind 记录,见 evidence /测试rust版本/4 state.json),查那个 socket
+        // 的 list_targets 找 anchor pane_id → pane_pid → 进入 process_tree 保护。
+        // 不在 state 中的 socket 不查(MUST-17 不撒宽 / 不主动枚举全机器 sockets)。
+        for socket_endpoint in collect_state_recorded_tmux_sockets(state) {
+            let cross_backend =
+                crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket_endpoint);
+            let cross_panes = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::list_targets(&cross_backend)
+                .unwrap_or_default();
+            leader_pane_pids.extend(
+                cross_panes
+                    .iter()
+                    .filter(|pane| anchor_pane_ids.contains(pane.pane_id.as_str()))
+                    .filter_map(|pane| pane.pane_pid),
+            );
+        }
+        leader_pane_pids.sort_unstable();
+        leader_pane_pids.dedup();
         if leader_pane_pids.is_empty() {
             return;
         }
@@ -1352,7 +1488,41 @@ pub mod lifecycle_port {
     }
 
     fn error_value(error: crate::lifecycle::LifecycleError) -> Value {
-        json!({"ok": false, "error": error.to_string()})
+        let message = error.to_string();
+        let mut payload = json!({"ok": false, "error": message});
+        if let Some(next_action) = error_next_action(&message) {
+            payload["next_action"] = json!(next_action);
+        }
+        payload
+    }
+
+    /// E8 (N38): 把"错路常犯"的运行时错误指到正确出路(纯文案,无语义变更)。
+    /// 匹配 [`LifecycleError`] 的人读消息子串(`agent {id} not found` /
+    /// `agent id already exists` / `unknown worker agent id`),给出下一步命令。
+    fn error_next_action(message: &str) -> Option<&'static str> {
+        // start-agent 撞"agent ... not found":start-agent 语义=启动 state 已有 agent;
+        // 想新增角色应走 add-agent。
+        if message.contains("not found") && message.contains("agent") {
+            return Some(
+                "start-agent only starts an agent that already exists in state. \
+                 To add a NEW role at runtime use: team-agent add-agent <id> --role-file <path>",
+            );
+        }
+        // add-agent / fork 撞"agent id already exists":id 已占用。
+        if message.contains("agent id already exists") {
+            return Some(
+                "that agent id is already in the team. \
+                 Use a different id, or start the existing one with: team-agent start-agent <id>",
+            );
+        }
+        // stop/reset/fork 源撞"unknown worker agent id":拼写/团队选择错。
+        if message.contains("unknown worker agent id") {
+            return Some(
+                "no such worker agent in this team. \
+                 Run `team-agent status` to list agent ids (check --team if multiple teams)",
+            );
+        }
+        None
     }
 
     fn record_idle_acknowledged(
@@ -1796,6 +1966,53 @@ pub mod lifecycle_port {
                     .any(|agent| agent.get("status").and_then(Value::as_str) == Some("running"))
             })
     }
+
+    #[cfg(test)]
+    mod e8_error_guidance_tests {
+        use super::{error_next_action, error_value};
+
+        #[test]
+        fn start_agent_not_found_points_to_add_agent() {
+            // LifecycleError::RequirementUnmet("agent {id} not found") 经 to_string():
+            // "agent start requirement unmet: agent foo not found".
+            let msg = "agent start requirement unmet: agent foo not found";
+            let na = error_next_action(msg).expect("not-found must carry next_action");
+            assert!(na.contains("add-agent"), "must steer to add-agent: {na}");
+            assert!(na.contains("--role-file"), "must show the role-file flag: {na}");
+        }
+
+        #[test]
+        fn add_agent_already_exists_explains_way_out() {
+            let msg = "agent start requirement unmet: agent id already exists: foo";
+            let na = error_next_action(msg).expect("already-exists must carry next_action");
+            assert!(na.contains("start-agent"), "must mention start-agent: {na}");
+        }
+
+        #[test]
+        fn unknown_worker_points_to_status() {
+            let msg = "agent start requirement unmet: unknown worker agent id: ghost";
+            let na = error_next_action(msg).expect("unknown worker must carry next_action");
+            assert!(na.contains("status"), "must steer to status: {na}");
+        }
+
+        #[test]
+        fn unrelated_error_has_no_next_action() {
+            assert_eq!(error_next_action("state persistence failed: disk full"), None);
+        }
+
+        #[test]
+        fn error_value_attaches_next_action_field() {
+            let err = crate::lifecycle::LifecycleError::RequirementUnmet(
+                "agent foo not found".to_string(),
+            );
+            let v = error_value(err);
+            assert_eq!(v["ok"], serde_json::json!(false));
+            assert!(
+                v["next_action"].as_str().unwrap_or("").contains("add-agent"),
+                "error_value must attach the add-agent guidance: {v}"
+            );
+        }
+    }
 }
 
 /// PLACEHOLDER → diagnose lane(`diagnose/health.py` `doctor`、`diagnose/comms.py`
@@ -1812,14 +2029,45 @@ pub mod diagnose_port {
         let workspace_valid = workspace.is_dir();
         let team_context = workspace_valid && has_doctor_team_context(workspace, spec);
         let workspace_has_entries = workspace_valid && workspace_has_any_entry(workspace);
-        let profile_smoke = doctor_team_dir(workspace, spec)
-            .map(|team| crate::cli::diagnose::build_profile_smoke_check_for_team(&team))
-            .transpose()?;
-        let profile_smoke_ok = profile_smoke
+        // SMOKE-1 (locate.md §"Minimal Fix"):default doctor 不再隐式编译
+        // `<workspace>/.team/current`(legacy 残留)作 profile_smoke 目标。
+        // profile_smoke 是 team-scoped 体检,只在以下两种情形跑:
+        //   ① 用户显式给了 spec / team dir;
+        //   ② workspace 根本身就是 team dir(含 TEAM.md / team.spec.yaml)。
+        // legacy `<workspace>/.team/current` 仅作降级诊断面(legacy_team_invalid),
+        // 不再绑架整个 doctor 假死在 profile_smoke_failed 上。
+        let explicit_team_target = explicit_doctor_team_dir(workspace, spec);
+        let profile_smoke = explicit_team_target
             .as_ref()
-            .and_then(|check| check.get("ok").and_then(Value::as_bool))
+            .map(|team| crate::cli::diagnose::build_profile_smoke_check_for_team(team))
+            .transpose()?;
+        let legacy_check = if explicit_team_target.is_none() {
+            legacy_current_team_check(workspace)?
+        } else {
+            None
+        };
+        let profile_smoke_value = profile_smoke.unwrap_or_else(|| {
+            legacy_check.clone().unwrap_or_else(|| {
+                json!({
+                    "name": "profile_smoke",
+                    "ok": true,
+                    "status": "not_required",
+                    "checks": [],
+                    "secret_values_printed": false,
+                })
+            })
+        });
+        let profile_smoke_ok = profile_smoke_value
+            .get("ok")
+            .and_then(Value::as_bool)
             .unwrap_or(true);
-        let ok = workspace_valid && (team_context || workspace_has_entries) && profile_smoke_ok;
+        // legacy 降级面(legacy_team_invalid)不下拉整体 ok —— 用户没显式让我们
+        // 体检这个 team,失败是降级诊断信息,不是 install 自检失败。
+        let legacy_only_failure =
+            !profile_smoke_ok && profile_smoke_value.get("status").and_then(Value::as_str)
+                == Some("legacy_team_invalid");
+        let effective_smoke_ok = profile_smoke_ok || legacy_only_failure;
+        let ok = workspace_valid && (team_context || workspace_has_entries) && effective_smoke_ok;
         let health = crate::coordinator::coordinator_health(
             &crate::coordinator::WorkspacePath::new(workspace.to_path_buf()),
         );
@@ -1836,18 +2084,12 @@ pub mod diagnose_port {
                 "local_module": true,
             },
             "secret_scan": secret_scan(workspace),
-            "profile_smoke": profile_smoke.unwrap_or_else(|| json!({
-                "name": "profile_smoke",
-                "ok": true,
-                "status": "not_required",
-                "checks": [],
-                "secret_values_printed": false,
-            })),
+            "profile_smoke": profile_smoke_value,
             "coordinator": coordinator_health_value(health),
             "ok": ok,
             "error": if ok {
                 Value::Null
-            } else if !profile_smoke_ok {
+            } else if !profile_smoke_ok && !legacy_only_failure {
                 json!("profile_smoke_failed")
             } else if workspace_valid {
                 json!("workspace has no Team Agent spec or runtime context")
@@ -1855,6 +2097,63 @@ pub mod diagnose_port {
                 json!("invalid workspace")
             },
         }))
+    }
+
+    /// SMOKE-1: 仅当用户显式提供 spec/team dir,或 workspace 根本身是 team dir
+    /// (含 TEAM.md / team.spec.yaml)时返 team_dir。legacy `<workspace>/.team/
+    /// current` 不算 explicit target(走 legacy_current_team_check 降级面)。
+    fn explicit_doctor_team_dir(workspace: &Path, spec: Option<&Path>) -> Option<PathBuf> {
+        if let Some(spec) = spec {
+            let candidate = if spec.is_absolute() {
+                spec.to_path_buf()
+            } else {
+                workspace.join(spec)
+            };
+            if candidate.is_file() {
+                return candidate.parent().map(Path::to_path_buf);
+            }
+            if candidate.join("team.spec.yaml").is_file() || candidate.join("TEAM.md").is_file() {
+                return Some(candidate);
+            }
+        }
+        if workspace.join("team.spec.yaml").is_file() || workspace.join("TEAM.md").is_file() {
+            return Some(workspace.to_path_buf());
+        }
+        None
+    }
+
+    /// SMOKE-1: legacy `<workspace>/.team/current` 残留体检 — 降级诊断,**不**
+    /// 当 install self-check 失败。如果 legacy 团有 spec/TEAM.md,尝试 compile,
+    /// 失败返 `status=legacy_team_invalid` + team_dir + reason + next_action(N38
+    /// 失败可解释性);compile 成功就不打扰用户(返 None,profile_smoke 走
+    /// `not_required`)。无 legacy 团目录 → None。
+    fn legacy_current_team_check(workspace: &Path) -> Result<Option<Value>, CliError> {
+        let team = workspace.join(".team").join("current");
+        let has_spec = team.join("team.spec.yaml").is_file();
+        let has_team_md = team.join("TEAM.md").is_file();
+        if !has_spec && !has_team_md {
+            return Ok(None);
+        }
+        match crate::compiler::compile_team(&team) {
+            Ok(_) => Ok(None),
+            Err(error) => {
+                let team_dir = team.to_string_lossy().to_string();
+                Ok(Some(json!({
+                    "name": "profile_smoke",
+                    "ok": false,
+                    "status": "legacy_team_invalid",
+                    "team_dir": team_dir,
+                    "reason": error.to_string(),
+                    "next_action": format!(
+                        "scope doctor to a real team: `team-agent doctor <team-dir>`, \
+                         or repair/remove the legacy `{}` directory",
+                        team.display()
+                    ),
+                    "checks": [],
+                    "secret_values_printed": false,
+                })))
+            }
+        }
     }
 
     fn doctor_team_dir(workspace: &Path, spec: Option<&Path>) -> Option<PathBuf> {

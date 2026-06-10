@@ -18,6 +18,45 @@ pub(super) fn quick_start_team_dir(role_doc: &str) -> PathBuf {
     team
 }
 
+/// E5 spec 迁移:spec 不再落 team_dir,而在 <team_workspace>/.team/runtime/<team_key>/。
+/// team_key = team_dir.name(quick_start_team_dir → "teamdir");workspace = team_workspace(team)。
+pub(super) fn quick_start_runtime_spec_path(team: &std::path::Path) -> PathBuf {
+    let workspace = crate::model::paths::team_workspace(team).unwrap();
+    let team_key = team.file_name().unwrap().to_string_lossy().to_string();
+    crate::model::paths::runtime_spec_path(&workspace, &team_key)
+}
+
+/// 在 team 自身或其 team_workspace 父下找 .team/runtime/*/team.spec.yaml。run_workspace 解析
+/// 可能是 team 或父、team_key 可能因 state 缺省而非 team 名,故扫整个 runtime 目录任一子目录。
+/// `team_key` 给定时优先精确命中,否则取扫到的第一个。
+pub(super) fn find_runtime_spec(team: &std::path::Path, team_key: &str) -> Option<PathBuf> {
+    let mut workspaces = vec![team.to_path_buf()];
+    if let Ok(ws) = crate::model::paths::team_workspace(team) {
+        workspaces.push(ws);
+    }
+    // 精确命中优先。
+    for ws in &workspaces {
+        let exact = crate::model::paths::runtime_spec_path(ws, team_key);
+        if exact.exists() {
+            return Some(exact);
+        }
+    }
+    // 回退:扫 .team/runtime/*/team.spec.yaml。
+    for ws in &workspaces {
+        let runtime = crate::model::paths::runtime_dir(ws);
+        let Ok(entries) = std::fs::read_dir(&runtime) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let spec = entry.path().join("team.spec.yaml");
+            if spec.exists() {
+                return Some(spec);
+            }
+        }
+    }
+    None
+}
+
 /// A no-owner running workspace: state.json carries session_name + agents but NO team_owner →
 /// check_team_owner returns None = allowed (owner_gate.rs:48), so the owner-gated entry points can
 /// proceed PAST the owner gate. Also inits the real team.db.
@@ -46,11 +85,16 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
     let result = quick_start_with_transport(&team, None, true, true, None, &transport);
 
     // OBSERVABLE 1 (real compiler ran; spawn-independent): the compiled spec is written.
-    let spec_path = team.join("team.spec.yaml");
+    // E5: spec lands in .team/runtime/<team_key>/ (NOT the user team dir).
+    let spec_path = quick_start_runtime_spec_path(&team);
     assert!(
         spec_path.exists(),
-        "quick_start must compile the team dir and write team.spec.yaml (the real compiler runs \
-         before launch); the stub returns before compiling. result={result:?}"
+        "quick_start must compile the team dir and write team.spec.yaml under .team/runtime/<team_key>/ \
+         (the real compiler runs before launch); the stub returns before compiling. result={result:?}"
+    );
+    assert!(
+        !team.join("team.spec.yaml").exists(),
+        "E5: spec must NOT be written into the user team dir"
     );
     let spec_text = std::fs::read_to_string(&spec_path).unwrap_or_default();
     assert!(
@@ -94,9 +138,11 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         )
         .expect("status/collect selector should resolve project root");
         assert_eq!(selected.run_workspace, workspace, "input={}", input.display());
+        // E5: selector resolves spec_path to .team/runtime/<team_key>/ (team_key="current").
+        let expected_spec = crate::model::paths::runtime_spec_path(&workspace, "current");
         assert_eq!(
             selected.spec_path.as_deref().map(std::fs::canonicalize).transpose().unwrap(),
-            Some(std::fs::canonicalize(team.join("team.spec.yaml")).unwrap()),
+            Some(std::fs::canonicalize(&expected_spec).unwrap()),
             "input={}",
             input.display()
         );
@@ -433,6 +479,164 @@ fn spine_add_agent_rejects_duplicate_agent_id() {
     );
 }
 
+// E5 Bug1 — add-agent must NOT copy the external role file into <team_dir>/agents (the
+// self-copy O_TRUNC truncation reproduced on real machine), and must still inject the new
+// agent into the compiled spec by reading the role file in place.
+#[test]
+fn e5_add_agent_does_not_copy_role_into_platform_dir_and_injects_into_spec() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    // External role file OUTSIDE team_dir/agents, with recognizable body content.
+    let role = team.parent().unwrap().join("w2-external-role.md");
+    let role_body = "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
+    std::fs::write(&role, role_body).unwrap();
+    let transport = OfflineTransport::new();
+    // The spawn may not complete under OfflineTransport; we only assert the no-copy + spec-inject
+    // observables, which happen BEFORE spawn. Ignore the spawn-stage Result.
+    let _ = add_agent_with_transport(&team, &AgentId::new("w2"), &role, false, None, &transport);
+
+    // (1) No copy landed in the platform agents dir.
+    let copied = team.join("agents").join("w2.md");
+    assert!(
+        !copied.exists(),
+        "add-agent must NOT copy the role file into <team_dir>/agents (anti-pattern + O_TRUNC bug)"
+    );
+    // (2) The external role file is untouched (not truncated by a self-copy).
+    assert_eq!(
+        std::fs::read_to_string(&role).unwrap(),
+        role_body,
+        "external role file must be left intact (no truncating self-copy)"
+    );
+    // (3) The compiled spec (under .team/runtime/<team_key>/, NOT the user team dir) carries w2.
+    let runtime_spec = find_runtime_spec(&team, "teamdir").expect("runtime spec written");
+    let spec_text = std::fs::read_to_string(&runtime_spec).unwrap();
+    assert!(
+        spec_text.contains("w2"),
+        "compiled spec must inject the new agent w2 (read in place, not copied); spec=\n{spec_text}"
+    );
+    assert!(
+        !team.join("team.spec.yaml").exists(),
+        "E5: add_agent must NOT write spec into the user team dir"
+    );
+}
+
+// E5 task#3 / E4 — restart rebuilds the runtime spec from role docs EVERY time: editing a role
+// doc (here: rename a role) is reflected in the freshly-written runtime spec after restart.
+#[test]
+fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
+    let ws = restart_ws_two_resumable_workers(); // has TEAM.md + agents/{alpha,bravo}.md + state
+    // Edit a role doc AFTER initial compile: change alpha's role text.
+    std::fs::write(
+        ws.join("agents").join("alpha.md"),
+        "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
+    )
+    .unwrap();
+    let transport = OfflineTransport::new();
+    let _ = restart_with_transport(&ws, false, None, &transport);
+    // The runtime spec (rebuilt from role docs) must carry the edited role text.
+    let runtime_spec = find_runtime_spec(&ws, "restartteam").expect("runtime spec rebuilt");
+    let spec_text = std::fs::read_to_string(&runtime_spec).unwrap();
+    assert!(
+        spec_text.contains("RENAMED Alpha Role"),
+        "restart must rebuild runtime spec from role docs (E4: TEAM.md/role edits take effect); spec=\n{spec_text}"
+    );
+    assert!(
+        !ws.join("team.spec.yaml").exists(),
+        "E5: rebuilt spec must land in .team/runtime, not the user team dir"
+    );
+}
+
+// E5 task#3 / RC-A6b — restart with role definitions MISSING explicitly refuses (lists what's
+// missing) and leaves the previous runtime spec in place (no silent path, no data destruction).
+#[test]
+fn e5_restart_missing_role_docs_refuses_and_preserves_old_spec() {
+    let ws = restart_ws_two_resumable_workers();
+    // Pre-seed a previous runtime spec so we can assert it survives the refusal.
+    let prev_spec = crate::model::paths::runtime_spec_path(&ws, "restartteam");
+    std::fs::create_dir_all(prev_spec.parent().unwrap()).unwrap();
+    std::fs::write(&prev_spec, "PREVIOUS-RUNTIME-SPEC-MARKER\n").unwrap();
+    // Remove the role definitions (TEAM.md) → role source gone.
+    std::fs::remove_file(ws.join("TEAM.md")).unwrap();
+    let transport = OfflineTransport::new();
+    let result = restart_with_transport(&ws, false, None, &transport);
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("role definitions missing") || text.to_lowercase().contains("missing"),
+        "restart with missing role docs must explicitly refuse listing what's missing; got {text}"
+    );
+    // Old runtime spec preserved untouched (T2: no data destruction on refusal).
+    assert_eq!(
+        std::fs::read_to_string(&prev_spec).unwrap(),
+        "PREVIOUS-RUNTIME-SPEC-MARKER\n",
+        "previous runtime spec must be left in place on refusal"
+    );
+}
+
+// E5 §3 解耦(tester 场景2)— add-agent on a team whose runtime spec already exists must still
+// resolve team_dir to the USER role dir for compile_team (find TEAM.md/agents), not the runtime
+// spec dir. Regression: SelectedTeam.spec_workspace=runtime was used as team_dir → compile_team
+// looked for TEAM.md under .team/runtime/<key>/ → "missing TEAM.md".
+#[test]
+fn e5_add_agent_resolves_team_dir_to_role_dir_when_runtime_spec_exists() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    // Pre-create the runtime spec so the selector's runtime-first branch is taken (migrated team).
+    let runtime_spec = quick_start_runtime_spec_path(&team);
+    std::fs::create_dir_all(runtime_spec.parent().unwrap()).unwrap();
+    let base = crate::compiler::compile_team(&team).unwrap();
+    std::fs::write(&runtime_spec, crate::model::yaml::dumps(&base)).unwrap();
+    // External role file (relative-ish, outside agents/).
+    let role = team.join("w2-role.md");
+    std::fs::write(
+        &role,
+        "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nw2.\n",
+    )
+    .unwrap();
+    let transport = OfflineTransport::new();
+    let result = add_agent_with_transport(&team, &AgentId::new("w2"), &role, false, None, &transport);
+    // Core decoupling signature: must NOT fail because compile_team looked for TEAM.md/agents under
+    // the runtime spec dir. Before the fix, team_dir=spec_workspace(runtime) → "missing TEAM.md".
+    let text = format!("{result:?}");
+    assert!(
+        !text.contains("missing TEAM.md") && !text.to_lowercase().contains("missing agents"),
+        "add-agent must resolve team_dir to the role dir for compile_team (not the runtime spec dir); got {text}"
+    );
+}
+
+// E5 grep guard G1 — writers must land spec via runtime_spec_path (.team/runtime/<team_key>/),
+// never write team.spec.yaml into the user team_dir/agents_dir. Pins the spec-demote invariant.
+#[test]
+fn e5_guard_g1_writers_use_runtime_spec_path_not_user_dir() {
+    let source = include_str!("../launch.rs");
+    let runtime_writes = source.matches("runtime_spec_path(").count();
+    assert!(
+        runtime_writes >= 2,
+        "G1: quick_start + add_agent must write spec via runtime_spec_path (found {runtime_writes})"
+    );
+    for forbidden in [
+        "let spec_path = agents_dir.join(\"team.spec.yaml\");\n    std::fs::write",
+        "let spec_path = team_dir.join(\"team.spec.yaml\");\n    std::fs::write",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "G1: user-dir spec write idiom must be gone: {forbidden:?}"
+        );
+    }
+}
+
+// E5 grep guard G2 — launch.rs must NOT copy a role file into the platform team dir.
+// Pins the Bug1 fix: no `fs::copy` of a role file + no `materialize_added_role_file` reborn.
+#[test]
+fn e5_guard_g2_no_copy_role_into_platform_dir() {
+    let source = include_str!("../launch.rs");
+    assert!(
+        !source.contains("materialize_added_role_file"),
+        "G2: materialize_added_role_file (role copy anti-pattern) must stay deleted"
+    );
+    assert!(
+        !source.contains("copy role file"),
+        "G2: no 'copy role file' into the platform agents dir (O_TRUNC self-copy bug)"
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // SPAWN sub-phase RED — launch(dry_run=false) must REALLY spawn (unlocks the acceptance
 // framework's cheap real-machine Tier-1). Golden launch/core.py: create the session + one worker
@@ -754,8 +958,17 @@ fn add_agent_with_transport_spawns_new_worker_not_stub() {
 
     let _result = add_agent_with_transport(&team, &AgentId::new("worker2"), &role_file, false, None, &transport);
 
-    // (a) the recompiled spec was written (real subsystem step — works today).
-    assert!(team.join("team.spec.yaml").exists(), "add_agent must recompile + write team.spec.yaml under the team dir");
+    // (a) the recompiled spec was written (real subsystem step). E5: under .team/runtime/<team_key>/,
+    // NOT the user team dir.
+    let runtime_spec = find_runtime_spec(&team, "addteam");
+    assert!(
+        runtime_spec.is_some(),
+        "add_agent must recompile + write team.spec.yaml under .team/runtime/<team_key>/"
+    );
+    assert!(
+        !team.join("team.spec.yaml").exists(),
+        "E5: add_agent must NOT write spec into the user team dir"
+    );
     // (b) the new worker window was spawned (RED: stub recompiles then RequirementUnmet -> ZERO spawns).
     let recorded = transport.spawn_records();
     assert!(
@@ -839,7 +1052,8 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
     let workspace = team.parent().expect("team_workspace(<base>/teamdir) = <base>");
-    let spec_path = team.join("team.spec.yaml");
+    // E5: spec_path in state now points to .team/runtime/<team_key>/, team_dir stays the user role dir.
+    let spec_path = quick_start_runtime_spec_path(&team);
     let (raw, state) = raw_runtime_state(workspace);
     let keys = state.as_object().expect("state root object").keys().cloned().collect::<Vec<_>>();
     assert_eq!(

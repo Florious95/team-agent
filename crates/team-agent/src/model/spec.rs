@@ -409,9 +409,31 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
     let map_agents: Vec<&Yaml> = agents.iter().filter(|a| a.is_map()).collect();
 
     // duplicate agent id(集合含 None 复刻 Python `{a.get("id") ...}`)。
+    // SMOKE-1 N38 失败可解释性:不仅报"有重复",还点出**哪个 id 重复**(可能多个),
+    // 给 operator 直接定位线索;locate.md §"Smallest likely code touch" item 3。
     let id_set: HashSet<Option<&str>> = map_agents.iter().map(|a| a.get("id").and_then(Yaml::as_str)).collect();
     if id_set.len() != map_agents.len() {
-        e.push("/agents: duplicate agent id".to_string());
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut duplicates: Vec<&str> = Vec::new();
+        for agent in &map_agents {
+            if let Some(id) = agent.get("id").and_then(Yaml::as_str) {
+                if !seen.insert(id) && !duplicates.contains(&id) {
+                    duplicates.push(id);
+                }
+            }
+        }
+        if duplicates.is_empty() {
+            e.push("/agents: duplicate agent id".to_string());
+        } else {
+            e.push(format!(
+                "/agents: duplicate agent id: {}",
+                duplicates
+                    .iter()
+                    .map(|id| format!("`{id}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
     }
     // all_ids:present 的 agent id + leader id(若 truthy)。
     let mut all_ids: HashSet<&str> = map_agents.iter().filter_map(|a| a.get("id").and_then(Yaml::as_str)).collect();

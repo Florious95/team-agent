@@ -711,6 +711,71 @@ provider.copilot.mcp_residual_detected (user-visible, not silent); events tail={
     );
 }
 
+/// Q3 downgrade branch (C-3-3, RC-8 negative): when the `copilot` binary is NOT on
+/// PATH (e.g. CI runners), the residual scan must degrade honestly — it must NOT emit
+/// a false-positive `provider.copilot.mcp_residual_detected`, must add NO
+/// `--disable-mcp-server` flags, and must still land a per-agent `mcp-residual.txt`
+/// recording the `unavailable` outcome. This is the coverage the populated-residual
+/// case alone could not give (0.3.5 ship-gate hermetic follow-up).
+#[test]
+#[serial(env)]
+fn copilot_mcp_residual_scan_unavailable_degrades_honestly_no_false_positive() {
+    // Empty isolated HOME (no ~/.copilot config) and a PATH with NO copilot binary, so
+    // the scan exercises the `Err(_)` / unavailable arm deterministically.
+    let home = tmp_ws("residual-unavail-home");
+    std::fs::create_dir_all(home.join(".copilot")).unwrap();
+    let empty_bin = tmp_ws("no-copilot-bin");
+    let _guard = EnvGuard::set(&[
+        (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
+        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+        ("PATH", Box::leak(empty_bin.to_string_lossy().to_string().into_boxed_str())),
+    ]);
+    let ws = tmp_ws("residual-unavail");
+    let team_dir = write_copilot_team(&ws, "cp-residual-unavail", &["mcp_team"], false);
+    seed_healthy_coordinator(&ws);
+    let transport = RecordingTransport::new();
+
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpresidunavail"), &transport)
+        .expect("quick-start should spawn the copilot worker even without copilot on PATH");
+    let spawn = transport.single_spawn();
+
+    let mut failures = Vec::new();
+    if spawn.argv.iter().any(|arg| arg == "--disable-mcp-server") {
+        failures.push(format!(
+            "C-3-3 downgrade: an unavailable copilot scan must add NO --disable-mcp-server \
+flags (nothing was actually observed); argv={:?}",
+            spawn.argv
+        ));
+    }
+    let events = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap_or_default();
+    if events.contains("mcp_residual_detected") {
+        failures.push(
+            "RC-8 negative: an unavailable scan must NOT emit a false-positive \
+provider.copilot.mcp_residual_detected (only a real non-empty residual emits)".to_string(),
+        );
+    }
+    let residual_file = ws.join(".team/logs/copilot/worker_a/mcp-residual.txt");
+    match std::fs::read_to_string(&residual_file) {
+        Err(_) => failures.push(format!(
+            "C-3-3: the residual record must still be written at {} even when copilot is \
+unavailable (honest 'I could not check')",
+            residual_file.display()
+        )),
+        Ok(text) => {
+            if !text.contains("unavailable") {
+                failures.push(format!(
+                    "C-3-3: the residual record must state the unavailable outcome; got {text:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "copilot MCP residual downgrade contract failed:\n{}",
+        failures.join("\n")
+    );
+}
+
 /// Q3 (C-3-4, RC-9): the `--additional-mcp-config` JSON the adapter writes must use
 /// copilot's expected field name. Copilot's `mcp add` schema field is `transport`
 /// (stdio|http|sse), NOT the `type` field used by claude/codex configs — the contract

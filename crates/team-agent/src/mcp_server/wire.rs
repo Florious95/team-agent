@@ -411,7 +411,17 @@ pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: 
         McpTool::ReportResult => tools.report_result(
             args.get("envelope"),
             args.get("summary").and_then(Value::as_str),
-            normalize_result_status(args.get("status").and_then(Value::as_str)),
+            // cr verdict (T3-1 refined): an unknown status literal normalizes to
+            // Partial and is OBSERVABLE at this ingestion boundary, never silent.
+            {
+                let (status, unknown) = crate::mcp_server::normalize::normalize_result_status_observed(
+                    args.get("status").and_then(Value::as_str),
+                );
+                if let Some(raw) = unknown {
+                    tools.note_unknown_result_status(&raw);
+                }
+                status
+            },
             args.get("changes").and_then(Value::as_array).map(Vec::as_slice),
             args.get("tests").and_then(Value::as_array).map(Vec::as_slice),
             args.get("risks").and_then(Value::as_array).map(Vec::as_slice),

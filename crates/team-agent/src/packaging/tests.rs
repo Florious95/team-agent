@@ -58,6 +58,44 @@ fn dest_dir_claude_resolves_to_dot_claude() {
 }
 
 #[test]
+fn skill_target_copilot_maps_to_provider_copilot() {
+    // E9: copilot → Provider::Copilot (0.3.x 新增 provider,不归到 codex/claude).
+    assert_eq!(SkillTarget::Copilot.provider(), Some(Provider::Copilot));
+}
+
+#[test]
+fn dest_dir_copilot_resolves_to_dot_copilot() {
+    // E9 实证 (.team/artifacts/copilot-probe/):copilot skill 源 = ~/.copilot/skills,
+    // configDir 默认 ~/.copilot → ~/.copilot/skills/team-agent.
+    let home = Path::new("/home/testuser");
+    let got = SkillTarget::Copilot.dest_dir(home);
+    assert_eq!(
+        got,
+        Some(SkillDestDir(PathBuf::from(
+            "/home/testuser/.copilot/skills/team-agent"
+        )))
+    );
+}
+
+#[test]
+fn dest_dir_three_providers_distinct_locations() {
+    // E9: 三 provider 各自独立位置 (.codex / .claude / .copilot),互不踩.
+    let home = Path::new("/home/testuser");
+    let dirs: Vec<PathBuf> = SkillTarget::SINGLE_TARGETS
+        .iter()
+        .map(|t| t.dest_dir(home).expect("single target has dest").0)
+        .collect();
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/home/testuser/.codex/skills/team-agent"),
+            PathBuf::from("/home/testuser/.claude/skills/team-agent"),
+            PathBuf::from("/home/testuser/.copilot/skills/team-agent"),
+        ]
+    );
+}
+
+#[test]
 fn dest_dir_all_is_none_not_single_dir() {
     // `All` 应 fan-out 到两者 → 非单 dir → None (skeleton:116).
     let home = Path::new("/home/testuser");
@@ -520,14 +558,15 @@ fn install_skill_dry_run_single_target_reports_plan_no_side_effects() {
 }
 
 #[test]
-fn install_skill_dry_run_target_all_fans_out_to_two() {
-    // commands.py:458-463 — target all → 两个 outcome (codex + claude),顺序固定.
+fn install_skill_dry_run_target_all_fans_out_to_all_providers() {
+    // E9: target all → 表驱动 fan-out 全 provider (codex + claude + copilot),顺序固定.
     let opts = skill_opts(SkillTarget::All, None, true);
     let outcomes = install_skill(&opts).expect("dry-run install-skill all");
-    assert_eq!(outcomes.len(), 2, "all → fan-out codex+claude");
-    // KEY ORDER:commands.py:460-461 codex first, claude second.
+    assert_eq!(outcomes.len(), 3, "all → fan-out codex+claude+copilot");
+    // KEY ORDER:SINGLE_TARGETS 顺序 codex, claude, copilot.
     assert_eq!(outcomes[0].target, SkillTarget::Codex);
     assert_eq!(outcomes[1].target, SkillTarget::Claude);
+    assert_eq!(outcomes[2].target, SkillTarget::Copilot);
     assert!(outcomes.iter().all(|o| o.dry_run));
 }
 
@@ -791,6 +830,43 @@ impl Drop for HomeGuard {
     }
 }
 
+// E9 — install-skill --target all (real copy) must land team-agent SKILL.md in ALL THREE
+// provider locations (~/.codex|.claude|.copilot/skills/team-agent) and the copied bytes must
+// equal the source. This is the "三 provider 位置断言(install 后文件存在且=源)" gate.
+#[test]
+#[serial_test::serial(env)]
+fn install_skill_all_real_copies_to_three_provider_locations() {
+    let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
+    let base = std::env::temp_dir().join(format!("ta-e9-skill-all-{}", std::process::id()));
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // Build a real skill source tree with a recognizable SKILL.md.
+    let source = base.join("src-skill");
+    std::fs::create_dir_all(&source).unwrap();
+    let body = b"---\nname: team-agent\n---\nE9 source marker\n";
+    std::fs::write(source.join("SKILL.md"), body).unwrap();
+    let _h = HomeGuard::set(&home);
+
+    let opts = SkillInstallOptions {
+        target: SkillTarget::All,
+        dest: None,
+        dry_run: false,
+        source: source.clone(),
+    };
+    let outcomes = install_skill(&opts).expect("real install-skill all");
+    assert_eq!(outcomes.len(), 3, "all → codex+claude+copilot");
+
+    for sub in [".codex", ".claude", ".copilot"] {
+        let dest = home.join(sub).join("skills").join("team-agent").join("SKILL.md");
+        assert!(dest.exists(), "{sub}: SKILL.md must exist after install");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            body,
+            "{sub}: installed SKILL.md bytes must equal source"
+        );
+    }
+}
+
 // P1 — update() must perform a REAL atomic replace (rename dest→.previous), not fabricate
 // a Replaced outcome whose backup file never exists (install.mjs:60-66; bug-084).
 #[test]
@@ -819,21 +895,21 @@ fn p2_update_creates_real_atomic_replace_backup() {
     );
 }
 
-// P1 — uninstall() must remove BOTH ~/.codex/skills/team-agent and ~/.claude/skills/team-agent
-// and record them (install.mjs:115-122). Current returns removed_skill_dirs empty and leaves
-// the dirs on disk.
+// P1 — uninstall() must remove ALL provider skill dirs (~/.codex|.claude|.copilot/skills/team-agent)
+// and record them (install.mjs:115-122 + E9 copilot). Table-driven over SkillTarget::SINGLE_TARGETS.
 #[test]
 #[serial_test::serial(env)]
-fn p2_uninstall_removes_both_skill_dirs() {
+fn p2_uninstall_removes_all_provider_skill_dirs() {
     let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
     let base = std::env::temp_dir().join(format!("ta-p2-uninst-{}", std::process::id()));
     let home = base.join("home");
     let codex = home.join(".codex").join("skills").join("team-agent");
     let claude = home.join(".claude").join("skills").join("team-agent");
-    std::fs::create_dir_all(&codex).unwrap();
-    std::fs::create_dir_all(&claude).unwrap();
-    std::fs::write(codex.join("SKILL.md"), b"x").unwrap();
-    std::fs::write(claude.join("SKILL.md"), b"x").unwrap();
+    let copilot = home.join(".copilot").join("skills").join("team-agent");
+    for d in [&codex, &claude, &copilot] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("SKILL.md"), b"x").unwrap();
+    }
     let _h = HomeGuard::set(&home);
 
     let opts = UninstallOptions {
@@ -844,9 +920,10 @@ fn p2_uninstall_removes_both_skill_dirs() {
     let out = uninstall(&opts).unwrap();
     assert_eq!(
         out.removed_skill_dirs.len(),
-        2,
-        "uninstall must remove BOTH ~/.codex and ~/.claude skill dirs"
+        3,
+        "uninstall must remove ~/.codex, ~/.claude AND ~/.copilot skill dirs"
     );
     assert!(!codex.exists(), "~/.codex skill dir must be removed");
     assert!(!claude.exists(), "~/.claude skill dir must be removed");
+    assert!(!copilot.exists(), "~/.copilot skill dir must be removed");
 }

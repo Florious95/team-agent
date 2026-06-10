@@ -228,8 +228,18 @@ impl Coordinator {
             );
         }
 
+        // B-4 / 036b N36 三路可用 — 监测步(runtime_prompts / sync_health /
+        // detect_abnormal_exits)失败必须降级+continue,**不能**用 `?` 中断 tick,
+        // 否则 deliver_pending(下行投递主干)够不到,消息卡 accepted。
+        // bug-084 哲学 + A-6 同族:每步独立 try,失败写 `coordinator.tick.<step>_failed`
+        // 事件后继续走下一步;tick 本身仍返 Ok。
         self.record_step("runtime_prompts");
-        self.handle_runtime_approval_prompts(&mut state, &event_log)?;
+        if let Err(error) = self.handle_runtime_approval_prompts(&mut state, &event_log) {
+            let _ = event_log.write(
+                "coordinator.tick.runtime_prompts_failed",
+                serde_json::json!({"error": error.to_string()}),
+            );
+        }
 
         self.record_step("sync_health");
         // P5 (C-P5-1, N3): ONE pane snapshot per tick, shared by sync_health and the
@@ -237,32 +247,71 @@ impl Coordinator {
         // this tick; every tick re-reads).
         let pane_snapshot = self.transport.list_targets().unwrap_or_default();
         let captures_by_agent =
-            self.sync_agent_health(&mut state, &store, &event_log, &pane_snapshot)?;
+            match self.sync_agent_health(&mut state, &store, &event_log, &pane_snapshot) {
+                Ok(captures) => captures,
+                Err(error) => {
+                    let _ = event_log.write(
+                        "coordinator.tick.sync_health_failed",
+                        serde_json::json!({"error": error.to_string()}),
+                    );
+                    BTreeMap::new()
+                }
+            };
         // C-3-4 cr verdict — copilot 一期 classify→None(Unknown);为防 silent,
         // tick 每次发现 copilot agent(从 state.agents 直接扫,不依赖 captures —
         // 离线/未起 tmux 场景仍能写)就发 `provider.classify.unsupported` 事件
         // (字面 reason=`phase1_unknown_pending_sample`,含 provider="copilot" + "classify"
         // 串)。二期接 sqlite turns 表后这条删/降级,届时改 reason 区分。
-        if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-            for (agent_id, agent) in agents {
-                let is_copilot = agent
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .and_then(parse_provider)
-                    .is_some_and(|p| matches!(p, crate::model::enums::Provider::Copilot));
-                if is_copilot {
-                    let _ = event_log.write(
-                        "provider.classify.unsupported",
-                        serde_json::json!({
-                            "provider": "copilot",
-                            "agent_id": agent_id,
-                            "reason": "phase1_unknown_pending_sample",
-                        }),
-                    );
-                }
+        //
+        // B-4 P4 / 036b 防 dedup-flood:同 (provider, agent_id, reason) 状态跨 tick
+        // 只发一次(check_key 范式,同 abnormal_check_key tick.rs:603 同精神);状态
+        // 变了才再发。check_key 落 state.agents.<id>.classify_unsupported.last_key,
+        // tick-only metadata,不进 #235 owner / receiver 等持久态。
+        let agents_snapshot: Vec<(String, Option<String>)> =
+            if let Some(agents) = state.get("agents").and_then(Value::as_object) {
+                agents
+                    .iter()
+                    .filter_map(|(agent_id, agent)| {
+                        let is_copilot = agent
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .and_then(parse_provider)
+                            .is_some_and(|p| matches!(p, crate::model::enums::Provider::Copilot));
+                        if !is_copilot {
+                            return None;
+                        }
+                        let last_key = agent
+                            .get("classify_unsupported")
+                            .and_then(|v| v.get("last_key"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        Some((agent_id.clone(), last_key))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        for (agent_id, last_key) in agents_snapshot {
+            let check_key = format!("copilot|{agent_id}|phase1_unknown_pending_sample");
+            if last_key.as_deref() == Some(check_key.as_str()) {
+                continue;
             }
+            let _ = event_log.write(
+                "provider.classify.unsupported",
+                serde_json::json!({
+                    "provider": "copilot",
+                    "agent_id": agent_id,
+                    "reason": "phase1_unknown_pending_sample",
+                }),
+            );
+            mark_classify_unsupported(&mut state, &agent_id, &check_key);
         }
-        self.detect_abnormal_exits(&mut state, &event_log, &pane_snapshot)?;
+        if let Err(error) = self.detect_abnormal_exits(&mut state, &event_log, &pane_snapshot) {
+            let _ = event_log.write(
+                "coordinator.tick.detect_abnormal_failed",
+                serde_json::json!({"error": error.to_string()}),
+            );
+        }
 
         self.record_step("deliver_pending");
         let delivered = crate::messaging::deliver_pending_messages(
@@ -389,6 +438,12 @@ impl Coordinator {
         let team = crate::state::projection::team_state_key(&snapshot);
         let team_key = Some(crate::model::ids::TeamKey::new(team.clone()));
         let session_name = state.get("session_name").and_then(Value::as_str).map(str::to_string);
+        // B-4 / 036b N36 三路可用 — sync_health 内 per-agent capture 失败本就降级
+        // (写 coordinator.agent_capture_failed 后 continue),不打断 deliver_pending
+        // 主干。但 contract 要求一条【tick 级】可观测的 step-failed 信号 —
+        // sync_health 失败一旦发生就在末尾 emit `coordinator.tick.sync_health_failed`
+        // (含 "tick" + "_failed" 双串),避免 silent。
+        let mut had_capture_failure = false;
         // P5 (C-P5-2): one list-windows per SESSION per tick — memoized across the
         // agent loop instead of one fork per agent.
         let mut windows_by_session: BTreeMap<String, Result<Vec<crate::transport::WindowName>, String>> =
@@ -409,6 +464,7 @@ impl Coordinator {
                 }) {
                 Ok(windows) => windows.clone(),
                 Err(error) => {
+                    had_capture_failure = true;
                     event_log.write(
                         "coordinator.agent_capture_failed",
                         serde_json::json!({
@@ -429,6 +485,7 @@ impl Coordinator {
             {
                 Ok(captured) => captured,
                 Err(error) => {
+                    had_capture_failure = true;
                     event_log.write(
                         "coordinator.agent_capture_failed",
                         serde_json::json!({
@@ -504,6 +561,15 @@ impl Coordinator {
                     rollout_path,
                     process_liveness: explicit_process_liveness(agent),
                 },
+            );
+        }
+        // B-4 step-level signal:若本 tick 有任一 capture 失败,emit
+        // `coordinator.tick.sync_health_failed`(含 "tick" + "_failed")让 contract
+        // 可观测,deliver_pending 主干不受影响。
+        if had_capture_failure {
+            let _ = event_log.write(
+                "coordinator.tick.sync_health_failed",
+                serde_json::json!({"step": "sync_health", "degraded": true}),
             );
         }
         Ok(captures)
@@ -1735,6 +1801,28 @@ fn mark_abnormal_suppressed(state: &mut Value, agent_id: &str, key: &str) {
             obj.insert("last_suppressed_key".to_string(), serde_json::json!(key));
             obj.insert("last_suppressed_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
         }
+    }
+}
+
+/// B-4 P4 dedup marker — 把 classify.unsupported check_key 写到
+/// state.agents.<id>.classify_unsupported.last_key,只在状态变了才再发事件。
+/// 同 abnormal_check_key (line 603) 同精神,但落 agents 子 obj(per-agent locality,
+/// 不污染 abnormal_exit_watch 命名空间)。
+fn mark_classify_unsupported(state: &mut Value, agent_id: &str, key: &str) {
+    let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(agent) = agents.get_mut(agent_id).and_then(Value::as_object_mut) else {
+        return;
+    };
+    let entry = agent
+        .entry("classify_unsupported".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert("last_key".to_string(), serde_json::json!(key));
     }
 }
 

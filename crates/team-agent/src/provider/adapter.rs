@@ -1025,6 +1025,43 @@ fn scan_session_candidates_once(
             agent_path_match,
         });
     }
+    // E6 层1·C(机会性兜底):若盘上真有 expected_session_id 命名的 transcript(claude 哪天
+    // 真采用 --session-id,或别的 provider 本就采用),直接唯一命中,省去时间窗扫描。
+    // 命不中(交互式 claude 现实:不落 <expected>.jsonl)→ 回落 B。
+    if let Some(expected) = context.expected_session_id.as_ref() {
+        if let Some(hit) = out.iter().find(|candidate| {
+            candidate
+                .captured
+                .session_id
+                .as_ref()
+                .is_some_and(|session| session.as_str() == expected.as_str())
+        }) {
+            return Ok(vec![hit.clone()]);
+        }
+    }
+    // E6 层1·B(主路径,交互式现实):cwd 匹配但盘上有多个 sibling transcript(claude 自生成,
+    // 不采用预定 UUID)→ 用 spawn 时间窗唯一选:只留 mtime >= spawned_at 的候选,打破歧义。
+    // spawned_at 缺/无法解析时不收窄(保守,维持既有行为)。
+    if context.expected_session_id.is_none() || out.len() > 1 {
+        if let Some(spawned_at) = context.spawned_at.as_deref().and_then(parse_spawned_at) {
+            let within: Vec<CapturedSessionCandidate> = out
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .captured
+                        .rollout_path
+                        .as_ref()
+                        .and_then(|p| std::fs::metadata(p.as_path()).and_then(|m| m.modified()).ok())
+                        .is_some_and(|mtime| mtime >= spawned_at)
+                })
+                .cloned()
+                .collect();
+            // 只有当时间窗把候选收成唯一时才采用(收成 0 或仍多义则不强行,交给上层 ambiguous)。
+            if within.len() == 1 {
+                return Ok(within);
+            }
+        }
+    }
     if let Some(expected) = context.expected_session_id.as_ref() {
         out.sort_by_key(|candidate| {
             candidate
@@ -1035,6 +1072,28 @@ fn scan_session_candidates_once(
         });
     }
     Ok(out)
+}
+
+/// 解析 state 里的 `spawned_at`(RFC3339)为 SystemTime,用于 spawn 时间窗候选筛选。
+/// 解析失败 → None(调用方据此不收窄时间窗,保守维持既有行为)。
+fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
+}
+
+/// E6 层1·B:把 spawn cwd 映射成 claude transcript 子目录 `~/.claude/projects/<encoded>`。
+/// claude 用 **canonical(realpath)** cwd 且把每个 `/` 替换成 `-`(实证:cwd
+/// `/private/tmp/x` → `-private-tmp-x`;macOS `/tmp`→`/private/tmp` 必须先 canonical)。
+/// canonical 失败(目录已不在)退回原始路径,仍尽力编码。dir 不存在也返回(调用方
+/// `collect_optional_candidate_files` 对不存在目录是 no-op)。
+fn claude_projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(spawn_cwd).unwrap_or_else(|_| spawn_cwd.to_path_buf());
+    let encoded = canonical.to_string_lossy().replace('/', "-");
+    if encoded.is_empty() {
+        return None;
+    }
+    Some(home.join(".claude").join("projects").join(encoded))
 }
 
 /// §C4 cr verdict — copilot session 真相源 sqlite 点查。
@@ -1113,6 +1172,12 @@ fn candidate_session_files(
             }
             Provider::Claude | Provider::ClaudeCode => {
                 collect_optional_candidate_files(&home.join(".claude").join("sessions"), &context.agent_id, &mut out)?;
+                // E6 层1·B:优先锚到 ~/.claude/projects/<canonical spawn_cwd 编码> 子目录
+                // (claude 把 cwd 的 '/' 编码成 '-';交互式 worker 的真实 transcript 落在此),
+                // 而非全 projects 树盲扫(交互式 claude 自生成 UUID,锚 cwd 子目录 + 时间窗才能唯一选)。
+                if let Some(dir) = claude_projects_dir_for_cwd(&home, &context.spawn_cwd) {
+                    collect_optional_candidate_files(&dir, &context.agent_id, &mut out)?;
+                }
                 collect_optional_candidate_files(&home.join(".claude").join("projects"), &context.agent_id, &mut out)?;
             }
             // §C4 cr verdict + 设计 §C: copilot session 真相源是 ~/.copilot/session-store.db
@@ -1764,4 +1829,143 @@ fn next_session_token() -> String {
         bytes[14],
         bytes[15],
     )
+}
+
+#[cfg(test)]
+mod e6_session_attribution_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ta-e6-attr-{}-{}-{}",
+            tag,
+            std::process::id(),
+            CTR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_transcript(dir: &Path, uuid: &str, cwd: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{uuid}.jsonl"));
+        let line = serde_json::json!({
+            "sessionId": uuid,
+            "cwd": cwd.to_string_lossy(),
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn claude_projects_dir_for_cwd_encodes_slashes_to_dashes() {
+        let home = Path::new("/home/u");
+        // 用一个真实存在的 cwd 让 canonicalize 成功(否则退回原始);用 tmp。
+        let cwd = tmp_root("encode");
+        let got = claude_projects_dir_for_cwd(home, &cwd).unwrap();
+        let canon = std::fs::canonicalize(&cwd).unwrap();
+        let expected_leaf = canon.to_string_lossy().replace('/', "-");
+        assert_eq!(got, home.join(".claude").join("projects").join(expected_leaf));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn parse_spawned_at_rfc3339_roundtrips_and_rejects_junk() {
+        assert!(parse_spawned_at("2026-06-10T21:40:00+00:00").is_some());
+        assert!(parse_spawned_at("not-a-date").is_none());
+        assert!(parse_spawned_at("").is_none());
+    }
+
+    #[test]
+    fn scan_expected_session_id_hit_returns_only_that_candidate() {
+        // C 兜底:盘上恰有 <expected>.jsonl(假设 claude 哪天真采用)→ 唯一命中,忽略 sibling。
+        let base = tmp_root("c-hit");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let proj = base.join("projects");
+        write_transcript(&proj, "11111111-1111-4111-8111-111111111111", &cwd);
+        write_transcript(&proj, "22222222-2222-4222-8222-222222222222", &cwd);
+        let ctx = CaptureSessionContext {
+            agent_id: "w1".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: Some(SessionId::new("22222222-2222-4222-8222-222222222222")),
+            provider_projects_root: Some(proj.clone()),
+        };
+        let out = scan_session_candidates_once(Provider::ClaudeCode, &ctx).unwrap();
+        assert_eq!(out.len(), 1, "expected-id hit must collapse to the single match");
+        assert_eq!(
+            out[0].captured.session_id.as_ref().unwrap().as_str(),
+            "22222222-2222-4222-8222-222222222222"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scan_spawn_time_window_disambiguates_two_siblings() {
+        // B 主路径:claude 不采用预定 UUID,盘上两个自生成 sibling 都匹配 cwd。
+        // 只有一个在 spawn 时间窗内(mtime >= spawned_at)→ 时间窗唯一选出它。
+        let base = tmp_root("b-window");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let proj = base.join("projects");
+        let old = write_transcript(&proj, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", &cwd);
+        let new = write_transcript(&proj, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", &cwd);
+        // 把 old 的 mtime 设到很久以前,new 保持现在;spawned_at = 两者之间。
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        filetime_set(&old, long_ago);
+        // spawned_at 取一个介于 old 与 new 之间、肯定早于 new 真实 mtime 的时刻(2020 年)。
+        let ctx = CaptureSessionContext {
+            agent_id: "w1".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some("2020-01-01T00:00:00+00:00".to_string()),
+            expected_session_id: None,
+            provider_projects_root: Some(proj.clone()),
+        };
+        let out = scan_session_candidates_once(Provider::ClaudeCode, &ctx).unwrap();
+        assert_eq!(out.len(), 1, "time window must collapse two siblings to one");
+        assert_eq!(
+            out[0].captured.session_id.as_ref().unwrap().as_str(),
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "the in-window (recent) transcript must win"
+        );
+        let _ = new;
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scan_no_spawned_at_keeps_both_siblings_ambiguous() {
+        // 保守:spawned_at 缺 → 不收窄时间窗,两 sibling 仍并存(交上层 ambiguous 处理)。
+        let base = tmp_root("b-noamb");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let proj = base.join("projects");
+        write_transcript(&proj, "cccccccc-cccc-4ccc-8ccc-cccccccccccc", &cwd);
+        write_transcript(&proj, "dddddddd-dddd-4ddd-8ddd-dddddddddddd", &cwd);
+        let ctx = CaptureSessionContext {
+            agent_id: "w1".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None,
+            provider_projects_root: Some(proj.clone()),
+        };
+        let out = scan_session_candidates_once(Provider::ClaudeCode, &ctx).unwrap();
+        assert!(out.len() >= 2, "no spawned_at → no time-window narrowing");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn filetime_set(path: &Path, when: std::time::SystemTime) {
+        // 用 utimensat 经 std:无直接 set_mtime,借 filetime-free 方式:写后用 File::set_modified。
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
+    }
 }

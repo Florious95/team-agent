@@ -209,10 +209,18 @@ fn current_uid() -> Option<String> {
             json: true,
         };
         let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
+        // E5: spec compiled to .team/runtime/<team_key>/, NOT the user team dir.
+        let team_key = team.file_name().unwrap().to_string_lossy().to_string();
+        let workspace = crate::model::paths::team_workspace(&team).unwrap();
+        let runtime_spec = crate::model::paths::runtime_spec_path(&workspace, &team_key);
         assert!(
-            team.join("team.spec.yaml").exists(),
+            runtime_spec.exists(),
             "cmd_quick_start must delegate to crate::lifecycle::quick_start, which compiles team.spec.yaml \
-             under the team dir; the placeholder never writes it"
+             under .team/runtime/<team_key>/; the placeholder never writes it"
+        );
+        assert!(
+            !team.join("team.spec.yaml").exists(),
+            "E5: quick_start must NOT write spec into the user team dir"
         );
     }
 

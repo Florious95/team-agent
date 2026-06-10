@@ -208,11 +208,20 @@ pub(crate) fn build_profile_smoke_check_for_team(team: &std::path::Path) -> Resu
     let spec = match crate::compiler::compile_team(team) {
         Ok(spec) => spec,
         Err(error) => {
+            // SMOKE-1 (locate.md §"Smallest likely code touch" item 2):compile
+            // 失败时把 team_dir + next_action 带上,operator 才有可下手的诊断
+            // (不是只贴一行 reason)。
             return Ok(json!({
                 "name": "profile_smoke",
                 "ok": false,
                 "status": "profile_invalid",
+                "team_dir": team.to_string_lossy().to_string(),
                 "reason": error.to_string(),
+                "next_action": format!(
+                    "fix the team spec at `{}` (see reason above) or re-run \
+                     doctor with a different `<team-dir>`",
+                    team.display()
+                ),
                 "secret_values_printed": false,
                 "checks": [],
             }));

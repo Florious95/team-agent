@@ -491,14 +491,57 @@ fn classify_restart_plan_interacted_unresumable_with_allow_fresh_yields_fresh_st
 }
 
 #[test]
-fn classify_restart_plan_never_interacted_yields_fresh_start() {
-    // first_send_at absent(从未交互)→ FreshStart,即使 !allow_fresh(无 context 可丢)。
+fn classify_restart_plan_never_interacted_null_session_refuses_not_fresh() {
+    // E6 层2 (C2, 用户裁定"绝不静默 fresh"): first_send_at absent(自启动 worker,leader 从未发消息)
+    // + session_id null → 不能再静默 FreshStart(那会丢真实 provider 会话上下文)。
+    // 默认 !allow_fresh → Refuse + unresumable(诚实出口 resume_not_ready)。
     let state = json!({
         "agents": { "w1": { "provider": "claude", "session_id": null } }
     });
     let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
     assert_eq!(plan.decisions.len(), 1);
-    assert_eq!(plan.decisions[0].decision, ResumeDecision::FreshStart);
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::Refuse,
+        "null-session 自启动 worker 默认必须 Refuse,不许静默 fresh"
+    );
+    assert_eq!(plan.unresumable.len(), 1, "Refuse 必入 unresumable(诚实出口)");
+    assert_eq!(plan.unresumable[0].reason, "no_persisted_session_id");
+}
+
+#[test]
+fn classify_restart_plan_never_interacted_null_session_with_allow_fresh_marks_forced_fresh() {
+    // E6 层2: 同上自启动 null-session worker,但显式 --allow-fresh → 用户主动认账丢上下文 → FreshStart。
+    let state = json!({
+        "agents": { "w1": { "provider": "claude", "session_id": null } }
+    });
+    let plan = classify_restart_plan(&state, true).expect("纯验证不应 Err");
+    assert_eq!(plan.decisions.len(), 1);
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::FreshStart,
+        "显式 --allow-fresh 才允许 null-session worker fresh"
+    );
+    assert!(
+        plan.unresumable.is_empty(),
+        "allow_fresh 下不触发 unresumable refusal"
+    );
+}
+
+#[test]
+fn classify_restart_plan_codex_with_session_still_resumes() {
+    // E6 层2 回归锁(不误伤): codex worker first_send_at=null 但 session_id 已捕 →
+    // 仍走 Resume(分流轴是 session_id 有无,不是 interacted)。防层2 修法把 has_session 也误判。
+    let state = json!({
+        "agents": { "w1": { "provider": "codex", "session_id": "sess-codex-abc" } }
+    });
+    let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
+    assert_eq!(plan.decisions.len(), 1);
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::Resume,
+        "有 session_id 必 Resume,与 first_send_at/interacted 无关"
+    );
     assert!(plan.unresumable.is_empty());
 }
 

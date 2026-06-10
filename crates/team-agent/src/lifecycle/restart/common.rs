@@ -331,15 +331,10 @@ pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Val
                 .get("status")
                 .and_then(|value| value.as_str())
                 .is_some_and(|status| status == "running");
-            let has_live_pane_binding = agent
-                .get("pane_id")
-                .and_then(|value| value.as_str())
-                .is_some_and(|pane| !pane.is_empty());
-            let has_interaction_marker = agent
-                .get("first_send_at")
-                .and_then(|value| value.as_str())
-                .is_some_and(|value| !value.is_empty());
-            missing_session_id && is_running && (has_live_pane_binding || has_interaction_marker)
+            // E6 层2 (C2): required-missing 谓词只看 session_id 有无 + 是否在跑。
+            // pane 绑定 / first_send_at 在 gate 时刻天然可空(自启动 worker leader 从未发消息),
+            // 不能作判据 —— 否则真丢上下文的 null-session worker 被漏判,走静默 fresh。
+            missing_session_id && is_running
         })
         .collect::<Vec<_>>();
     missing.sort();
