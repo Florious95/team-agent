@@ -22,12 +22,12 @@ Pass provider flags after the provider name, for example `team-agent codex --dan
 
 ```bash
 mkdir -p .team/current/agents
+team-agent profile init codex-default --auth-mode subscription --workspace .
 cat > .team/current/TEAM.md <<'EOF'
 ---
 name: demo-team
 objective: One worker handles bounded tasks and reports through Team Agent MCP.
 dangerous_auto_approve: false
-display_backend: ghostty_workspace
 fast: false
 provider_models:
   codex: gpt-5.5
@@ -60,14 +60,57 @@ team-agent quick-start .team/current
 
 YAML lists must be block style. Use `tools:\n  - fs_read`; do not use `tools: [fs_read, mcp_team]`.
 
-Display choices:
+Display choices (set `display_backend:` in `TEAM.md` to opt in):
+
+- `none` (default): headless / no GUI window manager. The team runs entirely in the per-workspace tmux server; this is what the demo above uses.
+- `adaptive`: framework picks an available GUI layout for the local platform.
 - `ghostty_workspace`: one Ghostty window. Workers are shown in tmux tabs/windows, up to 3 side-by-side panes per tab. Four workers become `3 + 1`; eight become `3 + 3 + 2`.
 - `ghostty_window`: one Ghostty window per worker.
-- `none`: headless/CI.
 
-Omitting `display_backend` defaults to `ghostty_window`.
+**Omitting `display_backend` defaults to `none`** (changed in 0.3.4). Set `display_backend: adaptive` (or one of the explicit ghostty variants) in `TEAM.md` only when the user wants GUI windows.
+
+## Private Tmux Socket
+
+Worker windows live on a private per-workspace tmux server, not the user's default socket. `tmux list-sessions` (no `-L`/`-S`) will not show them; that is expected, not a failure.
+
+To attach manually, read `attach_commands` (or the `tmux` action printed near `ready:`) from `team-agent quick-start` / `team-agent restart` / `team-agent status --json` output. It is the canonical `tmux -L <socket-name> attach -t <session>` (or `-S <socket-path>`) line for the current team.
+
+Use `team-agent attach-leader` / `team-agent claim-leader` to bind the leader pane to a team. Do not invent socket paths by hand.
+
+## Provider Capability Matrix
+
+| Provider | Resume | Turn-state detection | Per-worker model override | Native session fork |
+|---|---|---|---|---|
+| `claude` / `claude_code` | yes (`--resume <id>`, transcript-verified) | yes (JSONL stream) | yes (role `model` overrides `provider_models`) | yes (`--fork-session` + new `--session-id`) |
+| `codex` | yes (`codex resume <id>`, session-store-verified) | yes (turn JSONL) | yes (role `model`) | yes (`codex fork`) |
+| `copilot` | yes (`copilot --resume <id|name>`, sqlite `sessions` row) | not yet (phase 1: `provider.classify.unsupported` event) | yes (role `model`) | **no — `CapabilityUnsupported`** |
+| `gemini_cli` | no | no | yes | no |
+| `fake` (testing only) | no | no | n/a | no |
+
+Notes:
+- Per-worker model override means a role-doc `model:` value wins over `TEAM.md` `provider_models.<provider>`; subscription defaults still fill blanks.
+- Copilot's `caps.fork=false` is a hard refusal in 0.3.7 — `team-agent fork-agent` against a Copilot worker returns a structured `CapabilityUnsupported` error instead of falling back to a fresh spawn (honest by design).
+- Copilot phase-1 idle/turn detection is intentionally Unknown; tick emits a single explicit `provider.classify.unsupported` event per state change (P4 dedup), never a silent default.
 
 ## Provider Prep
+
+### Subscription auth (Codex / Claude account login)
+
+Before workers can use a subscription provider, create a named subscription profile in the workspace and reference it from role docs:
+
+```bash
+team-agent profile init codex-default --auth-mode subscription --workspace .
+team-agent profile init claude-default --auth-mode subscription --workspace .
+```
+
+Then in `agents/<role>.md` frontmatter, set `auth_mode: subscription` and `profile: codex-default` (or `claude-default`). The demo above uses `profile: codex-default`; that name only works after `profile init` has created it in the same workspace.
+
+Common errors:
+
+- `profile already exists`: a profile by that name is already in `.team/current/profiles/`. Either reuse it (skip `init`) or pick a new name.
+- `profile not found` during quick-start: the role doc references a profile that was never `profile init`-ed in this workspace. Run `team-agent profile init <name> --auth-mode subscription --workspace .` and retry.
+
+### Codex provider notes
 
 Codex: run `codex login` first. Optional `~/.codex/config.toml` profile:
 
@@ -133,7 +176,41 @@ For diagnosis, run `team-agent profile show deepseek --workspace . --json`; neve
 
 Startup trust prompts are handled by the runtime/coordinator with bounded probes; do not wait on raw worker screens or manually press Enter for routine startup trust prompts.
 
-Use `team-agent start-agent <agent_id> --workspace .` only as a narrow repair when one worker window is missing after launch/restart/display failure. It preserves the worker provider, resumes from `session_id` when available, starts fresh when there is no prior session id, and does not restart the rest of the team. If an existing session id cannot resume, it fails closed unless the user explicitly passes `--allow-fresh`. To change the team, edit role docs and start a new team or regenerate the compiled spec.
+Use `team-agent start-agent <agent_id> --workspace .` only as a narrow repair when one worker window is missing after launch/restart/display failure. It preserves the worker provider, resumes from `session_id` when available, starts fresh when there is no prior session id, and does not restart the rest of the team. If an existing session id cannot resume, it fails closed unless the user explicitly passes `--allow-fresh`.
+
+## Adding A New Worker At Runtime
+
+To add a new worker to a running team, write the role doc and run **one command** — do not shutdown/restart, do not regenerate the compiled spec, do not `quick-start --fresh`:
+
+```bash
+cat > .team/current/agents/reviewer.md <<'EOF'
+---
+name: reviewer
+role: Code Reviewer
+provider: codex
+auth_mode: subscription
+profile: codex-default
+tools:
+  - fs_read
+  - fs_list
+  - mcp_team
+---
+
+Review changed files and report findings to leader.
+EOF
+team-agent add-agent reviewer --role-file .team/current/agents/reviewer.md --workspace .
+```
+
+`add-agent` registers the new worker into the running team's state, launches its window on the existing tmux socket, and leaves every other worker untouched. **Do not shutdown/restart for adding a worker** — it loses every other worker's resumable session. If `add-agent` fails, surface the structured error to the user; do not fall back to shutdown.
+
+Semantic distinction:
+
+- `team-agent add-agent <agent> --role-file <file>` — add a **new** worker not yet in team state.
+- `team-agent start-agent <agent>` — (re)launch a worker that **already exists** in team state but whose window is missing.
+- `team-agent restart .` — resume a fully **stopped** team from stored worker sessions.
+- `team-agent quick-start <dir>` — **fresh** team startup from role docs; `--fresh` is reserved for the user explicitly accepting brand-new blank worker contexts.
+
+Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> --workspace . --confirm`.
 
 ## Worker Protocol
 
