@@ -11,6 +11,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
 const DOCTOR_TIMEOUT_MS = 5000;
+const VERSION_SMOKE_TIMEOUT_MS = 5000;
 
 const command = process.argv[2] || "install";
 const args = process.argv.slice(3);
@@ -87,6 +88,26 @@ function install(argv) {
   console.log(`binary: ${platformBinary.packageName}`);
   console.log("skill: installed for Codex and Claude");
   console.log(`PATH: ensure ${binDir} is on PATH`);
+
+  // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
+  // 子命令,因为 0.3.x CLI 现阶段没有 --version)。真跑一次 binary 才能抓住
+  // loader 级失败(glibc 不兼容 / cpu 错配 / 下载损坏 / 平台子包未装到位 等),
+  // 不止依赖 file 元数据。失败输出走三行式(错/动作/日志),非零退出。
+  // C-2 cr verdict 守护:本步不做 libc 探测、不读 /lib/x86_64-linux-gnu/libc.so.6,
+  // 通用 smoke 而非 platform-aware 逻辑。
+  const binarySmoke = spawnSync(teamAgent, ["--help"], {
+    text: true,
+    encoding: "utf8",
+    timeout: VERSION_SMOKE_TIMEOUT_MS,
+  });
+  if (binarySmoke.status !== 0) {
+    const log = (binarySmoke.stderr || binarySmoke.stdout || "").trim() || "no stderr/stdout";
+    console.error(`ERROR: team-agent --help failed (status=${binarySmoke.status ?? "signal"})`);
+    console.error(`ACTION: verify your platform is supported, reinstall, or open an issue with the log below`);
+    console.error(`LOG: ${teamAgent} --help => ${log}`);
+    process.exit(1);
+  }
+  console.log("smoke: team-agent --help ok");
 
   const doctorWorkspace = makeDoctorWorkspace();
   try {

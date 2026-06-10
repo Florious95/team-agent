@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -46,7 +46,7 @@ jobs:
           const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
           const cargo = fs.readFileSync("Cargo.toml", "utf8");
           const expected = {
-            version: "0.3.5",
+            version: "0.3.6",
             license: "AGPL-3.0",
             platforms: [
               ["cli-darwin-arm64", "@team-agent/cli-darwin-arm64", "darwin", "arm64"],
@@ -119,19 +119,28 @@ jobs:
             package_dir: cli-darwin-x64
             package_name: "@team-agent/cli-darwin-x64"
           - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             package_dir: cli-linux-x64
             package_name: "@team-agent/cli-linux-x64"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
         uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
+
+      # C-1 cr verdict — linux-only musl-tools(`musl-gcc` linker) 是 musl 静态构建
+      # 必需。条件门 `runs-on == ubuntu-latest`(matrix linux 行)收紧到 linux,
+      # mac runner 完全不触发该步。
+      - name: Install musl tools (linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Set up Rust
         run: |
@@ -143,6 +152,31 @@ jobs:
 
       - name: Build binary
         run: cargo build --release --bin team-agent --target "${{ matrix.target }}" --locked
+
+      # C-3 cr verdict — 静态断言发布前置门。Linux 包必须:
+      #   ① `file` 报告 "statically linked"(musl 主门);
+      #   ② `objdump -T` 取的动态符号表里 GLIBC_ 计数 == 0
+      #   (musl 产物根本不应出现任何 GLIBC_ 版本符号)。
+      # C-4 反向:把 publish-npm.yml 的 linux target 改回 x86_64-unknown-linux-gnu
+      # 再发,本步必失败(file 不报 statically linked / GLIBC_ 计数 > 0)→ 拦在
+      # publish 之前。
+      - name: Assert linux binary is statically linked with no GLIBC_ symbols
+        if: runner.os == 'Linux'
+        run: |
+          binary="target/${{ matrix.target }}/release/team-agent"
+          file_info="$(file "$binary")"
+          echo "file: $file_info"
+          if ! echo "$file_info" | grep -q 'statically linked'; then
+            echo "::error::linux binary is not statically linked: $file_info"
+            exit 1
+          fi
+          glibc_count="$(objdump -T "$binary" 2>/dev/null | grep -c 'GLIBC_' || true)"
+          echo "objdump -T | grep -c GLIBC_ = ${glibc_count}"
+          if [ "${glibc_count}" != "0" ]; then
+            echo "::error::linux binary still carries GLIBC_ version symbols (count=${glibc_count})"
+            objdump -T "$binary" | grep 'GLIBC_' | sort -u | head
+            exit 1
+          fi
 
       - name: Fill platform package
         run: |
@@ -205,7 +239,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node
         uses: actions/setup-node@v6
