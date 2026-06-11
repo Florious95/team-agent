@@ -383,6 +383,7 @@ struct LeaderTarget {
     current_command: Option<String>,
     current_path: Option<PathBuf>,
     active: bool,
+    pane_pid: Option<u32>,
     leader_env: BTreeMap<String, String>,
     provider: Option<Provider>,
     leader_session_uuid: Option<LeaderSessionUuid>,
@@ -394,7 +395,7 @@ impl LeaderTarget {
         if !info.active {
             return None;
         }
-        let provider = leader_command_provider(info.current_command.as_deref().unwrap_or(""));
+        let provider = super::attribute_pane_provider(info);
         let leader_session_uuid = info
             .leader_env
             .get("TEAM_AGENT_LEADER_SESSION_UUID")
@@ -411,6 +412,7 @@ impl LeaderTarget {
             current_command: info.current_command.clone(),
             current_path: info.current_path.clone(),
             active: info.active,
+            pane_pid: info.pane_pid,
             leader_env: info.leader_env.clone(),
             provider,
             leader_session_uuid,
@@ -508,8 +510,26 @@ impl OwnerIdentity {
 fn target_from_value(value: &Value) -> Option<LeaderTarget> {
     let pane_id = get_str(value, "pane_id").or_else(|| get_str(value, "pane"))?;
     let current_command = get_str(value, "pane_current_command").or_else(|| get_str(value, "current_command"));
-    let provider = current_command.as_deref().and_then(leader_command_provider);
     let leader_env = map_env(value.get("leader_env").or_else(|| value.get("env")));
+    let pane_pid = get_u32(value, "pane_pid");
+    let provider = super::attribute_pane_provider(&PaneInfo {
+        pane_id: PaneId::new(pane_id.clone()),
+        session: get_str(value, "session_name")
+            .or_else(|| get_str(value, "session"))
+            .map(SessionName::new)
+            .unwrap_or_else(|| SessionName::new("")),
+        window_index: get_u32(value, "window_index"),
+        window_name: get_str(value, "window_name").map(WindowName::new),
+        pane_index: get_u32(value, "pane_index"),
+        tty: get_str(value, "pane_tty").or_else(|| get_str(value, "tty")),
+        current_command: current_command.clone(),
+        current_path: get_str(value, "pane_current_path")
+            .or_else(|| get_str(value, "current_path"))
+            .map(PathBuf::from),
+        active: value.get("active").and_then(Value::as_bool).unwrap_or(true),
+        pane_pid,
+        leader_env: leader_env.clone(),
+    });
     let leader_session_uuid = get_str(value, "leader_session_uuid")
         .or_else(|| leader_env.get("TEAM_AGENT_LEADER_SESSION_UUID").cloned())
         .and_then(|raw| serde_json::from_value(Value::String(raw)).ok());
@@ -528,6 +548,7 @@ fn target_from_value(value: &Value) -> Option<LeaderTarget> {
             .or_else(|| get_str(value, "current_path"))
             .map(PathBuf::from),
         active: value.get("active").and_then(Value::as_bool).unwrap_or(true),
+        pane_pid,
         leader_env,
         provider,
         leader_session_uuid,
@@ -584,21 +605,6 @@ fn path_in_workspace(path: &Path, workspace: &Path) -> bool {
     cwd == root || cwd.starts_with(root)
 }
 
-fn leader_command_provider(command: &str) -> Option<Provider> {
-    let lower = command.to_ascii_lowercase();
-    if lower.contains("claude") {
-        Some(Provider::ClaudeCode)
-    } else if lower.contains("codex") {
-        Some(Provider::Codex)
-    } else if lower.contains("copilot") {
-        Some(Provider::Copilot)
-    } else if lower.contains("fake") {
-        Some(Provider::Fake)
-    } else {
-        None
-    }
-}
-
 fn target_matches_owner_identity(target: &LeaderTarget, identity: &OwnerIdentity) -> bool {
     identity
         .pane_id
@@ -624,6 +630,7 @@ fn pane_info_value(
         "pane_index": info.pane_index,
         "pane_tty": info.tty,
         "pane_current_command": info.current_command,
+        "pane_pid": info.pane_pid,
         "pane_current_path": info.current_path.as_ref().map(|path| path.to_string_lossy().to_string()),
         "fingerprint": info.leader_env.get("TEAM_AGENT_MACHINE_FINGERPRINT"),
         "provider": provider.map(provider_wire),
@@ -1098,6 +1105,16 @@ fn get_str(value: &Value, key: &str) -> Option<String> {
                 .or_else(|| raw.as_u64().map(|n| n.to_string()))
         })
         .filter(|s| !s.is_empty())
+}
+
+fn get_u32(value: &Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(|raw| {
+            raw.as_u64()
+                .or_else(|| raw.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 #[cfg(test)]

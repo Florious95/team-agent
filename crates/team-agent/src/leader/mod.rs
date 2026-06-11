@@ -13,7 +13,7 @@
 //!     (`build_idle_nodes` / `push_idle_reminder`) / `wake.py`
 //!     (`should_reread` / `on_file_changed` / `take_pending`).
 //!   - `messaging/leader_panes.py` (`_leader_command_looks_usable` /
-//!     `_leader_command_provider` / `_target_leader_session_uuid`).
+//!     provider attribution / `_target_leader_session_uuid`).
 //!
 //! 职责(card §职责):拥有「谁是 leader、消息投到哪个 pane」这一身份事实,当成租约(lease)
 //! 管理。pane id 即权威路由/授权身份,`owner_epoch` 做 CAS/去重,确定派生的
@@ -79,6 +79,7 @@ mod helpers;
 pub mod inject;
 pub mod lease;
 pub mod owner_bind;
+pub mod provider_attribution;
 pub mod rediscover;
 pub mod start;
 pub mod takeover;
@@ -88,6 +89,7 @@ pub mod types;
 pub use inject::*;
 pub use lease::*;
 pub use owner_bind::*;
+pub(crate) use provider_attribution::*;
 pub use rediscover::*;
 pub use start::*;
 pub use takeover::*;

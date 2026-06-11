@@ -88,11 +88,8 @@ pub fn cmd_leader_passthrough(
 }
 
 pub(crate) fn leader_passthrough_provider(command: &str) -> crate::model::enums::Provider {
-    match command {
-        "codex" => crate::model::enums::Provider::Codex,
-        "copilot" => crate::model::enums::Provider::Copilot,
-        _ => crate::model::enums::Provider::ClaudeCode,
-    }
+    crate::leader::attribute_command_provider(command)
+        .unwrap_or(crate::model::enums::Provider::ClaudeCode)
 }
 
 // =============================================================================

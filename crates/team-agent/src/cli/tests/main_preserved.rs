@@ -472,6 +472,74 @@ fn seed_team_spec(ws: &std::path::Path) {
             other => panic!("expected JSON output, got {other:?}"),
         }
     }
+    fn seed_remove_agent_workspace(ws: &std::path::Path, status: &str) {
+        seed_team_spec(ws);
+        crate::state::persist::save_runtime_state(
+            ws,
+            &json!({
+                "session_name": "team-agent-fake-e2e",
+                "agents": {
+                    "fake_impl": {
+                        "status": status,
+                        "provider": "fake",
+                        "window": "fake_impl"
+                    }
+                },
+                "spec_path": ws.join("team.spec.yaml").to_string_lossy()
+            }),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn remove_agent_running_refusal_is_not_success_envelope() {
+        let ws = tmp_workspace();
+        seed_remove_agent_workspace(&ws, "running");
+        let out = json_output(
+            cmd_remove_agent(&RemoveAgentArgs {
+                agent: "fake_impl".to_string(),
+                workspace: ws.clone(),
+                team: None,
+                from_spec: true,
+                confirm: true,
+                force: false,
+                json: true,
+            })
+            .unwrap(),
+        );
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["status"], json!("refused"));
+        assert_eq!(out["reason"], json!("force_required"));
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert!(
+            state["agents"].get("fake_impl").is_some(),
+            "refused remove-agent must not delete the running agent"
+        );
+    }
+    #[test]
+    fn remove_agent_from_spec_refusal_is_not_success_envelope() {
+        let ws = tmp_workspace();
+        seed_remove_agent_workspace(&ws, "stopped");
+        let out = json_output(
+            cmd_remove_agent(&RemoveAgentArgs {
+                agent: "fake_impl".to_string(),
+                workspace: ws.clone(),
+                team: None,
+                from_spec: false,
+                confirm: true,
+                force: false,
+                json: true,
+            })
+            .unwrap(),
+        );
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["status"], json!("refused"));
+        assert_eq!(out["reason"], json!("from_spec_confirm_required"));
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert!(
+            state["agents"].get("fake_impl").is_some(),
+            "refused remove-agent must not delete the spec-defined agent"
+        );
+    }
     #[test]
     fn validate_result_file_good_and_inline_garbage_are_distinct() {
         let ws = tmp_workspace();

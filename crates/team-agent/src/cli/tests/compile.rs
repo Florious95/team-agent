@@ -16,6 +16,16 @@ fn compile_team_dir(tag: &str) -> std::path::PathBuf {
     team
 }
 
+fn compile_team_dir_with_owner_team_id(tag: &str) -> std::path::PathBuf {
+    let team = compile_team_dir(tag);
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: compileteam\nobjective: Compile probe.\nprovider: fake\nowner_team_id: user-set-owner\n---\n\nCompile team.\n",
+    )
+    .unwrap();
+    team
+}
+
 #[test]
 fn cmd_compile_json_and_human_match_golden_shape_and_writes_out() {
     let team = compile_team_dir("compile-ok");
@@ -45,6 +55,65 @@ fn cmd_compile_json_and_human_match_golden_shape_and_writes_out() {
         out.to_string_lossy()
     );
     assert_eq!(human_text, expected_human, "golden human output preserves cmd_compile insertion order");
+}
+
+#[test]
+fn cmd_compile_ignores_user_owner_team_id_and_emits_warning_event() {
+    let team = compile_team_dir_with_owner_team_id("compile-ignored-owner");
+    let workspace = team.parent().unwrap().to_path_buf();
+    let out = workspace.join("ignored-owner-out.yaml");
+    let args = CompileArgs { team: team.clone(), out: out.clone(), json: true };
+
+    let result = cmd_compile(&args).expect("compile");
+    assert_eq!(result.exit, ExitCode::Ok);
+    let compiled = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        !compiled.contains("owner_team_id"),
+        "user-set owner_team_id must not be compiled into team.spec.yaml"
+    );
+    let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+    let event = events
+        .iter()
+        .find(|event| {
+            event
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                == Some("spec.field_ignored")
+        })
+        .expect("owner_team_id warning event");
+    assert_eq!(
+        event.get("field").and_then(serde_json::Value::as_str),
+        Some("owner_team_id")
+    );
+    assert_eq!(
+        event.get("value").and_then(serde_json::Value::as_str),
+        Some("user-set-owner")
+    );
+    assert_eq!(
+        event.get("action").and_then(serde_json::Value::as_str),
+        Some("remove owner_team_id from TEAM.md")
+    );
+}
+
+#[test]
+fn cmd_compile_without_owner_team_id_emits_no_ignored_field_event() {
+    let team = compile_team_dir("compile-no-ignored-owner");
+    let workspace = team.parent().unwrap().to_path_buf();
+    let out = workspace.join("no-ignored-owner-out.yaml");
+    let args = CompileArgs { team: team.clone(), out, json: true };
+
+    let result = cmd_compile(&args).expect("compile");
+    assert_eq!(result.exit, ExitCode::Ok);
+    let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
+    assert!(
+        events.iter().all(|event| {
+            event
+                .get("event")
+                .and_then(serde_json::Value::as_str)
+                != Some("spec.field_ignored")
+        }),
+        "TEAM.md without owner_team_id must not emit ignored-field warning"
+    );
 }
 
 #[test]

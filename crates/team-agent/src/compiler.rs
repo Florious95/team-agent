@@ -29,6 +29,14 @@ use std::path::Path;
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
 
+pub const IGNORED_OWNER_TEAM_ID_FIELD: &str = "owner_team_id";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredTeamField {
+    pub field: &'static str,
+    pub value: String,
+}
+
 /// `compiler._read_front_matter` (compiler.py:173-185).
 ///
 /// Reads `path` (UTF-8). If the text does not start with `"---\n"`, returns
@@ -74,6 +82,21 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
         )));
     }
     Ok((meta, after_marker.trim_start_matches('\n').to_string()))
+}
+
+pub fn ignored_owner_team_id_from_team_md(team_dir: &Path) -> Result<Option<IgnoredTeamField>, ModelError> {
+    let team_md = team_dir.join("TEAM.md");
+    if !team_md.exists() {
+        return Ok(None);
+    }
+    let (team_meta, _) = read_front_matter(&team_md)?;
+    let Some(value) = team_meta.get(IGNORED_OWNER_TEAM_ID_FIELD) else {
+        return Ok(None);
+    };
+    Ok(Some(IgnoredTeamField {
+        field: IGNORED_OWNER_TEAM_ID_FIELD,
+        value: front_matter_value_label(value),
+    }))
 }
 
 /// `compiler.compile_team` (compiler.py:23-135) — returns the compiled spec dict.
@@ -516,6 +539,13 @@ fn max_active_agents(count: usize) -> i64 {
     } else {
         2
     }
+}
+
+fn front_matter_value_label(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| yaml::dumps(value).trim().to_string())
 }
 
 #[cfg(test)]

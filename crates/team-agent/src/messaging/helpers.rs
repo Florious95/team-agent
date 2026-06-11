@@ -123,7 +123,7 @@ pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
     let base = command.rsplit('/').next().unwrap_or(command);
     let normalized = base.to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "codex" | "claude" | "gemini" | "openai" | "team-agent" => None,
+        "" | "codex" | "claude" | "copilot" | "gemini" | "openai" | "team-agent" => None,
         _ => Some(base),
     }
 }

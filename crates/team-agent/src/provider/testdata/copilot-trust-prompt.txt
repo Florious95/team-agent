@@ -1,0 +1,19 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Confirm folder trust                                                         │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ ╭──────────────────────────────────────────────────────────────────────────╮ │
+│ │ /private/tmp/copilot-trust-fixture-20260611T160323Z/dir-a                │ │
+│ ╰──────────────────────────────────────────────────────────────────────────╯ │
+│                                                                              │
+│ Copilot can read files in this folder and, with your permission, edit them   │
+│ or run code and shell commands. It will remember your permissions for the    │
+│ rest of this session.                                                        │
+│                                                                              │
+│ Do you trust the files in this folder?                                       │
+│                                                                              │
+│ ❯ 1. Yes                                                                     │
+│   2. Yes, and remember this folder for future sessions                       │
+│   3. No (Esc)                                                                │
+│                                                                              │
+│ ↑/↓ to navigate · enter to select · esc to cancel                            │
+╰──────────────────────────────────────────────────────────────────────────────╯

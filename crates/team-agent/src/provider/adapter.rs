@@ -233,6 +233,11 @@ pub trait ProviderAdapter {
                     transport, target, checks, sleep_s,
                 )
             }
+            Provider::Copilot => {
+                super::startup_prompt::copilot_handle_startup_prompts(
+                    transport, target, checks, sleep_s,
+                )
+            }
             _ => super::startup_prompt::StartupPromptOutcome::default(),
         }))
         .unwrap_or_default()
@@ -869,9 +874,7 @@ impl ProviderAdapter for BasicProviderAdapter {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback"),
             Provider::Codex => patterns(r"(›|❯|codex>)", r"•.*esc to interrupt", r"Error|Traceback|panic"),
-            // C-3-3 cr verdict: copilot 真值待用户真会话样本(§E3 line 105),一期占位
-            // 仅 error 行至少能识别;idle/processing 留 Unknown(N11 守,classify→None)。
-            Provider::Copilot => patterns(r">", r"working|processing", r"Error|panic"),
+            Provider::Copilot => patterns(r"(?m)^\s*❯\s*$| / commands · \? help", r"working|processing", r"Error|panic"),
             Provider::GeminiCli | Provider::Fake => patterns(r">", r"working|processing", r"Error|Traceback"),
         }
     }

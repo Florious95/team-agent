@@ -634,8 +634,7 @@ fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<Le
     if !target.active {
         return None;
     }
-    let command = target.current_command.as_deref().unwrap_or_default();
-    let provider = leader_command_provider(command)?;
+    let provider = super::attribute_pane_provider(target)?;
     let current_path = target.current_path.as_deref()?;
     if !crate::state::owner_gate::workspace_paths_match(current_path, workspace) {
         return None;
@@ -646,21 +645,6 @@ fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<Le
         team_id: target.leader_env.get("TEAM_AGENT_TEAM_ID").filter(|raw| !raw.is_empty()).cloned(),
         pane_info: Some(target.clone()),
     })
-}
-
-fn leader_command_provider(command: &str) -> Option<Provider> {
-    let lower = command.to_ascii_lowercase();
-    if lower.contains("claude") {
-        Some(Provider::ClaudeCode)
-    } else if lower.contains("codex") {
-        Some(Provider::Codex)
-    } else if lower.contains("copilot") {
-        Some(Provider::Copilot)
-    } else if lower.contains("fake") {
-        Some(Provider::Fake)
-    } else {
-        None
-    }
 }
 
 fn target_leader_session_uuid(target: &PaneInfo) -> Option<crate::model::ids::LeaderSessionUuid> {
@@ -1090,13 +1074,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn leader_command_provider_recognizes_copilot() {
+    fn attribute_command_provider_recognizes_copilot() {
         assert_eq!(
-            leader_command_provider("copilot --allow-all-tools"),
+            super::super::attribute_command_provider("copilot --allow-all-tools"),
             Some(Provider::Copilot)
         );
         assert_eq!(
-            leader_command_provider("/usr/local/bin/copilot"),
+            super::super::attribute_command_provider("/usr/local/bin/copilot"),
             Some(Provider::Copilot)
         );
     }

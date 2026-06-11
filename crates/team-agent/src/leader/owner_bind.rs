@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch, TeamKey};
 use crate::provider::Provider;
 use crate::tmux_backend::TmuxBackend;
-use crate::transport::{PaneField, PaneId, Target, Transport};
+use crate::transport::{PaneField, PaneId, PaneInfo, SessionName, Target, Transport};
 
 use super::helpers::{get_path_str, now_ts, prefix, resolve_workspace_for_hash};
 use super::{
@@ -134,8 +134,12 @@ pub fn bind_owner_from_caller_pane(
             hint: Some(hint.to_string()),
         });
     };
-    let caller_current_command = tmux_pane_current_command(workspace, &pane).unwrap_or_default();
-    let provider = bind_provider_from_env_or_command(&caller_current_command);
+    let caller_info = tmux_pane_info(workspace, &pane);
+    let caller_current_command = caller_info
+        .as_ref()
+        .and_then(|info| info.current_command.clone())
+        .unwrap_or_else(|| tmux_pane_current_command(workspace, &pane).unwrap_or_default());
+    let provider = bind_provider_from_env_or_pane(&caller_current_command, caller_info);
     let machine_fingerprint = std::env::var("TEAM_AGENT_MACHINE_FINGERPRINT").unwrap_or_default();
     let os_user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -185,45 +189,17 @@ pub fn emit_owner_bound_event(
     Ok(())
 }
 
-fn bind_provider_from_env_or_command(command: &str) -> Provider {
-    std::env::var("TEAM_AGENT_LEADER_PROVIDER")
+fn bind_provider_from_env_or_pane(command: &str, pane: Option<PaneInfo>) -> Provider {
+    let env_provider = std::env::var("TEAM_AGENT_LEADER_PROVIDER")
         .ok()
-        .and_then(|raw| super::helpers::parse_provider(&raw))
-        .or_else(|| provider_from_command(command))
+        .and_then(|raw| super::helpers::parse_provider(&raw));
+    env_provider
+        .or_else(|| pane.as_ref().and_then(super::attribute_pane_provider))
+        .or_else(|| super::attribute_command_provider(command))
         // E11 层2:未知命令不再静默默认 codex(会误绑任意 provider + 喂错分类器)。
-        // 无法识别时回落 Codex 仅作最末兜底,且该路径已被 provider_from_command 的显式 None 收窄
+        // 无法识别时回落 Codex 仅作最末兜底,且该路径已被统一归因入口的显式 None 收窄
         // (调用方理应只在已知 leader 命令上 bind);保留以不改 fn 签名/上游 panic 面。
         .unwrap_or(Provider::Codex)
-}
-
-/// E11 层2 + N39:command 名 → wire 串 → `parse_provider`(**单一映射源**,与
-/// `owner_bind_provider_wire` 共用 [`command_provider_wire`])。未知命令 → `None`
-/// (危险的 `_ => Codex` 默认已删:不静默把任意 provider 误绑成 codex)。
-fn provider_from_command(command: &str) -> Option<Provider> {
-    command_provider_wire(command).and_then(super::helpers::parse_provider)
-}
-
-/// command 名 → provider wire 串(单一真相;copilot/claude/codex/fake)。未知 → `None`。
-/// `claude.exe` 归一为 `claude`。
-fn command_provider_wire(command: &str) -> Option<&'static str> {
-    match exact_command_name(command).as_deref() {
-        Some("claude") | Some("claude.exe") => Some("claude"),
-        Some("codex") => Some("codex"),
-        Some("copilot") => Some("copilot"),
-        Some("fake") => Some("fake"),
-        _ => None,
-    }
-}
-
-fn exact_command_name(command: &str) -> Option<String> {
-    let last = command
-        .split_whitespace()
-        .next()
-        .unwrap_or(command)
-        .rsplit(['/', '\\'])
-        .next()?;
-    let lower = last.to_ascii_lowercase();
-    if lower.is_empty() { None } else { Some(lower) }
 }
 
 pub fn owner_bind_provider_wire(command: &str) -> &'static str {
@@ -234,9 +210,9 @@ pub fn owner_bind_provider_wire(command: &str) -> &'static str {
             .map(super::helpers::provider_wire)
             .unwrap_or("");
     }
-    // E11 层2 + N39:与 provider_from_command 共用 command_provider_wire 单一映射(含 copilot);
+    // E11 层2 + N39:与统一 provider attribution 共用单一映射(含 copilot);
     // 未知命令 → ""(不绑),不再静默当 codex。
-    command_provider_wire(command).unwrap_or("")
+    super::provider_wire_from_command(command).unwrap_or("")
 }
 
 fn family_a_identity(
@@ -295,6 +271,28 @@ fn tmux_pane_current_command(workspace: &Path, pane: &str) -> Result<String, Lea
         .map_err(|e| LeaderError::Tmux(e.to_string()))
 }
 
+fn tmux_pane_info(workspace: &Path, pane: &str) -> Option<PaneInfo> {
+    let target = PaneId::new(pane);
+    TmuxBackend::for_workspace(workspace)
+        .list_targets()
+        .ok()?
+        .into_iter()
+        .find(|info| info.pane_id == target)
+        .or_else(|| tmux_pane_current_command(workspace, pane).ok().map(|command| PaneInfo {
+            pane_id: target,
+            session: SessionName::new(""),
+            window_index: None,
+            window_name: None,
+            pane_index: None,
+            tty: None,
+            current_command: (!command.is_empty()).then_some(command),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: Default::default(),
+        }))
+}
+
 // NOTE: `derive_leader_session_uuid`(`leader_binding.py:146`)已由
 // `model::ids::LeaderSessionUuid::derive` 字节对齐实现(含 NUL 拒绝 + golden 测试)——
 // 此 lane REUSE 之,不重声明。
@@ -307,25 +305,25 @@ mod e11_provider_bind_tests {
     // E11 层2:copilot leader 命令必须绑成 Provider::Copilot(此前缺臂 → _ => Codex 误绑)。
     #[test]
     fn copilot_command_binds_copilot_not_codex() {
-        assert_eq!(provider_from_command("copilot --banner -C /ws"), Some(Provider::Copilot));
-        assert_eq!(provider_from_command("/opt/homebrew/bin/copilot"), Some(Provider::Copilot));
+        assert_eq!(super::super::attribute_command_provider("copilot --banner -C /ws"), Some(Provider::Copilot));
+        assert_eq!(super::super::attribute_command_provider("/opt/homebrew/bin/copilot"), Some(Provider::Copilot));
         assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
     }
 
     #[test]
     fn known_commands_map_via_single_source() {
-        assert_eq!(provider_from_command("claude"), Some(Provider::Claude));
-        assert_eq!(provider_from_command("codex"), Some(Provider::Codex));
-        assert_eq!(provider_from_command("fake"), Some(Provider::Fake));
+        assert_eq!(super::super::attribute_command_provider("claude"), Some(Provider::ClaudeCode));
+        assert_eq!(super::super::attribute_command_provider("codex"), Some(Provider::Codex));
+        assert_eq!(super::super::attribute_command_provider("fake"), Some(Provider::Fake));
         assert_eq!(owner_bind_provider_wire("claude"), "claude");
         assert_eq!(owner_bind_provider_wire("codex"), "codex");
     }
 
-    // E11 层2:未知命令不再静默默认 codex —— provider_from_command → None,wire → ""。
+    // E11 层2:未知命令不再静默默认 codex —— attribution → None,wire → ""。
     #[test]
     fn unknown_command_is_none_not_silent_codex() {
-        assert_eq!(provider_from_command("node /some/thing.js"), None);
-        assert_eq!(provider_from_command("totally-unknown"), None);
+        assert_eq!(super::super::attribute_command_provider("node /some/thing.js"), None);
+        assert_eq!(super::super::attribute_command_provider("totally-unknown"), None);
         assert_eq!(owner_bind_provider_wire("totally-unknown"), "");
     }
 }

@@ -166,6 +166,7 @@ fn quickstart_human(value: &Value) -> String {
 pub fn cmd_compile(args: &CompileArgs) -> Result<CmdResult, CliError> {
     let spec = crate::compiler::compile_team(&args.team)
         .map_err(|e| CliError::Runtime(e.to_string()))?;
+    warn_ignored_owner_team_id(&args.team);
     std::fs::write(&args.out, crate::model::yaml::dumps(&spec))?;
     Ok(CmdResult::from_json(
         json!({
@@ -176,6 +177,28 @@ pub fn cmd_compile(args: &CompileArgs) -> Result<CmdResult, CliError> {
         }),
         args.json,
     ))
+}
+
+fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
+    let Ok(Some(ignored)) = crate::compiler::ignored_owner_team_id_from_team_md(team_dir) else {
+        return;
+    };
+    let workspace = crate::model::paths::team_workspace(team_dir)
+        .unwrap_or_else(|_| team_dir.parent().unwrap_or(team_dir).to_path_buf());
+    eprintln!("Warning: ignored TEAM.md {}={}", ignored.field, ignored.value);
+    eprintln!("Reason: owner identity is the canonical runtime team key, not TEAM.md front matter");
+    eprintln!("Action: remove {} from TEAM.md", ignored.field);
+    let fields = json!({
+        "field": ignored.field,
+        "source": team_dir.join("TEAM.md").to_string_lossy().to_string(),
+        "value": ignored.value,
+        "warning": "ignored user-set owner_team_id",
+        "reason": "owner identity is derived from the canonical runtime team key",
+        "action": "remove owner_team_id from TEAM.md",
+    });
+    if let Err(err) = crate::event_log::EventLog::new(&workspace).write("spec.field_ignored", fields) {
+        eprintln!("Warning: spec.field_ignored event write failed: {err}");
+    }
 }
 
 /// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;

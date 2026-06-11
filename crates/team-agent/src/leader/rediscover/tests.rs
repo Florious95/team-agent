@@ -81,13 +81,13 @@ fn event_named(events: &[Value], name: &str) -> Value {
 }
 
 #[test]
-fn leader_command_provider_recognizes_copilot() {
+fn attribute_command_provider_recognizes_copilot() {
     assert_eq!(
-        leader_command_provider("copilot --allow-all-tools"),
+        super::super::attribute_command_provider("copilot --allow-all-tools"),
         Some(Provider::Copilot)
     );
     assert_eq!(
-        leader_command_provider("/usr/local/bin/copilot"),
+        super::super::attribute_command_provider("/usr/local/bin/copilot"),
         Some(Provider::Copilot)
     );
 }

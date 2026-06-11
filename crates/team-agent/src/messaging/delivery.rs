@@ -744,7 +744,7 @@ fn recipient_pane_has_actionable_startup_prompt(
     let provider = agent
         .and_then(|agent| agent.get("provider"))
         .and_then(serde_json::Value::as_str);
-    if !matches!(provider, Some("codex" | "claude" | "claude_code")) {
+    if !matches!(provider, Some("codex" | "claude" | "claude_code" | "copilot")) {
         return false;
     }
     // step2-retry/scrollback root-cause (rt binary 6c9c6c1c): once the agent's
@@ -775,6 +775,10 @@ fn recipient_pane_has_actionable_startup_prompt(
         ),
         Some("claude" | "claude_code") => matches!(
             crate::provider::classify_claude_startup_screen(&captured),
+            crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
+        ),
+        Some("copilot") => matches!(
+            crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
         _ => false,

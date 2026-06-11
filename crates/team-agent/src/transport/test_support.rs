@@ -25,6 +25,7 @@ struct OfflineState {
     targets: Vec<PaneInfo>,
     windows: Vec<WindowName>,
     pane_presence: BTreeMap<String, bool>,
+    spawn_failures: BTreeMap<String, String>,
     spawned_panes_addressable: bool,
     liveness: BTreeMap<String, PaneLiveness>,
     default_liveness: PaneLiveness,
@@ -42,6 +43,7 @@ impl Default for OfflineState {
             targets: Vec::new(),
             windows: Vec::new(),
             pane_presence: BTreeMap::new(),
+            spawn_failures: BTreeMap::new(),
             spawned_panes_addressable: true,
             liveness: BTreeMap::new(),
             default_liveness: PaneLiveness::Unknown,
@@ -102,6 +104,13 @@ impl OfflineTransport {
         self
     }
 
+    pub fn with_spawn_failure(self, window: impl Into<String>, error: impl Into<String>) -> Self {
+        self.with_state(|state| {
+            state.spawn_failures.insert(window.into(), error.into());
+        });
+        self
+    }
+
     pub fn with_spawned_panes_addressable(self, present: bool) -> Self {
         self.with_state(|state| state.spawned_panes_addressable = present);
         self
@@ -149,10 +158,16 @@ impl OfflineTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-    ) -> SpawnResult {
+    ) -> Result<SpawnResult, TransportError> {
         let pane_index = self.with_state(|state| {
             state.calls.push(kind);
             state.spawns.push(SpawnRecord { kind: kind.to_string(), argv: argv.to_vec() });
+            if let Some(error) = state.spawn_failures.get(window.as_str()) {
+                return Err(TransportError::Spawn {
+                    backend: BackendKind::Tmux,
+                    source: std::io::Error::other(error.clone()),
+                });
+            }
             if kind == "spawn_first" && !state.session_absent_after_spawn_first {
                 state.session_present = true;
             }
@@ -160,14 +175,14 @@ impl OfflineTransport {
             state
                 .pane_presence
                 .insert(format!("%{pane_index}"), state.spawned_panes_addressable);
-            pane_index
-        });
-        SpawnResult {
+            Ok(pane_index)
+        })?;
+        Ok(SpawnResult {
             pane_id: PaneId::new(format!("%{pane_index}")),
             session: session.clone(),
             window: window.clone(),
             child_pid: None,
-        }
+        })
     }
 
     fn inject_report() -> InjectReport {
@@ -194,7 +209,7 @@ impl Transport for OfflineTransport {
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result("spawn_first", session, window, argv))
+        self.spawn_result("spawn_first", session, window, argv)
     }
 
     fn spawn_into(
@@ -205,7 +220,7 @@ impl Transport for OfflineTransport {
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result("spawn_into", session, window, argv))
+        self.spawn_result("spawn_into", session, window, argv)
     }
 
     fn inject(

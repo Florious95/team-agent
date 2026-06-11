@@ -5,8 +5,15 @@
 //! 集成面由 tests/b5_leader_terminal_kill_red.rs 的真 tmux 契约覆盖,此处锁纯决策 + 4 反向 case。
 
 use crate::cli::lifecycle_port::{sessions_to_kill, KillDecision};
-use crate::transport::SessionName;
-use std::collections::BTreeSet;
+use crate::transport::{
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+    Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, Transport,
+    TransportError, WindowName,
+};
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 fn names(raw: &[&str]) -> Vec<SessionName> {
     raw.iter().map(|name| SessionName::new(*name)).collect()
@@ -101,4 +108,155 @@ fn union_prefix_and_anchor_no_double_count() {
         decision,
         KillDecision::KillIndividually { to_kill: vec![], spared: names(&["team-agent-leader-claude-ws-beef"]) }
     );
+}
+
+#[test]
+fn missing_coordinator_is_ok_when_shutdown_cleaned_session() {
+    let ws = tmp_shutdown_workspace("missing-coordinator-clean");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-lane-l1-clean-shutdown",
+            "agents": {
+                "fake_impl": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "fake_impl"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        None,
+        &CleanShutdownTransport::new(),
+    )
+    .expect("shutdown should complete");
+    assert_eq!(out["coordinator"]["status"], json!("missing"));
+    assert_eq!(
+        out["ok"], json!(true),
+        "coordinator.status=missing alone must not make a fully cleaned shutdown partial: {out}"
+    );
+    assert_eq!(out["status"], json!("ok"));
+    assert_eq!(out["residuals"]["sessions"], json!([]));
+    assert_eq!(out["residuals"]["processes"], json!([]));
+}
+
+fn tmp_shutdown_workspace(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ta-shutdown-{tag}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(dir.join(".team").join("runtime")).unwrap();
+    dir
+}
+
+struct CleanShutdownTransport {
+    session_present: Mutex<bool>,
+}
+
+impl CleanShutdownTransport {
+    fn new() -> Self {
+        Self { session_present: Mutex::new(true) }
+    }
+}
+
+impl Transport for CleanShutdownTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+
+    fn spawn_first(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _argv: &[String],
+        _cwd: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        unimplemented!("shutdown test does not spawn")
+    }
+
+    fn spawn_into(
+        &self,
+        _session: &SessionName,
+        _window: &WindowName,
+        _argv: &[String],
+        _cwd: &Path,
+        _env: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        unimplemented!("shutdown test does not spawn")
+    }
+
+    fn inject(
+        &self,
+        _target: &Target,
+        _payload: &InjectPayload,
+        _submit: Key,
+        _bracketed: bool,
+    ) -> Result<InjectReport, TransportError> {
+        unimplemented!("shutdown test does not inject")
+    }
+
+    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText { text: String::new(), range })
+    }
+
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
+        Ok(None)
+    }
+
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<crate::model::enums::PaneLiveness, TransportError> {
+        Ok(crate::model::enums::PaneLiveness::Live)
+    }
+
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+        Ok(*self.session_present.lock().unwrap())
+    }
+
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+
+    fn set_session_env(
+        &self,
+        _session: &SessionName,
+        _key: &str,
+        _value: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+
+    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        *self.session_present.lock().unwrap() = false;
+        Ok(())
+    }
+
+    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
 }

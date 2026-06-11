@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.13
+
+- **Copilot is now end-to-end usable** as both a leader and a worker provider:
+  - The Copilot startup `Confirm folder trust / Do you trust the files in this folder?` prompt is recognised and auto-confirmed by the framework, so a fresh Copilot leader/worker boots all the way to ready instead of staying parked on the trust screen.
+  - The leader's owner / receiver attribution is correct under a Copilot leader — previously `leader.provider=copilot` but `leader_receiver.provider=codex` / `team_owner.provider=codex` because the quick-start seed path defaulted to `codex` when the launcher couldn't observe the leader yet. The unified attribution path (E22) now covers this sixth call site so the seeded receiver/owner provider matches the real leader provider.
+  - `team-agent shutdown` on a Copilot-led team no longer misidentifies the leader pane — the rediscovery path that already understood codex/claude leaders now also understands `copilot`, so bare shutdown reliably spares the leader instead of killing it.
+- **`team-agent restart` no longer takes the whole team down when one worker can't resume**: the spawn loop now isolates per-worker failures — a worker whose resume fails is marked failed and the other workers continue. `restart` exit code now reports `partial` when some workers came up and some didn't, instead of a single all-or-nothing `ok`/`fail`. A single failed `--resume` no longer kills the shared tmux session and starves the next spawn.
+- **Nested team state is preserved on merge**: when a child team launches inside a workspace that already hosts a team, the parent team's `teams` map is preserved through the launched-state merge instead of being overwritten. A user-supplied `owner_team_id` is now ignored with a warning rather than silently honoured, so it cannot point a child team at the wrong owner.
+- **Honest exit codes in two more places**: a `team-agent shutdown` against a workspace whose coordinator was already absent now reports `ok` cleanly instead of falsely reporting `partial`; `remove-agent` and friends now return `ok: false` envelopes on Refused outcomes instead of returning `ok: true` for a no-op.
+
 ## 0.3.12
 
 - **Coordinator now detaches from the launching terminal**: the coordinator daemon process is spawned with `setsid` so it becomes its own session/process-group leader instead of inheriting the launcher's. Closing the terminal that ran `team-agent quick-start` (or disconnecting an SSH session) no longer sends `SIGHUP` to the coordinator and no longer kills it as a side effect — common cause of "coordinator died after I closed the window" on WSL/SSH workflows.

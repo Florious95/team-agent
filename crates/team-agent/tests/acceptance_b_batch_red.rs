@@ -100,59 +100,6 @@ delivery trunk does not depend on the monitor face (N36 three-way availability);
     assert!(failures.is_empty(), "B-4 monitor isolation contract failed:\n{}", failures.join("\n"));
 }
 
-/// B-4 reverse (cr `classify_unsupported_dedup_no_flood`): the same unsupported copilot
-/// state across TWO ticks must emit exactly one provider.classify.unsupported event
-/// (P4 check_key dedup). Today it re-emits every tick → RED.
-#[test]
-#[serial(env)]
-fn b4_classify_unsupported_dedup_no_flood() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b4-dedup");
-    seed_copilot_team_state(&ws, "cp1", true);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealRegistry),
-        Box::new(QuietTransport),
-    );
-    let _ = coord.tick();
-    let _ = coord.tick();
-
-    let count = events_text(&ws)
-        .lines()
-        .filter(|l| l.contains("provider.classify.unsupported"))
-        .count();
-    assert_eq!(
-        count, 1,
-        "B-4: an unchanged unsupported state must emit provider.classify.unsupported ONCE \
-across two ticks (P4 check_key dedup, no flood); got {count}"
-    );
-}
-
-/// B-4 reverse (cr `classify_unsupported_emits_first_time`): dedup must not silently
-/// swallow the FIRST emission — one tick must still produce exactly one event.
-#[test]
-#[serial(env)]
-fn b4_classify_unsupported_emits_first_time() {
-    let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
-    let ws = tmp_ws("b4-first");
-    seed_copilot_team_state(&ws, "cp1", true);
-    let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
-        Box::new(RealRegistry),
-        Box::new(QuietTransport),
-    );
-    let _ = coord.tick();
-    let count = events_text(&ws)
-        .lines()
-        .filter(|l| l.contains("provider.classify.unsupported"))
-        .count();
-    assert_eq!(
-        count, 1,
-        "B-4: the first unsupported observation must still emit exactly one event (dedup \
-must not silently swallow the first); got {count}"
-    );
-}
-
 /// B-4 reverse (cr `force_paste_flag_not_in_argv`): the --force-paste flag (REJECTed —
 /// a back-door on a gate that does not exist) must never be introduced into the
 /// delivery / provider command code. Source grep guard across the crate.

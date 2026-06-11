@@ -212,35 +212,49 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     }
-    let mut last_spawned: Option<AgentId> = None;
+    let mut successful_agents: Vec<RestartedAgent> = Vec::new();
+    let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
+    // B5 restart isolation loop: per-agent spawn failures must be recorded and
+    // isolated here. Do not reintroduce `?`, `break`, or `return` inside this loop.
+    // BEGIN_B5_RESTART_ISOLATION_LOOP
     for decision in &plan.decisions {
-        let agent = state
+        let Some(agent) = state
             .get("agents")
             .and_then(|v| v.get(decision.agent_id.as_str()))
-            .ok_or_else(|| {
-                LifecycleError::RequirementUnmet(format!(
-                    "agent {} not found for restart",
-                    decision.agent_id
-                ))
-            })?
-            .clone();
+            .cloned()
+        else {
+            let error = format!("agent {} not found for restart", decision.agent_id);
+            mark_agent_restart_failed(&mut state, decision, &error);
+            let _ = write_restart_agent_failed_event(&selected.run_workspace, decision, "spawn", &error);
+            failed_agents.push(restart_failed_agent(decision, "spawn", error));
+            continue;
+        };
         let session_id = if matches!(decision.restart_mode, StartMode::Resumed) {
             decision.session_id.as_ref()
         } else {
             None
         };
-        let session_live = session_live_or_default(transport, &session_name, false);
+        let mut session_live = session_live_or_default(transport, &session_name, false);
         if !session_live {
-            if let Some(previous) = &last_spawned {
-                return Err(LifecycleError::Transport(format!(
+            if let Some(previous) = successful_agents.pop() {
+                let error = format!(
                     "session_disappeared_after_spawn: provider_resume_exited for {}; session {} disappeared before spawning {}",
-                    previous,
+                    previous.agent_id,
                     session_name.as_str(),
                     decision.agent_id
-                )));
+                );
+                mark_agent_restart_failed(&mut state, &previous, &error);
+                let _ = write_restart_agent_failed_event(
+                    &selected.run_workspace,
+                    &previous,
+                    "resume",
+                    &error,
+                );
+                failed_agents.push(restart_failed_agent(&previous, "resume", error));
+                session_live = false;
             }
         }
-        let spawn = spawn_agent_window(
+        let spawn = match spawn_agent_window(
             &selected.run_workspace,
             &session_name,
             &decision.agent_id,
@@ -250,10 +264,33 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             transport,
             Some(&safety),
             Some(spec_workspace),
-        )?;
-        verify_spawned_agent_live(&decision.agent_id, &spawn, transport)?;
-        mark_agent_respawned(&mut state, &decision.agent_id, &spawn, transport, &safety)?;
-        last_spawned = Some(decision.agent_id.clone());
+        ) {
+            Ok(spawn) => spawn,
+            Err(error) => {
+                let error = error.to_string();
+                mark_agent_restart_failed(&mut state, decision, &error);
+                let _ = write_restart_agent_failed_event(&selected.run_workspace, decision, "spawn", &error);
+                failed_agents.push(restart_failed_agent(decision, "spawn", error));
+                continue;
+            }
+        };
+        if let Err(error) = verify_spawned_agent_live(&decision.agent_id, &spawn, transport)
+            .and_then(|_| {
+                mark_agent_respawned(&mut state, &decision.agent_id, &spawn, transport, &safety)
+            })
+        {
+            let error = error.to_string();
+            mark_agent_restart_failed(&mut state, decision, &error);
+            let _ = write_restart_agent_failed_event(
+                &selected.run_workspace,
+                decision,
+                "readiness",
+                &error,
+            );
+            failed_agents.push(restart_failed_agent(decision, "readiness", error));
+            continue;
+        }
+        successful_agents.push(decision.clone());
         if let Some(agent) = state
             .get_mut("agents")
             .and_then(serde_json::Value::as_object_mut)
@@ -263,14 +300,31 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             persist_effective_approval_policy_for_restart(agent, &safety);
         }
     }
+    // END_B5_RESTART_ISOLATION_LOOP
     crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if successful_agents.is_empty() && !failed_agents.is_empty() {
+        let attach_commands = Vec::new();
+        let next_actions = restart_failure_next_actions(&failed_agents);
+        write_restart_completed_event(
+            &selected.run_workspace,
+            &successful_agents,
+            &failed_agents,
+            "fail",
+        )?;
+        return Ok(RestartReport::Failed {
+            session_name,
+            failed_agents,
+            next_actions,
+            attach_commands,
+        });
+    }
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
         &state,
         &session_name,
-        &plan.decisions,
+        &successful_agents,
         transport,
         restart_readiness_deadline(readiness_deadline_ms),
         restart_readiness_poll_interval(),
@@ -278,14 +332,37 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     let attach_commands = crate::tmux_backend::attach_commands_for_windows(
         &selected.run_workspace,
         &session_name,
-        plan.decisions
+        successful_agents
             .iter()
             .map(|decision| decision.agent_id.as_str()),
     );
-    let next_actions = attach_commands.clone();
+    let mut next_actions = attach_commands.clone();
+    if !failed_agents.is_empty() {
+        next_actions.extend(restart_failure_next_actions(&failed_agents));
+        write_restart_completed_event(
+            &selected.run_workspace,
+            &successful_agents,
+            &failed_agents,
+            "partial",
+        )?;
+        return Ok(RestartReport::Partial {
+            session_name,
+            agents: successful_agents,
+            failed_agents,
+            coordinator_started,
+            next_actions,
+            attach_commands,
+        });
+    }
+    write_restart_completed_event(
+        &selected.run_workspace,
+        &successful_agents,
+        &failed_agents,
+        "ok",
+    )?;
     Ok(RestartReport::Restarted {
         session_name,
-        agents: plan.decisions,
+        agents: successful_agents,
         coordinator_started,
         next_actions,
         attach_commands,
@@ -749,6 +826,134 @@ fn mark_agent_respawned(
     Ok(())
 }
 
+fn restart_failed_agent(
+    decision: &RestartedAgent,
+    phase: impl Into<String>,
+    error: String,
+) -> RestartFailedAgent {
+    RestartFailedAgent {
+        agent_id: decision.agent_id.clone(),
+        restart_mode: decision.restart_mode,
+        decision: decision.decision,
+        session_id: decision.session_id.clone(),
+        phase: phase.into(),
+        error,
+    }
+}
+
+fn mark_agent_restart_failed(
+    state: &mut serde_json::Value,
+    decision: &RestartedAgent,
+    error: &str,
+) {
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(decision.agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    agent.insert("status".to_string(), serde_json::json!("failed"));
+    agent.insert("restart_error".to_string(), serde_json::json!(error));
+    agent.insert(
+        "restart_failed_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    agent.remove("pane_id");
+    agent.remove("pane_pid");
+}
+
+fn write_restart_agent_failed_event(
+    workspace: &Path,
+    decision: &RestartedAgent,
+    phase: &str,
+    error: &str,
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "restart.agent_failed",
+            serde_json::json!({
+                "agent_id": decision.agent_id.as_str(),
+                "restart_mode": start_mode_wire(decision.restart_mode),
+                "decision": resume_decision_wire(decision.decision),
+                "session_id": decision.session_id.as_ref().map(|session| session.as_str()),
+                "phase": phase,
+                "error": error,
+                "action": format!(
+                    "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                    decision.agent_id,
+                    decision.agent_id
+                ),
+                "log": format!(
+                    ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
+                    decision.agent_id
+                ),
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn write_restart_completed_event(
+    workspace: &Path,
+    successful_agents: &[RestartedAgent],
+    failed_agents: &[RestartFailedAgent],
+    rc: &str,
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "restart.completed",
+            serde_json::json!({
+                "rc": rc,
+                "status": rc,
+                "successful_agents": successful_agents
+                    .iter()
+                    .map(|agent| agent.agent_id.as_str())
+                    .collect::<Vec<_>>(),
+                "failed_agents": failed_agents
+                    .iter()
+                    .map(|failure| serde_json::json!({
+                        "agent_id": failure.agent_id.as_str(),
+                        "phase": failure.phase,
+                        "error": failure.error,
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn restart_failure_next_actions(failed_agents: &[RestartFailedAgent]) -> Vec<String> {
+    failed_agents
+        .iter()
+        .map(|failure| {
+            format!(
+                "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                failure.agent_id, failure.agent_id
+            )
+        })
+        .collect()
+}
+
+fn start_mode_wire(mode: StartMode) -> &'static str {
+    match mode {
+        StartMode::Resumed => "resumed",
+        StartMode::Fresh => "fresh",
+        StartMode::FreshAfterMissingRollout => "fresh_after_missing_rollout",
+        StartMode::Noop => "noop",
+    }
+}
+
+fn resume_decision_wire(decision: ResumeDecision) -> &'static str {
+    match decision {
+        ResumeDecision::Resume => "resume",
+        ResumeDecision::FreshStart => "fresh_start",
+        ResumeDecision::Refuse => "refuse",
+    }
+}
+
 fn write_restart_resume_decision_events(
     workspace: &Path,
     state: &serde_json::Value,
@@ -768,11 +973,7 @@ fn write_restart_resume_decision_events(
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         let session_id = decision.session_id.as_ref().map(|s| s.as_str().to_string());
-        let decision_wire = match decision.decision {
-            ResumeDecision::Resume => "resume",
-            ResumeDecision::FreshStart => "fresh_start",
-            ResumeDecision::Refuse => "refuse",
-        };
+        let decision_wire = resume_decision_wire(decision.decision);
         write_restart_resume_decision_event(
             workspace,
             decision.agent_id.as_str(),

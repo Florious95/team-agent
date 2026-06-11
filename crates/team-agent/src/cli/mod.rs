@@ -452,7 +452,9 @@ pub mod lifecycle_port {
         let coordinator_pid = stopped
             .as_ref()
             .and_then(|stopped| stopped.pid.map(|p| p.get()));
-        let ok = stopped.as_ref().map(|stopped| stopped.ok).unwrap_or(true)
+        let coordinator_clean =
+            !coordinator_timeout && stopped.as_ref().map(|stopped| stopped.ok).unwrap_or(true);
+        let ok = coordinator_clean
             && kill_error.is_none()
             && session_residuals.is_empty()
             && process_residuals.is_empty()
@@ -1484,9 +1486,28 @@ pub mod lifecycle_port {
         }
         let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::remove_agent(workspace, &agent_id, from_spec, force, team) {
-            Ok(report) => {
-                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
-            }
+            Ok(report @ crate::lifecycle::RemoveAgentOutcome::Removed { .. }) => Ok(json!({
+                "ok": true,
+                "agent_id": agent,
+                "status": "removed",
+                "report": format!("{report:?}"),
+            })),
+            Ok(crate::lifecycle::RemoveAgentOutcome::RefusedFromSpecConfirm { .. }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent,
+                "status": "refused",
+                "reason": "from_spec_confirm_required",
+                "error": "remove-agent requires --from-spec --confirm for spec-defined agents",
+                "action": "rerun with --from-spec --confirm, or omit --from-spec only for dynamic agents",
+            })),
+            Ok(crate::lifecycle::RemoveAgentOutcome::RefusedForceRequired { .. }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent,
+                "status": "refused",
+                "reason": "force_required",
+                "error": "agent is running; remove-agent requires --force",
+                "action": "rerun with --force to stop and remove the running agent",
+            })),
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -1910,6 +1931,71 @@ pub mod lifecycle_port {
                 "session_name": session_name.as_str(),
                 "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
                 "coordinator_started": coordinator_started,
+                "next_actions": next_actions,
+                "attach_commands": attach_commands,
+            }),
+            crate::lifecycle::RestartReport::Partial {
+                session_name,
+                agents,
+                failed_agents,
+                coordinator_started,
+                next_actions,
+                attach_commands,
+            } => json!({
+                "ok": false,
+                "status": "partial",
+                "reason": "restart_agent_failed",
+                "session_name": session_name.as_str(),
+                "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
+                "failed_agents": failed_agents.iter().map(|failure| json!({
+                    "agent_id": failure.agent_id.as_str(),
+                    "restart_mode": failure.restart_mode,
+                    "decision": failure.decision,
+                    "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
+                    "phase": failure.phase,
+                    "error": failure.error,
+                    "action": format!(
+                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                        failure.agent_id,
+                        failure.agent_id
+                    ),
+                    "log": format!(
+                        ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
+                        failure.agent_id
+                    ),
+                })).collect::<Vec<_>>(),
+                "coordinator_started": coordinator_started,
+                "next_actions": next_actions,
+                "attach_commands": attach_commands,
+            }),
+            crate::lifecycle::RestartReport::Failed {
+                session_name,
+                failed_agents,
+                next_actions,
+                attach_commands,
+            } => json!({
+                "ok": false,
+                "status": "failed",
+                "reason": "restart_all_agents_failed",
+                "session_name": session_name.as_str(),
+                "agents": [],
+                "failed_agents": failed_agents.iter().map(|failure| json!({
+                    "agent_id": failure.agent_id.as_str(),
+                    "restart_mode": failure.restart_mode,
+                    "decision": failure.decision,
+                    "session_id": failure.session_id.as_ref().map(|session| session.as_str()),
+                    "phase": failure.phase,
+                    "error": failure.error,
+                    "action": format!(
+                        "inspect worker {} output, then restart that worker with `team-agent restart-agent {}` or rerun `team-agent restart --allow-fresh`",
+                        failure.agent_id,
+                        failure.agent_id
+                    ),
+                    "log": format!(
+                        ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
+                        failure.agent_id
+                    ),
+                })).collect::<Vec<_>>(),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
             }),

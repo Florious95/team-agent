@@ -9,7 +9,7 @@ use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::{load_runtime_state, save_runtime_state};
-use crate::transport::{SessionName, Target, Transport, WindowName};
+use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use super::*;
 
@@ -595,7 +595,7 @@ fn merge_workspace_team_state_with_key(
     launched_key: &str,
 ) -> serde_json::Value {
     let mut launched_obj = launched.as_object().cloned().unwrap_or_default();
-    let mut teams = launched
+    let mut teams = existing
         .get("teams")
         .and_then(serde_json::Value::as_object)
         .cloned()
@@ -636,6 +636,41 @@ fn merge_workspace_team_state_with_key(
     teams.insert(launched_key.to_string(), launched_entry);
     merged.insert("teams".to_string(), serde_json::Value::Object(teams));
     serde_json::Value::Object(merged)
+}
+
+#[cfg(test)]
+mod merge_workspace_team_state_with_key_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn empty_top_level_existing_session_preserves_existing_teams() {
+        let existing = json!({
+            "session_name": "",
+            "active_team_key": "parent",
+            "teams": {
+                "parent": {
+                    "session_name": "team-parent",
+                    "agents": {"parent_worker": {"status": "running"}}
+                }
+            }
+        });
+        let launched = json!({
+            "session_name": "team-child",
+            "agents": {"child_worker": {"status": "running"}}
+        });
+        let merged = merge_workspace_team_state_with_key(&existing, &launched, "child");
+        assert_eq!(
+            merged.pointer("/teams/parent/session_name"),
+            Some(&json!("team-parent")),
+            "existing.teams must survive even when existing.session_name is empty: {merged}"
+        );
+        assert_eq!(
+            merged.pointer("/teams/child/session_name"),
+            Some(&json!("team-child")),
+            "launched team must still be inserted under its runtime key: {merged}"
+        );
+    }
 }
 
 fn promote_launched_binding_from_team_entry(launched: &mut serde_json::Value, launched_key: &str) {
@@ -849,6 +884,29 @@ fn write_invalid_leader_pane_env_warning(workspaces: &[&Path], pane_id_raw: &str
     }
 }
 
+fn warn_ignored_owner_team_id(workspace: &Path, team_dir: &Path, runtime_team_key: &str) {
+    let Ok(Some(ignored)) = crate::compiler::ignored_owner_team_id_from_team_md(team_dir) else {
+        return;
+    };
+    eprintln!("Warning: ignored TEAM.md {}={}", ignored.field, ignored.value);
+    eprintln!("Reason: owner identity is the canonical runtime team key ({runtime_team_key}), not TEAM.md front matter");
+    eprintln!("Action: remove {} from TEAM.md", ignored.field);
+    if let Err(err) = crate::event_log::EventLog::new(workspace).write(
+        "spec.field_ignored",
+        serde_json::json!({
+            "field": ignored.field,
+            "source": team_dir.join("TEAM.md").to_string_lossy().to_string(),
+            "value": ignored.value,
+            "warning": "ignored user-set owner_team_id",
+            "reason": "owner identity is derived from the canonical runtime team key",
+            "action": "remove owner_team_id from TEAM.md",
+            "runtime_team_key": runtime_team_key,
+        }),
+    ) {
+        eprintln!("Warning: spec.field_ignored event write failed: {err}");
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LeaderPaneEnvState {
     Live,
@@ -932,12 +990,13 @@ fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &
     let Some(owner) = unbound_launched_owner(launched, launched_key) else {
         return;
     };
-    let provider = launched
-        .get("team_owner")
-        .and_then(|owner| owner.get("provider"))
+    let Some(provider) = owner
+        .get("provider")
         .and_then(serde_json::Value::as_str)
         .filter(|provider| !provider.is_empty())
-        .unwrap_or("codex");
+    else {
+        return;
+    };
     let owner_epoch = 1u64;
     let receiver = serde_json::json!({
         "mode": "direct_tmux",
@@ -958,12 +1017,7 @@ fn unbound_launched_owner(
     launched: &serde_json::Value,
     launched_key: &str,
 ) -> Option<serde_json::Value> {
-    let provider = launched
-        .get("team_owner")
-        .and_then(|owner| owner.get("provider"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or("codex");
+    let provider = unbound_launched_provider(launched)?;
     let machine_fingerprint = launched
         .get("team_owner")
         .and_then(|owner| owner.get("machine_fingerprint"))
@@ -992,6 +1046,97 @@ fn unbound_launched_owner(
         "claimed_via": "quick-start",
         "os_user": os_user,
     }))
+}
+
+fn unbound_launched_provider(launched: &serde_json::Value) -> Option<String> {
+    if let Some(provider) = launched
+        .get("team_owner")
+        .and_then(|owner| owner.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|provider| !provider.is_empty())
+        .and_then(parse_provider)
+        .and_then(provider_wire_string)
+    {
+        return Some(provider);
+    }
+    let workspace = launched
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|workspace| !workspace.is_empty())?;
+    let pane = launched
+        .get("team_owner")
+        .and_then(|owner| owner.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())?;
+    let target = PaneId::new(pane);
+    crate::tmux_backend::TmuxBackend::for_workspace(Path::new(workspace))
+        .list_targets()
+        .ok()?
+        .into_iter()
+        .find(|info| info.pane_id == target)
+        .and_then(|info| crate::leader::attribute_pane_provider(&info))
+        .and_then(provider_wire_string)
+}
+
+fn provider_wire_string(provider: Provider) -> Option<String> {
+    serde_json::to_value(provider)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+#[cfg(test)]
+mod e22_unbound_owner_provider_tests {
+    use super::*;
+
+    #[test]
+    fn unbound_owner_preserves_explicit_copilot_provider() {
+        let mut launched = serde_json::json!({
+            "workspace": "/tmp/team-agent-e22",
+            "team_owner": {
+                "provider": "copilot",
+                "machine_fingerprint": "machine"
+            }
+        });
+
+        seed_unbound_launched_owner(&mut launched, "team-e22");
+
+        assert_eq!(
+            launched
+                .pointer("/team_owner/provider")
+                .and_then(serde_json::Value::as_str),
+            Some("copilot")
+        );
+        assert_eq!(
+            launched
+                .pointer("/leader_receiver/provider")
+                .and_then(serde_json::Value::as_str),
+            Some("copilot")
+        );
+    }
+
+    #[test]
+    fn unbound_owner_without_attributed_provider_does_not_default_codex() {
+        let mut launched = serde_json::json!({
+            "workspace": "/tmp/team-agent-e22",
+            "team_owner": {
+                "machine_fingerprint": "machine"
+            }
+        });
+
+        seed_unbound_launched_owner(&mut launched, "team-e22");
+
+        assert!(
+            launched.get("leader_receiver").is_none(),
+            "unattributed unbound owner must not seed a codex receiver: {launched}"
+        );
+        assert!(
+            launched
+                .pointer("/team_owner/provider")
+                .and_then(serde_json::Value::as_str)
+                != Some("codex"),
+            "unattributed unbound owner must not silently become codex: {launched}"
+        );
+    }
 }
 
 fn owner_pane_belongs_to_other_team(
@@ -2144,6 +2289,7 @@ pub fn quick_start_with_transport_in_workspace(
     let state_team_key = explicit_team_key.clone().unwrap_or_else(|| {
         runtime_team_key_for_spec(&agents_dir.join("team.spec.yaml"), &spec, &session_name)
     });
+    warn_ignored_owner_team_id(workspace.as_path(), agents_dir, &state_team_key);
     // E5 spec 迁移:spec 写到 .team/runtime/<team_key>/(中间产物,绝不落用户目录 agents_dir)。
     // Bug2:原子写(tmp+rename),避免半截 spec。
     let spec_path = crate::model::paths::runtime_spec_path(&workspace, &state_team_key);

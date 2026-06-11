@@ -19,8 +19,8 @@
 //!     identity-first per the 0.3.4 B2/D6 lock)
 //!  3. permission mapping (C-2-1, via the prompt's Permission note + argv deny flags)
 //!  4. fork = structured CapabilityUnsupported (C-4-2/3)
-//!  5. phase-1 classify -> Unknown + unsupported event; Unknown never idles (N11,
-//!     C-3-1/4)
+//!  5. startup recognizer supports copilot trust/ready; turn-state Unknown never idles
+//!     (N11, C-3-1/4)
 //!  6. leader session naming falls under the B5 `team-agent-leader-` prefix protection
 //!  7. session capture = sqlite point query, no directory traversal (PERF P2 lock)
 
@@ -411,13 +411,11 @@ missing `fork` capability (Python unsupported-plug parity); got {text}"
     );
 }
 
-/// Face 5 (C-3-1/4 + N11; verdict `classify_copilot_returns_none_unknown`,
-/// `unsupported_event_emitted_phase1`, `copilot_worker_never_counted_in_idle_takeover`):
-/// phase-1 copilot turn-state classification is an EXPLICIT Unknown — the fact
-/// extractors yield None, a real tick over a copilot worker must emit the
-/// `provider.classify.unsupported` event with the literal phase-1 reason (no silent
-/// degradation), and an unknown copilot node blocks the idle take-over ping
-/// (unknown ≠ idle, N11).
+/// Face 5 (B12 + C-3-1/4 + N11): copilot startup trust/ready recognition is
+/// supported from the fixture-backed recognizer, so a real tick over a copilot
+/// worker must no longer emit the old `provider.classify.unsupported` event or
+/// disturb an attached leader receiver. Turn-state facts remain absent for phase
+/// 1, and an unknown copilot node still blocks idle take-over (unknown ≠ idle).
 #[test]
 #[serial(env)]
 fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
@@ -435,8 +433,22 @@ fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
         ));
     }
 
-    // C-3-4: the explicit unsupported event must land when the runtime actually
-    // classifies a copilot worker — driven through a REAL tick.
+    if team_agent::provider::classify_copilot_startup_screen(
+        team_agent::provider::COPILOT_TRUST_PROMPT_MARKER,
+    ) != team_agent::provider::StartupScreenDecision::AnswerWorkspaceTrust
+    {
+        failures.push("B12: copilot trust fixture must be recognized as actionable".to_string());
+    }
+    if team_agent::provider::classify_copilot_startup_screen(
+        team_agent::provider::COPILOT_READY_MARKER,
+    ) != team_agent::provider::StartupScreenDecision::Ready
+    {
+        failures.push("B12: copilot ready fixture must be recognized as ready".to_string());
+    }
+
+    // C-3-4/B12: the old unsupported event was a phase-1 placeholder. Once the
+    // fixture-backed recognizer exists, a real tick over a copilot worker must
+    // not re-emit it or poison leader receiver attachment.
     let ws = tmp_ws("classify");
     let rollout = ws.join("rollout-cp1.jsonl");
     std::fs::write(&rollout, "{\"junk\":true}\n").unwrap();
@@ -454,6 +466,13 @@ fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
                     "spawn_cwd": ws.to_string_lossy(),
                 },
             },
+            "leader_receiver": {
+                "status": "attached",
+                "mode": "direct_tmux",
+                "pane_id": "%leader",
+                "provider": "copilot",
+                "tmux_socket": "default",
+            },
         }),
     )
     .unwrap();
@@ -467,21 +486,22 @@ fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
     let unsupported_line = events
         .lines()
         .find(|line| line.contains("classify") && line.contains("unsupported"));
-    match unsupported_line {
-        None => failures.push(format!(
-            "C-3-4: a tick over a copilot worker must emit the explicit \
-provider.classify.unsupported event (reason phase1_unknown_pending_sample), not degrade \
-silently; events tail={}",
+    if let Some(line) = unsupported_line {
+        failures.push(format!(
+            "B12/C-3-4: copilot startup classify is supported; tick must not emit the old \
+provider.classify.unsupported placeholder event; line={line}"
+        ));
+    }
+    let after = team_agent::state::persist::load_runtime_state(&ws).unwrap();
+    if after
+        .pointer("/leader_receiver/status")
+        .and_then(serde_json::Value::as_str)
+        != Some("attached")
+    {
+        failures.push(format!(
+            "B12: copilot leader_receiver must remain attached after tick; events tail={} state={after}",
             events.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
-        )),
-        Some(line) => {
-            if !line.contains("phase1_unknown_pending_sample") || !line.contains("copilot") {
-                failures.push(format!(
-                    "C-3-4: the unsupported event must carry provider copilot and the \
-literal phase-1 reason; line={line}"
-                ));
-            }
-        }
+        ));
     }
 
     // N11: an unknown copilot node must BLOCK the take-over ping.

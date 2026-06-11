@@ -1030,24 +1030,151 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         matches!(result, Ok(RestartReport::Restarted { coordinator_started: true, .. })),
         "restart must reach RestartReport::Restarted with coordinator_started=true (AlreadyRunning, seeded); got {result:?}"
     );
+    let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
+    let completed = events
+        .iter()
+        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.completed"))
+        .expect("restart.completed event for successful restart");
+    assert_eq!(completed.get("rc").and_then(|v| v.as_str()), Some("ok"));
 
     let ws = restart_ws_two_resumable_workers();
     let dead_after_first = OfflineTransport::new().with_session_absent_after_spawn_first();
-    let result = restart_with_transport(&ws, false, None, &dead_after_first);
+    let result =
+        restart_with_transport_with_readiness_deadline(&ws, false, None, &dead_after_first, Some(0));
     let recorded = dead_after_first.spawn_records();
     assert_eq!(
         recorded.len(),
-        1,
-        "if the session disappears after alpha, restart must stop before spawning bravo; got result={result:?} recorded={recorded:?}"
+        2,
+        "if the session disappears after alpha, restart must isolate alpha and still try bravo; got result={result:?} recorded={recorded:?}"
     );
     assert!(
-        recorded.iter().all(|(kind, _)| kind != "spawn_into"),
-        "restart must not call spawn_into/new-window for bravo against a dead server; result={result:?} recorded={recorded:?}"
+        recorded.iter().all(|(kind, _)| kind == "spawn_first"),
+        "restart must not call spawn_into/new-window against a dead server; result={result:?} recorded={recorded:?}"
     );
-    let error = format!("{result:?}");
     assert!(
-        error.contains("session_disappeared_after_spawn") || error.contains("provider_resume_exited"),
-        "restart must report the first resumed agent/session disappearance explicitly, not continue to a later no-server failure; result={result:?}"
+        dead_after_first.calls().iter().all(|call| *call != "kill_session"),
+        "a single worker/session disappearance must not trigger another shared-session kill; calls={:?}",
+        dead_after_first.calls()
+    );
+    let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
+    let failed = events
+        .iter()
+        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.agent_failed"))
+        .expect("restart.agent_failed event for isolated alpha");
+    assert_eq!(failed.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
+    assert!(
+        failed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|error| error.contains("session_disappeared_after_spawn")),
+        "restart must report the first resumed agent/session disappearance explicitly; event={failed} result={result:?}"
+    );
+}
+
+#[test]
+fn restart_spawn_failure_isolated_to_partial_report() {
+    let ws = restart_ws_two_resumable_workers();
+    let transport = OfflineTransport::new().with_spawn_failure("bravo", "injected bravo failure");
+
+    let result = restart_with_transport(&ws, false, None, &transport);
+
+    let report = result.expect("single worker failure must be represented as partial report");
+    let RestartReport::Partial {
+        agents,
+        failed_agents,
+        coordinator_started,
+        ..
+    } = report
+    else {
+        panic!("single worker failure must return RestartReport::Partial; got {report:?}");
+    };
+    assert!(coordinator_started, "partial restart still starts coordinator for successful agents");
+    assert_eq!(
+        agents.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
+        vec!["alpha"]
+    );
+    assert_eq!(failed_agents.len(), 1);
+    assert_eq!(failed_agents[0].agent_id.as_str(), "bravo");
+    assert_eq!(failed_agents[0].phase, "spawn");
+
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(state.pointer("/agents/alpha/status").and_then(|v| v.as_str()), Some("running"));
+    assert_eq!(state.pointer("/agents/bravo/status").and_then(|v| v.as_str()), Some("failed"));
+    assert!(
+        state
+            .pointer("/agents/bravo/restart_error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|error| error.contains("injected bravo failure")),
+        "failed agent must retain restart_error in state: {state}"
+    );
+
+    let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
+    let completed = events
+        .iter()
+        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.completed"))
+        .expect("restart.completed event for partial restart");
+    assert_eq!(completed.get("rc").and_then(|v| v.as_str()), Some("partial"));
+    assert!(
+        completed
+            .get("successful_agents")
+            .and_then(|v| v.as_array())
+            .is_some_and(|agents| agents.iter().any(|agent| agent.as_str() == Some("alpha"))),
+        "completed event must list successful agents: {completed}"
+    );
+    assert!(
+        completed
+            .get("failed_agents")
+            .and_then(|v| v.as_array())
+            .is_some_and(|agents| agents.iter().any(|agent| {
+                agent.get("agent_id").and_then(|v| v.as_str()) == Some("bravo")
+                    && agent.get("phase").and_then(|v| v.as_str()) == Some("spawn")
+            })),
+        "completed event must list failed agents with phase: {completed}"
+    );
+}
+
+#[test]
+fn restart_all_spawn_failures_return_failed_report() {
+    let ws = restart_ws_one_resumable_worker();
+    let transport = OfflineTransport::new().with_spawn_failure("alpha", "injected alpha failure");
+
+    let result = restart_with_transport(&ws, false, None, &transport);
+
+    let report = result.expect("all worker failures should return typed failed report");
+    let RestartReport::Failed { failed_agents, .. } = report else {
+        panic!("all worker failures must return RestartReport::Failed; got {report:?}");
+    };
+    assert_eq!(failed_agents.len(), 1);
+    assert_eq!(failed_agents[0].agent_id.as_str(), "alpha");
+    assert_eq!(failed_agents[0].phase, "spawn");
+
+    let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
+    let completed = events
+        .iter()
+        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.completed"))
+        .expect("restart.completed event for failed restart");
+    assert_eq!(completed.get("rc").and_then(|v| v.as_str()), Some("fail"));
+}
+
+#[test]
+fn restart_spawn_loop_keeps_failure_isolation_guard() {
+    let source = include_str!("../restart/rebuild.rs");
+    let start = source
+        .find("BEGIN_B5_RESTART_ISOLATION_LOOP")
+        .expect("B5 isolation loop start marker");
+    let end = source
+        .find("END_B5_RESTART_ISOLATION_LOOP")
+        .expect("B5 isolation loop end marker");
+    let body = &source[start..end];
+    for forbidden in ["?;", "break", "return "] {
+        assert!(
+            !body.contains(forbidden),
+            "B5 spawn loop must not fail-fast via {forbidden:?}; body={body}"
+        );
+    }
+    assert!(
+        body.contains("continue"),
+        "B5 spawn loop should isolate per-agent failures and continue; body={body}"
     );
 }
 

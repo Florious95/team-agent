@@ -264,55 +264,6 @@ impl Coordinator {
                     BTreeMap::new()
                 }
             };
-        // C-3-4 cr verdict — copilot 一期 classify→None(Unknown);为防 silent,
-        // tick 每次发现 copilot agent(从 state.agents 直接扫,不依赖 captures —
-        // 离线/未起 tmux 场景仍能写)就发 `provider.classify.unsupported` 事件
-        // (字面 reason=`phase1_unknown_pending_sample`,含 provider="copilot" + "classify"
-        // 串)。二期接 sqlite turns 表后这条删/降级,届时改 reason 区分。
-        //
-        // B-4 P4 / 036b 防 dedup-flood:同 (provider, agent_id, reason) 状态跨 tick
-        // 只发一次(check_key 范式,同 abnormal_check_key tick.rs:603 同精神);状态
-        // 变了才再发。check_key 落 state.agents.<id>.classify_unsupported.last_key,
-        // tick-only metadata,不进 #235 owner / receiver 等持久态。
-        let agents_snapshot: Vec<(String, Option<String>)> =
-            if let Some(agents) = state.get("agents").and_then(Value::as_object) {
-                agents
-                    .iter()
-                    .filter_map(|(agent_id, agent)| {
-                        let is_copilot = agent
-                            .get("provider")
-                            .and_then(Value::as_str)
-                            .and_then(parse_provider)
-                            .is_some_and(|p| matches!(p, crate::model::enums::Provider::Copilot));
-                        if !is_copilot {
-                            return None;
-                        }
-                        let last_key = agent
-                            .get("classify_unsupported")
-                            .and_then(|v| v.get("last_key"))
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        Some((agent_id.clone(), last_key))
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-        for (agent_id, last_key) in agents_snapshot {
-            let check_key = format!("copilot|{agent_id}|phase1_unknown_pending_sample");
-            if last_key.as_deref() == Some(check_key.as_str()) {
-                continue;
-            }
-            let _ = event_log.write(
-                "provider.classify.unsupported",
-                serde_json::json!({
-                    "provider": "copilot",
-                    "agent_id": agent_id,
-                    "reason": "phase1_unknown_pending_sample",
-                }),
-            );
-            mark_classify_unsupported(&mut state, &agent_id, &check_key);
-        }
         if let Err(error) = self.detect_abnormal_exits(&mut state, &event_log, &pane_snapshot) {
             let _ = event_log.write(
                 "coordinator.tick.detect_abnormal_failed",
@@ -1644,7 +1595,7 @@ fn agent_process_liveness(
     }
     if let Some(target) = matching_agent_target(agent, session_name, targets) {
         if let Some(command) = target.current_command.as_deref() {
-            return command_process_check(agent.provider, command);
+            return pane_command_process_check(agent.provider, target, command);
         }
         if let Some(pid) = target.pane_pid.map(Pid::new) {
             return pid_process_check("pane_pid", pid);
@@ -1731,7 +1682,7 @@ fn pid_process_check(label: &str, pid: Pid) -> ProcessCheck {
 }
 
 fn command_process_check(provider: crate::model::enums::Provider, command: &str) -> ProcessCheck {
-    if provider_command_matches(provider, command) {
+    if crate::leader::command_matches_provider(provider, command) {
         process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
     } else {
         process_check(
@@ -1741,16 +1692,20 @@ fn command_process_check(provider: crate::model::enums::Provider, command: &str)
     }
 }
 
-fn provider_command_matches(provider: crate::model::enums::Provider, command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    match provider {
-        crate::model::enums::Provider::Claude | crate::model::enums::Provider::ClaudeCode => {
-            lower.contains("claude")
-        }
-        crate::model::enums::Provider::Codex => lower.contains("codex"),
-        crate::model::enums::Provider::Copilot => lower.contains("copilot"),
-        crate::model::enums::Provider::GeminiCli => lower.contains("gemini"),
-        crate::model::enums::Provider::Fake => lower.contains("fake"),
+fn pane_command_process_check(
+    provider: crate::model::enums::Provider,
+    pane: &crate::transport::PaneInfo,
+    command: &str,
+) -> ProcessCheck {
+    if crate::leader::attribute_pane_provider(pane)
+        .is_some_and(|candidate| crate::leader::provider_matches(candidate, provider))
+    {
+        process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
+    } else {
+        process_check(
+            ProcessLiveness::Dead,
+            format!("provider_not_foreground:{command}"),
+        )
     }
 }
 
@@ -1959,28 +1914,6 @@ fn mark_abnormal_suppressed(state: &mut Value, agent_id: &str, key: &str) {
                 serde_json::json!(chrono::Utc::now().to_rfc3339()),
             );
         }
-    }
-}
-
-/// B-4 P4 dedup marker — 把 classify.unsupported check_key 写到
-/// state.agents.<id>.classify_unsupported.last_key,只在状态变了才再发事件。
-/// 同 abnormal_check_key (line 603) 同精神,但落 agents 子 obj(per-agent locality,
-/// 不污染 abnormal_exit_watch 命名空间)。
-fn mark_classify_unsupported(state: &mut Value, agent_id: &str, key: &str) {
-    let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
-        return;
-    };
-    let Some(agent) = agents.get_mut(agent_id).and_then(Value::as_object_mut) else {
-        return;
-    };
-    let entry = agent
-        .entry("classify_unsupported".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    if !entry.is_object() {
-        *entry = serde_json::json!({});
-    }
-    if let Some(obj) = entry.as_object_mut() {
-        obj.insert("last_key".to_string(), serde_json::json!(key));
     }
 }
 

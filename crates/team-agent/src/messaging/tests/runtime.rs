@@ -174,6 +174,20 @@ fn classify_idle_prompt_beats_recent_output_for_just_launched_agent() {
     );
 }
 
+#[test]
+fn classify_copilot_idle_prompt_is_not_masked_by_current_command() {
+    let state = json(serde_json::json!({}));
+    let a = classify_agent_activity(
+        &state,
+        " / commands · ? help\n❯ \n",
+        false,
+        Some("copilot"),
+        None,
+    );
+    assert_eq!(a.status, ActivityStatus::Idle);
+    assert_eq!(a.confidence, 0.9);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // GROUP H — attempt_trust_auto_answer: own-vs-foreign realpath + fail-safe
 // pane-width + opt-in gate + reason byte-locks. leader_panes.py:383-470.

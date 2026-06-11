@@ -620,6 +620,23 @@ pub enum RestartReport {
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
     },
+    /// At least one worker failed during live spawn, but other workers were isolated
+    /// and restarted. The CLI reports `status=partial` and exits non-zero.
+    Partial {
+        session_name: SessionName,
+        agents: Vec<RestartedAgent>,
+        failed_agents: Vec<RestartFailedAgent>,
+        coordinator_started: bool,
+        next_actions: Vec<String>,
+        attach_commands: Vec<String>,
+    },
+    /// All workers failed during live spawn. No worker is reported as restarted.
+    Failed {
+        session_name: SessionName,
+        failed_agents: Vec<RestartFailedAgent>,
+        next_actions: Vec<String>,
+        attach_commands: Vec<String>,
+    },
     /// atomic refusal(`reason=resume_atomicity`):某 interacted worker 不可 resume
     /// 且非 allow_fresh。**nothing created yet**,无需回滚。
     RefusedResumeAtomicity {
@@ -650,6 +667,17 @@ pub struct RestartedAgent {
     pub restart_mode: StartMode,
     pub decision: ResumeDecision,
     pub session_id: Option<SessionId>,
+}
+
+/// Worker restart failure isolated from the rest of the restart pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestartFailedAgent {
+    pub agent_id: AgentId,
+    pub restart_mode: StartMode,
+    pub decision: ResumeDecision,
+    pub session_id: Option<SessionId>,
+    pub phase: String,
+    pub error: String,
 }
 
 /// atomic refusal 里的不可重建 worker(`orchestration.py:517`)。

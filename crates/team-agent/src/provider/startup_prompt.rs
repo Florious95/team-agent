@@ -28,6 +28,18 @@ const CLAUDE_TRUST_MARKERS: &[&str] = &[
     "Enter to confirm",
 ];
 const CLAUDE_READY_MARKERS: &[&str] = &["Claude Code"];
+pub const COPILOT_TRUST_PROMPT_MARKER: &str =
+    include_str!("testdata/copilot-trust-prompt.txt");
+pub const COPILOT_READY_MARKER: &str =
+    include_str!("testdata/copilot-ready-marker.txt");
+const COPILOT_TRUST_MARKERS: &[&str] = &[COPILOT_TRUST_PROMPT_MARKER];
+const COPILOT_READY_MARKERS: &[&str] = &[COPILOT_READY_MARKER];
+const COPILOT_TRUST_TITLE: &str = "Confirm folder trust";
+const COPILOT_TRUST_QUESTION: &str = "Do you trust the files in this folder?";
+const COPILOT_TRUST_YES_SESSION: &str = "❯ 1. Yes";
+const COPILOT_TRUST_REMEMBER: &str = "2. Yes, and remember this folder for future sessions";
+const COPILOT_TRUST_NO: &str = "3. No (Esc)";
+const COPILOT_READY_FOOTER: &str = " / commands · ? help";
 /// Plain ready markers (not the bare `›` glyph — that glyph also indicates a
 /// numbered-menu selector and is handled by [`rightmost_input_prompt_glyph`] with
 /// shape gating per N15 / CR-063: detect by SHAPE, not a single Unicode codepoint).
@@ -106,6 +118,20 @@ pub fn classify_claude_startup_screen(output: &str) -> StartupScreenDecision {
     }
 }
 
+pub fn classify_copilot_startup_screen(output: &str) -> StartupScreenDecision {
+    let ready_pos = copilot_ready_pos(output);
+    if has_active_copilot_trust_shape(output)
+        && is_more_recent(copilot_trust_pos(output), ready_pos)
+    {
+        return StartupScreenDecision::AnswerWorkspaceTrust;
+    }
+    if ready_pos.is_some() {
+        StartupScreenDecision::Ready
+    } else {
+        StartupScreenDecision::KeepPolling
+    }
+}
+
 /// Actionable trust shape (N15): the captured text contains a trust phrase AND a
 /// numbered-menu selector line `› <digit>. `. This is the modal-still-active signal
 /// that survives Codex's pre-rendering of the banner/input prompt below the menu.
@@ -159,6 +185,53 @@ fn has_active_claude_yes_trust_shape(output: &str) -> bool {
 fn has_claude_ready_shape(output: &str) -> bool {
     max_rfind(output, CLAUDE_READY_MARKERS).is_some()
         && rightmost_claude_input_prompt_glyph(output).is_some()
+}
+
+fn has_active_copilot_trust_shape(output: &str) -> bool {
+    if max_rfind(output, COPILOT_TRUST_MARKERS).is_some() {
+        return true;
+    }
+    [
+        COPILOT_TRUST_TITLE,
+        COPILOT_TRUST_QUESTION,
+        COPILOT_TRUST_YES_SESSION,
+        COPILOT_TRUST_REMEMBER,
+        COPILOT_TRUST_NO,
+    ]
+    .iter()
+    .all(|marker| output.contains(marker))
+}
+
+fn copilot_trust_pos(output: &str) -> Option<usize> {
+    max_two(
+        max_rfind(output, COPILOT_TRUST_MARKERS),
+        max_rfind(output, &[COPILOT_TRUST_TITLE, COPILOT_TRUST_QUESTION]),
+    )
+}
+
+fn copilot_ready_pos(output: &str) -> Option<usize> {
+    let fixture_pos = max_rfind(output, COPILOT_READY_MARKERS);
+    let footer_pos = output.rfind(COPILOT_READY_FOOTER);
+    let prompt_pos = rightmost_copilot_input_prompt_glyph(output);
+    if footer_pos.is_some() && prompt_pos.is_some() {
+        max_two(fixture_pos, max_two(footer_pos, prompt_pos))
+    } else {
+        fixture_pos
+    }
+}
+
+fn rightmost_copilot_input_prompt_glyph(output: &str) -> Option<usize> {
+    let mut best = None;
+    let mut offset = 0;
+    for line in output.split_inclusive('\n') {
+        if line.trim() == "❯" {
+            if let Some(idx) = line.find('❯') {
+                best = Some(offset + idx);
+            }
+        }
+        offset += line.len();
+    }
+    best
 }
 
 fn rightmost_claude_input_prompt_glyph(output: &str) -> Option<usize> {
@@ -316,6 +389,40 @@ pub fn claude_handle_startup_prompts(
     StartupPromptOutcome { handled, capture_error }
 }
 
+pub fn copilot_handle_startup_prompts(
+    transport: &dyn Transport,
+    target: &Target,
+    checks: usize,
+    sleep_s: f64,
+) -> StartupPromptOutcome {
+    let mut handled = Vec::new();
+    let mut capture_error: Option<String> = None;
+    for _ in 0..checks {
+        let screen = match transport.capture(target, CaptureRange::Full) {
+            Ok(captured) => captured.text,
+            Err(error) => {
+                capture_error.get_or_insert_with(|| error.to_string());
+                String::new()
+            }
+        };
+        match classify_copilot_startup_screen(&screen) {
+            StartupScreenDecision::AnswerWorkspaceTrust => {
+                let _ = transport.send_keys(target, &[Key::Enter]);
+                handled.push(HandledPrompt {
+                    prompt: "copilot_workspace_trust".to_string(),
+                    action: "sent_enter_yes_session".to_string(),
+                });
+                sleep_between_polls(sleep_s);
+            }
+            StartupScreenDecision::Ready => break,
+            StartupScreenDecision::SkipUpdatePrompt | StartupScreenDecision::KeepPolling => {
+                sleep_between_polls(sleep_s);
+            }
+        }
+    }
+    StartupPromptOutcome { handled, capture_error }
+}
+
 fn max_rfind(output: &str, needles: &[&str]) -> Option<usize> {
     needles.iter().filter_map(|needle| output.rfind(needle)).max()
 }
@@ -445,6 +552,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn copilot_trust_fixture_answers_yes_for_this_session() {
+        assert_eq!(
+            classify_copilot_startup_screen(COPILOT_TRUST_PROMPT_MARKER),
+            StartupScreenDecision::AnswerWorkspaceTrust
+        );
+        assert!(
+            COPILOT_TRUST_PROMPT_MARKER.contains(COPILOT_TRUST_YES_SESSION),
+            "copilot trust default must remain option 1, not persistent option 2"
+        );
+    }
+
+    #[test]
+    fn copilot_trust_prompt_tolerates_path_variation() {
+        let dir_b = COPILOT_TRUST_PROMPT_MARKER.replace("/dir-a", "/dir-b");
+        assert_eq!(
+            classify_copilot_startup_screen(&dir_b),
+            StartupScreenDecision::AnswerWorkspaceTrust
+        );
+    }
+
+    #[test]
+    fn copilot_ready_fixture_is_ready_without_trust_prompt() {
+        assert_eq!(
+            classify_copilot_startup_screen(COPILOT_READY_MARKER),
+            StartupScreenDecision::Ready
+        );
+    }
+
+    #[test]
+    fn copilot_ready_after_stale_trust_wins() {
+        let screen = format!("{COPILOT_TRUST_PROMPT_MARKER}\n{COPILOT_READY_MARKER}");
+        assert_eq!(
+            classify_copilot_startup_screen(&screen),
+            StartupScreenDecision::Ready
+        );
+    }
+
     // ── ④ transport.capture() SEAM — the loop answers trust then breaks on ready, via the seam ───────
     /// Scripted transport: `capture` pops the next canned screen; `send_keys` records the keys. All
     /// other methods are unreachable by the startup-prompt loop.
@@ -530,6 +675,34 @@ mod tests {
         assert!(
             sent.iter().any(|keys| keys.as_slice() == [Key::Enter]),
             "on workspace-trust the loop must send Enter via the transport.capture() seam; got {sent:?}"
+        );
+    }
+
+    #[test]
+    fn copilot_loop_answers_trust_then_breaks_on_ready_via_capture_seam() {
+        let t = ScriptedTransport {
+            screens: Mutex::new(vec![
+                COPILOT_TRUST_PROMPT_MARKER.to_string(),
+                COPILOT_READY_MARKER.to_string(),
+            ]),
+            sent: Mutex::new(Vec::new()),
+        };
+        let target = Target::Pane(PaneId::new("%1"));
+
+        let handled = copilot_handle_startup_prompts(&t, &target, 5, 0.0).handled;
+
+        assert_eq!(
+            handled,
+            vec![HandledPrompt {
+                prompt: "copilot_workspace_trust".to_string(),
+                action: "sent_enter_yes_session".to_string(),
+            }]
+        );
+        let sent = t.sent.lock().unwrap();
+        assert_eq!(
+            sent.iter().filter(|keys| keys.as_slice() == [Key::Enter]).count(),
+            1,
+            "copilot trust prompt must choose option 1 with one Enter; got {sent:?}"
         );
     }
 }
