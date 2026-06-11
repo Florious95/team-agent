@@ -95,17 +95,18 @@ use super::*;
     fn copilot_leader_env_disables_terminal_title_only_for_copilot() {
         let ws = std::env::temp_dir().join(format!("ta_rs_lsp_copilot_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
+        let identity = leader_identity_context(&ws, None, Some(&serde_json::json!({}))).unwrap();
 
-        let copilot = leader_start_plan(Provider::Copilot, &[], &ws, false, false, None).unwrap();
+        let copilot = leader_env_for_identity(Provider::Copilot, &identity);
         assert_eq!(
-            copilot.leader_env.get("COPILOT_DISABLE_TERMINAL_TITLE").map(String::as_str),
+            copilot.get("COPILOT_DISABLE_TERMINAL_TITLE").map(String::as_str),
             Some("1")
         );
 
         for provider in [Provider::Codex, Provider::ClaudeCode] {
-            let plan = leader_start_plan(provider, &[], &ws, false, false, None).unwrap();
+            let leader_env = leader_env_for_identity(provider, &identity);
             assert!(
-                !plan.leader_env.contains_key("COPILOT_DISABLE_TERMINAL_TITLE"),
+                !leader_env.contains_key("COPILOT_DISABLE_TERMINAL_TITLE"),
                 "{provider:?} leader env must not include copilot title override"
             );
         }

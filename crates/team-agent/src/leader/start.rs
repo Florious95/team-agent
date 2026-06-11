@@ -14,8 +14,8 @@ use super::helpers::{
 };
 use super::owner_bind::leader_identity_context;
 use super::{
-    LeaderError, LeaderLaunchOutcome, LeaderLaunchSocket, LeaderLaunchStatus, LeaderStartMode,
-    LeaderStartPlan,
+    LeaderError, LeaderIdentity, LeaderLaunchOutcome, LeaderLaunchSocket, LeaderLaunchStatus,
+    LeaderStartMode, LeaderStartPlan,
 };
 
 // ── leader::start — leader_start_plan / start_leader / session 名 ──
@@ -72,30 +72,7 @@ pub fn leader_start_plan(
     } else {
         LeaderStartMode::NewTmuxSession
     };
-    let mut leader_env = BTreeMap::new();
-    leader_env.insert(
-        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
-        provider_wire(provider).to_string(),
-    );
-    leader_env.insert(
-        "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
-        identity.leader_session_uuid.as_str().to_string(),
-    );
-    leader_env.insert(
-        "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
-        identity.machine_fingerprint.clone(),
-    );
-    leader_env.insert(
-        "TEAM_AGENT_WORKSPACE".to_string(),
-        identity.workspace_abspath.to_string_lossy().into_owned(),
-    );
-    leader_env.insert(
-        "TEAM_AGENT_TEAM_ID".to_string(),
-        identity.team_id.as_str().to_string(),
-    );
-    if provider == Provider::Copilot {
-        leader_env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
-    }
+    let leader_env = leader_env_for_identity(provider, &identity);
     let argv = start_argv(
         mode,
         provider,
@@ -120,6 +97,37 @@ pub fn leader_start_plan(
         identity: Some(identity),
         detached: false,
     })
+}
+
+pub(crate) fn leader_env_for_identity(
+    provider: Provider,
+    identity: &LeaderIdentity,
+) -> BTreeMap<String, String> {
+    let mut leader_env = BTreeMap::new();
+    leader_env.insert(
+        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+        provider_wire(provider).to_string(),
+    );
+    leader_env.insert(
+        "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+        identity.leader_session_uuid.as_str().to_string(),
+    );
+    leader_env.insert(
+        "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+        identity.machine_fingerprint.clone(),
+    );
+    leader_env.insert(
+        "TEAM_AGENT_WORKSPACE".to_string(),
+        identity.workspace_abspath.to_string_lossy().into_owned(),
+    );
+    leader_env.insert(
+        "TEAM_AGENT_TEAM_ID".to_string(),
+        identity.team_id.as_str().to_string(),
+    );
+    if provider == Provider::Copilot {
+        leader_env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
+    }
+    leader_env
 }
 
 /// `start_leader`(card §46;`__init__.py:60`)。计算并执行 leader 启动计划(spawn + 信号处理)。
