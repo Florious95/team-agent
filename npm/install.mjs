@@ -80,13 +80,13 @@ function install(argv) {
   writeExecWrapper(path.join(binDir, "team-agent"), runtimeBinary, []);
   writeExecWrapper(path.join(binDir, "team_orchestrator"), runtimeBinary, ["mcp-server"]);
   writeExecWrapper(path.join(binDir, "team-agent-coordinator"), runtimeBinary, ["coordinator"]);
-  installSkills();
+  installSkills(runtimeBinary);
 
   const teamAgent = path.join(binDir, "team-agent");
   console.log(`installed: ${teamAgent}`);
   console.log(`runtime: ${dest}`);
   console.log(`binary: ${platformBinary.packageName}`);
-  console.log("skill: installed for Codex and Claude");
+  console.log("skill: installed for Codex, Claude and Copilot");
   console.log(`PATH: ensure ${binDir} is on PATH`);
 
   // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
@@ -149,14 +149,24 @@ function runDoctor(argv) {
 function uninstall(argv) {
   const opts = parseOptions(argv);
   const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
+  // 卸载 skill 走二进制单源(同一 SkillTarget 表 codex/claude/copilot),在删 wrapper 前调
+  // (删 wrapper 后 PATH 上的 team-agent 没了,但 runtime 二进制仍在;用 runtime 二进制直调)。
+  const teamAgentBin = path.join(prefix, "bin", "team-agent");
+  if (fs.existsSync(teamAgentBin)) {
+    const res = spawnSync(teamAgentBin, ["install-skill", "--target", "all", "--uninstall", "--json"], {
+      text: true,
+      encoding: "utf8",
+      timeout: VERSION_SMOKE_TIMEOUT_MS,
+    });
+    if (res.status !== 0) {
+      console.error(`WARN: skill uninstall via binary failed (status=${res.status ?? "signal"}); skill dirs may remain under ~/.codex|.claude|.copilot/skills/team-agent`);
+    }
+  }
   for (const name of ["team-agent", "team_orchestrator", "team-agent-coordinator"]) {
     fs.rmSync(path.join(prefix, "bin", name), { force: true });
   }
-  for (const skillDir of skillDestinations()) {
-    fs.rmSync(skillDir, { recursive: true, force: true });
-  }
   console.log(`removed wrappers from ${path.join(prefix, "bin")}`);
-  console.log("removed skills from ~/.codex/skills/team-agent and ~/.claude/skills/team-agent");
+  console.log("removed skills from ~/.codex, ~/.claude and ~/.copilot skills/team-agent");
   if (opts.purgeRuntime) {
     const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
@@ -238,44 +248,30 @@ exec ${shellQuote(binary)} ${argPrefix}"$@"
   fs.chmodSync(file, 0o755);
 }
 
-function installSkills() {
+// RED-1 根治(单源):skill 安装唯一实现在二进制 `install-skill`(SkillTarget 表:
+// codex/claude/copilot)。install.mjs 不再有自己的 JS 拷贝逻辑/目标硬编码——改调二进制,
+// 失败显式报错(非零退出),绝不静默回退 JS。
+function installSkills(runtimeBinary) {
   const source = path.join(packageRoot, "skills", "team-agent");
   if (!fs.existsSync(source)) {
     throw new Error(`skill source not found: ${source}`);
   }
-  for (const dest of skillDestinations()) {
-    fs.rmSync(dest, { recursive: true, force: true });
-    copyTree(source, dest);
+  const res = spawnSync(runtimeBinary, ["install-skill", "--target", "all", "--source", source, "--json"], {
+    text: true,
+    encoding: "utf8",
+    timeout: VERSION_SMOKE_TIMEOUT_MS,
+  });
+  if (res.status !== 0) {
+    const log = (res.stderr || res.stdout || "").trim() || "no stderr/stdout";
+    console.error(`ERROR: skill install failed (status=${res.status ?? "signal"})`);
+    console.error(`ACTION: reinstall, or run \`team-agent install-skill --target all --source ${source}\` manually`);
+    console.error(`LOG: ${runtimeBinary} install-skill --target all => ${log}`);
+    process.exit(1);
   }
-}
-
-function skillDestinations() {
-  return [
-    path.join(os.homedir(), ".codex", "skills", "team-agent"),
-    path.join(os.homedir(), ".claude", "skills", "team-agent"),
-  ];
 }
 
 function makeDoctorWorkspace() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "team-agent-doctor-"));
-}
-
-function copyTree(src, dest) {
-  const stat = fs.lstatSync(src);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(dest, { recursive: true, mode: stat.mode });
-    for (const entry of fs.readdirSync(src)) {
-      if (entry === ".DS_Store") {
-        continue;
-      }
-      copyTree(path.join(src, entry), path.join(dest, entry));
-    }
-    return;
-  }
-  if (stat.isFile()) {
-    fs.copyFileSync(src, dest);
-    fs.chmodSync(dest, stat.mode);
-  }
 }
 
 function expandHome(value) {
