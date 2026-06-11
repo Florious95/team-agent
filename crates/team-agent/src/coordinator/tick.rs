@@ -89,6 +89,9 @@ pub enum TickError {
     /// messaging subsystem failure(delivery/scheduler/result watchers).
     #[error("messaging: {0}")]
     Messaging(#[from] crate::messaging::MessagingError),
+    /// coordinator.tick panic caught by the daemon loop.
+    #[error("panic: {0}")]
+    Panic(String),
 }
 
 // ===========================================================================
@@ -98,7 +101,8 @@ pub enum TickError {
 /// tick 末原子 save 失败注入钩(bug-084)。生产装配为 `None`(走真实 `save_runtime_state`);
 /// 测试装配一个返回 `Err` 的闭包,在不触碰真实磁盘的前提下强制 save 失败,断言 degraded
 /// `TickReport` 而非 panic/Err。porter 在 `tick` 的「ATOMIC save」包裹点先查它再落真实 save。
-pub type SaveHook = Box<dyn Fn(&WorkspacePath, &Value) -> Result<(), crate::state::StateError> + Send + Sync>;
+pub type SaveHook =
+    Box<dyn Fn(&WorkspacePath, &Value) -> Result<(), crate::state::StateError> + Send + Sync>;
 
 /// tick 链式副作用 ORDER 记录器(测试探针)。porter 在 `tick` 的每个原子调用点 push 一个
 /// 稳定步骤名;测试断言固定序列。生产装配为 `None`(零开销,porter 用 `if let Some(rec)` 守卫)。
@@ -222,7 +226,9 @@ impl Coordinator {
         // become deliverable. Reset them to `accepted` so the existing
         // `deliver_pending` step below picks them up on THIS tick. Reuses the
         // delivery pipeline; no new injector. Best-effort logging on inner errors.
-        if let Err(error) = self.requeue_trust_retries_for_handled_agents(&state, &store, &event_log) {
+        if let Err(error) =
+            self.requeue_trust_retries_for_handled_agents(&state, &store, &event_log)
+        {
             let _ = event_log.write(
                 "messaging.trust_retry_requeue_failed",
                 serde_json::json!({"error": error.to_string()}),
@@ -377,7 +383,9 @@ impl Coordinator {
         self.record_step("atomic_save");
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
-            None => crate::state::projection::save_team_scoped_state(self.workspace.as_path(), &state),
+            None => {
+                crate::state::projection::save_team_scoped_state(self.workspace.as_path(), &state)
+            }
         };
         if saved.is_err() {
             return Ok(base_tick_report(
@@ -390,17 +398,13 @@ impl Coordinator {
         }
 
         self.record_step("collect_results");
-        collections.results = collect_results(
-            crate::messaging::collect_results_and_notify_watchers(self.workspace.as_path(), &event_log)?,
-        );
+        collections.results =
+            collect_results(crate::messaging::collect_results_and_notify_watchers(
+                self.workspace.as_path(),
+                &event_log,
+            )?);
         self.record_step("prune_dedupe_log");
-        Ok(base_tick_report(
-            true,
-            false,
-            None,
-            Some(true),
-            collections,
-        ))
+        Ok(base_tick_report(true, false, None, Some(true), collections))
     }
 
     // #236 nag_removal (N35): the framework-synthesized idle/stuck/deadlock nag
@@ -408,7 +412,11 @@ impl Coordinator {
     // were removed by design. Delivery primitives still flow through the rest of
     // the tick body unchanged.
 
-    fn capture_missing_sessions(&self, state: &mut Value, event_log: &EventLog) -> Result<(), TickError> {
+    fn capture_missing_sessions(
+        &self,
+        state: &mut Value,
+        event_log: &EventLog,
+    ) -> Result<(), TickError> {
         let report = crate::session_capture::capture_missing_provider_sessions_once(
             state,
             &mut |provider| self.provider_registry.adapter_for(provider),
@@ -438,7 +446,10 @@ impl Coordinator {
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
         let team_key = Some(crate::model::ids::TeamKey::new(team.clone()));
-        let session_name = state.get("session_name").and_then(Value::as_str).map(str::to_string);
+        let session_name = state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         // B-4 / 036b N36 三路可用 — sync_health 内 per-agent capture 失败本就降级
         // (写 coordinator.agent_capture_failed 后 continue),不打断 deliver_pending
         // 主干。但 contract 要求一条【tick 级】可观测的 step-failed 信号 —
@@ -447,13 +458,17 @@ impl Coordinator {
         let mut had_capture_failure = false;
         // P5 (C-P5-2): one list-windows per SESSION per tick — memoized across the
         // agent loop instead of one fork per agent.
-        let mut windows_by_session: BTreeMap<String, Result<Vec<crate::transport::WindowName>, String>> =
-            BTreeMap::new();
+        let mut windows_by_session: BTreeMap<
+            String,
+            Result<Vec<crate::transport::WindowName>, String>,
+        > = BTreeMap::new();
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
             return Ok(captures);
         };
         for (agent_id, agent) in agents {
-            let Some((session, window, target)) = capture_window_target(agent, session_name.as_deref()) else {
+            let Some((session, window, target)) =
+                capture_window_target(agent, session_name.as_deref())
+            else {
                 continue;
             };
             let windows = match windows_by_session
@@ -535,7 +550,14 @@ impl Coordinator {
             );
             write_activity(agent, &activity, false);
             let last_output_at = last_output_at_now;
-            write_agent_health(store, &team, agent_id, agent, &activity, last_output_at.as_deref())?;
+            write_agent_health(
+                store,
+                &team,
+                agent_id,
+                agent,
+                &activity,
+                last_output_at.as_deref(),
+            )?;
             let pane_info = matching_capture_pane_info(agent, &session, &window, pane_infos);
             let pane_id = pane_info
                 .as_ref()
@@ -547,7 +569,10 @@ impl Coordinator {
                 CapturedRuntimeFact {
                     team_key: team_key.clone(),
                     agent_id: AgentId::new(agent_id.clone()),
-                    provider: agent.get("provider").and_then(Value::as_str).and_then(parse_provider),
+                    provider: agent
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .and_then(parse_provider),
                     session_name: Some(session),
                     window: Some(window),
                     pane_id,
@@ -620,14 +645,22 @@ impl Coordinator {
         let team = crate::state::projection::team_state_key(&snapshot);
         let session_name = snapshot.get("session_name").and_then(Value::as_str);
         for agent in abnormal_watch_agents(&snapshot) {
-            let rollout_path = resolve_agent_rollout_path(self.workspace.as_path(), &agent.rollout_path);
+            let rollout_path =
+                resolve_agent_rollout_path(self.workspace.as_path(), &agent.rollout_path);
             let metadata = match std::fs::metadata(&rollout_path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
                     upsert_abnormal_watch(
                         state,
                         &agent.agent_id,
-                        abnormal_watch_payload(&agent, None, None, "unverifiable", None, Some(error.to_string())),
+                        abnormal_watch_payload(
+                            &agent,
+                            None,
+                            None,
+                            "unverifiable",
+                            None,
+                            Some(error.to_string()),
+                        ),
                     );
                     continue;
                 }
@@ -638,9 +671,10 @@ impl Coordinator {
             // read at all (live sample: 332MB whole-file read per agent per 2s tick).
             // ANY field change (including a size shrink / truncate) falls through to the
             // re-read below.
-            if let (Some(mtime), Some(stored)) =
-                (mtime_ns, abnormal_watch_stored_metadata(&snapshot, &agent.agent_id))
-            {
+            if let (Some(mtime), Some(stored)) = (
+                mtime_ns,
+                abnormal_watch_stored_metadata(&snapshot, &agent.agent_id),
+            ) {
                 if stored == (size, mtime) {
                     continue;
                 }
@@ -654,17 +688,20 @@ impl Coordinator {
                     upsert_abnormal_watch(
                         state,
                         &agent.agent_id,
-                        abnormal_watch_payload(&agent, Some(size), mtime_ns, "unverifiable", None, Some(error.to_string())),
+                        abnormal_watch_payload(
+                            &agent,
+                            Some(size),
+                            mtime_ns,
+                            "unverifiable",
+                            None,
+                            Some(error.to_string()),
+                        ),
                     );
                     continue;
                 }
             };
-            let liveness = agent_process_liveness(
-                &agent,
-                session_name,
-                targets,
-                self.transport.as_ref(),
-            );
+            let liveness =
+                agent_process_liveness(&agent, session_name, targets, self.transport.as_ref());
             let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
             let decision = abnormal_exit_decision(liveness.state, fact.as_ref());
             let check_key = abnormal_check_key(&agent, &liveness, fact.as_ref(), size);
@@ -680,8 +717,19 @@ impl Coordinator {
                     None,
                 ),
             );
-            if abnormal_last_check_key(state, &agent.agent_id).as_deref() != Some(check_key.as_str()) {
-                write_abnormal_check(event_log, &team, &agent, &liveness, fact.as_ref(), decision, size, mtime_ns)?;
+            if abnormal_last_check_key(state, &agent.agent_id).as_deref()
+                != Some(check_key.as_str())
+            {
+                write_abnormal_check(
+                    event_log,
+                    &team,
+                    &agent,
+                    &liveness,
+                    fact.as_ref(),
+                    decision,
+                    size,
+                    mtime_ns,
+                )?;
                 mark_abnormal_checked(state, &agent.agent_id, &check_key);
             }
             let fact = match (decision, fact) {
@@ -700,7 +748,9 @@ impl Coordinator {
                 (AbnormalExitDecision::Notify, None) => continue,
             };
             let dedupe_key = abnormal_dedupe_key(&agent, &fact, size);
-            if abnormal_last_notified_key(state, &agent.agent_id).as_deref() == Some(dedupe_key.as_str()) {
+            if abnormal_last_notified_key(state, &agent.agent_id).as_deref()
+                == Some(dedupe_key.as_str())
+            {
                 continue;
             }
             let content = format_abnormal_exit_message(&team, &agent, &fact, &liveness, size);
@@ -755,7 +805,10 @@ impl Coordinator {
     }
 
     fn handle_startup_prompts(&self, state: &mut Value, event_log: &EventLog) {
-        let session_name = state.get("session_name").and_then(Value::as_str).map(str::to_string);
+        let session_name = state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
             return;
         };
@@ -827,7 +880,10 @@ impl Coordinator {
                 continue;
             };
             agent_obj.insert("startup_prompts".to_string(), serde_json::json!("handled"));
-            agent_obj.insert("startup_prompt_status".to_string(), serde_json::json!("handled"));
+            agent_obj.insert(
+                "startup_prompt_status".to_string(),
+                serde_json::json!("handled"),
+            );
             agent_obj.insert("startup_prompt_handled".to_string(), handled_payload);
         }
     }
@@ -891,7 +947,10 @@ impl Coordinator {
     ) -> Result<(), TickError> {
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
-        let session_name = snapshot.get("session_name").and_then(Value::as_str).map(str::to_string);
+        let session_name = snapshot
+            .get("session_name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let mut dedup_updates = Vec::new();
         {
             let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
@@ -942,32 +1001,32 @@ impl Coordinator {
                         });
                         let choice = choose_internal_mcp_approval_choice(&prompt);
                         let keys = approval_choice_keys(&prompt, &captured.text, &choice)
-                        .into_iter()
-                        .filter_map(runtime_approval_key)
-                        .collect::<Vec<_>>();
-                    // A-6 / Python approvals/runtime_prompts.py:21-43: prompts are handled
-                    // per-agent with run_cmd(check=False) — one agent's tmux failure must
-                    // not abort the whole tick for the rest.
-                    if let Err(error) = self.transport.send_keys(&target, &keys) {
-                        event_log.write(
-                            "runtime_approval.send_keys_failed",
-                            serde_json::json!({
-                                "agent_id": agent_id,
-                                "target": format!("{target:?}"),
-                                "tool": prompt.tool,
-                                "error": error.to_string(),
-                            }),
-                        )?;
-                        continue;
-                    }
-                    let after = self
-                        .transport
-                        .capture(&target, crate::transport::CaptureRange::Tail(80))
-                        .ok()
-                        .and_then(|capture| extract_approval_prompt(agent_id, &capture.text));
-                    let cleared = after
-                        .as_ref()
-                        .is_none_or(|after| after.prompt != prompt.prompt || after.tool != prompt.tool);
+                            .into_iter()
+                            .filter_map(runtime_approval_key)
+                            .collect::<Vec<_>>();
+                        // A-6 / Python approvals/runtime_prompts.py:21-43: prompts are handled
+                        // per-agent with run_cmd(check=False) — one agent's tmux failure must
+                        // not abort the whole tick for the rest.
+                        if let Err(error) = self.transport.send_keys(&target, &keys) {
+                            event_log.write(
+                                "runtime_approval.send_keys_failed",
+                                serde_json::json!({
+                                    "agent_id": agent_id,
+                                    "target": format!("{target:?}"),
+                                    "tool": prompt.tool,
+                                    "error": error.to_string(),
+                                }),
+                            )?;
+                            continue;
+                        }
+                        let after = self
+                            .transport
+                            .capture(&target, crate::transport::CaptureRange::Tail(80))
+                            .ok()
+                            .and_then(|capture| extract_approval_prompt(agent_id, &capture.text));
+                        let cleared = after.as_ref().is_none_or(|after| {
+                            after.prompt != prompt.prompt || after.tool != prompt.tool
+                        });
                         event_log.write(
                         "runtime_approval.auto_approved",
                         serde_json::json!({
@@ -1001,14 +1060,16 @@ impl Coordinator {
                         )?;
                     }
                     RuntimeApprovalDecision::AwaitingHumanConfirm => {
-                        let Some(reason) = awaiting_human_confirm_reason(&prompt, auto_answer_allowed) else {
+                        let Some(reason) =
+                            awaiting_human_confirm_reason(&prompt, auto_answer_allowed)
+                        else {
                             continue;
                         };
                         let fact = awaiting_human_confirm_fact(&team, agent_id, &prompt, reason);
                         let previous = agent
-                        .get("awaiting_human_confirm")
-                        .and_then(|v| v.get("fingerprint"))
-                        .and_then(Value::as_str);
+                            .get("awaiting_human_confirm")
+                            .and_then(|v| v.get("fingerprint"))
+                            .and_then(Value::as_str);
                         if previous == Some(fact.fingerprint.as_str())
                             || state_awaiting_human_confirm_fingerprint(&snapshot, &team, agent_id)
                                 .as_deref()
@@ -1020,10 +1081,10 @@ impl Coordinator {
                         let notification = awaiting_human_confirm_payload(agent, &fact);
                         let content = notification.to_string();
                         let _ = crate::messaging::send_to_leader_receiver(
-                        self.workspace.as_path(),
-                        &snapshot,
-                        "leader",
-                        &content,
+                            self.workspace.as_path(),
+                            &snapshot,
+                            "leader",
+                            &content,
                             None,
                             agent_id,
                             false,
@@ -1034,43 +1095,43 @@ impl Coordinator {
                         remember_awaiting_human_confirm(agent, &fact);
                         dedup_updates.push(AwaitingDedupUpdate::Remember(fact.clone()));
                         match reason {
-                        "tool_not_allowlisted" => {
-                            event_log.write(
-                                "runtime_approval.tool_not_allowlisted",
-                                serde_json::json!({
-                                    "agent_id": agent_id,
-                                    "tool": prompt.tool,
-                                    "kind": prompt.kind,
-                                    "prompt": prompt.prompt,
-                                }),
-                            )?;
+                            "tool_not_allowlisted" => {
+                                event_log.write(
+                                    "runtime_approval.tool_not_allowlisted",
+                                    serde_json::json!({
+                                        "agent_id": agent_id,
+                                        "tool": prompt.tool,
+                                        "kind": prompt.kind,
+                                        "prompt": prompt.prompt,
+                                    }),
+                                )?;
+                            }
+                            "leader_restricted" | "leader_safety_restricted" => {
+                                event_log.write(
+                                    "runtime_approval.blocked_by_leader_safety",
+                                    serde_json::json!({
+                                        "agent_id": agent_id,
+                                        "tool": prompt.tool,
+                                        "command": prompt.command,
+                                        "kind": prompt.kind,
+                                        "prompt": prompt.prompt,
+                                    }),
+                                )?;
+                            }
+                            "command_approval_requires_human" => {
+                                event_log.write(
+                                    "runtime_approval.command_approval_requires_human",
+                                    serde_json::json!({
+                                        "agent_id": agent_id,
+                                        "tool": prompt.tool,
+                                        "command": prompt.command,
+                                        "kind": prompt.kind,
+                                        "prompt": prompt.prompt,
+                                    }),
+                                )?;
+                            }
+                            _ => {}
                         }
-                        "leader_restricted" | "leader_safety_restricted" => {
-                            event_log.write(
-                                "runtime_approval.blocked_by_leader_safety",
-                                serde_json::json!({
-                                    "agent_id": agent_id,
-                                    "tool": prompt.tool,
-                                    "command": prompt.command,
-                                    "kind": prompt.kind,
-                                    "prompt": prompt.prompt,
-                                }),
-                            )?;
-                        }
-                        "command_approval_requires_human" => {
-                            event_log.write(
-                                "runtime_approval.command_approval_requires_human",
-                                serde_json::json!({
-                                    "agent_id": agent_id,
-                                    "tool": prompt.tool,
-                                    "command": prompt.command,
-                                    "kind": prompt.kind,
-                                    "prompt": prompt.prompt,
-                                }),
-                            )?;
-                        }
-                        _ => {}
-                    }
                     }
                     RuntimeApprovalDecision::Ignore => {
                         clear_awaiting_human_confirm(agent);
@@ -1084,7 +1145,9 @@ impl Coordinator {
         }
         for update in dedup_updates {
             match update {
-                AwaitingDedupUpdate::Remember(fact) => remember_state_awaiting_human_confirm(state, &fact),
+                AwaitingDedupUpdate::Remember(fact) => {
+                    remember_state_awaiting_human_confirm(state, &fact)
+                }
                 AwaitingDedupUpdate::Clear { team, agent_id } => {
                     clear_state_awaiting_human_confirm(state, &team, &agent_id)
                 }
@@ -1126,7 +1189,9 @@ impl Coordinator {
     /// Python 是 `python -m team_agent.coordinator`,`lifecycle.py:108`)。
     /// **schema 兼容门**:三元任一不匹配 → restart_incompatible,**不可静默继续**(card §89)。
     pub fn start(&self) -> Result<StartReport, StartError> {
-        let health = self.health().map_err(|e| std::io::Error::other(e.to_string()))?;
+        let health = self
+            .health()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
         if health.ok {
             return Ok(StartReport {
                 ok: true,
@@ -1164,14 +1229,26 @@ impl Coordinator {
     pub fn stop(&self) -> Result<StopReport, StopError> {
         let pid_path = coordinator_pid_path(&self.workspace);
         if !pid_path.exists() {
-            return Ok(StopReport { ok: true, status: StopOutcome::Missing, pid: None });
+            return Ok(StopReport {
+                ok: true,
+                status: StopOutcome::Missing,
+                pid: None,
+            });
         }
         let pid = read_pid_file(&pid_path);
         remove_file_if_exists(&pid_path)?;
         remove_file_if_exists(&coordinator_meta_path(&self.workspace))?;
         match pid {
-            Some(pid) => Ok(StopReport { ok: true, status: StopOutcome::Stopped, pid: Some(pid) }),
-            None => Ok(StopReport { ok: true, status: StopOutcome::InvalidPidRemoved, pid: None }),
+            Some(pid) => Ok(StopReport {
+                ok: true,
+                status: StopOutcome::Stopped,
+                pid: Some(pid),
+            }),
+            None => Ok(StopReport {
+                ok: true,
+                status: StopOutcome::InvalidPidRemoved,
+                pid: None,
+            }),
         }
     }
 
@@ -1236,20 +1313,16 @@ fn empty_tick_report(
     reason: Option<TickStopReason>,
     persisted: Option<bool>,
 ) -> TickReport {
-    base_tick_report(
-        ok,
-        stop,
-        reason,
-        persisted,
-        TickCollections::default(),
-    )
+    base_tick_report(ok, stop, reason, persisted, TickCollections::default())
 }
 
 fn collect_results(value: Value) -> Vec<CollectedResult> {
     let Some(result_id) = value.get("result_id").and_then(Value::as_str) else {
         return Vec::new();
     };
-    vec![CollectedResult { result_id: result_id.to_string() }]
+    vec![CollectedResult {
+        result_id: result_id.to_string(),
+    }]
 }
 
 struct ProviderTurnClassifier;
@@ -1282,8 +1355,7 @@ impl TurnStateClassifier for ProviderTurnClassifier {
 /// `coordinator.coordinator_tick_iteration_count` load fine (read-compat, C-P3-3) —
 /// new versions simply stop writing it.
 fn increment_coordinator_tick_iteration_count(workspace: &WorkspacePath) {
-    let path =
-        crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json");
+    let path = crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json");
     let next = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -1423,13 +1495,13 @@ fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
     agents
         .iter()
         .filter_map(|(agent_id, agent)| {
-            if matches!(
-                agent.get("status").and_then(Value::as_str),
-                Some("paused")
-            ) {
+            if matches!(agent.get("status").and_then(Value::as_str), Some("paused")) {
                 return None;
             }
-            let provider = agent.get("provider").and_then(Value::as_str).and_then(parse_provider)?;
+            let provider = agent
+                .get("provider")
+                .and_then(Value::as_str)
+                .and_then(parse_provider)?;
             let rollout_path_display = ["rollout_path", "transcript_path", "session_log_path"]
                 .into_iter()
                 .find_map(|key| agent.get(key).and_then(Value::as_str))
@@ -1440,10 +1512,19 @@ fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
                 provider,
                 rollout_path: PathBuf::from(&rollout_path_display),
                 rollout_path_display,
-                status: agent.get("status").and_then(Value::as_str).map(str::to_string),
+                status: agent
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 process_liveness: explicit_process_liveness(agent),
-                window: agent.get("window").and_then(Value::as_str).map(str::to_string),
-                pane_id: agent.get("pane_id").and_then(Value::as_str).map(str::to_string),
+                window: agent
+                    .get("window")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                pane_id: agent
+                    .get("pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 pid: agent_pid(agent),
                 current_command: agent
                     .get("pane_current_command")
@@ -1462,12 +1543,19 @@ fn agent_pid(agent: &Value) -> Option<Pid> {
 }
 
 fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
-    if let Some(process) = agent.get("provider_process").or_else(|| agent.get("process")) {
+    if let Some(process) = agent
+        .get("provider_process")
+        .or_else(|| agent.get("process"))
+    {
         if let Some(liveness) = explicit_process_liveness(process) {
             return Some(liveness);
         }
     }
-    for key in ["provider_process_liveness", "process_liveness", "pane_liveness"] {
+    for key in [
+        "provider_process_liveness",
+        "process_liveness",
+        "pane_liveness",
+    ] {
         match agent.get(key).and_then(Value::as_str) {
             Some("dead") => return Some(ProcessLiveness::Dead),
             Some("alive" | "live") => return Some(ProcessLiveness::Alive),
@@ -1475,14 +1563,32 @@ fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
             _ => {}
         }
     }
-    for key in ["provider_process_alive", "process_alive", "provider_alive", "alive"] {
+    for key in [
+        "provider_process_alive",
+        "process_alive",
+        "provider_alive",
+        "alive",
+    ] {
         if let Some(alive) = agent.get(key).and_then(Value::as_bool) {
-            return Some(if alive { ProcessLiveness::Alive } else { ProcessLiveness::Dead });
+            return Some(if alive {
+                ProcessLiveness::Alive
+            } else {
+                ProcessLiveness::Dead
+            });
         }
     }
-    for key in ["provider_process_dead", "process_dead", "provider_dead", "dead"] {
+    for key in [
+        "provider_process_dead",
+        "process_dead",
+        "provider_dead",
+        "dead",
+    ] {
         if let Some(dead) = agent.get(key).and_then(Value::as_bool) {
-            return Some(if dead { ProcessLiveness::Dead } else { ProcessLiveness::Alive });
+            return Some(if dead {
+                ProcessLiveness::Dead
+            } else {
+                ProcessLiveness::Alive
+            });
         }
     }
     for key in ["status", "state", "liveness"] {
@@ -1500,7 +1606,10 @@ fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
 
 fn json_u32(value: Option<&Value>) -> Option<u32> {
     value
-        .and_then(|v| v.as_u64().or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
         .and_then(|n| u32::try_from(n).ok())
 }
 
@@ -1514,15 +1623,17 @@ fn agent_process_liveness(
         return pid_process_check("pid", pid);
     }
     if let Some(liveness) = agent.process_liveness {
-        return process_check(liveness, format!("explicit:{}", process_liveness_wire(liveness)));
+        return process_check(
+            liveness,
+            format!("explicit:{}", process_liveness_wire(liveness)),
+        );
     }
     if agent.status.as_deref().is_some_and(|status| {
         matches!(
             status,
             "stopped" | "missing" | "error" | "dead" | "exited" | "terminated" | "crashed"
         )
-    })
-    {
+    }) {
         return process_check(
             ProcessLiveness::Dead,
             format!("status:{}", agent.status.as_deref().unwrap_or("unknown")),
@@ -1538,7 +1649,10 @@ fn agent_process_liveness(
         if let Some(pid) = target.pane_pid.map(Pid::new) {
             return pid_process_check("pane_pid", pid);
         }
-        return process_check(ProcessLiveness::Unverifiable, "pane_present_pid_unknown".to_string());
+        return process_check(
+            ProcessLiveness::Unverifiable,
+            "pane_present_pid_unknown".to_string(),
+        );
     }
     if let Some(pane_id) = agent.pane_id.as_deref() {
         let pane = crate::transport::PaneId::new(pane_id);
@@ -1546,27 +1660,37 @@ fn agent_process_liveness(
             Ok(crate::transport::PaneLiveness::Dead) => {
                 process_check(ProcessLiveness::Dead, format!("pane_dead:{pane_id}"))
             }
-            Ok(crate::transport::PaneLiveness::Live) => {
-                process_check(ProcessLiveness::Unverifiable, format!("pane_live_pid_unknown:{pane_id}"))
-            }
-            Ok(crate::transport::PaneLiveness::Unknown) => {
-                process_check(ProcessLiveness::Unverifiable, format!("pane_unknown:{pane_id}"))
-            }
-            Err(error) => {
-                process_check(ProcessLiveness::Unverifiable, format!("pane_unverifiable:{pane_id}:{error}"))
-            }
+            Ok(crate::transport::PaneLiveness::Live) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_live_pid_unknown:{pane_id}"),
+            ),
+            Ok(crate::transport::PaneLiveness::Unknown) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_unknown:{pane_id}"),
+            ),
+            Err(error) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_unverifiable:{pane_id}:{error}"),
+            ),
         };
     }
     let (Some(session), Some(window)) = (session_name, agent.window.as_deref()) else {
-        return process_check(ProcessLiveness::Unverifiable, "missing_session_or_window".to_string());
+        return process_check(
+            ProcessLiveness::Unverifiable,
+            "missing_session_or_window".to_string(),
+        );
     };
     let session = crate::transport::SessionName::new(session);
     match transport.list_windows(&session) {
-        Ok(windows) if windows.iter().any(|known| known.as_str() == window) => {
-            process_check(ProcessLiveness::Unverifiable, "window_present_pid_unknown".to_string())
-        }
+        Ok(windows) if windows.iter().any(|known| known.as_str() == window) => process_check(
+            ProcessLiveness::Unverifiable,
+            "window_present_pid_unknown".to_string(),
+        ),
         Ok(_) => process_check(ProcessLiveness::Dead, format!("window_missing:{window}")),
-        Err(error) => process_check(ProcessLiveness::Unverifiable, format!("window_unverifiable:{window}:{error}")),
+        Err(error) => process_check(
+            ProcessLiveness::Unverifiable,
+            format!("window_unverifiable:{window}:{error}"),
+        ),
     }
 }
 
@@ -1576,7 +1700,10 @@ fn matching_agent_target<'a>(
     targets: &'a [crate::transport::PaneInfo],
 ) -> Option<&'a crate::transport::PaneInfo> {
     if let Some(pane_id) = agent.pane_id.as_deref() {
-        if let Some(target) = targets.iter().find(|target| target.pane_id.as_str() == pane_id) {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target.pane_id.as_str() == pane_id)
+        {
             return Some(target);
         }
     }
@@ -1596,7 +1723,10 @@ fn pid_process_check(label: &str, pid: Pid) -> ProcessCheck {
     match pid_is_running(pid) {
         Ok(true) => process_check(ProcessLiveness::Alive, format!("{label}_running:{pid}")),
         Ok(false) => process_check(ProcessLiveness::Dead, format!("{label}_not_running:{pid}")),
-        Err(error) => process_check(ProcessLiveness::Unverifiable, format!("{label}_unverifiable:{pid}:{error}")),
+        Err(error) => process_check(
+            ProcessLiveness::Unverifiable,
+            format!("{label}_unverifiable:{pid}:{error}"),
+        ),
     }
 }
 
@@ -1604,7 +1734,10 @@ fn command_process_check(provider: crate::model::enums::Provider, command: &str)
     if provider_command_matches(provider, command) {
         process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
     } else {
-        process_check(ProcessLiveness::Dead, format!("provider_not_foreground:{command}"))
+        process_check(
+            ProcessLiveness::Dead,
+            format!("provider_not_foreground:{command}"),
+        )
     }
 }
 
@@ -1803,7 +1936,10 @@ fn mark_abnormal_notified(state: &mut Value, agent_id: &str, key: &str) {
         }
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("last_notified_key".to_string(), serde_json::json!(key));
-            obj.insert("last_notified_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+            obj.insert(
+                "last_notified_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
         }
     }
 }
@@ -1818,7 +1954,10 @@ fn mark_abnormal_suppressed(state: &mut Value, agent_id: &str, key: &str) {
         }
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("last_suppressed_key".to_string(), serde_json::json!(key));
-            obj.insert("last_suppressed_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+            obj.insert(
+                "last_suppressed_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
         }
     }
 }
@@ -1855,7 +1994,10 @@ fn mark_abnormal_checked(state: &mut Value, agent_id: &str, key: &str) {
         }
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("last_check_key".to_string(), serde_json::json!(key));
-            obj.insert("last_check_at".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+            obj.insert(
+                "last_check_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
         }
     }
 }
@@ -2043,7 +2185,10 @@ fn capture_window_target(
     crate::transport::WindowName,
     crate::transport::Target,
 )> {
-    let window = agent.get("window").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    let window = agent
+        .get("window")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
     let session = session_name.filter(|s| !s.is_empty())?;
     let session = crate::transport::SessionName::new(session);
     let window = crate::transport::WindowName::new(window);
@@ -2093,13 +2238,18 @@ fn agent_rollout_path(agent: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn runtime_approval_target(agent: &Value, session_name: Option<&str>) -> Option<crate::transport::Target> {
+fn runtime_approval_target(
+    agent: &Value,
+    session_name: Option<&str>,
+) -> Option<crate::transport::Target> {
     if let Some(pane_id) = agent
         .get("pane_id")
         .and_then(Value::as_str)
         .filter(|pane_id| !pane_id.is_empty())
     {
-        return Some(crate::transport::Target::Pane(crate::transport::PaneId::new(pane_id)));
+        return Some(crate::transport::Target::Pane(
+            crate::transport::PaneId::new(pane_id),
+        ));
     }
     capture_window_target(agent, session_name).map(|(_, _, target)| target)
 }
@@ -2200,7 +2350,14 @@ fn awaiting_human_confirm_payload(
     fact: &crate::provider::AwaitingHumanConfirmFact,
 ) -> Value {
     let mut payload = fact.to_event_payload();
-    let excerpt = fact.prompt.lines().next().unwrap_or("").chars().take(240).collect::<String>();
+    let excerpt = fact
+        .prompt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(240)
+        .collect::<String>();
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("team_id".to_string(), serde_json::json!(fact.team));
         obj.insert("owner_team_id".to_string(), serde_json::json!(fact.team));
@@ -2363,7 +2520,10 @@ fn write_activity(
     activity: &crate::messaging::AgentActivity,
     output_advanced: bool,
 ) -> Option<String> {
-    let previous_last_output = agent.get("last_output_at").and_then(Value::as_str).map(str::to_string);
+    let previous_last_output = agent
+        .get("last_output_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let Some(agent_obj) = agent.as_object_mut() else {
         return previous_last_output;
     };

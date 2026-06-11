@@ -25,6 +25,7 @@ pub enum DeliveryStatus {
     Queued,
     Blocked,
     Refused,
+    Degraded,
     RetryScheduled,
     TrustAutoAnswerExhausted,
     AlreadyDelivered,
@@ -65,6 +66,9 @@ pub enum DeliveryRefusal {
     /// swallow batch 3: an explicit empty `--to` target list (a failed send always
     /// carries its reason; an unexplained `failed` is a swallowed error).
     EmptyTargetList,
+    /// Coordinator is known unhealthy, so accepting a worker-bound message would
+    /// strand it in the store with no delivery tick.
+    CoordinatorUnavailable,
 }
 
 /// Debug 输出 = wire snake_case 字面(单一真相源 = serde rename),与事件/JSON 面一致,
@@ -134,7 +138,11 @@ pub enum AlertType {
 impl AlertType {
     /// `stuck_cancel(alert_type="all")` → `sorted(_ALERT_TYPES)` 全集 (`scheduler.py:269`)。
     pub fn all() -> [AlertType; 3] {
-        [AlertType::CrossWorkerDeadlock, AlertType::IdleFallback, AlertType::Stuck]
+        [
+            AlertType::CrossWorkerDeadlock,
+            AlertType::IdleFallback,
+            AlertType::Stuck,
+        ]
     }
 }
 
@@ -175,10 +183,14 @@ pub enum ReceiverMode {
 /// 自动应答。故 `Failed` 携带 reason 但**不**携带任何 fallback 宽度。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneWidthQuery {
-    Ok { pane_width: u32 },
+    Ok {
+        pane_width: u32,
+    },
     /// 失败原因 (`tmux_query_failed:<exc>`/`tmux_query_nonzero`/`empty_output`/
     /// `unparseable_output`/`non_positive_width`)。**无默认宽度** (fail-safe)。
-    Failed { error: String },
+    Failed {
+        error: String,
+    },
 }
 
 // ===========================================================================
@@ -243,7 +255,10 @@ pub enum CheckEvidence {
     /// `no_provider_sdk_calls` 的机械证据 (§84):三 SDK 调用计数。
     ProviderSdkCalls(ProviderSdkCalls),
     /// binding 一致性比对结果 (mismatch 列表)。
-    Binding { mismatches: Vec<String>, details: serde_json::Value },
+    Binding {
+        mismatches: Vec<String>,
+        details: serde_json::Value,
+    },
     /// executable zero-token comms contract suite evidence.
     ContractSuite { checks: Vec<ContractSuiteCheck> },
 }

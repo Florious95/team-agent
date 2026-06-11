@@ -65,7 +65,10 @@ pub fn normalize_change_kind(value: Option<&str>, description: &str) -> ChangeKi
                 ChangeKind::Created
             } else if desc.contains("removed") || desc.contains("deleted") {
                 ChangeKind::Deleted
-            } else if desc.contains("verified") || desc.contains("observed") || desc.contains("inspected") {
+            } else if desc.contains("verified")
+                || desc.contains("observed")
+                || desc.contains("inspected")
+            {
                 ChangeKind::Observed
             } else {
                 ChangeKind::Modified
@@ -127,6 +130,7 @@ pub fn compact_tool_result(result: &Value) -> ToolResult {
             "ok",
             "status",
             "reason",
+            "warning",
             "error",
             "message_id",
             "agent_id",
@@ -195,7 +199,10 @@ pub fn compact_tool_result(result: &Value) -> ToolResult {
     Ok(ToolOk { fields })
 }
 
-pub(crate) fn normalize_changes(value: Option<&Value>, envelope_summary: &str) -> Vec<NormalizedChange> {
+pub(crate) fn normalize_changes(
+    value: Option<&Value>,
+    envelope_summary: &str,
+) -> Vec<NormalizedChange> {
     items_from_value(value)
         .iter()
         .filter_map(|item| {
@@ -267,7 +274,9 @@ pub(crate) fn normalize_risks(value: Option<&Value>) -> Vec<NormalizedRisk> {
         .filter_map(|item| match item {
             Value::Object(obj) => Some(NormalizedRisk {
                 severity: normalize_risk_severity(
-                    obj.get("severity").or_else(|| obj.get("level")).and_then(Value::as_str),
+                    obj.get("severity")
+                        .or_else(|| obj.get("level"))
+                        .and_then(Value::as_str),
                 ),
                 description: obj
                     .get("description")
@@ -325,9 +334,7 @@ pub(crate) fn normalize_next_actions(value: Option<&Value>) -> Vec<NormalizedNex
                 .or_else(|| obj.get("todo"))
                 .or_else(|| obj.get("message"))
                 .and_then(text_of_value)
-                .map(|description| NormalizedNextAction {
-                    description,
-                }),
+                .map(|description| NormalizedNextAction { description }),
             scalar => text_of_value(scalar).map(|description| NormalizedNextAction { description }),
         })
         .collect()

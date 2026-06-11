@@ -2,9 +2,10 @@
 
 use std::path::Path;
 
+use crate::coordinator::{CoordinatorHealthStatus, WorkspacePath};
 use crate::event_log::EventLog;
-use crate::model::ids::{TaskId, TeamKey};
 use crate::model::enums::PaneLiveness;
+use crate::model::ids::{TaskId, TeamKey};
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
@@ -118,7 +119,15 @@ pub fn send_message(
         MessageTarget::Single(target) => target,
         MessageTarget::Broadcast => {
             let recipients = broadcast_recipients(&state, &opts.sender, opts.team.as_ref());
-            return fanout_send(workspace, &state, &recipients, content, opts, &event_log, "*");
+            return fanout_send(
+                workspace,
+                &state,
+                &recipients,
+                content,
+                opts,
+                &event_log,
+                "*",
+            );
         }
         MessageTarget::Fanout(recipients) if recipients.is_empty() => {
             // swallow batch 3 ②: a failed send carries its reason (Python send error
@@ -135,7 +144,9 @@ pub fn send_message(
             });
         }
         MessageTarget::Fanout(recipients) => {
-            return fanout_send(workspace, &state, recipients, content, opts, &event_log, "fanout");
+            return fanout_send(
+                workspace, &state, recipients, content, opts, &event_log, "fanout",
+            );
         }
     };
     // send.py:259-261 — a non-leader target that is NOT a known team agent is refused
@@ -169,6 +180,10 @@ pub fn send_message(
                 )));
             }
         }
+    }
+    if let Some(outcome) = coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
+    {
+        return Ok(outcome);
     }
     let store = crate::message_store::MessageStore::open(workspace)?;
     let task_id = opts.task_id.as_ref().map(|t| t.as_str());
@@ -220,9 +235,9 @@ fn task_exists(state: &serde_json::Value, task_id: &TaskId) -> bool {
         .get("tasks")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|tasks| {
-            tasks
-                .iter()
-                .any(|task| task.get("id").and_then(serde_json::Value::as_str) == Some(task_id.as_str()))
+            tasks.iter().any(|task| {
+                task.get("id").and_then(serde_json::Value::as_str) == Some(task_id.as_str())
+            })
         })
 }
 
@@ -259,6 +274,46 @@ fn refused_outcome_with_verification(
     }
 }
 
+fn coordinator_unavailable_outcome(
+    workspace: &Path,
+    recipient: &str,
+    opts: &SendOptions,
+    event_log: &EventLog,
+) -> Result<Option<DeliveryOutcome>, MessagingError> {
+    let coordinator_workspace = WorkspacePath::new(workspace.to_path_buf());
+    let health = crate::coordinator::coordinator_health(&coordinator_workspace);
+    if health.ok || matches!(health.status, CoordinatorHealthStatus::Missing) {
+        return Ok(None);
+    }
+    let warning = format!(
+        "coordinator is not running; message was not queued for {recipient}. Run `team-agent diagnose` or restart the team before sending again."
+    );
+    event_log.write(
+        "send.coordinator_unavailable",
+        serde_json::json!({
+            "recipient": recipient,
+            "sender": opts.sender,
+            "coordinator_status": health.status,
+            "coordinator_pid": health.pid.map(|pid| pid.get()),
+            "message_queued": false,
+            "warning": warning,
+            "coordinator_log": crate::coordinator::coordinator_log_path(&coordinator_workspace)
+                .display()
+                .to_string(),
+        }),
+    )?;
+    Ok(Some(DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Degraded,
+        message_status: MessageStatusShadow("degraded".to_string()),
+        message_id: None,
+        verification: Some(warning),
+        stage: None,
+        reason: Some(DeliveryRefusal::CoordinatorUnavailable),
+        channel: Some("coordinator_unavailable".to_string()),
+    }))
+}
+
 fn rebind_required_outcome(message_id: Option<String>) -> DeliveryOutcome {
     rebind_required_outcome_with_verification(
         message_id,
@@ -291,7 +346,10 @@ fn sender_is_leader(state: &serde_json::Value, sender: &str) -> bool {
     sender == leader_id || sender == "leader" || sender == "Leader"
 }
 
-fn backfill_leader_binding_for_delivery_view(state: &mut serde_json::Value, raw_state: &serde_json::Value) {
+fn backfill_leader_binding_for_delivery_view(
+    state: &mut serde_json::Value,
+    raw_state: &serde_json::Value,
+) {
     let Some(obj) = state.as_object_mut() else {
         return;
     };
@@ -329,7 +387,9 @@ fn send_owner_gate_refusal(
         None,
     )
     .map_err(|e| MessagingError::Routing(e.to_string()))?;
-    if let Some(refusal) = crate::state::owner_gate::check_team_owner(state, &caller, false, &LiveLiveness) {
+    if let Some(refusal) =
+        crate::state::owner_gate::check_team_owner(state, &caller, false, &LiveLiveness)
+    {
         if caller.pane_id.is_empty() {
             return Ok(Some(refused_outcome(DeliveryRefusal::NoCallerPane)));
         }
@@ -365,7 +425,8 @@ fn explicit_claim_applied(workspace: &Path, _team_key: &str, _caller_pane: &str)
         .iter()
         .rev()
         .any(|event| {
-            event.get("event").and_then(serde_json::Value::as_str) == Some("leader_receiver.rebind_applied")
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.rebind_applied")
         })
 }
 
@@ -514,11 +575,7 @@ fn broadcast_recipients(
                 .and_then(|t| t.get("agents"))
                 .and_then(serde_json::Value::as_object)
         })
-        .or_else(|| {
-            state
-                .get("agents")
-                .and_then(serde_json::Value::as_object)
-        });
+        .or_else(|| state.get("agents").and_then(serde_json::Value::as_object));
     if let Some(agents) = agents_obj {
         for (agent_id, _) in agents {
             if agent_id == sender {

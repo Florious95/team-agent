@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.11
+
+- **Message delivery now surfaces a degraded status when the coordinator is not alive**: `team-agent send` (and the internal MCP send path) previously returned `accepted` even when the coordinator was dead, leaving messages silently stuck. The send path now returns an explicit degraded status instead of falsely reporting acceptance, so the leader can tell immediately that the coordinator needs attention rather than waiting on a delivery that will never happen.
+- **Coordinator crashes now leave a durable post-mortem marker**: a panic inside the coordinator tick is now caught and written to `coordinator.tick_panic` with the captured backtrace, so `team-agent diagnose` and on-disk inspection can see where the coordinator died instead of finding only an absent process. Combined with the 0.3.10 "no silent self-exit" change, every coordinator failure mode now produces an evidence trail.
+
 ## 0.3.10
 
 - **`team-agent restart` no longer resurrects dead worker sessions (#264, E20)**: the resume gate was only running a transcript-existence check for `codex` workers — `claude`, `claude_code`, and `copilot` workers were promoted to `Resumed` purely on the presence of a stored `session_id`, even when the provider had no live transcript to resume against, producing a zombie window that looked alive but was attached to nothing. The transcript-existence check now runs for every provider that has a known transcript root, so a stale session id falls through to refused-or-fresh-by-policy instead of being silently honored.

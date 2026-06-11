@@ -1,6 +1,5 @@
 use super::*;
 
-
 // ════════════════════════════════════════════════════════════════════════
 // GROUP A — serde byte-locks (audit/event wire values; changing one byte
 // breaks downstream recognizers/event consumers). delivery.py / send.py /
@@ -15,6 +14,7 @@ fn delivery_status_serde_snake_case_byte_locked() {
         (DeliveryStatus::Queued, "\"queued\""),
         (DeliveryStatus::Blocked, "\"blocked\""),
         (DeliveryStatus::Refused, "\"refused\""),
+        (DeliveryStatus::Degraded, "\"degraded\""),
         (DeliveryStatus::RetryScheduled, "\"retry_scheduled\""),
         (
             DeliveryStatus::TrustAutoAnswerExhausted,
@@ -22,7 +22,10 @@ fn delivery_status_serde_snake_case_byte_locked() {
         ),
         (DeliveryStatus::AlreadyDelivered, "\"already_delivered\""),
         (DeliveryStatus::FallbackLog, "\"fallback_log\""),
-        (DeliveryStatus::BroadcastDelivered, "\"broadcast_delivered\""),
+        (
+            DeliveryStatus::BroadcastDelivered,
+            "\"broadcast_delivered\"",
+        ),
         (DeliveryStatus::BroadcastPartial, "\"broadcast_partial\""),
         (DeliveryStatus::FanoutDelivered, "\"fanout_delivered\""),
         (DeliveryStatus::FanoutPartial, "\"fanout_partial\""),
@@ -40,16 +43,32 @@ fn delivery_refusal_serde_snake_case_byte_locked() {
             DeliveryRefusal::HumanConfirmationRequired,
             "\"human_confirmation_required\"",
         ),
-        (DeliveryRefusal::MissingPermissions, "\"missing_permissions\""),
+        (
+            DeliveryRefusal::MissingPermissions,
+            "\"missing_permissions\"",
+        ),
         (DeliveryRefusal::RecipientBusy, "\"recipient_busy\""),
         (DeliveryRefusal::UnknownRecipient, "\"unknown_recipient\""),
-        (DeliveryRefusal::TmuxTargetMissing, "\"tmux_target_missing\""),
+        (
+            DeliveryRefusal::TmuxTargetMissing,
+            "\"tmux_target_missing\"",
+        ),
         (
             DeliveryRefusal::MessageAlreadyClaimed,
             "\"message_already_claimed\"",
         ),
-        (DeliveryRefusal::LeaderNotAttached, "\"leader_not_attached\""),
-        (DeliveryRefusal::TeamOwnerMismatch, "\"team_owner_mismatch\""),
+        (
+            DeliveryRefusal::LeaderNotAttached,
+            "\"leader_not_attached\"",
+        ),
+        (
+            DeliveryRefusal::CoordinatorUnavailable,
+            "\"coordinator_unavailable\"",
+        ),
+        (
+            DeliveryRefusal::TeamOwnerMismatch,
+            "\"team_owner_mismatch\"",
+        ),
         (DeliveryRefusal::Ambiguous, "\"ambiguous\""),
         (
             DeliveryRefusal::RecipientPaneInNonInputMode,
@@ -354,4 +373,3 @@ fn result_id_from_text_strips_trailing_whitespace() {
         Some("abc".to_string())
     );
 }
-

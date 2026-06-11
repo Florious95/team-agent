@@ -29,6 +29,7 @@ pub(crate) fn status_wire(status: DeliveryStatus) -> &'static str {
         DeliveryStatus::Queued => "queued",
         DeliveryStatus::Blocked => "blocked",
         DeliveryStatus::Refused => "refused",
+        DeliveryStatus::Degraded => "degraded",
         DeliveryStatus::RetryScheduled => "retry_scheduled",
         DeliveryStatus::TrustAutoAnswerExhausted => "trust_auto_answer_exhausted",
         DeliveryStatus::AlreadyDelivered => "already_delivered",
@@ -40,7 +41,10 @@ pub(crate) fn status_wire(status: DeliveryStatus) -> &'static str {
     }
 }
 
-pub(crate) fn message_exists(store: &MessageStore, message_id: &str) -> Result<bool, MessagingError> {
+pub(crate) fn message_exists(
+    store: &MessageStore,
+    message_id: &str,
+) -> Result<bool, MessagingError> {
     let conn = crate::db::schema::open_db(store.db_path())?;
     let found: Option<String> = conn
         .query_row(
@@ -65,7 +69,10 @@ pub(crate) fn next_run_id() -> String {
     id.chars().filter(|c| *c != '_').take(12).collect()
 }
 
-pub(crate) fn required_str<'a>(value: &'a serde_json::Value, key: &str) -> Result<&'a str, MessagingError> {
+pub(crate) fn required_str<'a>(
+    value: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, MessagingError> {
     value
         .get(key)
         .and_then(|v| v.as_str())
@@ -85,7 +92,9 @@ pub(crate) fn validate_result_envelope(envelope: &serde_json::Value) -> Result<(
     }
     for key in ["changes", "tests", "risks", "artifacts", "next_actions"] {
         if !envelope.get(key).is_some_and(serde_json::Value::is_array) {
-            return Err(MessagingError::Validation(format!("missing required array field: {key}")));
+            return Err(MessagingError::Validation(format!(
+                "missing required array field: {key}"
+            )));
         }
     }
     Ok(())
@@ -122,10 +131,12 @@ pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
 pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
     let lower = scrollback.to_ascii_lowercase();
     let idle_pos = latest_idle_prompt_pos(scrollback);
-    let working_pos = ["working", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        .iter()
-        .filter_map(|needle| lower.rfind(needle))
-        .max();
+    let working_pos = [
+        "working", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+    ]
+    .iter()
+    .filter_map(|needle| lower.rfind(needle))
+    .max();
     match (idle_pos, working_pos) {
         (Some(i), Some(w)) if i > w => Some(idle_activity()),
         (Some(_), None) => Some(idle_activity()),
@@ -168,10 +179,19 @@ pub fn fail_leader_delivery(
     error: Option<&str>,
 ) -> Result<DeliveryOutcome, MessagingError> {
     let store = MessageStore::open(workspace)?;
-    let sender = payload.get("sender").and_then(serde_json::Value::as_str).unwrap_or("system");
-    let content = payload.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+    let sender = payload
+        .get("sender")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("system");
+    let content = payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     let task_id = payload.get("task_id").and_then(serde_json::Value::as_str);
-    let message_id = match payload.get("message_id").and_then(serde_json::Value::as_str) {
+    let message_id = match payload
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+    {
         Some(existing) => existing.to_string(),
         None => store.create_message(task_id, sender, "leader", content, None, false, None)?,
     };

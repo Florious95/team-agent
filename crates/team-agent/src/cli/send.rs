@@ -22,7 +22,9 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     // empty message body is a prompt-only invocation (`team-agent send "fix the build"`).
     // The lone positional is CONTENT, not a target — reject with `routing_ambiguous`
     // (NOT `target_not_in_team`, which would lie that the user did pick a target).
-    if let Some(amb) = routing_ambiguous_value(&selected.run_workspace, args, &target, &content, &opts) {
+    if let Some(amb) =
+        routing_ambiguous_value(&selected.run_workspace, args, &target, &content, &opts)
+    {
         return Ok(CmdResult::from_json(amb, args.json));
     }
     let outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
@@ -117,7 +119,10 @@ fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> Value {
     let agent_id = match target {
         MessageTarget::Single(agent) => agent.clone(),
         MessageTarget::Broadcast => "*".to_string(),
-        MessageTarget::Fanout(recipients) => recipients.first().cloned().unwrap_or_else(|| "-".to_string()),
+        MessageTarget::Fanout(recipients) => recipients
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "-".to_string()),
     };
     json!({
         "status": "registered",
@@ -174,6 +179,7 @@ fn delivery_status_wire(status: DeliveryStatus) -> &'static str {
         DeliveryStatus::Queued => "queued",
         DeliveryStatus::Blocked => "blocked",
         DeliveryStatus::Refused => "refused",
+        DeliveryStatus::Degraded => "degraded",
         DeliveryStatus::RetryScheduled => "retry_scheduled",
         DeliveryStatus::TrustAutoAnswerExhausted => "trust_auto_answer_exhausted",
         DeliveryStatus::AlreadyDelivered => "already_delivered",
@@ -195,6 +201,7 @@ fn delivery_refusal_wire(reason: DeliveryRefusal) -> &'static str {
         DeliveryRefusal::TmuxTargetMissing => "tmux_target_missing",
         DeliveryRefusal::MessageAlreadyClaimed => "message_already_claimed",
         DeliveryRefusal::LeaderNotAttached => "leader_not_attached",
+        DeliveryRefusal::CoordinatorUnavailable => "coordinator_unavailable",
         DeliveryRefusal::NoCallerPane => "no_caller_pane",
         DeliveryRefusal::TeamOwnerMismatch => "team_owner_mismatch",
         DeliveryRefusal::Ambiguous => "ambiguous",

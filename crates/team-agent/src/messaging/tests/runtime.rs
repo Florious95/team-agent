@@ -43,9 +43,11 @@ fn session_drift_refusal_none_for_no_target_leader_or_broadcast() {
             .is_none()
     );
     // target == "*" (broadcast) → None.
-    assert!(session_drift_refusal(&state, "*", "leader", "s", None, &log)
-        .unwrap()
-        .is_none());
+    assert!(
+        session_drift_refusal(&state, "*", "leader", "s", None, &log)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -53,9 +55,11 @@ fn session_drift_refusal_none_when_status_not_drift() {
     let ws = tmp_ws("driftok");
     let log = EventLog::new(&ws);
     let state = json(serde_json::json!({"agents": {"w1": {"status": "idle"}}}));
-    assert!(session_drift_refusal(&state, "w1", "leader", "s", None, &log)
-        .unwrap()
-        .is_none());
+    assert!(
+        session_drift_refusal(&state, "w1", "leader", "s", None, &log)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -149,7 +153,13 @@ fn classify_recent_provider_output_is_working_low_confidence() {
 fn classify_idle_prompt_beats_recent_output_for_just_launched_agent() {
     let state = json(serde_json::json!({}));
     let recent = chrono::Utc::now().to_rfc3339();
-    let a = classify_agent_activity(&state, "codex ready\n❯ \n", false, Some("codex"), Some(&recent));
+    let a = classify_agent_activity(
+        &state,
+        "codex ready\n❯ \n",
+        false,
+        Some("codex"),
+        Some(&recent),
+    );
     assert_eq!(
         a.status,
         ActivityStatus::Idle,
@@ -158,7 +168,10 @@ fn classify_idle_prompt_beats_recent_output_for_just_launched_agent() {
          the startup banner is recent (activity.rs:192 recent-output fires before latest_prompt_signal:200) \
          — the Stage B dispatch deferred_busy regression. got {a:?}"
     );
-    assert_eq!(a.confidence, 0.9, "golden idle-prompt confidence is 0.9; got {a:?}");
+    assert_eq!(
+        a.confidence, 0.9,
+        "golden idle-prompt confidence is 0.9; got {a:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -227,7 +240,10 @@ fn trust_auto_answer_own_workspace_realpath_equal_answers() {
         &log,
     )
     .unwrap();
-    assert!(out.answered, "own-workspace realpath-equal prompt must auto-answer");
+    assert!(
+        out.answered,
+        "own-workspace realpath-equal prompt must auto-answer"
+    );
     assert_eq!(out.reason, "trust_auto_answered");
 }
 
@@ -269,7 +285,10 @@ fn pane_width_failed_forces_exact_match_never_default() {
     )
     .unwrap();
     // fail-safe: no width → exact-equality only → truncated prefix refused.
-    assert!(!out.answered, "Failed pane-width must NOT enable prefix/truncation matching");
+    assert!(
+        !out.answered,
+        "Failed pane-width must NOT enable prefix/truncation matching"
+    );
     assert_eq!(out.reason, "workspace_dir_mismatch");
     assert_eq!(out.action.as_deref(), Some("prompt_leader"));
 }
@@ -350,6 +369,80 @@ fn send_message_target_not_in_team_is_refused() {
     .unwrap();
     assert_eq!(out.status, DeliveryStatus::Refused);
     assert_eq!(out.reason, Some(DeliveryRefusal::TargetNotInTeam));
+}
+
+#[test]
+fn message_not_silently_stuck_accepted_when_coordinator_dead() {
+    let ws = tmp_ws("sendcoorddead");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "session_name": "team-x",
+            "agents": {
+                "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
+            },
+        }),
+    )
+    .unwrap();
+    let coordinator_ws = crate::coordinator::WorkspacePath::new(ws.clone());
+    std::fs::create_dir_all(crate::model::paths::runtime_dir(&ws)).unwrap();
+    let _ = MessageStore::open(&ws).unwrap();
+    let stale_pid = crate::coordinator::Pid::new(99_999_999);
+    crate::coordinator::write_coordinator_metadata(
+        &coordinator_ws,
+        stale_pid,
+        crate::coordinator::MetadataSource::Boot,
+    )
+    .unwrap();
+    std::fs::write(
+        crate::coordinator::coordinator_pid_path(&coordinator_ws),
+        stale_pid.to_string(),
+    )
+    .unwrap();
+
+    let out = send_message(
+        &ws,
+        &MessageTarget::Single("worker-1".to_string()),
+        "hi",
+        &SendOptions::default(),
+    )
+    .unwrap();
+
+    assert!(!out.ok);
+    assert_eq!(out.status, DeliveryStatus::Degraded);
+    assert_eq!(out.message_status.0, "degraded");
+    assert_eq!(out.reason, Some(DeliveryRefusal::CoordinatorUnavailable));
+    assert!(
+        out.verification
+            .as_deref()
+            .is_some_and(|warning| warning.contains("coordinator is not running")),
+        "N38 warning must explain why the message was not queued; out={out:?}"
+    );
+    let store = MessageStore::open(&ws).unwrap();
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let accepted: i64 = conn
+        .query_row(
+            "select count(*) from messages where status = 'accepted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        accepted, 0,
+        "dead coordinator send must not strand an accepted row"
+    );
+    let events = EventLog::new(&ws).tail(20).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("send.coordinator_unavailable")
+                && event
+                    .get("message_queued")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(false)
+        }),
+        "send.coordinator_unavailable event must be durable; events={events:?}"
+    );
 }
 
 #[test]
@@ -455,14 +548,8 @@ fn report_result_valid_envelope_returns_ok_with_result_id() {
     let out = report_result(&ws, &envelope).unwrap();
     // results.py:216-227 — ok True with result_id/task_id/agent_id echoed.
     assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        out.get("task_id").and_then(|v| v.as_str()),
-        Some("t1")
-    );
-    assert_eq!(
-        out.get("agent_id").and_then(|v| v.as_str()),
-        Some("alice")
-    );
+    assert_eq!(out.get("task_id").and_then(|v| v.as_str()), Some("t1"));
+    assert_eq!(out.get("agent_id").and_then(|v| v.as_str()), Some("alice"));
     assert!(out.get("result_id").and_then(|v| v.as_str()).is_some());
 }
 
@@ -523,7 +610,9 @@ fn report_result_funnels_into_leader_delivery_primitive_not_queued_scheduled_eve
     // No `scheduled_events` rows: the queued parallel path is gone.
     let conn = seed_conn(&store);
     let scheduled_count: i64 = conn
-        .query_row("select count(*) from scheduled_events", [], |row| row.get(0))
+        .query_row("select count(*) from scheduled_events", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(
         scheduled_count, 0,
@@ -544,15 +633,16 @@ fn report_result_funnels_into_leader_delivery_primitive_not_queued_scheduled_eve
         "I-4: leader_notified=false when no leader pane is bound"
     );
     assert!(
-        out.get("notification_event_id").is_some_and(|v| v.is_null()),
+        out.get("notification_event_id")
+            .is_some_and(|v| v.is_null()),
         "no scheduled_events row → notification_event_id is null"
     );
 
     // Audit events: the funnel emits leader_receiver.delivery_blocked (I-4 rebind),
     // and the legacy mcp.report_result_notify_queued audit is gone.
     let events_path = ws.join(".team").join("logs").join("events.jsonl");
-    let event_lines = std::fs::read_to_string(events_path)
-        .expect("report_result writes events.jsonl");
+    let event_lines =
+        std::fs::read_to_string(events_path).expect("report_result writes events.jsonl");
     assert!(
         event_lines.contains("\"leader_receiver.delivery_blocked\""),
         "I-4 rebind path must emit leader_receiver.delivery_blocked audit; got {event_lines}",
@@ -595,14 +685,7 @@ fn notify_result_watchers_no_match_returns_empty() {
     let watchers = vec![json(serde_json::json!({
         "watcher_id": "w-x", "task_id": "OTHER", "agent_id": "alice"
     }))];
-    let notices = notify_result_watchers(
-        &ws,
-        &result,
-        &log,
-        Some(&watchers),
-        None,
-    )
-    .unwrap();
+    let notices = notify_result_watchers(&ws, &result, &log, Some(&watchers), None).unwrap();
     assert!(notices.is_empty());
 }
 
@@ -625,14 +708,16 @@ fn notify_result_watchers_supersedes_duplicate_watchers() {
             "created_at": "2026-06-02T11:00:00+00:00"
         })),
     ];
-    let notices =
-        notify_result_watchers(&ws, &result, &log, Some(&watchers), None).unwrap();
+    let notices = notify_result_watchers(&ws, &result, &log, Some(&watchers), None).unwrap();
     // The late watcher must appear as a superseded (not-ok) notice — exactly-once.
     let superseded = notices
         .iter()
         .find(|n| n.watcher_id == "w-late")
         .expect("late watcher must be reported");
-    assert!(!superseded.ok, "duplicate watcher must be superseded, not re-delivered");
+    assert!(
+        !superseded.ok,
+        "duplicate watcher must be superseded, not re-delivered"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -654,17 +739,36 @@ fn requeue_after_claim_leader_skips_already_notified() {
     let team = TeamKey::new("team-a");
     let pane = PaneId::new("%new-leader");
 
-    let w_un = seed_watcher(&store, "w-unnotified", "team-a", "t1", "alice", "pending", None, None);
+    let w_un = seed_watcher(
+        &store,
+        "w-unnotified",
+        "team-a",
+        "t1",
+        "alice",
+        "pending",
+        None,
+        None,
+    );
     let w_notified = seed_watcher(
-        &store, "w-notified", "team-a", "t2", "bob", "pending", None, Some("msg_already"),
+        &store,
+        "w-notified",
+        "team-a",
+        "t2",
+        "bob",
+        "pending",
+        None,
+        Some("msg_already"),
     );
 
-    let requeued =
-        requeue_after_claim_leader(&ws, &store, &log, &team, &pane, None).unwrap();
+    let requeued = requeue_after_claim_leader(&ws, &store, &log, &team, &pane, None).unwrap();
 
     // ONLY the un-notified watcher requeues (the notified one is the dedupe gate).
     let ids: Vec<&str> = requeued.iter().map(|n| n.watcher_id.as_str()).collect();
-    assert_eq!(ids, vec![w_un.as_str()], "exactly the un-notified watcher requeues");
+    assert_eq!(
+        ids,
+        vec![w_un.as_str()],
+        "exactly the un-notified watcher requeues"
+    );
     assert!(
         !requeued.iter().any(|n| n.watcher_id == w_notified),
         "already-notified watcher must NOT be requeued (Gap 32)"
@@ -719,10 +823,13 @@ fn requeue_delivery_exhausted_watchers_reopens_only_exhausted() {
         None,
     );
 
-    let requeued =
-        requeue_delivery_exhausted_watchers(&ws, &store, &log, &team, &pane).unwrap();
+    let requeued = requeue_delivery_exhausted_watchers(&ws, &store, &log, &team, &pane).unwrap();
 
-    assert_eq!(requeued.len(), 1, "only delivery_exhausted unnotified watchers requeue");
+    assert_eq!(
+        requeued.len(),
+        1,
+        "only delivery_exhausted unnotified watchers requeue"
+    );
     let notice = &requeued[0];
     assert_eq!(notice.watcher_id, exhausted);
     assert_eq!(notice.result_id.as_deref(), Some(rid.as_str()));
@@ -734,26 +841,55 @@ fn requeue_delivery_exhausted_watchers_reopens_only_exhausted() {
     // R8 (golden): attach requeue leaves the watcher at notify_failed and DEFERS retry to the coordinator
     // tick — it does NOT immediately re-deliver (only the claim path retries). So the persisted status is
     // notify_failed, not 'notified'.
-    assert_eq!(status, "notify_failed", "attach requeue flips to notify_failed and defers retry (golden)");
+    assert_eq!(
+        status, "notify_failed",
+        "attach requeue flips to notify_failed and defers retry (golden)"
+    );
     let (status, notified_id) = watcher_state(&store, &notified);
     assert_eq!(status, "delivery_exhausted");
     assert_eq!(notified_id.as_deref(), Some("msg_done"));
     let (status, _notified_id) = watcher_state(&store, &failed);
-    assert_eq!(status, "notify_failed", "non-exhausted watcher is not selected");
+    assert_eq!(
+        status, "notify_failed",
+        "non-exhausted watcher is not selected"
+    );
 
     // R8 (golden leader/__init__.py:46-50): result_watcher.requeued is the ATTACH form
     // {watcher_id, trigger:"attach_leader", new_pane_id} — NOT the claim-style {prior_state,claimed_pane_id,team_id}.
     let events = log.tail(0).unwrap();
-    let ev = events.iter().rev()
-        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("result_watcher.requeued"))
+    let ev = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.get("event").and_then(|v| v.as_str()) == Some("result_watcher.requeued")
+        })
         .expect("result_watcher.requeued event");
-    let keys: std::collections::BTreeSet<&str> = ev.as_object().unwrap().keys()
-        .map(String::as_str).filter(|k| *k != "ts" && *k != "event").collect();
-    let expected: std::collections::BTreeSet<&str> = ["watcher_id", "trigger", "new_pane_id"].into_iter().collect();
-    assert_eq!(keys, expected, "result_watcher.requeued must be golden attach form {{watcher_id, trigger, new_pane_id}}");
-    assert_eq!(ev.get("watcher_id").and_then(|v| v.as_str()), Some("w-exhausted"));
-    assert_eq!(ev.get("trigger").and_then(|v| v.as_str()), Some("attach_leader"));
-    assert_eq!(ev.get("new_pane_id").and_then(|v| v.as_str()), Some("%leader"));
+    let keys: std::collections::BTreeSet<&str> = ev
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "ts" && *k != "event")
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = ["watcher_id", "trigger", "new_pane_id"]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        keys, expected,
+        "result_watcher.requeued must be golden attach form {{watcher_id, trigger, new_pane_id}}"
+    );
+    assert_eq!(
+        ev.get("watcher_id").and_then(|v| v.as_str()),
+        Some("w-exhausted")
+    );
+    assert_eq!(
+        ev.get("trigger").and_then(|v| v.as_str()),
+        Some("attach_leader")
+    );
+    assert_eq!(
+        ev.get("new_pane_id").and_then(|v| v.as_str()),
+        Some("%leader")
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -767,10 +903,11 @@ fn stuck_cancel_none_alert_type_expands_to_all() {
     let ws = tmp_ws("stuckcancel");
     let out = stuck_cancel(&ws, "w1", None, "leader").unwrap();
     // The suppression result must enumerate all three alert types.
-    let types = out
-        .get("alert_types")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>());
+    let types = out.get("alert_types").and_then(|v| v.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    });
     assert_eq!(
         types,
         Some(vec![
@@ -825,9 +962,18 @@ fn collect_accepts_message_scoped_result_for_matching_recipient() {
         .and_then(|v| v.as_array())
         .expect("collected_results");
     assert_eq!(collected.len(), 1);
-    assert_eq!(collected[0].get("task_id").and_then(|v| v.as_str()), Some(message_id.as_str()));
-    assert_eq!(collected[0].get("agent_id").and_then(|v| v.as_str()), Some("w1"));
-    assert_eq!(collected[0].get("scope").and_then(|v| v.as_str()), Some("message"));
+    assert_eq!(
+        collected[0].get("task_id").and_then(|v| v.as_str()),
+        Some(message_id.as_str())
+    );
+    assert_eq!(
+        collected[0].get("agent_id").and_then(|v| v.as_str()),
+        Some("w1")
+    );
+    assert_eq!(
+        collected[0].get("scope").and_then(|v| v.as_str()),
+        Some("message")
+    );
     // D3 (leader-adjudicated): golden collected_results entry is EXACTLY the 8-key summary for BOTH
     // scopes; golden's task_status feeds only the `collect.result` EVENT, never the entry. So a
     // message-scope entry carries NO task_status key (the prior `Some("message_scoped")` lock encoded a
@@ -837,7 +983,12 @@ fn collect_accepts_message_scoped_result_for_matching_recipient() {
         "collected_results entry must NOT carry task_status (golden 8-key summary; event-only); got {:?}",
         collected[0]
     );
-    let keys: Vec<&str> = collected[0].as_object().expect("entry is an object").keys().map(String::as_str).collect();
+    let keys: Vec<&str> = collected[0]
+        .as_object()
+        .expect("entry is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         keys,
         vec!["result_id", "task_id", "agent_id", "status", "summary", "tests", "created_at", "scope"],
@@ -868,7 +1019,10 @@ fn collect_rejects_message_scoped_result_without_matching_recipient() {
         .and_then(|v| v.as_array())
         .expect("invalid_results");
     assert_eq!(invalid.len(), 1);
-    assert_eq!(invalid[0].get("task_id").and_then(|v| v.as_str()), Some(message_id.as_str()));
+    assert_eq!(
+        invalid[0].get("task_id").and_then(|v| v.as_str()),
+        Some(message_id.as_str())
+    );
     assert_eq!(
         invalid[0].get("error").and_then(|v| v.as_str()),
         Some(format!("unknown task id: {message_id}").as_str())
@@ -882,7 +1036,10 @@ fn allow_peer_talk_records_bidirectional_allowlist_and_event() {
     assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(out.get("a").and_then(|v| v.as_str()), Some("alice"));
     assert_eq!(out.get("b").and_then(|v| v.as_str()), Some("bob"));
-    assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("compat_noop"));
+    assert_eq!(
+        out.get("status").and_then(|v| v.as_str()),
+        Some("compat_noop")
+    );
     assert_eq!(
         out.get("reason").and_then(|v| v.as_str()),
         Some("team_scoped_peer_messages_enabled")
@@ -893,7 +1050,9 @@ fn allow_peer_talk_records_bidirectional_allowlist_and_event() {
     let rows = conn
         .prepare("select a, b from peer_allowlist order by a, b")
         .unwrap()
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
@@ -908,7 +1067,9 @@ fn allow_peer_talk_records_bidirectional_allowlist_and_event() {
     let events = EventLog::new(&ws).tail(10).unwrap();
     let event = events
         .iter()
-        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("communication.peer_allowed"))
+        .find(|event| {
+            event.get("event").and_then(|v| v.as_str()) == Some("communication.peer_allowed")
+        })
         .expect("communication.peer_allowed event");
     assert_eq!(event.get("a").and_then(|v| v.as_str()), Some("alice"));
     assert_eq!(event.get("b").and_then(|v| v.as_str()), Some("bob"));
@@ -1017,7 +1178,8 @@ fn deliver_pending_message_missing_message_fails() {
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
     let t = NoopTransport;
-    let out = deliver_pending_message(&ws, &store, &t, "nope", &log, &serde_json::json!({})).unwrap();
+    let out =
+        deliver_pending_message(&ws, &store, &t, "nope", &log, &serde_json::json!({})).unwrap();
     assert!(!out.ok);
     assert_eq!(out.status, DeliveryStatus::Failed);
 }
@@ -1046,8 +1208,12 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
         "%w1",
         &serde_json::json!({"content": "ping", "attempt": 1, "max_attempts": 1}),
     );
-    let ping_id =
-        seed_scheduled_event(&store, ScheduledKind::HealthPing, "%w1", &serde_json::json!({}));
+    let ping_id = seed_scheduled_event(
+        &store,
+        ScheduledKind::HealthPing,
+        "%w1",
+        &serde_json::json!({}),
+    );
     let trust_id = seed_scheduled_event(
         &store,
         ScheduledKind::TrustRetry,
@@ -1065,7 +1231,11 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
             "scheduled event id {id} (each ScheduledKind) must fire; got {fired:?}"
         );
     }
-    assert_eq!(fired.len(), 3, "exactly the three seeded due events fire, no extras");
+    assert_eq!(
+        fired.len(),
+        3,
+        "exactly the three seeded due events fire, no extras"
+    );
 }
 
 struct UnverifiedInjectTransport;
@@ -1073,17 +1243,38 @@ impl Transport for UnverifiedInjectTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
-            submit_verification: crate::transport::SubmitVerification::PastedContentPromptStillPresentAfterSubmit,
+            submit_verification:
+                crate::transport::SubmitVerification::PastedContentPromptStillPresentAfterSubmit,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: u32::from(SEND_RETRY_MAX_ATTEMPTS),
         })
@@ -1092,7 +1283,10 @@ impl Transport for UnverifiedInjectTransport {
         Ok(())
     }
     fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
     fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
@@ -1109,7 +1303,12 @@ impl Transport for UnverifiedInjectTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
@@ -1138,22 +1337,30 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
         .create_message(None, "leader", "w1", "ping", None, false, None)
         .unwrap();
 
-    let out = deliver_pending_message(&ws, &store, &UnverifiedInjectTransport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &UnverifiedInjectTransport,
+        &message_id,
+        &log,
+        &state,
+    )
+    .unwrap();
 
     assert!(!out.ok);
     assert_eq!(out.message_status.0, "failed");
     let events = log.tail(0).unwrap();
     assert!(
-        events
-            .iter()
-            .any(|event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")),
+        events.iter().any(
+            |event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
+        ),
         "exhausted unverified send must emit send.failed; got {events:?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed_notification")),
+        events.iter().any(
+            |event| event.get("event").and_then(serde_json::Value::as_str)
+                == Some("send.failed_notification")
+        ),
         "exhausted unverified send must queue a leader-visible notification; got {events:?}"
     );
 }
@@ -1179,14 +1386,28 @@ fn retry_result_deliveries_retries_notify_failed_watcher() {
 
     let rid = seed_result(&store, "res_r1", "t1", "alice", "success");
     let w = seed_watcher(
-        &store, "w-failed", "team-a", "t1", "alice", "notify_failed", Some(&rid), None,
+        &store,
+        "w-failed",
+        "team-a",
+        "t1",
+        "alice",
+        "notify_failed",
+        Some(&rid),
+        None,
     );
 
     let notices = retry_result_deliveries(&ws, &log).unwrap();
 
-    assert_eq!(notices.len(), 1, "the single notify_failed watcher must be retried");
+    assert_eq!(
+        notices.len(),
+        1,
+        "the single notify_failed watcher must be retried"
+    );
     let notice = &notices[0];
-    assert_eq!(notice.watcher_id, w, "the retried notice names the seeded watcher");
+    assert_eq!(
+        notice.watcher_id, w,
+        "the retried notice names the seeded watcher"
+    );
     assert_eq!(
         notice.result_id.as_deref(),
         Some(rid.as_str()),
@@ -1214,18 +1435,31 @@ fn collect_results_and_notify_watchers_returns_concrete_ok_shape() {
     let log = EventLog::new(&ws);
 
     seed_watcher(
-        &store, "w-orphan", "team-a", "t1", "alice", "notify_failed", Some("res_missing"), None,
+        &store,
+        "w-orphan",
+        "team-a",
+        "t1",
+        "alice",
+        "notify_failed",
+        Some("res_missing"),
+        None,
     );
 
     let out = collect_results_and_notify_watchers(&ws, &log).unwrap();
-    assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true), "ok==true");
+    assert_eq!(
+        out.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "ok==true"
+    );
     assert_eq!(
         out.get("collected").and_then(|v| v.as_i64()),
         Some(0),
         "no uncollected results → collected==0"
     );
     assert_eq!(
-        out.get("notified").and_then(|v| v.as_array()).map(|a| a.len()),
+        out.get("notified")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
         Some(0),
         "orphan watcher (missing result) is skipped → notified empty"
     );
@@ -1271,26 +1505,52 @@ fn collect_task_scoped_result_collects_and_marks_task_done() {
             "agents": { "w1": { "provider": "codex" } },
             "tasks": [ { "id": "t2", "assignee": "w1", "title": "t2", "status": "pending" } ]
         }),
-    ).unwrap();
+    )
+    .unwrap();
     let store = store_for(&ws);
     seed_result(&store, "res_t2", "t2", "w1", "success");
 
     let out = collect(&ws, None, false).unwrap();
-    assert_eq!(out.get("ok").and_then(|v| v.as_bool()), Some(true), "no invalid → ok:true");
-    let cr = out.get("collected_results").and_then(|v| v.as_array()).expect("collected_results");
+    assert_eq!(
+        out.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "no invalid → ok:true"
+    );
+    let cr = out
+        .get("collected_results")
+        .and_then(|v| v.as_array())
+        .expect("collected_results");
     assert_eq!(cr.len(), 1, "the seeded t2 result must collect");
-    assert_eq!(cr[0].get("scope").and_then(|v| v.as_str()), Some("task"), "t2 ∈ state.tasks → scope:task");
+    assert_eq!(
+        cr[0].get("scope").and_then(|v| v.as_str()),
+        Some("task"),
+        "t2 ∈ state.tasks → scope:task"
+    );
     assert_eq!(cr[0].get("task_id").and_then(|v| v.as_str()), Some("t2"));
     assert_eq!(cr[0].get("agent_id").and_then(|v| v.as_str()), Some("w1"));
     assert!(
-        out.get("results").and_then(|r| r.get("collected")).and_then(|v| v.as_i64()).unwrap_or(0) >= 1,
+        out.get("results")
+            .and_then(|r| r.get("collected"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 1,
         "results.collected must be ≥ 1"
     );
     let st = crate::state::persist::load_runtime_state(&ws).unwrap();
-    let t2_status = st.get("tasks").and_then(|v| v.as_array())
-        .and_then(|ts| ts.iter().find(|t| t.get("id").and_then(|v| v.as_str()) == Some("t2")))
-        .and_then(|t| t.get("status")).and_then(|v| v.as_str());
-    assert_eq!(t2_status, Some("done"), "success result → task row status 'done' (runtime.py:1066)");
+    let t2_status = st
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .and_then(|ts| {
+            ts.iter()
+                .find(|t| t.get("id").and_then(|v| v.as_str()) == Some("t2"))
+        })
+        .and_then(|t| t.get("status"))
+        .and_then(|v| v.as_str());
+    assert_eq!(
+        t2_status,
+        Some("done"),
+        "success result → task row status 'done' (runtime.py:1066)"
+    );
 }
 
 // (c-C1) collect OUTPUT shape: collected_results entries are the 8-KEY SUMMARY (NO inlined
@@ -1308,30 +1568,46 @@ fn collect_output_matches_golden_collected_shape() {
             "agents": { "w1": { "provider": "codex" } },
             "tasks": [ { "id": "t2", "assignee": "w1", "title": "t2", "status": "pending" } ]
         }),
-    ).unwrap();
+    )
+    .unwrap();
     let store = store_for(&ws);
     seed_result(&store, "res_t2s", "t2", "w1", "success");
 
     let out = collect(&ws, None, false).unwrap();
-    let cr = out.get("collected_results").and_then(|v| v.as_array()).expect("collected_results");
+    let cr = out
+        .get("collected_results")
+        .and_then(|v| v.as_array())
+        .expect("collected_results");
     let e = &cr[0];
     // C1: collected_results entry is the 8-key SUMMARY — NO envelope inlined; carries summary+tests.
     assert!(e.get("envelope").is_none(),
         "collected_results entry must NOT inline `envelope` (golden 8-key summary); the full envelope belongs in `collected`. got {e:?}");
-    assert!(e.get("summary").is_some() && e.get("tests").is_some(),
-        "collected_results summary entry must carry `summary`+`tests` (golden results.py:131)");
+    assert!(
+        e.get("summary").is_some() && e.get("tests").is_some(),
+        "collected_results summary entry must carry `summary`+`tests` (golden results.py:131)"
+    );
     // C1: the full envelopes live in a separate top-level `collected` list.
-    let collected = out.get("collected").and_then(|v| v.as_array())
+    let collected = out
+        .get("collected")
+        .and_then(|v| v.as_array())
         .expect("golden collect returns a top-level `collected` list of full envelopes");
     assert!(
-        collected.first().and_then(|env| env.get("schema_version")).and_then(|v| v.as_str())
+        collected
+            .first()
+            .and_then(|env| env.get("schema_version"))
+            .and_then(|v| v.as_str())
             == Some("result_envelope_v1"),
         "collected[0] must be the full result_envelope_v1 envelope; got {collected:?}"
     );
 
     // ── STRENGTHENED (option-B byte-parity, leader-adjudicated 0700cff review) ──
     // D3 — task-scope collected_results entry must be EXACTLY the golden 8 keys, in order, NO task_status.
-    let keys: Vec<&str> = e.as_object().expect("entry is an object").keys().map(String::as_str).collect();
+    let keys: Vec<&str> = e
+        .as_object()
+        .expect("entry is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         keys,
         vec!["result_id", "task_id", "agent_id", "status", "summary", "tests", "created_at", "scope"],
@@ -1339,10 +1615,24 @@ fn collect_output_matches_golden_collected_shape() {
     );
     // D1+D2 — collect RETURN top-level key order must match golden EXACTLY: delivered_messages BEFORE
     // invalid_results, AND a `coordinator` key (mirroring golden _ensure_coordinator_after_collect).
-    let top: Vec<&str> = out.as_object().expect("collect result is an object").keys().map(String::as_str).collect();
+    let top: Vec<&str> = out
+        .as_object()
+        .expect("collect result is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         top,
-        vec!["ok", "collected", "collected_results", "delivered_messages", "invalid_results", "results", "state_file", "coordinator"],
+        vec![
+            "ok",
+            "collected",
+            "collected_results",
+            "delivered_messages",
+            "invalid_results",
+            "results",
+            "state_file",
+            "coordinator"
+        ],
         "collect return top-level key order must match golden return shape; got {top:?}"
     );
 }
@@ -1360,7 +1650,8 @@ fn send_with_unknown_task_id_raises_unknown_task() {
             "agents": { "w1": { "provider": "codex" } },
             "tasks": []
         }),
-    ).unwrap();
+    )
+    .unwrap();
     let _ = store_for(&ws);
     let opts = SendOptions {
         task_id: Some(crate::model::ids::TaskId::new("t2-unknown")),
@@ -1435,7 +1726,8 @@ fn send_route_task_id_true_known_task_succeeds() {
             "agents": { "w1": { "provider": "codex" } },
             "tasks": [ { "id": "t-known", "assignee": "w1", "title": "t", "status": "pending" } ]
         }),
-    ).unwrap();
+    )
+    .unwrap();
     let _ = store_for(&ws);
     let opts = SendOptions {
         task_id: Some(crate::model::ids::TaskId::new("t-known")),
@@ -1445,7 +1737,10 @@ fn send_route_task_id_true_known_task_succeeds() {
     };
     let out = send_message(&ws, &MessageTarget::Single("w1".to_string()), "go", &opts)
         .expect("route_task_id=true with a KNOWN task must succeed");
-    assert!(out.message_id.is_some(), "known-task routing send must create the message; got {out:?}");
+    assert!(
+        out.message_id.is_some(),
+        "known-task routing send must create the message; got {out:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1468,7 +1763,16 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
 
     // --- Sub-A: DRIVE w-r8 (team-a) to delivery_exhausted via notify_result_watchers (attempts>=MAX) ---
     let rid = seed_result(&store, "res_r8", "t1", "alice", "success");
-    seed_watcher(&store, "w-r8", "team-a", "t1", "alice", "pending", Some(&rid), None);
+    seed_watcher(
+        &store,
+        "w-r8",
+        "team-a",
+        "t1",
+        "alice",
+        "pending",
+        Some(&rid),
+        None,
+    );
     // attempts are EVENT-counted (result_watcher.notify_failed/retry_notified) — seed MAX prior failures.
     for n in 0..u64::from(RESULT_DELIVERY_MAX_ATTEMPTS) {
         log.write(
@@ -1476,7 +1780,8 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
             json(serde_json::json!({"watcher_id": "w-r8", "result_id": rid.as_str(), "status": "notify_failed", "error": "x", "n": n})),
         ).unwrap();
     }
-    let result_env = json(serde_json::json!({"result_id": rid.as_str(), "task_id": "t1", "agent_id": "alice"}));
+    let result_env =
+        json(serde_json::json!({"result_id": rid.as_str(), "task_id": "t1", "agent_id": "alice"}));
     let watcher_view = json(serde_json::json!({
         "watcher_id": "w-r8", "task_id": "t1", "agent_id": "alice",
         "created_at": "2026-01-01T00:00:00Z", "owner_team_id": "team-a",
@@ -1489,9 +1794,36 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
          proves the attach-requeue input is real, not 空过");
 
     // selection-lock fixtures: cross-team exhausted + notified exhausted (Gap-32) + pending.
-    let team_b = seed_watcher(&store, "w-teamb", "team-b", "t2", "bob", "delivery_exhausted", Some("res_b"), None);
-    let notif = seed_watcher(&store, "w-notified", "team-a", "t3", "carol", "delivery_exhausted", Some("res_c"), Some("msg_done"));
-    seed_watcher(&store, "w-pending", "team-a", "t4", "dave", "pending", Some("res_d"), None);
+    let team_b = seed_watcher(
+        &store,
+        "w-teamb",
+        "team-b",
+        "t2",
+        "bob",
+        "delivery_exhausted",
+        Some("res_b"),
+        None,
+    );
+    let notif = seed_watcher(
+        &store,
+        "w-notified",
+        "team-a",
+        "t3",
+        "carol",
+        "delivery_exhausted",
+        Some("res_c"),
+        Some("msg_done"),
+    );
+    seed_watcher(
+        &store,
+        "w-pending",
+        "team-a",
+        "t4",
+        "dave",
+        "pending",
+        Some("res_d"),
+        None,
+    );
 
     // --- Sub-B: attach requeue (golden contract) ---
     let requeued = requeue_delivery_exhausted_watchers(&ws, &store, &log, &team, &pane).unwrap();
@@ -1506,24 +1838,50 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
         "D1 ✦: team-scoped selection — a team-b exhausted watcher must NOT be requeued by a team-a attach (anti cross-team pollution / CP-1)");
     // Gap-32: a notified watcher is never requeued; its notified_message_id survives.
     let (st_n, nid) = watcher_state(&store, &notif);
-    assert_eq!(st_n, "delivery_exhausted", "Gap-32: notified watcher not requeued");
-    assert_eq!(nid.as_deref(), Some("msg_done"), "Gap-32: notified_message_id preserved");
+    assert_eq!(
+        st_n, "delivery_exhausted",
+        "Gap-32: notified watcher not requeued"
+    );
+    assert_eq!(
+        nid.as_deref(),
+        Some("msg_done"),
+        "Gap-32: notified_message_id preserved"
+    );
     // only the team-a unnotified exhausted watcher requeues.
     let ids: Vec<&str> = requeued.iter().map(|n| n.watcher_id.as_str()).collect();
-    assert_eq!(ids, vec!["w-r8"], "only team-a unnotified delivery_exhausted watcher requeues");
+    assert_eq!(
+        ids,
+        vec!["w-r8"],
+        "only team-a unnotified delivery_exhausted watcher requeues"
+    );
 
     // D3: result_watcher.requeued payload == golden ATTACH form {watcher_id, trigger, new_pane_id}.
     let events = log.tail(0).unwrap();
-    let ev = events.iter().rev()
+    let ev = events
+        .iter()
+        .rev()
         .find(|e| e.get("event").and_then(|v| v.as_str()) == Some("result_watcher.requeued"))
         .expect("result_watcher.requeued event");
-    let keys: std::collections::BTreeSet<&str> = ev.as_object().unwrap().keys()
-        .map(String::as_str).filter(|k| *k != "ts" && *k != "event").collect();
-    let expected: std::collections::BTreeSet<&str> = ["watcher_id", "trigger", "new_pane_id"].into_iter().collect();
+    let keys: std::collections::BTreeSet<&str> = ev
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "ts" && *k != "event")
+        .collect();
+    let expected: std::collections::BTreeSet<&str> = ["watcher_id", "trigger", "new_pane_id"]
+        .into_iter()
+        .collect();
     assert_eq!(keys, expected,
         "D3: result_watcher.requeued must be golden ATTACH form {{watcher_id, trigger, new_pane_id}} (leader/__init__.py:46-50), not claim-style; got {keys:?}");
-    assert_eq!(ev.get("trigger").and_then(|v| v.as_str()), Some("attach_leader"));
-    assert_eq!(ev.get("new_pane_id").and_then(|v| v.as_str()), Some("%leader-new"));
+    assert_eq!(
+        ev.get("trigger").and_then(|v| v.as_str()),
+        Some("attach_leader")
+    );
+    assert_eq!(
+        ev.get("new_pane_id").and_then(|v| v.as_str()),
+        Some("%leader-new")
+    );
 }
 
 // E15 (F4.4 双投修)·源码守卫:report_result 的 direct inject 必须被 `if !outcome.ok` 守为
@@ -1536,8 +1894,14 @@ fn e15_direct_inject_is_gated_by_deliver_failure_not_unconditional() {
     let inject_call = "match inject_leader_notification_direct(";
     let gate_pos = src.find(gate);
     let inject_pos = src.find(inject_call);
-    assert!(gate_pos.is_some(), "E15: direct inject must be gated by `if !outcome.ok` (deliver-fail fallback)");
-    assert!(inject_pos.is_some(), "inject_leader_notification_direct call site must exist (do NOT delete it; #230 fallback)");
+    assert!(
+        gate_pos.is_some(),
+        "E15: direct inject must be gated by `if !outcome.ok` (deliver-fail fallback)"
+    );
+    assert!(
+        inject_pos.is_some(),
+        "inject_leader_notification_direct call site must exist (do NOT delete it; #230 fallback)"
+    );
     assert!(
         gate_pos.unwrap() < inject_pos.unwrap(),
         "E15: the `if !outcome.ok` gate must precede the direct-inject call (deliver-success must skip inject → leader gets exactly one copy)"

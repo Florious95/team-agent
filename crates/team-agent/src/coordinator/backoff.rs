@@ -8,7 +8,7 @@ use crate::model::enums::Provider;
 use crate::provider::ProviderAdapter;
 
 use super::health::{coordinator_pid_path, write_coordinator_metadata};
-use super::tick::TickError;
+use super::tick::{TickError, TickReport};
 use super::types::{
     ErrorLists, MetadataSource, Pid, ProviderRegistry, WorkspacePath, BACKOFF_MAX_SEC,
     DEFAULT_TICK_INTERVAL_SEC,
@@ -87,7 +87,7 @@ pub fn run_daemon_with_coordinator(
             );
             break;
         }
-        match coordinator.tick() {
+        match run_tick_with_panic_marker(&event_log, || coordinator.tick()) {
             Ok(report) => {
                 if consecutive_failures > 0 {
                     event_log.write(
@@ -150,6 +150,36 @@ pub fn run_daemon_with_coordinator(
     Ok(())
 }
 
+fn run_tick_with_panic_marker<F>(event_log: &EventLog, tick: F) -> Result<TickReport, TickError>
+where
+    F: FnOnce() -> Result<TickReport, TickError>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(tick)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let panic_message = panic_payload_message(payload.as_ref());
+            event_log.write(
+                "coordinator.tick_panic",
+                serde_json::json!({
+                    "panic": panic_message,
+                    "backtrace": std::backtrace::Backtrace::force_capture().to_string(),
+                }),
+            )?;
+            Err(TickError::Panic(panic_message))
+        }
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// 当前 ppid(`os.getppid()`,孤儿自检输入)。
 fn current_ppid() -> u32 {
     u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
@@ -198,4 +228,55 @@ pub enum DaemonError {
     EventLog(#[from] crate::event_log::EventLogError),
     #[error("tick: {0}")]
     Tick(#[from] TickError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_ws(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("ta-rs-coord-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn coordinator_tick_panic_writes_durable_marker() {
+        let workspace = tmp_ws("tick-panic");
+        let event_log = EventLog::new(&workspace);
+
+        let old_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = run_tick_with_panic_marker(&event_log, || -> Result<TickReport, TickError> {
+            panic!("synthetic tick panic")
+        });
+        std::panic::set_hook(old_hook);
+
+        assert!(
+            matches!(result, Err(TickError::Panic(message)) if message == "synthetic tick panic")
+        );
+        let events = event_log.tail(20).unwrap();
+        let panic_event = events
+            .iter()
+            .find(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("coordinator.tick_panic")
+            })
+            .expect("coordinator.tick_panic event");
+        assert_eq!(
+            panic_event.get("panic").and_then(serde_json::Value::as_str),
+            Some("synthetic tick panic")
+        );
+        assert!(
+            panic_event
+                .get("backtrace")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|backtrace| !backtrace.is_empty()),
+            "panic marker must carry a backtrace; event={panic_event}"
+        );
+    }
 }

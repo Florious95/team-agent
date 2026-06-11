@@ -146,7 +146,10 @@ impl serde_json::ser::Formatter for PythonJsonFormatter {
         }
     }
 
-    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+    fn begin_object_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
         writer.write_all(b": ")
     }
 }
@@ -171,7 +174,11 @@ pub(crate) fn ensure_object(value: &mut Value) {
     }
 }
 
-pub(crate) fn insert_array(obj: &mut serde_json::Map<String, Value>, key: &str, value: Option<&[Value]>) {
+pub(crate) fn insert_array(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&[Value]>,
+) {
     if let Some(items) = value {
         obj.insert(key.to_string(), Value::Array(items.to_vec()));
     }
@@ -198,11 +205,20 @@ pub(crate) fn object_fields(value: Value) -> serde_json::Map<String, Value> {
 }
 
 pub(crate) fn delivery_outcome_value(out: &DeliveryOutcome) -> Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "ok": out.ok,
         "status": enum_value(out.status),
         "message_id": out.message_id,
-    })
+    });
+    if let Some(obj) = value.as_object_mut() {
+        if let Some(reason) = out.reason {
+            obj.insert("reason".to_string(), enum_value(reason));
+        }
+        if let Some(warning) = out.verification.as_deref() {
+            obj.insert("warning".to_string(), Value::String(warning.to_string()));
+        }
+    }
+    value
 }
 
 pub(crate) fn latest_task_for_assignee(workspace: &Path, agent_id: &str) -> Option<String> {
@@ -218,7 +234,10 @@ pub(crate) fn latest_task_for_assignee(workspace: &Path, agent_id: &str) -> Opti
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_ascii_lowercase();
-        if matches!(status.as_str(), "done" | "success" | "failed" | "blocked" | "cancelled") {
+        if matches!(
+            status.as_str(),
+            "done" | "success" | "failed" | "blocked" | "cancelled"
+        ) {
             continue;
         }
         if let Some(id) = task.get("id").and_then(text_of_value) {
