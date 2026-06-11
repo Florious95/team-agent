@@ -18,14 +18,22 @@ const PROVIDER_COMMANDS: &[(&str, Provider)] = &[
 ];
 
 pub(crate) fn attribute_pane_provider(pane: &PaneInfo) -> Option<Provider> {
+    attribute_pane_provider_with_process(pane, provider_from_pid_env, provider_from_pid_argv)
+}
+
+fn attribute_pane_provider_with_process(
+    pane: &PaneInfo,
+    provider_from_env_pid: impl Fn(u32) -> Option<Provider>,
+    provider_from_argv_pid: impl Fn(u32) -> Option<Provider>,
+) -> Option<Provider> {
     provider_from_env(&pane.leader_env)
-        .or_else(|| pane.pane_pid.and_then(provider_from_pid_env))
+        .or_else(|| pane.pane_pid.and_then(provider_from_env_pid))
         .or_else(|| {
             pane.current_command
                 .as_deref()
                 .and_then(attribute_command_provider)
         })
-        .or_else(|| pane.pane_pid.and_then(provider_from_pid_argv))
+        .or_else(|| pane.pane_pid.and_then(provider_from_argv_pid))
 }
 
 pub(crate) fn attribute_command_provider(command: &str) -> Option<Provider> {
@@ -132,9 +140,6 @@ fn process_environment(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::transport::{PaneId, SessionName};
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt;
-
     fn pane(command: &str, pid: Option<u32>) -> PaneInfo {
         PaneInfo {
             pane_id: PaneId::new("%1"),
@@ -179,50 +184,30 @@ mod tests {
         assert_eq!(attribute_pane_provider(&pane), Some(Provider::Copilot));
     }
 
-    #[cfg(unix)]
-    struct ChildGuard(std::process::Child);
-
-    #[cfg(unix)]
-    impl Drop for ChildGuard {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
     fn node_form_copilot_is_attributed_from_process_argv() {
-        let mut child = Command::new("/bin/sleep");
-        child
-            .arg0("/opt/homebrew/bin/copilot")
-            .arg("30")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = ChildGuard(child.spawn().expect("spawn node-form process"));
+        let pane = pane("node", Some(4242));
 
         assert_eq!(
-            attribute_pane_provider(&pane("node", Some(child.0.id()))),
+            attribute_pane_provider_with_process(
+                &pane,
+                |_| None,
+                |pid| (pid == 4242).then_some(Provider::Copilot),
+            ),
             Some(Provider::Copilot)
         );
     }
 
-    #[cfg(all(unix, target_os = "linux"))]
     #[test]
     fn process_env_provider_wins_for_node_form() {
-        let mut child = Command::new("/bin/sleep");
-        child
-            .arg0("node")
-            .arg("30")
-            .env("TEAM_AGENT_LEADER_PROVIDER", "copilot")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let child = ChildGuard(child.spawn().expect("spawn env-provider process"));
+        let pane = pane("node /opt/homebrew/bin/copilot", Some(4242));
 
         assert_eq!(
-            attribute_pane_provider(&pane("node", Some(child.0.id()))),
+            attribute_pane_provider_with_process(
+                &pane,
+                |pid| (pid == 4242).then_some(Provider::Copilot),
+                |_| Some(Provider::Codex),
+            ),
             Some(Provider::Copilot)
         );
     }
