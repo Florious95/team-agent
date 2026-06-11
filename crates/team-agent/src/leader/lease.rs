@@ -654,6 +654,8 @@ fn leader_command_provider(command: &str) -> Option<Provider> {
         Some(Provider::ClaudeCode)
     } else if lower.contains("codex") {
         Some(Provider::Codex)
+    } else if lower.contains("copilot") {
+        Some(Provider::Copilot)
     } else if lower.contains("fake") {
         Some(Provider::Fake)
     } else {
@@ -1081,4 +1083,21 @@ pub fn detect_dual_state_divergence(
         "workspace_owner_epoch": workspace_epoch,
         "team_owner_epoch": team_epoch,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leader_command_provider_recognizes_copilot() {
+        assert_eq!(
+            leader_command_provider("copilot --allow-all-tools"),
+            Some(Provider::Copilot)
+        );
+        assert_eq!(
+            leader_command_provider("/usr/local/bin/copilot"),
+            Some(Provider::Copilot)
+        );
+    }
 }

@@ -8,28 +8,29 @@
 
 use std::path::Path;
 
-use team_agent::provider::{extract_approval_prompt, runtime_mcp_tool_allowlisted, ApprovalKind};
+use team_agent::provider::{extract_approval_prompt, runtime_mcp_prompt_allowlisted, ApprovalKind};
 
 #[test]
 fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fingerprint() {
-    let assign_task_prompt = concat!(
-        "Allow the team_orchestrator MCP server to run tool \"assign_task\"?\n",
+    let custom_mcp_prompt = concat!(
+        "Allow the custom_server MCP server to run tool \"write_file\"?\n",
         "  1. Allow\n",
         "  2. Deny\n",
         "Enter to submit | Esc to cancel\n"
     );
-    let prompt = extract_approval_prompt("worker_a", assign_task_prompt)
+    let prompt = extract_approval_prompt("worker_a", custom_mcp_prompt)
         .expect("fixture precondition: active-tail MCP approval prompt");
     assert_eq!(prompt.kind, ApprovalKind::McpTool);
-    assert_eq!(prompt.tool.as_deref(), Some("assign_task"));
+    assert_eq!(prompt.server.as_deref(), Some("custom_server"));
+    assert_eq!(prompt.tool.as_deref(), Some("write_file"));
     assert!(
-        !runtime_mcp_tool_allowlisted("assign_task"),
-        "fixture precondition: assign_task is not an auto-approved Team Agent MCP tool"
+        !runtime_mcp_prompt_allowlisted(&prompt),
+        "fixture precondition: custom MCP servers are not auto-approved Team Agent MCP tools"
     );
     assert!(
         extract_approval_prompt(
             "worker_a",
-            "Allow the team_orchestrator MCP server to run tool \"assign_task\"?\n  1. Allow\nEnter to submit | Esc to cancel\nlater output\n"
+            "Allow the custom_server MCP server to run tool \"write_file\"?\n  1. Allow\nEnter to submit | Esc to cancel\nlater output\n"
         )
         .is_none(),
         "active-tail parser must reject stale prompts with non-empty output after the control line"
@@ -47,9 +48,9 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
                 .to_string(),
         );
     }
-    if !src.contains("runtime_mcp_tool_allowlisted") || !src.contains("tool_not_allowlisted") {
+    if !src.contains("runtime_mcp_prompt_allowlisted") || !src.contains("tool_not_allowlisted") {
         failures.push(
-            "non-allowlisted MCP tools must be classified as notify(reason=tool_not_allowlisted)"
+            "non-team_orchestrator MCP prompts must be classified as notify(reason=tool_not_allowlisted)"
                 .to_string(),
         );
     }

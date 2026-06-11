@@ -14,11 +14,12 @@ use team_agent::provider::{
     Provider, RuntimeApprovalDecision, SessionId,
 };
 
-const ALLOWLISTED_MCP_TOOLS: [&str; 4] = [
+const TEAM_ORCHESTRATOR_MCP_TOOLS: [&str; 5] = [
     "send_message",
     "report_result",
     "get_team_status",
     "request_human",
+    "assign_task",
 ];
 const CLAUDE_DANGEROUS: &str = "--dangerously-skip-permissions";
 const CLAUDE_PERMISSION_MODE: &str = "--permission-mode";
@@ -26,12 +27,18 @@ const CLAUDE_PERMISSION_DEFAULT: &str = "default";
 
 #[test]
 fn allowlist_mcp_tool_auto_approved_by_runtime_prompt_step() {
-    for tool in ALLOWLISTED_MCP_TOOLS {
-        let capture = approval_prompt_capture(tool);
+    for tool in TEAM_ORCHESTRATOR_MCP_TOOLS {
+        let capture = team_orchestrator_approval_prompt_capture(tool);
         let prompt = extract_approval_prompt("worker_a", &capture)
             .expect("fixture should be a live MCP approval prompt");
         assert_eq!(prompt.kind, ApprovalKind::McpTool);
+        assert_eq!(prompt.server.as_deref(), Some("team_orchestrator"));
         assert_eq!(prompt.tool.as_deref(), Some(tool));
+        assert_eq!(
+            runtime_approval_decision(&prompt, true),
+            RuntimeApprovalDecision::AutoApprove,
+            "team_orchestrator.{tool} must inherit leader bypass"
+        );
         let choice = choose_internal_mcp_approval_choice(&prompt);
         let keys = approval_choice_keys(&prompt, &capture, &choice);
         assert!(
@@ -60,12 +67,11 @@ fn allowlist_mcp_tool_auto_approved_by_runtime_prompt_step() {
                 .to_string(),
         );
     }
-    for tool in ALLOWLISTED_MCP_TOOLS {
-        if !allowlist_source.contains(tool) {
-            failures.push(format!(
-                "runtime MCP approval allowlist must name `{tool}` so Team Agent's own tool prompt can be auto-approved"
-            ));
-        }
+    if !allowlist_source.contains("team_orchestrator") {
+        failures.push(
+            "runtime MCP approval allowlist must be the team_orchestrator namespace, not a per-tool subset"
+                .to_string(),
+        );
     }
     for required in [
         "extract_approval_prompt",
@@ -97,11 +103,17 @@ fn allowlist_mcp_tool_auto_approved_by_runtime_prompt_step() {
 
 #[test]
 fn non_allowlist_mcp_tool_is_not_auto_approved_and_is_reported() {
-    let capture = approval_prompt_capture("assign_task");
+    let capture = custom_server_approval_prompt_capture("custom_server", "write_file");
     let prompt = extract_approval_prompt("worker_a", &capture)
         .expect("fixture should be a live MCP approval prompt");
     assert_eq!(prompt.kind, ApprovalKind::McpTool);
-    assert_eq!(prompt.tool.as_deref(), Some("assign_task"));
+    assert_eq!(prompt.server.as_deref(), Some("custom_server"));
+    assert_eq!(prompt.tool.as_deref(), Some("write_file"));
+    assert_eq!(
+        runtime_approval_decision(&prompt, true),
+        RuntimeApprovalDecision::AwaitingHumanConfirm,
+        "custom MCP servers must not inherit leader bypass"
+    );
 
     let all_sources = source_tree("src");
     let allowlist_source = allowlist_source_region(&all_sources);
@@ -113,9 +125,9 @@ fn non_allowlist_mcp_tool_is_not_auto_approved_and_is_reported() {
                 .to_string(),
         );
     }
-    if allowlist_source.contains("assign_task") {
+    if allowlist_source.contains("custom_server") || allowlist_source.contains("write_file") {
         failures.push(
-            "assign_task must not be in the runtime MCP auto-approval allowlist; it requires human notification"
+            "custom MCP servers/tools must not be in the runtime MCP auto-approval allowlist"
                 .to_string(),
         );
     }
@@ -347,6 +359,7 @@ fn coordinator_auto_approval_reads_state_not_process_ancestry_and_emits_audit_pa
         "fn coordinator_status",
     );
     let auto_event = source_section(&handler, "\"runtime_approval.auto_approved\"", "RuntimeApprovalDecision::AwaitingHumanConfirm");
+    let mcp_event = source_section(&handler, "\"mcp.tool.auto_approved\"", "RuntimeApprovalDecision::AwaitingHumanConfirm");
     let mut failures = Vec::new();
 
     if handler.contains("detect_dangerous_approval") || tick.contains("fn runtime_approval_auto_answer_allowed()") {
@@ -370,6 +383,20 @@ fn coordinator_auto_approval_reads_state_not_process_ancestry_and_emits_audit_pa
         if !auto_event.contains(field) {
             failures.push(format!(
                 "C9/C12: runtime_approval.auto_approved event must include {field} from persisted policy; event_source={auto_event}"
+            ));
+        }
+    }
+    for field in [
+        "inherit_reason",
+        "bypass_source",
+        "server",
+        "tool",
+        "provider",
+        "flag",
+    ] {
+        if !mcp_event.contains(field) {
+            failures.push(format!(
+                "B/#232: mcp.tool.auto_approved event must include {field} from persisted policy; event_source={mcp_event}"
             ));
         }
     }
@@ -470,9 +497,15 @@ fn leader_restricted_worker_runtime_approvals_stay_blocked() {
     );
 }
 
-fn approval_prompt_capture(tool: &str) -> String {
+fn team_orchestrator_approval_prompt_capture(tool: &str) -> String {
     format!(
         "Allow the team_orchestrator MCP server to run tool \"{tool}\"?\n  1. Allow\n  2. Deny\nEnter to submit | Esc to cancel\n"
+    )
+}
+
+fn custom_server_approval_prompt_capture(server: &str, tool: &str) -> String {
+    format!(
+        "Allow the {server} MCP server to run tool \"{tool}\"?\n  1. Allow\n  2. Deny\nEnter to submit | Esc to cancel\n"
     )
 }
 
@@ -494,7 +527,7 @@ fn coordinator_runtime_prompt_step() -> String {
 
 fn allowlist_source_region(all_sources: &str) -> String {
     for marker in [
-        "RUNTIME_MCP_APPROVAL_ALLOWLIST",
+        "RUNTIME_MCP_APPROVAL_SERVER",
         "INTERNAL_MCP_APPROVAL_ALLOWLIST",
         "MCP_APPROVAL_ALLOWLIST",
         "allowlisted_mcp",

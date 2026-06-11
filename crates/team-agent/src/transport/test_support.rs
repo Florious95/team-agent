@@ -25,6 +25,7 @@ struct OfflineState {
     targets: Vec<PaneInfo>,
     windows: Vec<WindowName>,
     pane_presence: BTreeMap<String, bool>,
+    spawned_panes_addressable: bool,
     liveness: BTreeMap<String, PaneLiveness>,
     default_liveness: PaneLiveness,
     calls: Vec<&'static str>,
@@ -41,6 +42,7 @@ impl Default for OfflineState {
             targets: Vec::new(),
             windows: Vec::new(),
             pane_presence: BTreeMap::new(),
+            spawned_panes_addressable: true,
             liveness: BTreeMap::new(),
             default_liveness: PaneLiveness::Unknown,
             calls: Vec::new(),
@@ -100,6 +102,11 @@ impl OfflineTransport {
         self
     }
 
+    pub fn with_spawned_panes_addressable(self, present: bool) -> Self {
+        self.with_state(|state| state.spawned_panes_addressable = present);
+        self
+    }
+
     pub fn calls(&self) -> Vec<&'static str> {
         self.with_state(|state| state.calls.clone())
     }
@@ -149,7 +156,11 @@ impl OfflineTransport {
             if kind == "spawn_first" && !state.session_absent_after_spawn_first {
                 state.session_present = true;
             }
-            state.spawns.len().saturating_sub(1)
+            let pane_index = state.spawns.len().saturating_sub(1);
+            state
+                .pane_presence
+                .insert(format!("%{pane_index}"), state.spawned_panes_addressable);
+            pane_index
         });
         SpawnResult {
             pane_id: PaneId::new(format!("%{pane_index}")),

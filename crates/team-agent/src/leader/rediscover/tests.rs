@@ -80,6 +80,18 @@ fn event_named(events: &[Value], name: &str) -> Value {
         .unwrap_or_else(|| panic!("missing event {name}; got {events:?}"))
 }
 
+#[test]
+fn leader_command_provider_recognizes_copilot() {
+    assert_eq!(
+        leader_command_provider("copilot --allow-all-tools"),
+        Some(Provider::Copilot)
+    );
+    assert_eq!(
+        leader_command_provider("/usr/local/bin/copilot"),
+        Some(Provider::Copilot)
+    );
+}
+
 fn last_event_named(events: &[Value], name: &str) -> Value {
     events
         .iter()

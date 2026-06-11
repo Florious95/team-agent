@@ -342,13 +342,12 @@ fn start_mode_serde_names_match_python_start_mode_strings() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// decide_start_mode — bug-085 四象限 (start.py:66-69 + 179-190)
-// golden 实跑(PYTHONPATH=… python3 /tmp/x.py,_resume_rollout_missing + start_mode 逻辑):
+// decide_start_mode — bug-085 四象限 + E20 #264 gap closure.
 //   codex sess  rollout-present any-fresh   -> resumed
-//   codex sess  rollout-MISSING !allow_fresh -> resumed  (随后真实 resume 失败)
-//   codex sess  rollout-MISSING  allow_fresh -> fresh_after_missing_rollout   ← bug-085 唯一臂
+//   codex sess  backing-MISSING !allow_fresh -> noop/refuse (绝不静默 resume 死 session)
+//   codex sess  backing-MISSING  allow_fresh -> fresh_after_missing_rollout
 //   codex no-sess any                        -> fresh
-//   claude(非codex) sess rollout-missing fresh -> resumed (非 codex 永不"缺 rollout")
+//   claude/copilot sess backing-missing       -> fresh_after_missing_rollout 或 noop/refuse
 //   claude no-sess                            -> fresh
 // 这是 bug-085 把 start_mode 分类从 start_agent 的 lock+spawn 全路径剥离出来的命门。
 // ───────────────────────────────────────────────────────────────────────
@@ -375,11 +374,11 @@ fn decide_start_mode_codex_missing_rollout_with_allow_fresh_is_fresh_after_missi
 }
 
 #[test]
-fn decide_start_mode_codex_missing_rollout_without_allow_fresh_stays_resumed() {
-    // 关键陷阱:rollout 缺但 !allow_fresh → 仍 Resumed(start.py 不擅自丢 context)。
+fn decide_start_mode_codex_missing_rollout_without_allow_fresh_refuses() {
+    // E20 C①:backing 缺且 !allow_fresh → 诚实拒绝,绝不 resume 进死 session。
     assert_eq!(
         decide_start_mode("codex", Some(&sid("s1")), None, false, false),
-        StartMode::Resumed
+        StartMode::Noop
     );
 }
 
@@ -408,12 +407,24 @@ fn decide_start_mode_no_session_is_fresh() {
 }
 
 #[test]
-fn decide_start_mode_non_codex_never_fresh_after_missing_rollout() {
-    // 非 codex provider:rollout 概念不适用,_resume_rollout_missing 恒 false。
-    assert_eq!(
-        decide_start_mode("claude", Some(&sid("s1")), None, false, true),
-        StartMode::Resumed
-    );
+fn decide_start_mode_checks_backing_for_all_resumable_providers() {
+    for provider in ["claude", "claude_code", "copilot"] {
+        assert_eq!(
+            decide_start_mode(provider, Some(&sid("s1")), None, false, true),
+            StartMode::FreshAfterMissingRollout,
+            "{provider} missing backing + allow_fresh must not resume"
+        );
+        assert_eq!(
+            decide_start_mode(provider, Some(&sid("s1")), None, false, false),
+            StartMode::Noop,
+            "{provider} missing backing + !allow_fresh must refuse"
+        );
+        assert_eq!(
+            decide_start_mode(provider, Some(&sid("s1")), Some(&rp("/r")), true, false),
+            StartMode::Resumed,
+            "{provider} existing backing remains resumable"
+        );
+    }
     assert_eq!(
         decide_start_mode("claude", None, None, false, true),
         StartMode::Fresh
@@ -533,8 +544,11 @@ fn classify_restart_plan_never_interacted_null_session_with_allow_fresh_marks_fo
 fn classify_restart_plan_codex_with_session_still_resumes() {
     // E6 层2 回归锁(不误伤): codex worker first_send_at=null 但 session_id 已捕 →
     // 仍走 Resume(分流轴是 session_id 有无,不是 interacted)。防层2 修法把 has_session 也误判。
+    let ws = temp_ws();
+    let rollout = ws.join("codex-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
     let state = json!({
-        "agents": { "w1": { "provider": "codex", "session_id": "sess-codex-abc" } }
+        "agents": { "w1": { "provider": "codex", "session_id": "sess-codex-abc", "rollout_path": rollout.to_string_lossy() } }
     });
     let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
     assert_eq!(plan.decisions.len(), 1);
@@ -976,6 +990,66 @@ fn leader_pane_env_cross_socket_all_probe_errors_stays_unknown() {
     );
 
     assert_eq!(state, LeaderPaneEnvState::Unknown);
+}
+
+#[test]
+fn mcp_auto_approval_env_marks_leader_bypass_namespace_only() {
+    let mut env = std::collections::BTreeMap::new();
+    let safety = DangerousApproval {
+        enabled: true,
+        source: DangerousApprovalSource::LeaderProcess,
+        inherited: true,
+        provider: Some("codex".to_string()),
+        flag: Some("--dangerously-bypass-approvals-and-sandbox".to_string()),
+        worker_capability_above_leader: false,
+        ancestry_binary_name: Some("codex".to_string()),
+        unexpected_binary: false,
+    };
+
+    apply_mcp_auto_approval_env(&mut env, &safety);
+
+    assert_eq!(env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str), Some("1"));
+    assert_eq!(
+        env.get("TEAM_AGENT_MCP_AUTO_APPROVE").map(String::as_str),
+        Some("team_orchestrator")
+    );
+    assert_eq!(
+        env.get("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE").map(String::as_str),
+        Some("leader_bypass")
+    );
+    assert_eq!(
+        env.get("TEAM_AGENT_LEADER_BYPASS_FLAG").map(String::as_str),
+        Some("--dangerously-bypass-approvals-and-sandbox")
+    );
+}
+
+#[test]
+fn mcp_auto_approval_env_clears_when_leader_is_restricted() {
+    let mut env = std::collections::BTreeMap::from([
+        (
+            "TEAM_AGENT_MCP_AUTO_APPROVE".to_string(),
+            "team_orchestrator".to_string(),
+        ),
+        ("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(), "leader_bypass".to_string()),
+    ]);
+    let safety = DangerousApproval {
+        enabled: false,
+        source: DangerousApprovalSource::Disabled,
+        inherited: false,
+        provider: None,
+        flag: None,
+        worker_capability_above_leader: false,
+        ancestry_binary_name: None,
+        unexpected_binary: false,
+    };
+
+    apply_mcp_auto_approval_env(&mut env, &safety);
+
+    assert_eq!(env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str), Some("0"));
+    assert!(
+        !env.contains_key("TEAM_AGENT_MCP_AUTO_APPROVE"),
+        "restricted leader must not leave MCP auto-approval env behind: {env:?}"
+    );
 }
 
 struct EnvVarGuard {

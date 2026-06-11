@@ -258,4 +258,10 @@ fn spine_tick_session_missing_emits_event() {
             .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("coordinator.session_missing")),
         "the tmux-missing gate must emit a coordinator.session_missing event before the stop report; got {events:?}"
     );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("coordinator.session_missing_alert")),
+        "the tmux-missing gate must emit an explicit leader-visible alert before stopping; got {events:?}"
+    );
 }

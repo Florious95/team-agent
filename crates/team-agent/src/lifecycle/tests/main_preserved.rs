@@ -88,11 +88,13 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
 fn respawn_ws_one_resumable_worker() -> PathBuf {
     let ws = temp_ws().join("respawn_dead_session");
     std::fs::create_dir_all(&ws).unwrap();
+    let rollout = ws.join("alpha-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-sa",
-            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "first_send_at": "2026-05-27T10:00:00+00:00"}}
+            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
         }),
     )
     .unwrap();

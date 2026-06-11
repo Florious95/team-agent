@@ -98,6 +98,8 @@ fn compiled_team_dir(label: &str) -> PathBuf {
 
 fn restart_workspace(label: &str) -> PathBuf {
     let ws = compiled_team_dir(label);
+    let rollout = ws.join("implementer-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").expect("seed rollout backing");
     team_agent::state::persist::save_runtime_state(
         &ws,
         &json!({
@@ -107,6 +109,7 @@ fn restart_workspace(label: &str) -> PathBuf {
                     "status": "running",
                     "provider": "codex",
                     "session_id": "sess-impl",
+                    "rollout_path": rollout.to_string_lossy(),
                     "first_send_at": "2026-05-27T10:00:00+00:00"
                 }
             }
@@ -251,12 +254,19 @@ impl Transport for PanicOnStartupPromptTransport {
         Ok(team_agent::transport::PaneLiveness::Live)
     }
 
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let spawns = self.spawns.lock().expect("spawns lock");
+        Ok(Some(spawns.iter().enumerate().any(|(idx, _)| {
+            pane.as_str() == format!("%{idx}")
+        })))
+    }
+
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Ok(false)
+        Ok(!self.spawns.lock().expect("spawns lock").is_empty())
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

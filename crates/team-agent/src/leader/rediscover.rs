@@ -590,6 +590,8 @@ fn leader_command_provider(command: &str) -> Option<Provider> {
         Some(Provider::ClaudeCode)
     } else if lower.contains("codex") {
         Some(Provider::Codex)
+    } else if lower.contains("copilot") {
+        Some(Provider::Copilot)
     } else if lower.contains("fake") {
         Some(Provider::Fake)
     } else {

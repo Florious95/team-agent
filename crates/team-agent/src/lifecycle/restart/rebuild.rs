@@ -1,5 +1,5 @@
 use super::common::*;
-use super::selection::classify_restart_plan;
+use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
 
 // ── lifecycle::restart —— 整队 Route B resume-or-fresh 重建 ──────────────────
@@ -29,6 +29,7 @@ pub fn restart_with_session_convergence_deadline(
         team,
         &crate::tmux_backend::TmuxBackend::for_workspace(&run_ws),
         session_converge_deadline_ms,
+        None,
     )
 }
 
@@ -41,12 +42,23 @@ pub fn restart_with_transport(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<RestartReport, LifecycleError> {
+    restart_with_transport_with_readiness_deadline(workspace, allow_fresh, team, transport, None)
+}
+
+pub fn restart_with_transport_with_readiness_deadline(
+    workspace: &Path,
+    allow_fresh: bool,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+    readiness_deadline_ms: Option<u64>,
+) -> Result<RestartReport, LifecycleError> {
     match restart_with_transport_with_session_convergence_deadline(
         workspace,
         allow_fresh,
         team,
         transport,
         None,
+        readiness_deadline_ms,
     )? {
         RestartReport::RefusedResumeNotReady {
             missing,
@@ -76,6 +88,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
     session_converge_deadline_ms: Option<u64>,
+    readiness_deadline_ms: Option<u64>,
 ) -> Result<RestartReport, LifecycleError> {
     // RED-2-STILL(P0):入口门必须在 canonical_run_workspace 解析后的路径上判,不用 raw workspace。
     // 根因:quick-start <dir> 把 .team/runtime/spec 落在 team_workspace(dir)=**parent**/.team;
@@ -166,7 +179,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         convergence.missing.iter().cloned().collect()
     };
     let forced_fresh_convergence = (!convergence.converged).then_some(convergence.clone());
-    let plan = classify_restart_plan(&state, allow_fresh)?;
+    let plan = classify_restart_plan_with_resume_validation(Some(&selected.run_workspace), &state, allow_fresh)?;
     write_restart_resume_decision_events(
         &selected.run_workspace,
         &state,
@@ -186,7 +199,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         return Ok(RestartReport::RefusedResumeAtomicity {
             unresumable: plan.unresumable,
             allow_fresh,
-            error: "restart requires resumable workers before live spawn".to_string(),
+            error: "restart requires resumable workers before live spawn; rerun with --allow-fresh to start fresh".to_string(),
         });
     }
     let session_name = state_session_name(&state);
@@ -253,6 +266,15 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
+    wait_restart_readiness_or_timeout(
+        &selected.run_workspace,
+        &state,
+        &session_name,
+        &plan.decisions,
+        transport,
+        restart_readiness_deadline(readiness_deadline_ms),
+        restart_readiness_poll_interval(),
+    )?;
     let attach_commands = crate::tmux_backend::attach_commands_for_windows(
         &selected.run_workspace,
         &session_name,
@@ -453,6 +475,182 @@ fn parse_duration_value_seconds_ms(value: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+fn restart_readiness_deadline(requested_ms: Option<u64>) -> std::time::Duration {
+    requested_ms.map(std::time::Duration::from_millis).unwrap_or_else(|| {
+        env_duration_ms(&["TEAM_AGENT_RESTART_READINESS_DEADLINE_MS"], 30_000)
+    })
+}
+
+fn restart_readiness_poll_interval() -> std::time::Duration {
+    env_duration_ms(&["TEAM_AGENT_RESTART_READINESS_POLL_MS"], 200)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RestartReadiness {
+    session_created: bool,
+    worker_pane_addressable: bool,
+    coordinator_alive: bool,
+}
+
+impl RestartReadiness {
+    fn ready(self) -> bool {
+        self.session_created && self.worker_pane_addressable && self.coordinator_alive
+    }
+}
+
+fn wait_restart_readiness_or_timeout(
+    workspace: &Path,
+    state: &serde_json::Value,
+    session_name: &SessionName,
+    decisions: &[RestartedAgent],
+    transport: &dyn crate::transport::Transport,
+    deadline: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> Result<(), LifecycleError> {
+    let started = std::time::Instant::now();
+    loop {
+        let readiness = restart_readiness(workspace, state, session_name, decisions, transport);
+        if readiness.ready() {
+            return Ok(());
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= deadline {
+            write_restart_readiness_timeout_event(workspace, readiness, deadline, elapsed)?;
+            return Err(LifecycleError::RequirementUnmet(restart_readiness_timeout_message(
+                workspace, readiness, deadline,
+            )));
+        }
+        std::thread::sleep(std::cmp::min(poll_interval, deadline.saturating_sub(elapsed)));
+    }
+}
+
+fn restart_readiness(
+    workspace: &Path,
+    state: &serde_json::Value,
+    session_name: &SessionName,
+    decisions: &[RestartedAgent],
+    transport: &dyn crate::transport::Transport,
+) -> RestartReadiness {
+    let session_created = session_live_or_default(transport, session_name, false);
+    let worker_pane_addressable = restart_worker_panes_addressable(state, decisions, transport);
+    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let coordinator_alive =
+        crate::coordinator::coordinator_health(&coordinator_workspace).ok && session_created;
+    RestartReadiness { session_created, worker_pane_addressable, coordinator_alive }
+}
+
+fn restart_worker_panes_addressable(
+    state: &serde_json::Value,
+    decisions: &[RestartedAgent],
+    transport: &dyn crate::transport::Transport,
+) -> bool {
+    if decisions.is_empty() {
+        return true;
+    }
+    decisions.iter().all(|decision| {
+        let Some(pane_id) = state
+            .get("agents")
+            .and_then(|agents| agents.get(decision.agent_id.as_str()))
+            .and_then(|agent| agent.get("pane_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|pane| !pane.is_empty())
+            .map(crate::transport::PaneId::new)
+        else {
+            return false;
+        };
+        pane_addressable(transport, &pane_id)
+    })
+}
+
+fn pane_addressable(
+    transport: &dyn crate::transport::Transport,
+    pane_id: &crate::transport::PaneId,
+) -> bool {
+    match transport.has_pane(pane_id) {
+        Ok(Some(present)) => present,
+        Ok(None) | Err(_) => {
+            transport
+                .list_targets()
+                .map(|targets| targets.iter().any(|pane| pane.pane_id == *pane_id))
+                .unwrap_or(false)
+                || transport
+                    .liveness(pane_id)
+                    .map(|state| state == crate::transport::PaneLiveness::Live)
+                    .unwrap_or(false)
+        }
+    }
+}
+
+fn write_restart_readiness_timeout_event(
+    workspace: &Path,
+    readiness: RestartReadiness,
+    deadline: std::time::Duration,
+    elapsed: std::time::Duration,
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "restart.readiness_timeout",
+            serde_json::json!({
+                "tmux_session_created": readiness.session_created,
+                "worker_pane_addressable": readiness.worker_pane_addressable,
+                "coordinator_alive": readiness.coordinator_alive,
+                "deadline_ms": deadline.as_millis(),
+                "elapsed_ms": elapsed.as_millis(),
+                "coordinator_log": crate::coordinator::coordinator_log_path(
+                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
+                ).display().to_string(),
+                "state_path": crate::state::persist::runtime_state_path(workspace).display().to_string(),
+                "pid_path": crate::coordinator::coordinator_pid_path(
+                    &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
+                ).display().to_string(),
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn restart_readiness_timeout_message(
+    workspace: &Path,
+    readiness: RestartReadiness,
+    deadline: std::time::Duration,
+) -> String {
+    let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let deadline_s = deadline.as_secs_f64();
+    format!(
+        "restart not ready within {deadline_s:.1}s: {missing}\n\
+         - tmux session created: {session}\n\
+         - worker pane addressable: {pane}\n\
+         - coordinator alive: {coordinator}\n\
+         Action: check coordinator log {log}, then `team-agent restart <agent> --allow-fresh` or `team-agent diagnose`\n\
+         Log: coordinator_log={log} state={state} pid_file={pid}",
+        missing = restart_readiness_missing_summary(readiness),
+        session = yes_no(readiness.session_created),
+        pane = yes_no(readiness.worker_pane_addressable),
+        coordinator = yes_no(readiness.coordinator_alive),
+        log = crate::coordinator::coordinator_log_path(&coordinator_workspace).display(),
+        state = crate::state::persist::runtime_state_path(workspace).display(),
+        pid = crate::coordinator::coordinator_pid_path(&coordinator_workspace).display(),
+    )
+}
+
+fn restart_readiness_missing_summary(readiness: RestartReadiness) -> String {
+    let mut missing = Vec::new();
+    if !readiness.session_created {
+        missing.push("tmux session created");
+    }
+    if !readiness.worker_pane_addressable {
+        missing.push("worker pane addressable");
+    }
+    if !readiness.coordinator_alive {
+        missing.push("coordinator alive");
+    }
+    missing.join(", ")
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn verify_spawned_agent_live(

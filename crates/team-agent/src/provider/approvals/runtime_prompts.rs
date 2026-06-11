@@ -5,15 +5,15 @@ use sha2::{Digest, Sha256};
 
 use crate::provider::{ApprovalFingerprint, ApprovalKind, ApprovalPrompt};
 
-pub const RUNTIME_MCP_APPROVAL_ALLOWLIST: &[&str] = &[
-    "send_message",
-    "report_result",
-    "get_team_status",
-    "request_human",
-];
+pub const RUNTIME_MCP_APPROVAL_SERVER: &str = "team_orchestrator";
 
 pub fn runtime_mcp_tool_allowlisted(tool: &str) -> bool {
-    RUNTIME_MCP_APPROVAL_ALLOWLIST.contains(&tool)
+    !tool.trim().is_empty()
+}
+
+pub fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
+    prompt.server.as_deref() == Some(RUNTIME_MCP_APPROVAL_SERVER)
+        && prompt.tool.as_deref().is_some_and(runtime_mcp_tool_allowlisted)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,8 +79,7 @@ pub fn awaiting_human_confirm_reason(
 ) -> Option<&'static str> {
     match prompt.kind {
         ApprovalKind::McpTool => {
-            let tool = prompt.tool.as_deref()?;
-            if !runtime_mcp_tool_allowlisted(tool) {
+            if !runtime_mcp_prompt_allowlisted(prompt) {
                 Some("tool_not_allowlisted")
             } else if !leader_auto_approval_allowed {
                 Some("leader_restricted")
@@ -103,6 +102,10 @@ pub fn approval_prompt_fingerprint(team: &str, agent_id: &str, prompt: &Approval
     hasher.update([0]);
     if let Some(tool) = prompt.tool.as_deref() {
         hasher.update(tool.as_bytes());
+    }
+    hasher.update([0]);
+    if let Some(server) = prompt.server.as_deref() {
+        hasher.update(server.as_bytes());
     }
     hasher.update([0]);
     if let Some(command) = prompt.command.as_deref() {

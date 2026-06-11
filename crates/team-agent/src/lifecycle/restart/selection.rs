@@ -4,30 +4,33 @@ use super::common::*;
 /// bug-085 四象限 `start_mode` 决策(`start.py:179-188` + `_resume_rollout_missing` `start.py:66-69`),
 /// **从 start_agent 的整条 lock+spawn 路径里分离出的纯函数**(gate gap:porter 需要单元级 RED
 /// for `FreshAfterMissingRollout`,而 start_agent 全路径不可单测)。语义:
-/// - `_resume_rollout_missing` 仅 codex 且有 session_id 时可能 true:`!rollout_path || !exists`。
+/// - resume backing 缺失时不可 resume:codex/claude 用 transcript/rollout 文件,
+///   copilot 用 session-store 行存在性(由调用方折叠进 `rollout_exists`)。
 /// - 初始 `start_mode = if session_id { Resumed } else { Fresh }`(`start.py:179`)。
-/// - **仅当** `missing && allow_fresh` 才升级为 `FreshAfterMissingRollout` 并清空 session_id
-///   (`start.py:180-190`)。`missing && !allow_fresh` 仍 `Resumed`(随后真实 resume 会 fail)。
-/// - 非 codex:rollout 永不"缺失",直接看 session_id。
+/// - `missing && allow_fresh` 升级为 `FreshAfterMissingRollout` 并清空 session_id。
+/// - `missing && !allow_fresh` 返回 `Noop`,调用方据此诚实拒绝并提示 `--allow-fresh`。
 pub fn decide_start_mode(
     provider: &str,
     session_id: Option<&SessionId>,
-    rollout_path: Option<&RolloutPath>,
+    _rollout_path: Option<&RolloutPath>,
     rollout_exists: bool,
     allow_fresh: bool,
 ) -> StartMode {
     match session_id {
         None => StartMode::Fresh,
         Some(_) => {
-            let missing_codex_rollout =
-                provider == "codex" && (rollout_path.is_none() || !rollout_exists);
-            if missing_codex_rollout && allow_fresh {
-                StartMode::FreshAfterMissingRollout
-            } else {
-                StartMode::Resumed
+            let missing_resume_backing = resumable_provider_requires_backing(provider) && !rollout_exists;
+            match (missing_resume_backing, allow_fresh) {
+                (true, true) => StartMode::FreshAfterMissingRollout,
+                (true, false) => StartMode::Noop,
+                (false, _) => StartMode::Resumed,
             }
         }
     }
+}
+
+pub(crate) fn resumable_provider_requires_backing(provider: &str) -> bool {
+    matches!(provider, "codex" | "claude" | "claude_code" | "copilot")
 }
 
 /// `first_send_at` 严格分类(`_classify_first_send_at`,`orchestration.py:399`)。
@@ -130,6 +133,14 @@ pub fn classify_restart_plan(
     state: &serde_json::Value,
     allow_fresh: bool,
 ) -> Result<RestartPlan, LifecycleError> {
+    classify_restart_plan_with_resume_validation(None, state, allow_fresh)
+}
+
+pub(crate) fn classify_restart_plan_with_resume_validation(
+    workspace: Option<&Path>,
+    state: &serde_json::Value,
+    allow_fresh: bool,
+) -> Result<RestartPlan, LifecycleError> {
     let mut decisions = Vec::new();
     let mut corrupt_entries = Vec::new();
     let mut unresumable = Vec::new();
@@ -171,21 +182,47 @@ pub fn classify_restart_plan(
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(SessionId::new);
+        let agent_id = AgentId::new(worker_id.clone());
         // E6 层2 (C2, 用户裁定"绝不静默 fresh"): null session 只有显式 --allow-fresh 才 fresh,
         // 否则 Refuse(→ resume_not_ready + 指引)。删 `!interacted` 短路 —— 自启动 worker
         // (leader 从未发消息 → first_send_at=null → interacted=false)会被它静默 fresh 丢上下文。
-        let decision = if session_id.is_some() {
+        let provider = agent_provider(agent);
+        let provider_wire = provider_wire(provider);
+        let resume_backing_exists = match (workspace, session_id.as_ref()) {
+            (Some(workspace), Some(session)) => resume_backing_exists_for_agent(
+                workspace,
+                &agent_id,
+                agent,
+                provider,
+                session,
+                agent_rollout_path(agent).as_ref(),
+            ),
+            (None, Some(_)) if resumable_provider_requires_backing(provider_wire) => {
+                agent_rollout_path(agent)
+                    .as_ref()
+                    .is_some_and(|path| path.as_path().exists())
+            }
+            _ => true,
+        };
+        let decision = if session_id.is_some() && resume_backing_exists {
             ResumeDecision::Resume
+        } else if session_id.is_some() && allow_fresh {
+            ResumeDecision::FreshStart
+        } else if session_id.is_some() {
+            ResumeDecision::Refuse
         } else if allow_fresh {
             ResumeDecision::FreshStart
         } else {
             ResumeDecision::Refuse
         };
-        let agent_id = AgentId::new(worker_id.clone());
         if matches!(decision, ResumeDecision::Refuse) {
             unresumable.push(UnresumableWorker {
                 agent_id: agent_id.clone(),
-                reason: "no_persisted_session_id".to_string(),
+                reason: if session_id.is_some() {
+                    "session_unresumable".to_string()
+                } else {
+                    "no_persisted_session_id".to_string()
+                },
                 session_id: session_id.clone(),
                 first_send_at: first_send_at_raw.as_str().map(|s| s.to_string()),
             });

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.10
+
+- **`team-agent restart` no longer resurrects dead worker sessions (#264, E20)**: the resume gate was only running a transcript-existence check for `codex` workers — `claude`, `claude_code`, and `copilot` workers were promoted to `Resumed` purely on the presence of a stored `session_id`, even when the provider had no live transcript to resume against, producing a zombie window that looked alive but was attached to nothing. The transcript-existence check now runs for every provider that has a known transcript root, so a stale session id falls through to refused-or-fresh-by-policy instead of being silently honored.
+- **Restart readiness gate (E20 C②)**: after relaunch, `restart` now waits for each worker to reach a ready state before reporting the team restart as complete; partial relaunches no longer silently look successful while leaving workers stuck mid-startup.
+- **Coordinator no longer silently self-exits** on transient errors and **messages no longer silently disappear** in delivery race conditions — both paths now surface failures through the event log instead of swallowing them.
+- **`--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions` inheritance is correct for internal MCP tools (#232)**: when the leader is started with a bypass flag, internal Team Agent MCP tools (orchestrator send/result/etc.) inherit the bypass correctly so they no longer trigger approval prompts that the user already opted out of.
+- **`team-agent shutdown` under a Copilot-launched leader no longer kills the leader window**: the leader-pane rediscovery path now recognises `copilot` as a valid leader command (it previously only looked for `codex`/`claude`), so the shutdown-protection extension correctly identifies and spares the Copilot leader.
+
 ## 0.3.9
 
 - **`team-agent restart` standard usage actually works (RED-2-STILL, P0 hotfix)**: the restart entry gate now resolves the team workspace through `canonical_run_workspace` before checking for a spec, so the documented form `team-agent restart .` (or `team-agent restart <workspace>`) finds the spec under `.team/runtime/<team_key>/` instead of falsely reporting "no spec" because it was looking at the raw workspace argument. The second-layer guard from 0.3.8 (067f78f) is preserved and still catches deeper misses.

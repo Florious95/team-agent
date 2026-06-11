@@ -840,13 +840,18 @@ fn copilot_mcp_config_uses_copilot_field_name() {
 #[test]
 #[serial(env)]
 fn copilot_resume_argv_has_no_session_id_resume_conflict() {
-    let _guard = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
+    let home = tmp_ws("resume-home");
+    let _guard = EnvGuard::set(&[
+        (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
+        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+    ]);
     let ws = tmp_ws("resume");
     let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpresume"), &RecordingTransport::new())
         .expect("quick-start should seed the team");
     seed_running_resumable(&ws, "worker_a");
+    seed_copilot_session_store(&home, "99999999-aaaa-4bbb-8ccc-dddddddddddd");
 
     let restart_transport = RecordingTransport::new();
     let _ = team_agent::lifecycle::restart_with_transport(&ws, true, Some("cpresume"), &restart_transport);
@@ -1167,6 +1172,25 @@ fn seed_running_resumable(ws: &Path, agent: &str) {
         }
     }
     team_agent::state::persist::save_runtime_state(ws, &state).unwrap();
+}
+
+fn seed_copilot_session_store(home: &Path, session_id: &str) {
+    let db = home.join(".copilot").join("session-store.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.execute_batch(
+        "create table if not exists sessions (
+            id text primary key,
+            name text,
+            created_at text
+        );",
+    )
+    .unwrap();
+    conn.execute(
+        "insert or replace into sessions(id, name, created_at) values (?1, 'resume-test', '2026-06-10T00:00:00Z')",
+        rusqlite::params![session_id],
+    )
+    .unwrap();
 }
 
 fn seed_session_id(ws: &Path, agent: &str) {

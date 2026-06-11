@@ -17,7 +17,7 @@ use crate::transport::{
 use super::helpers::{message_exists, MessageStatusShadow};
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError,
-    PaneWidthQuery, TrustRetryPayload,
+    PaneWidthQuery, TrustRetryPayload, SEND_RETRY_MAX_ATTEMPTS,
 };
 use crate::state::projection::OwnerTeamResolution;
 
@@ -286,7 +286,6 @@ pub fn deliver_pending_message(
             "submit_unverified:{}",
             submit_verification_wire(inject_report.submit_verification)
         );
-        store.mark(message_id, "submitted_unverified", Some(&reason))?;
         event_log.write(
             "send.unverified",
             serde_json::json!({
@@ -296,6 +295,29 @@ pub fn deliver_pending_message(
                 "attempts": inject_report.attempts,
             }),
         )?;
+        if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
+            store.mark(message_id, "failed", Some("send_unverified_exhausted"))?;
+            emit_send_failed_exhausted(
+                workspace,
+                state,
+                event_log,
+                message_id,
+                &message.recipient,
+                inject_report.attempts,
+                &reason,
+            )?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Failed,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(reason),
+                stage: Some(DeliveryStage::Submit),
+                reason: None,
+                channel: None,
+            });
+        }
+        store.mark(message_id, "submitted_unverified", Some(&reason))?;
         return Ok(DeliveryOutcome {
             ok: false,
             status: DeliveryStatus::Failed,
@@ -536,6 +558,65 @@ fn leader_receiver_field_in_state<'a>(
         .and_then(|receiver| receiver.get(field))
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
+}
+
+fn emit_send_failed_exhausted(
+    workspace: &Path,
+    state: &serde_json::Value,
+    event_log: &EventLog,
+    message_id: &str,
+    recipient: &str,
+    attempts: u32,
+    verification: &str,
+) -> Result<(), MessagingError> {
+    event_log.write(
+        "send.failed",
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": recipient,
+            "attempts": attempts,
+            "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
+            "reason": "send_unverified_exhausted",
+            "verification": verification,
+        }),
+    )?;
+    let content = format!(
+        "send.failed\nerror: send to {recipient} remained unverified after {attempts}/{SEND_RETRY_MAX_ATTEMPTS} attempts\naction: inspect the target pane and retry the send\nlog: .team/logs/events.jsonl"
+    );
+    match crate::messaging::send_to_leader_receiver(
+        workspace,
+        state,
+        "leader",
+        &content,
+        None,
+        "coordinator",
+        false,
+        Some(&format!("send.failed:{message_id}")),
+        event_log,
+    ) {
+        Ok(outcome) => {
+            event_log.write(
+                "send.failed_notification",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": recipient,
+                    "leader_notification_status": super::helpers::status_wire(outcome.status),
+                    "leader_message_id": outcome.message_id,
+                }),
+            )?;
+        }
+        Err(error) => {
+            event_log.write(
+                "send.failed_notification_failed",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": recipient,
+                    "error": error.to_string(),
+                }),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn active_team_entry(state: &serde_json::Value) -> Option<&serde_json::Value> {

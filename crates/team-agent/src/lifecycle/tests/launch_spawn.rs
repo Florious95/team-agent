@@ -945,6 +945,10 @@ const DELEG_ROLE_WORKER2: &str = "---\nname: worker2\nrole: Second Worker\nprovi
 pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
     let ws = temp_ws().join("restartteam");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
+    let alpha_rollout = ws.join("alpha-rollout.jsonl");
+    let bravo_rollout = ws.join("bravo-rollout.jsonl");
+    std::fs::write(&alpha_rollout, "{}\n").unwrap();
+    std::fs::write(&bravo_rollout, "{}\n").unwrap();
     std::fs::write(ws.join("TEAM.md"), "---\nname: restartteam\nobjective: Restart probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
@@ -955,13 +959,40 @@ pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
         &json!({
             "session_name": "team-restartteam",
             "agents": {
-                "alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "first_send_at": "2026-05-27T10:00:00+00:00"},
-                "bravo": {"status": "running", "provider": "codex", "session_id": "sess-b", "first_send_at": "2026-05-27T10:00:00+00:00"}
+                "alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": alpha_rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"},
+                "bravo": {"status": "running", "provider": "codex", "session_id": "sess-b", "rollout_path": bravo_rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}
             }
         }),
     )
     .unwrap();
     seed_healthy_coordinator(&ws); // start_coordinator -> AlreadyRunning (no real daemon subprocess)
+    ws
+}
+
+fn restart_ws_one_resumable_worker() -> PathBuf {
+    let ws = temp_ws().join("restartone");
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    let rollout = ws.join("alpha-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: restartone\nobjective: Restart readiness probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
+    let spec = crate::compiler::compile_team(&ws).expect("compile 1-agent team");
+    std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-restartone",
+            "agents": {
+                "alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&ws);
     ws
 }
 
@@ -1020,6 +1051,38 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
     );
 }
 
+#[test]
+fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
+    let ws = restart_ws_one_resumable_worker();
+    let transport = OfflineTransport::new().with_spawned_panes_addressable(false);
+
+    let result =
+        restart_with_transport_with_readiness_deadline(&ws, false, None, &transport, Some(0));
+
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("restart not ready")
+            && text.contains("worker pane addressable: no")
+            && text.contains("Action:")
+            && text.contains("Log:"),
+        "restart must refuse with N38 readiness timeout details, not return ok; got {text}"
+    );
+    assert!(
+        !matches!(result, Ok(RestartReport::Restarted { .. })),
+        "restart readiness timeout must not return Restarted ok"
+    );
+    let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
+    let timeout = events
+        .iter()
+        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.readiness_timeout"))
+        .expect("restart.readiness_timeout event");
+    assert_eq!(
+        timeout.get("worker_pane_addressable").and_then(|v| v.as_bool()),
+        Some(false),
+        "timeout event must carry the failed readiness condition: {timeout}"
+    );
+}
+
 // 3 [P0] — start_agent_with_transport on a non-paused agent with a session_id must spawn EXACTLY ONE
 // worker (resume) carrying the provider build_command. Today the stub returns RequirementUnmet with
 // ZERO spawns -> RED at recorded.len().
@@ -1027,11 +1090,13 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
 fn start_agent_with_transport_spawns_resume_not_stub() {
     let ws = temp_ws().join("startagentws");
     std::fs::create_dir_all(&ws).unwrap();
+    let rollout = ws.join("alpha-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-sa",
-            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "first_send_at": "2026-05-27T10:00:00+00:00"}}
+            "agents": {"alpha": {"status": "running", "provider": "codex", "session_id": "sess-a", "rollout_path": rollout.to_string_lossy(), "first_send_at": "2026-05-27T10:00:00+00:00"}}
         }),
     )
     .unwrap();

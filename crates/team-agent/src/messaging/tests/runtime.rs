@@ -1068,6 +1068,96 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
     assert_eq!(fired.len(), 3, "exactly the three seeded due events fire, no extras");
 }
 
+struct UnverifiedInjectTransport;
+impl Transport for UnverifiedInjectTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: crate::transport::InjectStage::Submit,
+            inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
+            submit_verification: crate::transport::SubmitVerification::PastedContentPromptStillPresentAfterSubmit,
+            turn_verification: crate::transport::TurnVerification::NotYetObserved,
+            attempts: u32::from(SEND_RETRY_MAX_ATTEMPTS),
+        })
+    }
+    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText { text: String::new(), range })
+    }
+    fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
+        Ok(None)
+    }
+    fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
+        Ok(PaneLiveness::Unknown)
+    }
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn has_session(&self, _s: &SessionName) -> Result<bool, TransportError> {
+        Ok(true)
+    }
+    fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+}
+
+#[test]
+fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
+    let ws = tmp_ws("sendfailed");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-sendfailed",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+
+    let out = deliver_pending_message(&ws, &store, &UnverifiedInjectTransport, &message_id, &log, &state)
+        .unwrap();
+
+    assert!(!out.ok);
+    assert_eq!(out.message_status.0, "failed");
+    let events = log.tail(0).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")),
+        "exhausted unverified send must emit send.failed; got {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed_notification")),
+        "exhausted unverified send must queue a leader-visible notification; got {events:?}"
+    );
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // GROUP V — retry_result_deliveries: re-route notify_failed watchers with
 // dedupe_reason rebind_retry. result_delivery.py:19-35.

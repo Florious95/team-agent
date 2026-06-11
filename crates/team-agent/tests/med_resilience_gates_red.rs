@@ -157,7 +157,7 @@ fn a6_tick_runtime_approval_send_keys_failure_must_not_abort_tick() {
         }),
     )
     .unwrap();
-    let transport = ApprovalPromptTransport::new();
+    let transport = ApprovalPromptTransport::failing();
     let send_keys_targets = transport.send_keys_targets.clone();
     let coord = Coordinator::new(
         WorkspacePath::new(ws.clone()),
@@ -185,6 +185,49 @@ agent's send_keys failed; send_keys targets={targets:?}"
         failures.is_empty(),
         "A-6 tick approval resilience contract failed:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn b232_tick_auto_approved_mcp_tool_writes_audit_event() {
+    let ws = tmp_ws("b232-mcp-event");
+    save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-x",
+            "active_team_key": "team-x",
+            "agents": {
+                "w1": {
+                    "status": "running", "provider": "codex", "agent_id": "w1",
+                    "window": "w1", "pane_id": "%11",
+                    "effective_approval_policy": leader_bypass_policy(),
+                },
+            },
+        }),
+    )
+    .unwrap();
+    let coord = Coordinator::new(
+        WorkspacePath::new(ws.clone()),
+        Box::new(RealAdapterRegistry),
+        Box::new(ApprovalPromptTransport::successful()),
+    );
+
+    coord.tick().expect("tick");
+
+    let events = team_agent::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let event = events
+        .iter()
+        .find(|event| {
+            event.get("event").and_then(Value::as_str) == Some("mcp.tool.auto_approved")
+        })
+        .unwrap_or_else(|| panic!("missing mcp.tool.auto_approved event: {events:?}"));
+    assert_eq!(event.get("server").and_then(Value::as_str), Some("team_orchestrator"));
+    assert_eq!(event.get("tool").and_then(Value::as_str), Some("report_result"));
+    assert_eq!(event.get("inherit_reason").and_then(Value::as_str), Some("leader_bypass"));
+    assert_eq!(event.get("bypass_source").and_then(Value::as_str), Some("leader_process"));
+    assert_eq!(
+        event.get("flag").and_then(Value::as_str),
+        Some("--dangerously-bypass-approvals-and-sandbox")
     );
 }
 
@@ -240,6 +283,18 @@ fn approval_policy() -> Value {
     })
 }
 
+fn leader_bypass_policy() -> Value {
+    json!({
+        "enabled": true,
+        "source": "leader_process",
+        "inherited": true,
+        "explicit_yes_confirmed": false,
+        "provider": "codex",
+        "flag": "--dangerously-bypass-approvals-and-sandbox",
+        "worker_capability_above_leader": false,
+    })
+}
+
 fn idle_node(id: &str) -> IdleNode {
     IdleNode {
         node_id: id.to_string(),
@@ -269,12 +324,25 @@ impl ProviderRegistry for RealAdapterRegistry {
 /// the deterministic per-agent failure injection for the tick resilience contract.
 struct ApprovalPromptTransport {
     send_keys_targets: std::sync::Arc<Mutex<Vec<String>>>,
+    fail_send_keys: bool,
 }
 
 impl ApprovalPromptTransport {
     fn new() -> Self {
+        Self::failing()
+    }
+
+    fn failing() -> Self {
         Self {
             send_keys_targets: std::sync::Arc::new(Mutex::new(Vec::new())),
+            fail_send_keys: true,
+        }
+    }
+
+    fn successful() -> Self {
+        Self {
+            send_keys_targets: std::sync::Arc::new(Mutex::new(Vec::new())),
+            fail_send_keys: false,
         }
     }
 }
@@ -332,11 +400,15 @@ impl Transport for ApprovalPromptTransport {
             .lock()
             .unwrap()
             .push(format!("{target:?}"));
-        Err(TransportError::Subprocess {
-            argv: vec!["tmux".to_string(), "send-keys".to_string()],
-            code: Some(1),
-            stderr: "injected send-keys failure".to_string(),
-        })
+        if self.fail_send_keys {
+            Err(TransportError::Subprocess {
+                argv: vec!["tmux".to_string(), "send-keys".to_string()],
+                code: Some(1),
+                stderr: "injected send-keys failure".to_string(),
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {

@@ -198,6 +198,7 @@ impl Coordinator {
                     "coordinator.session_missing",
                     serde_json::json!({"session": session_name}),
                 )?;
+                notify_session_missing(self.workspace.as_path(), &state, &event_log, session_name)?;
                 return Ok(empty_tick_report(
                     false,
                     true,
@@ -971,7 +972,8 @@ impl Coordinator {
                         "runtime_approval.auto_approved",
                         serde_json::json!({
                             "agent_id": agent_id,
-                            "tool": prompt.tool,
+                            "server": prompt.server.as_deref(),
+                            "tool": prompt.tool.as_deref(),
                             "choice": choice,
                             "cleared": cleared,
                             "policy_source": approval_policy.source,
@@ -980,6 +982,23 @@ impl Coordinator {
                             "worker_capability_above_leader": approval_policy.worker_capability_above_leader,
                         }),
                     )?;
+                        event_log.write(
+                            "mcp.tool.auto_approved",
+                            serde_json::json!({
+                                "agent_id": agent_id,
+                                "server": prompt.server.as_deref(),
+                                "tool": prompt.tool.as_deref(),
+                                "choice": choice,
+                                "cleared": cleared,
+                                "inherit_reason": approval_policy.inherit_reason(),
+                                "bypass_source": approval_policy.source,
+                                "provider": approval_policy.provider,
+                                "flag": approval_policy.flag,
+                                "inherited": approval_policy.inherited,
+                                "explicit_yes_confirmed": approval_policy.explicit_yes_confirmed,
+                                "worker_capability_above_leader": approval_policy.worker_capability_above_leader,
+                            }),
+                        )?;
                     }
                     RuntimeApprovalDecision::AwaitingHumanConfirm => {
                         let Some(reason) = awaiting_human_confirm_reason(&prompt, auto_answer_allowed) else {
@@ -2110,6 +2129,8 @@ struct RuntimeApprovalPolicy {
     source: String,
     inherited: bool,
     explicit_yes_confirmed: bool,
+    provider: Option<String>,
+    flag: Option<String>,
     worker_capability_above_leader: bool,
 }
 
@@ -2126,6 +2147,14 @@ impl RuntimeApprovalPolicy {
         source_allows
             && (!self.worker_capability_above_leader
                 || (self.source == "runtime_config" && self.explicit_yes_confirmed))
+    }
+
+    fn inherit_reason(&self) -> &'static str {
+        match self.source.as_str() {
+            "leader_process" if self.inherited => "leader_bypass",
+            "runtime_config" if self.explicit_yes_confirmed => "runtime_config_explicit_yes",
+            _ => "none",
+        }
     }
 }
 
@@ -2151,6 +2180,14 @@ fn runtime_approval_policy_from_agent(agent: &Value) -> RuntimeApprovalPolicy {
             .and_then(|p| p.get("explicit_yes_confirmed"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        provider: policy
+            .and_then(|p| p.get("provider"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        flag: policy
+            .and_then(|p| p.get("flag"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         worker_capability_above_leader: policy
             .and_then(|p| p.get("worker_capability_above_leader"))
             .and_then(Value::as_bool)
@@ -2422,4 +2459,49 @@ fn remove_file_if_exists(path: &Path) -> Result<(), std::io::Error> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn notify_session_missing(
+    workspace: &Path,
+    state: &Value,
+    event_log: &EventLog,
+    session_name: &str,
+) -> Result<(), TickError> {
+    let content = format!(
+        "coordinator.session_missing\nerror: tmux session {session_name} is missing; coordinator is stopping\naction: restart the team or recover the missing tmux session\nlog: .team/logs/events.jsonl"
+    );
+    let dedupe_key = format!("coordinator.session_missing:{session_name}");
+    match crate::messaging::send_to_leader_receiver(
+        workspace,
+        state,
+        "leader",
+        &content,
+        None,
+        "coordinator",
+        false,
+        Some(&dedupe_key),
+        event_log,
+    ) {
+        Ok(outcome) => {
+            event_log.write(
+                "coordinator.session_missing_alert",
+                serde_json::json!({
+                    "session": session_name,
+                    "leader_notification_status": crate::messaging::helpers::status_wire(outcome.status),
+                    "message_id": outcome.message_id,
+                }),
+            )?;
+        }
+        Err(error) => {
+            event_log.write(
+                "coordinator.session_missing_alert_failed",
+                serde_json::json!({
+                    "session": session_name,
+                    "error": error.to_string(),
+                    "action": "inspect .team/logs/events.jsonl and restart the team",
+                }),
+            )?;
+        }
+    }
+    Ok(())
 }

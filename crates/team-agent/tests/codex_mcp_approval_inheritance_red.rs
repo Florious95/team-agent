@@ -869,7 +869,7 @@ impl Transport for RecordingTransport {
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Ok(self.session_present)
+        Ok(self.session_present || !self.spawns.lock().unwrap().is_empty())
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

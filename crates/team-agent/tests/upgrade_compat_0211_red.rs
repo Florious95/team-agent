@@ -213,12 +213,16 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
 
 #[test]
 fn upgrade_restart_plan_uses_persisted_session_id() {
+    let dir = tmp_dir("restart-plan-rollout");
+    let rollout = dir.join("rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
     let state = json!({
         "agents": {
             "w1": {
                 "status": "running",
                 "provider": "codex",
                 "session_id": "sess-upgrade",
+                "rollout_path": rollout.to_string_lossy(),
                 "first_send_at": "2026-06-07T01:00:00+00:00"
             }
         }
@@ -355,6 +359,7 @@ impl UpgradeFixture {
     }
 
     fn seed_restartable_state(&self) {
+        std::fs::write(self.workspace.join("rollout.jsonl"), "{}\n").unwrap();
         save_runtime_state(
             &self.workspace,
             &json!({
@@ -662,12 +667,19 @@ impl Transport for RecordingTransport {
         Ok(PaneLiveness::Live)
     }
 
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let spawns = self.spawns.lock().unwrap();
+        Ok(Some(spawns.iter().enumerate().any(|(idx, _)| {
+            pane.as_str() == format!("%{}", idx + 1)
+        })))
+    }
+
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Ok(self.session_present)
+        Ok(self.session_present || !self.spawns.lock().unwrap().is_empty())
     }
 
     fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {

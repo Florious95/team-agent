@@ -288,6 +288,7 @@ fn spawn_agents(
         let mut env =
             inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
         apply_profile_launch_env(&mut env, &profile_launch);
+        apply_mcp_auto_approval_env(&mut env, &safety);
         // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker
         // with cwd=workspace, same as the RS fork/add and restart paths.
         let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
@@ -1388,6 +1389,39 @@ pub(crate) fn inherited_env_with_team_overrides(
         env.insert("TEAM_AGENT_OWNER_TEAM_ID".to_string(), tid.to_string());
     }
     env
+}
+
+pub(crate) fn apply_mcp_auto_approval_env(
+    env: &mut BTreeMap<String, String>,
+    safety: &DangerousApproval,
+) {
+    for key in [
+        "TEAM_AGENT_LEADER_BYPASS",
+        "TEAM_AGENT_LEADER_BYPASS_SOURCE",
+        "TEAM_AGENT_LEADER_BYPASS_PROVIDER",
+        "TEAM_AGENT_LEADER_BYPASS_FLAG",
+        "TEAM_AGENT_MCP_AUTO_APPROVE",
+        "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE",
+    ] {
+        env.remove(key);
+    }
+    if safety.enabled
+        && matches!(safety.source, DangerousApprovalSource::LeaderProcess)
+        && safety.inherited
+    {
+        env.insert("TEAM_AGENT_LEADER_BYPASS".to_string(), "1".to_string());
+        env.insert("TEAM_AGENT_LEADER_BYPASS_SOURCE".to_string(), "leader_process".to_string());
+        if let Some(provider) = safety.provider.as_deref() {
+            env.insert("TEAM_AGENT_LEADER_BYPASS_PROVIDER".to_string(), provider.to_string());
+        }
+        if let Some(flag) = safety.flag.as_deref() {
+            env.insert("TEAM_AGENT_LEADER_BYPASS_FLAG".to_string(), flag.to_string());
+        }
+        env.insert("TEAM_AGENT_MCP_AUTO_APPROVE".to_string(), "team_orchestrator".to_string());
+        env.insert("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(), "leader_bypass".to_string());
+    } else {
+        env.insert("TEAM_AGENT_LEADER_BYPASS".to_string(), "0".to_string());
+    }
 }
 
 /// BUG / B2 灵魂件 + C-1-2 + C-6-1 cr verdict — Copilot per-worker AGENTS.md
@@ -2971,6 +3005,7 @@ pub fn fork_agent_with_transport(
     let mut env =
         inherited_env_with_team_overrides(&workspace, as_agent_id.as_str(), Some(&fork_team));
     apply_profile_launch_env(&mut env, &profile_launch);
+    apply_mcp_auto_approval_env(&mut env, &safety);
     // golden operations.py:336 -> _tmux_start_command_for_agent_window (runtime.py:1017-1020): branch on
     // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
     // (spawn_into). The Rust restart seam (restart.rs spawn_agent_window) uses the same branch.

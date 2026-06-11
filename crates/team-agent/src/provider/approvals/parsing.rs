@@ -10,6 +10,8 @@ pub struct ApprovalPrompt {
     pub prompt: String,
     pub choices: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
@@ -21,6 +23,9 @@ impl ApprovalPrompt {
         map.insert("agent_id".to_string(), serde_json::json!(self.agent_id));
         map.insert("state".to_string(), serde_json::json!(self.state));
         map.insert("kind".to_string(), serde_json::json!(self.kind));
+        if let Some(server) = &self.server {
+            map.insert("server".to_string(), serde_json::json!(server));
+        }
         if let Some(tool) = &self.tool {
             map.insert("tool".to_string(), serde_json::json!(tool));
         }
@@ -54,17 +59,17 @@ pub fn extract_approval_prompt(agent_id: &str, capture: &str) -> Option<Approval
     let lines: Vec<&str> = capture.lines().collect();
     let control_idx = active_approval_control_index(&lines)?;
 
-    if let Some((matched_idx, prompt, tool)) = explicit_mcp_prompt(&lines, control_idx) {
+    if let Some((matched_idx, prompt, server, tool)) = explicit_mcp_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(tool), None));
+        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(server), Some(tool), None));
     }
-    if let Some((matched_idx, prompt, tool)) = short_mcp_prompt(&lines, control_idx) {
+    if let Some((matched_idx, prompt, server, tool)) = short_mcp_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(tool), None));
+        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(server), Some(tool), None));
     }
     if let Some((matched_idx, prompt, command)) = command_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::Command, prompt, choices, None, Some(command)));
+        return Some(approval(agent_id, ApprovalKind::Command, prompt, choices, None, None, Some(command)));
     }
     let choices = approval_choices_between(&lines, 0, control_idx);
     Some(approval(
@@ -72,6 +77,7 @@ pub fn extract_approval_prompt(agent_id: &str, capture: &str) -> Option<Approval
         ApprovalKind::Unknown,
         "approval prompt detected".to_string(),
         choices,
+        None,
         None,
         None,
     ))
@@ -117,6 +123,7 @@ fn approval(
     kind: ApprovalKind,
     prompt: String,
     choices: Vec<String>,
+    server: Option<String>,
     tool: Option<String>,
     command: Option<String>,
 ) -> ApprovalPrompt {
@@ -126,6 +133,7 @@ fn approval(
         kind,
         prompt,
         choices,
+        server,
         tool,
         command,
     }
@@ -137,15 +145,18 @@ fn is_control_line(line: &str) -> bool {
         || (lower.contains("esc to cancel") && lower.contains("tab to amend"))
 }
 
-fn explicit_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String, String)> {
+fn explicit_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String, String, String)> {
     for (idx, raw) in lines.iter().enumerate().take(control_idx).rev() {
         let line = clean_line(raw);
-        let prefix = "Allow the team_orchestrator MCP server to run tool \"";
+        let prefix = "Allow the ";
         if let Some(rest) = line.strip_prefix(prefix) {
-            if let Some((tool, _)) = rest.split_once('"') {
-                if !tool.is_empty() {
-                    let tool = tool.to_string();
-                    return Some((idx, line, tool));
+            if let Some((server, rest)) = rest.split_once(" MCP server to run tool \"") {
+                if let Some((tool, _)) = rest.split_once('"') {
+                    if !server.is_empty() && !tool.is_empty() {
+                        let server = server.to_string();
+                        let tool = tool.to_string();
+                        return Some((idx, line, server, tool));
+                    }
                 }
             }
         }
@@ -153,17 +164,17 @@ fn explicit_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, Str
     None
 }
 
-fn short_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String, String)> {
+fn short_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String, String, String)> {
     for (idx, raw) in lines.iter().enumerate().take(control_idx).rev() {
         let line = clean_line(raw);
         if parse_choice_line(&line).is_some() {
             continue;
         }
         if let Some(tool) = team_orchestrator_tool(&line, '-') {
-            return Some((idx, format!("team_orchestrator - {tool}"), tool));
+            return Some((idx, format!("team_orchestrator - {tool}"), "team_orchestrator".to_string(), tool));
         }
         if let Some(tool) = team_orchestrator_tool(&line, '.') {
-            return Some((idx, format!("team_orchestrator - {tool}"), tool));
+            return Some((idx, format!("team_orchestrator - {tool}"), "team_orchestrator".to_string(), tool));
         }
     }
     None
@@ -287,6 +298,7 @@ mod tests {
         assert_eq!(prompt.agent_id, "agent-x");
         assert_eq!(prompt.state, "waiting_approval");
         assert_eq!(prompt.kind, ApprovalKind::McpTool);
+        assert_eq!(prompt.server.as_deref(), Some("team_orchestrator"));
         assert_eq!(prompt.tool.as_deref(), Some("send_message"));
         assert_eq!(prompt.prompt, "Allow the team_orchestrator MCP server to run tool \"send_message\"?");
         assert_eq!(prompt.choices, vec!["Allow for this session", "Deny"]);
@@ -300,8 +312,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(prompt.kind, ApprovalKind::McpTool);
+        assert_eq!(prompt.server.as_deref(), Some("team_orchestrator"));
         assert_eq!(prompt.tool.as_deref(), Some("assign_task"));
         assert_eq!(prompt.prompt, "team_orchestrator - assign_task");
+    }
+
+    #[test]
+    fn explicit_mcp_prompt_preserves_custom_server_name() {
+        let prompt = extract_approval_prompt(
+            "agent-x",
+            "Allow the custom_server MCP server to run tool \"write_file\"?\n  1. Allow\nEnter to submit | Esc to cancel\n",
+        )
+        .unwrap();
+        assert_eq!(prompt.kind, ApprovalKind::McpTool);
+        assert_eq!(prompt.server.as_deref(), Some("custom_server"));
+        assert_eq!(prompt.tool.as_deref(), Some("write_file"));
     }
 
     #[test]
@@ -354,6 +379,7 @@ mod tests {
             ],
             None,
             None,
+            None,
         );
         assert_eq!(choose_internal_mcp_approval_choice(&prompt), "Allow for this session");
         prompt.choices = vec!["Maybe".to_string()];
@@ -372,6 +398,7 @@ mod tests {
             ApprovalKind::McpTool,
             String::new(),
             vec!["Allow".to_string(), "Deny".to_string()],
+            None,
             None,
             None,
         );
@@ -413,6 +440,7 @@ mod tests {
             ApprovalKind::McpTool,
             "p".to_string(),
             vec!["Allow".to_string()],
+            None,
             Some("send_message".to_string()),
             None,
         )
@@ -425,6 +453,7 @@ mod tests {
             ApprovalKind::Command,
             "p".to_string(),
             vec!["Yes".to_string()],
+            None,
             None,
             Some("Bash(echo hi)".to_string()),
         )

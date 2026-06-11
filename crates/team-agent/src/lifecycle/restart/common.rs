@@ -122,6 +122,7 @@ pub(super) fn spawn_agent_window(
         team_id.as_deref(),
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
+    crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
     let spawn_cwd = spawn_cwd_override
         .or_else(|| {
             agent
@@ -240,6 +241,80 @@ pub(super) fn agent_rollout_path(agent: &serde_json::Value) -> Option<RolloutPat
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(RolloutPath::new)
+}
+
+pub(super) fn resume_backing_exists_for_agent(
+    workspace: &Path,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    session_id: &SessionId,
+    rollout_path: Option<&RolloutPath>,
+) -> bool {
+    match provider {
+        Provider::Codex => rollout_path_exists(rollout_path),
+        Provider::Claude | Provider::ClaudeCode => {
+            rollout_path_exists(rollout_path)
+                || event_log_transcript_exists(workspace, agent_id.as_str(), session_id.as_str())
+        }
+        Provider::Copilot => copilot_session_store_has_session(session_id.as_str()),
+        Provider::GeminiCli | Provider::Fake => {
+            let _ = agent;
+            true
+        }
+    }
+}
+
+fn rollout_path_exists(rollout_path: Option<&RolloutPath>) -> bool {
+    rollout_path
+        .as_ref()
+        .is_some_and(|path| path.as_path().exists())
+}
+
+fn event_log_transcript_exists(workspace: &Path, agent_id: &str, session_id: &str) -> bool {
+    let Ok(events) = crate::event_log::EventLog::new(workspace).tail(0) else {
+        return false;
+    };
+    events.iter().rev().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("session.captured")
+            && ["agent_id", "worker_id"]
+                .iter()
+                .any(|key| event.get(*key).and_then(serde_json::Value::as_str) == Some(agent_id))
+            && event.get("session_id").and_then(serde_json::Value::as_str) == Some(session_id)
+            && event_transcript_path(event).is_some_and(|path| path.exists())
+    })
+}
+
+fn event_transcript_path(event: &serde_json::Value) -> Option<PathBuf> {
+    event
+        .get("rollout_path")
+        .or_else(|| event.get("transcript_path"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn copilot_session_store_has_session(session_id: &str) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    let db_path = home.join(".copilot").join("session-store.db");
+    if !db_path.exists() {
+        return false;
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    conn
+        .query_row(
+            "select 1 from sessions where id = ?1 limit 1",
+            [session_id],
+            |_| Ok(()),
+        )
+        .is_ok()
 }
 
 pub(crate) fn refresh_missing_provider_sessions(
