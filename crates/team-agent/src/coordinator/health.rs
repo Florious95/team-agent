@@ -1,6 +1,8 @@
 //! coordinator 健康/身份 & 只读可观测面:metadata 身份原语 + coordinator 路径 + watch 实时流。
 
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -96,13 +98,15 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
         .append(true)
         .open(&log_path)?;
     let log_err = log.try_clone()?;
-    let child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .args(["coordinator", "--workspace"])
         .arg(workspace.as_path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()?;
+        .stderr(Stdio::from(log_err));
+    detach_daemon_child(&mut command);
+    let child = command.spawn()?;
     let pid = Pid::new(child.id());
     std::fs::write(coordinator_pid_path(workspace), pid.to_string())?;
     write_coordinator_metadata(workspace, pid, MetadataSource::Start)?;
@@ -115,6 +119,24 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
         action: None,
     })
 }
+
+#[cfg(unix)]
+fn detach_daemon_child(command: &mut Command) {
+    // The coordinator is a daemon: it must not remain in the launcher's process
+    // group, otherwise bare SSH command teardown can SIGHUP it after quick-start exits.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn detach_daemon_child(_command: &mut Command) {}
 
 /// `stop_coordinator`(`lifecycle.py:228-247`):SIGTERM pid + 清 pid/meta → typed report。
 pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopError> {
@@ -695,4 +717,42 @@ fn clean_text(text: &str) -> String {
 
 fn prefix_chars(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn coordinator_daemon_spawn_helper_detaches_session() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        detach_daemon_child(&mut command);
+
+        let child = command.spawn().expect("spawn detached child");
+        let guard = ChildGuard(child);
+        let pid = guard.0.id() as libc::pid_t;
+        let sid = unsafe { libc::getsid(pid) };
+
+        assert_ne!(sid, -1, "getsid({pid}) failed");
+        assert_eq!(
+            sid, pid,
+            "detached coordinator children must become session leaders so launcher SIGHUP does not reach them"
+        );
+    }
 }
