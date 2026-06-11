@@ -6,8 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 use serial_test::serial;
+use team_agent::coordinator::{
+    coordinator_pid_path, write_coordinator_metadata, MetadataSource, Pid, WorkspacePath,
+};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{restart_with_transport, RestartReport, ResumeDecision};
+use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -179,6 +183,17 @@ impl ResumeFixture {
             }),
         )
         .unwrap();
+        self.seed_healthy_coordinator();
+    }
+
+    fn seed_healthy_coordinator(&self) {
+        let workspace = WorkspacePath::new(self.team.clone());
+        std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path()))
+            .unwrap();
+        let _ = MessageStore::open(workspace.as_path()).unwrap();
+        let pid = Pid::new(std::process::id());
+        write_coordinator_metadata(&workspace, pid, MetadataSource::Boot).unwrap();
+        std::fs::write(coordinator_pid_path(&workspace), pid.to_string()).unwrap();
     }
 
     fn bounded_empty_provider_home_env(&self) -> EnvGuard {
