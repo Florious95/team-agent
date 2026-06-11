@@ -499,12 +499,14 @@ pub enum QuickStartReport {
         session_name: Option<SessionName>,
         state_path: Option<PathBuf>,
         next_actions: Vec<String>,
+        attach_commands: Vec<String>,
     },
     /// preflight 阻塞(`quick_start.py:59`)。
     PreflightBlocked {
         summary: String,
         blockers: Vec<String>,
         next_actions: Vec<String>,
+        attach_commands: Vec<String>,
     },
 }
 

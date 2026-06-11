@@ -1,4 +1,5 @@
 use super::*;
+use crate::transport::PaneLiveness;
 
 // ───────────────────────────────────────────────────────────────────────
 // classify_first_send_at — _classify_first_send_at (orchestration.py:404)
@@ -794,6 +795,189 @@ fn detect_dangerous_approval_clean_process_is_disabled() {
     assert!(!got.inherited);
 }
 
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_absent_pane_fails_fast() {
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%9999");
+    let transport =
+        crate::transport::test_support::OfflineTransport::new().with_pane_presence("%9999", false);
+    let err = validate_active_leader_pane_env(&transport).expect_err("absent pane must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("TEAM_AGENT_LEADER_PANE_ID"), "got: {msg}");
+    assert!(msg.contains("absent"), "got: {msg}");
+    assert!(msg.contains("%9999"), "got: {msg}");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_dead_pane_fails_fast() {
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%404");
+    let transport = crate::transport::test_support::OfflineTransport::new()
+        .with_liveness("%404", PaneLiveness::Dead);
+    let err = validate_active_leader_pane_env(&transport).expect_err("dead pane must fail");
+    let msg = err.to_string();
+    assert!(msg.contains("TEAM_AGENT_LEADER_PANE_ID"), "got: {msg}");
+    assert!(msg.contains("dead"), "got: {msg}");
+    assert!(msg.contains("%404"), "got: {msg}");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_unset_passes_without_probe() {
+    let _leader_pane = EnvVarGuard::remove("TEAM_AGENT_LEADER_PANE_ID");
+    let transport = crate::transport::test_support::OfflineTransport::new();
+    validate_active_leader_pane_env(&transport).expect("unset env must pass");
+    assert!(
+        transport.calls().is_empty(),
+        "unset env must not probe transport: {:?}",
+        transport.calls()
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_unknown_when_unprovable_does_not_fail_fast() {
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "%8888");
+    let transport = crate::transport::test_support::OfflineTransport::new()
+        .with_default_liveness(PaneLiveness::Unknown);
+    validate_active_leader_pane_env(&transport).expect("unknown/unprovable pane must not fail");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_non_numeric_pane_id_is_unknown_not_absent() {
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "abc-notapane");
+    let transport = crate::transport::test_support::OfflineTransport::new()
+        .with_pane_presence("abc-notapane", false)
+        .with_liveness("abc-notapane", PaneLiveness::Dead);
+    validate_active_leader_pane_env(&transport)
+        .expect("non `%<digits>` env values are unprovable, not absent");
+    assert!(
+        transport.calls().is_empty(),
+        "invalid pane id format must not hit tmux probe: {:?}",
+        transport.calls()
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_invalid_format_writes_warning_event() {
+    let ws = temp_ws();
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "abc-notapane");
+    let transport = crate::transport::test_support::OfflineTransport::new()
+        .with_pane_presence("abc-notapane", false);
+
+    validate_active_leader_pane_env_with_workspace(&transport, Some(&ws))
+        .expect("invalid format is warning-only");
+
+    let events = crate::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let event = events
+        .iter()
+        .find(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_pane_env.validation_warning")
+        })
+        .expect("warning event");
+    assert_eq!(
+        event.get("value").and_then(serde_json::Value::as_str),
+        Some("abc-notapane")
+    );
+    assert_eq!(
+        event.get("warning").and_then(serde_json::Value::as_str),
+        Some("invalid pane id format, skipping validation")
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn leader_pane_env_invalid_format_writes_warning_to_all_candidate_workspaces() {
+    let cli_ws = temp_ws();
+    let team_ws = temp_ws();
+    let _leader_pane = EnvVarGuard::set("TEAM_AGENT_LEADER_PANE_ID", "abc-notapane");
+    let transport = crate::transport::test_support::OfflineTransport::new();
+
+    validate_active_leader_pane_env_with_workspaces(&transport, &[&cli_ws, &team_ws])
+        .expect("invalid format is warning-only");
+
+    for ws in [&cli_ws, &team_ws] {
+        let events = crate::event_log::EventLog::new(ws).tail(0).expect("events");
+        assert!(
+            events.iter().any(|event| {
+                event.get("event").and_then(serde_json::Value::as_str)
+                    == Some("leader_pane_env.validation_warning")
+                    && event.get("value").and_then(serde_json::Value::as_str)
+                        == Some("abc-notapane")
+            }),
+            "warning event missing in {}: {events:?}",
+            ws.display()
+        );
+    }
+}
+
+#[test]
+fn leader_pane_env_cross_socket_live_wins() {
+    let pane = crate::transport::PaneId::new("%7");
+    let absent =
+        crate::transport::test_support::OfflineTransport::new().with_pane_presence("%7", false);
+    let live =
+        crate::transport::test_support::OfflineTransport::new().with_pane_presence("%7", true);
+
+    let state = active_leader_pane_state_across_transports(
+        [&absent as &dyn crate::transport::Transport, &live],
+        &pane,
+    );
+
+    assert_eq!(state, LeaderPaneEnvState::Live);
+}
+
+#[test]
+fn leader_pane_env_cross_socket_dead_rejects_without_live() {
+    let pane = crate::transport::PaneId::new("%404");
+    let absent = crate::transport::test_support::OfflineTransport::new()
+        .with_pane_presence("%404", false);
+    let dead = crate::transport::test_support::OfflineTransport::new()
+        .with_liveness("%404", PaneLiveness::Dead);
+
+    let state = active_leader_pane_state_across_transports(
+        [&absent as &dyn crate::transport::Transport, &dead],
+        &pane,
+    );
+
+    assert_eq!(state, LeaderPaneEnvState::Dead);
+}
+
+#[test]
+fn leader_pane_env_cross_socket_absent_when_reachable_servers_confirm_missing() {
+    let pane = crate::transport::PaneId::new("%9999");
+    let absent = crate::transport::test_support::OfflineTransport::new()
+        .with_pane_presence("%9999", false);
+    let unknown = crate::transport::test_support::OfflineTransport::new()
+        .with_default_liveness(PaneLiveness::Unknown);
+
+    let state = active_leader_pane_state_across_transports(
+        [&absent as &dyn crate::transport::Transport, &unknown],
+        &pane,
+    );
+
+    assert_eq!(state, LeaderPaneEnvState::Absent);
+}
+
+#[test]
+fn leader_pane_env_cross_socket_all_probe_errors_stays_unknown() {
+    let pane = crate::transport::PaneId::new("%maybe");
+    let unknown_a = crate::transport::test_support::OfflineTransport::new()
+        .with_default_liveness(PaneLiveness::Unknown);
+    let unknown_b = crate::transport::test_support::OfflineTransport::new()
+        .with_default_liveness(PaneLiveness::Unknown);
+
+    let state = active_leader_pane_state_across_transports(
+        [&unknown_a as &dyn crate::transport::Transport, &unknown_b],
+        &pane,
+    );
+
+    assert_eq!(state, LeaderPaneEnvState::Unknown);
+}
+
 struct EnvVarGuard {
     key: &'static str,
     previous: Option<String>,
@@ -804,6 +988,14 @@ impl EnvVarGuard {
         let previous = std::env::var(key).ok();
         unsafe {
             std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::remove_var(key);
         }
         Self { key, previous }
     }

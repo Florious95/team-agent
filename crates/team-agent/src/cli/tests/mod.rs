@@ -94,5 +94,6 @@ mod status_send;
 mod verb_validate;
 mod verb_settle;
 mod verb_profile;
+mod verb_install_skill;
 mod main_preserved;
 mod shutdown_kill_plan;

@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -331,6 +332,20 @@ pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
 }
 
 pub(crate) fn socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
+    if let Some(existing) = existing_socket_path_for_workspace(workspace) {
+        return Some(existing);
+    }
+    let uid = unsafe { libc::geteuid() };
+    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
+    let default_root = default_root.canonicalize().unwrap_or(default_root);
+    Some(default_root.join(socket_name_for_workspace(workspace)))
+}
+
+pub(crate) fn socket_probe_missing_for_workspace(workspace: &Path) -> bool {
+    existing_socket_path_for_workspace(workspace).is_none()
+}
+
+fn existing_socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
     let socket_name = socket_name_for_workspace(workspace);
     let roots = tmux_socket_roots();
     for root in &roots {
@@ -340,12 +355,19 @@ pub(crate) fn socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
             return Some(candidate.canonicalize().unwrap_or(candidate));
         }
     }
-    let uid = unsafe { libc::geteuid() };
-    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
-    let default_root = default_root
-        .canonicalize()
-        .unwrap_or(default_root);
-    Some(default_root.join(socket_name))
+    None
+}
+
+pub(crate) fn socket_missing_hint_for_workspace(workspace: &Path) -> String {
+    let socket_name = socket_name_for_workspace(workspace);
+    let roots = tmux_socket_roots()
+        .into_iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "tmux socket {socket_name} not found under [{roots}]; run `team-agent attach-leader` or restart the team before attaching"
+    )
 }
 
 pub(crate) fn attach_command_for_workspace(
@@ -373,7 +395,7 @@ pub(crate) fn attach_commands_for_windows<'a>(
         .collect()
 }
 
-fn tmux_socket_roots() -> Vec<PathBuf> {
+pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
     let uid = unsafe { libc::geteuid() };
     let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
     if let Some(tmpdir) = std::env::var_os("TMPDIR") {
@@ -382,6 +404,29 @@ fn tmux_socket_roots() -> Vec<PathBuf> {
     roots.sort();
     roots.dedup();
     roots
+}
+
+pub(crate) fn tmux_socket_endpoints() -> Vec<String> {
+    let mut endpoints = Vec::new();
+    for root in tmux_socket_roots() {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_socket() {
+                continue;
+            }
+            let path = entry.path();
+            let path = path.canonicalize().unwrap_or(path);
+            endpoints.push(path.to_string_lossy().to_string());
+        }
+    }
+    endpoints.sort();
+    endpoints.dedup();
+    endpoints
 }
 
 pub(crate) fn socket_name_from_tmux_env() -> Option<String> {
@@ -673,6 +718,10 @@ impl Transport for TmuxBackend {
         BackendKind::Tmux
     }
 
+    fn probes_real_tmux_socket_roots(&self) -> bool {
+        true
+    }
+
     fn spawn_first(
         &self,
         session: &SessionName,
@@ -856,6 +905,40 @@ impl Transport for TmuxBackend {
             Ok(PaneLiveness::Dead)
         } else {
             Ok(PaneLiveness::Unknown)
+        }
+    }
+
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "#{pane_id}".to_string(),
+        ]);
+        let output = self.runner.run(&argv)?;
+        if output.success {
+            let pane_id = output.stdout.trim();
+            if pane_id.is_empty() {
+                return Ok(Some(false));
+            }
+            if pane_id == pane.as_str()
+                && pane_id.starts_with('%')
+                && pane_id[1..].chars().all(|ch| ch.is_ascii_digit())
+            {
+                return Ok(Some(true));
+            }
+            return Ok(None);
+        }
+        let stderr = output.stderr.to_ascii_lowercase();
+        if stderr.contains("can't find pane")
+            || stderr.contains("no such pane")
+            || (stderr.contains("can't find") && stderr.contains("pane"))
+        {
+            Ok(Some(false))
+        } else {
+            Ok(None)
         }
     }
 

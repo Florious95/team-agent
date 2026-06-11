@@ -189,15 +189,29 @@ fn bind_provider_from_env_or_command(command: &str) -> Provider {
     std::env::var("TEAM_AGENT_LEADER_PROVIDER")
         .ok()
         .and_then(|raw| super::helpers::parse_provider(&raw))
-        .unwrap_or_else(|| provider_from_command(command))
+        .or_else(|| provider_from_command(command))
+        // E11 层2:未知命令不再静默默认 codex(会误绑任意 provider + 喂错分类器)。
+        // 无法识别时回落 Codex 仅作最末兜底,且该路径已被 provider_from_command 的显式 None 收窄
+        // (调用方理应只在已知 leader 命令上 bind);保留以不改 fn 签名/上游 panic 面。
+        .unwrap_or(Provider::Codex)
 }
 
-fn provider_from_command(command: &str) -> Provider {
+/// E11 层2 + N39:command 名 → wire 串 → `parse_provider`(**单一映射源**,与
+/// `owner_bind_provider_wire` 共用 [`command_provider_wire`])。未知命令 → `None`
+/// (危险的 `_ => Codex` 默认已删:不静默把任意 provider 误绑成 codex)。
+fn provider_from_command(command: &str) -> Option<Provider> {
+    command_provider_wire(command).and_then(super::helpers::parse_provider)
+}
+
+/// command 名 → provider wire 串(单一真相;copilot/claude/codex/fake)。未知 → `None`。
+/// `claude.exe` 归一为 `claude`。
+fn command_provider_wire(command: &str) -> Option<&'static str> {
     match exact_command_name(command).as_deref() {
-        Some("claude") | Some("claude.exe") => Provider::Claude,
-        Some("codex") => Provider::Codex,
-        Some("fake") => Provider::Fake,
-        _ => Provider::Codex,
+        Some("claude") | Some("claude.exe") => Some("claude"),
+        Some("codex") => Some("codex"),
+        Some("copilot") => Some("copilot"),
+        Some("fake") => Some("fake"),
+        _ => None,
     }
 }
 
@@ -214,21 +228,15 @@ fn exact_command_name(command: &str) -> Option<String> {
 
 pub fn owner_bind_provider_wire(command: &str) -> &'static str {
     if let Ok(raw) = std::env::var("TEAM_AGENT_LEADER_PROVIDER") {
-        return match raw.as_str() {
-            "claude" => "claude",
-            "claude_code" => "claude_code",
-            "codex" => "codex",
-            "gemini_cli" => "gemini_cli",
-            "fake" => "fake",
-            _ => "",
-        };
+        // env 显式 provider:经 parse_provider(单一表,知 copilot)校验后透传其 wire 串;
+        // 不识别 → ""(空,与原行为一致:不绑)。
+        return super::helpers::parse_provider(&raw)
+            .map(super::helpers::provider_wire)
+            .unwrap_or("");
     }
-    match exact_command_name(command).as_deref() {
-        Some("claude") | Some("claude.exe") => "claude",
-        Some("codex") => "codex",
-        Some("fake") => "fake",
-        _ => "",
-    }
+    // E11 层2 + N39:与 provider_from_command 共用 command_provider_wire 单一映射(含 copilot);
+    // 未知命令 → ""(不绑),不再静默当 codex。
+    command_provider_wire(command).unwrap_or("")
 }
 
 fn family_a_identity(
@@ -290,3 +298,34 @@ fn tmux_pane_current_command(workspace: &Path, pane: &str) -> Result<String, Lea
 // NOTE: `derive_leader_session_uuid`(`leader_binding.py:146`)已由
 // `model::ids::LeaderSessionUuid::derive` 字节对齐实现(含 NUL 拒绝 + golden 测试)——
 // 此 lane REUSE 之,不重声明。
+
+#[cfg(test)]
+mod e11_provider_bind_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    // E11 层2:copilot leader 命令必须绑成 Provider::Copilot(此前缺臂 → _ => Codex 误绑)。
+    #[test]
+    fn copilot_command_binds_copilot_not_codex() {
+        assert_eq!(provider_from_command("copilot --banner -C /ws"), Some(Provider::Copilot));
+        assert_eq!(provider_from_command("/opt/homebrew/bin/copilot"), Some(Provider::Copilot));
+        assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
+    }
+
+    #[test]
+    fn known_commands_map_via_single_source() {
+        assert_eq!(provider_from_command("claude"), Some(Provider::Claude));
+        assert_eq!(provider_from_command("codex"), Some(Provider::Codex));
+        assert_eq!(provider_from_command("fake"), Some(Provider::Fake));
+        assert_eq!(owner_bind_provider_wire("claude"), "claude");
+        assert_eq!(owner_bind_provider_wire("codex"), "codex");
+    }
+
+    // E11 层2:未知命令不再静默默认 codex —— provider_from_command → None,wire → ""。
+    #[test]
+    fn unknown_command_is_none_not_silent_codex() {
+        assert_eq!(provider_from_command("node /some/thing.js"), None);
+        assert_eq!(provider_from_command("totally-unknown"), None);
+        assert_eq!(owner_bind_provider_wire("totally-unknown"), "");
+    }
+}

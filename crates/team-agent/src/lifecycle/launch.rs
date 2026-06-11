@@ -768,26 +768,163 @@ fn env_nonempty(key: &str) -> bool {
 ///   action : `unset TEAM_AGENT_LEADER_PANE_ID, or set it to a live tmux pane id`
 ///   log    : `TEAM_AGENT_LEADER_PANE_ID=%<id>`
 /// env 未设(或空)→ Ok(())。
-/// env 设了但 transport.liveness(pane) 报 Dead → Err(RequirementUnmet)。
-/// liveness 返 Unknown 不挡(被动路径降级):本主动路径只对【显式 Dead】fail-fast,
+/// env 设了但 pane 可判定为 Dead/Absent → Err(RequirementUnmet)。
+/// 真实 tmux 后端跨所有现存 tmux socket server 探测:TEAM_AGENT_LEADER_PANE_ID 是用户
+/// override 指针,不归属当前 team socket。
+/// probe 返 Unknown 不挡(被动路径降级):本主动路径只对【显式 Dead/Absent】fail-fast,
 /// MUST-17 不过度设计 / unset 走 pass-through(b7_unset_leader_pane_env_passes_through 守)。
 pub(crate) fn validate_active_leader_pane_env(
     transport: &dyn Transport,
+) -> Result<(), LifecycleError> {
+    validate_active_leader_pane_env_with_workspaces(transport, &[])
+}
+
+pub(crate) fn validate_active_leader_pane_env_with_workspace(
+    transport: &dyn Transport,
+    workspace: Option<&Path>,
+) -> Result<(), LifecycleError> {
+    let workspaces = workspace.into_iter().collect::<Vec<_>>();
+    validate_active_leader_pane_env_with_workspaces(transport, &workspaces)
+}
+
+pub(crate) fn validate_active_leader_pane_env_with_workspaces(
+    transport: &dyn Transport,
+    workspaces: &[&Path],
 ) -> Result<(), LifecycleError> {
     let pane_id_raw = match std::env::var("TEAM_AGENT_LEADER_PANE_ID") {
         Ok(v) if !v.is_empty() => v,
         _ => return Ok(()),
     };
-    let probe = transport.liveness(&crate::transport::PaneId::new(&pane_id_raw));
-    let dead = matches!(probe, Ok(crate::transport::PaneLiveness::Dead));
-    if !dead {
+    let pane = crate::transport::PaneId::new(&pane_id_raw);
+    if !is_tmux_pane_id_format(&pane) {
+        write_invalid_leader_pane_env_warning(workspaces, &pane_id_raw);
         return Ok(());
     }
+    let failure = match leader_pane_env_state_for_validation(transport, &pane) {
+        LeaderPaneEnvState::Dead => Some("dead"),
+        LeaderPaneEnvState::Absent => Some("absent"),
+        LeaderPaneEnvState::Live | LeaderPaneEnvState::Unknown => None,
+    };
+    let Some(reason) = failure else {
+        return Ok(());
+    };
     Err(LifecycleError::RequirementUnmet(format!(
-        "TEAM_AGENT_LEADER_PANE_ID points at a dead/absent pane: {pane_id_raw}\n\
+        "TEAM_AGENT_LEADER_PANE_ID points at a {reason} pane: {pane_id_raw}\n\
          action: unset TEAM_AGENT_LEADER_PANE_ID, or set it to a live tmux pane id\n\
          log: TEAM_AGENT_LEADER_PANE_ID={pane_id_raw}"
     )))
+}
+
+fn write_invalid_leader_pane_env_warning(workspaces: &[&Path], pane_id_raw: &str) {
+    let message = "invalid pane id format, skipping validation";
+    let mut wrote = false;
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for workspace in workspaces {
+        let key = workspace.to_string_lossy().to_string();
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        match crate::event_log::EventLog::new(workspace).write(
+            "leader_pane_env.validation_warning",
+            serde_json::json!({
+                "env": "TEAM_AGENT_LEADER_PANE_ID",
+                "value": pane_id_raw,
+                "warning": message,
+            }),
+        ) {
+            Ok(_) => wrote = true,
+            Err(err) => errors.push(format!("{key}: {err}")),
+        }
+    }
+    if !wrote {
+        eprintln!("TEAM_AGENT_LEADER_PANE_ID={pane_id_raw}: {message}");
+        if !errors.is_empty() {
+            eprintln!(
+                "TEAM_AGENT_LEADER_PANE_ID warning event write failed: {}",
+                errors.join("; ")
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeaderPaneEnvState {
+    Live,
+    Dead,
+    Absent,
+    Unknown,
+}
+
+fn leader_pane_env_state_for_validation(
+    transport: &dyn Transport,
+    pane: &crate::transport::PaneId,
+) -> LeaderPaneEnvState {
+    if !is_tmux_pane_id_format(pane) {
+        return LeaderPaneEnvState::Unknown;
+    }
+    if transport.probes_real_tmux_socket_roots() {
+        return active_leader_pane_state_across_tmux_sockets(pane);
+    }
+    active_leader_pane_state(transport, pane)
+}
+
+fn is_tmux_pane_id_format(pane: &crate::transport::PaneId) -> bool {
+    let pane = pane.as_str();
+    pane.len() > 1 && pane.starts_with('%') && pane[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn active_leader_pane_state_across_tmux_sockets(
+    pane: &crate::transport::PaneId,
+) -> LeaderPaneEnvState {
+    let endpoints = crate::tmux_backend::tmux_socket_endpoints();
+    let transports = endpoints
+        .iter()
+        .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint))
+        .collect::<Vec<_>>();
+    active_leader_pane_state_across_transports(
+        transports.iter().map(|transport| transport as &dyn Transport),
+        pane,
+    )
+}
+
+pub(crate) fn active_leader_pane_state_across_transports<'a>(
+    transports: impl IntoIterator<Item = &'a dyn Transport>,
+    pane: &crate::transport::PaneId,
+) -> LeaderPaneEnvState {
+    let mut found_absent = false;
+    let mut found_dead = false;
+    for transport in transports {
+        match active_leader_pane_state(transport, pane) {
+            LeaderPaneEnvState::Live => return LeaderPaneEnvState::Live,
+            LeaderPaneEnvState::Dead => found_dead = true,
+            LeaderPaneEnvState::Absent => found_absent = true,
+            LeaderPaneEnvState::Unknown => {}
+        }
+    }
+    if found_dead {
+        LeaderPaneEnvState::Dead
+    } else if found_absent {
+        LeaderPaneEnvState::Absent
+    } else {
+        LeaderPaneEnvState::Unknown
+    }
+}
+
+fn active_leader_pane_state(
+    transport: &dyn Transport,
+    pane: &crate::transport::PaneId,
+) -> LeaderPaneEnvState {
+    match transport.has_pane(pane) {
+        Ok(Some(true)) => return LeaderPaneEnvState::Live,
+        Ok(Some(false)) => return LeaderPaneEnvState::Absent,
+        Ok(None) | Err(_) => {}
+    }
+    match transport.liveness(pane) {
+        Ok(crate::transport::PaneLiveness::Live) => LeaderPaneEnvState::Live,
+        Ok(crate::transport::PaneLiveness::Dead) => LeaderPaneEnvState::Dead,
+        Ok(crate::transport::PaneLiveness::Unknown) | Err(_) => LeaderPaneEnvState::Unknown,
+    }
 }
 
 fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &str) {
@@ -1884,7 +2021,9 @@ pub fn quick_start_with_transport_in_workspace(
     // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
     // 降级+event,不在这里挡。错误三行式:error(含 pane id 字面)/action(unset
     // 或修 env)/log(env var 名)。
-    validate_active_leader_pane_env(transport)?;
+    let team_workspace = team_workspace(agents_dir);
+    let warning_workspaces = [workspace, team_workspace.as_path()];
+    validate_active_leader_pane_env_with_workspaces(transport, &warning_workspaces)?;
     if !agents_dir.exists() {
         return Err(LifecycleError::Compile(format!(
             "agents dir not found: {}",
@@ -1920,18 +2059,40 @@ pub fn quick_start_with_transport_in_workspace(
                 .as_deref()
                 .is_none_or(|team| runtime_state_has_quick_start_team(&state, team))
             {
+                let session_name = state
+                    .get("session_name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(SessionName::new);
+                let attach_commands = session_name
+                    .as_ref()
+                    .map(|session| {
+                        let windows = quick_start_attach_window_names(&state);
+                        crate::tmux_backend::attach_commands_for_windows(
+                            &workspace,
+                            session,
+                            windows.iter().map(String::as_str),
+                        )
+                    })
+                    .unwrap_or_default();
+                let mut next_actions = vec![
+                    "run restart to resume the existing team or pass --fresh to replace it"
+                        .to_string(),
+                ];
+                if session_name.is_some() {
+                    if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
+                        next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
+                            &workspace,
+                        ));
+                    }
+                    next_actions.extend(attach_commands.iter().cloned());
+                }
                 return Ok(QuickStartReport::ExistingRuntime {
                     team: requested_team.clone(),
-                    session_name: state
-                        .get("session_name")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|s| !s.is_empty())
-                        .map(SessionName::new),
+                    session_name,
                     state_path: Some(state_path),
-                    next_actions: vec![
-                        "run restart to resume the existing team or pass --fresh to replace it"
-                            .to_string(),
-                    ],
+                    next_actions,
+                    attach_commands,
                 });
             }
         }
@@ -2008,6 +2169,9 @@ pub fn quick_start_with_transport_in_workspace(
     let mut next_actions = vec![format!(
         "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
     )];
+    if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
+        next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(&workspace));
+    }
     next_actions.extend(attach_commands.iter().cloned());
     let display_backend = state
         .get("display_backend")
@@ -2022,6 +2186,29 @@ pub fn quick_start_with_transport_in_workspace(
         display_backend,
         worker_readiness,
     })
+}
+
+fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<String> {
+    let mut windows = state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .map(|agents| {
+            agents
+                .iter()
+                .filter_map(|(agent_id, agent)| {
+                    agent
+                        .get("window")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|window| !window.is_empty())
+                        .map(str::to_string)
+                        .or_else(|| Some(agent_id.clone()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    windows.sort();
+    windows.dedup();
+    windows
 }
 
 /// BUG-7 helper: derive a [`QuickStartReadiness`] verdict from the just-written

@@ -1118,30 +1118,51 @@ fn scan_copilot_session_store(context: &CaptureSessionContext) -> Vec<CapturedSe
     ) else {
         return Vec::new();
     };
-    let cwd = context.spawn_cwd.to_string_lossy().to_string();
-    let mut stmt = match conn.prepare(
-        "select id from sessions where cwd = ?1 order by updated_at desc, id desc limit 1",
-    ) {
-        Ok(stmt) => stmt,
-        Err(_) => return Vec::new(),
-    };
-    let row: Option<String> = stmt
-        .query_row([cwd.as_str()], |row| row.get::<_, String>(0))
-        .ok();
-    let Some(session_id) = row else {
+    // E11 层1(本机实锤):copilot honor `--session-id`(sessions.id == 注入的 expected_session_id),
+    // 故 worker 权威 id 可靠在 db。**expected-id 优先点查**:命中即返(High,直接根治 leader/worker
+    // 同 cwd 共享 db 时 latest-wins 误抓 leader 的 bug)。expected 查无 → **不 promote**(E6 铁律:
+    // 不硬写不在盘的假 session),回落 cwd-latest 让收敛重试。
+    if let Some(expected) = context.expected_session_id.as_ref() {
+        let hit: Option<String> = conn
+            .prepare("select id from sessions where id = ?1 limit 1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row([expected.as_str()], |row| row.get::<_, String>(0)).ok()
+            });
+        if let Some(session_id) = hit {
+            return vec![copilot_candidate(session_id, &db_path, context)];
+        }
+        // expected 设了但 db 无该 id → 返空(收敛重试),绝不回落抓别人(尤其 leader)的 latest。
         return Vec::new();
-    };
-    vec![CapturedSessionCandidate {
+    }
+    // 无 expected → **返空**(保守,不 cwd-latest 猜)。
+    // E11 层1 兜底洞(architect 核实):leader+worker 同 cwd 共享 db 时,cwd-latest 可能抓 leader
+    // 的 session;而 allocator 的 claimed 去重只扫 state.agents,**leader 在 state.leader/team_owner
+    // 不在 agents → 兜不住**;且 leader 的 copilot session_id 运行期不入 state(team_owner 只存
+    // leader_session_uuid,非 copilot db id),故无从显式排除。所幸 copilot build_command_plan **总**
+    // 注入 --session-id(expected_session_id 恒 Some)→ 真实 copilot worker 永走上面点查路径,
+    // 此 expected=None 分支对真实 worker 不可达。故直接返空最干净:不猜、绝不把 leader session 分给
+    // worker。db 留 _。
+    let _ = (&db_path, &conn);
+    Vec::new()
+}
+
+fn copilot_candidate(
+    session_id: String,
+    db_path: &Path,
+    context: &CaptureSessionContext,
+) -> CapturedSessionCandidate {
+    CapturedSessionCandidate {
         captured: CapturedSession {
             session_id: Some(SessionId::new(session_id)),
-            rollout_path: Some(RolloutPath::new(db_path.clone())),
+            rollout_path: Some(RolloutPath::new(db_path.to_path_buf())),
             captured_via: CaptureVia::FsWatch,
             attribution_confidence: Confidence::High,
             spawn_cwd: context.spawn_cwd.clone(),
         },
         positive_agent_id_match: false,
         agent_path_match: false,
-    }]
+    }
 }
 
 fn command_on_path(name: &str) -> bool {
@@ -1967,5 +1988,146 @@ mod e6_session_attribution_tests {
         // 用 utimensat 经 std:无直接 set_mtime,借 filetime-free 方式:写后用 File::set_modified。
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         f.set_modified(when).unwrap();
+    }
+
+    // ── E11 层1:copilot session 归因(expected-id 优先,不抓 leader latest)──
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self { prev }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// 造一个 copilot session-store.db,写 (id, cwd, updated_at) 行。
+    fn seed_copilot_db(home: &Path, rows: &[(&str, &str, i64)]) {
+        let dir = home.join(".copilot");
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("session-store.db")).unwrap();
+        conn.execute(
+            "create table sessions (id text primary key, cwd text, updated_at integer)",
+            [],
+        )
+        .unwrap();
+        for (id, cwd, updated) in rows {
+            conn.execute(
+                "insert into sessions (id, cwd, updated_at) values (?1, ?2, ?3)",
+                rusqlite::params![id, cwd, updated],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn copilot_expected_id_wins_over_leader_latest_same_cwd() {
+        // 真机复现的确定性 fixture:leader row updated 晚(latest),worker row id == expected。
+        // capture 必返 worker 自己的 id,不返 leader 的 latest。
+        let base = tmp_root("e11-copilot");
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let worker_id = "1142c4c2-0000-4000-8000-000000000001";
+        let leader_id = "f9c5485d-0000-4000-8000-00000000beef";
+        // leader updated_at 更大(latest-wins 会抓它);worker 更早。
+        seed_copilot_db(
+            &home,
+            &[
+                (worker_id, &cwd.to_string_lossy(), 100),
+                (leader_id, &cwd.to_string_lossy(), 999),
+            ],
+        );
+        let _h = HomeGuard::set(&home);
+        let ctx = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: Some(SessionId::new(worker_id)),
+            provider_projects_root: None,
+        };
+        let out = scan_copilot_session_store(&ctx);
+        assert_eq!(out.len(), 1, "expected-id point query → single authoritative candidate");
+        assert_eq!(
+            out[0].captured.session_id.as_ref().unwrap().as_str(),
+            worker_id,
+            "must return worker's own (expected) session, NOT leader's latest"
+        );
+        drop(_h);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn copilot_expected_id_absent_in_db_returns_empty_not_leader() {
+        // expected 设了但 db 无该 id(会话还没落)→ 返空(收敛重试),绝不回落抓 leader latest。
+        let base = tmp_root("e11-copilot-absent");
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let leader_id = "f9c5485d-0000-4000-8000-00000000beef";
+        seed_copilot_db(&home, &[(leader_id, &cwd.to_string_lossy(), 999)]);
+        let _h = HomeGuard::set(&home);
+        let ctx = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: Some(SessionId::new("1142c4c2-0000-4000-8000-000000000001")),
+            provider_projects_root: None,
+        };
+        let out = scan_copilot_session_store(&ctx);
+        assert!(
+            out.is_empty(),
+            "expected id absent in db → empty (no promote, no leader latest); got {out:?}"
+        );
+        drop(_h);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn copilot_no_expected_same_cwd_only_leader_row_returns_empty_not_leader() {
+        // E11 层1 兜底洞(architect):无 expected + 同 cwd 仅 leader row → 必返空,绝不返 leader。
+        // (真实 copilot worker 恒有 expected,此分支不可达;保守返空堵住 allocator 不排除 leader 的洞。)
+        let base = tmp_root("e11-copilot-noexp");
+        let home = base.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let leader_id = "f9c5485d-0000-4000-8000-00000000beef";
+        seed_copilot_db(&home, &[(leader_id, &cwd.to_string_lossy(), 999)]);
+        let _h = HomeGuard::set(&home);
+        let ctx = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None, // 无 expected → 兜底路径
+            provider_projects_root: None,
+        };
+        let out = scan_copilot_session_store(&ctx);
+        assert!(
+            out.is_empty(),
+            "no expected + only leader row in same cwd → must return empty, NOT leader; got {out:?}"
+        );
+        drop(_h);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

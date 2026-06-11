@@ -168,6 +168,7 @@ pub mod lifecycle_port {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
+        let state_for_kill = state.clone();
         let transport = if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
             crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
         } else {
@@ -176,23 +177,62 @@ pub mod lifecycle_port {
         let result =
             shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state));
         if team.is_none() {
-            // B5/F1: the leader terminal (`team-agent claude`) lives on this same
-            // workspace socket by design (leader/start.rs); a bare shutdown must not
-            // `kill-server` it away. Spare `team-agent-leader-*` sessions and clear the
-            // remaining non-leader sessions individually; only an empty-of-leader socket
-            // gets the whole-server teardown (the original leak-cleanup intent).
+            // E12 (P0): the leader terminal lives on this socket by design. A bare shutdown must
+            // NOT `kill-server` it away. spare = state-anchor sessions ∪ `team-agent-leader-*`
+            // prefix sessions (union; cr E12 ①). kill_server only when the socket is exclusively
+            // ours (no spare + no foreign session); shared socket → kill our sessions individually
+            // (cr E12 ②). All spare derivation comes from ONE snapshot (list_targets + the state
+            // already loaded) — no independent ps/tmux re-derivation (N39).
             let transport_dyn: &dyn crate::transport::Transport = &transport;
+            let pane_targets = transport_dyn.list_targets().unwrap_or_default();
             let sessions = socket_session_names(transport_dyn);
-            match sessions_to_kill_sparing_leader(&sessions) {
-                None => transport.kill_server(),
-                Some(non_leader_sessions) => {
-                    for session in &non_leader_sessions {
+            let event_log = crate::event_log::EventLog::new(&run_ws);
+            let anchor_sessions =
+                anchor_sessions_from_state(&state_for_kill, &pane_targets, &event_log);
+            let decision = sessions_to_kill(&sessions, &anchor_sessions);
+            match decision {
+                KillDecision::KillServerExclusive => transport.kill_server(),
+                KillDecision::KillIndividually { to_kill, spared } => {
+                    if !spared.is_empty() || to_kill.len() != sessions.len() {
+                        // shared socket / leader spared → never whole-server teardown.
+                        let _ = event_log.write(
+                            "shutdown.kill_server_skipped_shared_socket",
+                            json!({
+                                "spared_sessions": spared.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                                "killed_sessions": to_kill.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            }),
+                        );
+                    }
+                    for session in &to_kill {
                         let _ = transport_dyn.kill_session(session);
                     }
                 }
             }
         }
         result
+    }
+
+    /// E12 ①:从 state 锚 pane_id(leader_receiver/team_owner,top+teams)映射到其所在 session
+    /// (经同一帧 list_targets pane→session)。state 无任何锚 → 退命名判据 + spare_fallback event。
+    fn anchor_sessions_from_state(
+        state: &Value,
+        pane_targets: &[crate::transport::PaneInfo],
+        event_log: &crate::event_log::EventLog,
+    ) -> std::collections::BTreeSet<String> {
+        let anchor_pane_ids = collect_state_leader_anchor_pane_ids(state);
+        if anchor_pane_ids.is_empty() {
+            // 无锚(state 损坏/未记)→ 退纯命名前缀判据(下游 sessions_to_kill 仍 spare 前缀)。
+            let _ = event_log.write(
+                "shutdown.spare_fallback_to_naming",
+                json!({"reason": "no leader_receiver/team_owner pane anchor in state"}),
+            );
+            return std::collections::BTreeSet::new();
+        }
+        pane_targets
+            .iter()
+            .filter(|pane| anchor_pane_ids.contains(pane.pane_id.as_str()))
+            .map(|pane| pane.session.as_str().to_string())
+            .collect()
     }
 
     fn socket_session_names(
@@ -208,26 +248,37 @@ pub mod lifecycle_port {
             .collect()
     }
 
-    /// B5/F1 pure kill decision for the bare-shutdown socket teardown.
-    /// `None` => no `team-agent-leader-*` session on the socket → safe to kill the whole
-    /// server. `Some(rest)` => leader present → kill only the non-leader sessions.
-    pub(crate) fn sessions_to_kill_sparing_leader(
+    /// E12 下沉纯函数:bare-shutdown socket 拆除决策。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) enum KillDecision {
+        /// socket 独享(无 spare、无外来 session)→ 可整 server 拆除。
+        KillServerExclusive,
+        /// 有 spare(leader 锚/前缀)或非独享 → 逐 session kill,绝不 kill-server。
+        KillIndividually {
+            to_kill: Vec<crate::transport::SessionName>,
+            spared: Vec<crate::transport::SessionName>,
+        },
+    }
+
+    /// E12 纯决策(单测下沉):spare = `anchor_sessions` ∪ `team-agent-leader-*` 前缀(并集,锚优先)。
+    /// 全部 session 都不 spare 且非空 → `KillServerExclusive`(独享 socket 兜底);否则逐 session
+    /// kill 非 spare 的(共享 socket / leader 在 → 绝不整 server 拆)。空 session 集 → 逐 kill(no-op)。
+    pub(crate) fn sessions_to_kill(
         sessions: &[crate::transport::SessionName],
-    ) -> Option<Vec<crate::transport::SessionName>> {
-        let leader_present = sessions
-            .iter()
-            .any(|session| session.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX));
-        leader_present.then(|| {
-            sessions
-                .iter()
-                .filter(|session| {
-                    !session
-                        .as_str()
-                        .starts_with(crate::leader::LEADER_SESSION_PREFIX)
-                })
-                .cloned()
-                .collect()
-        })
+        anchor_sessions: &std::collections::BTreeSet<String>,
+    ) -> KillDecision {
+        let is_spared = |s: &crate::transport::SessionName| {
+            s.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX)
+                || anchor_sessions.contains(s.as_str())
+        };
+        let spared: Vec<_> = sessions.iter().filter(|s| is_spared(s)).cloned().collect();
+        let to_kill: Vec<_> = sessions.iter().filter(|s| !is_spared(s)).cloned().collect();
+        // 独享 = 非空 + 无 spare(socket 上每个 session 都是要 kill 的我方 session)。
+        if spared.is_empty() && !sessions.is_empty() {
+            KillDecision::KillServerExclusive
+        } else {
+            KillDecision::KillIndividually { to_kill, spared }
+        }
     }
 
     pub fn shutdown_with_transport(
@@ -1782,6 +1833,7 @@ pub mod lifecycle_port {
                 session_name,
                 state_path,
                 next_actions,
+                attach_commands,
             } => json!({
                 "ok": false,
                 "summary": "existing runtime",
@@ -1789,17 +1841,58 @@ pub mod lifecycle_port {
                 "session_name": session_name.map(|s| s.as_str().to_string()),
                 "state_path": state_path.map(|p| p.to_string_lossy().to_string()),
                 "next_actions": next_actions,
+                "attach_commands": attach_commands,
             }),
             crate::lifecycle::QuickStartReport::PreflightBlocked {
                 summary,
                 blockers,
                 next_actions,
+                attach_commands,
             } => json!({
                 "ok": false,
                 "summary": summary,
                 "blockers": blockers,
                 "next_actions": next_actions,
+                "attach_commands": attach_commands,
             }),
+        }
+    }
+
+    #[cfg(test)]
+    mod quick_start_value_tests {
+        use super::*;
+
+        #[test]
+        fn existing_runtime_json_includes_attach_commands() {
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::ExistingRuntime {
+                team: Some("teamA".to_string()),
+                session_name: Some(crate::transport::SessionName::new("team-teamA")),
+                state_path: Some(PathBuf::from("/tmp/state.json")),
+                next_actions: vec!["restart".to_string()],
+                attach_commands: vec![
+                    "tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker".to_string(),
+                ],
+            });
+            assert_eq!(
+                value.pointer("/attach_commands/0").and_then(Value::as_str),
+                Some("tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker"),
+                "B-2: ExistingRuntime JSON must preserve attach_commands instead of only next_actions; value={value}"
+            );
+        }
+
+        #[test]
+        fn preflight_blocked_json_includes_empty_attach_commands() {
+            let value = quick_start_value(crate::lifecycle::QuickStartReport::PreflightBlocked {
+                summary: "blocked".to_string(),
+                blockers: vec!["missing TEAM.md".to_string()],
+                next_actions: vec!["fix preflight blockers".to_string()],
+                attach_commands: Vec::new(),
+            });
+            assert_eq!(
+                value.get("attach_commands").and_then(Value::as_array).map(Vec::len),
+                Some(0),
+                "B-2: PreflightBlocked JSON must include attach_commands: [] for schema parity with Ready/Restart; value={value}"
+            );
         }
     }
 

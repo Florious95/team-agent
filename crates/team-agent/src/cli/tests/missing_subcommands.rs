@@ -1,4 +1,41 @@
 use super::*;
+use serial_test::serial;
+
+struct EnvUnsetGuard {
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvUnsetGuard {
+    fn unset(keys: &[&'static str]) -> Self {
+        let previous = keys
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::remove_var(key);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for EnvUnsetGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.previous.drain(..).rev() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+struct WorkspaceCleanup(std::path::PathBuf);
+
+impl Drop for WorkspaceCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
     // =========================================================================
     // WAVE-2 NON-SUB CHECKPOINT — 9 MISSING CLI subcommands (ABSENT from cli/emit.rs dispatch).
@@ -131,6 +168,36 @@ tasks:
         std::fs::write(ws.join("team.spec.yaml"), spec).unwrap();
     }
 
+    fn seed_collect_runtime_state(ws: &std::path::Path) {
+        crate::state::persist::save_runtime_state(
+            ws,
+            &json!({
+                "active_team_key": "fake-e2e",
+                "team_dir": ws.to_string_lossy().to_string(),
+                "spec_path": ws.join("team.spec.yaml").to_string_lossy().to_string(),
+                "session_name": "team-agent-fake-e2e",
+                "leader": {"id": "leader"},
+                "agents": {
+                    "fake_impl": {
+                        "status": "running",
+                        "provider": "fake",
+                        "role": "implementation_engineer",
+                        "window": "fake_impl",
+                        "owner_team_id": "fake-e2e"
+                    }
+                },
+                "tasks": [{
+                    "id": "task_impl",
+                    "title": "Fake implementation",
+                    "type": "implementation",
+                    "status": "pending",
+                    "assignee": "fake_impl"
+                }]
+            }),
+        )
+        .unwrap();
+    }
+
     // ── sessions ── golden cli/parser.py:230 `cmd_sessions` -> runtime.sessions(ws). EXIT 0.
     // `team-agent sessions --workspace <ws> --json` on an empty ws ->
     //   {"ok":true,"sessions":[],"workspace":"<ws>"}  (--json sort_keys). RED: unrouted -> Error.
@@ -169,9 +236,25 @@ tasks:
     //    "delivered_messages":[],"invalid_results":[],"ok":true,"results":{...},"state_file":"<ws>/team_state.md"}
     // RED: unrouted -> Error.
     #[test]
+    #[serial(env)]
     fn dispatch_routes_collect_with_spec() {
+        let _env = EnvUnsetGuard::unset(&[
+            "TEAM_AGENT_WORKSPACE",
+            "TEAM_AGENT_TEAM_ID",
+            "TEAM_AGENT_OWNER_TEAM_ID",
+            "TEAM_AGENT_ACTIVE_TEAM",
+            "TEAM_AGENT_ID",
+            "TEAM_AGENT_LEADER_PANE_ID",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+            "TEAM_AGENT_LEADER_PROVIDER",
+            "TMUX",
+            "TMUX_PANE",
+        ]);
         let ws = tmp_workspace();
+        let _cleanup = WorkspaceCleanup(ws.clone());
         seed_team_spec(&ws);
+        seed_collect_runtime_state(&ws);
         let code = run(&cli_argv(&["collect", "--workspace", &ws.to_string_lossy(), "--json"]), &ws);
         assert_eq!(
             code,
@@ -180,7 +263,6 @@ tasks:
              {{collected,collected_results,coordinator,delivered_messages,invalid_results,ok,results,state_file}}; \
              today -> unknown-subcommand Error"
         );
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     // ── repair-state ── golden parser.py:303 `cmd_repair_state` -> runtime.repair_state (quick_start.py:285).

@@ -563,7 +563,37 @@ fn copilot_session_capture_is_sqlite_point_query_not_directory_scan() {
     .unwrap();
     drop(conn);
 
-    let candidates = team_agent::provider::get_adapter(Provider::Copilot)
+    // 断言1(方法锁·PERF P2):expected-id 点查命中(==seed 的那行 id)+ poison decoy 保留 →
+    // capture 返回含该 id 的 candidate。证 sqlite 点查命中而非扫目录被毒文件炸。
+    // (E11 后点查路径是 `where id = expected`,故 expected 必须 == seed 的 session id。)
+    let method_lock = team_agent::provider::get_adapter(Provider::Copilot)
+        .capture_session_candidates(
+            &team_agent::provider::CaptureSessionContext {
+                agent_id: "worker_a".to_string(),
+                spawn_cwd: spawn_cwd.clone(),
+                pane_id: None,
+                pane_pid: None,
+                spawned_at: None,
+                expected_session_id: Some(team_agent::provider::SessionId::new(
+                    "66666666-7777-4888-9999-aaaaaaaaaaaa",
+                )),
+                provider_projects_root: None,
+            },
+            0,
+        )
+        .expect("copilot capture scan must not error on a poisoned home file (point query, not traversal)");
+    assert!(
+        method_lock.iter().any(|candidate| {
+            candidate.captured.session_id.as_ref().map(|id| id.as_str())
+                == Some("66666666-7777-4888-9999-aaaaaaaaaaaa")
+        }),
+        "PERF P2 lock: the session must come from the session-store.db sqlite point \
+query (id == expected_session_id), not from scanning provider-home files; candidates={method_lock:?}"
+    );
+
+    // 断言2(安全锁·E11 语义):同 db、同 cwd,expected_session_id: None → 返回空。
+    // no-expected 不 cwd-latest 猜(防 leader+worker 同 cwd 共享 db 时抓 leader 的 latest)。
+    let safety_lock = team_agent::provider::get_adapter(Provider::Copilot)
         .capture_session_candidates(
             &team_agent::provider::CaptureSessionContext {
                 agent_id: "worker_a".to_string(),
@@ -576,14 +606,11 @@ fn copilot_session_capture_is_sqlite_point_query_not_directory_scan() {
             },
             0,
         )
-        .expect("copilot capture scan must not error on a poisoned home file (point query, not traversal)");
+        .expect("copilot capture must not error with no expected id");
     assert!(
-        candidates.iter().any(|candidate| {
-            candidate.captured.session_id.as_ref().map(|id| id.as_str())
-                == Some("66666666-7777-4888-9999-aaaaaaaaaaaa")
-        }),
-        "PERF P2 lock: the session must come from the session-store.db sqlite point \
-query (sessions.cwd == spawn_cwd), not from scanning provider-home files; candidates={candidates:?}"
+        safety_lock.is_empty(),
+        "E11 safety lock: no expected_session_id → empty (no cwd-latest guess that could grab \
+leader's session); candidates={safety_lock:?}"
     );
 }
 

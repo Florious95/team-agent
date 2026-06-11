@@ -503,6 +503,7 @@ fn compiled_team_dir(tag: &str, dangerous: bool, agents: &[(&str, &str)]) -> Pat
         team_agent::model::yaml::dumps(&spec),
     )
     .unwrap();
+    seed_healthy_coordinator(&team_workspace(&team));
     team
 }
 
@@ -840,7 +841,7 @@ impl Transport for RecordingTransport {
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
-            text: String::new(),
+            text: "OpenAI Codex\ncodex>".to_string(),
             range,
         })
     }

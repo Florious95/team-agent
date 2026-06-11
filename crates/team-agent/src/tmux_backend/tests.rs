@@ -503,6 +503,50 @@
         );
     }
 
+    #[test]
+    fn has_pane_is_direct_existence_probe_not_liveness_guess() {
+        let (be, rec) = backend_with(MockResp::Out(ok("%7")), vec![]);
+        assert_eq!(be.has_pane(&PaneId::new("%7")).expect("has_pane"), Some(true));
+        let argv0 = rec.lock().unwrap()[0].clone();
+        assert!(
+            argv0.contains(&"display-message".to_string())
+                && argv0.iter().any(|x| x.contains("#{pane_id}"))
+                && argv0.contains(&"%7".to_string()),
+            "has_pane must use the cheap display-message #{{pane_id}} probe; got {argv0:?}"
+        );
+
+        let (be, _r) = backend_with(MockResp::Out(ok("")), vec![]);
+        assert_eq!(
+            be.has_pane(&PaneId::new("%9999")).expect("has_pane"),
+            Some(false),
+            "real tmux can report a missing pane as exit 0 with empty stdout"
+        );
+
+        let (be, _r) = backend_with(MockResp::Out(fail(1, "can't find pane: %9999")), vec![]);
+        assert_eq!(be.has_pane(&PaneId::new("%9999")).expect("has_pane"), Some(false));
+
+        let (be, _r) = backend_with(MockResp::Out(ok("%8")), vec![]);
+        assert_eq!(
+            be.has_pane(&PaneId::new("%7")).expect("has_pane"),
+            None,
+            "a successful but mismatched pane id is not proof that the requested pane exists"
+        );
+
+        let (be, _r) = backend_with(MockResp::Out(ok("not-a-pane")), vec![]);
+        assert_eq!(
+            be.has_pane(&PaneId::new("%7")).expect("has_pane"),
+            None,
+            "a successful but invalid pane id stays Unknown"
+        );
+
+        let (be, _r) = backend_with(MockResp::Out(fail(1, "error connecting to server: No such file or directory")), vec![]);
+        assert_eq!(
+            be.has_pane(&PaneId::new("%7")).expect("has_pane"),
+            None,
+            "server/probe errors remain Unknown, not absent"
+        );
+    }
+
     // ── CP-1: per-team socket — for_workspace injects `-L ta-<hash>` at the run chokepoint; new() does NOT ─
     #[test]
     fn for_workspace_backend_injects_per_team_socket_but_default_backend_does_not() {

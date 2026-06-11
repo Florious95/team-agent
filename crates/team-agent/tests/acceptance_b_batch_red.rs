@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::coordinator::{Coordinator, ErrorLists, ProviderRegistry, WorkspacePath};
+use team_agent::lifecycle::QuickStartReport;
 use team_agent::message_store::MessageStore;
 use team_agent::model::enums::Provider;
 use team_agent::provider::{get_adapter, ProviderAdapter};
@@ -190,25 +191,46 @@ fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
         &WindowedTransport::new("b2team", &["worker_a"]),
     )
     .expect("quick-start should run");
-    let json = format!("{report:?}");
 
     let mut failures = Vec::new();
-    let attach_present = json.contains("attach -t") || json.contains("attach_commands");
-    if !attach_present {
-        failures.push(format!(
-            "B-2: the quick-start Ready report must carry attach_commands (symmetry with \
-restart); report={json}"
-        ));
+    match &report {
+        QuickStartReport::Ready {
+            attach_commands,
+            next_actions,
+            ..
+        } => assert_attach_commands_or_socket_hint(
+            "Ready",
+            attach_commands,
+            next_actions,
+            &mut failures,
+        ),
+        other => failures.push(format!("B-2 fixture expected Ready report; got {other:?}")),
     }
-    // Socket-miss observability: with no real tmux socket on disk, the probe must not
-    // silently return an empty set — an event/hint must mention attach/socket.
-    let events = events_text(&ws);
-    let report_has_hint = json.to_lowercase().contains("socket") || json.contains("attach");
-    if !(events.contains("socket") || report_has_hint) {
-        failures.push(
-            "B-2: a socket probe that finds nothing on disk must surface an event or hint \
-(N38 explicable), not a silent empty attach_commands".to_string(),
-        );
+
+    let existing = team_agent::lifecycle::quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        false,
+        Some("b2team"),
+        &WindowedTransport::new("b2team", &["worker_a"]),
+    )
+    .expect("second quick-start should return ExistingRuntime");
+    match &existing {
+        QuickStartReport::ExistingRuntime {
+            attach_commands,
+            next_actions,
+            ..
+        } => assert_attach_commands_or_socket_hint(
+            "ExistingRuntime",
+            attach_commands,
+            next_actions,
+            &mut failures,
+        ),
+        other => failures.push(format!(
+            "B-2 duplicate quick-start expected ExistingRuntime report; got {other:?}"
+        )),
     }
     assert!(failures.is_empty(), "B-2 attach_commands contract failed:\n{}", failures.join("\n"));
 }
@@ -467,6 +489,58 @@ fn tmp_ws(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::canonicalize(dir).unwrap()
+}
+
+fn assert_attach_commands_or_socket_hint(
+    branch: &str,
+    attach_commands: &[String],
+    next_actions: &[String],
+    failures: &mut Vec<String>,
+) {
+    if attach_commands.is_empty() {
+        if !has_socket_missing_hint(next_actions) {
+            failures.push(format!(
+                "B-2: {branch} with no attach_commands must explain the missing tmux socket \
+and give an attach/restart action; next_actions={next_actions:?}"
+            ));
+        }
+        return;
+    }
+
+    for command in attach_commands {
+        let Some(socket_path) = attach_socket_path(command) else {
+            failures.push(format!(
+                "B-2: {branch} attach command must include `tmux -S <socket>`; command={command:?}"
+            ));
+            continue;
+        };
+        if !socket_path.exists() {
+            if !has_socket_missing_hint(next_actions) {
+                failures.push(format!(
+                    "B-2: {branch} attach command points at a socket missing on disk, so the report \
+must also explain the socket miss; command={command:?} socket_path={} next_actions={next_actions:?}",
+                    socket_path.display()
+                ));
+            }
+        }
+    }
+}
+
+fn has_socket_missing_hint(next_actions: &[String]) -> bool {
+    let hints = next_actions.join("\n").to_lowercase();
+    hints.contains("socket")
+        && (hints.contains("not found") || hints.contains("missing"))
+        && (hints.contains("attach") || hints.contains("restart"))
+}
+
+fn attach_socket_path(command: &str) -> Option<PathBuf> {
+    let mut parts = command.split_whitespace();
+    while let Some(part) = parts.next() {
+        if part == "-S" {
+            return parts.next().map(PathBuf::from);
+        }
+    }
+    None
 }
 
 // ─────────────────────────────── transports ───────────────────────────────

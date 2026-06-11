@@ -83,22 +83,28 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             workspace.join("team.spec.yaml").display()
         )));
     }
-    let run_candidate = crate::model::paths::canonical_run_workspace(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    if !workspace.join("team.spec.yaml").exists()
-        && !crate::state::persist::runtime_state_path(&run_candidate).exists()
-    {
-        return Err(LifecycleError::TeamSelect(format!(
-            "missing spec for restart: {}",
-            workspace.join("team.spec.yaml").display()
-        )));
-    }
+    // RED-2(P0)修:存在性门下移到 resolve 之后,用 selected.spec_path(读序 B:runtime 优先、
+    // legacy 用户目录回落)判,而非 resolve 前自拼 workspace/team.spec.yaml(spec-demote 后 spec
+    // 不在用户目录 → 旧门误报缺)。resolve_active_team(RequireSpec) 内部已按 spec_path 校验存在性,
+    // 故直接交给它;失败信息(含真实 expected runtime spec 路径)即正确的 N38。
     let selected = crate::state::selector::resolve_active_team(
         workspace,
         team,
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    // 显式存在性门(下移后):selected.spec_path 经读序 B 已定位 runtime/legacy spec。
+    // 缺(空目录 restart 等)→ 报真实期望路径,不误导去用户目录找。
+    if !selected.spec_path.as_ref().is_some_and(|p| p.exists()) {
+        let expected = selected
+            .spec_path
+            .clone()
+            .unwrap_or_else(|| crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key));
+        return Err(LifecycleError::TeamSelect(format!(
+            "missing spec for restart: {} (run `team-agent quick-start <teamdir>` first, or restore the team's role docs)",
+            expected.display()
+        )));
+    }
     let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
     // E5 task#3 / RC-A6a + E4(leader 裁定:每次 restart 都从角色定义重建 runtime spec,覆盖):

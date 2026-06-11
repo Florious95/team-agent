@@ -399,6 +399,12 @@ pub trait Transport: Send + Sync {
     /// 后端种类(诊断/事件用)。
     fn kind(&self) -> BackendKind;
 
+    /// Only the concrete tmux backend should scan real tmux socket roots.
+    /// Test doubles stay hermetic and use their injected probe results.
+    fn probes_real_tmux_socket_roots(&self) -> bool {
+        false
+    }
+
     // —— SPAWN(ST):所有后端天然满足;cwd/env 是 spawn 参数,无独立动词(§gap-setenv)——
 
     /// tmux=`new-session -d` / wezterm=`spawn --new-window` / conpty=`openpty`+spawn。
@@ -480,6 +486,13 @@ pub trait Transport: Send + Sync {
 
     /// pane 存活三态(`PaneLiveness`,bug-085 穷尽 match;unknown ≠ dead ≠ live)。
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError>;
+
+    /// Cheap direct pane existence check when a backend can prove it. `Ok(None)`
+    /// preserves the existing Unknown boundary.
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let _ = pane;
+        Ok(None)
+    }
 
     // —— ENUMERATE / IDENTITY(SL + 进程探测):身份/rebind 地基 ——
 

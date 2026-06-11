@@ -422,6 +422,7 @@ fn py_repr_str(s: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
     use super::*;
+    use serial_test::serial;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -444,6 +445,32 @@ mod tests {
         let ws = std::env::temp_dir().join(format!("ta_rs_id_{}_{}", std::process::id(), n));
         std::fs::create_dir_all(&ws).unwrap();
         ws
+    }
+
+    struct EnvUnsetGuard {
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+    impl EnvUnsetGuard {
+        fn unset(keys: &[&'static str]) -> Self {
+            let previous = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self { previous }
+        }
+    }
+    impl Drop for EnvUnsetGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.previous.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -560,7 +587,9 @@ mod tests {
     }
 
     #[test]
+    #[serial(env)]
     fn apply_first_time_binding_success_writes_state() {
+        let _env = EnvUnsetGuard::unset(&["TMUX", "TMUX_PANE"]);
         let ws = temp_ws();
         let now = "2026-06-02T09:17:59.994383+00:00";
         let mut state = json!({});

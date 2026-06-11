@@ -545,6 +545,42 @@ fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
     );
 }
 
+// RED-2 (P0) — restart existence gate must use selected.spec_path (read-order B: runtime spec),
+// NOT the user-dir team.spec.yaml. spec-demote put spec under .team/runtime/<key>/, so the old
+// pre-resolve gate (`!workspace.join("team.spec.yaml").exists()`) falsely reported "missing spec".
+#[test]
+fn red2_restart_finds_runtime_spec_not_missing_when_user_dir_has_no_spec() {
+    let ws = restart_ws_two_resumable_workers(); // has TEAM.md + agents + state
+    // Simulate spec-demote: remove any user-dir spec the fixture wrote; restart must still find
+    // the runtime spec (rebuilt from role docs / read-order B), NOT report "missing spec".
+    let _ = std::fs::remove_file(ws.join("team.spec.yaml"));
+    assert!(!ws.join("team.spec.yaml").exists(), "user-dir spec removed (spec-demote condition)");
+    let transport = OfflineTransport::new();
+    let result = restart_with_transport(&ws, false, None, &transport);
+    // The gate must NOT short-circuit with "missing spec for restart" — restart must proceed
+    // (any later resume/rebuild outcome is fine; we only assert the spec-missing gate is gone).
+    let text = format!("{result:?}");
+    assert!(
+        !text.contains("missing spec for restart"),
+        "RED-2: restart must locate the runtime spec via read-order B, not report missing; got {text}"
+    );
+}
+
+// RED-2 negative — a truly empty workspace (no role docs, no spec, no state) must STILL report
+// missing spec (gate moved, not removed).
+#[test]
+fn red2_restart_empty_workspace_still_reports_missing() {
+    let ws = temp_ws(); // empty, no TEAM.md/agents/spec/state
+    let transport = OfflineTransport::new();
+    let result = restart_with_transport(&ws, false, None, &transport);
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("missing spec") || text.to_lowercase().contains("not found") || text.contains("no_local_team_context") || text.to_lowercase().contains("invalid workspace"),
+        "RED-2 negative: empty workspace restart must still error (missing/not-found); got {text}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 // E5 task#3 / RC-A6b — restart with role definitions MISSING explicitly refuses (lists what's
 // missing) and leaves the previous runtime spec in place (no silent path, no data destruction).
 #[test]

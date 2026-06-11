@@ -14,6 +14,8 @@ use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{PaneId, SessionName};
 
 #[test]
+#[ignore = "real-machine: adaptive open creates tmux panes"]
+#[file_serial(tmux)]
 fn adaptive_open_creates_real_tmux_pane_records_instead_of_placeholder_state() {
     let fixture = DisplayFixture::new("open-records");
     fixture.seed_running_workers(["alpha", "bravo"]);

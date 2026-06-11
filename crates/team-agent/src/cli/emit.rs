@@ -108,6 +108,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "watch" => cmd_watch(&watch_args(args, cwd)).map(emit_result),
         "sessions" => cmd_sessions(&sessions_args(args, cwd)).map(emit_result),
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
+        "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
         "validate-result" if has_arg(args, "--result") => {
             eprintln!("team-agent: error: unrecognized arguments: --result");
@@ -160,6 +161,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "watch",
     "sessions",
     "validate",
+    "install-skill",
     "profile",
     "validate-result",
     "collect",
@@ -230,6 +232,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("watch") => "usage: team-agent watch [--workspace WORKSPACE] [--team TEAM]".to_string(),
         Some("sessions") => "usage: team-agent sessions [--workspace WORKSPACE] [--json]".to_string(),
         Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
+        Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
         Some("validate-result") => "usage: team-agent validate-result [ENVELOPE] [--file FILE|--result JSON] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
@@ -298,6 +301,115 @@ fn emit_usage_error(message: &str) {
 }
 
 /// `cmd_validate` delegates to runtime validate_file.
+/// `install-skill` 参数(RED-1 根治:把 skill 安装单源收敛到二进制,install.mjs 调它)。
+struct InstallSkillArgs {
+    target: crate::packaging::SkillTarget,
+    dest: Option<PathBuf>,
+    dry_run: bool,
+    /// `--uninstall`:删 target 的 skill 目标目录(单源,走同一 SkillTarget 表),不需 --source。
+    uninstall: bool,
+    source: Option<PathBuf>,
+    json: bool,
+}
+
+fn install_skill_args(args: &[String]) -> Result<InstallSkillArgs, CliError> {
+    let parsed = parse_args(args);
+    // `--target` 复用 parse_args.targets(codex|claude|copilot|all,默认 all)。
+    let target = match parsed.targets.as_deref() {
+        None | Some("all") => crate::packaging::SkillTarget::All,
+        Some("codex") => crate::packaging::SkillTarget::Codex,
+        Some("claude") => crate::packaging::SkillTarget::Claude,
+        Some("copilot") => crate::packaging::SkillTarget::Copilot,
+        Some(other) => {
+            return Err(CliError::Usage(format!(
+                "invalid --target: {other} (choose from codex, claude, copilot, all)"
+            )))
+        }
+    };
+    let uninstall = args.iter().any(|a| a == "--uninstall");
+    // `--source <dir>` 安装时必需(npm 包的 skills/team-agent;运行期无 CARGO_MANIFEST_DIR);
+    // 卸载不需要。
+    let source = flag_value(args, "--source").map(PathBuf::from);
+    if !uninstall && source.is_none() {
+        return Err(CliError::Usage("missing --source <skill dir>".to_string()));
+    }
+    let dest = flag_value(args, "--dest").map(PathBuf::from);
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    Ok(InstallSkillArgs {
+        target,
+        dest,
+        dry_run,
+        uninstall,
+        source,
+        json: parsed.json,
+    })
+}
+
+/// 取 `--flag <value>` 的值(用于 install-skill 的 --source/--dest,parse_args 不覆盖的旗标)。
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+}
+
+/// `team-agent install-skill`(RED-1 单源):repo `skills/team-agent` → `~/.codex|.claude|.copilot`。
+/// install.mjs 删 JS 拷贝逻辑、改调本命令(`--target all --source <pkg>/skills/team-agent`)。
+fn cmd_install_skill(args: &InstallSkillArgs) -> Result<CmdResult, CliError> {
+    // 卸载分支(单源:走同一 SkillTarget 表的 dest_dir;all → SINGLE_TARGETS 全集)。
+    if args.uninstall {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let targets: Vec<crate::packaging::SkillTarget> = match args.target {
+            crate::packaging::SkillTarget::All => {
+                crate::packaging::SkillTarget::SINGLE_TARGETS.to_vec()
+            }
+            t => vec![t],
+        };
+        let mut removed: Vec<serde_json::Value> = Vec::new();
+        for t in targets {
+            if let Some(dest) = t.dest_dir(&home) {
+                let existed = dest.0.exists();
+                if existed && !args.dry_run {
+                    std::fs::remove_dir_all(&dest.0).map_err(|e| CliError::Runtime(e.to_string()))?;
+                }
+                removed.push(serde_json::json!({
+                    "target": t,
+                    "dest": dest.0.to_string_lossy(),
+                    "removed": existed,
+                    "dry_run": args.dry_run,
+                }));
+            }
+        }
+        return Ok(CmdResult::from_json(
+            serde_json::json!({"ok": true, "uninstalled": removed}),
+            args.json,
+        ));
+    }
+    let source = args
+        .source
+        .clone()
+        .ok_or_else(|| CliError::Usage("missing --source <skill dir>".to_string()))?;
+    let outcomes = crate::packaging::install::install_skill(&crate::packaging::SkillInstallOptions {
+        target: args.target,
+        dest: args.dest.clone(),
+        dry_run: args.dry_run,
+        source,
+    })
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let installed: Vec<serde_json::Value> = outcomes
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "target": o.target,
+                "dest": o.dest.0.to_string_lossy(),
+                "dry_run": o.dry_run,
+                "removed_stale": o.removed_stale.len(),
+            })
+        })
+        .collect();
+    Ok(CmdResult::from_json(
+        serde_json::json!({"ok": true, "installed": installed}),
+        args.json,
+    ))
+}
+
 pub fn cmd_validate(args: &ValidateArgs) -> Result<CmdResult, CliError> {
     let spec = resolve_path(&args.spec);
     let value = if spec.is_dir() {

@@ -133,13 +133,33 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         }
         Ok(result)
     } else {
-        Ok(CmdResult::human(
-            value
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or("quick-start complete"),
-        ))
+        // E13:happy 人类路径必须带 attach_commands(json 路径 cli/mod.rs:1775 已有)。
+        Ok(CmdResult::human(&quickstart_human(&value)))
     }
+}
+
+/// E13:quick-start "team 起了" 人类输出 = summary + attach 块。所有成功出口共用(别每分支手拷)。
+/// attach_commands 缺/空 → 只 summary(向后兼容)。
+fn quickstart_human(value: &Value) -> String {
+    let summary = value
+        .get("summary")
+        .and_then(Value::as_str)
+        .unwrap_or("quick-start complete");
+    let attach: Vec<&str> = value
+        .get("attach_commands")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if attach.is_empty() {
+        return summary.to_string();
+    }
+    let mut out = String::from(summary);
+    out.push_str("\n\nattach:");
+    for cmd in attach {
+        out.push_str("\n  ");
+        out.push_str(cmd);
+    }
+    out
 }
 
 /// `cmd_compile`(`commands.py:42`)。
@@ -1522,8 +1542,33 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::agent_pane_id;
+    use super::{agent_pane_id, quickstart_human};
     use serde_json::json;
+
+    // E13:happy 人类输出必须带 attach 块(此前 else 分支只打 summary 丢 attach_commands)。
+    #[test]
+    fn e13_quickstart_human_includes_attach_commands() {
+        let value = json!({
+            "summary": "team started",
+            "attach_commands": [
+                "tmux -S /tmp/ta-x attach -t team-y:w1",
+                "tmux -S /tmp/ta-x attach -t team-y:w2",
+            ],
+        });
+        let out = quickstart_human(&value);
+        assert!(out.contains("team started"), "must keep summary; got {out}");
+        assert!(out.contains("attach:"), "must render attach block; got {out}");
+        assert!(out.contains("team-y:w1") && out.contains("team-y:w2"), "must list each attach cmd; got {out}");
+    }
+
+    #[test]
+    fn e13_quickstart_human_summary_only_when_no_attach() {
+        let value = json!({"summary": "quick-start complete"});
+        assert_eq!(quickstart_human(&value), "quick-start complete");
+        // 空数组也只 summary。
+        let value2 = json!({"summary": "s", "attach_commands": []});
+        assert_eq!(quickstart_human(&value2), "s");
+    }
 
     #[test]
     fn agent_pane_id_resolves_session_window_even_with_recorded_pane_id() {

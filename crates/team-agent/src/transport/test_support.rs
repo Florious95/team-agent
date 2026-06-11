@@ -18,16 +18,37 @@ pub struct SpawnRecord {
     pub argv: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct OfflineState {
     session_present: bool,
     session_absent_after_spawn_first: bool,
     targets: Vec<PaneInfo>,
     windows: Vec<WindowName>,
+    pane_presence: BTreeMap<String, bool>,
+    liveness: BTreeMap<String, PaneLiveness>,
+    default_liveness: PaneLiveness,
     calls: Vec<&'static str>,
     spawns: Vec<SpawnRecord>,
     inject_targets: Vec<Target>,
     inject_payloads: Vec<String>,
+}
+
+impl Default for OfflineState {
+    fn default() -> Self {
+        Self {
+            session_present: false,
+            session_absent_after_spawn_first: false,
+            targets: Vec::new(),
+            windows: Vec::new(),
+            pane_presence: BTreeMap::new(),
+            liveness: BTreeMap::new(),
+            default_liveness: PaneLiveness::Unknown,
+            calls: Vec::new(),
+            spawns: Vec::new(),
+            inject_targets: Vec::new(),
+            inject_payloads: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -57,6 +78,25 @@ impl OfflineTransport {
 
     pub fn with_windows(self, windows: Vec<WindowName>) -> Self {
         self.with_state(|state| state.windows = windows);
+        self
+    }
+
+    pub fn with_default_liveness(self, liveness: PaneLiveness) -> Self {
+        self.with_state(|state| state.default_liveness = liveness);
+        self
+    }
+
+    pub fn with_liveness(self, pane: impl Into<String>, liveness: PaneLiveness) -> Self {
+        self.with_state(|state| {
+            state.liveness.insert(pane.into(), liveness);
+        });
+        self
+    }
+
+    pub fn with_pane_presence(self, pane: impl Into<String>, present: bool) -> Self {
+        self.with_state(|state| {
+            state.pane_presence.insert(pane.into(), present);
+        });
         self
     }
 
@@ -198,9 +238,22 @@ impl Transport for OfflineTransport {
         Ok(None)
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
-        self.record("liveness");
-        Ok(PaneLiveness::Unknown)
+    fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+        Ok(self.with_state(|state| {
+            state.calls.push("liveness");
+            state
+                .liveness
+                .get(pane.as_str())
+                .copied()
+                .unwrap_or(state.default_liveness)
+        }))
+    }
+
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        Ok(self.with_state(|state| {
+            state.calls.push("has_pane");
+            state.pane_presence.get(pane.as_str()).copied()
+        }))
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
