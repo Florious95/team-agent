@@ -90,6 +90,27 @@ use super::*;
         }
     }
 
+    #[test]
+    #[serial_test::serial(env)]
+    fn copilot_leader_env_disables_terminal_title_only_for_copilot() {
+        let ws = std::env::temp_dir().join(format!("ta_rs_lsp_copilot_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let copilot = leader_start_plan(Provider::Copilot, &[], &ws, false, false, None).unwrap();
+        assert_eq!(
+            copilot.leader_env.get("COPILOT_DISABLE_TERMINAL_TITLE").map(String::as_str),
+            Some("1")
+        );
+
+        for provider in [Provider::Codex, Provider::ClaudeCode] {
+            let plan = leader_start_plan(provider, &[], &ws, false, false, None).unwrap();
+            assert!(
+                !plan.leader_env.contains_key("COPILOT_DISABLE_TERMINAL_TITLE"),
+                "{provider:?} leader env must not include copilot title override"
+            );
+        }
+    }
+
     // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
     // Lock CORRECT Python v0.2.11 leader-identity behavior the contracts missed.
     // Golden re-probed via /tmp/probe_p2_leader.py vs team-agent-public @ 439bef8

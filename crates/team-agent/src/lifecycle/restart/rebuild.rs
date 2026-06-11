@@ -77,10 +77,17 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     transport: &dyn crate::transport::Transport,
     session_converge_deadline_ms: Option<u64>,
 ) -> Result<RestartReport, LifecycleError> {
-    if crate::lifecycle::restart::input_has_no_local_team_context(workspace) {
+    // RED-2-STILL(P0):入口门必须在 canonical_run_workspace 解析后的路径上判,不用 raw workspace。
+    // 根因:quick-start <dir> 把 .team/runtime/spec 落在 team_workspace(dir)=**parent**/.team;
+    // 入口门查 raw dir 自身的 .team/state(空,它在 parent)→ 误判"无 team context"早退,到不了
+    // 067f78f 下移后的第二道门。canonical_run_workspace 已能正确解析到 parent(走 parent.join(".team")
+    // 分支),在它之上判 input_has_no_local_team_context 才对齐 quick-start 落点。
+    let resolved_ws = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if crate::lifecycle::restart::input_has_no_local_team_context(&resolved_ws) {
         return Err(LifecycleError::TeamSelect(format!(
-            "missing spec for restart: {}",
-            workspace.join("team.spec.yaml").display()
+            "missing spec for restart: {} (run `team-agent quick-start <teamdir>` first)",
+            crate::model::paths::runtime_dir(&resolved_ws).display()
         )));
     }
     // RED-2(P0)修:存在性门下移到 resolve 之后,用 selected.spec_path(读序 B:runtime 优先、

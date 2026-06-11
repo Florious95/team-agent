@@ -1,4 +1,4 @@
-//! cli · leader — `codex`/`claude` passthrough(`cmd_leader_passthrough` + `_provider_args` /
+//! cli · leader — `codex`/`claude`/`copilot` passthrough(`cmd_leader_passthrough` + `_provider_args` /
 //! `_leader_launcher_args`)+ leader fallback inbox 摘要(`consume_leader_inbox_summary` 及
 //! `_leader_inbox_entries` / `_leader_inbox_summary` / `_leader_inbox_entry_title`)。
 
@@ -68,9 +68,9 @@ fn without_leader_json(values: &[String]) -> Vec<String> {
     out
 }
 
-/// `codex`/`claude` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
+/// `codex`/`claude`/`copilot` passthrough(`parser.py:86`/`_run_leader_passthrough`):leader 早返回,
 /// **不**进 subparser。`-h`/`--help` 打 usage 直接返回 [`CmdResult::none`]。否则解析 attach
-/// 旗标 + `lifecycle_port::start_leader`。`command` ∈ {codex, claude}。
+/// 旗标 + `lifecycle_port::start_leader`。`command` ∈ {codex, claude, copilot}。
 pub fn cmd_leader_passthrough(
     command: &str,
     provider_args: &[String],
@@ -82,13 +82,17 @@ pub fn cmd_leader_passthrough(
     let as_json = leader_launcher_json(provider_args);
     let launcher_args = without_leader_json(provider_args);
     let attach = leader_launcher_args(&launcher_args)?;
-    let provider = if command == "codex" {
-        crate::model::enums::Provider::Codex
-    } else {
-        crate::model::enums::Provider::ClaudeCode
-    };
+    let provider = leader_passthrough_provider(command);
     let value = lifecycle_port::start_leader(provider, &attach.provider_args, cwd, &attach)?;
     Ok(CmdResult::from_json(value, as_json))
+}
+
+pub(crate) fn leader_passthrough_provider(command: &str) -> crate::model::enums::Provider {
+    match command {
+        "codex" => crate::model::enums::Provider::Codex,
+        "copilot" => crate::model::enums::Provider::Copilot,
+        _ => crate::model::enums::Provider::ClaudeCode,
+    }
 }
 
 // =============================================================================

@@ -93,6 +93,9 @@ pub fn leader_start_plan(
         "TEAM_AGENT_TEAM_ID".to_string(),
         identity.team_id.as_str().to_string(),
     );
+    if provider == Provider::Copilot {
+        leader_env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
+    }
     let argv = start_argv(
         mode,
         provider,

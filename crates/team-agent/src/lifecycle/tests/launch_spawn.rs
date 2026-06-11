@@ -581,6 +581,82 @@ fn red2_restart_empty_workspace_still_reports_missing() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+// RED-2-STILL (P0) — the ENTRY gate (input_has_no_local_team_context) must judge on the
+// canonical_run_workspace-resolved path, not raw. quick-start <team_dir> lands .team under the
+// resolved workspace (team_dir's parent when invoked from there); restart <team_dir> with raw gate
+// checks team_dir's own (empty) .team → false "no context" early-exit before the down-moved gate.
+//
+// Two forms (leader hard requirement — must lock BOTH, not the coincidental same-dir form):
+//   Form A: .team in the team_dir's PARENT (standard quick-start <dir> from parent cwd).
+//   Form B: .team in the team_dir itself (cwd == team_dir).
+#[test]
+fn red2still_entry_gate_resolves_parent_dot_team_form_a() {
+    // Build: base/  (has .team)  + base/teamdir/{TEAM.md, agents/} (role docs, NO own .team).
+    let base = temp_ws();
+    let team_dir = base.join("teamdir");
+    std::fs::create_dir_all(team_dir.join("agents")).unwrap();
+    std::fs::write(team_dir.join("TEAM.md"), "---\nname: teamdir\nobjective: o\nprovider: codex\n---\nt.\n").unwrap();
+    std::fs::write(team_dir.join("agents").join("w1.md"), QS_VALID_ROLE).unwrap();
+    // .team lives in the PARENT (base), with a runtime spec — mirrors quick-start <dir> from base cwd.
+    let spec = crate::compiler::compile_team(&team_dir).unwrap();
+    let runtime_spec = crate::model::paths::runtime_spec_path(&base, "teamdir");
+    std::fs::create_dir_all(runtime_spec.parent().unwrap()).unwrap();
+    std::fs::write(&runtime_spec, crate::model::yaml::dumps(&spec)).unwrap();
+    // Seed minimal team state under base so resolve finds it.
+    crate::state::persist::save_runtime_state(
+        &base,
+        &json!({"session_name": "team-teamdir", "team_dir": team_dir.to_string_lossy(),
+                "spec_path": runtime_spec.to_string_lossy(),
+                "agents": {"w1": {"status": "running", "provider": "codex"}}}),
+    )
+    .unwrap();
+    // Entry gate on team_dir: raw team_dir has NO .team (it's in parent), but resolved → base has it.
+    assert!(
+        crate::lifecycle::restart::input_has_no_local_team_context(&team_dir),
+        "precondition: raw team_dir has no local .team (it's in the parent)"
+    );
+    let resolved = crate::model::paths::canonical_run_workspace(&team_dir).unwrap();
+    assert!(
+        !crate::lifecycle::restart::input_has_no_local_team_context(&resolved),
+        "RED-2-STILL: gate on canonical_run_workspace-resolved path must see parent .team (false)"
+    );
+    // Full restart on team_dir must NOT early-exit with missing spec.
+    let transport = OfflineTransport::new();
+    let text = format!("{:?}", restart_with_transport(&team_dir, false, None, &transport));
+    assert!(
+        !text.contains("missing spec for restart") && !text.contains("active team spec not found"),
+        "RED-2-STILL Form A: restart <team_dir> (.team in parent) must not report missing; got {text}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn red2still_entry_gate_same_dir_dot_team_form_b() {
+    // Form B: .team in team_dir itself (cwd == team_dir at quick-start time).
+    let team_dir = temp_ws();
+    std::fs::create_dir_all(team_dir.join("agents")).unwrap();
+    std::fs::write(team_dir.join("TEAM.md"), "---\nname: tb\nobjective: o\nprovider: codex\n---\nt.\n").unwrap();
+    std::fs::write(team_dir.join("agents").join("w1.md"), QS_VALID_ROLE).unwrap();
+    let spec = crate::compiler::compile_team(&team_dir).unwrap();
+    let runtime_spec = crate::model::paths::runtime_spec_path(&team_dir, "tb");
+    std::fs::create_dir_all(runtime_spec.parent().unwrap()).unwrap();
+    std::fs::write(&runtime_spec, crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &team_dir,
+        &json!({"session_name": "team-tb", "team_dir": team_dir.to_string_lossy(),
+                "spec_path": runtime_spec.to_string_lossy(),
+                "agents": {"w1": {"status": "running", "provider": "codex"}}}),
+    )
+    .unwrap();
+    let transport = OfflineTransport::new();
+    let text = format!("{:?}", restart_with_transport(&team_dir, false, None, &transport));
+    assert!(
+        !text.contains("missing spec for restart") && !text.contains("active team spec not found"),
+        "RED-2-STILL Form B: restart <team_dir> (.team in team_dir) must not report missing; got {text}"
+    );
+    let _ = std::fs::remove_dir_all(&team_dir);
+}
+
 // E5 task#3 / RC-A6b — restart with role definitions MISSING explicitly refuses (lists what's
 // missing) and leaves the previous runtime spec in place (no silent path, no data destruction).
 #[test]

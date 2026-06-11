@@ -1435,3 +1435,21 @@ fn r8_attach_requeue_exhausted_to_notify_failed_golden_attach_event() {
     assert_eq!(ev.get("trigger").and_then(|v| v.as_str()), Some("attach_leader"));
     assert_eq!(ev.get("new_pane_id").and_then(|v| v.as_str()), Some("%leader-new"));
 }
+
+// E15 (F4.4 双投修)·源码守卫:report_result 的 direct inject 必须被 `if !outcome.ok` 守为
+// deliver 失败时的真兜底,绝不在 deliver 成功后无条件再投一次(=用户看到两条同内容回复)。
+#[test]
+fn e15_direct_inject_is_gated_by_deliver_failure_not_unconditional() {
+    let src = include_str!("../results.rs");
+    // 锁:inject_leader_notification_direct 调用点之前必须有 `if !outcome.ok` 门。
+    let gate = "if !outcome.ok {";
+    let inject_call = "match inject_leader_notification_direct(";
+    let gate_pos = src.find(gate);
+    let inject_pos = src.find(inject_call);
+    assert!(gate_pos.is_some(), "E15: direct inject must be gated by `if !outcome.ok` (deliver-fail fallback)");
+    assert!(inject_pos.is_some(), "inject_leader_notification_direct call site must exist (do NOT delete it; #230 fallback)");
+    assert!(
+        gate_pos.unwrap() < inject_pos.unwrap(),
+        "E15: the `if !outcome.ok` gate must precede the direct-inject call (deliver-success must skip inject → leader gets exactly one copy)"
+    );
+}

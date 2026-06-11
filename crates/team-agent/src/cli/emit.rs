@@ -23,7 +23,7 @@ pub fn emit(output: &CmdOutput, as_json: bool) -> Option<String> {
     }
 }
 
-/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude passthrough 早返回 →
+/// `main(argv)`(`parser.py:84`):**CLI 唯一进程入口**。codex/claude/copilot passthrough 早返回 →
 /// 解析 argv 到 subcommand → 调对应 handler → 异常落盘 + 信封 + `ExitCode::Error` →
 /// `consume_leader_inbox_summary` → `emit` → `result.ok is False ? Error : Ok`。
 /// **行为入口**:契约可端到端跑 argv→(stdout, exit code)。
@@ -31,7 +31,7 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     let Some(command) = argv.first().map(String::as_str) else {
         return emit_missing_subcommand_usage();
     };
-    if command == "codex" || command == "claude" {
+    if command == "codex" || command == "claude" || command == "copilot" {
         return cmd_leader_passthrough(command, &argv[1..], cwd)
             .map(emit_result)
             .unwrap_or(ExitCode::Error);
@@ -193,7 +193,7 @@ fn is_known_subcommand(command: &str) -> bool {
 fn command_help(command: Option<&str>) -> String {
     match command {
         None => {
-            let mut commands = vec!["codex", "claude"];
+            let mut commands = vec!["codex", "claude", "copilot"];
             commands.extend_from_slice(DISPATCH_COMMANDS);
             commands.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
             format!(
@@ -261,7 +261,7 @@ fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
 
 /// 在已知子命令里找与 `input` 最接近的一个(Levenshtein ≤ 阈值)。无足够接近者 → None。
 fn nearest_subcommand(input: &str) -> Option<&'static str> {
-    let mut candidates: Vec<&'static str> = vec!["codex", "claude"];
+    let mut candidates: Vec<&'static str> = vec!["codex", "claude", "copilot"];
     candidates.extend_from_slice(DISPATCH_COMMANDS);
     candidates.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
     // 阈值随长度放宽,但短词收紧,避免 'x' 误配任何东西。
@@ -1418,6 +1418,22 @@ mod tests {
                 "top-level --help is missing spec-only help command `{command}`"
             );
         }
+        assert!(
+            top_help.contains("copilot"),
+            "top-level leader passthrough help must list copilot"
+        );
+    }
+
+    #[test]
+    fn copilot_is_listed_as_leader_passthrough_candidate() {
+        assert!(command_help(None).contains("copilot"));
+        assert_eq!(nearest_subcommand("copliot"), Some("copilot"));
+    }
+
+    #[test]
+    fn copilot_help_dispatches_as_leader_passthrough() {
+        let cwd = tmp_workspace();
+        assert_eq!(run(&cli_argv(&["copilot", "--help"]), &cwd), ExitCode::Ok);
     }
 
     #[test]

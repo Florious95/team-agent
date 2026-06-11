@@ -617,5 +617,19 @@ Truncated: more fallback entries available; run team-agent inbox leader";
         assert_eq!(r.exit, ExitCode::Ok);
         let r2 = cmd_leader_passthrough("claude", &["--help".into()], Path::new(".")).unwrap();
         assert_eq!(r2.output, CmdOutput::None);
+        let r3 = cmd_leader_passthrough("copilot", &["--help".into()], Path::new(".")).unwrap();
+        assert_eq!(r3.output, CmdOutput::None);
     }
 
+    #[test]
+    fn cmd_leader_passthrough_maps_copilot_provider() {
+        assert_eq!(leader_passthrough_provider("codex"), crate::model::enums::Provider::Codex);
+        assert_eq!(
+            leader_passthrough_provider("claude"),
+            crate::model::enums::Provider::ClaudeCode
+        );
+        assert_eq!(
+            leader_passthrough_provider("copilot"),
+            crate::model::enums::Provider::Copilot
+        );
+    }

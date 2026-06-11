@@ -264,9 +264,13 @@ fn current_uid() -> Option<String> {
             json: true,
         };
         let text = outcome_text(cmd_restart(&args));
+        // RED-2-STILL: entry gate now resolves via canonical_run_workspace; for a no-spec workspace
+        // the "no spec" surfacing may come from either the entry gate ("missing spec for restart")
+        // or, when a stray ancestor .team lets it past, the resolve gate ("active team spec not
+        // found"). Both are the REAL crate::lifecycle error (not a placeholder ok:true).
         assert!(
-            text.contains("missing spec for restart"),
-            "cmd_restart must surface the REAL crate::lifecycle::restart 'missing spec for restart' error \
+            text.contains("missing spec for restart") || text.contains("active team spec not found"),
+            "cmd_restart must surface the REAL crate::lifecycle::restart missing-spec error \
              (not the placeholder's canned ok:true); got {text}"
         );
     }

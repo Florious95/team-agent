@@ -134,6 +134,19 @@ use super::*;
         assert!(got.as_str().starts_with("team-agent-leader-claude_code-proj-"), "got {}", got.as_str());
     }
 
+    #[test]
+    fn leader_session_name_uses_copilot_provider_string() {
+        let base = std::env::temp_dir().join(format!("ta_rs_lsn_copilot_{}", std::process::id()));
+        let dir = base.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let got = leader_session_name(Provider::Copilot, &dir);
+        assert!(
+            got.as_str().starts_with("team-agent-leader-copilot-proj-"),
+            "got {}",
+            got.as_str()
+        );
+    }
+
     // =====================================================================
     // 6. Family A 正源 owner 绑定 — bind_owner_from_caller_pane(unimplemented → RED)
     // =====================================================================

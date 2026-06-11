@@ -49,11 +49,15 @@ pub(crate) fn lifecycle_run_workspace(workspace: &Path) -> Result<std::path::Pat
 }
 
 fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePaths, LifecycleError> {
-    if input_has_no_local_team_context(workspace) {
+    // RED-2-STILL(P0):入口门在 canonical_run_workspace 解析后的路径上判(quick-start 的 .team 落
+    // team_dir 父目录,raw team_dir 必 miss)。期望路径报解析后 runtime 落点,不指 raw team_dir。
+    let resolved_ws = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if input_has_no_local_team_context(&resolved_ws) {
         return Err(LifecycleError::TeamSelect(format!(
-            "active team spec not found: input_workspace={} expected_spec_path={}",
+            "active team spec not found: input_workspace={} expected_runtime_dir={}",
             workspace.display(),
-            workspace.join("team.spec.yaml").display()
+            crate::model::paths::runtime_dir(&resolved_ws).display()
         )));
     }
     let selected = crate::state::selector::resolve_active_team(

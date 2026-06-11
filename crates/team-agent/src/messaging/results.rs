@@ -689,28 +689,33 @@ pub fn report_result_for_owner_team(
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
             }
-            match inject_leader_notification_direct(workspace, &delivery_state, &content, &message_id) {
-                Ok(()) => {
-                    store.mark(&message_id, "delivered", None)?;
-                    outcome = crate::messaging::DeliveryOutcome {
-                        ok: true,
-                        status: crate::messaging::DeliveryStatus::Delivered,
-                        message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
-                        message_id: Some(message_id),
-                        verification: None,
-                        stage: None,
-                        reason: None,
-                        channel: Some("leader_receiver".to_string()),
-                    };
-                }
-                Err(reason) => {
-                    event_log.write(
-                        "leader_receiver.direct_inject_skipped",
-                        serde_json::json!({
-                            "message_id": message_id,
-                            "reason": reason,
-                        }),
-                    )?;
+            // E15(F4.4 双投修):direct inject 是 deliver **失败时的兜底**,不是无条件第二投。
+            // deliver loop 成功(outcome.ok)→ 跳过 direct inject,leader 仅收 deliver 那一条;
+            // 全失败 → direct inject 兜底投一条(不丢 result,守 #230/MUST-8)。两全:恰一条。
+            if !outcome.ok {
+                match inject_leader_notification_direct(workspace, &delivery_state, &content, &message_id) {
+                    Ok(()) => {
+                        store.mark(&message_id, "delivered", None)?;
+                        outcome = crate::messaging::DeliveryOutcome {
+                            ok: true,
+                            status: crate::messaging::DeliveryStatus::Delivered,
+                            message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
+                            message_id: Some(message_id),
+                            verification: None,
+                            stage: None,
+                            reason: None,
+                            channel: Some("leader_receiver".to_string()),
+                        };
+                    }
+                    Err(reason) => {
+                        event_log.write(
+                            "leader_receiver.direct_inject_skipped",
+                            serde_json::json!({
+                                "message_id": message_id,
+                                "reason": reason,
+                            }),
+                        )?;
+                    }
                 }
             }
     }
