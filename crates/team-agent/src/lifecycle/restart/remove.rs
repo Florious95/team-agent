@@ -13,13 +13,17 @@ pub fn remove_agent(
     force: bool,
     team: Option<&str>,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
-    remove_agent_with_transport(
-        workspace,
+    let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    remove_agent_at_paths(
+        &paths.run_workspace,
+        &paths.spec_workspace,
         agent_id,
         from_spec,
         force,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&lifecycle_run_workspace(workspace)?),
+        &transport,
     )
 }
 

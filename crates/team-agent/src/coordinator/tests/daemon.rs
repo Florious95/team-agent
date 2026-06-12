@@ -209,6 +209,156 @@ fn coord_over_staged_tmux(
     (coord, dir, seen)
 }
 
+fn coord_over_runtime_state_tmux_endpoint(
+    session_name: &str,
+    endpoint: &str,
+    steps: Vec<RunnerStep>,
+    last: RunnerStep,
+) -> (
+    Coordinator,
+    std::path::PathBuf,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    Option<String>,
+    &'static str,
+) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "ta-rs-e27-coord-explicit-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(crate::model::paths::runtime_dir(&dir)).unwrap();
+    let _ = crate::message_store::MessageStore::open(&dir).unwrap();
+    let state = serde_json::json!({
+        "session_name": session_name,
+        "tmux_endpoint": endpoint,
+        "tmux_socket": endpoint,
+        "agents": {},
+    });
+    crate::state::persist::save_runtime_state(&dir, &state).unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let runner = StagedTmuxRunner {
+        steps: std::sync::Mutex::new(steps.into_iter().collect()),
+        last,
+        seen: std::sync::Arc::clone(&seen),
+    };
+    let selection = crate::tmux_backend::tmux_backend_with_runner_for_runtime_state_or_workspace(
+        Box::new(runner),
+        &dir,
+        Some(&state),
+    );
+    let endpoint_used = selection.tmux_endpoint_used.clone();
+    let endpoint_source = selection.tmux_endpoint_source.as_str();
+    let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
+    let coord = Coordinator::for_test(
+        WorkspacePath::new(dir.clone()),
+        reg,
+        Box::new(selection.backend),
+        None,
+        None,
+    );
+    (coord, dir, seen, endpoint_used, endpoint_source)
+}
+
+#[test]
+fn e27_coordinator_tick_uses_runtime_explicit_endpoint_for_session_gate() {
+    let session = "team-e27-explicit-restart";
+    let endpoint = "/tmp/e27-explicit-restart-test.sock";
+    let (coord, dir, seen, endpoint_used, endpoint_source) = coord_over_runtime_state_tmux_endpoint(
+        session,
+        endpoint,
+        vec![RunnerStep::Exit(true)],
+        RunnerStep::Exit(true),
+    );
+    assert_eq!(endpoint_used.as_deref(), Some(endpoint));
+    assert_eq!(endpoint_source, "state.tmux_endpoint");
+
+    let report = coord
+        .tick()
+        .expect("explicit endpoint with present session should tick");
+    assert!(
+        report.ok,
+        "present explicit endpoint session should keep tick ok"
+    );
+    assert!(
+        !report.stop,
+        "present explicit endpoint session must not trip the session-missing stop gate"
+    );
+    let calls = seen.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .all(|argv| !argv.iter().any(|part| part == "-L")),
+        "explicit endpoint coordinator must not fall back to workspace -L socket; got {calls:?}"
+    );
+    assert_eq!(
+        calls.first(),
+        Some(&vec![
+            "tmux".to_string(),
+            "-S".to_string(),
+            endpoint.to_string(),
+            "has-session".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]),
+        "session gate must probe the persisted explicit endpoint"
+    );
+    let events = read_event_log_dir(&dir);
+    assert!(
+        events
+            .iter()
+            .all(|event| event.get("event").and_then(|v| v.as_str())
+                != Some("coordinator.session_missing")),
+        "present explicit endpoint session must not emit coordinator.session_missing; got {events:?}"
+    );
+}
+
+#[test]
+fn e27_coordinator_tick_still_stops_when_explicit_endpoint_session_is_missing() {
+    let session = "team-e27-explicit-restart";
+    let endpoint = "/tmp/e27-explicit-restart-test.sock";
+    let (coord, dir, seen, endpoint_used, endpoint_source) = coord_over_runtime_state_tmux_endpoint(
+        session,
+        endpoint,
+        vec![RunnerStep::Exit(false)],
+        RunnerStep::Exit(false),
+    );
+    assert_eq!(endpoint_used.as_deref(), Some(endpoint));
+    assert_eq!(endpoint_source, "state.tmux_endpoint");
+
+    let report = coord
+        .tick()
+        .expect("definitive missing session is a typed stop report");
+    assert!(!report.ok, "missing explicit endpoint session => ok=false");
+    assert!(
+        report.stop,
+        "genuine missing session on the selected explicit endpoint must still stop"
+    );
+    assert_eq!(report.reason, Some(TickStopReason::TmuxSessionMissing));
+    let calls = seen.lock().unwrap().clone();
+    assert_eq!(
+        calls.first(),
+        Some(&vec![
+            "tmux".to_string(),
+            "-S".to_string(),
+            endpoint.to_string(),
+            "has-session".to_string(),
+            "-t".to_string(),
+            session.to_string(),
+        ]),
+        "negative control must also probe the persisted explicit endpoint"
+    );
+    let events = read_event_log_dir(&dir);
+    assert!(
+        events
+            .iter()
+            .any(|event| event.get("event").and_then(|v| v.as_str())
+                == Some("coordinator.session_missing")),
+        "genuine explicit endpoint miss must still emit coordinator.session_missing; got {events:?}"
+    );
+}
+
 // ── 2(a) tick TOLERATES a has-session TIMEOUT as Err (NOT a definitive miss) — LOCK ───────────────
 #[test]
 fn tick_tolerates_has_session_timeout_as_transport_err_not_session_missing() {

@@ -188,6 +188,29 @@ impl TmuxSocketEndpoint {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeTmuxEndpointSource {
+    StateTmuxEndpoint,
+    StateTmuxSocket,
+    WorkspaceFallback,
+}
+
+impl RuntimeTmuxEndpointSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StateTmuxEndpoint => "state.tmux_endpoint",
+            Self::StateTmuxSocket => "state.tmux_socket",
+            Self::WorkspaceFallback => "workspace_fallback",
+        }
+    }
+}
+
+pub(crate) struct RuntimeTmuxBackendSelection {
+    pub(crate) backend: TmuxBackend,
+    pub(crate) tmux_endpoint_used: Option<String>,
+    pub(crate) tmux_endpoint_source: RuntimeTmuxEndpointSource,
+}
+
 impl TmuxBackend {
     /// Backend bound to the real `tmux` subprocess on the SHARED default socket (no `-L`).
     /// Non-team callers + existing argv/unit tests stay unaffected.
@@ -336,6 +359,70 @@ impl TmuxBackend {
         let argv = self.tmux_argv(&["tmux".to_string(), "kill-server".to_string()]);
         let _ = self.runner.run(&argv);
     }
+}
+
+pub(crate) fn tmux_backend_for_runtime_state_or_workspace(
+    workspace: &Path,
+    state: Option<&serde_json::Value>,
+) -> RuntimeTmuxBackendSelection {
+    let (backend, source) =
+        if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
+            (TmuxBackend::for_tmux_endpoint(endpoint), source)
+        } else {
+            (
+                TmuxBackend::for_workspace(workspace),
+                RuntimeTmuxEndpointSource::WorkspaceFallback,
+            )
+        };
+    RuntimeTmuxBackendSelection {
+        tmux_endpoint_used: backend.tmux_endpoint(),
+        backend,
+        tmux_endpoint_source: source,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tmux_backend_with_runner_for_runtime_state_or_workspace(
+    runner: Box<dyn CommandRunner>,
+    workspace: &Path,
+    state: Option<&serde_json::Value>,
+) -> RuntimeTmuxBackendSelection {
+    let (backend, source) =
+        if let Some((endpoint, source)) = runtime_tmux_endpoint_from_state(state) {
+            (
+                TmuxBackend::with_runner_for_tmux_endpoint(runner, endpoint),
+                source,
+            )
+        } else {
+            (
+                TmuxBackend::with_runner_for_workspace(runner, workspace),
+                RuntimeTmuxEndpointSource::WorkspaceFallback,
+            )
+        };
+    RuntimeTmuxBackendSelection {
+        tmux_endpoint_used: backend.tmux_endpoint(),
+        backend,
+        tmux_endpoint_source: source,
+    }
+}
+
+fn runtime_tmux_endpoint_from_state(
+    state: Option<&serde_json::Value>,
+) -> Option<(&str, RuntimeTmuxEndpointSource)> {
+    state.and_then(|state| {
+        state
+            .get("tmux_endpoint")
+            .and_then(|v| v.as_str())
+            .filter(|endpoint| !endpoint.is_empty())
+            .map(|endpoint| (endpoint, RuntimeTmuxEndpointSource::StateTmuxEndpoint))
+            .or_else(|| {
+                state
+                    .get("tmux_socket")
+                    .and_then(|v| v.as_str())
+                    .filter(|endpoint| !endpoint.is_empty())
+                    .map(|endpoint| (endpoint, RuntimeTmuxEndpointSource::StateTmuxSocket))
+            })
+    })
 }
 
 /// CP-1 socket name: SHORT + DETERMINISTIC per canonical workspace path. `ta-` + 12 hex chars of a

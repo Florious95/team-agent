@@ -17,6 +17,8 @@ pub fn start_agent(
     team: Option<&str>,
 ) -> Result<StartAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     start_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -25,7 +27,7 @@ pub fn start_agent(
         open_display,
         allow_fresh,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&paths.run_workspace),
+        &transport,
     )
 }
 
@@ -267,11 +269,15 @@ pub fn stop_agent(
     agent_id: &AgentId,
     team: Option<&str>,
 ) -> Result<StopAgentReport, LifecycleError> {
-    stop_agent_with_transport(
-        workspace,
+    let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    stop_agent_at_paths(
+        &paths.run_workspace,
+        &paths.spec_workspace,
         agent_id,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&lifecycle_run_workspace(workspace)?),
+        &transport,
     )
 }
 
@@ -473,13 +479,22 @@ pub fn reset_agent(
     open_display: bool,
     team: Option<&str>,
 ) -> Result<ResetAgentOutcome, LifecycleError> {
-    reset_agent_with_transport(
-        workspace,
+    if !discard_session {
+        return Ok(ResetAgentOutcome::Refused {
+            reason: ResetRefusal::DiscardSessionRequired,
+        });
+    }
+    let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    reset_agent_at_paths(
+        &paths.run_workspace,
+        &paths.spec_workspace,
         agent_id,
         discard_session,
         open_display,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&lifecycle_run_workspace(workspace)?),
+        &transport,
     )
 }
 

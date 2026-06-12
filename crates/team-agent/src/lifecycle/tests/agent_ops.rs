@@ -260,6 +260,228 @@ fn bug_a_stop_agent_team_dir_input_kills_existing_window_real_machine() {
     assert!(report.stopped, "existing worker window must be killed, not silently reported absent");
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+struct TmuxShim {
+    log: std::path::PathBuf,
+    _path: EnvVarGuard,
+    _log: EnvVarGuard,
+    _endpoint: EnvVarGuard,
+    _session: EnvVarGuard,
+    _pane: EnvVarGuard,
+    _real_tmux: EnvVarGuard,
+}
+
+fn install_e27_tmux_shim(expected_endpoint: &str, session_name: &str) -> TmuxShim {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = temp_ws().join("e27_tmux_shim");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = root.join("tmux-argv.log");
+    let tmux = bin.join("tmux");
+    let real_tmux = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v tmux || true")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    std::fs::write(
+        &tmux,
+        r#"#!/bin/sh
+set -eu
+log="${TEAM_AGENT_E27_TMUX_LOG}"
+expected="${TEAM_AGENT_E27_EXPECTED_ENDPOINT}"
+session="${TEAM_AGENT_E27_SESSION_NAME}"
+pane="${TEAM_AGENT_E27_PANE_ID}"
+track=0
+case "$*" in
+  *"$expected"*|*"$session"*|*"$pane"*) track=1 ;;
+esac
+if [ "$track" != 1 ]; then
+  if [ -n "${TEAM_AGENT_E27_REAL_TMUX}" ]; then
+    exec "${TEAM_AGENT_E27_REAL_TMUX}" "$@"
+  fi
+  exit 127
+fi
+printf '%s\n' "$*" >> "$log"
+case "$*" in
+  *"-S $expected"*) ;;
+  *)
+    echo "missing expected socket $expected: $*" >&2
+    exit 18
+    ;;
+esac
+case "$*" in
+  *"display-message -p -t $pane #{pane_id}"*)
+    printf '%s\n' "$pane"
+    exit 0
+    ;;
+  *"display-message -p -t $session:alpha #{pane_id}"*)
+    printf '%%9288\n'
+    exit 0
+    ;;
+  *"list-windows -t $session -F #{window_name}"*)
+    exit 0
+    ;;
+  *"has-session -t $session"*)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&tmux).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&tmux, perms).unwrap();
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    TmuxShim {
+        log: log.clone(),
+        _path: EnvVarGuard::set("PATH", &format!("{}:{old_path}", bin.display())),
+        _log: EnvVarGuard::set("TEAM_AGENT_E27_TMUX_LOG", &log.to_string_lossy()),
+        _endpoint: EnvVarGuard::set("TEAM_AGENT_E27_EXPECTED_ENDPOINT", expected_endpoint),
+        _session: EnvVarGuard::set("TEAM_AGENT_E27_SESSION_NAME", session_name),
+        _pane: EnvVarGuard::set("TEAM_AGENT_E27_PANE_ID", "%9277"),
+        _real_tmux: EnvVarGuard::set("TEAM_AGENT_E27_REAL_TMUX", &real_tmux),
+    }
+}
+
+fn seed_e27_attached_socket_state(ws: &std::path::Path, endpoint: &str, session_name: &str) {
+    let mut state = crate::state::persist::load_runtime_state(ws).unwrap();
+    let obj = state.as_object_mut().unwrap();
+    obj.insert("session_name".to_string(), json!(session_name));
+    obj.insert("tmux_endpoint".to_string(), json!(endpoint));
+    obj.insert("tmux_socket".to_string(), json!(endpoint));
+    let alpha = obj
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut("alpha"))
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap();
+    alpha.insert("status".to_string(), json!("running"));
+    alpha.insert("provider".to_string(), json!("fake"));
+    alpha.insert("window".to_string(), json!("alpha"));
+    alpha.insert("pane_id".to_string(), json!("%9277"));
+    alpha.insert("session_id".to_string(), json!("old-session"));
+    crate::state::persist::save_runtime_state(ws, &state).unwrap();
+    seed_healthy_coordinator(ws);
+}
+
+fn assert_only_expected_socket_used(log: &std::path::Path, expected_endpoint: &str) {
+    let raw = std::fs::read_to_string(log).unwrap();
+    assert!(!raw.is_empty(), "tmux shim was not invoked");
+    assert!(
+        !raw.contains("-L ta-"),
+        "lifecycle worker operation must not use workspace-derived -L ta-* socket; argv log:\n{raw}"
+    );
+    for line in raw.lines() {
+        assert!(
+            line.contains(&format!("-S {expected_endpoint}")),
+            "tmux argv must use state endpoint {expected_endpoint}; got line {line:?}; full log:\n{raw}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn e27_stop_agent_uses_attached_explicit_state_socket() {
+    let endpoint = "/tmp/loop13-e27-explicit.sock";
+    let session_name = "team-e27-explicit-stop";
+    let ws = lanea_team_ws("running");
+    seed_e27_attached_socket_state(&ws, endpoint, session_name);
+    let shim = install_e27_tmux_shim(endpoint, session_name);
+
+    let report = stop_agent(&ws, &aid("alpha"), None).expect("stop-agent");
+
+    assert!(report.stopped, "attached explicit-socket worker should be stopped");
+    assert_only_expected_socket_used(&shim.log, endpoint);
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        state.pointer("/agents/alpha/status").and_then(serde_json::Value::as_str),
+        Some("stopped")
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn e27_reset_agent_uses_attached_explicit_state_socket_for_stop_and_spawn() {
+    let endpoint = "/tmp/loop13-e27-explicit.sock";
+    let session_name = "team-e27-explicit-reset";
+    let ws = lanea_team_ws("running");
+    seed_e27_attached_socket_state(&ws, endpoint, session_name);
+    let shim = install_e27_tmux_shim(endpoint, session_name);
+
+    let outcome = reset_agent(&ws, &aid("alpha"), true, false, None).expect("reset-agent");
+
+    assert!(
+        matches!(outcome, ResetAgentOutcome::Reset { .. }),
+        "reset-agent should complete over attached explicit socket; got {outcome:?}"
+    );
+    assert_only_expected_socket_used(&shim.log, endpoint);
+    let raw = std::fs::read_to_string(&shim.log).unwrap();
+    assert!(raw.contains("kill-pane"), "reset must stop the old pane first; argv log:\n{raw}");
+    assert!(
+        raw.contains("new-window") || raw.contains("new-session"),
+        "reset must respawn the worker through the same endpoint; argv log:\n{raw}"
+    );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_ne!(
+        state.pointer("/agents/alpha/session_id").and_then(serde_json::Value::as_str),
+        Some("old-session"),
+        "discard-session must not preserve the old session id"
+    );
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn e27_stop_agent_expands_short_state_socket_name() {
+    let short = "ta-loop13-e27-short";
+    let session_name = "team-e27-short-stop";
+    let expected = crate::tmux_backend::socket_path_for_name(short)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let ws = lanea_team_ws("running");
+    seed_e27_attached_socket_state(&ws, short, session_name);
+    let shim = install_e27_tmux_shim(&expected, session_name);
+
+    let report = stop_agent(&ws, &aid("alpha"), None).expect("stop-agent short endpoint");
+
+    assert!(report.stopped, "short endpoint worker should be stopped");
+    assert_only_expected_socket_used(&shim.log, &expected);
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // WAVE-2 · LANE A v2 — DEEPENED byte-parity REDs (stop / reset / remove / fork).
 //

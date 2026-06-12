@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.20
+
+- **`team-agent reset` / `stop` / `start` / `remove` / `restart` work on attached and explicit-socket teams again**: the lifecycle transport now resolves the tmux endpoint from the team's recorded `state.leader_receiver.tmux_socket` (and falls back to the workspace-default socket only when no recorded endpoint is present), instead of always going through the workspace-default short `ta-*` socket. A team whose user attached against an explicit socket (`/tmp/<custom>.sock`) — or whose recorded socket is a legacy short name — no longer fails with `error connecting to /private/tmp/tmux-501/ta-... (No such file or directory)` on any of the five lifecycle entry points.
+- **`team-agent restart` on attached / explicit-socket teams no longer races the coordinator into a `session_missing` self-exit**: the coordinator's tmux probe now reads the same resolved endpoint as the rest of the lifecycle path, so it stops mis-classifying the team session as missing under the user's explicit socket and self-exiting — the previous symptom was `restart not ready within 30.0s … coordinator alive=no` with `coordinator.session_missing → coordinator.exit → restart.readiness_timeout` in the event log even though the worker pane was already addressable.
+
 ## 0.3.19
 
 - **`team-agent attach-leader` survives short `ta-*` socket names**: when a team's recorded `tmux_socket` is a bare short name (e.g. `ta-0535b990e299` left over from a managed shared socket), `attach-leader` now expands it to its workspace-resolved absolute path (`/private/tmp/tmux-501/ta-0535b990e299` etc.) via the existing `tmux_backend::socket_path_for_workspace` helper before probing, and persists the resolved endpoint back. The 0.3.17 / 0.3.18 attach-leader fix is now also correct for the legacy short-name receiver path.

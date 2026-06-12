@@ -208,6 +208,38 @@ pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, 
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
+pub(super) fn lifecycle_worker_tmux_backend_for_selected_state(
+    run_workspace: &Path,
+    team: Option<&str>,
+) -> Result<crate::tmux_backend::TmuxBackend, LifecycleError> {
+    let (state, refusal) = crate::state::projection::resolve_team_scoped_state(run_workspace, team)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if let Some(refusal) = refusal {
+        let reason = refusal
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("team_target_unresolved");
+        let detail = refusal
+            .get("error")
+            .or_else(|| refusal.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
+    }
+    Ok(state
+        .as_ref()
+        .map(|state| lifecycle_worker_tmux_backend_for_state(run_workspace, state))
+        .unwrap_or_else(|| crate::tmux_backend::TmuxBackend::for_workspace(run_workspace)))
+}
+
+pub(super) fn lifecycle_worker_tmux_backend_for_state(
+    run_workspace: &Path,
+    state: &serde_json::Value,
+) -> crate::tmux_backend::TmuxBackend {
+    crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(run_workspace, Some(state))
+        .backend
+}
+
 pub(super) fn persist_effective_approval_policy_for_restart(
     agent: &mut serde_json::Map<String, serde_json::Value>,
     safety: &DangerousApproval,

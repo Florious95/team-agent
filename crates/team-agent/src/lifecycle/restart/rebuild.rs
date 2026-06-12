@@ -22,12 +22,14 @@ pub fn restart_with_session_convergence_deadline(
     team: Option<&str>,
     session_converge_deadline_ms: Option<u64>,
 ) -> Result<RestartReport, LifecycleError> {
-    let run_ws = lifecycle_run_workspace(workspace)?;
+    let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     restart_with_transport_with_session_convergence_deadline(
         workspace,
         allow_fresh,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&run_ws),
+        &transport,
         session_converge_deadline_ms,
         None,
     )

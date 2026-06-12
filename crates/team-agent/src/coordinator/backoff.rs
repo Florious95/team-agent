@@ -34,21 +34,42 @@ pub struct DaemonArgs {
 /// §10:返 `Result`(顶层 bin 用 anyhow 收;§12 边界)。
 pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // CP-1: the daemon's whole tick surface (has_session / capture / inject / list_windows / kill)
-    // runs through this backend — bind it to the per-team socket so a dying shared `default` server
-    // can no longer tear the team down. The daemon knows its --workspace.
+    // runs through this backend. Prefer the persisted runtime endpoint so attached explicit-socket
+    // teams are checked on the same socket as lifecycle worker operations.
+    let state = crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
+    let tmux_selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+        args.workspace.as_path(),
+        state.as_ref(),
+    );
+    let tmux_metadata = DaemonTmuxEndpointMetadata {
+        tmux_endpoint_used: tmux_selection.tmux_endpoint_used.clone(),
+        tmux_endpoint_source: tmux_selection.tmux_endpoint_source.as_str(),
+    };
     let coordinator = Coordinator::new(
         args.workspace.clone(),
         Box::new(RealProviderRegistry),
-        Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
-            args.workspace.as_path(),
-        )),
+        Box::new(tmux_selection.backend),
     );
-    run_daemon_with_coordinator(&args, &coordinator)
+    run_daemon_with_coordinator_and_boot_tmux(&args, &coordinator, Some(tmux_metadata))
 }
 
 pub fn run_daemon_with_coordinator(
     args: &DaemonArgs,
     coordinator: &Coordinator,
+) -> Result<(), DaemonError> {
+    run_daemon_with_coordinator_and_boot_tmux(args, coordinator, None)
+}
+
+#[derive(Debug, Clone)]
+struct DaemonTmuxEndpointMetadata {
+    tmux_endpoint_used: Option<String>,
+    tmux_endpoint_source: &'static str,
+}
+
+fn run_daemon_with_coordinator_and_boot_tmux(
+    args: &DaemonArgs,
+    coordinator: &Coordinator,
+    tmux_metadata: Option<DaemonTmuxEndpointMetadata>,
 ) -> Result<(), DaemonError> {
     let runtime_dir = crate::model::paths::runtime_dir(args.workspace.as_path());
     std::fs::create_dir_all(&runtime_dir)?;
@@ -57,13 +78,26 @@ pub fn run_daemon_with_coordinator(
     write_coordinator_metadata(&args.workspace, pid, MetadataSource::Boot)?;
 
     let event_log = EventLog::new(args.workspace.as_path());
-    event_log.write(
-        "coordinator.boot",
-        serde_json::json!({
-            "workspace": args.workspace.as_path().to_string_lossy(),
-            "once": args.once,
-        }),
-    )?;
+    let mut boot_event = serde_json::json!({
+        "workspace": args.workspace.as_path().to_string_lossy(),
+        "once": args.once,
+    });
+    if let Some(metadata) = tmux_metadata {
+        if let Some(object) = boot_event.as_object_mut() {
+            object.insert(
+                "tmux_endpoint_source".to_string(),
+                serde_json::Value::String(metadata.tmux_endpoint_source.to_string()),
+            );
+            object.insert(
+                "tmux_endpoint_used".to_string(),
+                metadata
+                    .tmux_endpoint_used
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    event_log.write("coordinator.boot", boot_event)?;
     let tick_interval = match args.tick_interval_sec {
         Some(v) if v > 0.0 => v,
         _ => resolve_tick_interval(&args.workspace)?,
