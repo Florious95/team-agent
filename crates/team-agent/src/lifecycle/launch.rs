@@ -1201,14 +1201,29 @@ mod e22_unbound_owner_provider_tests {
             "leader": {"provider": "copilot"},
         });
 
-        assert!(!seed_launched_owner_from_caller_with_provider_lookup(
+        assert!(seed_launched_owner_from_caller_with_provider_lookup(
             &mut state,
             caller("", "%0"),
             |_| None,
         ));
+        assert_eq!(
+            state
+                .pointer("/team_owner/pane_id")
+                .and_then(serde_json::Value::as_str),
+            Some("%0")
+        );
+        assert_eq!(
+            state
+                .pointer("/leader_receiver/pane_id")
+                .and_then(serde_json::Value::as_str),
+            Some("%0")
+        );
         assert!(
-            state.get("leader_receiver").is_none(),
-            "unknown caller pane must not seed a codex receiver: {state}"
+            state
+                .pointer("/leader_receiver/provider")
+                .and_then(serde_json::Value::as_str)
+                != Some("codex"),
+            "unknown caller pane must not silently seed a codex receiver: {state}"
         );
         assert!(
             state
@@ -3804,17 +3819,14 @@ fn seed_launched_owner_from_caller_with_provider_lookup(
     caller: crate::state::owner_gate::CallerIdentity,
     lookup_pane_provider: impl Fn(&PaneId) -> Option<Provider>,
 ) -> bool {
-    let Some(provider) = caller_provider_for_seed_with_lookup(&caller, lookup_pane_provider) else {
-        return false;
-    };
-    let pane_id = caller.pane_id;
-    if pane_id.is_empty() {
+    if caller.pane_id.is_empty() {
         return false;
     }
+    let provider = caller_provider_for_seed_with_lookup(&caller, lookup_pane_provider);
+    let pane_id = caller.pane_id;
     let owner_epoch = 1u64;
-    let owner = serde_json::json!({
+    let mut owner = serde_json::json!({
         "pane_id": pane_id,
-        "provider": provider.clone(),
         "machine_fingerprint": caller.machine_fingerprint,
         "leader_session_uuid": caller.leader_session_uuid,
         "owner_epoch": owner_epoch,
@@ -3824,17 +3836,23 @@ fn seed_launched_owner_from_caller_with_provider_lookup(
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_default(),
     });
-    let receiver = serde_json::json!({
+    let mut receiver = serde_json::json!({
         "mode": "direct_tmux",
         "status": "attached",
-        "provider": provider,
         "pane_id": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
         "pane": owner.get("pane_id").cloned().unwrap_or(serde_json::Value::Null),
         "leader_session_uuid": owner.get("leader_session_uuid").cloned().unwrap_or(serde_json::Value::Null),
         "owner_epoch": owner_epoch,
         "discovery": "quick_start",
     });
-    let mut receiver = receiver;
+    if let Some(provider) = provider.as_ref() {
+        if let Some(owner) = owner.as_object_mut() {
+            owner.insert("provider".to_string(), serde_json::json!(provider));
+        }
+        if let Some(receiver) = receiver.as_object_mut() {
+            receiver.insert("provider".to_string(), serde_json::json!(provider));
+        }
+    }
     if let (Some(receiver), Some(socket)) = (
         receiver.as_object_mut(),
         crate::tmux_backend::socket_name_from_tmux_env(),
