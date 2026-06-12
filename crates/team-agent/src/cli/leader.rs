@@ -29,6 +29,8 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
             out.attach_existing = true;
         } else if token == "--confirm" {
             out.confirm_attach = true;
+        } else if token == "--external-leader" {
+            out.external_leader = true;
         } else if token == "--attach-session" {
             let Some(value) = values.get(idx + 1) else {
                 return Err(CliError::Runtime(

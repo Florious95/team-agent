@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
-use crate::transport::{PaneId, SessionName, Target, Transport};
+use crate::transport::{PaneId, SessionName, SpawnResult, Target, Transport, WindowName};
 
 use super::helpers::{
     provider_wire, resolve_workspace_for_hash, sanitize_session_folder, sha1_hex_prefix,
@@ -29,6 +29,7 @@ pub fn leader_start_plan(
     attach_existing: bool,
     confirm_attach: bool,
     attach_session: Option<&SessionName>,
+    external_leader: bool,
 ) -> Result<LeaderStartPlan, LeaderError> {
     if attach_session.is_some() && !confirm_attach {
         return Err(LeaderError::Start(
@@ -49,15 +50,24 @@ pub fn leader_start_plan(
             command_name
         )));
     }
-    let identity = leader_identity_context(workspace, None, None)?;
-    let session_name = attach_session
-        .cloned()
-        .or_else(|| Some(leader_session_name(provider, workspace)));
+    let state = crate::state::persist::load_runtime_state(workspace).ok();
+    let identity = leader_identity_context(workspace, None, state.as_ref())?;
+    let external_path = external_leader || attach_existing || attach_session.is_some();
+    let session_name = if external_path {
+        attach_session
+            .cloned()
+            .or_else(|| Some(leader_session_name(provider, workspace)))
+    } else {
+        Some(managed_team_session_name(&identity))
+    };
     let in_tmux = std::env::var_os("TMUX").is_some();
-    if !in_tmux {
+    if !in_tmux || !external_path {
         ensure_tmux_installed()?;
     }
-    let existing_session = if !in_tmux && !attach_existing && attach_session.is_none() {
+    if !external_path {
+        validate_managed_tmux_context(workspace)?;
+    }
+    let existing_session = if external_path && !in_tmux && !attach_existing && attach_session.is_none() {
         match session_name.as_ref() {
             Some(session) => tmux_session_exists(workspace, session)?,
             None => false,
@@ -65,7 +75,9 @@ pub fn leader_start_plan(
     } else {
         false
     };
-    let mode = if in_tmux {
+    let mode = if !external_path {
+        LeaderStartMode::ManagedTmuxClient
+    } else if in_tmux {
         LeaderStartMode::ExecProvider
     } else if attach_existing || attach_session.is_some() || existing_session {
         LeaderStartMode::AttachExisting
@@ -86,6 +98,7 @@ pub fn leader_start_plan(
     } else {
         leader_env.clone()
     };
+    let provider_argv = provider_command_argv(provider, provider_args);
     Ok(LeaderStartPlan {
         mode,
         provider,
@@ -93,6 +106,10 @@ pub fn leader_start_plan(
         socket: LeaderLaunchSocket::Workspace,
         session_name,
         argv,
+        provider_argv,
+        leader_window: (mode == LeaderStartMode::ManagedTmuxClient)
+            .then(|| WindowName::new("leader")),
+        is_external_leader: external_path,
         leader_env: plan_env,
         identity: Some(identity),
         detached: false,
@@ -142,6 +159,7 @@ pub fn start_leader(
     attach_existing: bool,
     confirm_attach: bool,
     attach_session: Option<&SessionName>,
+    external_leader: bool,
 ) -> Result<(), LeaderError> {
     let plan = leader_start_plan(
         provider,
@@ -150,6 +168,7 @@ pub fn start_leader(
         attach_existing,
         confirm_attach,
         attach_session,
+        external_leader,
     )?;
     crate::event_log::EventLog::new(workspace).write(
         super::LeaderEvent::LeaderStart.name(),
@@ -170,6 +189,9 @@ pub fn execute_leader_plan(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
+    if plan.mode == LeaderStartMode::ManagedTmuxClient {
+        return execute_managed_leader_plan(plan, workspace);
+    }
     let mut argv = plan.argv.clone();
     let detached = plan.mode == LeaderStartMode::NewTmuxSession
         && !std::io::stdin().is_terminal()
@@ -236,6 +258,12 @@ fn start_argv(
             argv.extend(provider_args.iter().cloned());
             Ok(argv)
         }
+        LeaderStartMode::ManagedTmuxClient => {
+            let Some(session) = session_name else {
+                return Err(LeaderError::Start("managed leader session missing".to_string()));
+            };
+            managed_client_argv(workspace, session)
+        }
         LeaderStartMode::AttachExisting => {
             let Some(session) = session_name else {
                 return Err(LeaderError::Start("attach session missing".to_string()));
@@ -281,6 +309,224 @@ fn start_argv(
             Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
         }
     }
+}
+
+fn provider_command_argv(provider: Provider, provider_args: &[String]) -> Vec<String> {
+    let mut argv = vec![provider_command_name(provider).to_string()];
+    argv.extend(provider_args.iter().cloned());
+    argv
+}
+
+fn managed_team_session_name(identity: &LeaderIdentity) -> SessionName {
+    let team = identity.team_id.as_str();
+    if team.starts_with("team-") {
+        SessionName::new(team.to_string())
+    } else {
+        SessionName::new(format!("team-{team}"))
+    }
+}
+
+fn managed_client_argv(workspace: &Path, session: &SessionName) -> Result<Vec<String>, LeaderError> {
+    let target = format!("{}:leader", session.as_str());
+    let argv = if std::env::var_os("TMUX").is_some() {
+        vec![
+            "tmux".to_string(),
+            "switch-client".to_string(),
+            "-t".to_string(),
+            target,
+        ]
+    } else {
+        vec![
+            "tmux".to_string(),
+            "attach-session".to_string(),
+            "-t".to_string(),
+            target,
+        ]
+    };
+    Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
+}
+
+fn validate_managed_tmux_context(workspace: &Path) -> Result<(), LeaderError> {
+    let Some(current_endpoint) = crate::tmux_backend::socket_name_from_tmux_env() else {
+        return Ok(());
+    };
+    let expected = crate::tmux_backend::socket_name_for_workspace(workspace);
+    if tmux_endpoint_matches_socket_name(&current_endpoint, &expected) {
+        return Ok(());
+    }
+    Err(LeaderError::Start(format!(
+        "Error: managed leader launch refused inside a different tmux server\nReason: current TMUX socket is {current_endpoint}, but this team uses {expected}\nAction: detach and run from a normal shell, or use --external-leader for the external leader topology"
+    )))
+}
+
+fn tmux_endpoint_matches_socket_name(endpoint: &str, socket_name: &str) -> bool {
+    endpoint == socket_name
+        || Path::new(endpoint)
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(socket_name)
+}
+
+fn execute_managed_leader_plan(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<LeaderLaunchOutcome, LeaderError> {
+    let Some(session) = plan.session_name.as_ref() else {
+        return Err(LeaderError::Start("managed leader session missing".to_string()));
+    };
+    let Some(window) = plan.leader_window.as_ref() else {
+        return Err(LeaderError::Start("managed leader window missing".to_string()));
+    };
+    let transport = TmuxBackend::for_workspace(workspace);
+    let spawned = ensure_managed_leader_pane(&transport, session, window, plan, workspace)?;
+    persist_managed_leader_binding(plan, workspace, &spawned)?;
+    spawn_managed_provider_startup_prompt_handler(
+        plan.provider,
+        workspace.to_path_buf(),
+        spawned.pane_id.as_str().to_string(),
+    );
+    let status = run_leader_argv(&plan.argv, &BTreeMap::new(), plan, workspace)?;
+    let code = status.code();
+    if !status.success() {
+        return Err(LeaderError::Start(format!(
+            "leader launcher exited with status {}",
+            code.map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        )));
+    }
+    Ok(LeaderLaunchOutcome {
+        status: LeaderLaunchStatus::Exited,
+        exit_code: code,
+        session_name: plan.session_name.clone(),
+        reason: None,
+    })
+}
+
+fn ensure_managed_leader_pane(
+    transport: &TmuxBackend,
+    session: &SessionName,
+    window: &WindowName,
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<SpawnResult, LeaderError> {
+    if transport.has_session(session).unwrap_or(false) {
+        if transport
+            .list_windows(session)
+            .unwrap_or_default()
+            .iter()
+            .any(|existing| existing.as_str() == window.as_str())
+        {
+            if let Some(existing) = transport
+                .list_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .find(|pane| {
+                    pane.session.as_str() == session.as_str()
+                        && pane.window_name.as_ref().map(WindowName::as_str)
+                            == Some(window.as_str())
+                })
+            {
+                return Ok(SpawnResult {
+                    pane_id: existing.pane_id,
+                    session: session.clone(),
+                    window: window.clone(),
+                    child_pid: existing.pane_pid,
+                });
+            }
+        }
+        transport
+            .spawn_into(session, window, &plan.provider_argv, workspace, &plan.leader_env)
+            .map_err(|error| LeaderError::Start(error.to_string()))
+    } else {
+        transport
+            .spawn_first(session, window, &plan.provider_argv, workspace, &plan.leader_env)
+            .map_err(|error| LeaderError::Start(error.to_string()))
+    }
+}
+
+fn persist_managed_leader_binding(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+    spawned: &SpawnResult,
+) -> Result<(), LeaderError> {
+    let identity = plan
+        .identity
+        .as_ref()
+        .ok_or_else(|| LeaderError::Start("managed leader identity missing".to_string()))?;
+    let mut state = crate::state::persist::load_runtime_state(workspace)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let owner_epoch = state
+        .get("owner_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            state
+                .get("team_owner")
+                .and_then(|owner| owner.get("owner_epoch"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(0)
+        .saturating_add(1);
+    let now = chrono::Utc::now().to_rfc3339();
+    let socket = crate::tmux_backend::socket_name_for_workspace(workspace);
+    let provider = serde_json::to_value(plan.provider)?;
+    let session = spawned.session.as_str().to_string();
+    let window = spawned.window.as_str().to_string();
+    let pane = spawned.pane_id.as_str().to_string();
+    let receiver = serde_json::json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "provider": provider.clone(),
+        "pane_id": pane,
+        "pane": pane,
+        "session_name": session,
+        "window_name": window,
+        "tmux_socket": socket,
+        "leader_session_uuid": identity.leader_session_uuid,
+        "owner_epoch": owner_epoch,
+        "attached_at": now,
+        "discovery": "managed_launcher",
+    });
+    let owner = serde_json::json!({
+        "pane_id": pane,
+        "provider": provider.clone(),
+        "machine_fingerprint": identity.machine_fingerprint,
+        "leader_session_uuid": identity.leader_session_uuid,
+        "owner_epoch": owner_epoch,
+        "claimed_at": now,
+        "claimed_via": "claim-leader",
+        "os_user": identity.os_user,
+    });
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("session_name".to_string(), serde_json::json!(session));
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::json!(identity.team_id.as_str()),
+        );
+        obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
+        obj.insert("is_external_leader".to_string(), serde_json::json!(false));
+        obj.insert(
+            "leader_client".to_string(),
+            serde_json::json!({
+                "diagnostic_only": true,
+                "attach_mode": if std::env::var_os("TMUX").is_some() { "switch-client" } else { "attach-session" },
+                "tmux": std::env::var("TMUX").ok(),
+            }),
+        );
+        obj.insert("leader_receiver".to_string(), receiver);
+        obj.insert("team_owner".to_string(), owner);
+        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
+    }
+    let entry = crate::state::projection::compact_team_state(&state);
+    if let Some(obj) = state.as_object_mut() {
+        let teams = obj
+            .entry("teams".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(teams) = teams.as_object_mut() {
+            teams.insert(identity.team_id.as_str().to_string(), entry);
+        }
+    }
+    crate::state::persist::save_runtime_state(workspace, &state)?;
+    Ok(())
 }
 
 fn insert_detach_flag(argv: &mut Vec<String>) -> bool {
@@ -338,6 +584,24 @@ fn spawn_exec_provider_startup_prompt_handler(provider: Provider, workspace: Pat
         let transport = tmux_transport_for_current_pane();
         let _ = handle_exec_provider_startup_prompts(
             provider, &workspace, &pane_id, &transport, 30, 0.5,
+        );
+    });
+}
+
+fn spawn_managed_provider_startup_prompt_handler(
+    provider: Provider,
+    workspace: PathBuf,
+    pane_id: String,
+) {
+    std::thread::spawn(move || {
+        let transport = TmuxBackend::for_workspace(&workspace);
+        let _ = handle_exec_provider_startup_prompts(
+            provider,
+            &workspace,
+            &pane_id,
+            &transport,
+            30,
+            0.5,
         );
     });
 }

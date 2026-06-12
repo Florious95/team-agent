@@ -94,6 +94,7 @@ use super::*;
     #[test]
     fn leader_start_mode_serializes_to_python_strings() {
         assert_eq!(serde_json::to_string(&LeaderStartMode::ExecProvider).unwrap(), "\"exec_provider\"");
+        assert_eq!(serde_json::to_string(&LeaderStartMode::ManagedTmuxClient).unwrap(), "\"managed_tmux_client\"");
         assert_eq!(serde_json::to_string(&LeaderStartMode::NewTmuxSession).unwrap(), "\"new_tmux_session\"");
         assert_eq!(serde_json::to_string(&LeaderStartMode::AttachExisting).unwrap(), "\"attach_existing\"");
     }

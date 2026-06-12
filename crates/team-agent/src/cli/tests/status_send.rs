@@ -36,6 +36,10 @@ use super::*;
         for key in [
             "team",
             "session_name",
+            "leader_topology",
+            "is_external_leader",
+            "leader_attach_command",
+            "leader_client",
             "tmux_session_present",
             "leader_receiver",
             "agents",
@@ -58,6 +62,27 @@ use super::*;
         // compact bounds: queued_messages[:8] and latest_results[:5] -> arrays.
         assert!(obj["queued_messages"].is_array());
         assert!(obj["latest_results"].as_array().unwrap().len() <= 5);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn status_port_status_reports_managed_leader_topology_and_attach_command() {
+        let ws = seed_status_workspace();
+        let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("is_external_leader".to_string(), json!(false));
+            obj.insert("session_name".to_string(), json!("team-current"));
+        }
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+
+        assert_eq!(v["leader_topology"], json!("managed"));
+        assert_eq!(v["is_external_leader"], json!(false));
+        let attach = v["leader_attach_command"]
+            .as_str()
+            .expect("managed status includes attach command");
+        assert!(attach.contains("attach -t team-current:leader"), "{attach}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 

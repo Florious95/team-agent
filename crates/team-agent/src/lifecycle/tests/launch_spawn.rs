@@ -1206,6 +1206,69 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
 }
 
 #[test]
+fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    seed_healthy_coordinator(workspace);
+    crate::state::persist::save_runtime_state(
+        workspace,
+        &json!({
+            "active_team_key": "teamdir",
+            "session_name": "team-teamdir",
+            "is_external_leader": false,
+            "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
+            "leader_receiver": {"mode": "direct_tmux", "status": "attached", "pane_id": "%42"},
+            "team_owner": {"pane_id": "%42", "owner_epoch": 1},
+            "agents": {},
+            "teams": {
+                "teamdir": {
+                    "session_name": "team-teamdir",
+                    "is_external_leader": false,
+                    "leader_client": {"diagnostic_only": true, "attach_mode": "attach-session"},
+                    "agents": {}
+                }
+            }
+        }),
+    )
+    .expect("seed managed leader state");
+    let transport = OfflineTransport::new();
+
+    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+        .expect("quick_start_with_transport must reach Ready");
+    let attach_commands = match report {
+        QuickStartReport::Ready { attach_commands, .. } => attach_commands,
+        other => panic!("quick_start must reach Ready; got {other:?}"),
+    };
+
+    assert!(
+        attach_commands.iter().any(|cmd| cmd.contains(":leader")),
+        "managed topology quick-start output must include the leader window attach command: {attach_commands:?}"
+    );
+    let (_raw, state) = raw_runtime_state(workspace);
+    assert_eq!(state["is_external_leader"], json!(false));
+    assert_eq!(state["leader_client"]["diagnostic_only"], json!(true));
+}
+
+#[test]
+fn attach_window_names_for_state_agents_include_managed_leader_and_layout_windows() {
+    let state = json!({
+        "is_external_leader": false,
+        "agents": {
+            "w1": {"layout_window": "team-w1", "window": "w1"},
+            "w2": {"layout_window": "team-w1", "window": "w2"},
+            "w4": {"layout_window": "team-w2", "window": "w4"}
+        }
+    });
+
+    let windows = crate::lifecycle::launch::attach_window_names_for_state_agents(
+        &state,
+        ["w1", "w2", "w4"].into_iter(),
+    );
+
+    assert_eq!(windows, vec!["leader", "team-w1", "team-w2"]);
+}
+
+#[test]
 fn quick_start_no_display_keeps_one_window_per_agent() {
     let roles = ["w1", "w2"]
         .into_iter()

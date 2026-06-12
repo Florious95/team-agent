@@ -104,6 +104,10 @@ pub fn format_status_summary(data: &Value) -> String {
         ],
         "-",
     );
+    let topology = non_empty_str(
+        data.get("leader_topology").and_then(Value::as_str),
+        "external",
+    );
     let agents = data.get("agents").unwrap_or(&Value::Null);
     let health = data.get("agent_health").unwrap_or(&Value::Null);
     let counts = agent_summary_counts(agents, health);
@@ -137,7 +141,7 @@ pub fn format_status_summary(data: &Value) -> String {
         .map(format_latest_result)
         .unwrap_or_else(|| "none".to_string());
     format!(
-        "coordinator: {coordinator} schema_ok={schema_ok} tmux={tmux}\nreceiver: {pane} cmd={cmd}\n{agent_line}\nqueued: {queued} mailbox messages awaiting delivery\nlatest result: {latest}"
+        "coordinator: {coordinator} schema_ok={schema_ok} tmux={tmux}\nreceiver: {pane} cmd={cmd} topology={topology}\n{agent_line}\nqueued: {queued} mailbox messages awaiting delivery\nlatest result: {latest}"
     )
 }
 

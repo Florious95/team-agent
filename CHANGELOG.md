@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.16
+
+- **`team-agent <provider>` is now structurally unkillable from your terminal**: managed launchers (`team-agent codex`, `team-agent claude`, `team-agent copilot`) now create the leader provider process **inside** the team's tmux session and attach your terminal to it as a tmux client. Closing the terminal — or even `kill`-ing it from outside — only detaches the client; the leader provider and the rest of the team keep running. Same semantic as `tmux new-session -t ...` but with no manual tmux invocation. Status output, the team-agent skill, and `attach-leader` output all carry the `:leader` window pointer so re-attaching from anywhere is one command.
+- **`--external-leader` opt-out keeps the old topology** for users who already drive the leader from their own terminal stack: pass `--external-leader` to `team-agent codex` / `claude` / `copilot` and the launcher behaves like before — the leader provider stays on the terminal you started it from, and the framework only treats it as the leader (no managed-session take-over). `state.is_external_leader` carries the choice forward through dispatch / restart / status; nested teams keep separate is_external_leader values so a parent and child team can each use the topology that fits.
+- **`team-agent shutdown` no longer reports a false `partial`** when the coordinator hits a "late success" race (it finished cleanup just after the shutdown timer started reporting). The shutdown result classifier now folds the late-success outcome into the success bucket — the JSON / `lifecycle.shutdown` event now say `ok` when the coordinator did in fact stop cleanly.
+
 ## 0.3.15
 
 - **Adaptive layout is on by default**: `team-agent quick-start` now lays out worker windows automatically — up to 3 panes per window (332 split for 8 workers becomes 3+3+2), agents added or restarted later land in the same adaptive layout instead of arriving as orphan windows, and the leader pane is never touched. The whole team shares one tmux socket and one window tree, so opening a second team in the same workspace doesn't fight the first.

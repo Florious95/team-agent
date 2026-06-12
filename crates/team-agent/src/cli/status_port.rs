@@ -48,6 +48,22 @@ use rusqlite::params;
             .cloned()
             .unwrap_or_else(|| json!({}));
         let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
+        let is_external_leader = state
+            .get("is_external_leader")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let leader_topology = if is_external_leader { "external" } else { "managed" };
+        let leader_attach_command = if is_external_leader {
+            None
+        } else {
+            session_name.as_str().and_then(|session| {
+                crate::tmux_backend::attach_command_for_workspace(
+                    workspace,
+                    &crate::transport::SessionName::new(session.to_string()),
+                    "leader",
+                )
+            })
+        };
         let tmux_present = tmux_session_present(workspace, session_name.as_str());
         let mut readiness_state = state.clone();
         if let Some(obj) = readiness_state.as_object_mut() {
@@ -58,6 +74,10 @@ use rusqlite::params;
             "ok": true,
             "team": state.pointer("/leader/id").cloned().unwrap_or_else(|| json!("leader")),
             "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
+            "leader_topology": leader_topology,
+            "is_external_leader": is_external_leader,
+            "leader_attach_command": leader_attach_command,
+            "leader_client": state.get("leader_client").cloned().unwrap_or(Value::Null),
             "tmux_session_present": tmux_present,
             "all_spawned": readiness.get("all_spawned").cloned().unwrap_or(Value::Bool(false)),
             "all_attached_receiver": readiness.get("all_attached_receiver").cloned().unwrap_or(Value::Bool(true)),
@@ -553,6 +573,10 @@ use rusqlite::params;
         json!({
             "team": full.get("team").cloned().unwrap_or(Value::Null),
             "session_name": full.get("session_name").cloned().unwrap_or(Value::Null),
+            "leader_topology": full.get("leader_topology").cloned().unwrap_or_else(|| json!("external")),
+            "is_external_leader": full.get("is_external_leader").cloned().unwrap_or(Value::Bool(true)),
+            "leader_attach_command": full.get("leader_attach_command").cloned().unwrap_or(Value::Null),
+            "leader_client": full.get("leader_client").cloned().unwrap_or(Value::Null),
             "tmux_session_present": full.get("tmux_session_present").cloned().unwrap_or(Value::Bool(false)),
             "all_spawned": full.get("all_spawned").cloned().unwrap_or(Value::Bool(false)),
             "all_attached_receiver": full.get("all_attached_receiver").cloned().unwrap_or(Value::Bool(true)),

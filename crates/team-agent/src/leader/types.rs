@@ -145,6 +145,9 @@ pub enum RereadReason {
 pub enum LeaderStartMode {
     /// `os.environ["TMUX"]` 已在 tmux 内 → exec provider in-place。
     ExecProvider,
+    /// Managed launcher topology: provider pane lives in the team session's `leader` window;
+    /// the invoking terminal is only a tmux client attached/switched to that pane.
+    ManagedTmuxClient,
     /// 无 tmux session → 新建 tmux session。
     NewTmuxSession,
     /// session 已存在 / `--attach-session` → attach。
@@ -331,6 +334,12 @@ pub struct LeaderStartPlan {
     pub session_name: Option<SessionName>,
     /// 要 exec 的 argv(provider argv 或 tmux argv)。
     pub argv: Vec<String>,
+    /// For managed launches, the provider command argv spawned inside the leader pane.
+    pub provider_argv: Vec<String>,
+    /// For managed launches, the window that hosts the leader provider pane.
+    pub leader_window: Option<WindowName>,
+    /// True for external/current-pane leader compatibility paths.
+    pub is_external_leader: bool,
     /// `new_tmux_session` / `exec_provider` 的 leader env 导出。
     pub leader_env: BTreeMap<String, String>,
     pub identity: Option<LeaderIdentity>,

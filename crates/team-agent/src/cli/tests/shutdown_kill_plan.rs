@@ -161,6 +161,7 @@ struct CleanShutdownTransport {
     targets: Vec<PaneInfo>,
     kill_server_called: Mutex<bool>,
     probe_timeout_kind: Option<&'static str>,
+    targets_persist_after_kill: bool,
 }
 
 impl CleanShutdownTransport {
@@ -170,6 +171,7 @@ impl CleanShutdownTransport {
             targets: Vec::new(),
             kill_server_called: Mutex::new(false),
             probe_timeout_kind: None,
+            targets_persist_after_kill: false,
         }
     }
 
@@ -184,6 +186,11 @@ impl CleanShutdownTransport {
 
     fn with_probe_timeout(mut self, probe: &'static str) -> Self {
         self.probe_timeout_kind = Some(probe);
+        self
+    }
+
+    fn with_targets_persist_after_kill(mut self) -> Self {
+        self.targets_persist_after_kill = true;
         self
     }
 }
@@ -249,7 +256,7 @@ impl Transport for CleanShutdownTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        if *self.session_present.lock().unwrap() {
+        if *self.session_present.lock().unwrap() || self.targets_persist_after_kill {
             Ok(self.targets.clone())
         } else {
             Ok(Vec::new())
@@ -376,6 +383,85 @@ fn ps_table_timeout_still_degrades_shutdown_truth() {
 }
 
 #[test]
+fn bounded_coordinator_stop_returns_grace_window_late_success() {
+    let ws = tmp_shutdown_workspace("late-coordinator-stop-success");
+    let report = crate::cli::lifecycle_port::stop_coordinator_bounded_with(
+        crate::coordinator::WorkspacePath::new(ws),
+        std::time::Duration::from_millis(5),
+        |_workspace| {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            Ok(crate::coordinator::StopReport {
+                ok: true,
+                status: crate::coordinator::StopOutcome::Stopped,
+                pid: Some(crate::coordinator::Pid::new(12345)),
+            })
+        },
+    )
+    .expect("late result inside grace window must be returned")
+    .expect("stop result should be ok");
+
+    assert!(report.ok, "late success must not be discarded as timeout");
+    assert_eq!(report.status, crate::coordinator::StopOutcome::Stopped);
+}
+
+#[test]
+fn shutdown_outcome_late_or_postcheck_gone_is_ok_with_lsof_diagnostic() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: true,
+            coordinator_stop_ok: None,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+        },
+    );
+
+    assert!(out.ok);
+    assert_eq!(out.status, "ok");
+    assert_eq!(out.phase, None);
+}
+
+#[test]
+fn shutdown_outcome_coordinator_timeout_still_running_is_timeout() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: true,
+            coordinator_stop_ok: None,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+        },
+    );
+
+    assert!(!out.ok);
+    assert_eq!(out.status, "timeout");
+    assert_eq!(out.phase, Some("stop_coordinator"));
+}
+
+#[test]
+fn shutdown_outcome_ps_table_degraded_still_partial_after_coordinator_gone() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            cleanup_truth_degraded: true,
+            coordinator_timeout: true,
+            coordinator_stop_ok: None,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+        },
+    );
+
+    assert!(!out.ok);
+    assert_eq!(out.status, "partial");
+    assert_eq!(out.phase, Some("os_probe"));
+}
+
+#[test]
 fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive() {
     let ws = tmp_shutdown_workspace("leader-env-socket-no-kill-server");
     crate::state::persist::save_runtime_state(
@@ -415,5 +501,45 @@ fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive()
     assert!(
         !transport.kill_server_called(),
         "leader-env/shared socket shutdown must kill sessions individually, never kill-server"
+    );
+}
+
+#[test]
+fn managed_leader_shutdown_never_kills_server_even_when_socket_looks_exclusive() {
+    let ws = tmp_shutdown_workspace("managed-leader-no-kill-server");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-current",
+            "is_external_leader": false,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%1"),
+            session: SessionName::new("team-current"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("leader")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_targets_persist_after_kill();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["killed_sessions"], json!(["team-current"]));
+    assert_eq!(out["spared_sessions"], json!([]));
+    assert!(
+        !transport.kill_server_called(),
+        "managed topology must clear the team session/window without kill-server"
     );
 }

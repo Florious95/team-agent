@@ -202,6 +202,8 @@ pub struct LeaderLauncherArgs {
     pub confirm_attach: bool,
     /// `--attach-session <name>` / `--attach-session=<name>`。
     pub attach_session: Option<String>,
+    /// 0.3.16 topology opt-out: keep the old external/current-pane leader launcher path.
+    pub external_leader: bool,
 }
 
 // =============================================================================

@@ -59,35 +59,131 @@ use super::*;
     #[test]
     #[serial_test::serial(env)]
     fn leader_start_plan_pins_mode_and_leader_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TMUX", None), ("TMUX_PANE", None)]);
         let ws = std::env::temp_dir().join(format!("ta_rs_lsp_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
-        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None).unwrap();
+        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
         assert_eq!(plan.provider, Provider::Fake);
-        if std::env::var_os("TMUX").is_some() {
-            // 已在 tmux 内 → exec in-place。
-            assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
-        } else {
-            // 不在 tmux → 新建 tmux session(测试环境假定 tmux 可用;否则 Err(Start))。
-            assert_eq!(plan.mode, LeaderStartMode::NewTmuxSession);
-            // session_name 由派生公式确定。
-            assert_eq!(plan.session_name.as_ref(), Some(&leader_session_name(Provider::Fake, &ws)));
-            // plan 边界 detached 恒 false(`-d` 插入在 start_leader 层,非此处)。
-            assert!(!plan.detached, "leader_start_plan 返回值 detached 恒 false");
-            // leader_env 携带 5 个 TEAM_AGENT_* 导出键(_leader_provider_env)。
-            for key in [
-                "TEAM_AGENT_LEADER_PROVIDER",
-                "TEAM_AGENT_LEADER_SESSION_UUID",
-                "TEAM_AGENT_MACHINE_FINGERPRINT",
-                "TEAM_AGENT_WORKSPACE",
-                "TEAM_AGENT_TEAM_ID",
-            ] {
-                assert!(plan.leader_env.contains_key(key), "leader_env 缺导出键 {key}");
-            }
-            assert_eq!(
-                plan.leader_env.get("TEAM_AGENT_LEADER_PROVIDER").map(String::as_str),
-                Some("fake")
-            );
+        assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
+        assert_eq!(
+            plan.session_name.as_ref().map(SessionName::as_str),
+            Some("team-current")
+        );
+        assert_eq!(plan.leader_window.as_ref().map(WindowName::as_str), Some("leader"));
+        assert!(!plan.is_external_leader);
+        assert!(
+            plan.argv.iter().any(|arg| arg == "attach-session"),
+            "no-tmux managed launch attaches the user client to the team leader window: {:?}",
+            plan.argv
+        );
+        assert!(
+            plan.argv.iter().any(|arg| arg == "team-current:leader"),
+            "managed client target must be the team leader window: {:?}",
+            plan.argv
+        );
+        // plan 边界 detached 恒 false(`-d` 插入在 start_leader 层,非此处)。
+        assert!(!plan.detached, "leader_start_plan 返回值 detached 恒 false");
+        // leader_env 携带 5 个 TEAM_AGENT_* 导出键(_leader_provider_env)。
+        for key in [
+            "TEAM_AGENT_LEADER_PROVIDER",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_MACHINE_FINGERPRINT",
+            "TEAM_AGENT_WORKSPACE",
+            "TEAM_AGENT_TEAM_ID",
+        ] {
+            assert!(plan.leader_env.contains_key(key), "leader_env 缺导出键 {key}");
         }
+        assert_eq!(
+            plan.leader_env.get("TEAM_AGENT_LEADER_PROVIDER").map(String::as_str),
+            Some("fake")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn leader_start_plan_external_leader_keeps_exec_provider_in_tmux() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TMUX", Some("/private/tmp/tmux-501/default,88432,187"))]);
+        let ws = std::env::temp_dir().join(format!("ta_rs_lsp_external_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, true).unwrap();
+
+        assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
+        assert!(plan.is_external_leader);
+        assert_eq!(plan.leader_window, None);
+        assert_eq!(plan.argv, vec!["fake".to_string()]);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn managed_leader_reuses_existing_team_session_name_without_double_prefix() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TMUX", None), ("TMUX_PANE", None)]);
+        let ws = std::env::temp_dir().join(format!("ta_rs_lsp_existing_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &serde_json::json!({"session_name": "team-alpha"}),
+        )
+        .unwrap();
+
+        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+
+        assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
+        assert_eq!(
+            plan.session_name.as_ref().map(SessionName::as_str),
+            Some("team-alpha")
+        );
+        assert!(
+            !plan.argv.iter().any(|arg| arg.contains("team-team-alpha")),
+            "managed session name must not gain a second team- prefix: {:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn managed_leader_in_same_tmux_server_switches_client() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ws = std::env::temp_dir().join(format!("ta_rs_lsp_switch_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let socket = crate::tmux_backend::socket_name_for_workspace(&ws);
+        let endpoint = format!("/private/tmp/tmux-501/{socket},88432,187");
+        let _e = EnvGuard::apply(&[("TMUX", Some(&endpoint))]);
+
+        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
+
+        assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
+        assert!(
+            plan.argv.iter().any(|arg| arg == "switch-client"),
+            "same-server managed launch must switch the existing tmux client: {:?}",
+            plan.argv
+        );
+        assert!(
+            plan.argv.iter().any(|arg| arg == "team-current:leader"),
+            "managed switch target must be the team leader window: {:?}",
+            plan.argv
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn managed_leader_in_different_tmux_server_refuses_with_n38_hint() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TMUX", Some("/private/tmp/tmux-501/default,88432,187"))]);
+        let ws = std::env::temp_dir().join(format!("ta_rs_lsp_refuse_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let err = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("Error:"), "{err}");
+        assert!(err.contains("Reason:"), "{err}");
+        assert!(err.contains("Action:"), "{err}");
+        assert!(err.contains("--external-leader"), "{err}");
     }
 
     #[test]

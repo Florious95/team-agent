@@ -858,6 +858,7 @@ fn save_launched_team_state_for_key(
         );
     }
     promote_launched_binding_from_team_entry(&mut launched, &launched_key);
+    preserve_existing_leader_topology(&existing, &launched_key, &mut launched);
     drop_foreign_seeded_owner(&existing, &launched_key, &mut launched);
     drop_bare_worker_seeded_owner(&mut launched, &launched_key);
     let merged = if team_key.is_some() {
@@ -869,6 +870,28 @@ fn save_launched_team_state_for_key(
     drop_unbound_top_level_owner(&mut projected);
     save_runtime_state(workspace, &projected)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn preserve_existing_leader_topology(
+    existing: &serde_json::Value,
+    launched_key: &str,
+    launched: &mut serde_json::Value,
+) {
+    let Some(obj) = launched.as_object_mut() else {
+        return;
+    };
+    let existing_team = existing
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|teams| teams.get(launched_key))
+        .unwrap_or(existing);
+    for key in ["is_external_leader", "leader_client"] {
+        if !obj.contains_key(key) {
+            if let Some(value) = existing_team.get(key).or_else(|| existing.get(key)) {
+                obj.insert(key.to_string(), value.clone());
+            }
+        }
+    }
 }
 
 fn drop_bare_worker_seeded_owner(launched: &mut serde_json::Value, launched_key: &str) {
@@ -2834,7 +2857,12 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     //   asynchronously after spawn), so the verdict is PendingToolLoad — never
     //   bare Ready.
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
-    let attach_windows = started_attach_window_names(&launch.started);
+    let attach_windows = load_runtime_state(&workspace)
+        .ok()
+        .map(|state| {
+            attach_window_names_with_managed_leader(&state, started_attach_window_names(&launch.started))
+        })
+        .unwrap_or_else(|| started_attach_window_names(&launch.started));
     let attach_commands = attach_commands_for_runtime_windows(
         launch.tmux_endpoint.as_deref(),
         &workspace,
@@ -2934,8 +2962,33 @@ fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
     windows
 }
 
+pub(crate) fn attach_window_names_for_state_agents<'a>(
+    state: &serde_json::Value,
+    agent_ids: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let windows = agent_ids
+        .into_iter()
+        .map(|agent_id| {
+            state
+                .get("agents")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|agents| agents.get(agent_id))
+                .and_then(|agent| {
+                    agent
+                        .get("layout_window")
+                        .or_else(|| agent.get("window"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|window| !window.is_empty())
+                })
+                .unwrap_or(agent_id)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    attach_window_names_with_managed_leader(state, windows)
+}
+
 fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<String> {
-    let mut windows = state
+    let windows = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .map(|agents| {
@@ -2952,9 +3005,26 @@ fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    attach_window_names_with_managed_leader(state, windows)
+}
+
+fn attach_window_names_with_managed_leader(
+    state: &serde_json::Value,
+    mut windows: Vec<String>,
+) -> Vec<String> {
+    if state_uses_managed_leader(state) {
+        windows.push("leader".to_string());
+    }
     windows.sort();
     windows.dedup();
     windows
+}
+
+fn state_uses_managed_leader(state: &serde_json::Value) -> bool {
+    state
+        .get("is_external_leader")
+        .and_then(serde_json::Value::as_bool)
+        .is_some_and(|external| !external)
 }
 
 /// BUG-7 helper: derive a [`QuickStartReadiness`] verdict from the just-written

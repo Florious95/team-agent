@@ -44,21 +44,23 @@ fn managed_claude_leader_plan_uses_workspace_socket_tmux_not_default_server() {
         false,
         false,
         None,
+        false,
     )
     .expect("fake claude/tmux make leader_start_plan reachable");
 
     assert_eq!(
         plan.mode,
-        team_agent::leader::LeaderStartMode::NewTmuxSession
+        team_agent::leader::LeaderStartMode::ManagedTmuxClient
     );
     assert!(
         plan.argv.len() >= 5
             && plan.argv[0] == "tmux"
             && plan.argv[1] == "-L"
             && plan.argv[2].starts_with("ta-")
-            && plan.argv.iter().any(|arg| arg == "new-session"),
-        "managed leader tmux argv must be workspace-socketed (`tmux -L ta-* new-session ...`) \
-         so leader and workers share the same tmux server. default-socket argv={:?}",
+            && plan.argv.iter().any(|arg| arg == "attach-session")
+            && plan.argv.iter().any(|arg| arg.ends_with(":leader")),
+        "managed leader client argv must be workspace-socketed (`tmux -L ta-* attach-session -t <team>:leader`) \
+         so the provider pane and workers share the same tmux server. default-socket argv={:?}",
         plan.argv
     );
 }
@@ -159,7 +161,7 @@ fn cli_leader_launcher_does_not_mutate_leader_receiver_or_team_owner() {
     ]);
 
     let _ = Command::new(bin())
-        .args(["claude", "--json"])
+        .args(["claude", "--external-leader", "--json"])
         .current_dir(&workspace)
         .output()
         .expect("run team-agent claude");
@@ -169,6 +171,69 @@ fn cli_leader_launcher_does_not_mutate_leader_receiver_or_team_owner() {
     assert_owner_binding_unchanged(&before, &after, "/team_owner");
     assert_owner_binding_unchanged(&before, &after, "/teams/current/leader_receiver");
     assert_owner_binding_unchanged(&before, &after, "/teams/current/team_owner");
+}
+
+#[test]
+#[serial(env)]
+fn managed_leader_launcher_writes_client_diagnostics_outside_owner_gate() {
+    let workspace = tmp_dir("managed-client-diagnostic");
+    let fake = FakeLauncherTools::new(&workspace);
+    let _env = EnvGuard::set([
+        (
+            "PATH",
+            Some(format!(
+                "{}:{}",
+                fake.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )),
+        ),
+        ("TMUX", None),
+        ("TMUX_PANE", None),
+    ]);
+
+    let out = Command::new(bin())
+        .args(["claude", "--json"])
+        .current_dir(&workspace)
+        .output()
+        .expect("run team-agent claude");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "fake managed launcher should complete; stdout={stdout:?} stderr={stderr:?}"
+    );
+    let state = load_runtime_state(&workspace).expect("load runtime state");
+
+    assert_eq!(state["is_external_leader"], json!(false));
+    assert_eq!(state["leader_client"]["diagnostic_only"], json!(true));
+    assert_eq!(state["leader_receiver"]["pane_id"], json!("%42"));
+    assert_eq!(state["team_owner"]["pane_id"], json!("%42"));
+    for path in ["/leader_receiver", "/team_owner"] {
+        let value = state.pointer(path).expect("owner/receiver");
+        assert!(
+            value.get("diagnostic_only").is_none()
+                && value.get("attach_mode").is_none()
+                && value.get("tmux").is_none(),
+            "client diagnostic fields must not enter owner gate at {path}: {value}"
+        );
+    }
+}
+
+#[test]
+fn managed_topology_source_guard_keeps_external_leader_protections_path_aware() {
+    let cli_source = include_str!("../src/cli/mod.rs");
+
+    assert!(
+        cli_source.contains("fn state_uses_external_leader")
+            && cli_source.contains("if !state_uses_external_leader(state)")
+            && cli_source.contains("managed_leader_socket_cleanup"),
+        "managed topology must be an explicit path branch, not a deletion of external leader handling"
+    );
+    assert!(
+        cli_source.contains("extend_protection_with_leader_panes")
+            && cli_source.contains("LEADER_SESSION_PREFIX"),
+        "external leader spare/protection guards must remain alongside managed topology"
+    );
 }
 
 #[test]

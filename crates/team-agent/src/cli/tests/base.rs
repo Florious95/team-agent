@@ -52,6 +52,7 @@ use super::*;
         assert!(!got.attach_existing);
         assert!(!got.confirm_attach);
         assert_eq!(got.attach_session, None);
+        assert!(!got.external_leader);
     }
 
     #[test]
@@ -70,6 +71,23 @@ use super::*;
         let got = leader_launcher_args(&["--attach-existing".into()]).unwrap();
         assert!(got.attach_existing);
         assert!(!got.confirm_attach);
+    }
+
+    #[test]
+    fn leader_launcher_args_external_leader_opt_out() {
+        let got = leader_launcher_args(&[
+            "--external-leader".into(),
+            "--".into(),
+            "--model".into(),
+            "opus".into(),
+        ])
+        .unwrap();
+        assert!(got.external_leader);
+        assert!(!got.attach_existing);
+        assert_eq!(
+            got.provider_args,
+            vec!["--".to_string(), "--model".to_string(), "opus".to_string()]
+        );
     }
 
     #[test]
@@ -272,7 +290,7 @@ use super::*;
     fn format_status_summary_full_byte_lock() {
         // golden:
         // coordinator: running schema_ok=True tmux=True
-        // receiver: %3 cmd=codex
+        // receiver: %3 cmd=codex topology=external
         // agents: 2 — running=1 busy=1 idle=0 stopped=0 failed=0 unknown=0
         // queued: 2 mailbox messages awaiting delivery
         // latest result: a1 -> did the thing @ -
@@ -287,7 +305,7 @@ use super::*;
         });
         let got = format_status_summary(&data);
         let expected = "coordinator: running schema_ok=true tmux=true\n\
-receiver: %3 cmd=codex\n\
+receiver: %3 cmd=codex topology=external\n\
 agents: 2 — running=1 busy=1 idle=0 stopped=0 failed=0 unknown=0\n\
 queued: 2 mailbox messages awaiting delivery\n\
 latest result: a1 -> did the thing @ -";
@@ -299,7 +317,7 @@ latest result: a1 -> did the thing @ -";
         // golden empty data: stopped/false/false, dashes, 0 counts, none latest.
         let got = format_status_summary(&json!({}));
         let expected = "coordinator: stopped schema_ok=false tmux=false\n\
-receiver: - cmd=-\n\
+receiver: - cmd=- topology=external\n\
 agents: 0 — running=0 busy=0 idle=0 stopped=0 failed=0 unknown=0\n\
 queued: 0 mailbox messages awaiting delivery\n\
 latest result: none";

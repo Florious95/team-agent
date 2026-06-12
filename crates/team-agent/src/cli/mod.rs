@@ -148,6 +148,7 @@ pub mod lifecycle_port {
             attach.attach_existing,
             attach.confirm_attach,
             attach_session.as_ref(),
+            attach.external_leader,
         )
         .map_err(|e| CliError::Runtime(e.to_string()))?;
         let outcome = crate::leader::start::execute_leader_plan(&plan, cwd)
@@ -157,10 +158,21 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::Detached => true,
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
+        let leader_attach_command = if plan.is_external_leader {
+            None
+        } else {
+            plan.session_name.as_ref().and_then(|session| {
+                crate::tmux_backend::attach_command_for_workspace(cwd, session, "leader")
+            })
+        };
         Ok(json!({
             "ok": ok,
             "provider": provider,
             "mode": plan.mode,
+            "leader_topology": if plan.is_external_leader { "external" } else { "managed" },
+            "is_external_leader": plan.is_external_leader,
+            "leader_window": plan.leader_window.as_ref().map(|window| window.as_str().to_string()),
+            "leader_attach_command": leader_attach_command,
             "status": outcome.status,
             "exit_code": outcome.exit_code,
             "reason": outcome.reason,
@@ -282,6 +294,9 @@ pub mod lifecycle_port {
         // no independent ps/tmux re-derivation (N39).
         let pane_targets = transport.list_targets().unwrap_or_default();
         let sessions = socket_session_names_from_targets(&pane_targets);
+        if !state_uses_external_leader(state) {
+            return managed_leader_socket_cleanup(transport, state, &sessions, event_log);
+        }
         let anchor_sessions = anchor_sessions_from_state(state, &pane_targets, event_log);
         match sessions_to_kill(&sessions, &anchor_sessions) {
             KillDecision::KillServerExclusive => {
@@ -344,6 +359,66 @@ pub mod lifecycle_port {
                     error,
                 }
             }
+        }
+    }
+
+    fn state_uses_external_leader(state: &Value) -> bool {
+        state
+            .get("is_external_leader")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    }
+
+    fn managed_leader_socket_cleanup(
+        transport: &dyn crate::transport::Transport,
+        state: &Value,
+        sessions: &[crate::transport::SessionName],
+        event_log: &crate::event_log::EventLog,
+    ) -> ShutdownSocketCleanup {
+        let target = state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .filter(|session| !session.is_empty())
+            .map(crate::transport::SessionName::new);
+        let mut to_kill = Vec::new();
+        if let Some(target) = target {
+            if sessions.is_empty()
+                || sessions
+                    .iter()
+                    .any(|session| session.as_str() == target.as_str())
+            {
+                to_kill.push(target);
+            }
+        }
+        let spared = sessions
+            .iter()
+            .filter(|session| {
+                !to_kill
+                    .iter()
+                    .any(|target| target.as_str() == session.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let _ = event_log.write(
+            "shutdown.kill_server_skipped_managed_leader",
+            json!({
+                "reason": "managed_leader_topology",
+                "spared_sessions": spared.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                "killed_sessions": to_kill.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            }),
+        );
+        let mut error = None;
+        for session in &to_kill {
+            if let Err(err) = transport.kill_session(session) {
+                if !tmux_absent_error(&err.to_string()) {
+                    error.get_or_insert_with(|| err.to_string());
+                }
+            }
+        }
+        ShutdownSocketCleanup {
+            killed_sessions: to_kill,
+            spared_sessions: spared,
+            error,
         }
     }
 
@@ -483,8 +558,12 @@ pub mod lifecycle_port {
         );
         deadline.check("stop_coordinator")?;
         let mut coordinator_timeout = false;
+        let mut coordinator_post_stop = CoordinatorStopObservation::NotNeeded;
+        let mut coordinator_pid_for_report = None;
         let stopped = if team.is_none() {
             let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
+            let coordinator_pid_before_stop = crate::coordinator::coordinator_health(&wp).pid;
+            coordinator_pid_for_report = coordinator_pid_before_stop.map(|pid| pid.get());
             match stop_coordinator_bounded(wp, std::time::Duration::from_millis(900)) {
                 Some(Ok(report)) => Some(report),
                 Some(Err(error)) => {
@@ -493,12 +572,19 @@ pub mod lifecycle_port {
                 }
                 None => {
                     coordinator_timeout = true;
+                    let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
+                    coordinator_post_stop =
+                        coordinator_post_stop_observation(&wp, coordinator_pid_before_stop);
                     None
                 }
             }
         } else {
             None
         };
+        if let Some(stopped) = stopped.as_ref().filter(|stopped| !stopped.ok) {
+            let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
+            coordinator_post_stop = coordinator_post_stop_observation(&wp, stopped.pid);
+        }
         let probe_timeout = crate::os_probe::probe_timeout();
         let probe_timeout_kind = probe_timeout.as_ref().map(|timeout| timeout.probe);
         // swallow batch 1: a failed ps probe degrades cleanup truthfully — the
@@ -536,32 +622,19 @@ pub mod lifecycle_port {
         let coordinator_pid = stopped
             .as_ref()
             .and_then(|stopped| stopped.pid.map(|p| p.get()));
-        let coordinator_clean =
-            !coordinator_timeout && stopped.as_ref().map(|stopped| stopped.ok).unwrap_or(true);
-        let ok = coordinator_clean
-            && kill_error.is_none()
-            && session_residuals.is_empty()
-            && process_residuals.is_empty()
-            && !cleanup_truth_degraded
-            && !coordinator_timeout;
-        let status = if ok {
-            "ok"
-        } else if coordinator_timeout {
-            "timeout"
-        } else if cleanup_truth_degraded {
-            "partial"
-        } else if kill_error.is_some() {
-            "failed"
-        } else {
-            "partial"
-        };
-        let phase = if coordinator_timeout {
-            Some("stop_coordinator")
-        } else if cleanup_truth_degraded {
-            Some("os_probe")
-        } else {
-            None
-        };
+        let coordinator_pid = coordinator_pid.or(coordinator_pid_for_report);
+        let outcome = classify_shutdown_outcome(ShutdownOutcomeInput {
+            kill_error: kill_error.is_some(),
+            session_residuals: !session_residuals.is_empty(),
+            process_residuals: !process_residuals.is_empty(),
+            cleanup_truth_degraded,
+            coordinator_timeout,
+            coordinator_stop_ok: stopped.as_ref().map(|stopped| stopped.ok),
+            coordinator_post_stop,
+        });
+        let ok = outcome.ok;
+        let status = outcome.status;
+        let phase = outcome.phase;
         let probe_timeout_value = probe_timeout.as_ref().map(|timeout| {
             json!({
                 "probe": timeout.probe,
@@ -618,14 +691,110 @@ pub mod lifecycle_port {
     /// worker thread — on a timely result it joins immediately; on timeout it gives the
     /// thread one short grace join window instead of dropping it detached (repeated
     /// shutdowns no longer accumulate leaked threads racing the same workspace).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum CoordinatorStopObservation {
+        NotNeeded,
+        Gone,
+        Running,
+        Unknown,
+    }
+
+    pub(crate) struct ShutdownOutcome {
+        pub(crate) ok: bool,
+        pub(crate) status: &'static str,
+        pub(crate) phase: Option<&'static str>,
+    }
+
+    pub(crate) struct ShutdownOutcomeInput {
+        pub(crate) kill_error: bool,
+        pub(crate) session_residuals: bool,
+        pub(crate) process_residuals: bool,
+        pub(crate) cleanup_truth_degraded: bool,
+        pub(crate) coordinator_timeout: bool,
+        pub(crate) coordinator_stop_ok: Option<bool>,
+        pub(crate) coordinator_post_stop: CoordinatorStopObservation,
+    }
+
+    pub(crate) fn classify_shutdown_outcome(input: ShutdownOutcomeInput) -> ShutdownOutcome {
+        let coordinator_clean = match input.coordinator_post_stop {
+            CoordinatorStopObservation::Gone => true,
+            CoordinatorStopObservation::Running | CoordinatorStopObservation::Unknown => false,
+            CoordinatorStopObservation::NotNeeded => {
+                !input.coordinator_timeout && input.coordinator_stop_ok.unwrap_or(true)
+            }
+        };
+        let ok = coordinator_clean
+            && !input.kill_error
+            && !input.session_residuals
+            && !input.process_residuals
+            && !input.cleanup_truth_degraded;
+        if ok {
+            return ShutdownOutcome {
+                ok,
+                status: "ok",
+                phase: None,
+            };
+        }
+        let (status, phase) = if input.coordinator_timeout && !coordinator_clean {
+            ("timeout", Some("stop_coordinator"))
+        } else if input.cleanup_truth_degraded {
+            ("partial", Some("os_probe"))
+        } else if input.kill_error {
+            ("failed", None)
+        } else {
+            ("partial", None)
+        };
+        ShutdownOutcome { ok, status, phase }
+    }
+
+    fn coordinator_post_stop_observation(
+        workspace: &crate::coordinator::WorkspacePath,
+        pid: Option<crate::coordinator::Pid>,
+    ) -> CoordinatorStopObservation {
+        if let Some(pid) = pid {
+            match crate::coordinator::pid_is_running(pid) {
+                Ok(true) => return CoordinatorStopObservation::Running,
+                Ok(false) => return CoordinatorStopObservation::Gone,
+                Err(_) => {}
+            }
+        }
+        let health = crate::coordinator::coordinator_health(workspace);
+        match health.status {
+            crate::coordinator::CoordinatorHealthStatus::Running => {
+                CoordinatorStopObservation::Running
+            }
+            crate::coordinator::CoordinatorHealthStatus::Missing
+            | crate::coordinator::CoordinatorHealthStatus::InvalidPid
+            | crate::coordinator::CoordinatorHealthStatus::Stale => {
+                CoordinatorStopObservation::Gone
+            }
+        }
+    }
+
     fn stop_coordinator_bounded(
         workspace: crate::coordinator::WorkspacePath,
         timeout: std::time::Duration,
     ) -> Option<Result<crate::coordinator::types::StopReport, String>> {
+        stop_coordinator_bounded_with(workspace, timeout, |workspace| {
+            crate::coordinator::stop_coordinator(workspace).map_err(|error| error.to_string())
+        })
+    }
+
+    pub(crate) fn stop_coordinator_bounded_with<F>(
+        workspace: crate::coordinator::WorkspacePath,
+        timeout: std::time::Duration,
+        stop: F,
+    ) -> Option<Result<crate::coordinator::types::StopReport, String>>
+    where
+        F: FnOnce(
+                &crate::coordinator::WorkspacePath,
+            ) -> Result<crate::coordinator::types::StopReport, String>
+            + Send
+            + 'static,
+    {
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
-            let result =
-                crate::coordinator::stop_coordinator(&workspace).map_err(|error| error.to_string());
+            let result = stop(&workspace);
             let _ = tx.send(result);
         });
         let outcome = rx.recv_timeout(timeout).ok();
@@ -640,8 +809,7 @@ pub mod lifecycle_port {
         match rx.recv_timeout(std::time::Duration::from_millis(250)) {
             Ok(late) => {
                 let _ = handle.join();
-                let _ = late; // result arrived after the deadline: still a timeout to the caller
-                None
+                Some(late)
             }
             Err(_) => {
                 if handle.is_finished() {

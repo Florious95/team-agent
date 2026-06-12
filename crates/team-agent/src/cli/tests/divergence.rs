@@ -148,35 +148,35 @@ use super::*;
 
     #[test]
     fn red_format_status_summary_empty_pane_id_is_dash() {
-        // golden: pane_id='' -> 'receiver: - cmd=x'
+        // golden: pane_id='' -> 'receiver: - cmd=x topology=external'
         let line = format_status_summary(&json!({
             "leader_receiver": {"pane_id": "", "pane_current_command": "x"}
         }));
         assert_eq!(
             line.lines().nth(1).unwrap(),
-            "receiver: - cmd=x",
+            "receiver: - cmd=x topology=external",
             "empty-string pane_id MUST fall back to '-' (golden `pane_id or '-'`)"
         );
     }
 
     #[test]
     fn red_format_status_summary_cmd_falls_back_to_current_command() {
-        // golden: missing pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude'
+        // golden: missing pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude topology=external'
         let line_missing = format_status_summary(&json!({
             "leader_receiver": {"pane_id": "%3", "current_command": "claude"}
         }));
         assert_eq!(
             line_missing.lines().nth(1).unwrap(),
-            "receiver: %3 cmd=claude",
+            "receiver: %3 cmd=claude topology=external",
             "cmd MUST fall back to current_command when pane_current_command is absent (golden line 285)"
         );
-        // golden: empty pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude'
+        // golden: empty pane_current_command + current_command='claude' -> 'receiver: %3 cmd=claude topology=external'
         let line_empty = format_status_summary(&json!({
             "leader_receiver": {"pane_id": "%3", "pane_current_command": "", "current_command": "claude"}
         }));
         assert_eq!(
             line_empty.lines().nth(1).unwrap(),
-            "receiver: %3 cmd=claude",
+            "receiver: %3 cmd=claude topology=external",
             "empty pane_current_command MUST fall through to current_command (golden falsy `or`)"
         );
     }

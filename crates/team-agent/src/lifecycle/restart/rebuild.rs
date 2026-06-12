@@ -395,12 +395,16 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         restart_readiness_deadline(readiness_deadline_ms),
         restart_readiness_poll_interval(),
     )?;
-    let attach_commands = crate::tmux_backend::attach_commands_for_windows(
-        &selected.run_workspace,
-        &session_name,
+    let attach_windows = crate::lifecycle::launch::attach_window_names_for_state_agents(
+        &state,
         successful_agents
             .iter()
             .map(|decision| decision.agent_id.as_str()),
+    );
+    let attach_commands = crate::tmux_backend::attach_commands_for_windows(
+        &selected.run_workspace,
+        &session_name,
+        attach_windows.iter().map(String::as_str),
     );
     let mut next_actions = attach_commands.clone();
     if !failed_agents.is_empty() {
