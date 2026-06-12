@@ -83,16 +83,19 @@ pub use delivery::{
 };
 pub use helpers::fail_leader_delivery;
 pub use leader_receiver::{
-    claim_leader_receiver, mirror_peer_message_to_leader, send_to_leader_receiver,
+    claim_leader_receiver, deliver_to_leader_fallback_pane, mirror_peer_message_to_leader,
+    send_to_leader_receiver, send_to_leader_receiver_with_message_id,
 };
 pub use peers::allow_peer_talk;
 pub use results::{
     collect, collect_for_team, collect_results_and_notify_watchers, report_result,
-    report_result_for_owner_team,
+    report_result_for_owner_team, report_result_for_owner_team_with_primary_error,
 };
 pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel, stuck_list};
 pub use selftest::{evaluate_idle_behavior, run_comms_selftest, CommsSelftestDriver};
-pub use send::{apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions};
+pub use send::{
+    apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions,
+};
 pub use trust::{attempt_trust_auto_answer, TrustAnswerOutcome};
 pub use types::{
     ActivityStatus, AgentActivity, AlertSnapshot, AlertSuppression, AlertType, CheckEvidence,

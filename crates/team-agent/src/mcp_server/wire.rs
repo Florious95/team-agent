@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::event_log::EventLog;
 use crate::messaging::MessageTarget;
 
 use super::helpers::{json_dumps_default, object_fields};
@@ -172,19 +173,35 @@ fn run_stdio_loop<R: BufRead, W: Write>(
 ) -> Result<ServerRunReport, McpError> {
     let tools = TeamOrchestratorTools::new(workspace);
     let mut report = ServerRunReport::default();
+    let marker = McpServerLifecycleMarker::from_env(workspace);
+    marker.write_started();
+    let result = run_stdio_loop_inner(&tools, reader, &mut writer, &mut report);
+    match &result {
+        Ok(_) => marker.write_exit("stdin_eof", None),
+        Err(error) => marker.write_exit("fatal_error", Some(&error.to_string())),
+    }
+    result
+}
+
+fn run_stdio_loop_inner<R: BufRead, W: Write>(
+    tools: &TeamOrchestratorTools,
+    reader: R,
+    writer: &mut W,
+    report: &mut ServerRunReport,
+) -> Result<ServerRunReport, McpError> {
     for line in reader.lines() {
         let line = line?;
         report.requests_read = report.requests_read.saturating_add(1);
-        let frame = handle_stdin_line(&tools, &line, &mut report)?;
+        let frame = handle_stdin_line(tools, &line, report)?;
         if let Some(value) = frame {
-            serde_json::to_writer(&mut writer, &value)?;
+            serde_json::to_writer(&mut *writer, &value)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
             report.responses_written = report.responses_written.saturating_add(1);
         }
     }
     report.clean_eof = true;
-    Ok(report)
+    Ok(report.clone())
 }
 
 fn handle_stdin_line(
@@ -245,6 +262,66 @@ fn tool_call_result_value(is_error: bool, body: &Value) -> Value {
         "content": [Value::Object(content)],
         "isError": is_error
     })
+}
+
+struct McpServerLifecycleMarker {
+    workspace: std::path::PathBuf,
+    agent_id: Option<String>,
+    owner_team_id: Option<String>,
+    pid: u32,
+    ppid: u32,
+}
+
+impl McpServerLifecycleMarker {
+    fn from_env(workspace: &Path) -> Self {
+        Self {
+            workspace: workspace.to_path_buf(),
+            agent_id: non_empty_env("TEAM_AGENT_ID"),
+            owner_team_id: non_empty_env("TEAM_AGENT_OWNER_TEAM_ID"),
+            pid: std::process::id(),
+            ppid: parent_pid(),
+        }
+    }
+
+    fn write_started(&self) {
+        self.write("mcp.server_started", None, None);
+    }
+
+    fn write_exit(&self, reason: &str, error: Option<&str>) {
+        self.write("mcp.server_exit", Some(reason), error);
+    }
+
+    fn write(&self, event: &str, reason: Option<&str>, error: Option<&str>) {
+        let _ = EventLog::new(&self.workspace).write(
+            event,
+            serde_json::json!({
+                "agent_id": self.agent_id.as_deref(),
+                "owner_team_id": self.owner_team_id.as_deref(),
+                "workspace": self.workspace.display().to_string(),
+                "pid": self.pid,
+                "ppid": self.ppid,
+                "reason": reason,
+                "error": error,
+            }),
+        );
+    }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(unix)]
+fn parent_pid() -> u32 {
+    u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn parent_pid() -> u32 {
+    0
 }
 
 fn error_response_value(id: RpcId, code: i64, message: String) -> Value {
@@ -487,5 +564,78 @@ fn message_target_from_value(value: Option<&Value>) -> MessageTarget {
                 .collect(),
         ),
         _ => MessageTarget::Single(String::new()),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod e23_lifecycle_marker_tests {
+    use super::*;
+
+    fn marker_ws(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "ta-rs-mcp-marker-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn stdio_loop_writes_started_and_stdin_eof_exit_markers() {
+        let ws = marker_ws("eof");
+        let input = std::io::Cursor::new(Vec::<u8>::new());
+        let mut output = Vec::new();
+
+        let report = run_stdio_loop(&ws, input, &mut output).unwrap();
+
+        assert!(report.clean_eof);
+        assert!(output.is_empty(), "empty stdin must not write stdout");
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        assert_eq!(events.len(), 2, "started + stdin_eof exit events");
+        assert_eq!(events[0]["event"], serde_json::json!("mcp.server_started"));
+        assert_eq!(events[1]["event"], serde_json::json!("mcp.server_exit"));
+        assert_eq!(events[1]["reason"], serde_json::json!("stdin_eof"));
+        assert_eq!(events[1]["workspace"], serde_json::json!(ws.display().to_string()));
+        assert_eq!(events[1]["pid"], serde_json::json!(std::process::id()));
+        assert!(events[1].get("ppid").is_some());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn stdio_loop_writes_fatal_error_marker_before_returning_io_error() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("simulated stdout failure"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let ws = marker_ws("fatal");
+        let input = std::io::Cursor::new(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.to_vec(),
+        );
+
+        let err = run_stdio_loop(&ws, input, FailingWriter).expect_err("writer failure");
+
+        assert!(err.to_string().contains("simulated stdout failure"));
+        let events = EventLog::new(&ws).tail(0).unwrap();
+        assert_eq!(events[0]["event"], serde_json::json!("mcp.server_started"));
+        assert_eq!(events[1]["event"], serde_json::json!("mcp.server_exit"));
+        assert_eq!(events[1]["reason"], serde_json::json!("fatal_error"));
+        assert!(
+            events[1]["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("simulated stdout failure")
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

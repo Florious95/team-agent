@@ -275,7 +275,10 @@ impl EnvGuardMsg {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-        Self { key: key.to_string(), prev }
+        Self {
+            key: key.to_string(),
+            prev,
+        }
     }
 }
 impl Drop for EnvGuardMsg {
@@ -288,6 +291,7 @@ impl Drop for EnvGuardMsg {
 }
 
 mod basic;
+mod e23;
+mod main_preserved;
 mod runtime;
 mod spine;
-mod main_preserved;

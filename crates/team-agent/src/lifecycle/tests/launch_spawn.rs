@@ -1,6 +1,7 @@
 use super::*;
 use crate::transport::test_support::OfflineTransport;
 use serial_test::serial;
+use serde_json::json;
 
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
@@ -16,6 +17,38 @@ pub(super) fn quick_start_team_dir(role_doc: &str) -> PathBuf {
     std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
     std::fs::write(team.join("agents").join("implementer.md"), role_doc).unwrap();
     team
+}
+
+fn quick_start_team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
+    let team = temp_ws().join("teamdir");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(team.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    for (file, role_doc) in role_docs {
+        std::fs::write(team.join("agents").join(file), role_doc).unwrap();
+    }
+    team
+}
+
+fn role_doc(id: &str) -> String {
+    format!(
+        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+    )
+}
+
+fn layout_pane(session: &str, window: &str, pane: &str, pane_index: u32) -> crate::transport::PaneInfo {
+    crate::transport::PaneInfo {
+        pane_id: crate::transport::PaneId::new(pane),
+        session: crate::transport::SessionName::new(session),
+        window_index: None,
+        window_name: Some(crate::transport::WindowName::new(window)),
+        pane_index: Some(pane_index),
+        tty: None,
+        current_command: Some("codex".to_string()),
+        current_path: None,
+        active: pane_index == 0,
+        pane_pid: None,
+        leader_env: std::collections::BTreeMap::new(),
+    }
 }
 
 /// E5 spec 迁移:spec 不再落 team_dir,而在 <team_workspace>/.team/runtime/<team_key>/。
@@ -506,11 +539,20 @@ fn spine_restart_empty_team_is_not_atomic_refusal() {
     );
 }
 
-// #14 — add_agent rejects a duplicate agent id (golden operations.py:301 'agent id already exists'),
-// BEFORE any full recompile. Current does a full compile_team with no duplicate-id guard.
+// E25 — add_agent duplicate membership is runtime-state based, not role-doc/spec-file based.
 #[test]
 fn spine_add_agent_rejects_duplicate_agent_id() {
     let team = quick_start_team_dir(QS_VALID_ROLE); // team already has agent 'implementer'
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-quickteam",
+            "agents": {
+                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+            }
+        }),
+    )
+    .unwrap();
     let role = team.join("dup-role.md");
     std::fs::write(&role, QS_VALID_ROLE).unwrap(); // a role doc named 'implementer' = duplicate
     let transport = OfflineTransport::new();
@@ -525,7 +567,7 @@ fn spine_add_agent_rejects_duplicate_agent_id() {
     let text = format!("{result:?}");
     assert!(
         text.contains("already exists"),
-        "add_agent must reject a duplicate agent id (golden 'agent id already exists'); got {text}"
+        "add_agent must reject an id already present in runtime state; got {text}"
     );
 }
 
@@ -631,7 +673,8 @@ fn red2_restart_empty_workspace_still_reports_missing() {
         text.contains("missing spec")
             || text.to_lowercase().contains("not found")
             || text.contains("no_local_team_context")
-            || text.to_lowercase().contains("invalid workspace"),
+            || text.to_lowercase().contains("invalid workspace")
+            || text.contains("role definitions missing"),
         "RED-2 negative: empty workspace restart must still error (missing/not-found); got {text}"
     );
     let _ = std::fs::remove_dir_all(&ws);
@@ -1006,6 +1049,200 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
             .any(|(_, argv)| argv.iter().any(|a| a == "codex")),
         "the spawn argv must carry the agent's provider build_command (codex); got {recorded:?}"
     );
+}
+
+#[test]
+fn adaptive_layout_plan_8_workers_is_3_3_2() {
+    let agents = (1..=8)
+        .map(|i| AgentId::new(format!("w{i}")))
+        .collect::<Vec<_>>();
+    let plan = adaptive_layout_plan(&agents, 3);
+    let windows = plan
+        .iter()
+        .map(|placement| placement.layout_window.as_str().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        windows,
+        vec![
+            "team-w1", "team-w1", "team-w1", "team-w2", "team-w2", "team-w2", "team-w3",
+            "team-w3",
+        ]
+    );
+    let pane_counts = ["team-w1", "team-w2", "team-w3"]
+        .into_iter()
+        .map(|window| windows.iter().filter(|actual| actual.as_str() == window).count())
+        .collect::<Vec<_>>();
+    assert_eq!(pane_counts, vec![3, 3, 2]);
+    assert_eq!(
+        plan.iter()
+            .filter(|placement| placement.starts_window)
+            .map(|placement| placement.agent_id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec!["w1", "w4", "w7"]
+    );
+}
+
+#[test]
+fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
+    let roles = (1..=4)
+        .map(|i| {
+            let id = format!("w{i}");
+            (format!("{id}.md"), role_doc(&id))
+        })
+        .collect::<Vec<_>>();
+    let role_refs = roles
+        .iter()
+        .map(|(file, doc)| (file.as_str(), doc.as_str()))
+        .collect::<Vec<_>>();
+    let team = quick_start_team_dir_with_roles(&role_refs);
+    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    seed_healthy_coordinator(workspace);
+    let transport = OfflineTransport::new();
+
+    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+        .expect("quick_start_with_transport must reach Ready");
+
+    let (launch, attach_commands, display_backend) = match report {
+        QuickStartReport::Ready { launch, attach_commands, display_backend, .. } => {
+            (*launch, attach_commands, display_backend)
+        }
+        other => panic!("quick_start must reach Ready; got {other:?}"),
+    };
+    assert_eq!(display_backend, "adaptive");
+    assert_eq!(
+        transport
+            .spawn_records()
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spawn_first", "spawn_split", "spawn_split", "spawn_into"],
+        "4 default-adaptive workers should create team-w1 with 3 panes, then team-w2"
+    );
+    assert_eq!(
+        launch
+            .started
+            .iter()
+            .map(|started| {
+                (
+                    started.agent_id.as_str().to_string(),
+                    started.layout_window.as_ref().map(|w| w.as_str().to_string()),
+                    started.pane_index,
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("w1".to_string(), Some("team-w1".to_string()), Some(0)),
+            ("w2".to_string(), Some("team-w1".to_string()), Some(1)),
+            ("w3".to_string(), Some("team-w1".to_string()), Some(2)),
+            ("w4".to_string(), Some("team-w2".to_string()), Some(0)),
+        ]
+    );
+    assert!(
+        attach_commands.iter().any(|cmd| cmd.contains(":team-w1")),
+        "attach commands must include the first layout window: {attach_commands:?}"
+    );
+    assert!(
+        attach_commands.iter().any(|cmd| cmd.contains(":team-w2")),
+        "attach commands must include the second layout window: {attach_commands:?}"
+    );
+
+    let (_raw, state) = raw_runtime_state(workspace);
+    assert_eq!(state["display_backend"], json!("adaptive"));
+    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("team-w1")));
+    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(state.pointer("/agents/w1/pane_index"), Some(&json!(0)));
+    assert_eq!(
+        state.pointer("/agents/w1/display/backend"),
+        Some(&json!("adaptive"))
+    );
+    assert_eq!(
+        state.pointer("/agents/w4/layout_window"),
+        Some(&json!("team-w2"))
+    );
+}
+
+#[test]
+#[serial(env)]
+fn quick_start_tmux_backend_prefers_absolute_tmux_env_endpoint() {
+    let leader_socket = "/tmp/team-agent-layout-leader-socket";
+    let _tmux = EnvVarGuard::set("TMUX", &format!("{leader_socket},123,0"));
+    let backend = quick_start_tmux_backend(std::path::Path::new("/tmp/layout-workspace"));
+
+    assert_eq!(
+        crate::transport::Transport::tmux_endpoint(&backend).as_deref(),
+        Some(leader_socket),
+        "quick-start from inside tmux must use the caller's full $TMUX socket endpoint"
+    );
+    assert_eq!(
+        selected_tmux_socket_source(&backend, std::path::Path::new("/tmp/layout-workspace")),
+        Some("leader_env")
+    );
+}
+
+#[test]
+fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    seed_healthy_coordinator(workspace);
+    let endpoint = "/tmp/team-agent-layout-selected-socket";
+    let transport = OfflineTransport::new().with_tmux_endpoint(endpoint);
+
+    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+        .expect("quick_start_with_transport must reach Ready");
+    let attach_commands = match report {
+        QuickStartReport::Ready { attach_commands, .. } => attach_commands,
+        other => panic!("quick_start must reach Ready; got {other:?}"),
+    };
+
+    assert!(
+        attach_commands
+            .iter()
+            .any(|cmd| cmd.contains(&format!("tmux -S {endpoint} attach -t "))),
+        "attach commands must use the selected socket endpoint: {attach_commands:?}"
+    );
+    let (_raw, state) = raw_runtime_state(workspace);
+    assert_eq!(state["tmux_endpoint"], json!(endpoint));
+    assert_eq!(state["tmux_socket"], json!(endpoint));
+}
+
+#[test]
+fn quick_start_no_display_keeps_one_window_per_agent() {
+    let roles = ["w1", "w2"]
+        .into_iter()
+        .map(|id| (format!("{id}.md"), role_doc(id)))
+        .collect::<Vec<_>>();
+    let role_refs = roles
+        .iter()
+        .map(|(file, doc)| (file.as_str(), doc.as_str()))
+        .collect::<Vec<_>>();
+    let team = quick_start_team_dir_with_roles(&role_refs);
+    let workspace = team.parent().expect("team_workspace(team_dir) = parent");
+    seed_healthy_coordinator(workspace);
+    let transport = OfflineTransport::new();
+
+    let report = quick_start_with_transport_in_workspace_with_display(
+        workspace, &team, None, true, true, None, &transport, false,
+    )
+    .expect("quick_start_with_transport must reach Ready");
+
+    let display_backend = match report {
+        QuickStartReport::Ready { display_backend, .. } => display_backend,
+        other => panic!("quick_start must reach Ready; got {other:?}"),
+    };
+    assert_eq!(display_backend, "none");
+    assert_eq!(
+        transport
+            .spawn_records()
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["spawn_first", "spawn_into"],
+        "--no-display must use the legacy one-worker-window spawn path"
+    );
+    let (_raw, state) = raw_runtime_state(workspace);
+    assert_eq!(state["display_backend"], json!("none"));
+    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("w1")));
+    assert_eq!(state.pointer("/agents/w1/layout_window"), None);
 }
 
 // REAL-MACHINE residency boundary (acceptance framework): the PUBLIC quick_start (real TmuxBackend +
@@ -1453,6 +1690,419 @@ fn add_agent_with_transport_spawns_new_worker_not_stub() {
     );
 }
 
+#[test]
+fn add_agent_role_doc_exists_runtime_missing_succeeds() {
+    let team = temp_ws().join("add_role_doc_team");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: addroledoc\nobjective: Add role-doc probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("agents").join("worker2.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-addroledoc",
+            "agents": {
+                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&team);
+    let transport = OfflineTransport::new();
+
+    let result = add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        result.is_ok(),
+        "a prepared agents/<id>.md role doc is not membership; runtime state is authoritative: {result:?}"
+    );
+    let state = crate::state::persist::load_runtime_state(&team).expect("load state");
+    assert!(
+        state.pointer("/agents/worker2").is_some(),
+        "add-agent must add worker2 to runtime state; state={state}"
+    );
+    assert_eq!(
+        transport.spawn_records().len(),
+        1,
+        "add-agent must spawn exactly the new worker"
+    );
+}
+
+#[test]
+fn start_agent_runtime_missing_role_doc_exists_no_side_effect() {
+    let team = temp_ws().join("start_missing_team");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: startmissing\nobjective: Start missing probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("reviewer.md"), DELEG_ROLE_WORKER2).unwrap();
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-startmissing",
+            "agents": {
+                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = OfflineTransport::new();
+
+    let result = start_agent_with_transport(
+        &team,
+        &AgentId::new("reviewer"),
+        false,
+        false,
+        true,
+        None,
+        &transport,
+    );
+
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("not found"),
+        "start-agent must refuse runtime-missing agents before side effects; got {text}"
+    );
+    assert!(
+        transport.spawn_records().is_empty(),
+        "runtime-missing start-agent must not spawn a pane"
+    );
+    assert!(
+        !team
+            .join(".team")
+            .join("runtime")
+            .join("mcp")
+            .join("reviewer.json")
+            .exists(),
+        "runtime-missing start-agent must not write worker MCP config"
+    );
+    let events = crate::event_log::EventLog::new(&team)
+        .tail(20)
+        .unwrap_or_default();
+    assert!(
+        !events.iter().any(|event| {
+            event.get("event").and_then(|v| v.as_str()) == Some("start_agent.agent_start")
+        }),
+        "runtime-missing start-agent must not emit start_agent.agent_start; events={events:?}"
+    );
+}
+
+#[test]
+fn restart_allow_fresh_copilot_persists_expected_session_id() {
+    let ws = temp_ws().join("restartcopilot");
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: restartcopilot\nobjective: Restart copilot probe.\nprovider: copilot\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("agents").join("alpha.md"),
+        "---\nname: alpha\nrole: Alpha Worker\nprovider: copilot\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha.\n",
+    )
+    .unwrap();
+    let spec = crate::compiler::compile_team(&ws).expect("compile copilot team");
+    std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-restartcopilot",
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "provider": "copilot",
+                    "window": "alpha",
+                    "first_send_at": "2026-05-27T10:00:00+00:00",
+                    "session_id": null,
+                    "rollout_path": "/tmp/stale-copilot-rollout.jsonl",
+                    "captured_at": "2026-05-27T10:00:00+00:00",
+                    "captured_via": "stale",
+                    "attribution_confidence": "stale"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&ws);
+    let transport = OfflineTransport::new();
+
+    let result = restart_with_transport(&ws, true, None, &transport);
+
+    assert!(
+        matches!(result, Ok(RestartReport::Restarted { .. })),
+        "allow-fresh restart should fresh-spawn the copilot worker; got {result:?}"
+    );
+    let recorded = transport.spawn_records();
+    assert_eq!(
+        recorded.len(),
+        1,
+        "expected one copilot spawn; got {recorded:?}"
+    );
+    let session_arg = recorded[0]
+        .1
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--session-id").then(|| pair[1].clone()))
+        .expect("copilot fresh spawn argv must include --session-id");
+    let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
+    let agent = state.pointer("/agents/alpha").expect("alpha state");
+    assert_eq!(
+        agent.get("session_id").and_then(serde_json::Value::as_str),
+        Some(session_arg.as_str()),
+        "fresh restart must promote expected_session_id to persisted session_id"
+    );
+    assert_eq!(
+        agent
+            .get("_pending_session_id")
+            .and_then(serde_json::Value::as_str),
+        Some(session_arg.as_str()),
+        "fresh restart must retain pending session audit state"
+    );
+    for stale in [
+        "rollout_path",
+        "captured_at",
+        "captured_via",
+        "attribution_confidence",
+    ] {
+        assert_eq!(
+            agent.get(stale),
+            Some(&serde_json::Value::Null),
+            "fresh restart must clear stale capture field {stale}: {agent}"
+        );
+    }
+    let plan = crate::lifecycle::restart::classify_restart_plan(&state, false)
+        .expect("classify second restart");
+    assert!(
+        plan.unresumable
+            .iter()
+            .all(|worker| worker.reason != "no_persisted_session_id"),
+        "second restart must not loop as no_persisted_session_id; unresumable={:?}",
+        plan.unresumable
+    );
+}
+
+#[test]
+fn add_agent_adaptive_splits_last_non_full_layout_window() {
+    let roles = [("w1.md", role_doc("w1")), ("w2.md", role_doc("w2"))];
+    let role_refs = roles
+        .iter()
+        .map(|(file, doc)| (*file, doc.as_str()))
+        .collect::<Vec<_>>();
+    let team = quick_start_team_dir_with_roles(&role_refs);
+    let session = "team-layout-add";
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": session,
+            "display_backend": "adaptive",
+            "active_team_key": "teamdir",
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
+                "w2": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&team);
+    let role_file = team.join("w3-role.md");
+    std::fs::write(&role_file, role_doc("w3")).unwrap();
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_targets(vec![
+            layout_pane(session, "team-w1", "%1", 0),
+            layout_pane(session, "team-w1", "%2", 1),
+        ])
+        .with_pane_presence("%1", true)
+        .with_pane_presence("%2", true);
+
+    add_agent_with_transport(
+        &team,
+        &AgentId::new("w3"),
+        &role_file,
+        true,
+        None,
+        &transport,
+    )
+    .expect("adaptive add-agent should start");
+
+    assert_eq!(
+        transport.spawn_window_records().last(),
+        Some(&(String::from("spawn_split"), String::from("team-w1"))),
+        "last non-full layout window should be split"
+    );
+    let (_raw, state) = raw_runtime_state(&team);
+    assert_eq!(state.pointer("/agents/w3/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(state.pointer("/agents/w3/pane_index"), Some(&json!(2)));
+}
+
+#[test]
+fn add_agent_adaptive_creates_suffix_window_when_last_layout_full_and_name_collides() {
+    let roles = [
+        ("w1.md", role_doc("w1")),
+        ("w2.md", role_doc("w2")),
+        ("w3.md", role_doc("w3")),
+    ];
+    let role_refs = roles
+        .iter()
+        .map(|(file, doc)| (*file, doc.as_str()))
+        .collect::<Vec<_>>();
+    let team = quick_start_team_dir_with_roles(&role_refs);
+    let session = "team-layout-add-full";
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": session,
+            "display_backend": "adaptive",
+            "active_team_key": "teamdir",
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
+                "w2": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"},
+                "w3": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 2, "pane_id": "%3"}
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&team);
+    let role_file = team.join("w4-role.md");
+    std::fs::write(&role_file, role_doc("w4")).unwrap();
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_targets(vec![
+            layout_pane(session, "team-w1", "%1", 0),
+            layout_pane(session, "team-w1", "%2", 1),
+            layout_pane(session, "team-w1", "%3", 2),
+            layout_pane(session, "team-w2", "%9", 0),
+        ])
+        .with_pane_presence("%1", true)
+        .with_pane_presence("%2", true)
+        .with_pane_presence("%3", true);
+
+    add_agent_with_transport(
+        &team,
+        &AgentId::new("w4"),
+        &role_file,
+        true,
+        None,
+        &transport,
+    )
+    .expect("adaptive add-agent should start");
+
+    assert_eq!(
+        transport.spawn_window_records().last(),
+        Some(&(String::from("spawn_into"), String::from("team-w2-2"))),
+        "full last layout window should create next window with collision suffix"
+    );
+    let (_raw, state) = raw_runtime_state(&team);
+    assert_eq!(state.pointer("/agents/w4/layout_window"), Some(&json!("team-w2-2")));
+    assert_eq!(state.pointer("/agents/w4/pane_index"), Some(&json!(0)));
+}
+
+#[test]
+fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
+    let roles = [("w1.md", role_doc("w1")), ("w2.md", role_doc("w2"))];
+    let role_refs = roles
+        .iter()
+        .map(|(file, doc)| (*file, doc.as_str()))
+        .collect::<Vec<_>>();
+    let team = quick_start_team_dir_with_roles(&role_refs);
+    let spec = crate::compiler::compile_team(&team).unwrap();
+    std::fs::write(team.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    let session = "team-layout-stop";
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": session,
+            "display_backend": "adaptive",
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
+                "w2": {"status": "running", "provider": "codex", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = OfflineTransport::new()
+        .with_targets(vec![
+            layout_pane(session, "team-w1", "%1", 0),
+            layout_pane(session, "team-w1", "%2", 1),
+        ])
+        .with_pane_presence("%2", true);
+
+    let report =
+        stop_agent_with_transport(&team, &AgentId::new("w2"), None, &transport).unwrap();
+
+    assert!(report.stopped);
+    assert_eq!(report.target, "%2");
+    assert!(
+        transport.calls().iter().any(|call| *call == "kill_pane"),
+        "adaptive stop must kill only the target pane"
+    );
+    assert!(
+        !transport.calls().iter().any(|call| *call == "kill_window"),
+        "adaptive stop must not kill the shared layout window"
+    );
+    let (_raw, state) = raw_runtime_state(&team);
+    assert_eq!(state.pointer("/agents/w1/pane_id"), Some(&json!("%1")));
+    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
+}
+
+#[test]
+fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
+    let ws = temp_ws();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-layout-restart",
+            "display_backend": "adaptive",
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "role": "w1", "model": "gpt-5.5", "auth_mode": "subscription", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 0, "pane_id": "%1"},
+                "w2": {"status": "running", "provider": "codex", "role": "w2", "model": "gpt-5.5", "auth_mode": "subscription", "window": "team-w1", "layout_window": "team-w1", "layout_index": 0, "pane_index": 1, "pane_id": "%2"}
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&ws);
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_targets(vec![layout_pane("team-layout-restart", "team-w1", "%2", 1)])
+        .with_pane_presence("%1", false)
+        .with_pane_presence("%2", true);
+
+    let outcome = start_agent_with_transport(
+        &ws,
+        &AgentId::new("w1"),
+        false,
+        true,
+        true,
+        None,
+        &transport,
+    )
+    .expect("adaptive restart should spawn");
+
+    assert!(matches!(outcome, StartAgentOutcome::Running { .. }));
+    assert_eq!(
+        transport.spawn_window_records().last(),
+        Some(&(String::from("spawn_split"), String::from("team-w1"))),
+        "missing worker pane should be rebuilt in its existing layout window"
+    );
+    let (_raw, state) = raw_runtime_state(&ws);
+    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("team-w1")));
+    assert_eq!(state.pointer("/agents/w2/pane_id"), Some(&json!("%2")));
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // WAVE 2 · LANE A — agent-lifecycle byte-parity contracts. stop_agent / reset_agent / remove_agent /
 // fork_agent are stubs (OwnerRefused / RequirementUnmet / "session_id missing"). These RED contracts
@@ -1592,8 +2242,8 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
     );
     assert_eq!(
         state["display_backend"],
-        json!("none"),
-        "golden resolve_display_backend(None, source='launch') defaults to none"
+        json!("adaptive"),
+        "adaptive layout directive: resolve_display_backend(None, source='launch') defaults to adaptive"
     );
 }
 
@@ -1640,11 +2290,15 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "captured_at",
             "captured_via",
             "attribution_confidence",
+            "layout_window",
+            "layout_index",
+            "pane_index",
+            "display",
             "spawn_cwd",
             "spawned_at",
             "pane_id",
         ],
-        "running agent state key order must match golden launch/core.py:238-255; raw={raw}"
+        "running agent state key order must include adaptive layout fields; raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
     assert_eq!(agent["provider"], json!("codex"));
@@ -1652,7 +2306,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert_eq!(agent["model"], json!("gpt-5.5"));
     assert_eq!(agent["auth_mode"], json!("subscription"));
     assert!(agent["profile"].is_null());
-    assert_eq!(agent["window"], json!("implementer"));
+    assert_eq!(agent["window"], json!("team-w1"));
     assert_eq!(
         agent["mcp_config"],
         json!(workspace
@@ -1674,6 +2328,12 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert!(agent["captured_at"].is_null());
     assert!(agent["captured_via"].is_null());
     assert!(agent["attribution_confidence"].is_null());
+    assert_eq!(agent["layout_window"], json!("team-w1"));
+    assert_eq!(agent["layout_index"], json!(0));
+    assert_eq!(agent["pane_index"], json!(0));
+    assert_eq!(agent.pointer("/display/backend"), Some(&json!("adaptive")));
+    assert_eq!(agent.pointer("/display/window"), Some(&json!("team-w1")));
+    assert_eq!(agent.pointer("/display/pane_id"), Some(&json!("%0")));
     // D5 (#264) / Python launch/core.py:253 — fresh launch persists spawn_cwd=workspace.
     assert_eq!(agent["spawn_cwd"], json!(workspace.to_string_lossy()));
     assert_eq!(agent["spawned_at"], json!(FIXED_SPAWNED_AT));

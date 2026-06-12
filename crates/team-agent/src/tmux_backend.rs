@@ -180,6 +180,14 @@ enum TmuxSocketEndpoint {
     Path(String),
 }
 
+impl TmuxSocketEndpoint {
+    fn as_endpoint(&self) -> &str {
+        match self {
+            TmuxSocketEndpoint::Name(socket) | TmuxSocketEndpoint::Path(socket) => socket,
+        }
+    }
+}
+
 impl TmuxBackend {
     /// Backend bound to the real `tmux` subprocess on the SHARED default socket (no `-L`).
     /// Non-team callers + existing argv/unit tests stay unaffected.
@@ -514,6 +522,55 @@ impl TmuxBackend {
         })
     }
 
+    fn spawn_split(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        let command = shell_command(argv, cwd, env, env_unset);
+        let target = format!("{}:{}", session.as_str(), window.as_str());
+        let split_argv = vec![
+            "tmux".to_string(),
+            "split-window".to_string(),
+            "-t".to_string(),
+            target.clone(),
+            "-h".to_string(),
+            "-P".to_string(),
+            "-F".to_string(),
+            "#{pane_id}".to_string(),
+            "sh".to_string(),
+            "-lc".to_string(),
+            command,
+        ];
+        let output = self.run_spawn(&split_argv)?;
+        let pane = output.stdout.trim();
+        if pane.is_empty() {
+            return Err(TransportError::Subprocess {
+                argv: split_argv,
+                code: output.code,
+                stderr: format!("tmux split-window returned no pane id for {target}"),
+            });
+        }
+        let layout_argv = vec![
+            "tmux".to_string(),
+            "select-layout".to_string(),
+            "-t".to_string(),
+            target,
+            "tiled".to_string(),
+        ];
+        self.run_ok(&layout_argv)?;
+        Ok(SpawnResult {
+            pane_id: PaneId::new(pane),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: None,
+        })
+    }
+
     fn run_ok(&self, argv: &[String]) -> Result<(), TransportError> {
         let argv = self.tmux_argv(argv);
         let output = self.runner.run(&argv)?;
@@ -722,6 +779,12 @@ impl Transport for TmuxBackend {
         true
     }
 
+    fn tmux_endpoint(&self) -> Option<String> {
+        self.socket
+            .as_ref()
+            .map(|endpoint| endpoint.as_endpoint().to_string())
+    }
+
     fn spawn_first(
         &self,
         session: &SessionName,
@@ -766,6 +829,18 @@ impl Transport for TmuxBackend {
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
         self.spawn(session, window, argv, cwd, env, &[], false)
+    }
+
+    fn spawn_split_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.spawn_split(session, window, argv, cwd, env, env_unset)
     }
 
     fn inject(
@@ -1062,6 +1137,16 @@ impl Transport for TmuxBackend {
             "kill-window".to_string(),
             "-t".to_string(),
             target_name(target),
+        ]);
+        self.run_ok(&argv)
+    }
+
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        let argv = self.tmux_argv(&[
+            "tmux".to_string(),
+            "kill-pane".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
         ]);
         self.run_ok(&argv)
     }

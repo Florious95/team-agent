@@ -15,6 +15,8 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnRecord {
     pub kind: String,
+    pub session: SessionName,
+    pub window: WindowName,
     pub argv: Vec<String>,
 }
 
@@ -33,6 +35,7 @@ struct OfflineState {
     spawns: Vec<SpawnRecord>,
     inject_targets: Vec<Target>,
     inject_payloads: Vec<String>,
+    tmux_endpoint: Option<String>,
 }
 
 impl Default for OfflineState {
@@ -51,6 +54,7 @@ impl Default for OfflineState {
             spawns: Vec::new(),
             inject_targets: Vec::new(),
             inject_payloads: Vec::new(),
+            tmux_endpoint: None,
         }
     }
 }
@@ -116,6 +120,11 @@ impl OfflineTransport {
         self
     }
 
+    pub fn with_tmux_endpoint(self, endpoint: impl Into<String>) -> Self {
+        self.with_state(|state| state.tmux_endpoint = Some(endpoint.into()));
+        self
+    }
+
     pub fn calls(&self) -> Vec<&'static str> {
         self.with_state(|state| state.calls.clone())
     }
@@ -126,6 +135,16 @@ impl OfflineTransport {
                 .spawns
                 .iter()
                 .map(|record| (record.kind.clone(), record.argv.clone()))
+                .collect()
+        })
+    }
+
+    pub fn spawn_window_records(&self) -> Vec<(String, String)> {
+        self.with_state(|state| {
+            state
+                .spawns
+                .iter()
+                .map(|record| (record.kind.clone(), record.window.as_str().to_string()))
                 .collect()
         })
     }
@@ -161,7 +180,12 @@ impl OfflineTransport {
     ) -> Result<SpawnResult, TransportError> {
         let pane_index = self.with_state(|state| {
             state.calls.push(kind);
-            state.spawns.push(SpawnRecord { kind: kind.to_string(), argv: argv.to_vec() });
+            state.spawns.push(SpawnRecord {
+                kind: kind.to_string(),
+                session: session.clone(),
+                window: window.clone(),
+                argv: argv.to_vec(),
+            });
             if let Some(error) = state.spawn_failures.get(window.as_str()) {
                 return Err(TransportError::Spawn {
                     backend: BackendKind::Tmux,
@@ -201,6 +225,10 @@ impl Transport for OfflineTransport {
         BackendKind::Tmux
     }
 
+    fn tmux_endpoint(&self) -> Option<String> {
+        self.with_state(|state| state.tmux_endpoint.clone())
+    }
+
     fn spawn_first(
         &self,
         session: &SessionName,
@@ -221,6 +249,18 @@ impl Transport for OfflineTransport {
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
         self.spawn_result("spawn_into", session, window, argv)
+    }
+
+    fn spawn_split_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &Path,
+        _env: &BTreeMap<String, String>,
+        _env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.spawn_result("spawn_split", session, window, argv)
     }
 
     fn inject(
@@ -327,6 +367,11 @@ impl Transport for OfflineTransport {
 
     fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
         self.record("kill_window");
+        Ok(())
+    }
+
+    fn kill_pane(&self, _pane: &PaneId) -> Result<(), TransportError> {
+        self.record("kill_pane");
         Ok(())
     }
 

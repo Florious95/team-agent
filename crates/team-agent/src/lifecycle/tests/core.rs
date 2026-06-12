@@ -213,14 +213,21 @@ fn plan_condition_rejects_out_of_grammar() {
 
 // ───────────────────────────────────────────────────────────────────────
 // resolve_display_backend — display/backend.py
-// 默认 none;非默认非静默(non_default=true 触发 display.backend_resolved)。
+// 默认 adaptive;显式 none 是逃生口。
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
-fn resolve_backend_defaults_to_none_when_none_requested() {
+fn resolve_backend_defaults_to_adaptive_when_none_requested() {
     let r = resolve_display_backend(None, None);
+    assert_eq!(r.backend, DisplayBackend::Adaptive);
+    assert!(!r.non_default, "默认 adaptive 不应标记 non_default");
+}
+
+#[test]
+fn resolve_backend_explicit_none_is_escape_hatch() {
+    let r = resolve_display_backend(Some(DisplayBackend::None), None);
     assert_eq!(r.backend, DisplayBackend::None);
-    assert!(!r.non_default, "默认 none 不应标记 non_default");
+    assert!(r.non_default, "显式 none 是偏离默认 adaptive 的逃生口");
 }
 
 #[test]
@@ -732,8 +739,10 @@ fn remove_agent_without_from_spec_is_refused_confirm() {
         Ok(RemoveAgentOutcome::RefusedFromSpecConfirm { agent_id }) => {
             assert_eq!(agent_id, aid("w1"));
         }
-        // 若先撞 owner / 缺 state 门也可接受(门在 confirm 之前)。
-        Err(LifecycleError::OwnerRefused(_)) | Err(LifecycleError::TeamSelect(_)) => {}
+        // 若先撞 owner / 缺 state / runtime-missing 门也可接受(门在 confirm 之前)。
+        Err(LifecycleError::OwnerRefused(_))
+        | Err(LifecycleError::RequirementUnmet(_))
+        | Err(LifecycleError::TeamSelect(_)) => {}
         other => panic!("from_spec=false 应 RefusedFromSpecConfirm 或更上游门:{other:?}"),
     }
 }

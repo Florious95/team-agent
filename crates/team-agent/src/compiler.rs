@@ -247,7 +247,7 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                     "display_backend",
                     Value::Str(
                         string_field(&team_meta, "display_backend")
-                            .unwrap_or_else(|| "none".to_string()),
+                            .unwrap_or_else(|| "adaptive".to_string()),
                     ),
                 ),
                 ("session_name", Value::Str(session_name(&team_meta, &team_name))),

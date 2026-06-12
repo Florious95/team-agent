@@ -35,6 +35,17 @@ pub(crate) fn probe_timeout() -> Option<ProbeTimeout> {
     PROBE_TIMEOUT.with(|timeout| timeout.borrow().clone())
 }
 
+#[cfg(test)]
+pub(crate) fn set_probe_timeout_for_test(probe: &'static str, pid: Option<u32>, timeout_ms: u64) {
+    PROBE_TIMEOUT.with(|current| {
+        *current.borrow_mut() = Some(ProbeTimeout {
+            probe,
+            pid,
+            timeout_ms,
+        });
+    });
+}
+
 pub(crate) fn bounded_command_output_with_probe(
     command: &mut Command,
     probe: &'static str,

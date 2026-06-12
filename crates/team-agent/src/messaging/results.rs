@@ -6,14 +6,13 @@ use rusqlite::params;
 
 use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
-use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
 
 use super::helpers::{next_result_id, required_str, validate_result_envelope};
 use super::types::SEND_RETRY_MAX_ATTEMPTS;
-use crate::model::ids::TaskId;
-use crate::state::projection::OwnerTeamResolution;
 use super::watchers::retry_result_deliveries;
 use super::MessagingError;
+use crate::model::ids::TaskId;
+use crate::state::projection::OwnerTeamResolution;
 
 /// `collect` (`results.py:45`):投递 pending、捞 uncollected results、校验 envelope、更新任务态、
 /// 写 team_state、ensure coordinator。CLI `collect` + coordinator tick 调。
@@ -43,12 +42,18 @@ fn collect_scoped(
     let paths = collect_paths(workspace)?;
     let log = EventLog::new(&paths.run_workspace);
     let resolved_owner_team_id = match owner_team_id.filter(|team| !team.is_empty()) {
-        Some(team) => Some(resolve_owner_team_for_read(&paths.run_workspace, team, Some(&log))?),
+        Some(team) => Some(resolve_owner_team_for_read(
+            &paths.run_workspace,
+            team,
+            Some(&log),
+        )?),
         None => None,
     };
     let owner_team_id = resolved_owner_team_id.as_deref();
     let mut state = match owner_team_id {
-        Some(team) => crate::state::projection::select_runtime_state(&paths.run_workspace, Some(team))?,
+        Some(team) => {
+            crate::state::projection::select_runtime_state(&paths.run_workspace, Some(team))?
+        }
         None => crate::state::persist::load_runtime_state(&paths.run_workspace)?,
     };
     let spec_workspace = owner_team_id
@@ -56,7 +61,10 @@ fn collect_scoped(
         .unwrap_or_else(|| paths.spec_workspace.clone());
     let spec_path = spec_workspace.join("team.spec.yaml");
     if !spec_path.exists() {
-        return Err(MessagingError::Validation(format!("Cannot read {}", spec_path.display())));
+        return Err(MessagingError::Validation(format!(
+            "Cannot read {}",
+            spec_path.display()
+        )));
     }
     let store = MessageStore::open(&paths.run_workspace)?;
     let conn = crate::db::schema::open_db(store.db_path())?;
@@ -79,20 +87,20 @@ fn collect_scoped(
     };
     let mut stmt = conn.prepare(sql)?;
     let row_mapper = |row: &rusqlite::Row<'_>| {
-            Ok(StoredResult {
-                result_id: row.get(0)?,
-                task_id: row.get(1)?,
-                agent_id: row.get(2)?,
-                envelope: row.get(3)?,
-                status: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        };
+        Ok(StoredResult {
+            result_id: row.get(0)?,
+            task_id: row.get(1)?,
+            agent_id: row.get(2)?,
+            envelope: row.get(3)?,
+            status: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    };
     let rows = match owner_team_id {
         Some(team) => stmt.query_map(params![team], row_mapper),
         None => stmt.query_map([], row_mapper),
     }?
-        .collect::<Result<Vec<_>, _>>()?;
+    .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
 
     let mut collected = Vec::new();
@@ -225,7 +233,9 @@ fn ensure_coordinator_after_collect(
     let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let coordinator = match crate::coordinator::start_coordinator(&workspace_path) {
         Ok(report) => start_report_value(&report),
-        Err(e) => serde_json::json!({"ok": false, "status": "start_failed", "error": e.to_string()}),
+        Err(e) => {
+            serde_json::json!({"ok": false, "status": "start_failed", "error": e.to_string()})
+        }
     };
     let _ = log.write(
         "collect.coordinator_checked",
@@ -289,19 +299,18 @@ fn resolve_owner_team_for_read(
     let state = crate::state::persist::load_runtime_state(workspace)?;
     match crate::state::projection::resolve_owner_team_id(&state, requested) {
         OwnerTeamResolution::Canonical(canonical) => Ok(canonical),
-        OwnerTeamResolution::LegacyAlias { requested, canonical } => {
+        OwnerTeamResolution::LegacyAlias {
+            requested,
+            canonical,
+        } => {
             crate::messaging::delivery::normalize_owner_team_id_rows(
-                workspace,
-                &requested,
-                &canonical,
-                None,
-                event_log,
+                workspace, &requested, &canonical, None, event_log,
             )?;
             Ok(canonical)
         }
-        OwnerTeamResolution::Unresolved { requested } => {
-            Err(MessagingError::Routing(format!("owner_team_unresolved: {requested}")))
-        }
+        OwnerTeamResolution::Unresolved { requested } => Err(MessagingError::Routing(format!(
+            "owner_team_unresolved: {requested}"
+        ))),
         OwnerTeamResolution::Ambiguous { requested, matches } => {
             Err(MessagingError::Routing(format!(
                 "owner_team_ambiguous: {requested} matches {}",
@@ -431,7 +440,10 @@ struct StoredResult {
 }
 
 fn mark_task_done(state: &mut serde_json::Value, task_id: &str, result_id: &str) {
-    let Some(tasks) = state.get_mut("tasks").and_then(serde_json::Value::as_array_mut) else {
+    let Some(tasks) = state
+        .get_mut("tasks")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
         return;
     };
     for task in tasks {
@@ -439,7 +451,10 @@ fn mark_task_done(state: &mut serde_json::Value, task_id: &str, result_id: &str)
             continue;
         }
         if let Some(obj) = task.as_object_mut() {
-            obj.insert("status".to_string(), serde_json::Value::String("done".to_string()));
+            obj.insert(
+                "status".to_string(),
+                serde_json::Value::String("done".to_string()),
+            );
             obj.insert(
                 "accepted_result_id".to_string(),
                 serde_json::Value::String(result_id.to_string()),
@@ -507,7 +522,8 @@ fn result_counts(
         }
     };
     let mut stmt = conn.prepare(sql)?;
-    let row_mapper = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?));
+    let row_mapper =
+        |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?));
     let rows = match owner_team_id {
         Some(team) => stmt.query_map(params![team], row_mapper),
         None => stmt.query_map([], row_mapper),
@@ -565,6 +581,29 @@ pub fn report_result_for_owner_team(
     envelope: &serde_json::Value,
     explicit_owner_team: Option<&str>,
 ) -> Result<serde_json::Value, MessagingError> {
+    report_result_for_owner_team_inner(workspace, envelope, explicit_owner_team, None)
+}
+
+pub fn report_result_for_owner_team_with_primary_error(
+    workspace: &Path,
+    envelope: &serde_json::Value,
+    explicit_owner_team: Option<&str>,
+    fallback_primary_error: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
+    report_result_for_owner_team_inner(
+        workspace,
+        envelope,
+        explicit_owner_team,
+        fallback_primary_error,
+    )
+}
+
+fn report_result_for_owner_team_inner(
+    workspace: &Path,
+    envelope: &serde_json::Value,
+    explicit_owner_team: Option<&str>,
+    fallback_primary_error: Option<&str>,
+) -> Result<serde_json::Value, MessagingError> {
     validate_result_envelope(envelope)?;
     let store = MessageStore::open(workspace)?;
     let result_id = envelope
@@ -577,12 +616,15 @@ pub fn report_result_for_owner_team(
     let mut stored = envelope.clone();
     if stored.get("result_id").is_none() {
         if let Some(obj) = stored.as_object_mut() {
-            obj.insert("result_id".to_string(), serde_json::Value::String(result_id.clone()));
+            obj.insert(
+                "result_id".to_string(),
+                serde_json::Value::String(result_id.clone()),
+            );
         }
     }
     let conn = crate::db::schema::open_db(store.db_path())?;
-    let state_for_owner = crate::state::persist::load_runtime_state(workspace)
-        .unwrap_or(serde_json::json!({}));
+    let state_for_owner =
+        crate::state::persist::load_runtime_state(workspace).unwrap_or(serde_json::json!({}));
     let owner_team = explicit_owner_team
         .filter(|team| !team.is_empty())
         .map(str::to_string)
@@ -612,12 +654,27 @@ pub fn report_result_for_owner_team(
             "status".to_string(),
             serde_json::Value::String("duplicate_ignored".to_string()),
         );
-        out.insert("result_id".to_string(), serde_json::Value::String(result_id));
-        out.insert("task_id".to_string(), serde_json::Value::String(task_id.to_string()));
-        out.insert("agent_id".to_string(), serde_json::Value::String(agent_id.to_string()));
+        out.insert(
+            "result_id".to_string(),
+            serde_json::Value::String(result_id),
+        );
+        out.insert(
+            "task_id".to_string(),
+            serde_json::Value::String(task_id.to_string()),
+        );
+        out.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(agent_id.to_string()),
+        );
         out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
-        out.insert("leader_notified".to_string(), serde_json::Value::Bool(false));
-        out.insert("notification_message_id".to_string(), serde_json::Value::Null);
+        out.insert(
+            "leader_notified".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        out.insert(
+            "notification_message_id".to_string(),
+            serde_json::Value::Null,
+        );
         out.insert(
             "notification_status".to_string(),
             serde_json::Value::String("duplicate_ignored".to_string()),
@@ -633,10 +690,11 @@ pub fn report_result_for_owner_team(
     // primitive synchronously, NOT via a parallel queued scheduled_events row. The
     // legacy path was MUST-8 / I-3 violating (the deferred notification status was returned
     // to the caller as "success" while leader actually never saw the result text).
-    let content = format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
+    let content =
+        format_report_result_notification(&result_id, task_id, agent_id, status, envelope);
     let state = report_owner_state(&state_for_owner, &owner_team);
     let event_log = EventLog::new(workspace);
-    let mut outcome = super::leader_receiver::send_to_leader_receiver(
+    let mut outcome = match super::leader_receiver::send_to_leader_receiver(
         workspace,
         &state,
         "leader",
@@ -646,37 +704,77 @@ pub fn report_result_for_owner_team(
         false,
         Some(&result_id),
         &event_log,
-    )?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let message_id = format!("fallback:{result_id}");
+            let fallback_error =
+                fallback_primary_error_text(fallback_primary_error, format!("leader_funnel_error:{error}"));
+            super::leader_receiver::deliver_to_leader_fallback_pane(
+                workspace,
+                &state,
+                &message_id,
+                Some(&result_id),
+                &content,
+                false,
+                Some(&fallback_error),
+                &event_log,
+            )?
+        }
+    };
     if let Some(message_id) = outcome.message_id.clone() {
-            let store = MessageStore::open(workspace)?;
-            let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-            let delivery_state_raw = crate::state::persist::load_runtime_state(workspace)
-                .unwrap_or_else(|_| state_for_owner.clone());
-            let delivery_state = report_owner_state(&delivery_state_raw, &owner_team);
-            for attempt in 0..3 {
-                let _ = store.mark(&message_id, "accepted", None);
-                outcome = super::delivery::deliver_pending_message(
-                    workspace,
-                    &store,
-                    &transport,
-                    &message_id,
-                    &event_log,
-                    &delivery_state,
-                )?;
-                if outcome.ok {
+        let store = MessageStore::open(workspace)?;
+        let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+        let delivery_state_raw = crate::state::persist::load_runtime_state(workspace)
+            .unwrap_or_else(|_| state_for_owner.clone());
+        let delivery_state = report_owner_state(&delivery_state_raw, &owner_team);
+        let mut primary_error: Option<String> = None;
+        for attempt in 0..3 {
+            let _ = store.mark(&message_id, "accepted", None);
+            match super::delivery::deliver_pending_message(
+                workspace,
+                &store,
+                &transport,
+                &message_id,
+                &event_log,
+                &delivery_state,
+            ) {
+                Ok(next) => outcome = next,
+                Err(error) => {
+                    primary_error = Some(format!("primary_delivery_error:{error}"));
+                    outcome = crate::messaging::DeliveryOutcome {
+                        ok: false,
+                        status: crate::messaging::DeliveryStatus::Failed,
+                        message_status: super::helpers::MessageStatusShadow("failed".to_string()),
+                        message_id: Some(message_id.clone()),
+                        verification: Some(error.to_string()),
+                        stage: None,
+                        reason: None,
+                        channel: Some("leader_receiver".to_string()),
+                    };
                     break;
                 }
-                let delivered = super::delivery::deliver_pending_messages(
-                    workspace,
-                    &delivery_state,
-                    &transport,
-                    &event_log,
-                )?;
-                if delivered.iter().any(|delivered_id| delivered_id == &message_id) {
+            }
+            if outcome.ok {
+                break;
+            }
+            match super::delivery::deliver_pending_messages(
+                workspace,
+                &delivery_state,
+                &transport,
+                &event_log,
+            ) {
+                Ok(delivered)
+                    if delivered
+                        .iter()
+                        .any(|delivered_id| delivered_id == &message_id) =>
+                {
                     outcome = crate::messaging::DeliveryOutcome {
                         ok: true,
                         status: crate::messaging::DeliveryStatus::Delivered,
-                        message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
+                        message_status: super::helpers::MessageStatusShadow(
+                            "delivered".to_string(),
+                        ),
                         message_id: Some(message_id.clone()),
                         verification: None,
                         stage: None,
@@ -685,39 +783,46 @@ pub fn report_result_for_owner_team(
                     };
                     break;
                 }
-                if attempt < 2 {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                Ok(_) => {}
+                Err(error) => {
+                    primary_error = Some(format!("primary_delivery_error:{error}"));
+                    outcome = crate::messaging::DeliveryOutcome {
+                        ok: false,
+                        status: crate::messaging::DeliveryStatus::Failed,
+                        message_status: super::helpers::MessageStatusShadow("failed".to_string()),
+                        message_id: Some(message_id.clone()),
+                        verification: Some(error.to_string()),
+                        stage: None,
+                        reason: None,
+                        channel: Some("leader_receiver".to_string()),
+                    };
+                    break;
                 }
             }
-            // E15(F4.4 双投修):direct inject 是 deliver **失败时的兜底**,不是无条件第二投。
-            // deliver loop 成功(outcome.ok)→ 跳过 direct inject,leader 仅收 deliver 那一条;
-            // 全失败 → direct inject 兜底投一条(不丢 result,守 #230/MUST-8)。两全:恰一条。
-            if !outcome.ok {
-                match inject_leader_notification_direct(workspace, &delivery_state, &content, &message_id) {
-                    Ok(()) => {
-                        store.mark(&message_id, "delivered", None)?;
-                        outcome = crate::messaging::DeliveryOutcome {
-                            ok: true,
-                            status: crate::messaging::DeliveryStatus::Delivered,
-                            message_status: super::helpers::MessageStatusShadow("delivered".to_string()),
-                            message_id: Some(message_id),
-                            verification: None,
-                            stage: None,
-                            reason: None,
-                            channel: Some("leader_receiver".to_string()),
-                        };
-                    }
-                    Err(reason) => {
-                        event_log.write(
-                            "leader_receiver.direct_inject_skipped",
-                            serde_json::json!({
-                                "message_id": message_id,
-                                "reason": reason,
-                            }),
-                        )?;
-                    }
-                }
+            if attempt < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
+        }
+        if !outcome.ok {
+            let fallback_error = primary_error.unwrap_or_else(|| {
+                format!(
+                    "leader_notification_primary_failed:{}",
+                    super::helpers::status_wire(outcome.status)
+                )
+            });
+            let fallback_error =
+                fallback_primary_error_text(fallback_primary_error, fallback_error);
+            outcome = super::leader_receiver::deliver_to_leader_fallback_pane(
+                workspace,
+                &delivery_state,
+                &message_id,
+                Some(&result_id),
+                &content,
+                false,
+                Some(&fallback_error),
+                &event_log,
+            )?;
+        }
     }
     let leader_notified = outcome.ok;
     let notification_status_wire = if outcome.ok {
@@ -729,7 +834,10 @@ pub fn report_result_for_owner_team(
     } else {
         "refused"
     };
-    let channel = outcome.channel.clone().unwrap_or_else(|| "leader_receiver".to_string());
+    let channel = outcome
+        .channel
+        .clone()
+        .unwrap_or_else(|| "leader_receiver".to_string());
     event_log.write(
         "mcp.report_result",
         serde_json::json!({
@@ -744,14 +852,28 @@ pub fn report_result_for_owner_team(
 
     let mut out = serde_json::Map::new();
     out.insert("ok".to_string(), serde_json::Value::Bool(true));
-    out.insert("result_id".to_string(), serde_json::Value::String(result_id));
-    out.insert("task_id".to_string(), serde_json::Value::String(task_id.to_string()));
-    out.insert("agent_id".to_string(), serde_json::Value::String(agent_id.to_string()));
+    out.insert(
+        "result_id".to_string(),
+        serde_json::Value::String(result_id),
+    );
+    out.insert(
+        "task_id".to_string(),
+        serde_json::Value::String(task_id.to_string()),
+    );
+    out.insert(
+        "agent_id".to_string(),
+        serde_json::Value::String(agent_id.to_string()),
+    );
     out.insert("acknowledged_messages".to_string(), serde_json::json!([]));
-    out.insert("leader_notified".to_string(), serde_json::Value::Bool(leader_notified));
+    out.insert(
+        "leader_notified".to_string(),
+        serde_json::Value::Bool(leader_notified),
+    );
     out.insert(
         "notification_message_id".to_string(),
-        outcome.message_id.map_or(serde_json::Value::Null, serde_json::Value::String),
+        outcome
+            .message_id
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
     );
     out.insert(
         "notification_status".to_string(),
@@ -764,20 +886,28 @@ pub fn report_result_for_owner_team(
     if channel == "rebind_required" {
         out.insert(
             "notification_action".to_string(),
-            serde_json::Value::String("run team-agent claim-leader or team-agent takeover".to_string()),
+            serde_json::Value::String(
+                "run team-agent claim-leader or team-agent takeover".to_string(),
+            ),
         );
     }
     out.insert("notification_event_id".to_string(), serde_json::Value::Null);
     Ok(serde_json::Value::Object(out))
 }
 
+fn fallback_primary_error_text(cli_primary_error: Option<&str>, observed: String) -> String {
+    match cli_primary_error.filter(|error| !error.trim().is_empty()) {
+        Some(error) => format!("{error}; {observed}"),
+        None => observed,
+    }
+}
+
 fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json::Value {
-    let mut state = match crate::state::projection::resolve_owner_team_id(state, owner_team)
-        .canonical_key()
-    {
-        Some(team) => crate::state::projection::project_top_level_view(state, team),
-        None => state.clone(),
-    };
+    let mut state =
+        match crate::state::projection::resolve_owner_team_id(state, owner_team).canonical_key() {
+            Some(team) => crate::state::projection::project_top_level_view(state, team),
+            None => state.clone(),
+        };
     if let Some(obj) = state.as_object_mut() {
         obj.insert(
             "active_team_key".to_string(),
@@ -785,56 +915,6 @@ fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json
         );
     }
     state
-}
-
-fn inject_leader_notification_direct(
-    workspace: &Path,
-    state: &serde_json::Value,
-    content: &str,
-    message_id: &str,
-) -> Result<(), String> {
-    let Some(pane_id) = state
-        .get("leader_receiver")
-        .or_else(|| state.get("team_owner"))
-        .and_then(|receiver| receiver.get("pane_id"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|pane| !pane.is_empty() && *pane != "__team_agent_unbound__")
-    else {
-        return Err("leader_direct_inject_failed:no_bound_pane".to_string());
-    };
-    let rendered = format!(
-        "Team Agent message from leader_receiver:\n\n{content}\n\n[team-agent-token:{message_id}]"
-    );
-    let target = Target::Pane(PaneId::new(pane_id));
-    if let Some(socket) = state
-        .get("leader_receiver")
-        .and_then(|receiver| receiver.get("tmux_socket"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|socket| !socket.is_empty())
-    {
-        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
-        if backend
-            .inject(&target, &InjectPayload::Text(rendered.clone()), Key::Enter, true)
-            .is_ok()
-        {
-            return Ok(());
-        }
-    }
-    let workspace_backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-    if workspace_backend
-        .inject(&target, &InjectPayload::Text(rendered.clone()), Key::Enter, true)
-        .is_ok()
-    {
-        return Ok(());
-    }
-    let default_backend = crate::tmux_backend::TmuxBackend::new();
-    if default_backend
-        .inject(&target, &InjectPayload::Text(rendered), Key::Enter, true)
-        .is_ok()
-    {
-        return Ok(());
-    }
-    Err(format!("leader_direct_inject_failed:pane={pane_id}"))
 }
 
 fn insert_result_if_absent(
@@ -888,7 +968,9 @@ fn format_report_result_notification(
 }
 
 fn format_report_result_tests(envelope: &serde_json::Value) -> Option<String> {
-    let tests = envelope.get("tests").and_then(serde_json::Value::as_array)?;
+    let tests = envelope
+        .get("tests")
+        .and_then(serde_json::Value::as_array)?;
     let parts = tests
         .iter()
         .filter_map(|test| {

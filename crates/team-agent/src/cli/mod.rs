@@ -115,9 +115,16 @@ pub mod lifecycle_port {
         team_id: Option<&str>,
         yes: bool,
         fresh: bool,
+        open_display: bool,
     ) -> Result<Value, CliError> {
-        match crate::lifecycle::quick_start_in_workspace(
-            workspace, agents_dir, name, yes, fresh, team_id,
+        match crate::lifecycle::quick_start_in_workspace_with_display(
+            workspace,
+            agents_dir,
+            name,
+            yes,
+            fresh,
+            team_id,
+            open_display,
         ) {
             Ok(report) => Ok(quick_start_value(report)),
             Err(e) => Ok(error_value(e)),
@@ -169,7 +176,7 @@ pub mod lifecycle_port {
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
         let transport = if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
-            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+            shutdown_transport_for_endpoint(endpoint)
         } else {
             shutdown_workspace_transport(&run_ws)
         };
@@ -278,6 +285,33 @@ pub mod lifecycle_port {
         let anchor_sessions = anchor_sessions_from_state(state, &pane_targets, event_log);
         match sessions_to_kill(&sessions, &anchor_sessions) {
             KillDecision::KillServerExclusive => {
+                if state
+                    .get("tmux_socket_source")
+                    .and_then(Value::as_str)
+                    == Some("leader_env")
+                {
+                    let _ = event_log.write(
+                        "shutdown.kill_server_skipped_shared_socket",
+                        json!({
+                            "reason": "leader_env_tmux_socket",
+                            "spared_sessions": [],
+                            "killed_sessions": sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        }),
+                    );
+                    let mut error = None;
+                    for session in &sessions {
+                        if let Err(err) = transport.kill_session(session) {
+                            if !tmux_absent_error(&err.to_string()) {
+                                error.get_or_insert_with(|| err.to_string());
+                            }
+                        }
+                    }
+                    return ShutdownSocketCleanup {
+                        killed_sessions: sessions,
+                        spared_sessions: Vec::new(),
+                        error,
+                    };
+                }
                 let error = transport.kill_server().err().map(|error| error.to_string());
                 ShutdownSocketCleanup {
                     killed_sessions: sessions,
@@ -466,9 +500,17 @@ pub mod lifecycle_port {
             None
         };
         let probe_timeout = crate::os_probe::probe_timeout();
-        // swallow batch 1: a failed ps probe degrades verification truthfully — the
-        // empty table must never read as a clean "no residual processes".
-        let verification_degraded = probe_timeout.is_some() || probe_degraded;
+        let probe_timeout_kind = probe_timeout.as_ref().map(|timeout| timeout.probe);
+        // swallow batch 1: a failed ps probe degrades cleanup truthfully — the
+        // empty table must never read as a clean "no residual processes". A slow
+        // per-process cwd probe is diagnostic only once session/process residuals
+        // are otherwise clean.
+        let cleanup_truth_degraded = probe_degraded || probe_timeout_kind == Some("ps_table");
+        let diagnostic_probe_degraded = probe_timeout_kind == Some("lsof_cwd");
+        let other_probe_timeout_degraded =
+            probe_timeout.is_some() && !cleanup_truth_degraded && !diagnostic_probe_degraded;
+        let verification_degraded =
+            cleanup_truth_degraded || diagnostic_probe_degraded || other_probe_timeout_degraded;
         let session_killed = !killed_sessions.is_empty()
             && kill_error.is_none()
             && session_residuals.is_empty()
@@ -500,13 +542,13 @@ pub mod lifecycle_port {
             && kill_error.is_none()
             && session_residuals.is_empty()
             && process_residuals.is_empty()
-            && !verification_degraded
+            && !cleanup_truth_degraded
             && !coordinator_timeout;
         let status = if ok {
             "ok"
         } else if coordinator_timeout {
             "timeout"
-        } else if verification_degraded {
+        } else if cleanup_truth_degraded {
             "partial"
         } else if kill_error.is_some() {
             "failed"
@@ -515,12 +557,11 @@ pub mod lifecycle_port {
         };
         let phase = if coordinator_timeout {
             Some("stop_coordinator")
-        } else if verification_degraded {
+        } else if cleanup_truth_degraded {
             Some("os_probe")
         } else {
             None
         };
-        let probe_timeout_kind = probe_timeout.as_ref().map(|timeout| timeout.probe);
         let probe_timeout_value = probe_timeout.as_ref().map(|timeout| {
             json!({
                 "probe": timeout.probe,
@@ -652,10 +693,19 @@ pub mod lifecycle_port {
         crate::tmux_backend::TmuxBackend::for_workspace(workspace)
     }
 
+    fn shutdown_transport_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
+        if Path::new(endpoint).is_absolute() {
+            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+        } else {
+            crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
+        }
+    }
+
     fn legacy_worker_tmux_endpoint(state: &Value) -> Option<&str> {
         state
             .get("tmux_endpoint")
             .and_then(Value::as_str)
+            .or_else(|| state.get("tmux_socket").and_then(Value::as_str))
             .filter(|endpoint| !endpoint.is_empty())
     }
 

@@ -413,6 +413,8 @@ pub struct LaunchReport {
     pub started: Vec<StartedAgent>,
     /// 是否 dry-run(只解析路由/权限,不起进程)。
     pub dry_run: bool,
+    /// Selected tmux endpoint for the team transport when known.
+    pub tmux_endpoint: Option<String>,
     /// 路由决策(每 task 一条;`routing.decision` 事件)。
     pub routes: Vec<RoutingDecision>,
     /// 权限摘要(每 agent 一条)。
@@ -436,6 +438,9 @@ pub struct StartedAgent {
     pub claude_config_dir: Option<PathBuf>,
     pub provider_projects_root: Option<PathBuf>,
     pub managed_mcp_config: bool,
+    pub layout_window: Option<WindowName>,
+    pub layout_index: Option<usize>,
+    pub pane_index: Option<usize>,
     pub display: WorkerDisplay,
 }
 

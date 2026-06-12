@@ -158,11 +158,33 @@ fn tmp_shutdown_workspace(tag: &str) -> PathBuf {
 
 struct CleanShutdownTransport {
     session_present: Mutex<bool>,
+    targets: Vec<PaneInfo>,
+    kill_server_called: Mutex<bool>,
+    probe_timeout_kind: Option<&'static str>,
 }
 
 impl CleanShutdownTransport {
     fn new() -> Self {
-        Self { session_present: Mutex::new(true) }
+        Self {
+            session_present: Mutex::new(true),
+            targets: Vec::new(),
+            kill_server_called: Mutex::new(false),
+            probe_timeout_kind: None,
+        }
+    }
+
+    fn with_targets(mut self, targets: Vec<PaneInfo>) -> Self {
+        self.targets = targets;
+        self
+    }
+
+    fn kill_server_called(&self) -> bool {
+        *self.kill_server_called.lock().unwrap()
+    }
+
+    fn with_probe_timeout(mut self, probe: &'static str) -> Self {
+        self.probe_timeout_kind = Some(probe);
+        self
     }
 }
 
@@ -227,7 +249,11 @@ impl Transport for CleanShutdownTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        if *self.session_present.lock().unwrap() {
+            Ok(self.targets.clone())
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
@@ -248,7 +274,15 @@ impl Transport for CleanShutdownTransport {
     }
 
     fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        if let Some(probe) = self.probe_timeout_kind {
+            crate::os_probe::set_probe_timeout_for_test(probe, None, 900);
+        }
         *self.session_present.lock().unwrap() = false;
+        Ok(())
+    }
+
+    fn kill_server(&self) -> Result<(), TransportError> {
+        *self.kill_server_called.lock().unwrap() = true;
         Ok(())
     }
 
@@ -259,4 +293,127 @@ impl Transport for CleanShutdownTransport {
     fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         Ok(AttachOutcome::Attached)
     }
+}
+
+#[test]
+fn lsof_cwd_timeout_is_diagnostic_not_shutdown_partial() {
+    let ws = tmp_shutdown_workspace("lsof-cwd-timeout-diagnostic");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-lsof-cwd-timeout",
+            "agents": {
+                "fake_impl": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "fake_impl"
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        None,
+        &CleanShutdownTransport::new().with_probe_timeout("lsof_cwd"),
+    )
+    .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["status"], json!("ok"));
+    assert_eq!(out["phase"], json!(null));
+    assert_eq!(out["verification_degraded"], json!(true));
+    assert_eq!(out["probe_timeout_kind"], json!("lsof_cwd"));
+    assert_eq!(out["residuals"]["sessions"], json!([]));
+    assert_eq!(out["residuals"]["processes"], json!([]));
+
+    let events = crate::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let shutdown = events
+        .iter()
+        .find(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("lifecycle.shutdown")
+        })
+        .unwrap_or_else(|| panic!("missing lifecycle.shutdown event: {events:?}"));
+    assert_eq!(shutdown["status"], json!("ok"));
+    assert_eq!(shutdown["phase"], json!(null));
+    assert_eq!(shutdown["verification_degraded"], json!(true));
+    assert_eq!(shutdown["probe_timeout_kind"], json!("lsof_cwd"));
+}
+
+#[test]
+fn ps_table_timeout_still_degrades_shutdown_truth() {
+    let ws = tmp_shutdown_workspace("ps-table-timeout-partial");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-ps-table-timeout",
+            "agents": {
+                "fake_impl": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "fake_impl"
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        None,
+        &CleanShutdownTransport::new().with_probe_timeout("ps_table"),
+    )
+    .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(false));
+    assert_eq!(out["status"], json!("partial"));
+    assert_eq!(out["phase"], json!("os_probe"));
+    assert_eq!(out["verification_degraded"], json!(true));
+    assert_eq!(out["probe_timeout_kind"], json!("ps_table"));
+}
+
+#[test]
+fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive() {
+    let ws = tmp_shutdown_workspace("leader-env-socket-no-kill-server");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "tmux_socket_source": "leader_env",
+            "agents": {
+                "fake_impl": {
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "fake_impl"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new().with_targets(vec![PaneInfo {
+        pane_id: PaneId::new("%1"),
+        session: SessionName::new("team-layout"),
+        window_index: Some(0),
+        window_name: Some(WindowName::new("team-w1")),
+        pane_index: Some(0),
+        tty: None,
+        current_command: None,
+        current_path: None,
+        active: true,
+        pane_pid: None,
+        leader_env: BTreeMap::new(),
+    }]);
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["killed_sessions"], json!(["team-layout"]));
+    assert_eq!(out["spared_sessions"], json!([]));
+    assert!(
+        !transport.kill_server_called(),
+        "leader-env/shared socket shutdown must kill sessions individually, never kill-server"
+    );
 }

@@ -419,7 +419,13 @@ fn backfill_capture_fields(incoming_agent: &mut Value, latest_agent: &Value) {
     let Some(incoming_row) = incoming_agent.as_object_mut() else {
         return;
     };
+    let incoming_session = incoming_row.get("session_id").and_then(Value::as_str);
+    let latest_session = latest_agent.get("session_id").and_then(Value::as_str);
+    let session_changed = incoming_session.is_some() && incoming_session != latest_session;
     for field in CAPTURE_FIELDS {
+        if session_changed && field != "session_id" {
+            continue;
+        }
         if incoming_row.get(field).is_none_or(Value::is_null) {
             if let Some(value) = latest_agent.get(field).filter(|value| !value.is_null()) {
                 incoming_row.insert(field.to_string(), value.clone());

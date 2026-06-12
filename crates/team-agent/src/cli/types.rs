@@ -97,7 +97,8 @@ impl CliError {
                     "tmux session `{session}` already exists. It may be an active team. Do not terminate existing tmux sessions from startup; use a different team name or runtime.session_name and start again."
                 );
                 payload.next_actions = Some(vec![
-                    "Use a different team name or runtime.session_name before starting again.".to_string(),
+                    "Use a different team name or runtime.session_name before starting again."
+                        .to_string(),
                 ]);
             }
         }
@@ -262,6 +263,7 @@ pub struct QuickStartArgs {
     pub team_id: Option<String>,
     pub yes: bool,
     pub fresh: bool,
+    pub no_display: bool,
     pub json: bool,
 }
 
@@ -302,6 +304,33 @@ pub struct SendArgs {
     /// When set, the store insert uses this id verbatim; a repeat with the same
     /// id returns a `Duplicate` refusal instead of creating a second row.
     pub message_id: Option<String>,
+}
+
+/// E23 worker-side emergency fallback for `team_orchestrator.send_message`
+/// transport failures. This is not a general control-plane send path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackSendLeaderArgs {
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub sender: String,
+    pub task: Option<String>,
+    pub message_id: String,
+    pub content: String,
+    pub primary_error: String,
+    pub json: bool,
+}
+
+/// E23 worker-side emergency fallback for `team_orchestrator.report_result`
+/// transport failures. It must still persist through the results DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FallbackReportResultArgs {
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub agent_id: String,
+    pub task_id: String,
+    pub result_json: String,
+    pub primary_error: String,
+    pub json: bool,
 }
 
 /// `allow-peer-talk`(`parser.py`): allow direct peer communication between two agents.

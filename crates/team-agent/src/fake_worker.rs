@@ -107,7 +107,10 @@ fn parse_rendered_header(line: &str) -> Option<RenderedBlock> {
         .split_once(" for ")
         .map(|(_, task)| task.trim().to_string())
         .filter(|task| !task.is_empty());
-    Some(RenderedBlock { task_id, lines: Vec::new() })
+    Some(RenderedBlock {
+        task_id,
+        lines: Vec::new(),
+    })
 }
 
 fn parse_token(line: &str) -> Option<String> {
@@ -135,147 +138,11 @@ fn report_fake_result(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    mirror_fake_result_to_leader(workspace, owner_team.as_deref(), &envelope, source_content);
+    let _ = source_content;
     crate::messaging::report_result_for_owner_team(workspace, &envelope, owner_team.as_deref())
         .map_err(|e| FakeWorkerError::Report(e.to_string()))?;
-    mirror_fake_result_to_leader(workspace, owner_team.as_deref(), &envelope, source_content);
     writeln!(output, "{}", serde_json::to_string(&envelope)?)?;
     Ok(())
-}
-
-fn mirror_fake_result_to_leader(
-    workspace: &Path,
-    owner_team: Option<&str>,
-    envelope: &serde_json::Value,
-    source_content: Option<&str>,
-) {
-    let Ok(raw_state) = crate::state::persist::load_runtime_state(workspace) else {
-        return;
-    };
-    let state = owner_team
-        .and_then(|team| crate::state::projection::resolve_owner_team_id(&raw_state, team).canonical_key().map(str::to_string))
-        .map(|team| crate::state::projection::project_top_level_view(&raw_state, &team))
-        .unwrap_or(raw_state);
-    let attached = state
-        .get("leader_receiver")
-        .and_then(|receiver| receiver.get("status"))
-        .and_then(serde_json::Value::as_str)
-        == Some("attached");
-    let pane_id = state
-        .get("leader_receiver")
-        .and_then(|receiver| receiver.get("pane_id"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|pane| !pane.is_empty())
-        .map(str::to_string)
-        .or_else(|| owner_team.and_then(|team| claimed_pane_from_events(workspace, team)));
-    let Some(pane_id) = pane_id.filter(|_| attached || owner_team.is_some()) else {
-        return;
-    };
-    let summary = envelope
-        .get("summary")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("Fake worker completed");
-    let result_id = envelope
-        .get("result_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let text = match source_content.filter(|content| !content.trim().is_empty()) {
-        Some(content) => format!(
-            "Fake worker result: {summary}\nMessage content: {}\nResult id: {result_id}",
-            content.trim()
-        ),
-        None => format!("Fake worker result: {summary}\nResult id: {result_id}"),
-    };
-    let target = crate::transport::Target::Pane(crate::transport::PaneId::new(&pane_id));
-    let payload = crate::transport::InjectPayload::Text(text.clone());
-    let key = crate::transport::Key::Enter;
-    if let Some(socket) = leader_receiver_full_socket(&state) {
-        let endpoint_backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
-        if crate::transport::Transport::inject(&endpoint_backend, &target, &payload, key, true).is_ok() {
-            mirror_to_team_session_panes(&state, workspace, agent_id_from_envelope(envelope), &text);
-            return;
-        }
-    }
-    let workspace_backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-    let _ = crate::transport::Transport::inject(&workspace_backend, &target, &payload, key, true);
-    mirror_to_team_session_panes(&state, workspace, agent_id_from_envelope(envelope), &text);
-}
-
-fn leader_receiver_full_socket(state: &serde_json::Value) -> Option<&str> {
-    state
-        .get("leader_receiver")
-        .and_then(|receiver| receiver.get("tmux_socket"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|socket| !socket.is_empty() && Path::new(socket).is_absolute())
-}
-
-fn claimed_pane_from_events(workspace: &Path, owner_team: &str) -> Option<String> {
-    crate::event_log::EventLog::new(workspace)
-        .tail(50)
-        .ok()?
-        .into_iter()
-        .rev()
-        .find_map(|event| {
-            if event.get("event").and_then(serde_json::Value::as_str)
-                != Some("leader_receiver.rebind_applied")
-            {
-                return None;
-            }
-            if event.get("team_id").and_then(serde_json::Value::as_str) != Some(owner_team) {
-                return None;
-            }
-            event
-                .get("new_pane_id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|pane| !pane.is_empty())
-                .map(str::to_string)
-        })
-}
-
-fn agent_id_from_envelope(envelope: &serde_json::Value) -> Option<&str> {
-    envelope.get("agent_id").and_then(serde_json::Value::as_str)
-}
-
-fn mirror_to_team_session_panes(
-    state: &serde_json::Value,
-    workspace: &Path,
-    agent_id: Option<&str>,
-    text: &str,
-) {
-    let Some(session) = state
-        .get("session_name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|session| !session.is_empty())
-    else {
-        return;
-    };
-    let worker_pane = agent_id.and_then(|agent_id| {
-        state
-            .get("agents")
-            .and_then(|agents| agents.get(agent_id))
-            .and_then(|agent| agent.get("pane_id"))
-            .and_then(serde_json::Value::as_str)
-    });
-    if let Some(socket) = leader_receiver_full_socket(state) {
-        let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
-        for pane in crate::transport::Transport::list_targets(&backend).unwrap_or_default() {
-            if pane.session.as_str() != session || Some(pane.pane_id.as_str()) == worker_pane {
-                continue;
-            }
-            let target = crate::transport::Target::Pane(pane.pane_id);
-            let payload = crate::transport::InjectPayload::Text(text.to_string());
-            let _ = crate::transport::Transport::inject(&backend, &target, &payload, crate::transport::Key::Enter, true);
-        }
-    }
-    let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-    for pane in crate::transport::Transport::list_targets(&backend).unwrap_or_default() {
-        if pane.session.as_str() != session || Some(pane.pane_id.as_str()) == worker_pane {
-            continue;
-        }
-        let target = crate::transport::Target::Pane(pane.pane_id);
-        let payload = crate::transport::InjectPayload::Text(text.to_string());
-        let _ = crate::transport::Transport::inject(&backend, &target, &payload, crate::transport::Key::Enter, true);
-    }
 }
 
 fn fake_envelope(
@@ -331,7 +198,9 @@ mod tests {
     fn stored_result(ws: &std::path::Path) -> (String, String, String, serde_json::Value) {
         let store = MessageStore::open(ws).unwrap();
         let conn = open_db(store.db_path()).unwrap();
-        let mut stmt = conn.prepare("select task_id, agent_id, status, envelope from results").unwrap();
+        let mut stmt = conn
+            .prepare("select task_id, agent_id, status, envelope from results")
+            .unwrap();
         let row = stmt
             .query_row([], |r| {
                 Ok((
@@ -354,9 +223,18 @@ mod tests {
             ("t1", "w1", "success"),
             "stored result row must be task_id=t1 agent_id=w1 status=success"
         );
-        assert_eq!(env["schema_version"], serde_json::json!("result_envelope_v1"));
-        assert_eq!(env["summary"], serde_json::json!("Fake worker handled message m1"));
-        assert_eq!(env["tests"], serde_json::json!([{"command": "fake-provider", "status": "passed"}]));
+        assert_eq!(
+            env["schema_version"],
+            serde_json::json!("result_envelope_v1")
+        );
+        assert_eq!(
+            env["summary"],
+            serde_json::json!("Fake worker handled message m1")
+        );
+        assert_eq!(
+            env["tests"],
+            serde_json::json!([{"command": "fake-provider", "status": "passed"}])
+        );
         let artifact_path = env["artifacts"][0]["path"].as_str().unwrap_or_default();
         assert!(
             artifact_path.ends_with(".team/logs/w1.scrollback"),
@@ -375,8 +253,14 @@ mod tests {
 
         assert_golden_envelope(&ws);
         let printed = String::from_utf8(out).unwrap();
-        assert!(printed.contains("TEAM_AGENT_FAKE_READY agent=w1"), "must print the READY idle marker; got {printed}");
-        assert!(printed.contains("TEAM_AGENT_FAKE_WORKING agent=w1"), "must print the WORKING marker on a non-empty line; got {printed}");
+        assert!(
+            printed.contains("TEAM_AGENT_FAKE_READY agent=w1"),
+            "must print the READY idle marker; got {printed}"
+        );
+        assert!(
+            printed.contains("TEAM_AGENT_FAKE_WORKING agent=w1"),
+            "must print the WORKING marker on a non-empty line; got {printed}"
+        );
     }
 
     // Rendered-message form: a `Team Agent message from leader for t1:` block ending `[team-agent-token:m1]`
@@ -391,6 +275,9 @@ mod tests {
 
         assert_golden_envelope(&ws);
         let printed = String::from_utf8(out).unwrap();
-        assert!(printed.contains("TEAM_AGENT_FAKE_WORKING agent=w1"), "rendered form prints WORKING per line; got {printed}");
+        assert!(
+            printed.contains("TEAM_AGENT_FAKE_WORKING agent=w1"),
+            "rendered form prints WORKING per line; got {printed}"
+        );
     }
 }

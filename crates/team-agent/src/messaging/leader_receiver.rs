@@ -2,15 +2,16 @@
 
 use std::path::Path;
 
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 use crate::event_log::EventLog;
 use crate::message_store::{MessageStore, NotificationClaimParams};
 use crate::model::ids::{OwnerEpoch, TaskId};
-use crate::transport::Transport;
+use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
 
 use super::helpers::MessageStatusShadow;
-use super::{DeliveryOutcome, DeliveryStatus, MessagingError};
+use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
 /// caller(send_message(to=leader) / report_result / request_human / idle reminder /
@@ -33,6 +34,36 @@ pub fn send_to_leader_receiver(
     result_id: Option<&str>,
     event_log: &EventLog,
 ) -> Result<DeliveryOutcome, MessagingError> {
+    send_to_leader_receiver_with_message_id(
+        workspace,
+        state,
+        leader_id,
+        content,
+        task_id,
+        sender,
+        requires_ack,
+        result_id,
+        None,
+        event_log,
+    )
+}
+
+/// Same leader funnel as [`send_to_leader_receiver`], but lets the caller supply a
+/// stable message id for transport-fallback retries. The public function above
+/// keeps the existing call surface unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn send_to_leader_receiver_with_message_id(
+    workspace: &Path,
+    state: &serde_json::Value,
+    leader_id: &str,
+    content: &str,
+    task_id: Option<&TaskId>,
+    sender: &str,
+    requires_ack: bool,
+    result_id: Option<&str>,
+    requested_message_id: Option<&str>,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
     let store = MessageStore::open(workspace)?;
     let owner_team = active_team_key(workspace, state);
     if requires_ack {
@@ -41,15 +72,40 @@ pub fn send_to_leader_receiver(
             serde_json::json!({"sender": sender, "leader_id": leader_id, "result_id": result_id}),
         )?;
     }
-    let message_id = store.create_message(
-        task_id.map(TaskId::as_str),
-        sender,
-        leader_id,
-        content,
-        None,
-        false,
-        Some(&owner_team),
-    )?;
+    let message_id = if let Some(requested) = requested_message_id {
+        if store.message_exists(requested)? {
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Refused,
+                message_status: MessageStatusShadow("refused".to_string()),
+                message_id: Some(requested.to_string()),
+                verification: None,
+                stage: None,
+                reason: Some(DeliveryRefusal::Duplicate),
+                channel: Some("leader_receiver".to_string()),
+            });
+        }
+        store.create_message_with_id(
+            requested,
+            task_id.map(TaskId::as_str),
+            sender,
+            leader_id,
+            content,
+            None,
+            false,
+            Some(&owner_team),
+        )?
+    } else {
+        store.create_message(
+            task_id.map(TaskId::as_str),
+            sender,
+            leader_id,
+            content,
+            None,
+            false,
+            Some(&owner_team),
+        )?
+    };
     // #231 exactly-once across rebind: insert the leader_notification_log PK BEFORE the
     // unbound-pane check. That way, if the result row gets blocked (I-4) and later the
     // leader rebinds + reclaim replays this row, the dedup PK still gates any second
@@ -170,7 +226,9 @@ pub fn claim_leader_receiver(
     }
     let next_epoch = owner_epoch(state).unwrap_or(0).saturating_add(1);
     let Some(root) = state.as_object_mut() else {
-        return Err(MessagingError::Routing("runtime state root is not an object".to_string()));
+        return Err(MessagingError::Routing(
+            "runtime state root is not an object".to_string(),
+        ));
     };
     let owner = root
         .entry("team_owner")
@@ -225,18 +283,165 @@ pub fn mirror_peer_message_to_leader(
     event_log: &EventLog,
 ) -> Result<(), MessagingError> {
     let _ = send_to_leader_receiver(
-        workspace,
-        state,
-        "leader",
-        content,
-        task_id,
-        sender,
-        false,
-        None,
-        event_log,
+        workspace, state, "leader", content, task_id, sender, false, None, event_log,
     )?;
     let _ = recipient;
     Ok(())
+}
+
+/// E23 transport fallback: physically inject the already-built leader payload into
+/// the bound leader pane only after the caller's primary path is known not to have
+/// succeeded. This primitive is reclaim-neutral: it reads leader_receiver/team_owner
+/// fields but never writes binding state.
+#[allow(clippy::too_many_arguments)]
+pub fn deliver_to_leader_fallback_pane(
+    workspace: &Path,
+    state: &Value,
+    message_id: &str,
+    result_id: Option<&str>,
+    content: &str,
+    primary_ok: bool,
+    primary_error: Option<&str>,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
+    if primary_ok {
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: None,
+            stage: None,
+            reason: None,
+            channel: Some("leader_receiver".to_string()),
+        });
+    }
+
+    let store = MessageStore::open(workspace)?;
+    if message_already_delivered(&store, message_id)? {
+        return Ok(DeliveryOutcome {
+            ok: true,
+            status: DeliveryStatus::AlreadyDelivered,
+            message_status: MessageStatusShadow("delivered".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: None,
+            stage: None,
+            reason: None,
+            channel: Some("leader_receiver".to_string()),
+        });
+    }
+
+    let owner_team_id = active_team_key(workspace, state);
+    let pane_id = leader_pane_id(state).map(str::to_string);
+    let primary_error = primary_error
+        .filter(|error| !error.trim().is_empty())
+        .unwrap_or("primary delivery failed");
+    let attempt_payload = serde_json::json!({
+        "message_id": message_id,
+        "result_id": result_id,
+        "owner_team_id": owner_team_id,
+        "pane_id": pane_id,
+        "primary_error": primary_error,
+        "delivered_via": "fallback_pane",
+    });
+    event_log.write(
+        "leader_receiver.fallback_pane_attempt",
+        attempt_payload.clone(),
+    )?;
+
+    let Some(pane_id) = pane_id.filter(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
+    else {
+        let failed = serde_json::json!({
+            "message_id": message_id,
+            "result_id": result_id,
+            "owner_team_id": owner_team_id,
+            "pane_id": null,
+            "primary_error": primary_error,
+            "delivered_via": "fallback_pane",
+            "reason": "no_bound_pane",
+        });
+        event_log.write("leader_receiver.fallback_pane_failed", failed)?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Blocked,
+            message_status: MessageStatusShadow("blocked".to_string()),
+            message_id: Some(message_id.to_string()),
+            verification: Some("run team-agent claim-leader or team-agent takeover".to_string()),
+            stage: None,
+            reason: Some(DeliveryRefusal::LeaderNotAttached),
+            channel: Some("fallback_pane".to_string()),
+        });
+    };
+
+    let rendered = render_fallback_pane_message(content, message_id, primary_error);
+    let target = Target::Pane(PaneId::new(&pane_id));
+    let payload = InjectPayload::Text(rendered);
+    let inject_result = leader_tmux_socket(state)
+        .and_then(|socket| {
+            let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+            backend.inject(&target, &payload, Key::Enter, true).ok()
+        })
+        .map(Ok)
+        .unwrap_or_else(|| {
+            let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+            backend.inject(&target, &payload, Key::Enter, true)
+        })
+        .or_else(|_| {
+            let backend = crate::tmux_backend::TmuxBackend::new();
+            backend.inject(&target, &payload, Key::Enter, true)
+        });
+
+    match inject_result {
+        Ok(report) => {
+            store.mark(message_id, "delivered", None)?;
+            event_log.write(
+                "leader_receiver.fallback_pane_submitted",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "result_id": result_id,
+                    "owner_team_id": owner_team_id,
+                    "pane_id": pane_id,
+                    "primary_error": primary_error,
+                    "delivered_via": "fallback_pane",
+                    "verification": format!("{:?}", report.submit_verification),
+                }),
+            )?;
+            Ok(DeliveryOutcome {
+                ok: true,
+                status: DeliveryStatus::Delivered,
+                message_status: MessageStatusShadow("delivered".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some("delivered_via=fallback_pane".to_string()),
+                stage: None,
+                reason: None,
+                channel: Some("fallback_pane".to_string()),
+            })
+        }
+        Err(error) => {
+            event_log.write(
+                "leader_receiver.fallback_pane_failed",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "result_id": result_id,
+                    "owner_team_id": owner_team_id,
+                    "pane_id": pane_id,
+                    "primary_error": primary_error,
+                    "delivered_via": "fallback_pane",
+                    "reason": error.to_string(),
+                }),
+            )?;
+            Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Failed,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(error.to_string()),
+                stage: None,
+                reason: Some(DeliveryRefusal::TmuxTargetMissing),
+                channel: Some("fallback_pane".to_string()),
+            })
+        }
+    }
 }
 
 pub(crate) fn active_team_key(workspace: &Path, state: &Value) -> String {
@@ -245,29 +450,32 @@ pub(crate) fn active_team_key(workspace: &Path, state: &Value) -> String {
         .and_then(Value::as_str)
         .filter(|team| !team.is_empty())
         .map(ToString::to_string)
-        .or_else(|| workspace.file_name().map(|name| name.to_string_lossy().to_string()))
+        .or_else(|| {
+            workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
         .unwrap_or_else(|| "current".to_string())
 }
 
 fn owner_epoch(state: &Value) -> Option<u64> {
     receiver_or_owner_field(state, "team_owner", "owner_epoch")
         .and_then(Value::as_u64)
-        .or_else(|| receiver_or_owner_field(state, "leader_receiver", "owner_epoch").and_then(Value::as_u64))
+        .or_else(|| {
+            receiver_or_owner_field(state, "leader_receiver", "owner_epoch").and_then(Value::as_u64)
+        })
 }
 
 fn receiver_or_owner_field<'a>(state: &'a Value, record: &str, field: &str) -> Option<&'a Value> {
-    state
-        .get(record)
-        .and_then(|v| v.get(field))
-        .or_else(|| {
-            let active = state.get("active_team_key").and_then(Value::as_str)?;
-            state
-                .get("teams")
-                .and_then(Value::as_object)
-                .and_then(|teams| teams.get(active))
-                .and_then(|team| team.get(record))
-                .and_then(|v| v.get(field))
-        })
+    state.get(record).and_then(|v| v.get(field)).or_else(|| {
+        let active = state.get("active_team_key").and_then(Value::as_str)?;
+        state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(active))
+            .and_then(|team| team.get(record))
+            .and_then(|v| v.get(field))
+    })
 }
 
 fn leader_record_field<'a>(state: &'a Value, field: &str) -> Option<&'a Value> {
@@ -284,8 +492,7 @@ fn leader_session_uuid(state: &Value) -> Option<&str> {
 }
 
 pub(crate) fn leader_pane_bound_but_not_live(workspace: &Path, state: &Value) -> bool {
-    leader_pane_id(state)
-        .is_some_and(|pane_id| !leader_pane_is_live(workspace, state, pane_id))
+    leader_pane_id(state).is_some_and(|pane_id| !leader_pane_is_live(workspace, state, pane_id))
 }
 
 fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
@@ -304,7 +511,9 @@ fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
             .list_targets()
             .unwrap_or_default(),
     );
-    targets.iter().any(|target| target.pane_id.as_str() == pane_id)
+    targets
+        .iter()
+        .any(|target| target.pane_id.as_str() == pane_id)
 }
 
 fn leader_pane_id(state: &Value) -> Option<&str> {
@@ -318,11 +527,35 @@ fn leader_tmux_socket(state: &Value) -> Option<&str> {
         .filter(|socket| std::path::Path::new(socket).is_absolute())
 }
 
-fn copy_candidate_field(
-    out: &mut serde_json::Map<String, Value>,
-    candidate: &Value,
-    key: &str,
-) {
+fn message_already_delivered(
+    store: &MessageStore,
+    message_id: &str,
+) -> Result<bool, MessagingError> {
+    let conn = crate::db::schema::open_db(store.db_path())?;
+    let status = conn
+        .query_row(
+            "select status from messages where message_id = ?1",
+            [message_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(matches!(
+        status.as_deref(),
+        Some("delivered" | "acknowledged" | "submitted" | "submitted_unverified")
+    ))
+}
+
+fn render_fallback_pane_message(content: &str, message_id: &str, primary_error: &str) -> String {
+    format!(
+        "Team Agent fallback delivery\n\
+         delivered_via=fallback_pane\n\
+         primary_error: {primary_error}\n\n\
+         {content}\n\n\
+         [team-agent-token:{message_id}]"
+    )
+}
+
+fn copy_candidate_field(out: &mut serde_json::Map<String, Value>, candidate: &Value, key: &str) {
     if let Some(value) = candidate.get(key) {
         out.insert(key.to_string(), value.clone());
     }

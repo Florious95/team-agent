@@ -22,6 +22,14 @@ Use Team Agent MCP tools for team-visible coordination:
 - Do not pass sender, task_id, agent_id, schema_version, or ack fields unless
   doing a low-level compatibility diagnostic. The MCP runtime fills protocol
   fields from the current worker and task state.
+- Emergency fallback exception: if a leader-bound MCP send/report payload is
+  already built but the MCP transport itself fails or the primary delivery path
+  errors (for example `Transport closed`, `Connection refused`, `Broken pipe`,
+  `EOF`, timeout, or internal delivery error), use `team-agent fallback-send-leader`
+  or `team-agent fallback-report-result` exactly once with `--primary-error`.
+  Do not use fallback for business refusals such as permission, quota, or unknown
+  target. After fallback, tell the leader to run `team-agent restart-agent` to
+  refresh the worker MCP transport.
 
 If you are blocked or cannot continue, message the leader promptly instead of
 waiting silently. If work takes several minutes, send a short progress update.

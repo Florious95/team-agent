@@ -206,6 +206,7 @@ fn current_uid() -> Option<String> {
             team_id: None,
             yes: true,
             fresh: false,
+            no_display: false,
             json: true,
         };
         let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
@@ -240,6 +241,7 @@ fn current_uid() -> Option<String> {
             team_id: None,
             yes: false,
             fresh: false,
+            no_display: false,
             json: true,
         };
         let text = outcome_text(cmd_quick_start(&args));
@@ -275,15 +277,25 @@ fn current_uid() -> Option<String> {
         );
     }
 
-    // 4 [P1] — cmd_add_agent with a DUPLICATE agent id surfaces the REAL crate::lifecycle::add_agent
-    // "agent id already exists" error (launch.rs:252). The placeholder returns {ok:true} -> RED.
-    // OS-safe (the dup check fires before compile/spawn).
+    // 4 [P1] — cmd_add_agent with a DUPLICATE runtime agent id surfaces the REAL
+    // crate::lifecycle::add_agent "agent id already exists" error. E25: role docs/spec files are
+    // inputs, not membership; duplicate membership is runtime-state based.
     #[test]
     fn cli_add_agent_duplicate_id_surfaces_real_error() {
         let team = deleg_uniq_dir("addagent");
         std::fs::create_dir_all(team.join("agents")).unwrap();
         std::fs::write(team.join("TEAM.md"), DELEG_TEAM_MD).unwrap();
         std::fs::write(team.join("agents").join("implementer.md"), DELEG_VALID_ROLE).unwrap(); // 'implementer' already exists
+        crate::state::persist::save_runtime_state(
+            &team,
+            &json!({
+                "session_name": "team-deleg-addagent",
+                "agents": {
+                    "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+                }
+            }),
+        )
+        .unwrap();
         let dup_role = team.join("dup-role.md");
         std::fs::write(&dup_role, DELEG_VALID_ROLE).unwrap(); // role file must exist
         let args = AddAgentArgs {

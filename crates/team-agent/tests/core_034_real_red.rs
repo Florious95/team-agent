@@ -284,7 +284,7 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
 
 #[test]
 #[serial(env)]
-fn quick_start_default_display_none_and_adaptive_opt_in_are_observable() {
+fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
     let default_ws = tmp_dir("display-default");
     let default_team = write_team(
         &default_ws,
@@ -314,26 +314,26 @@ fn quick_start_default_display_none_and_adaptive_opt_in_are_observable() {
 
     assert_eq!(
         state_display_backend(&default_state),
-        Some("none"),
-        "B3 default display contract: omitting display_backend in TEAM.md must persist display_backend=none. \
+        Some("adaptive"),
+        "adaptive layout contract: omitting display_backend in TEAM.md must persist display_backend=adaptive. \
          state={default_state}\nreport={default_report:?}"
     );
     assert!(
         format!("{default_report:?}").contains("display_backend")
-            && format!("{default_report:?}").contains("none"),
-        "B3 default display contract: quick-start report/JSON surface must visibly report display_backend=none, not hide the default. report={default_report:?}"
+            && format!("{default_report:?}").contains("adaptive"),
+        "adaptive layout contract: quick-start report/JSON surface must visibly report display_backend=adaptive, not hide the default. report={default_report:?}"
     );
     assert!(
-        !state_has_adaptive_display_records(&default_state),
-        "B3 default display contract: default None must not create adaptive display records. state={default_state}"
+        state_has_adaptive_display_records(&default_state),
+        "adaptive layout contract: default adaptive must create direct adaptive display records. state={default_state}"
     );
 
-    let adaptive_ws = tmp_dir("display-adaptive");
-    let adaptive_team = write_team(
-        &adaptive_ws,
-        "display-adaptive-team",
+    let none_ws = tmp_dir("display-none");
+    let none_team = write_team(
+        &none_ws,
+        "display-none-team",
         "fake",
-        Some("adaptive"),
+        Some("none"),
         &[AgentDoc {
             id: "worker",
             role: "Fake Worker",
@@ -342,22 +342,26 @@ fn quick_start_default_display_none_and_adaptive_opt_in_are_observable() {
             body: "Fake worker.",
         }],
     );
-    seed_healthy_coordinator(&adaptive_ws);
-    let adaptive_report = quick_start_with_transport_in_workspace(
-        &adaptive_ws,
-        &adaptive_team,
+    seed_healthy_coordinator(&none_ws);
+    let none_report = quick_start_with_transport_in_workspace(
+        &none_ws,
+        &none_team,
         None,
         true,
         true,
-        Some("adaptivedisplay"),
+        Some("nonedisplay"),
         &RecordingTransport::new(),
     )
-    .expect("adaptive quick-start should run with recording transport");
-    let adaptive_state = load_runtime_state(&adaptive_ws).expect("load adaptive display state");
+    .expect("none quick-start should run with recording transport");
+    let none_state = load_runtime_state(&none_ws).expect("load none display state");
     assert_eq!(
-        state_display_backend(&adaptive_state),
-        Some("adaptive"),
-        "B3 opt-in contract: explicit display_backend=adaptive must remain supported. state={adaptive_state}\nreport={adaptive_report:?}"
+        state_display_backend(&none_state),
+        Some("none"),
+        "adaptive layout contract: explicit display_backend=none remains the escape hatch. state={none_state}\nreport={none_report:?}"
+    );
+    assert!(
+        !state_has_adaptive_display_records(&none_state),
+        "explicit display_backend=none must not create adaptive display records. state={none_state}"
     );
 }
 
@@ -427,8 +431,9 @@ fn display_default_none_is_documented_in_help_and_changelog() {
     assert!(
         help_text.contains("display_backend")
             && help_text.to_lowercase().contains("default")
+            && help_text.to_lowercase().contains("adaptive")
             && help_text.to_lowercase().contains("none"),
-        "B3 MUST-15 guard: quick-start help must disclose the default display_backend=none behavior. help={help_text:?}"
+        "adaptive layout guard: quick-start help must disclose default adaptive and none escape hatch. help={help_text:?}"
     );
 
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -438,8 +443,10 @@ fn display_default_none_is_documented_in_help_and_changelog() {
         .to_path_buf();
     let docs = read_optional_changelogs(&repo_root);
     assert!(
-        docs.contains("display_backend") && docs.to_lowercase().contains("none"),
-        "B3 MUST-15 guard: CHANGELOG/docs must disclose the user-visible default display change to none. searched_root={} docs_excerpt={}",
+        docs.contains("display_backend")
+            && docs.to_lowercase().contains("adaptive")
+            && docs.to_lowercase().contains("none"),
+        "adaptive layout guard: CHANGELOG/docs must disclose default adaptive and none escape hatch. searched_root={} docs_excerpt={}",
         repo_root.display(),
         &docs.chars().take(500).collect::<String>()
     );

@@ -4,6 +4,7 @@ pub(super) struct SpawnedAgentWindow {
     pub spawn: crate::transport::SpawnResult,
     pub plan: crate::provider::CommandPlan,
     pub profile_launch: crate::provider::ProviderProfileLaunch,
+    pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
 }
 
 pub(super) fn spawn_agent_window(
@@ -15,6 +16,7 @@ pub(super) fn spawn_agent_window(
     into_existing_session: bool,
     transport: &dyn crate::transport::Transport,
     safety: Option<&DangerousApproval>,
+    layout_placement: Option<&crate::lifecycle::launch::LayoutPlacement>,
     spawn_cwd_override: Option<&Path>,
 ) -> Result<SpawnedAgentWindow, LifecycleError> {
     let provider = agent_provider(agent);
@@ -114,7 +116,9 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref(),
     );
-    let window = WindowName::new(agent_id.as_str());
+    let window = layout_placement
+        .map(|placement| placement.layout_window.clone())
+        .unwrap_or_else(|| WindowName::new(agent_id.as_str()));
     let mut env = crate::lifecycle::launch::inherited_env_with_team_overrides(
         workspace,
         agent_id.as_str(),
@@ -132,7 +136,38 @@ pub(super) fn spawn_agent_window(
         })
         .unwrap_or(workspace);
     let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
-    let result = if into_existing_session {
+    let result = if let Some(placement) = layout_placement {
+        if placement.starts_window {
+            if into_existing_session {
+                transport.spawn_into_with_env_unset(
+                    session_name,
+                    &window,
+                    &plan.argv,
+                    spawn_cwd,
+                    &env,
+                    &env_unset,
+                )
+            } else {
+                transport.spawn_first_with_env_unset(
+                    session_name,
+                    &window,
+                    &plan.argv,
+                    spawn_cwd,
+                    &env,
+                    &env_unset,
+                )
+            }
+        } else {
+            transport.spawn_split_with_env_unset(
+                session_name,
+                &window,
+                &plan.argv,
+                spawn_cwd,
+                &env,
+                &env_unset,
+            )
+        }
+    } else if into_existing_session {
         transport.spawn_into_with_env_unset(
             session_name,
             &window,
@@ -162,6 +197,7 @@ pub(super) fn spawn_agent_window(
         spawn,
         plan,
         profile_launch,
+        layout_placement: layout_placement.cloned(),
     })
 }
 

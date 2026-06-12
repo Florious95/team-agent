@@ -405,6 +405,13 @@ pub trait Transport: Send + Sync {
         false
     }
 
+    /// Physical tmux endpoint used by this transport when known. For tmux this is
+    /// either a full `-S` socket path or a `-L` socket name; non-tmux/test
+    /// transports can leave it unknown.
+    fn tmux_endpoint(&self) -> Option<String> {
+        None
+    }
+
     // —— SPAWN(ST):所有后端天然满足;cwd/env 是 spawn 参数,无独立动词(§gap-setenv)——
 
     /// tmux=`new-session -d` / wezterm=`spawn --new-window` / conpty=`openpty`+spawn。
@@ -447,6 +454,22 @@ pub trait Transport: Send + Sync {
 
     /// 同 [`Transport::spawn_first_with_env_unset`],对应 `spawn_into`。
     fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = env_unset;
+        self.spawn_into(session, window, argv, cwd, env)
+    }
+
+    /// Spawn a worker as an additional pane in an existing session/window.
+    /// Backends without a split-pane primitive may conservatively fall back to
+    /// `spawn_into`; tmux overrides this with `split-window`.
+    fn spawn_split_with_env_unset(
         &self,
         session: &SessionName,
         window: &WindowName,
@@ -526,6 +549,10 @@ pub trait Transport: Send + Sync {
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError>;
 
     fn kill_window(&self, target: &Target) -> Result<(), TransportError>;
+
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        self.kill_window(&Target::Pane(pane.clone()))
+    }
 
     /// 交互前台 attach(leader 用)。tmux=`attach-session`;wezterm=GUI 即 attach
     /// (`GuiAttachIsImplicit`);conpty=typed 不支持(`Unsupported`)。

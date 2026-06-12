@@ -281,6 +281,12 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         if fatal_resume_failure {
             continue;
         }
+        let layout_placement = crate::lifecycle::launch::adaptive_existing_placement_for_agent(
+            &state,
+            transport,
+            &session_name,
+            &decision.agent_id,
+        );
         let spawn = match spawn_agent_window(
             &selected.run_workspace,
             &session_name,
@@ -290,6 +296,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             session_live,
             transport,
             Some(&safety),
+            layout_placement.as_ref(),
             Some(spec_workspace),
         ) {
             Ok(spawn) => spawn,
@@ -312,7 +319,14 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         };
         if let Err(error) = verify_spawned_agent_live(&decision.agent_id, &spawn, transport)
             .and_then(|_| {
-                mark_agent_respawned(&mut state, &decision.agent_id, &spawn, transport, &safety)
+                mark_agent_respawned(
+                    &mut state,
+                    &decision.agent_id,
+                    decision.restart_mode,
+                    &spawn,
+                    transport,
+                    &safety,
+                )
             })
         {
             let error = error.to_string();
@@ -851,6 +865,7 @@ fn mark_restart_targets_stopped_after_teardown(
 fn mark_agent_respawned(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
+    restart_mode: StartMode,
     spawn: &SpawnedAgentWindow,
     transport: &dyn crate::transport::Transport,
     safety: &DangerousApproval,
@@ -868,6 +883,10 @@ fn mark_agent_respawned(
     };
     agent.insert("status".to_string(), serde_json::json!("running"));
     agent.insert(
+        "window".to_string(),
+        serde_json::json!(spawn.spawn.window.as_str()),
+    );
+    agent.insert(
         "pane_id".to_string(),
         serde_json::json!(spawn.spawn.pane_id.as_str()),
     );
@@ -882,8 +901,60 @@ fn mark_agent_respawned(
     if let Some(pane_pid) = pane_pid {
         agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
     }
+    if matches!(
+        restart_mode,
+        StartMode::Fresh | StartMode::FreshAfterMissingRollout
+    ) {
+        if let Some(session_id) = spawn.plan.expected_session_id.as_ref() {
+            agent.insert(
+                "session_id".to_string(),
+                serde_json::json!(session_id.as_str()),
+            );
+        }
+    }
     crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
     persist_effective_approval_policy_for_restart(agent, safety);
+    if let Some(placement) = spawn.layout_placement.as_ref() {
+        agent.insert(
+            "layout_window".to_string(),
+            serde_json::json!(placement.layout_window.as_str()),
+        );
+        agent.insert(
+            "layout_index".to_string(),
+            serde_json::json!(placement.layout_index),
+        );
+        agent.insert("pane_index".to_string(), serde_json::json!(placement.pane_index));
+        agent.insert(
+            "display".to_string(),
+            serde_json::json!({
+                "backend": "adaptive",
+                "status": "opened",
+                "window": placement.layout_window.as_str(),
+                "workspace_window": null,
+                "pane_id": spawn.spawn.pane_id.as_str(),
+                "pane_title": agent_id.as_str(),
+                "target": spawn.spawn.pane_id.as_str(),
+                "target_worker_session": spawn.spawn.session.as_str(),
+                "linked_session": null,
+                "leader_session": spawn.spawn.session.as_str(),
+                "display_session": null,
+                "fallback": null,
+            }),
+        );
+    }
+    if matches!(
+        restart_mode,
+        StartMode::Fresh | StartMode::FreshAfterMissingRollout
+    ) && spawn.plan.expected_session_id.is_some()
+    {
+        agent.insert("rollout_path".to_string(), serde_json::Value::Null);
+        agent.insert("captured_at".to_string(), serde_json::Value::Null);
+        agent.insert("captured_via".to_string(), serde_json::Value::Null);
+        agent.insert(
+            "attribution_confidence".to_string(),
+            serde_json::Value::Null,
+        );
+    }
     agent.remove("startup_prompts");
     agent.remove("startup_prompt_status");
     Ok(())

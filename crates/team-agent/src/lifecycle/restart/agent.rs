@@ -86,7 +86,14 @@ pub(crate) fn start_agent_at_paths(
     }
     let session_name = state_session_name(&state);
     let window = agent_window(&agent, agent_id);
-    if !force && window_exists(transport, &session_name, &window) {
+    let adaptive_layout =
+        open_display && crate::lifecycle::launch::state_uses_adaptive_layout(&state);
+    let agent_live = if adaptive_layout {
+        agent_pane_live(transport, &agent)
+    } else {
+        window_exists(transport, &session_name, &window)
+    };
+    if !force && agent_live {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
         crate::state::projection::save_team_scoped_state(workspace, &state)
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
@@ -141,6 +148,28 @@ pub(crate) fn start_agent_at_paths(
     let into_existing_session =
         session_live_or_default(transport, &session_name, session_name_present(&state));
     let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
+    let layout_placement = if adaptive_layout {
+        crate::lifecycle::launch::adaptive_existing_placement_for_agent(
+            &state,
+            transport,
+            &session_name,
+            agent_id,
+        )
+        .or_else(|| {
+            crate::lifecycle::launch::adaptive_placement_for_agent(
+                &state,
+                transport,
+                &session_name,
+                agent_id,
+            )
+        })
+    } else {
+        None
+    };
+    let spawn_window = layout_placement
+        .as_ref()
+        .map(|placement| placement.layout_window.as_str().to_string())
+        .unwrap_or_else(|| window.clone());
     let spawn = spawn_agent_window(
         workspace,
         &session_name,
@@ -150,9 +179,10 @@ pub(crate) fn start_agent_at_paths(
         into_existing_session,
         transport,
         Some(&safety),
+        layout_placement.as_ref(),
         None,
     )?;
-    mark_agent_started(&mut state, agent_id, &window, &spawn, &safety)?;
+    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, &safety)?;
     crate::state::projection::save_team_scoped_state(workspace, &state)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     write_start_agent_start_event(
@@ -162,9 +192,9 @@ pub(crate) fn start_agent_at_paths(
         provider,
         start_mode,
         &session_name,
-        &window,
+        &spawn_window,
         spawn_session_id,
-        into_existing_session,
+        tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     let coordinator_started = start_coordinator_for_workspace(workspace)?;
     Ok(StartAgentOutcome::Running {
@@ -178,6 +208,55 @@ pub(crate) fn start_agent_at_paths(
         session_id,
         rollout_path,
     })
+}
+
+fn agent_pane_live(
+    transport: &dyn crate::transport::Transport,
+    agent: &serde_json::Value,
+) -> bool {
+    let Some(pane) = agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .map(crate::transport::PaneId::new)
+    else {
+        return false;
+    };
+    agent_pane_live_by_id(transport, &pane)
+}
+
+fn agent_pane_live_by_id(
+    transport: &dyn crate::transport::Transport,
+    pane: &crate::transport::PaneId,
+) -> bool {
+    match transport.has_pane(&pane) {
+        Ok(Some(live)) => live,
+        Ok(None) | Err(_) => !matches!(
+            transport.liveness(&pane),
+            Ok(crate::model::enums::PaneLiveness::Dead)
+        ),
+    }
+}
+
+fn tmux_start_mode_for_spawn(
+    spawn: &SpawnedAgentWindow,
+    into_existing_session: bool,
+) -> &'static str {
+    if let Some(placement) = spawn.layout_placement.as_ref() {
+        if placement.starts_window {
+            if into_existing_session {
+                "new-window"
+            } else {
+                "new-session"
+            }
+        } else {
+            "split-window"
+        }
+    } else if into_existing_session {
+        "new-window"
+    } else {
+        "new-session"
+    }
 }
 
 /// `stop_agent(workspace, agent_id, team)`(`lifecycle/operations.py:62`)。
@@ -233,16 +312,34 @@ pub(super) fn stop_agent_at_paths(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| agent_id.as_str())
         .to_string();
-    let target_str = format!("{}:{window}", session_name.as_str());
-    let stopped = window_exists(transport, &session_name, &window);
+    let pane_id = state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("pane_id"))
+        .and_then(|v| v.as_str())
+        .filter(|pane| !pane.is_empty())
+        .map(crate::transport::PaneId::new);
+    let target_str = pane_id
+        .as_ref()
+        .map(|pane| pane.as_str().to_string())
+        .unwrap_or_else(|| format!("{}:{window}", session_name.as_str()));
+    let stopped = pane_id
+        .as_ref()
+        .map(|pane| agent_pane_live_by_id(transport, pane))
+        .unwrap_or_else(|| window_exists(transport, &session_name, &window));
     if stopped {
-        let target = Target::SessionWindow {
-            session: session_name.clone(),
-            window: WindowName::new(&window),
-        };
         // golden operations.py:84-86: a non-zero kill-window raises
         // RuntimeError(f"failed to stop agent {agent_id}: {proc.stderr.strip()}").
-        if let Err(e) = transport.kill_window(&target) {
+        let kill_result = if let Some(pane) = pane_id.as_ref() {
+            transport.kill_pane(pane)
+        } else {
+            let target = Target::SessionWindow {
+                session: session_name.clone(),
+                window: WindowName::new(&window),
+            };
+            transport.kill_window(&target)
+        };
+        if let Err(e) = kill_result {
             let stderr = match &e {
                 crate::transport::TransportError::Subprocess { stderr, .. } => stderr.trim().to_string(),
                 other => other.to_string(),
@@ -335,6 +432,34 @@ fn mark_agent_started(
         &spawn.profile_launch,
     );
     crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
+    if let Some(placement) = spawn.layout_placement.as_ref() {
+        agent.insert(
+            "layout_window".to_string(),
+            serde_json::json!(placement.layout_window.as_str()),
+        );
+        agent.insert(
+            "layout_index".to_string(),
+            serde_json::json!(placement.layout_index),
+        );
+        agent.insert("pane_index".to_string(), serde_json::json!(placement.pane_index));
+        agent.insert(
+            "display".to_string(),
+            serde_json::json!({
+                "backend": "adaptive",
+                "status": "opened",
+                "window": placement.layout_window.as_str(),
+                "workspace_window": null,
+                "pane_id": spawn.spawn.pane_id.as_str(),
+                "pane_title": agent_id.as_str(),
+                "target": spawn.spawn.pane_id.as_str(),
+                "target_worker_session": spawn.spawn.session.as_str(),
+                "linked_session": null,
+                "leader_session": spawn.spawn.session.as_str(),
+                "display_session": null,
+                "fallback": null,
+            }),
+        );
+    }
     Ok(())
 }
 
@@ -458,7 +583,7 @@ fn write_start_agent_start_event(
     session_name: &SessionName,
     window: &str,
     session_id: Option<&SessionId>,
-    into_existing_session: bool,
+    tmux_start_mode: &'static str,
 ) -> Result<(), LifecycleError> {
     let auth_mode = agent_auth_mode(agent);
     let model = agent.get("model").and_then(|v| v.as_str());
@@ -535,11 +660,6 @@ fn write_start_agent_start_event(
         agent_id.as_str(),
         team_id,
     );
-    let tmux_start_mode = if into_existing_session {
-        "new-window"
-    } else {
-        "new-session"
-    };
     crate::event_log::EventLog::new(workspace)
         .write(
             "start_agent.agent_start",

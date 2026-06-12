@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.15
+
+- **Adaptive layout is on by default**: `team-agent quick-start` now lays out worker windows automatically — up to 3 panes per window (332 split for 8 workers becomes 3+3+2), agents added or restarted later land in the same adaptive layout instead of arriving as orphan windows, and the leader pane is never touched. The whole team shares one tmux socket and one window tree, so opening a second team in the same workspace doesn't fight the first.
+- **`report_result` is now delivered to the leader even when the worker's MCP channel is down**: a worker that finishes after losing its MCP session no longer leaves the leader staring at an apparently-stuck worker. The runtime now records the final result through a leader-side fallback delivery path (`team-agent collect` continues to be the authoritative state-update path) and surfaces it with two new diagnostic subcommands and a single noisy audit event so missing report_results stop being silent. `team-agent diagnose` will point at the fallback record when MCP delivery was lost.
+- **Verified RS recovery runbook is now a Team Agent skill reference**: `skills/team-agent/references/recovery-runbook.md` documents the supported recovery moves (Transport closed, leader pane re-attach, coordinator restart, etc.) for both human operators and Team Agent leaders. The skill description points at it so the runbook gets pulled in automatically when symptoms match.
+- **`team-agent add-agent` no longer dead-locks or leaves a ghost role**: the runtime-state path is now the single source of truth for add/start-agent (no second-source write that could go stale), and a failure mid-add cleanly rolls back instead of leaving an agent record without a launched session.
+- **`team-agent restart --allow-fresh` is no longer sticky across restarts**: a fresh session id is now persisted as the new expected session id, so the next restart resumes against the new session instead of asking for `--allow-fresh` again every cycle.
+
 ## 0.3.14
 
 - **Copilot leader trust prompt is now actually auto-answered** in `team-agent copilot` interactive sessions: the trust-prompt handler that already existed in the worker tick is now also wired into the leader passthrough path on the current `TMUX_PANE`, so a fresh `team-agent copilot` boot no longer parks on `Confirm folder trust / Do you trust the files in this folder?` — it advances to ready on its own (0.3.13 changelog claim is now actually delivered).

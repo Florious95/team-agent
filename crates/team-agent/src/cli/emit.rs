@@ -77,6 +77,12 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
         "compile" => cmd_compile(&compile_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
+        "fallback-send-leader" => {
+            cmd_fallback_send_leader(&fallback_send_leader_args(args, cwd)?).map(emit_result)
+        }
+        "fallback-report-result" => {
+            cmd_fallback_report_result(&fallback_report_result_args(args, cwd)?).map(emit_result)
+        }
         "allow-peer-talk" => {
             cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result)
         }
@@ -136,6 +142,8 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "quick-start",
     "compile",
     "send",
+    "fallback-send-leader",
+    "fallback-report-result",
     "allow-peer-talk",
     "status",
     "stop",
@@ -202,10 +210,12 @@ fn command_help(command: Option<&str>) -> String {
             )
         }
         Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--json]\n\ndefaults: display_backend=none; set display_backend: adaptive in TEAM.md to opt in to adaptive display windows.".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--no-display] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
+        Some("fallback-send-leader") => "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use.".to_string(),
+        Some("fallback-report-result") => "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use.".to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]".to_string(),
         Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
@@ -347,7 +357,9 @@ fn install_skill_args(args: &[String]) -> Result<InstallSkillArgs, CliError> {
 
 /// 取 `--flag <value>` 的值(用于 install-skill 的 --source/--dest,parse_args 不覆盖的旗标)。
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 /// `team-agent install-skill`(RED-1 单源):repo `skills/team-agent` → `~/.codex|.claude|.copilot`。
@@ -355,7 +367,9 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 fn cmd_install_skill(args: &InstallSkillArgs) -> Result<CmdResult, CliError> {
     // 卸载分支(单源:走同一 SkillTarget 表的 dest_dir;all → SINGLE_TARGETS 全集)。
     if args.uninstall {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
         let targets: Vec<crate::packaging::SkillTarget> = match args.target {
             crate::packaging::SkillTarget::All => {
                 crate::packaging::SkillTarget::SINGLE_TARGETS.to_vec()
@@ -367,7 +381,8 @@ fn cmd_install_skill(args: &InstallSkillArgs) -> Result<CmdResult, CliError> {
             if let Some(dest) = t.dest_dir(&home) {
                 let existed = dest.0.exists();
                 if existed && !args.dry_run {
-                    std::fs::remove_dir_all(&dest.0).map_err(|e| CliError::Runtime(e.to_string()))?;
+                    std::fs::remove_dir_all(&dest.0)
+                        .map_err(|e| CliError::Runtime(e.to_string()))?;
                 }
                 removed.push(serde_json::json!({
                     "target": t,
@@ -386,13 +401,14 @@ fn cmd_install_skill(args: &InstallSkillArgs) -> Result<CmdResult, CliError> {
         .source
         .clone()
         .ok_or_else(|| CliError::Usage("missing --source <skill dir>".to_string()))?;
-    let outcomes = crate::packaging::install::install_skill(&crate::packaging::SkillInstallOptions {
-        target: args.target,
-        dest: args.dest.clone(),
-        dry_run: args.dry_run,
-        source,
-    })
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let outcomes =
+        crate::packaging::install::install_skill(&crate::packaging::SkillInstallOptions {
+            target: args.target,
+            dest: args.dest.clone(),
+            dry_run: args.dry_run,
+            source,
+        })
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
     let installed: Vec<serde_json::Value> = outcomes
         .iter()
         .map(|o| {
@@ -643,6 +659,11 @@ struct ParsedArgs {
     pane: Option<String>,
     provider: Option<String>,
     message_id: Option<String>,
+    content: Option<String>,
+    primary_error: Option<String>,
+    agent_id: Option<String>,
+    task_id: Option<String>,
+    result_json: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
@@ -664,7 +685,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--team-id" => parsed.team_id = next_arg(args, &mut i),
             "--targets" | "--target" | "--to" => parsed.targets = next_arg(args, &mut i),
             "--task" => parsed.task = next_arg(args, &mut i),
+            "--task-id" => parsed.task_id = next_arg(args, &mut i),
             "--sender" => parsed.sender = next_arg(args, &mut i),
+            "--agent-id" => parsed.agent_id = next_arg(args, &mut i),
             "--watch-result" => parsed.watch_result = true,
             "--requires-ack" => parsed.requires_ack = true,
             "--no-ack" => parsed.no_ack = true,
@@ -719,6 +742,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--pane" => parsed.pane = next_arg(args, &mut i),
             "--provider" => parsed.provider = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
+            "--content" => parsed.content = next_arg(args, &mut i),
+            "--primary-error" => parsed.primary_error = next_arg(args, &mut i),
+            "--result-json" => parsed.result_json = next_arg(args, &mut i),
             "-h" | "--help" => {}
             other if other.starts_with("--team=") => {
                 parsed.team = Some(other.trim_start_matches("--team=").to_string());
@@ -792,6 +818,7 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         team_id: parsed.team_id.or(parsed.team),
         yes: parsed.yes,
         fresh: parsed.fresh,
+        no_display: parsed.no_display,
         json: parsed.json,
     })
 }
@@ -859,6 +886,60 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         confirm_human: parsed.confirm_human,
         json: parsed.json,
         message_id: parsed.message_id,
+    })
+}
+
+fn fallback_send_leader_args(
+    args: &[String],
+    cwd: &Path,
+) -> Result<FallbackSendLeaderArgs, CliError> {
+    let parsed = parse_args(args);
+    Ok(FallbackSendLeaderArgs {
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        sender: parsed
+            .sender
+            .or(parsed.agent_id)
+            .ok_or_else(|| CliError::Usage("missing --sender <agent>".to_string()))?,
+        task: parsed.task.or(parsed.task_id),
+        message_id: parsed
+            .message_id
+            .ok_or_else(|| CliError::Usage("missing --message-id <id>".to_string()))?,
+        content: parsed
+            .content
+            .or_else(|| (!parsed.positionals.is_empty()).then(|| parsed.positionals.join(" ")))
+            .ok_or_else(|| CliError::Usage("missing --content <text>".to_string()))?,
+        primary_error: parsed
+            .primary_error
+            .ok_or_else(|| CliError::Usage("missing --primary-error <error>".to_string()))?,
+        json: parsed.json,
+    })
+}
+
+fn fallback_report_result_args(
+    args: &[String],
+    cwd: &Path,
+) -> Result<FallbackReportResultArgs, CliError> {
+    let parsed = parse_args(args);
+    Ok(FallbackReportResultArgs {
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        agent_id: parsed
+            .agent_id
+            .or(parsed.sender)
+            .ok_or_else(|| CliError::Usage("missing --agent-id <agent>".to_string()))?,
+        task_id: parsed
+            .task_id
+            .or(parsed.task)
+            .ok_or_else(|| CliError::Usage("missing --task-id <task>".to_string()))?,
+        result_json: parsed
+            .result_json
+            .or_else(|| parsed.result)
+            .ok_or_else(|| CliError::Usage("missing --result-json <json>".to_string()))?,
+        primary_error: parsed
+            .primary_error
+            .ok_or_else(|| CliError::Usage("missing --primary-error <error>".to_string()))?,
+        json: parsed.json,
     })
 }
 

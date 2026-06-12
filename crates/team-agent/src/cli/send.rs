@@ -37,6 +37,120 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     Ok(CmdResult::from_json(value, args.json))
 }
 
+pub fn cmd_fallback_send_leader(args: &FallbackSendLeaderArgs) -> Result<CmdResult, CliError> {
+    if let Some(value) = fallback_business_refusal(&args.primary_error, args.json) {
+        return Ok(value);
+    }
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )?;
+    let target = MessageTarget::Single("leader".to_string());
+    let opts = SendOptions {
+        task_id: args.task.as_ref().map(|task| TaskId::new(task.clone())),
+        route_task_id: false,
+        sender: args.sender.clone(),
+        requires_ack: false,
+        wait_visible: false,
+        block_until_delivered: false,
+        team: Some(TeamKey::new(selected.team_key.clone())),
+        message_id: Some(args.message_id.clone()),
+        ..SendOptions::default()
+    };
+    let primary = messaging::send_message(&selected.run_workspace, &target, &args.content, &opts);
+    let message_id = match &primary {
+        Ok(outcome) => outcome
+            .message_id
+            .clone()
+            .unwrap_or_else(|| args.message_id.clone()),
+        Err(_) => args.message_id.clone(),
+    };
+    if let Ok(outcome) = &primary {
+        if is_business_refusal_outcome(outcome) {
+            let value = json!({
+                "ok": false,
+                "status": "refused",
+                "reason": "business_reject",
+                "primary_error": args.primary_error,
+                "message_id": outcome.message_id,
+                "action": "N38 fallback refused: business rule refusals must not use fallback pane delivery",
+            });
+            return Ok(CmdResult::from_json(value, args.json));
+        }
+    }
+
+    let state = selected_state_with_active_key(&selected);
+    let event_log = crate::event_log::EventLog::new(&selected.run_workspace);
+    let primary_error = match primary {
+        Ok(outcome) if primary_delivery_succeeded(outcome.status) => {
+            let mut value = delivery_outcome_json(&outcome, &target, &args.content, &opts);
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("fallback_used".to_string(), json!(false));
+                obj.insert("primary_error".to_string(), json!(args.primary_error));
+            }
+            return Ok(CmdResult::from_json(value, args.json));
+        }
+        Ok(outcome) => format!(
+            "{}; fallback_cli_primary_status={}",
+            args.primary_error,
+            delivery_status_wire(outcome.status)
+        ),
+        Err(error) => format!("{}; fallback_cli_primary_error={error}", args.primary_error),
+    };
+    let outcome = messaging::deliver_to_leader_fallback_pane(
+        &selected.run_workspace,
+        &state,
+        &message_id,
+        None,
+        &args.content,
+        false,
+        Some(&primary_error),
+        &event_log,
+    )?;
+    let mut value = delivery_outcome_json(&outcome, &target, &args.content, &opts);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("primary_error".to_string(), json!(args.primary_error));
+        obj.insert("delivered_via".to_string(), json!("fallback_pane"));
+        obj.insert(
+            "next_action".to_string(),
+            json!("run team-agent restart-agent to refresh the worker MCP transport"),
+        );
+    }
+    Ok(CmdResult::from_json(value, args.json))
+}
+
+pub fn cmd_fallback_report_result(args: &FallbackReportResultArgs) -> Result<CmdResult, CliError> {
+    if let Some(value) = fallback_business_refusal(&args.primary_error, args.json) {
+        return Ok(value);
+    }
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )?;
+    let envelope = fallback_result_envelope(args)?;
+    let value = messaging::report_result_for_owner_team_with_primary_error(
+        &selected.run_workspace,
+        &envelope,
+        Some(&selected.team_key),
+        Some(&args.primary_error),
+    )?;
+    let mut value = value;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("primary_error".to_string(), json!(args.primary_error));
+        obj.insert(
+            "fallback_protocol".to_string(),
+            json!("fallback-report-result"),
+        );
+        obj.insert(
+            "next_action".to_string(),
+            json!("run team-agent restart-agent to refresh the worker MCP transport"),
+        );
+    }
+    Ok(CmdResult::from_json(value, args.json))
+}
+
 fn routing_ambiguous_value(
     workspace: &Path,
     args: &SendArgs,
@@ -75,6 +189,101 @@ fn routing_ambiguous_value(
         "reason": "routing_ambiguous",
         "channel": null,
     }))
+}
+
+fn selected_state_with_active_key(selected: &crate::state::selector::SelectedTeam) -> Value {
+    let mut state = selected.state.clone();
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            Value::String(selected.team_key.clone()),
+        );
+    }
+    state
+}
+
+fn fallback_result_envelope(args: &FallbackReportResultArgs) -> Result<Value, CliError> {
+    let mut envelope: Value = serde_json::from_str(&args.result_json)?;
+    let Some(obj) = envelope.as_object_mut() else {
+        return Err(CliError::Usage(
+            "--result-json must be a JSON object".to_string(),
+        ));
+    };
+    obj.entry("schema_version".to_string())
+        .or_insert_with(|| json!("result_envelope_v1"));
+    obj.entry("task_id".to_string())
+        .or_insert_with(|| json!(args.task_id));
+    obj.entry("agent_id".to_string())
+        .or_insert_with(|| json!(args.agent_id));
+    obj.entry("status".to_string())
+        .or_insert_with(|| json!("success"));
+    obj.entry("summary".to_string())
+        .or_insert_with(|| json!("completed"));
+    for key in ["changes", "tests", "risks", "artifacts", "next_actions"] {
+        obj.entry(key.to_string()).or_insert_with(|| json!([]));
+    }
+    Ok(envelope)
+}
+
+fn fallback_business_refusal(primary_error: &str, as_json: bool) -> Option<CmdResult> {
+    is_business_reject_text(primary_error).then(|| {
+        CmdResult::from_json(
+            json!({
+                "ok": false,
+                "status": "refused",
+                "reason": "business_reject",
+                "primary_error": primary_error,
+                "action": "N38 fallback refused: business rule refusals must not use fallback pane delivery",
+            }),
+            as_json,
+        )
+    })
+}
+
+fn is_business_refusal_outcome(outcome: &DeliveryOutcome) -> bool {
+    matches!(
+        outcome.reason,
+        Some(
+            DeliveryRefusal::TargetNotInTeam
+                | DeliveryRefusal::HumanConfirmationRequired
+                | DeliveryRefusal::MissingPermissions
+                | DeliveryRefusal::UnknownRecipient
+                | DeliveryRefusal::TeamOwnerMismatch
+                | DeliveryRefusal::Ambiguous
+                | DeliveryRefusal::RecipientPaneInNonInputMode
+                | DeliveryRefusal::SessionDrift
+                | DeliveryRefusal::RoutingAmbiguous
+                | DeliveryRefusal::EmptyTargetList
+        )
+    )
+}
+
+fn primary_delivery_succeeded(status: DeliveryStatus) -> bool {
+    matches!(
+        status,
+        DeliveryStatus::Delivered | DeliveryStatus::AlreadyDelivered
+    )
+}
+
+fn is_business_reject_text(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "peer_not_in_scope",
+        "target_not_in_team",
+        "permission denied",
+        "missing_permissions",
+        "human_confirmation_required",
+        "unknown_recipient",
+        "routing_ambiguous",
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "blacklist",
+        "blacklisted",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// `_send_target`(`commands.py:181-184`):`--to` comma-split fanout / `target` 单值 / None。
@@ -219,5 +428,48 @@ fn delivery_stage_wire(stage: DeliveryStage) -> &'static str {
         DeliveryStage::Inject => "inject",
         DeliveryStage::Submit => "submit",
         DeliveryStage::VisibleCheck => "visible_check",
+    }
+}
+
+#[cfg(test)]
+mod e23_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_error_classifier_allows_transport_and_primary_bugs() {
+        for error in [
+            "Transport closed",
+            "Connection refused",
+            "Broken pipe",
+            "EOF on transport",
+            "MCP timeout after 5s",
+            "internal assertion failed: unwrap on Err",
+            "primary_delivery_error: serialize failed",
+        ] {
+            assert!(
+                !is_business_reject_text(error),
+                "failure should be fallback-eligible, not classified as a business refusal: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_error_classifier_blocks_business_refusals() {
+        for error in [
+            "peer_not_in_scope",
+            "target_not_in_team",
+            "permission denied",
+            "missing_permissions",
+            "human_confirmation_required",
+            "unknown_recipient",
+            "quota exceeded",
+            "rate_limit",
+            "blacklisted target",
+        ] {
+            assert!(
+                is_business_reject_text(error),
+                "business refusal must not use fallback pane delivery: {error}"
+            );
+        }
     }
 }

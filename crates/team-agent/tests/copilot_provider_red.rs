@@ -637,7 +637,7 @@ leader's session); candidates={safety_lock:?}"
 /// Q4 P0 (C-4-1/4/7, RC-11/RC-12): the worker spawn env MUST carry
 /// `COPILOT_DISABLE_TERMINAL_TITLE=1` (updateTerminalTitle defaults to true and would
 /// rewrite the tmux window name = an N39 addressing-anchor drift, same severity as the
-/// B5 leader misfire). The window the worker spawns into must keep the agent-id name.
+/// B5 leader misfire). The worker must spawn into the stable adaptive layout window.
 #[test]
 #[serial(env)]
 fn copilot_p0_terminal_title_disabled_and_window_name_stable() {
@@ -660,12 +660,11 @@ incident); got {:?}",
             spawn.env.get("COPILOT_DISABLE_TERMINAL_TITLE")
         ));
     }
-    // The window the framework addresses by must remain the agent id (the title-disable
-    // env is what keeps copilot from rewriting it; the recording transport spawns into
-    // the agent-id window).
-    if spawn.window != "worker_a" {
+    // Default adaptive layout groups workers into team-wN windows; the title-disable
+    // env is what keeps copilot from rewriting that addressing anchor.
+    if spawn.window != "team-w1" {
         failures.push(format!(
-            "RC-12/C-4-1: the worker window must stay named after the agent id; got {:?}",
+            "RC-12/C-4-1: the worker window must stay on the adaptive layout anchor; got {:?}",
             spawn.window
         ));
     }

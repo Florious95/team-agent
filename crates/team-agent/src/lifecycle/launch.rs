@@ -123,6 +123,7 @@ pub fn launch_with_transport_in_workspace(
         session_name,
         started,
         dry_run,
+        tmux_endpoint: transport.tmux_endpoint(),
         routes,
         permissions,
         safety,
@@ -157,6 +158,22 @@ fn spawn_agents(
         spec.get("runtime").and_then(|v| v.get("fast")),
         Some(Value::Bool(true))
     );
+    let display_backend = spec_display_backend(spec);
+    let active_agent_ids = spec_agent_values(spec)
+        .into_iter()
+        .filter_map(|agent| {
+            if agent_is_paused(agent) {
+                None
+            } else {
+                agent.get("id").and_then(Value::as_str).map(AgentId::new)
+            }
+        })
+        .collect::<Vec<_>>();
+    let layout_plan = if display_backend == DisplayBackend::Adaptive {
+        adaptive_layout_plan(&active_agent_ids, ADAPTIVE_LAYOUT_MAX_PER_WINDOW)
+    } else {
+        Vec::new()
+    };
     let mut started = Vec::new();
     for agent in spec_agent_values(spec) {
         let Some(agent_id_raw) = agent.get("id").and_then(Value::as_str) else {
@@ -284,7 +301,6 @@ fn spawn_agents(
             )?;
         }
         fill_spawn_placeholders_full(&mut plan.argv, workspace, agent_id_raw, Some(&mcp_team_id));
-        let window = WindowName::new(agent_id_raw);
         let mut env =
             inherited_env_with_team_overrides(workspace, agent_id_raw, Some(&mcp_team_id));
         apply_profile_launch_env(&mut env, &profile_launch);
@@ -349,7 +365,46 @@ fn spawn_agents(
                 }),
             );
         }
-        let spawn = if started.is_empty() {
+        let placement = layout_plan
+            .iter()
+            .find(|placement| placement.agent_id == agent_id)
+            .cloned();
+        let window = placement
+            .as_ref()
+            .map(|placement| placement.layout_window.clone())
+            .unwrap_or_else(|| WindowName::new(agent_id_raw));
+        let spawn = if let Some(placement) = placement.as_ref() {
+            if placement.starts_window {
+                if started.is_empty() {
+                    transport.spawn_first_with_env_unset(
+                        session_name,
+                        &window,
+                        &plan.argv,
+                        workspace,
+                        &env,
+                        &env_unset,
+                    )
+                } else {
+                    transport.spawn_into_with_env_unset(
+                        session_name,
+                        &window,
+                        &plan.argv,
+                        workspace,
+                        &env,
+                        &env_unset,
+                    )
+                }
+            } else {
+                transport.spawn_split_with_env_unset(
+                    session_name,
+                    &window,
+                    &plan.argv,
+                    workspace,
+                    &env,
+                    &env_unset,
+                )
+            }
+        } else if started.is_empty() {
             transport.spawn_first_with_env_unset(
                 session_name,
                 &window,
@@ -383,6 +438,25 @@ fn spawn_agents(
         if matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Dead)) {
             continue;
         }
+        let display = if placement.is_some() {
+            WorkerDisplay::Adaptive {
+                status: DisplayStatus::Opened,
+                window: Some(spawn.window.clone()),
+                workspace_window: None,
+                pane_id: Some(spawn.pane_id.clone()),
+                pane_title: Some(agent_id_raw.to_string()),
+                target: Some(spawn.pane_id.as_str().to_string()),
+                target_worker_session: Some(session_name.as_str().to_string()),
+                linked_session: None,
+                leader_session: Some(session_name.clone()),
+                display_session: None,
+                fallback: None,
+            }
+        } else {
+            WorkerDisplay::Blocked {
+                reason: AdaptiveBlockReason::NotImplementedThisPlatform,
+            }
+        };
         started.push(StartedAgent {
             agent_id,
             start_mode: StartMode::Fresh,
@@ -396,12 +470,230 @@ fn spawn_agents(
                 .clone()
                 .or_else(|| profile_launch.claude_projects_root.clone()),
             managed_mcp_config: plan.managed_mcp_config || profile_launch.managed_mcp_config,
-            display: WorkerDisplay::Blocked {
-                reason: AdaptiveBlockReason::NotImplementedThisPlatform,
-            },
+            layout_window: placement
+                .as_ref()
+                .map(|placement| placement.layout_window.clone()),
+            layout_index: placement.as_ref().map(|placement| placement.layout_index),
+            pane_index: placement.as_ref().map(|placement| placement.pane_index),
+            display,
         });
     }
     Ok(started)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LayoutPlacement {
+    pub agent_id: AgentId,
+    pub layout_window: WindowName,
+    pub layout_index: usize,
+    pub pane_index: usize,
+    pub starts_window: bool,
+}
+
+pub(crate) fn adaptive_layout_plan(
+    agent_ids: &[AgentId],
+    max_per_window: usize,
+) -> Vec<LayoutPlacement> {
+    let max_per_window = max_per_window.max(1);
+    agent_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, agent_id)| {
+            let layout_index = idx / max_per_window;
+            let pane_index = idx % max_per_window;
+            LayoutPlacement {
+                agent_id: agent_id.clone(),
+                layout_window: WindowName::new(format!("team-w{}", layout_index + 1)),
+                layout_index,
+                pane_index,
+                starts_window: pane_index == 0,
+            }
+        })
+        .collect()
+}
+
+pub(crate) const ADAPTIVE_LAYOUT_MAX_PER_WINDOW: usize = 3;
+
+pub(crate) fn state_uses_adaptive_layout(state: &serde_json::Value) -> bool {
+    state
+        .get("display_backend")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|backend| backend == "adaptive")
+        || state
+            .get("runtime")
+            .and_then(|runtime| runtime.get("display_backend"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|backend| backend == "adaptive")
+        || state
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|agents| {
+                agents.values().any(|agent| {
+                    agent
+                        .get("layout_window")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|window| !window.is_empty())
+                })
+            })
+}
+
+pub(crate) fn adaptive_placement_for_agent(
+    state: &serde_json::Value,
+    transport: &dyn Transport,
+    session_name: &SessionName,
+    agent_id: &AgentId,
+) -> Option<LayoutPlacement> {
+    if !state_uses_adaptive_layout(state) {
+        return None;
+    }
+    let live_panes: BTreeSet<String> = transport
+        .list_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|pane| pane.pane_id.as_str().to_string())
+        .collect();
+    let live_windows: BTreeSet<String> = transport
+        .list_windows(session_name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|window| window.as_str().to_string())
+        .collect();
+    let mut windows: BTreeMap<usize, (String, usize)> = BTreeMap::new();
+    if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
+        for (id, agent) in agents {
+            if id == agent_id.as_str() {
+                continue;
+            }
+            let Some(window) = agent
+                .get("layout_window")
+                .or_else(|| agent.get("window"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|window| !window.is_empty())
+            else {
+                continue;
+            };
+            let pane_live = agent
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|pane| live_panes.contains(pane));
+            if !pane_live && (!live_panes.is_empty() || !live_windows.contains(window)) {
+                continue;
+            }
+            let layout_index = agent
+                .get("layout_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|idx| idx as usize)
+                .or_else(|| parse_team_layout_index(window))
+                .unwrap_or(windows.len());
+            let entry = windows
+                .entry(layout_index)
+                .or_insert_with(|| (window.to_string(), 0));
+            entry.1 = entry.1.saturating_add(1);
+        }
+    }
+    if let Some((&layout_index, (window, count))) = windows.iter().next_back() {
+        if *count < ADAPTIVE_LAYOUT_MAX_PER_WINDOW {
+            return Some(LayoutPlacement {
+                agent_id: agent_id.clone(),
+                layout_window: WindowName::new(window.clone()),
+                layout_index,
+                pane_index: *count,
+                starts_window: false,
+            });
+        }
+    }
+    let next_index = windows.keys().next_back().map(|idx| idx + 1).unwrap_or(0);
+    let base = format!("team-w{}", next_index + 1);
+    Some(LayoutPlacement {
+        agent_id: agent_id.clone(),
+        layout_window: unique_layout_window_name(&base, &live_windows),
+        layout_index: next_index,
+        pane_index: 0,
+        starts_window: true,
+    })
+}
+
+pub(crate) fn adaptive_existing_placement_for_agent(
+    state: &serde_json::Value,
+    transport: &dyn Transport,
+    session_name: &SessionName,
+    agent_id: &AgentId,
+) -> Option<LayoutPlacement> {
+    if !state_uses_adaptive_layout(state) {
+        return None;
+    }
+    let agent = state.get("agents")?.get(agent_id.as_str())?;
+    let window = agent
+        .get("layout_window")
+        .or_else(|| agent.get("window"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|window| !window.is_empty())?;
+    let layout_index = agent
+        .get("layout_index")
+        .and_then(serde_json::Value::as_u64)
+        .map(|idx| idx as usize)
+        .or_else(|| parse_team_layout_index(window))
+        .unwrap_or(0);
+    let desired_pane_index = agent
+        .get("pane_index")
+        .and_then(serde_json::Value::as_u64)
+        .map(|idx| idx as usize)
+        .unwrap_or(0);
+    let live_windows: BTreeSet<String> = transport
+        .list_windows(session_name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|window| window.as_str().to_string())
+        .collect();
+    if !live_windows.contains(window) {
+        return Some(LayoutPlacement {
+            agent_id: agent_id.clone(),
+            layout_window: WindowName::new(window),
+            layout_index,
+            pane_index: desired_pane_index,
+            starts_window: desired_pane_index == 0,
+        });
+    }
+    let existing_panes = transport
+        .list_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pane| {
+            pane.window_name.as_ref().is_some_and(|name| name.as_str() == window)
+                && agent
+                    .get("pane_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|agent_pane| agent_pane != pane.pane_id.as_str())
+        })
+        .count();
+    Some(LayoutPlacement {
+        agent_id: agent_id.clone(),
+        layout_window: WindowName::new(window),
+        layout_index,
+        pane_index: existing_panes,
+        starts_window: false,
+    })
+}
+
+fn parse_team_layout_index(window: &str) -> Option<usize> {
+    window
+        .strip_prefix("team-w")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .and_then(|idx| idx.checked_sub(1))
+}
+
+fn unique_layout_window_name(base: &str, live_windows: &BTreeSet<String>) -> WindowName {
+    if !live_windows.contains(base) {
+        return WindowName::new(base);
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !live_windows.contains(&candidate) {
+            return WindowName::new(candidate);
+        }
+    }
+    unreachable!("unbounded suffix search always returns")
 }
 
 fn persist_spawn_agent_state(
@@ -464,7 +756,12 @@ fn persist_spawn_agent_state(
             agents.insert(id.to_string(), serde_json::Value::Object(paused));
             continue;
         }
-        let window = agent.get("window").and_then(Value::as_str).unwrap_or(id);
+        let started_agent = started.iter().find(|agent| agent.agent_id.as_str() == id);
+        let window = started_agent
+            .and_then(|started| started.layout_window.as_ref())
+            .map(WindowName::as_str)
+            .or_else(|| agent.get("window").and_then(Value::as_str))
+            .unwrap_or(id);
         if !live_started_agents.contains(id)
             || (!live_windows.is_empty() && !live_windows.contains(window))
         {
@@ -483,7 +780,6 @@ fn persist_spawn_agent_state(
         let pane_pid = pane_pids_by_agent.get(id).copied();
         let spawned_at = spawn_timestamp_for_agent(spawn_index);
         spawn_index = spawn_index.saturating_add(1);
-        let started_agent = started.iter().find(|agent| agent.agent_id.as_str() == id);
         agents.insert(
             id.to_string(),
             running_agent_state(
@@ -1279,7 +1575,11 @@ fn running_agent_state(
         .get("profile")
         .map(yaml_value_to_json)
         .unwrap_or(serde_json::Value::Null);
-    let window = agent.get("window").and_then(Value::as_str).unwrap_or(id);
+    let window = started_agent
+        .and_then(|started| started.layout_window.as_ref())
+        .map(WindowName::as_str)
+        .or_else(|| agent.get("window").and_then(Value::as_str))
+        .unwrap_or(id);
     let mcp_config = crate::provider::get_adapter(provider)
         .mcp_config(auth_mode)
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
@@ -1325,6 +1625,25 @@ fn running_agent_state(
     );
     if let Some(started_agent) = started_agent {
         persist_started_agent_plan_state(&mut state, started_agent);
+        if let Some(layout_window) = started_agent.layout_window.as_ref() {
+            state.insert(
+                "layout_window".to_string(),
+                serde_json::json!(layout_window.as_str()),
+            );
+        }
+        if let Some(layout_index) = started_agent.layout_index {
+            state.insert("layout_index".to_string(), serde_json::json!(layout_index));
+        }
+        if let Some(pane_index) = started_agent.pane_index {
+            state.insert("pane_index".to_string(), serde_json::json!(pane_index));
+        }
+        if !matches!(started_agent.display, WorkerDisplay::Blocked { .. }) {
+            state.insert(
+                "display".to_string(),
+                serde_json::to_value(&started_agent.display)
+                    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?,
+            );
+        }
     }
     state.insert(
         "spawn_cwd".to_string(),
@@ -2016,6 +2335,17 @@ fn transport_has_session(transport: &dyn Transport, session_name: &SessionName) 
     }
 }
 
+fn spec_display_backend(spec: &Value) -> DisplayBackend {
+    let requested = spec
+        .get("runtime")
+        .and_then(|runtime| runtime.get("display_backend"))
+        .and_then(Value::as_str)
+        .and_then(|backend| {
+            serde_json::from_value::<DisplayBackend>(serde_json::json!(backend)).ok()
+        });
+    crate::lifecycle::display::resolve_display_backend(requested, None).backend
+}
+
 fn parse_provider(raw: &str) -> Option<Provider> {
     match raw {
         "claude" => Some(Provider::Claude),
@@ -2242,6 +2572,7 @@ pub fn quick_start_in_workspace(
     team_id: Option<&str>,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = explicit_quick_start_workspace(workspace);
+    let transport = quick_start_tmux_backend(&workspace);
     quick_start_with_transport_in_workspace(
         &workspace,
         agents_dir,
@@ -2249,9 +2580,53 @@ pub fn quick_start_in_workspace(
         yes,
         fresh,
         team_id,
-        // CP-1: per-team socket bound to the selected run workspace.
-        &crate::tmux_backend::TmuxBackend::for_workspace(&workspace),
+        &transport,
     )
+}
+
+pub fn quick_start_in_workspace_with_display(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    fresh: bool,
+    team_id: Option<&str>,
+    open_display: bool,
+) -> Result<QuickStartReport, LifecycleError> {
+    let workspace = explicit_quick_start_workspace(workspace);
+    let transport = quick_start_tmux_backend(&workspace);
+    quick_start_with_transport_in_workspace_with_display(
+        &workspace,
+        agents_dir,
+        name,
+        yes,
+        fresh,
+        team_id,
+        &transport,
+        open_display,
+    )
+}
+
+pub(crate) fn quick_start_tmux_backend(workspace: &Path) -> crate::tmux_backend::TmuxBackend {
+    if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
+        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint)
+    } else {
+        crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+    }
+}
+
+pub(crate) fn selected_tmux_socket_source(
+    transport: &dyn Transport,
+    workspace: &Path,
+) -> Option<&'static str> {
+    let endpoint = transport.tmux_endpoint()?;
+    if crate::tmux_backend::socket_name_from_tmux_env().as_deref() == Some(endpoint.as_str()) {
+        Some("leader_env")
+    } else if endpoint == crate::tmux_backend::socket_name_for_workspace(workspace) {
+        Some("workspace")
+    } else {
+        None
+    }
 }
 
 fn explicit_quick_start_workspace(workspace: &Path) -> PathBuf {
@@ -2291,6 +2666,21 @@ pub fn quick_start_with_transport_in_workspace(
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
+    quick_start_with_transport_in_workspace_with_display(
+        workspace, agents_dir, name, yes, fresh, team_id, transport, true,
+    )
+}
+
+pub fn quick_start_with_transport_in_workspace_with_display(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    fresh: bool,
+    team_id: Option<&str>,
+    transport: &dyn Transport,
+    open_display: bool,
+) -> Result<QuickStartReport, LifecycleError> {
     // B-7 / 036b N38 三行 fail-fast — TEAM_AGENT_LEADER_PANE_ID 主动路径在 quick-start
     // 入口验活;死/缺(Dead)的 pane 必须明确报错,不可 silent bind 到 spawner /
     // owner_bind / lease / display 任一消费点。被动路径(display/seed 等)各自走
@@ -2308,6 +2698,9 @@ pub fn quick_start_with_transport_in_workspace(
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    if !open_display {
+        override_spec_display_backend(&mut spec, "none");
+    }
     let requested_team = quick_start_requested_team_key(team_id, name)
         .map(str::to_string)
         .or_else(|| spec_team_id(&spec));
@@ -2343,7 +2736,13 @@ pub fn quick_start_with_transport_in_workspace(
                     .as_ref()
                     .map(|session| {
                         let windows = quick_start_attach_window_names(&state);
-                        crate::tmux_backend::attach_commands_for_windows(
+                        attach_commands_for_runtime_windows(
+                            state
+                                .get("tmux_endpoint")
+                                .and_then(serde_json::Value::as_str)
+                                .or_else(|| {
+                                    state.get("tmux_socket").and_then(serde_json::Value::as_str)
+                                }),
                             &workspace,
                             session,
                             windows.iter().map(String::as_str),
@@ -2394,7 +2793,8 @@ pub fn quick_start_with_transport_in_workspace(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
-    let state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
+    let mut state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
+    annotate_runtime_tmux_endpoint(&mut state, transport, &workspace);
     save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
     annotate_persisted_team_depth(
         &workspace,
@@ -2434,13 +2834,12 @@ pub fn quick_start_with_transport_in_workspace(
     //   asynchronously after spawn), so the verdict is PendingToolLoad — never
     //   bare Ready.
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
-    let attach_commands = crate::tmux_backend::attach_commands_for_windows(
+    let attach_windows = started_attach_window_names(&launch.started);
+    let attach_commands = attach_commands_for_runtime_windows(
+        launch.tmux_endpoint.as_deref(),
         &workspace,
         &session_name,
-        launch
-            .started
-            .iter()
-            .map(|started| started.agent_id.as_str()),
+        attach_windows.iter().map(String::as_str),
     );
     let mut next_actions = vec![format!(
         "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
@@ -2462,6 +2861,77 @@ pub fn quick_start_with_transport_in_workspace(
         display_backend,
         worker_readiness,
     })
+}
+
+fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, transport: &dyn Transport, workspace: &Path) {
+    let Some(endpoint) = transport.tmux_endpoint() else {
+        return;
+    };
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("tmux_endpoint".to_string(), serde_json::json!(endpoint));
+        obj.insert(
+            "tmux_socket".to_string(),
+            obj.get("tmux_endpoint")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if let Some(source) = selected_tmux_socket_source(transport, workspace) {
+            obj.insert("tmux_socket_source".to_string(), serde_json::json!(source));
+        }
+    }
+}
+
+fn attach_commands_for_runtime_windows<'a>(
+    endpoint: Option<&str>,
+    workspace: &Path,
+    session_name: &SessionName,
+    window_names: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    let windows = window_names.into_iter().collect::<Vec<_>>();
+    let attach = if let Some(endpoint) = endpoint.filter(|endpoint| !endpoint.is_empty()) {
+        if Path::new(endpoint).is_absolute() {
+            windows
+                .iter()
+                .map(|window_name| {
+                    format!(
+                        "tmux -S {} attach -t {}:{}",
+                        endpoint,
+                        session_name.as_str(),
+                        window_name
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            crate::tmux_backend::attach_commands_for_windows(
+                workspace,
+                session_name,
+                windows.iter().copied(),
+            )
+        }
+    } else {
+        crate::tmux_backend::attach_commands_for_windows(
+            workspace,
+            session_name,
+            windows.iter().copied(),
+        )
+    };
+    attach
+}
+
+fn started_attach_window_names(started: &[StartedAgent]) -> Vec<String> {
+    let mut windows = started
+        .iter()
+        .map(|started| {
+            started
+                .layout_window
+                .as_ref()
+                .map(|window| window.as_str().to_string())
+                .unwrap_or_else(|| started.agent_id.as_str().to_string())
+        })
+        .collect::<Vec<_>>();
+    windows.sort();
+    windows.dedup();
+    windows
 }
 
 fn quick_start_attach_window_names(state: &serde_json::Value) -> Vec<String> {
@@ -2870,7 +3340,7 @@ fn add_agent_with_transport_at_paths(
             role_file_path.display()
         )));
     }
-    if agent_id_exists_in_team_dir(team_dir, agent_id) {
+    if runtime_agent_exists(&owner_state, agent_id) {
         return Err(LifecycleError::RequirementUnmet(format!(
             "agent id already exists: {agent_id}"
         )));
@@ -3027,27 +3497,72 @@ fn inject_agent_into_spec(
     };
     // agents 列表追加。
     match pairs.iter_mut().find(|(k, _)| k == "agents") {
-        Some((_, Value::List(agents))) => agents.push(agent),
+        Some((_, Value::List(agents))) => {
+            if !agents
+                .iter()
+                .any(|existing| yaml_agent_id(existing) == Some(agent_id))
+            {
+                agents.push(agent);
+            }
+        }
         _ => return Err(LifecycleError::Compile("spec.agents missing or not a list".to_string())),
     }
     // routing.rules 追加 route-<id>(与 compile_team 同形)。
     if let Some((_, Value::Map(routing))) = pairs.iter_mut().find(|(k, _)| k == "routing") {
         if let Some((_, Value::List(rules))) = routing.iter_mut().find(|(k, _)| k == "rules") {
-            rules.push(Value::Map(vec![
-                ("id".to_string(), Value::Str(format!("route-{agent_id}"))),
-                (
-                    "match".to_string(),
-                    Value::Map(vec![(
-                        "assignee".to_string(),
-                        Value::List(vec![Value::Str(agent_id.to_string())]),
-                    )]),
-                ),
-                ("assign_to".to_string(), Value::Str(agent_id.to_string())),
-                ("priority".to_string(), Value::Int(10)),
-            ]));
+            if !rules
+                .iter()
+                .any(|rule| yaml_route_assigns_to(rule) == Some(agent_id))
+            {
+                rules.push(Value::Map(vec![
+                    ("id".to_string(), Value::Str(format!("route-{agent_id}"))),
+                    (
+                        "match".to_string(),
+                        Value::Map(vec![(
+                            "assignee".to_string(),
+                            Value::List(vec![Value::Str(agent_id.to_string())]),
+                        )]),
+                    ),
+                    ("assign_to".to_string(), Value::Str(agent_id.to_string())),
+                    ("priority".to_string(), Value::Int(10)),
+                ]));
+            }
         }
     }
     Ok(())
+}
+
+fn runtime_agent_exists(state: &serde_json::Value, agent_id: &AgentId) -> bool {
+    state
+        .get("agents")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|agents| agents.contains_key(agent_id.as_str()))
+}
+
+fn yaml_agent_id(agent: &Value) -> Option<&str> {
+    let Value::Map(pairs) = agent else {
+        return None;
+    };
+    pairs
+        .iter()
+        .find(|(key, _)| key == "id")
+        .and_then(|(_, value)| match value {
+            Value::Str(id) => Some(id.as_str()),
+            _ => None,
+        })
+}
+
+fn yaml_route_assigns_to(rule: &Value) -> Option<&str> {
+    let Value::Map(pairs) = rule else {
+        return None;
+    };
+    pairs
+        .iter()
+        .find(|(key, _)| key == "assign_to")
+        .and_then(|(_, value)| match value {
+            Value::Str(id) => Some(id.as_str()),
+            _ => None,
+        })
 }
 
 /// `fork_agent(workspace, source_agent_id, as_agent_id, ...)`(`lifecycle/operations.py:284`)。
@@ -3751,15 +4266,7 @@ fn initial_runtime_state(
         }
         agents.insert(id.to_string(), value);
     }
-    let requested_display = spec
-        .get("runtime")
-        .and_then(|runtime| runtime.get("display_backend"))
-        .and_then(Value::as_str)
-        .and_then(|backend| {
-            serde_json::from_value::<DisplayBackend>(serde_json::json!(backend)).ok()
-        });
-    let display_backend =
-        crate::lifecycle::display::resolve_display_backend(requested_display, None).backend;
+    let display_backend = spec_display_backend(spec);
     let mut state = serde_json::Map::new();
     state.insert(
         "spec_path".to_string(),
@@ -3927,6 +4434,14 @@ pub(crate) fn write_spec_atomic(spec_path: &Path, spec: &Value) -> Result<(), Li
 }
 
 pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
+    override_spec_runtime_str(spec, "session_name", session_name);
+}
+
+fn override_spec_display_backend(spec: &mut Value, display_backend: &str) {
+    override_spec_runtime_str(spec, "display_backend", display_backend);
+}
+
+fn override_spec_runtime_str(spec: &mut Value, key: &str, value: &str) {
     let Value::Map(root) = spec else { return };
     let runtime_slot = root
         .iter_mut()
@@ -3934,28 +4449,19 @@ pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
         .map(|(_, v)| v);
     match runtime_slot {
         Some(Value::Map(runtime)) => {
-            if let Some((_, existing)) = runtime.iter_mut().find(|(k, _)| k == "session_name") {
-                *existing = Value::Str(session_name.to_string());
+            if let Some((_, existing)) = runtime.iter_mut().find(|(k, _)| k == key) {
+                *existing = Value::Str(value.to_string());
             } else {
-                runtime.push((
-                    "session_name".to_string(),
-                    Value::Str(session_name.to_string()),
-                ));
+                runtime.push((key.to_string(), Value::Str(value.to_string())));
             }
         }
         Some(other) => {
-            *other = Value::Map(vec![(
-                "session_name".to_string(),
-                Value::Str(session_name.to_string()),
-            )]);
+            *other = Value::Map(vec![(key.to_string(), Value::Str(value.to_string()))]);
         }
         None => {
             root.push((
                 "runtime".to_string(),
-                Value::Map(vec![(
-                    "session_name".to_string(),
-                    Value::Str(session_name.to_string()),
-                )]),
+                Value::Map(vec![(key.to_string(), Value::Str(value.to_string()))]),
             ));
         }
     }
@@ -4102,21 +4608,6 @@ fn team_workspace(team_dir: &Path) -> PathBuf {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| team_dir.to_path_buf())
     })
-}
-
-fn agent_id_exists_in_team_dir(team_dir: &Path, agent_id: &AgentId) -> bool {
-    let spec_path = team_dir.join("team.spec.yaml");
-    if let Ok(text) = std::fs::read_to_string(&spec_path) {
-        if let Ok(spec) = yaml::loads(&text) {
-            return spec_agents(&spec)
-                .into_iter()
-                .any(|existing| existing.as_str() == agent_id.as_str());
-        }
-    }
-    team_dir
-        .join("agents")
-        .join(format!("{}.md", agent_id.as_str()))
-        .exists()
 }
 
 mod plan;

@@ -107,6 +107,7 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         args.team_id.as_deref(),
         args.yes,
         args.fresh,
+        !args.no_display,
     )?;
     let readiness = value.get("readiness").and_then(Value::as_object);
     let all_resumable_have_session = readiness

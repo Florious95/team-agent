@@ -11,15 +11,15 @@ use super::*;
 // ── lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建 ────────────
 
 /// `resolve_display_backend(requested, recorded, source)`(`display/backend.py`)。默认
-/// none;非默认非静默发 `display.backend_resolved`。
+/// adaptive;显式 none 是逃生口。
 pub fn resolve_display_backend(
     requested: Option<DisplayBackend>,
     recorded: Option<DisplayBackend>,
 ) -> ResolvedBackend {
-    let backend = requested.or(recorded).unwrap_or(DisplayBackend::None);
+    let backend = requested.or(recorded).unwrap_or(DisplayBackend::Adaptive);
     ResolvedBackend {
         backend,
-        non_default: backend != DisplayBackend::None,
+        non_default: backend != DisplayBackend::Adaptive,
     }
 }
 

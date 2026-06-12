@@ -9,7 +9,7 @@ use crate::model::ids::{TaskId, TeamKey};
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
-use super::leader_receiver::send_to_leader_receiver;
+use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_message_id};
 use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
 
 /// 发件目标:单 target / 广播 `*` / 扇出 list (`send.py:36` `target: str|list[str]|None`)。
@@ -89,7 +89,7 @@ pub fn send_message(
     backfill_leader_binding_for_delivery_view(&mut state, &raw_state);
     let recipient = match target {
         MessageTarget::Single(target) if target == "leader" => {
-            let outcome = send_to_leader_receiver(
+            let outcome = send_to_leader_receiver_with_message_id(
                 workspace,
                 &state,
                 "leader",
@@ -98,6 +98,7 @@ pub fn send_message(
                 &opts.sender,
                 opts.requires_ack,
                 None,
+                opts.message_id.as_deref(),
                 &event_log,
             )?;
             if matches!(outcome.status, DeliveryStatus::Queued) && owner_pane_is_dead(&state) {
