@@ -23,7 +23,14 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
     while idx < values.len() {
         let token = &values[idx];
         if token == "--" {
-            out.provider_args.extend(values.iter().skip(idx).cloned());
+            for value in values.iter().skip(idx + 1) {
+                if is_leader_launcher_flag(value) {
+                    return Err(CliError::Runtime(format!(
+                        "Team Agent launcher flag {value} must appear before --"
+                    )));
+                }
+            }
+            out.provider_args.extend(values.iter().skip(idx + 1).cloned());
             break;
         } else if token == "--attach" || token == "--attach-existing" {
             out.attach_existing = true;
@@ -47,6 +54,13 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
         idx += 1;
     }
     Ok(out)
+}
+
+fn is_leader_launcher_flag(value: &str) -> bool {
+    matches!(
+        value,
+        "--external-leader" | "--attach" | "--attach-existing" | "--confirm" | "--attach-session"
+    ) || value.starts_with("--attach-session=")
 }
 
 fn leader_launcher_json(values: &[String]) -> bool {

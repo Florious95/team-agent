@@ -144,6 +144,7 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
     let mut targets = Vec::new();
     for endpoint in state_recorded_tmux_endpoints(state) {
         let backend = tmux_backend_for_endpoint(&endpoint);
+        let resolved_endpoint = backend.tmux_endpoint();
         targets.extend(
             backend
                 .list_targets()
@@ -151,7 +152,7 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
                 .into_iter()
                 .map(|info| AttachLeaderTarget {
                     info,
-                    endpoint: Some(endpoint.clone()),
+                    endpoint: resolved_endpoint.clone(),
                 }),
         );
     }
@@ -168,10 +169,8 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
 fn tmux_backend_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
     if endpoint.is_empty() || endpoint == "default" {
         crate::tmux_backend::TmuxBackend::new()
-    } else if Path::new(endpoint).is_absolute() {
-        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
     } else {
-        crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
+        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
     }
 }
 

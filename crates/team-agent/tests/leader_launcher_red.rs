@@ -229,6 +229,41 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
 }
 
 #[test]
+fn external_leader_after_dashdash_fails_with_visible_guidance() {
+    let workspace = tmp_dir("external-after-dashdash");
+
+    let out = Command::new(bin())
+        .args(["codex", "--", "--external-leader"])
+        .current_dir(&workspace)
+        .output()
+        .expect("run team-agent codex");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "misplaced --external-leader must fail before provider exec; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "human error path should not write stdout; stdout={stdout:?}"
+    );
+    assert!(
+        stderr.contains("error: Team Agent launcher flag --external-leader must appear before --"),
+        "stderr must name the misplaced flag; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("action: move the Team Agent launcher flag before `--`"),
+        "stderr must tell the user how to fix the flag boundary; stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("log: "),
+        "stderr must include the cli-error log path; stderr={stderr:?}"
+    );
+}
+
+#[test]
 #[serial(env)]
 fn attach_leader_uses_state_recorded_tmux_socket_endpoint() {
     let workspace = tmp_dir("attach-state-socket");

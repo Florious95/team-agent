@@ -415,6 +415,48 @@ fn run_send_unknown_task_renders_error_not_silent_swallow() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[test]
+fn run_leader_passthrough_flag_after_dashdash_renders_error_not_silent_swallow() {
+    let ws = std::env::temp_dir().join(format!(
+        "ta-run-leaderflag-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&ws).unwrap();
+    let argv: Vec<String> = ["codex", "--", "--external-leader"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+
+    let code = run(&argv, &ws);
+
+    assert_eq!(
+        code,
+        ExitCode::Error,
+        "misplaced leader flag must fail before provider exec"
+    );
+    let logs_dir = ws.join(".team").join("logs");
+    let mut found = String::new();
+    if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("cli-error-") {
+                found = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                break;
+            }
+        }
+    }
+    assert!(
+        found.contains("Team Agent launcher flag --external-leader must appear before --"),
+        "leader passthrough run() must render the misplaced flag error; a silent swallow leaves no \
+         cli-error log. got log body: {found:?}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
 // R8 D6 (c-lite offline byte-lock): the CLI requeued_exhausted_watchers return projection, extracted
 // into a pure helper, must project the golden event's watcher_ids STRING list (leader/__init__.py:56) —
 // NOT the Rust `requeued` Vec<WatcherNotice> objects.

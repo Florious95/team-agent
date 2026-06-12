@@ -32,9 +32,10 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         return emit_missing_subcommand_usage();
     };
     if command == "codex" || command == "claude" || command == "copilot" {
-        return cmd_leader_passthrough(command, &argv[1..], cwd)
-            .map(emit_result)
-            .unwrap_or(ExitCode::Error);
+        return match cmd_leader_passthrough(command, &argv[1..], cwd) {
+            Ok(result) => emit_result(result),
+            Err(error) => emit_cli_error(command, &argv[1..], cwd, &error),
+        };
     }
     if matches!(command, "-h" | "--help" | "help") {
         println!("{}", command_help(None));

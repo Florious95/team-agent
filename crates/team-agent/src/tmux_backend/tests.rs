@@ -8,6 +8,7 @@
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use std::collections::{BTreeMap, VecDeque};
+    use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
@@ -251,8 +252,20 @@
     }
 
     #[test]
+    #[serial_test::serial(env)]
     fn leader_receiver_short_endpoint_must_not_reconstruct_tmux_l_socket() {
         let endpoint = "dl9aa40c88";
+        let uid = unsafe { libc::geteuid() };
+        let tmp = std::env::temp_dir().join(format!(
+            "ta-tmux-short-endpoint-{}",
+            std::process::id()
+        ));
+        let root = tmp.join(format!("tmux-{uid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket_path = root.join(endpoint);
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+        let socket_path = socket_path.canonicalize().unwrap();
+        let _env = EnvGuard::apply(&[("TMPDIR", Some(tmp.to_str().unwrap()))]);
         let (be, rec) = {
             let recorded = Arc::new(Mutex::new(Vec::new()));
             let runner = MockCommandRunner {
@@ -274,6 +287,14 @@
             calls.iter().all(|call| !call.windows(2).any(|w| w == ["-L".to_string(), endpoint.to_string()])),
             "non-canonical leader endpoints must be rejected or left unbound, never reconstructed as \
              tmux -L <short> under the coordinator socket root; calls={calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call.starts_with(&[
+                "tmux".to_string(),
+                "-S".to_string(),
+                socket_path.to_string_lossy().to_string()
+            ])),
+            "short leader endpoints must resolve to the existing physical socket path with -S; calls={calls:?}"
         );
     }
 

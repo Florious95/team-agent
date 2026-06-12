@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.19
+
+- **`team-agent attach-leader` survives short `ta-*` socket names**: when a team's recorded `tmux_socket` is a bare short name (e.g. `ta-0535b990e299` left over from a managed shared socket), `attach-leader` now expands it to its workspace-resolved absolute path (`/private/tmp/tmux-501/ta-0535b990e299` etc.) via the existing `tmux_backend::socket_path_for_workspace` helper before probing, and persists the resolved endpoint back. The 0.3.17 / 0.3.18 attach-leader fix is now also correct for the legacy short-name receiver path.
+- **`--external-leader` is now end-to-end correct and self-explanatory when misplaced**: the topology marker is persisted **before** the provider is exec'd (so a crash mid-launch can't leave the team mis-classified), and provider passthrough args go through the existing `provider_args` boundary helper so they survive the `--` split. When a user writes `team-agent codex -- --external-leader` (a Team Agent launcher flag placed after `--`), the launcher now fails fast with the three-line `error / action / log` diagnostic instead of silently dropping the flag, so the misuse is visible at the terminal and in the log.
+
 ## 0.3.18
 
 - **Fresh teams created with `team-agent quick-start` are now correctly managed-topology by default again** (0.3.17 regression fix): the `is_external_leader` topology marker is now written explicitly on team creation (`false` for `quick-start`, `true` only for `--external-leader` opt-in or external attach), and every consumer (status, lifecycle, shutdown) reads it through a single helper. A missing marker is consistently interpreted as the managed default everywhere, so 0.3.17 teams could mis-classify themselves and `team-agent status` could falsely show ready when the managed leader receiver hadn't attached yet — both fixed. Managed teams now report a `degraded` / not-attached status when the leader receiver is missing, instead of silently saying ready.

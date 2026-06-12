@@ -101,6 +101,12 @@ impl CliError {
                         .to_string(),
                 ]);
             }
+        } else if error.contains("Team Agent launcher flag")
+            && error.contains("must appear before --")
+        {
+            payload.action = String::from(
+                "move the Team Agent launcher flag before `--`; only provider flags belong after `--`",
+            );
         }
         payload
     }

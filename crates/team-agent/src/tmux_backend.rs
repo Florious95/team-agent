@@ -233,6 +233,12 @@ impl TmuxBackend {
                 socket: Some(TmuxSocketEndpoint::Path(endpoint.to_string())),
                 event_workspace: None,
             }
+        } else if let Some(path) = socket_path_for_name(endpoint) {
+            Self {
+                runner: Box::new(RealCommandRunner),
+                socket: Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
+                event_workspace: None,
+            }
         } else {
             Self::new()
         }
@@ -273,6 +279,12 @@ impl TmuxBackend {
             Self {
                 runner,
                 socket: None,
+                event_workspace: None,
+            }
+        } else if let Some(path) = socket_path_for_name(endpoint) {
+            Self {
+                runner,
+                socket: Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
                 event_workspace: None,
             }
         } else {
@@ -340,13 +352,7 @@ pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
 }
 
 pub(crate) fn socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
-    if let Some(existing) = existing_socket_path_for_workspace(workspace) {
-        return Some(existing);
-    }
-    let uid = unsafe { libc::geteuid() };
-    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
-    let default_root = default_root.canonicalize().unwrap_or(default_root);
-    Some(default_root.join(socket_name_for_workspace(workspace)))
+    socket_path_for_name(&socket_name_for_workspace(workspace))
 }
 
 pub(crate) fn socket_probe_missing_for_workspace(workspace: &Path) -> bool {
@@ -354,11 +360,27 @@ pub(crate) fn socket_probe_missing_for_workspace(workspace: &Path) -> bool {
 }
 
 fn existing_socket_path_for_workspace(workspace: &Path) -> Option<PathBuf> {
-    let socket_name = socket_name_for_workspace(workspace);
+    existing_socket_path_for_name(&socket_name_for_workspace(workspace))
+}
+
+pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
+    if socket_name.is_empty() || socket_name == "default" || Path::new(socket_name).is_absolute() {
+        return None;
+    }
+    if let Some(existing) = existing_socket_path_for_name(socket_name) {
+        return Some(existing);
+    }
+    let uid = unsafe { libc::geteuid() };
+    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
+    let default_root = default_root.canonicalize().unwrap_or(default_root);
+    Some(default_root.join(socket_name))
+}
+
+fn existing_socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     let roots = tmux_socket_roots();
     for root in &roots {
         let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let candidate = root.join(&socket_name);
+        let candidate = root.join(socket_name);
         if candidate.exists() {
             return Some(candidate.canonicalize().unwrap_or(candidate));
         }

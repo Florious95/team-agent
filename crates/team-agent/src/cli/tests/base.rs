@@ -86,17 +86,18 @@ use super::*;
         assert!(!got.attach_existing);
         assert_eq!(
             got.provider_args,
-            vec!["--".to_string(), "--model".to_string(), "opus".to_string()]
+            vec!["--model".to_string(), "opus".to_string()]
         );
     }
 
     #[test]
-    fn leader_launcher_args_external_leader_after_dashdash_is_provider_arg() {
-        let got = leader_launcher_args(&["--".into(), "--external-leader".into()]).unwrap();
-        assert!(!got.external_leader);
-        assert_eq!(
-            got.provider_args,
-            vec!["--".to_string(), "--external-leader".to_string()]
+    fn leader_launcher_args_external_leader_after_dashdash_errors() {
+        let err = leader_launcher_args(&["--".into(), "--external-leader".into()])
+            .expect_err("Team Agent flags after -- must not be silently passed to provider");
+        assert!(
+            err.to_string()
+                .contains("Team Agent launcher flag --external-leader must appear before --"),
+            "unexpected error: {err}"
         );
     }
 
@@ -116,22 +117,22 @@ use super::*;
     }
 
     #[test]
-    fn leader_launcher_args_dashdash_passthrough_includes_following_flags() {
-        // golden: ["--attach","--","-x","--confirm"] ->
-        //   provider_args=["--","-x","--confirm"], attach_existing=True, confirm_attach=False
-        // (everything from `--` onward, INCLUDING the `--` token itself, is provider passthrough)
+    fn leader_launcher_args_dashdash_passthrough_strips_separator() {
+        // ["--attach","--","-x","--provider-confirm"] ->
+        //   provider_args=["-x","--provider-confirm"], attach_existing=True, confirm_attach=False
+        // Known Team Agent launcher flags after `--` are rejected by a separate guard.
         let got = leader_launcher_args(&[
             "--attach".into(),
             "--".into(),
             "-x".into(),
-            "--confirm".into(),
+            "--provider-confirm".into(),
         ])
         .unwrap();
         assert!(got.attach_existing);
-        assert!(!got.confirm_attach, "--confirm AFTER -- must NOT set confirm_attach");
+        assert!(!got.confirm_attach);
         assert_eq!(
             got.provider_args,
-            vec!["--".to_string(), "-x".to_string(), "--confirm".to_string()]
+            vec!["-x".to_string(), "--provider-confirm".to_string()]
         );
     }
 

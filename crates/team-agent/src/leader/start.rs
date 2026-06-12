@@ -196,6 +196,9 @@ pub fn execute_leader_plan(
     let detached = plan.mode == LeaderStartMode::NewTmuxSession
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
+    if plan.is_external_leader {
+        persist_external_leader_topology_marker(plan, workspace)?;
+    }
     let status = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
     let code = status.code();
     if !status.success() {
@@ -204,9 +207,6 @@ pub fn execute_leader_plan(
             code.map(|c| c.to_string())
                 .unwrap_or_else(|| "signal".to_string())
         )));
-    }
-    if plan.is_external_leader {
-        persist_external_leader_topology_marker(plan, workspace)?;
     }
     if detached {
         Ok(LeaderLaunchOutcome {
@@ -258,7 +258,7 @@ fn start_argv(
     match mode {
         LeaderStartMode::ExecProvider => {
             let mut argv = vec![provider_cmd];
-            argv.extend(provider_args.iter().cloned());
+            argv.extend(normalized_provider_args(provider_args));
             Ok(argv)
         }
         LeaderStartMode::ManagedTmuxClient => {
@@ -289,7 +289,7 @@ fn start_argv(
                 exports.push(shlex_quote(&format!("PATH={path}")));
             }
             let mut provider_argv = vec![provider_cmd];
-            provider_argv.extend(provider_args.iter().cloned());
+            provider_argv.extend(normalized_provider_args(provider_args));
             let shell = format!(
                 "cd {} && export {} && exec {}",
                 shlex_quote(&resolved_workspace.to_string_lossy()),
@@ -316,8 +316,15 @@ fn start_argv(
 
 fn provider_command_argv(provider: Provider, provider_args: &[String]) -> Vec<String> {
     let mut argv = vec![provider_command_name(provider).to_string()];
-    argv.extend(provider_args.iter().cloned());
+    argv.extend(normalized_provider_args(provider_args));
     argv
+}
+
+fn normalized_provider_args(provider_args: &[String]) -> impl Iterator<Item = String> + '_ {
+    provider_args
+        .iter()
+        .skip(usize::from(provider_args.first().is_some_and(|arg| arg == "--")))
+        .cloned()
 }
 
 fn managed_team_session_name(identity: &LeaderIdentity) -> SessionName {
@@ -777,7 +784,12 @@ mod tests {
     use std::path::Path;
     use std::sync::Mutex;
 
+    use crate::leader::{
+        LeaderIdentity, LeaderLaunchSocket, LeaderSessionUuidSource, LeaderStartMode,
+        LeaderStartPlan,
+    };
     use crate::model::enums::PaneLiveness;
+    use crate::model::ids::{LeaderSessionUuid, TeamKey};
     use crate::provider::{Provider, COPILOT_READY_MARKER, COPILOT_TRUST_PROMPT_MARKER};
     use crate::transport::{
         AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -786,7 +798,7 @@ mod tests {
         TurnVerification, WindowName,
     };
 
-    use super::handle_exec_provider_startup_prompts;
+    use super::{execute_leader_plan, handle_exec_provider_startup_prompts, shlex_quote};
 
     struct ScriptedTransport {
         screens: Mutex<Vec<String>>,
@@ -935,6 +947,57 @@ mod tests {
                 reason: "not used by startup-prompt test".to_string(),
             })
         }
+    }
+
+    #[test]
+    fn external_exec_provider_persists_topology_before_provider_exec() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-external-pre-exec-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        let command = format!(
+            "test -f {path} && grep -q is_external_leader {path}",
+            path = shlex_quote(&state_path.to_string_lossy())
+        );
+        let identity = LeaderIdentity {
+            leader_session_uuid: LeaderSessionUuid::derive(
+                "fp",
+                &workspace.to_string_lossy(),
+                "tester",
+                "current",
+            )
+            .unwrap(),
+            leader_session_uuid_source: LeaderSessionUuidSource::Derived,
+            machine_fingerprint: "fp".to_string(),
+            workspace_abspath: workspace.clone(),
+            os_user: "tester".to_string(),
+            team_id: TeamKey::new("current"),
+        };
+        let plan = LeaderStartPlan {
+            mode: LeaderStartMode::ExecProvider,
+            provider: Provider::Codex,
+            workspace: workspace.clone(),
+            socket: LeaderLaunchSocket::Workspace,
+            session_name: None,
+            argv: vec!["sh".to_string(), "-c".to_string(), command],
+            provider_argv: vec!["codex".to_string()],
+            leader_window: None,
+            is_external_leader: true,
+            leader_env: BTreeMap::new(),
+            identity: Some(identity),
+            detached: false,
+        };
+
+        let outcome = execute_leader_plan(&plan, &workspace)
+            .expect("external marker must be present before provider argv runs");
+
+        assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
+        let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(state["is_external_leader"], serde_json::json!(true));
+        assert_eq!(state["teams"]["current"]["is_external_leader"], serde_json::json!(true));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]

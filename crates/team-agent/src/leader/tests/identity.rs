@@ -108,12 +108,20 @@ use super::*;
         let ws = std::env::temp_dir().join(format!("ta_rs_lsp_external_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
 
-        let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, true).unwrap();
+        let provider_args = vec!["--".to_string(), "--model".to_string(), "opus".to_string()];
+        let plan = leader_start_plan(Provider::Fake, &provider_args, &ws, false, false, None, true).unwrap();
 
         assert_eq!(plan.mode, LeaderStartMode::ExecProvider);
         assert!(plan.is_external_leader);
         assert_eq!(plan.leader_window, None);
-        assert_eq!(plan.argv, vec!["fake".to_string()]);
+        assert_eq!(
+            plan.argv,
+            vec!["fake".to_string(), "--model".to_string(), "opus".to_string()]
+        );
+        assert_eq!(
+            plan.provider_argv,
+            vec!["fake".to_string(), "--model".to_string(), "opus".to_string()]
+        );
     }
 
     #[test]
