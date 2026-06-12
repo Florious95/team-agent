@@ -309,6 +309,7 @@ fn lsof_cwd_timeout_is_diagnostic_not_shutdown_partial() {
         &ws,
         &json!({
             "session_name": "team-lsof-cwd-timeout",
+            "is_external_leader": true,
             "agents": {
                 "fake_impl": {
                     "status": "running",
@@ -467,6 +468,7 @@ fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive()
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
+            "is_external_leader": true,
             "tmux_socket_source": "leader_env",
             "agents": {
                 "fake_impl": {
@@ -541,5 +543,44 @@ fn managed_leader_shutdown_never_kills_server_even_when_socket_looks_exclusive()
     assert!(
         !transport.kill_server_called(),
         "managed topology must clear the team session/window without kill-server"
+    );
+}
+
+#[test]
+fn shutdown_missing_topology_marker_defaults_to_managed_cleanup() {
+    let ws = tmp_shutdown_workspace("missing-topology-marker-managed-cleanup");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-current",
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%1"),
+            session: SessionName::new("team-current"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("leader")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_targets_persist_after_kill();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["killed_sessions"], json!(["team-current"]));
+    assert_eq!(out["spared_sessions"], json!([]));
+    assert!(
+        !transport.kill_server_called(),
+        "missing topology marker must default to managed cleanup, not external kill-server"
     );
 }

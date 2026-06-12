@@ -856,6 +856,8 @@ fn save_launched_team_state_for_key(
             "active_team_key".to_string(),
             serde_json::Value::String(launched_key.clone()),
         );
+        obj.entry("is_external_leader".to_string())
+            .or_insert(serde_json::Value::Bool(false));
     }
     promote_launched_binding_from_team_entry(&mut launched, &launched_key);
     preserve_existing_leader_topology(&existing, &launched_key, &mut launched);
@@ -3021,10 +3023,7 @@ fn attach_window_names_with_managed_leader(
 }
 
 fn state_uses_managed_leader(state: &serde_json::Value) -> bool {
-    state
-        .get("is_external_leader")
-        .and_then(serde_json::Value::as_bool)
-        .is_some_and(|external| !external)
+    crate::state::projection::state_is_managed_leader(state)
 }
 
 /// BUG-7 helper: derive a [`QuickStartReadiness`] verdict from the just-written
@@ -3087,7 +3086,7 @@ fn quick_start_session_capture_incomplete_agents(workspace: &Path, team_key: &st
     crate::session_capture::incomplete_interacted_resumable_agent_ids(team_state)
 }
 
-fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
+pub(crate) fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool {
     let Ok(state) = load_runtime_state(workspace) else {
         return true;
     };
@@ -3097,7 +3096,7 @@ fn launched_team_receiver_is_attached(workspace: &Path, team_key: &str) -> bool 
         .and_then(|teams| teams.get(team_key))
         .unwrap_or(&state);
     if team_state.get("leader_receiver").is_none() {
-        return true;
+        return crate::state::projection::state_is_external_leader(team_state);
     }
     if team_uses_fake_model_harness(team_state) {
         return true;
@@ -4366,6 +4365,7 @@ fn initial_runtime_state(
         "display_backend".to_string(),
         serde_json::json!(display_backend),
     );
+    state.insert("is_external_leader".to_string(), serde_json::json!(false));
     let mut state = serde_json::Value::Object(state);
     if !seed_launched_owner_from_env(&mut state) {
         let team_id = crate::state::projection::team_state_key(&state);

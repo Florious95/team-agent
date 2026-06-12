@@ -170,13 +170,38 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
-    save_runtime_state_with_deleted_agents(workspace, state, &[])
+    save_runtime_state_with_merge_exceptions(workspace, state, &[], None, &[])
 }
 
 pub(crate) fn save_runtime_state_with_deleted_agents(
     workspace: &Path,
     state: &Value,
     deleted_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_exceptions(workspace, state, deleted_agent_ids, None, &[])
+}
+
+pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
+    workspace: &Path,
+    state: &Value,
+    tombstoned_team_key: &str,
+    tombstoned_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_exceptions(
+        workspace,
+        state,
+        &[],
+        Some(tombstoned_team_key),
+        tombstoned_agent_ids,
+    )
+}
+
+fn save_runtime_state_with_merge_exceptions(
+    workspace: &Path,
+    state: &Value,
+    deleted_agent_ids: &[&str],
+    skip_capture_backfill_team_key: Option<&str>,
+    skip_capture_backfill_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     if cache_equals(&path, state) {
@@ -218,7 +243,19 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        preserve_latest_roster_entries(&mut migrated, &latest, &deleted);
+        let skip_capture_backfill = skip_capture_backfill_agent_ids
+            .iter()
+            .copied()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        preserve_latest_roster_entries(
+            &mut migrated,
+            &latest,
+            &deleted,
+            skip_capture_backfill_team_key,
+            &skip_capture_backfill,
+        );
     }
     // 字节对拍 Python json.dumps(indent=2, ensure_ascii=False)(无尾换行)。
     let payload = serde_json::to_string_pretty(&migrated)?;
@@ -269,19 +306,34 @@ fn read_latest_state_under_lock(workspace: &Path, path: &Path) -> Option<Value> 
     Some(latest)
 }
 
-fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_agent_ids: &BTreeSet<String>) {
+fn preserve_latest_roster_entries(
+    incoming: &mut Value,
+    latest: &Value,
+    deleted_agent_ids: &BTreeSet<String>,
+    skip_capture_backfill_team_key: Option<&str>,
+    skip_capture_backfill_agent_ids: &BTreeSet<String>,
+) {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
     // per-team `teams.<k>.agents` merge below is team-key self-identifying and must run
     // even when another process flipped session_name/active_team_key between this
     // writer's load and save.
     let projection_matches = same_runtime_projection(incoming, latest);
+    let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
+    let top_level_team = Some(team_state_key(incoming)).or_else(|| Some(team_state_key(latest)));
+    let skip_top_level_capture_backfill =
+        should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
-        preserve_missing_agents(incoming.get_mut("agents"), latest.get("agents"), deleted_agent_ids);
+        preserve_missing_agents(
+            incoming.get_mut("agents"),
+            latest.get("agents"),
+            deleted_agent_ids,
+            skip_top_level_capture_backfill,
+            skip_capture_backfill_agent_ids,
+        );
         preserve_latest_ownership_fields(incoming, latest);
     }
 
-    let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
     if projection_matches {
         if let Some(active_team) = active_team.as_deref() {
             let latest_active_agents = latest
@@ -289,7 +341,13 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
                 .and_then(Value::as_object)
                 .and_then(|teams| teams.get(active_team))
                 .and_then(|entry| entry.get("agents"));
-            preserve_missing_agents(incoming.get_mut("agents"), latest_active_agents, deleted_agent_ids);
+            preserve_missing_agents(
+                incoming.get_mut("agents"),
+                latest_active_agents,
+                deleted_agent_ids,
+                skip_top_level_capture_backfill,
+                skip_capture_backfill_agent_ids,
+            );
         }
     }
 
@@ -306,6 +364,8 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
                 incoming_entry.get_mut("agents"),
                 latest_entry.get("agents"),
                 deleted_agent_ids,
+                should_skip_capture_backfill(Some(team), skip_capture_backfill_team_key),
+                skip_capture_backfill_agent_ids,
             );
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
         }
@@ -314,10 +374,23 @@ fn preserve_latest_roster_entries(incoming: &mut Value, latest: &Value, deleted_
         if let Some(active_team) = active_team.as_deref() {
             let latest_top_agents = latest.get("agents");
             if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
-                preserve_missing_agents(incoming_entry.get_mut("agents"), latest_top_agents, deleted_agent_ids);
+                preserve_missing_agents(
+                    incoming_entry.get_mut("agents"),
+                    latest_top_agents,
+                    deleted_agent_ids,
+                    should_skip_capture_backfill(Some(active_team), skip_capture_backfill_team_key),
+                    skip_capture_backfill_agent_ids,
+                );
                 preserve_latest_ownership_fields(incoming_entry, latest);
             }
         }
+    }
+}
+
+fn should_skip_capture_backfill(current_team_key: Option<&str>, skip_team_key: Option<&str>) -> bool {
+    match skip_team_key {
+        Some(skip_team_key) => current_team_key == Some(skip_team_key),
+        None => true,
     }
 }
 
@@ -379,6 +452,8 @@ fn preserve_missing_agents(
     incoming_agents: Option<&mut Value>,
     latest_agents: Option<&Value>,
     deleted_agent_ids: &BTreeSet<String>,
+    skip_capture_backfill: bool,
+    skip_capture_backfill_agent_ids: &BTreeSet<String>,
 ) {
     let Some(incoming_agents) = incoming_agents else {
         return;
@@ -398,7 +473,9 @@ fn preserve_missing_agents(
                 slot.insert(latest_agent.clone());
             }
             serde_json::map::Entry::Occupied(mut existing) => {
-                backfill_capture_fields(existing.get_mut(), latest_agent);
+                if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
+                    backfill_capture_fields(existing.get_mut(), latest_agent);
+                }
             }
         }
     }

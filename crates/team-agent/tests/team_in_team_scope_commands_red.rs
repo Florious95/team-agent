@@ -298,6 +298,7 @@ impl MultiTeamFixture {
         let state = json!({
             "active_team_key": "teamB",
             "session_name": "team-teamB",
+            "is_external_leader": true,
             "team_dir": team_b.to_string_lossy().to_string(),
             "spec_path": team_b.join("team.spec.yaml").to_string_lossy().to_string(),
             "leader": {"id": "leader"},

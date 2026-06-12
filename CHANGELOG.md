@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.18
+
+- **Fresh teams created with `team-agent quick-start` are now correctly managed-topology by default again** (0.3.17 regression fix): the `is_external_leader` topology marker is now written explicitly on team creation (`false` for `quick-start`, `true` only for `--external-leader` opt-in or external attach), and every consumer (status, lifecycle, shutdown) reads it through a single helper. A missing marker is consistently interpreted as the managed default everywhere, so 0.3.17 teams could mis-classify themselves and `team-agent status` could falsely show ready when the managed leader receiver hadn't attached yet — both fixed. Managed teams now report a `degraded` / not-attached status when the leader receiver is missing, instead of silently saying ready.
+- **`team-agent reset-agent --discard-session` actually starts a fresh worker context now**: previously a discard could leave a stale provider session id behind because the save path backfilled it from an in-flight capture. The save path is now tombstone-aware (it does not backfill a session after a discard), the next launch reports `start_mode = Fresh` with a new `session_id`, and the JSON output now carries structured `start_mode` / `discarded` / `new_session_id` so operators can verify the reset actually took.
+
 ## 0.3.17
 
 - **`team-agent attach-leader` finds the leader pane on the first try in multi-team workspaces**: `--team` is now threaded through the lifecycle command port into the attach path, the attach logic selects team-scoped state and probes the tmux endpoint recorded in `leader_receiver.tmux_socket` / `tmux_socket` before falling back to the workspace default socket, and the endpoint that actually produced the pane is persisted back so subsequent attaches go straight to it. When the leader pane cannot be located, the error message now lists every endpoint that was searched instead of failing opaquely.

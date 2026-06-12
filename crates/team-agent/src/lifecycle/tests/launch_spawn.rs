@@ -1200,9 +1200,15 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
             .any(|cmd| cmd.contains(&format!("tmux -S {endpoint} attach -t "))),
         "attach commands must use the selected socket endpoint: {attach_commands:?}"
     );
+    assert!(
+        attach_commands.iter().any(|cmd| cmd.contains(":leader")),
+        "fresh managed quick-start must include the leader window attach command: {attach_commands:?}"
+    );
     let (_raw, state) = raw_runtime_state(workspace);
     assert_eq!(state["tmux_endpoint"], json!(endpoint));
     assert_eq!(state["tmux_socket"], json!(endpoint));
+    assert_eq!(state["is_external_leader"], json!(false));
+    assert_eq!(state["teams"]["teamdir"]["is_external_leader"], json!(false));
 }
 
 #[test]
@@ -1247,6 +1253,33 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
     let (_raw, state) = raw_runtime_state(workspace);
     assert_eq!(state["is_external_leader"], json!(false));
     assert_eq!(state["leader_client"]["diagnostic_only"], json!(true));
+}
+
+#[test]
+fn fresh_managed_state_without_receiver_is_not_attached() {
+    let workspace = temp_ws();
+    crate::state::persist::save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "teamdir",
+            "session_name": "team-teamdir",
+            "is_external_leader": false,
+            "agents": {"implementer": {"status": "running"}},
+            "teams": {
+                "teamdir": {
+                    "session_name": "team-teamdir",
+                    "is_external_leader": false,
+                    "agents": {"implementer": {"status": "running"}}
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    assert!(
+        !crate::lifecycle::launch::launched_team_receiver_is_attached(&workspace, "teamdir"),
+        "managed topology with missing leader_receiver must not be reported attached"
+    );
 }
 
 #[test]
@@ -2225,9 +2258,11 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   cross-team reads cannot accidentally pick up another team's binding from the root.
 //   The post-launch hook drops the top-level owner triple when the launched pane is
 //   unbound (empty pane_id), and only the per-team entry retains the binding.
-//   Order remains the golden prefix (spec_path … display_backend) + new suffix
-//   (active_team_key, teams). display_backend stays the resolved backend from
-//   display/backend.py:12-29 (default adaptive), not the raw optional spec field.
+//   R1: topology is explicit; fresh managed teams carry `is_external_leader=false`
+//   before the team-in-team suffix. Order remains the golden prefix
+//   (spec_path … display_backend) + topology marker + new suffix (active_team_key,
+//   teams). display_backend stays the resolved backend from display/backend.py:12-29
+//   (default adaptive), not the raw optional spec field.
 #[test]
 #[serial(env)]
 fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
@@ -2264,11 +2299,13 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "agents",
             "tasks",
             "display_backend",
+            "is_external_leader",
             "active_team_key",
             "teams",
         ],
         "state.json top-level key order must match golden launch/core.py:62-71 \
-         plus Bug 1/2 team-in-team suffix (active_team_key, teams). \
+         plus R1 topology marker and Bug 1/2 team-in-team suffix \
+         (is_external_leader, active_team_key, teams). \
          Bug 2 owner team-scope (N1/N12/N18/N29) deliberately keeps owner / \
          leader_receiver / owner_epoch OFF the top level — they live ONLY under \
          teams[<active_team_key>] so per-team isolation has a single source of \
@@ -2308,6 +2345,7 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
         json!("adaptive"),
         "adaptive layout directive: resolve_display_backend(None, source='launch') defaults to adaptive"
     );
+    assert_eq!(state["is_external_leader"], json!(false));
 }
 
 // Stage B1 — golden launch/core.py:238-255 writes the running agent state only after

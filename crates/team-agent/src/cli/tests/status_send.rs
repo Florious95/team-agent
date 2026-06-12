@@ -87,6 +87,27 @@ use super::*;
     }
 
     #[test]
+    fn status_port_missing_topology_marker_defaults_to_managed() {
+        let ws = seed_status_workspace();
+        let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        if let Some(obj) = state.as_object_mut() {
+            obj.remove("is_external_leader");
+            obj.insert("session_name".to_string(), json!("team-current"));
+        }
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+
+        assert_eq!(v["leader_topology"], json!("managed"));
+        assert_eq!(v["is_external_leader"], json!(false));
+        let attach = v["leader_attach_command"]
+            .as_str()
+            .expect("missing marker defaults to managed attach command");
+        assert!(attach.contains("attach -t team-current:leader"), "{attach}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn status_port_status_detail_full_keeps_uncompacted_events() {
         // cmd_status --json --detail -> status_port::status(compact=false): the FULL dict
         // (queries.py:65-79) is returned WITHOUT compact_status truncation. Distinguishing

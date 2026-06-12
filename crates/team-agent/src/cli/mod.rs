@@ -363,10 +363,7 @@ pub mod lifecycle_port {
     }
 
     fn state_uses_external_leader(state: &Value) -> bool {
-        state
-            .get("is_external_leader")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
+        crate::state::projection::state_is_external_leader(state)
     }
 
     fn managed_leader_socket_cleanup(
@@ -1722,9 +1719,31 @@ pub mod lifecycle_port {
             open_display,
             team,
         ) {
-            Ok(report) => {
-                Ok(json!({"ok": true, "agent_id": agent, "report": format!("{report:?}")}))
-            }
+            Ok(crate::lifecycle::ResetAgentOutcome::Reset {
+                env,
+                start_mode,
+                discarded_session_id,
+                session_id,
+                new_session_id,
+            }) => Ok(json!({
+                "ok": true,
+                "agent_id": env.agent_id.as_str(),
+                "status": "reset",
+                "state_file": env.state_file.to_string_lossy().to_string(),
+                "coordinator_started": env.coordinator_started,
+                "start_mode": start_mode,
+                "discarded_session_id": discarded_session_id.as_ref().map(|id| id.as_str()),
+                "session_id": session_id.as_ref().map(|id| id.as_str()),
+                "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+            })),
+            Ok(crate::lifecycle::ResetAgentOutcome::Refused { reason }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent,
+                "status": "refused",
+                "reason": match reason {
+                    crate::lifecycle::ResetRefusal::DiscardSessionRequired => "discard_session_required",
+                },
+            })),
             Err(e) => Ok(error_value(e)),
         }
     }

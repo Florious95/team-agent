@@ -535,6 +535,7 @@ pub enum StartAgentOutcome {
         start_mode: StartMode,
         target: String,
         session_id: Option<SessionId>,
+        new_session_id: Option<SessionId>,
         rollout_path: Option<RolloutPath>,
     },
     /// 窗口已存在且非 force → noop(`start.py:134`)。
@@ -565,6 +566,9 @@ pub enum ResetAgentOutcome {
     Reset {
         env: AgentActionEnvelope,
         start_mode: StartMode,
+        discarded_session_id: Option<SessionId>,
+        session_id: Option<SessionId>,
+        new_session_id: Option<SessionId>,
     },
     /// 未传 discard_session → 拒绝(不丢上下文的误用保护)。
     Refused { reason: ResetRefusal },

@@ -425,6 +425,7 @@ fn seed_state_with_leader_anchor(workspace: &Path, session_name: &str, leader_pa
         workspace,
         &json!({
             "session_name": session_name,
+            "is_external_leader": true,
             "leader_receiver": {
                 "mode": "direct_tmux",
                 "status": "attached",

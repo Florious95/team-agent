@@ -14,7 +14,7 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::StateError;
-use crate::state::persist::{load_runtime_state, save_runtime_state_with_deleted_agents};
+use crate::state::persist::{load_runtime_state, save_runtime_state_with_deleted_agents, save_runtime_state_with_team_tombstoned_agents};
 
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
@@ -160,6 +160,17 @@ pub fn compact_team_state(state: &Value) -> Value {
         ),
         None => state.clone(),
     }
+}
+
+pub fn state_is_external_leader(state: &Value) -> bool {
+    state
+        .get("is_external_leader")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn state_is_managed_leader(state: &Value) -> bool {
+    !state_is_external_leader(state)
 }
 
 /// `merge_workspace_team_state`(`state.py:111`):把新启动的 team 并入既有 workspace state。
@@ -472,6 +483,23 @@ pub(crate) fn save_team_scoped_state_with_deleted_agents(
     team_state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
+    save_team_scoped_state_with_merge_exceptions(workspace, team_state, deleted_agent_ids, &[])
+}
+
+pub(crate) fn save_team_scoped_state_with_tombstoned_agents(
+    workspace: &Path,
+    team_state: &Value,
+    tombstoned_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_team_scoped_state_with_merge_exceptions(workspace, team_state, &[], tombstoned_agent_ids)
+}
+
+fn save_team_scoped_state_with_merge_exceptions(
+    workspace: &Path,
+    team_state: &Value,
+    deleted_agent_ids: &[&str],
+    tombstoned_agent_ids: &[&str],
+) -> Result<(), StateError> {
     let target_key = team_state_key(team_state);
     let existing = load_runtime_state(workspace)?;
     // existing_primary_key = team_state_key(existing) if existing.get("session_name") else None
@@ -500,7 +528,15 @@ pub(crate) fn save_team_scoped_state_with_deleted_agents(
     // not existing_teams and existing_primary_key == target_key → 纯 save(剔 teams)。
     if existing_teams.is_empty() && existing_primary_key.as_deref() == Some(target_key.as_str()) {
         let merged = compact_team_state(team_state);
-        return save_runtime_state_with_deleted_agents(workspace, &merged, deleted_agent_ids);
+        if tombstoned_agent_ids.is_empty() {
+            return save_runtime_state_with_deleted_agents(workspace, &merged, deleted_agent_ids);
+        }
+        return save_runtime_state_with_team_tombstoned_agents(
+            workspace,
+            &merged,
+            &target_key,
+            tombstoned_agent_ids,
+        );
     }
     // teams = deepcopy(incoming_teams or existing_teams)
     let mut teams = match incoming_teams {
@@ -520,7 +556,16 @@ pub(crate) fn save_team_scoped_state_with_deleted_agents(
     if merged.get("teams").and_then(Value::as_object).is_some_and(Map::is_empty) {
         merged.remove("teams");
     }
-    save_runtime_state_with_deleted_agents(workspace, &Value::Object(merged), deleted_agent_ids)
+    if tombstoned_agent_ids.is_empty() {
+        save_runtime_state_with_deleted_agents(workspace, &Value::Object(merged), deleted_agent_ids)
+    } else {
+        save_runtime_state_with_team_tombstoned_agents(
+            workspace,
+            &Value::Object(merged),
+            &target_key,
+            tombstoned_agent_ids,
+        )
+    }
 }
 
 // ---- helpers ----

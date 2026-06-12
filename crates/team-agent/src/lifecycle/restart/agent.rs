@@ -206,6 +206,7 @@ pub(crate) fn start_agent_at_paths(
         start_mode,
         target: spawn.spawn.pane_id.as_str().to_string(),
         session_id,
+        new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
 }
@@ -528,8 +529,8 @@ fn reset_agent_at_paths(
         .and_then(|v| v.get(agent_id.as_str()))
         .and_then(|v| v.get("session_id"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .filter(|session| !session.is_empty())
+        .map(SessionId::new);
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state_before_stop, Some(agent_id))?;
     let stop = stop_agent_at_paths(workspace, spec_workspace, agent_id, team, transport)?;
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
@@ -537,11 +538,22 @@ fn reset_agent_at_paths(
     discard_agent_session_fields(&mut state, agent_id)?;
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.
-    crate::state::projection::save_team_scoped_state(workspace, &state)
+    crate::state::projection::save_team_scoped_state_with_tombstoned_agents(
+        workspace,
+        &state,
+        &[agent_id.as_str()],
+    )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:125: write_team_state after the discard-save (the intermediate stopped snapshot).
     write_team_state(spec_workspace, &spec, &state)?;
-    write_reset_tombstone_event(workspace, agent_id, &discarded_session_id)?;
+    write_reset_tombstone_event(
+        workspace,
+        agent_id,
+        discarded_session_id
+            .as_ref()
+            .map(SessionId::as_str)
+            .unwrap_or(""),
+    )?;
     let start = start_agent_at_paths(
         workspace,
         spec_workspace,
@@ -556,11 +568,34 @@ fn reset_agent_at_paths(
     write_reset_complete_event(workspace, agent_id, stop.stopped, started)?;
     match start {
         StartAgentOutcome::Running {
-            env, start_mode, ..
-        } => Ok(ResetAgentOutcome::Reset { env, start_mode }),
+            env,
+            start_mode,
+            session_id,
+            new_session_id,
+            ..
+        } => {
+            let output_session_id = if matches!(
+                start_mode,
+                StartMode::Fresh | StartMode::FreshAfterMissingRollout
+            ) {
+                new_session_id.clone().or(session_id)
+            } else {
+                session_id
+            };
+            Ok(ResetAgentOutcome::Reset {
+                env,
+                start_mode,
+                discarded_session_id,
+                session_id: output_session_id,
+                new_session_id,
+            })
+        }
         StartAgentOutcome::Noop { env, .. } => Ok(ResetAgentOutcome::Reset {
             env,
             start_mode: StartMode::Noop,
+            discarded_session_id,
+            session_id: None,
+            new_session_id: None,
         }),
         StartAgentOutcome::Paused { .. } => Ok(ResetAgentOutcome::Reset {
             env: AgentActionEnvelope {
@@ -569,6 +604,9 @@ fn reset_agent_at_paths(
                 coordinator_started: false,
             },
             start_mode: StartMode::Noop,
+            discarded_session_id,
+            session_id: None,
+            new_session_id: None,
         }),
     }
 }

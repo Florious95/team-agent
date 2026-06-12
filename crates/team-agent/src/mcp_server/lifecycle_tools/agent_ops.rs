@@ -60,7 +60,13 @@ pub(crate) fn reset_agent(
     )
     .map_err(tool_runtime_error)?
     {
-        ResetAgentOutcome::Reset { env, start_mode } => Ok(ToolOk {
+        ResetAgentOutcome::Reset {
+            env,
+            start_mode,
+            discarded_session_id,
+            session_id,
+            new_session_id,
+        } => Ok(ToolOk {
             fields: object_fields(serde_json::json!({
                 "ok": true,
                 "agent_id": env.agent_id.as_str(),
@@ -68,6 +74,9 @@ pub(crate) fn reset_agent(
                 "state_file": env.state_file.to_string_lossy().to_string(),
                 "coordinator_started": env.coordinator_started,
                 "start_mode": enum_value(start_mode),
+                "discarded_session_id": discarded_session_id.as_ref().map(|id| id.as_str()),
+                "session_id": session_id.as_ref().map(|id| id.as_str()),
+                "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
             })),
         }),
         ResetAgentOutcome::Refused { reason } => Ok(ToolOk {
