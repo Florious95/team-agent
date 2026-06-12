@@ -175,6 +175,206 @@ fn cli_leader_launcher_does_not_mutate_leader_receiver_or_team_owner() {
 
 #[test]
 #[serial(env)]
+fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
+    for command in ["codex", "claude", "copilot"] {
+        let workspace = tmp_dir(&format!("external-opt-out-{command}"));
+        let fake = FakeLauncherTools::new(&workspace);
+        let _env = EnvGuard::set([
+            (
+                "PATH",
+                Some(format!(
+                    "{}:{}",
+                    fake.bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                )),
+            ),
+            ("TMUX", None),
+            ("TMUX_PANE", None),
+        ]);
+
+        let out = Command::new(bin())
+            .args([command, "--external-leader", "--json"])
+            .current_dir(&workspace)
+            .output()
+            .unwrap_or_else(|err| panic!("run team-agent {command}: {err}"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{command} --external-leader should parse and launch external topology; stdout={stdout:?} stderr={stderr:?}"
+        );
+        let value: Value =
+            serde_json::from_slice(&out.stdout).expect("leader launcher emits json");
+        assert_eq!(value["is_external_leader"], json!(true), "{command}");
+        assert_eq!(value["leader_topology"], json!("external"), "{command}");
+        assert_eq!(value["leader_window"], Value::Null, "{command}");
+        assert_eq!(value["leader_attach_command"], Value::Null, "{command}");
+        let tmux_log = read_to_string(&fake.tmux_log);
+        assert!(
+            !tmux_log.contains(":leader"),
+            "{command} --external-leader must not create or attach the managed :leader window; tmux_log={tmux_log:?}"
+        );
+        let status = Command::new(bin())
+            .args(["status", "--workspace", workspace.to_str().unwrap(), "--json"])
+            .output()
+            .expect("status after external leader launch");
+        let status_stdout = String::from_utf8_lossy(&status.stdout);
+        let status_json: Value =
+            serde_json::from_slice(&status.stdout).unwrap_or_else(|err| {
+                panic!("status json parse failed: {err}; stdout={status_stdout:?}")
+            });
+        assert_eq!(status_json["is_external_leader"], json!(true), "{command}");
+        assert_eq!(status_json["leader_topology"], json!("external"), "{command}");
+    }
+}
+
+#[test]
+#[serial(env)]
+fn attach_leader_uses_state_recorded_tmux_socket_endpoint() {
+    let workspace = tmp_dir("attach-state-socket");
+    let socket_path = workspace.join("state-socket");
+    save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "team-current",
+            "workspace": workspace.to_string_lossy().to_string(),
+            "tmux_socket": socket_path.to_string_lossy().to_string(),
+            "agents": {}
+        }),
+    )
+    .expect("seed state with recorded socket endpoint");
+    let fake = FakeLauncherTools::new(&workspace);
+    fake.write_tmux_script_for_attach_probe(&socket_path, "%77");
+    let _env = EnvGuard::set([
+        (
+            "PATH",
+            Some(format!(
+                "{}:{}",
+                fake.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )),
+        ),
+        ("TMUX", None),
+        ("TMUX_PANE", None),
+    ]);
+
+    let attach = Command::new(bin())
+        .args([
+            "attach-leader",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--pane",
+            "%77",
+            "--provider",
+            "claude",
+            "--json",
+        ])
+        .output()
+        .expect("attach leader using state socket");
+    let stdout = String::from_utf8_lossy(&attach.stdout);
+    let stderr = String::from_utf8_lossy(&attach.stderr);
+    let tmux_log = read_to_string(&fake.tmux_log);
+    assert!(
+        attach.status.success(),
+        "attach-leader must resolve pane through state tmux_socket using -S; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+    );
+    let value: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["leader_receiver"]["pane_id"], json!("%77"));
+    assert!(
+        tmux_log
+            .lines()
+            .any(|line| line.contains("-S") && line.contains(socket_path.to_str().unwrap())),
+        "attach-leader must probe the recorded socket endpoint with -S; tmux_log={tmux_log:?}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn attach_leader_uses_team_scoped_state_socket_endpoint() {
+    let workspace = tmp_dir("attach-team-socket");
+    let top_socket = workspace.join("top-socket");
+    let child_socket = workspace.join("child-socket");
+    save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "team-current",
+            "workspace": workspace.to_string_lossy().to_string(),
+            "tmux_socket": top_socket.to_string_lossy().to_string(),
+            "teams": {
+                "current": {
+                    "session_name": "team-current",
+                    "workspace": workspace.to_string_lossy().to_string(),
+                    "tmux_socket": top_socket.to_string_lossy().to_string(),
+                    "agents": {}
+                },
+                "child": {
+                    "session_name": "team-child",
+                    "workspace": workspace.to_string_lossy().to_string(),
+                    "tmux_socket": child_socket.to_string_lossy().to_string(),
+                    "agents": {}
+                }
+            },
+            "agents": {}
+        }),
+    )
+    .expect("seed state with team-scoped socket endpoint");
+    let fake = FakeLauncherTools::new(&workspace);
+    fake.write_tmux_script_for_attach_probe(&child_socket, "%88");
+    let _env = EnvGuard::set([
+        (
+            "PATH",
+            Some(format!(
+                "{}:{}",
+                fake.bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )),
+        ),
+        ("TMUX", None),
+        ("TMUX_PANE", None),
+    ]);
+
+    let attach = Command::new(bin())
+        .args([
+            "attach-leader",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--team",
+            "child",
+            "--pane",
+            "%88",
+            "--provider",
+            "claude",
+            "--json",
+        ])
+        .output()
+        .expect("attach leader using child team socket");
+    let stdout = String::from_utf8_lossy(&attach.stdout);
+    let stderr = String::from_utf8_lossy(&attach.stderr);
+    let tmux_log = read_to_string(&fake.tmux_log);
+    assert!(
+        attach.status.success(),
+        "attach-leader --team child must resolve pane through child state's tmux_socket; stdout={stdout:?} stderr={stderr:?} tmux_log={tmux_log:?}"
+    );
+    let value: Value = serde_json::from_slice(&attach.stdout).expect("attach json");
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["team"], json!("child"));
+    assert_eq!(value["leader_receiver"]["pane_id"], json!("%88"));
+    assert_eq!(
+        value["leader_receiver"]["tmux_socket"],
+        json!(child_socket.to_string_lossy().to_string())
+    );
+    let state = load_runtime_state(&workspace).expect("load state after attach");
+    assert_eq!(
+        state["teams"]["child"]["leader_receiver"]["tmux_socket"],
+        json!(child_socket.to_string_lossy().to_string())
+    );
+}
+
+#[test]
+#[serial(env)]
 fn managed_leader_launcher_writes_client_diagnostics_outside_owner_gate() {
     let workspace = tmp_dir("managed-client-diagnostic");
     let fake = FakeLauncherTools::new(&workspace);
@@ -393,11 +593,63 @@ while :; do sleep 1; done
                 provider_log.display()
             ),
         );
+        for command in ["codex", "copilot"] {
+            write_executable(
+                &bin.join(command),
+                &format!(
+                    r#"#!/bin/sh
+printf '%s %s\n' '{}' "$*" >> '{}'
+if [ "$1" = "--version" ]; then
+  printf '{} 1.0.0\n'
+  exit 0
+fi
+exit 0
+"#,
+                    command,
+                    provider_log.display(),
+                    command
+                ),
+            );
+        }
         Self {
             bin,
             tmux_log,
             provider_log,
         }
+    }
+
+    fn write_tmux_script_for_attach_probe(&self, socket_path: &Path, pane_id: &str) {
+        write_executable(
+            &self.bin.join("tmux"),
+            &format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{}'
+if [ "$1" = "-V" ]; then
+  printf 'tmux 3.4\n'
+  exit 0
+fi
+case " $* " in
+  *"-S {} list-panes"*)
+    printf '%s\tteam-current\t0\tleader\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' '{}' '{}'
+    exit 0
+    ;;
+  *" list-panes "*)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+"#,
+                self.tmux_log.display(),
+                socket_path.display(),
+                pane_id,
+                self.bin
+                    .parent()
+                    .expect("workspace fake-bin has parent")
+                    .to_string_lossy()
+            ),
+        );
     }
 }
 

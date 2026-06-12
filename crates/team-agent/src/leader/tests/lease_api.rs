@@ -14,7 +14,7 @@ use super::*;
     fn attach_leader_errors_when_pane_not_resolvable() {
         let ws = std::env::temp_dir().join(format!("ta_rs_attach_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
-        let r = attach_leader(&ws, Some(&PaneId::new("%1")), Provider::Codex);
+        let r = attach_leader(&ws, None, Some(&PaneId::new("%1")), Provider::Codex);
         // 不可解析 pane → Err(Validation),错误串提及 pane not found。
         match r {
             Err(LeaderError::Validation(msg)) => {
@@ -39,7 +39,7 @@ use super::*;
         let ws = std::env::temp_dir().join(format!("ta_rs_attach_ok_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
         let pane = PaneId::new("%1");
-        let r = attach_leader(&ws, Some(&pane), Provider::Codex).unwrap();
+        let r = attach_leader(&ws, None, Some(&pane), Provider::Codex).unwrap();
         assert!(r.ok);
         assert_eq!(r.status, LeaseStatus::Claimed);
         let owner = r.owner.as_ref().expect("attach 成功必带 owner");

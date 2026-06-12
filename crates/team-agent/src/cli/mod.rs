@@ -3019,7 +3019,7 @@ pub mod leader_port {
         provider: crate::provider::Provider,
         _confirm: bool,
     ) -> Result<Value, CliError> {
-        let result = crate::leader::attach_leader(workspace, pane, provider)
+        let result = crate::leader::attach_leader(workspace, team, pane, provider)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let requeued =
             attach_requeued_exhausted_watchers(workspace, result.bound_pane_id.as_ref())?;

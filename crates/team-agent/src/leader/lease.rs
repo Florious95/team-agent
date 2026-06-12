@@ -1,6 +1,7 @@
 //! leader::lease — attach / claim / autobind 统一 CAS 路径 + claim_lease_no_incident
 //! + 双写 / 分叉检测。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::{json, Value};
@@ -25,27 +26,34 @@ use super::{
 /// 整段临界区做 state 变更 + 事件 + 双写 + requeue exhausted watchers。
 pub fn attach_leader(
     workspace: &Path,
+    team: Option<&str>,
     pane: Option<&PaneId>,
     provider: Provider,
 ) -> Result<LeaseResult, LeaderError> {
     let event_log = crate::event_log::EventLog::new(workspace);
-    let mut state = crate::state::persist::load_runtime_state(workspace)?;
-    let targets = crate::tmux_backend::TmuxBackend::for_workspace(workspace)
-        .list_targets()
-        .unwrap_or_default();
+    let scoped_team = team.filter(|value| !value.is_empty());
+    let mut state = if scoped_team.is_some() {
+        crate::state::projection::select_runtime_state(workspace, scoped_team)?
+    } else {
+        crate::state::persist::load_runtime_state(workspace)?
+    };
+    let targets = attach_leader_targets(workspace, &state);
     let pane_id = pane
         .cloned()
         .or_else(|| std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()).map(PaneId::new))
         .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
     let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
-    let Some(target) = targets.iter().find(|target| target.pane_id == pane_id) else {
+    let Some(target) = targets.iter().find(|target| target.info.pane_id == pane_id) else {
         return Err(LeaderError::Validation(format!("tmux pane not found: {pane_id}")));
     };
-    let mut receiver = receiver_for_attach_target(workspace, &state, target, provider, Discovery::ExplicitPane)?;
-    let validation = validate_attach_target(workspace, &state, target);
+    let mut receiver = receiver_for_attach_target(workspace, &state, &target.info, provider, Discovery::ExplicitPane)?;
+    if let Some(endpoint) = target.endpoint.as_ref() {
+        receiver.tmux_socket = Some(endpoint.clone());
+    }
+    let validation = validate_attach_target(workspace, &state, &target.info);
     if validation.is_err() {
-        let pane_info = pane_info_value(target);
-        let targets_value = Value::Array(targets.iter().map(pane_info_value).collect());
+        let pane_info = pane_info_value(&target.info);
+        let targets_value = Value::Array(targets.iter().map(|target| pane_info_value(&target.info)).collect());
         let owner_record = state_owner(&state);
         if let Some((readopted, validation)) = crate::leader::try_readopt_leader_pane(
             workspace,
@@ -85,7 +93,7 @@ pub fn attach_leader(
     let epoch = current_owner_epoch(&state);
     if state.get("team_owner").is_some() {
         write_receiver_to_state(&mut state, &receiver)?;
-        write_lease_dual_state(workspace, &state)?;
+        write_claim_state(workspace, &state, scoped_team, None)?;
         event_log.write(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
@@ -108,7 +116,7 @@ pub fn attach_leader(
     receiver.leader_session_uuid = Some(identity.leader_session_uuid.clone());
     let owner = make_owner(provider, &non_empty_pane_id, &identity, next_epoch);
     write_binding_to_state(&mut state, &receiver, &owner)?;
-    write_lease_dual_state(workspace, &state)?;
+    write_claim_state(workspace, &state, scoped_team, None)?;
     event_log.write(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
@@ -124,6 +132,80 @@ pub fn attach_leader(
         action: None,
         bound_pane_id: Some(pane_id),
     })
+}
+
+#[derive(Clone)]
+struct AttachLeaderTarget {
+    info: PaneInfo,
+    endpoint: Option<String>,
+}
+
+fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTarget> {
+    let mut targets = Vec::new();
+    for endpoint in state_recorded_tmux_endpoints(state) {
+        let backend = tmux_backend_for_endpoint(&endpoint);
+        targets.extend(
+            backend
+                .list_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|info| AttachLeaderTarget {
+                    info,
+                    endpoint: Some(endpoint.clone()),
+                }),
+        );
+    }
+    targets.extend(
+        crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| AttachLeaderTarget { info, endpoint: None }),
+    );
+    targets
+}
+
+fn tmux_backend_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
+    if endpoint.is_empty() || endpoint == "default" {
+        crate::tmux_backend::TmuxBackend::new()
+    } else if Path::new(endpoint).is_absolute() {
+        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+    } else {
+        crate::tmux_backend::TmuxBackend::for_socket_name(endpoint)
+    }
+}
+
+fn state_recorded_tmux_endpoints(state: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    push_state_tmux_endpoints(state, &mut out);
+    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+        for team_state in teams.values() {
+            push_state_tmux_endpoints(team_state, &mut out);
+        }
+    }
+    out
+}
+
+fn push_state_tmux_endpoints(state: &Value, out: &mut BTreeSet<String>) {
+    for key in ["tmux_socket", "tmux_endpoint"] {
+        if let Some(endpoint) = state
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            out.insert(endpoint.to_string());
+        }
+    }
+    for key in ["team_owner", "leader_receiver"] {
+        if let Some(endpoint) = state
+            .get(key)
+            .and_then(|value| value.get("tmux_socket"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            out.insert(endpoint.to_string());
+        }
+    }
 }
 
 fn requeue_exhausted_watchers_after_attach(

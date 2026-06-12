@@ -205,6 +205,9 @@ pub fn execute_leader_plan(
                 .unwrap_or_else(|| "signal".to_string())
         )));
     }
+    if plan.is_external_leader {
+        persist_external_leader_topology_marker(plan, workspace)?;
+    }
     if detached {
         Ok(LeaderLaunchOutcome {
             status: LeaderLaunchStatus::Detached,
@@ -515,6 +518,41 @@ fn persist_managed_leader_binding(
         obj.insert("leader_receiver".to_string(), receiver);
         obj.insert("team_owner".to_string(), owner);
         obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
+    }
+    let entry = crate::state::projection::compact_team_state(&state);
+    if let Some(obj) = state.as_object_mut() {
+        let teams = obj
+            .entry("teams".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(teams) = teams.as_object_mut() {
+            teams.insert(identity.team_id.as_str().to_string(), entry);
+        }
+    }
+    crate::state::persist::save_runtime_state(workspace, &state)?;
+    Ok(())
+}
+
+fn persist_external_leader_topology_marker(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<(), LeaderError> {
+    let identity = plan
+        .identity
+        .as_ref()
+        .ok_or_else(|| LeaderError::Start("external leader identity missing".to_string()))?;
+    let mut state = crate::state::persist::load_runtime_state(workspace)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(obj) = state.as_object_mut() {
+        obj.entry("workspace".to_string()).or_insert_with(|| {
+            serde_json::json!(resolve_workspace_for_hash(workspace).to_string_lossy().to_string())
+        });
+        obj.entry("active_team_key".to_string())
+            .or_insert_with(|| serde_json::json!(identity.team_id.as_str()));
+        if let Some(session) = plan.session_name.as_ref() {
+            obj.entry("session_name".to_string())
+                .or_insert_with(|| serde_json::json!(session.as_str()));
+        }
+        obj.insert("is_external_leader".to_string(), serde_json::json!(true));
     }
     let entry = crate::state::projection::compact_team_state(&state);
     if let Some(obj) = state.as_object_mut() {

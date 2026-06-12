@@ -91,6 +91,16 @@ use super::*;
     }
 
     #[test]
+    fn leader_launcher_args_external_leader_after_dashdash_is_provider_arg() {
+        let got = leader_launcher_args(&["--".into(), "--external-leader".into()]).unwrap();
+        assert!(!got.external_leader);
+        assert_eq!(
+            got.provider_args,
+            vec!["--".to_string(), "--external-leader".to_string()]
+        );
+    }
+
+    #[test]
     fn leader_launcher_args_attach_session_spaced() {
         // golden: ["--attach-session","mysess"] -> attach_session="mysess"
         let got = leader_launcher_args(&["--attach-session".into(), "mysess".into()]).unwrap();

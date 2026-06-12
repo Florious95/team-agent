@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.17
+
+- **`team-agent attach-leader` finds the leader pane on the first try in multi-team workspaces**: `--team` is now threaded through the lifecycle command port into the attach path, the attach logic selects team-scoped state and probes the tmux endpoint recorded in `leader_receiver.tmux_socket` / `tmux_socket` before falling back to the workspace default socket, and the endpoint that actually produced the pane is persisted back so subsequent attaches go straight to it. When the leader pane cannot be located, the error message now lists every endpoint that was searched instead of failing opaquely.
+- **`--external-leader` opt-out is now fully wired** for `team-agent codex` / `claude` / `copilot`: the flag is recognised at the managed-launcher entry, persisted on the team as `is_external_leader = true`, suppresses the managed `:leader` window creation, and is honored across dispatch / restart / status. CLI usage is clear about putting `--external-leader` before any `--` provider passthrough separator, and contracts now cover the no-tmux / real-shape paths.
+
 ## 0.3.16
 
 - **`team-agent <provider>` is now structurally unkillable from your terminal**: managed launchers (`team-agent codex`, `team-agent claude`, `team-agent copilot`) now create the leader provider process **inside** the team's tmux session and attach your terminal to it as a tmux client. Closing the terminal — or even `kill`-ing it from outside — only detaches the client; the leader provider and the rest of the team keep running. Same semantic as `tmux new-session -t ...` but with no manual tmux invocation. Status output, the team-agent skill, and `attach-leader` output all carry the `:leader` window pointer so re-attaching from anywhere is one command.
