@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::lifecycle_port::shutdown_with_transport;
 use team_agent::coordinator::{coordinator_pid_path, WorkspacePath};
+use team_agent::event_log::EventLog;
 use team_agent::state::persist::save_runtime_state;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -147,6 +148,55 @@ fn stale_coordinator_pid_file_does_not_create_false_kill_failed_when_process_is_
         report.get("ok").and_then(Value::as_bool),
         Some(true),
         "W1 guard: shutdown should not fail only because SIGTERM returned non-zero for an already-gone pid; report={report}"
+    );
+}
+
+#[test]
+fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
+    let workspace = tmp_dir("shared-socket-tail");
+    let primary = SessionName::new("team-red3-primary");
+    let tail = SessionName::new("team-red3-tail");
+    let leader = SessionName::new("team-agent-leader-copilot-red3");
+    seed_state_with_leader_anchor(&workspace, primary.as_str(), "%9");
+    let transport = ShutdownTransport::new(
+        [primary.as_str(), tail.as_str(), leader.as_str()],
+        true,
+        vec![
+            pane_info("%1", &primary, "w1", None),
+            pane_info("%2", &tail, "w2", None),
+            pane_info("%9", &leader, "leader", None),
+        ],
+    );
+
+    let report = shutdown_with_transport(&workspace, true, None, &transport)
+        .expect("bare shutdown should report after shared-socket tail cleanup");
+
+    assert_eq!(
+        report.get("session_killed").and_then(Value::as_bool),
+        Some(true),
+        "tail-killed sessions must be verified before session_killed is computed; report={report}"
+    );
+    assert_json_strings_include(&report["killed_sessions"], primary.as_str());
+    assert_json_strings_include(&report["killed_sessions"], tail.as_str());
+    assert_json_strings_include(&report["spared_sessions"], leader.as_str());
+    assert_eq!(
+        report.pointer("/coordinator/status").and_then(Value::as_str),
+        Some("missing")
+    );
+    assert_eq!(report.pointer("/residuals/sessions"), Some(&json!([])));
+
+    let events = EventLog::new(&workspace).tail(0).expect("events");
+    let shutdown = events
+        .iter()
+        .rev()
+        .find(|event| event.get("event").and_then(Value::as_str) == Some("lifecycle.shutdown"))
+        .unwrap_or_else(|| panic!("missing lifecycle.shutdown event: {events:?}"));
+    assert_json_strings_include(&shutdown["killed_sessions"], tail.as_str());
+    assert_json_strings_include(&shutdown["spared_sessions"], leader.as_str());
+    assert_eq!(
+        shutdown.get("session_killed").and_then(Value::as_bool),
+        Some(true),
+        "shutdown event must use post-tail cleanup truth: {shutdown}"
     );
 }
 
@@ -367,6 +417,43 @@ fn seed_state(workspace: &Path, session_name: &str) {
         }),
     )
     .unwrap();
+}
+
+fn seed_state_with_leader_anchor(workspace: &Path, session_name: &str, leader_pane: &str) {
+    std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace)).unwrap();
+    save_runtime_state(
+        workspace,
+        &json!({
+            "session_name": session_name,
+            "leader_receiver": {
+                "mode": "direct_tmux",
+                "status": "attached",
+                "pane_id": leader_pane,
+                "provider": "copilot"
+            },
+            "agents": {
+                "w1": {
+                    "agent_id": "w1",
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "w1",
+                    "pane_id": "%1"
+                }
+            },
+            "tasks": []
+        }),
+    )
+    .unwrap();
+}
+
+fn assert_json_strings_include(value: &Value, expected: &str) {
+    let strings = value
+        .as_array()
+        .unwrap_or_else(|| panic!("expected JSON string array, got {value}"));
+    assert!(
+        strings.iter().any(|value| value.as_str() == Some(expected)),
+        "expected {expected:?} in {strings:?}"
+    );
 }
 
 fn tmp_dir(tag: &str) -> PathBuf {

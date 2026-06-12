@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.14
+
+- **Copilot leader trust prompt is now actually auto-answered** in `team-agent copilot` interactive sessions: the trust-prompt handler that already existed in the worker tick is now also wired into the leader passthrough path on the current `TMUX_PANE`, so a fresh `team-agent copilot` boot no longer parks on `Confirm folder trust / Do you trust the files in this folder?` — it advances to ready on its own (0.3.13 changelog claim is now actually delivered).
+- **`team-agent shutdown` JSON / event result is honest about what got killed**: bare shutdown now performs the shared-socket tail cleanup BEFORE computing the report, and the report includes `killed_sessions` / `spared_sessions` for the shared socket. Previously the JSON/event was computed before the cleanup step ran, so `ok: false, status: partial` could be reported even after the socket had been fully cleaned (0.3.13 changelog claim now actually delivered for the bare path).
+- **Last remaining owner-attribution corner closed**: the seventh seed point (`lifecycle/launch.rs:3704-3758 seed_launched_owner_from_env`) previously defaulted to `codex` when `TMUX_PANE` was set but no explicit `TEAM_AGENT_LEADER_PROVIDER` env was passed, masking the 0.3.13 E22 fallback. Codex default removed; the seed now uses only the explicit env or attributes the caller pane via the existing `leader::attribute_pane_provider()` (and leaves owner/receiver unset rather than guessing). A `team-agent copilot` leader started from a tmux pane now writes `team_owner.provider = copilot` end-to-end.
+- **`team-agent restart` no longer brings up a zombie session under a refused-resume worker**: the restart entry path now treats refused-resume as a single-worker failure and isolates it from the rest of the team (G1 regression for the resume-atomicity contract); honest exit codes and per-worker failure events keep working alongside it.
+
 ## 0.3.13
 
 - **Copilot is now end-to-end usable** as both a leader and a worker provider:

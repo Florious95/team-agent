@@ -519,6 +519,10 @@ pub trait Transport: Send + Sync {
 
     // —— LIFECYCLE(SL)——
 
+    fn kill_server(&self) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError>;
 
     fn kill_window(&self, target: &Target) -> Result<(), TransportError>;

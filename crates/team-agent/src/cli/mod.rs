@@ -168,48 +168,12 @@ pub mod lifecycle_port {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
-        let state_for_kill = state.clone();
         let transport = if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
             crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
         } else {
             shutdown_workspace_transport(&run_ws)
         };
-        let result =
-            shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state));
-        if team.is_none() {
-            // E12 (P0): the leader terminal lives on this socket by design. A bare shutdown must
-            // NOT `kill-server` it away. spare = state-anchor sessions ∪ `team-agent-leader-*`
-            // prefix sessions (union; cr E12 ①). kill_server only when the socket is exclusively
-            // ours (no spare + no foreign session); shared socket → kill our sessions individually
-            // (cr E12 ②). All spare derivation comes from ONE snapshot (list_targets + the state
-            // already loaded) — no independent ps/tmux re-derivation (N39).
-            let transport_dyn: &dyn crate::transport::Transport = &transport;
-            let pane_targets = transport_dyn.list_targets().unwrap_or_default();
-            let sessions = socket_session_names(transport_dyn);
-            let event_log = crate::event_log::EventLog::new(&run_ws);
-            let anchor_sessions =
-                anchor_sessions_from_state(&state_for_kill, &pane_targets, &event_log);
-            let decision = sessions_to_kill(&sessions, &anchor_sessions);
-            match decision {
-                KillDecision::KillServerExclusive => transport.kill_server(),
-                KillDecision::KillIndividually { to_kill, spared } => {
-                    if !spared.is_empty() || to_kill.len() != sessions.len() {
-                        // shared socket / leader spared → never whole-server teardown.
-                        let _ = event_log.write(
-                            "shutdown.kill_server_skipped_shared_socket",
-                            json!({
-                                "spared_sessions": spared.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                                "killed_sessions": to_kill.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                            }),
-                        );
-                    }
-                    for session in &to_kill {
-                        let _ = transport_dyn.kill_session(session);
-                    }
-                }
-            }
-        }
-        result
+        shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state))
     }
 
     /// E12 ①:从 state 锚 pane_id(leader_receiver/team_owner,top+teams)映射到其所在 session
@@ -235,15 +199,13 @@ pub mod lifecycle_port {
             .collect()
     }
 
-    fn socket_session_names(
-        transport: &dyn crate::transport::Transport,
+    fn socket_session_names_from_targets(
+        pane_targets: &[crate::transport::PaneInfo],
     ) -> Vec<crate::transport::SessionName> {
         let mut seen = std::collections::BTreeSet::new();
-        transport
-            .list_targets()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|pane| pane.session)
+        pane_targets
+            .iter()
+            .map(|pane| pane.session.clone())
             .filter(|session| seen.insert(session.as_str().to_string()))
             .collect()
     }
@@ -278,6 +240,76 @@ pub mod lifecycle_port {
             KillDecision::KillServerExclusive
         } else {
             KillDecision::KillIndividually { to_kill, spared }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ShutdownSocketCleanup {
+        killed_sessions: Vec<crate::transport::SessionName>,
+        spared_sessions: Vec<crate::transport::SessionName>,
+        error: Option<String>,
+    }
+
+    fn push_unique_session(
+        sessions: &mut Vec<crate::transport::SessionName>,
+        session: crate::transport::SessionName,
+    ) {
+        if !sessions
+            .iter()
+            .any(|existing| existing.as_str() == session.as_str())
+        {
+            sessions.push(session);
+        }
+    }
+
+    fn bare_shutdown_socket_cleanup(
+        transport: &dyn crate::transport::Transport,
+        state: &Value,
+        event_log: &crate::event_log::EventLog,
+    ) -> ShutdownSocketCleanup {
+        // E12 (P0): the leader terminal lives on this socket by design. A bare shutdown must
+        // NOT `kill-server` it away. spare = state-anchor sessions ∪ `team-agent-leader-*`
+        // prefix sessions (union; cr E12 ①). kill_server only when the socket is exclusively
+        // ours (no spare + no foreign session); shared socket → kill our sessions individually
+        // (cr E12 ②). All spare derivation comes from ONE snapshot (list_targets + state) —
+        // no independent ps/tmux re-derivation (N39).
+        let pane_targets = transport.list_targets().unwrap_or_default();
+        let sessions = socket_session_names_from_targets(&pane_targets);
+        let anchor_sessions = anchor_sessions_from_state(state, &pane_targets, event_log);
+        match sessions_to_kill(&sessions, &anchor_sessions) {
+            KillDecision::KillServerExclusive => {
+                let error = transport.kill_server().err().map(|error| error.to_string());
+                ShutdownSocketCleanup {
+                    killed_sessions: sessions,
+                    spared_sessions: Vec::new(),
+                    error,
+                }
+            }
+            KillDecision::KillIndividually { to_kill, spared } => {
+                if !spared.is_empty() || to_kill.len() != sessions.len() {
+                    // shared socket / leader spared → never whole-server teardown.
+                    let _ = event_log.write(
+                        "shutdown.kill_server_skipped_shared_socket",
+                        json!({
+                            "spared_sessions": spared.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            "killed_sessions": to_kill.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                        }),
+                    );
+                }
+                let mut error = None;
+                for session in &to_kill {
+                    if let Err(err) = transport.kill_session(session) {
+                        if !tmux_absent_error(&err.to_string()) {
+                            error.get_or_insert_with(|| err.to_string());
+                        }
+                    }
+                }
+                ShutdownSocketCleanup {
+                    killed_sessions: to_kill,
+                    spared_sessions: spared,
+                    error,
+                }
+            }
         }
     }
 
@@ -358,8 +390,11 @@ pub mod lifecycle_port {
         reap_process_tree(&root_pids, &protected, &entry_table);
         reap_process_groups(&root_pgids, &protected);
         let mut kill_error: Option<String> = None;
+        let mut killed_sessions = Vec::new();
+        let mut spared_sessions = Vec::new();
         deadline.check("kill_session")?;
         if let Some(session) = session_name.as_ref() {
+            push_unique_session(&mut killed_sessions, session.clone());
             if let Err(error) = transport.kill_session(session) {
                 if !tmux_absent_error(&error.to_string()) {
                     kill_error = Some(error.to_string());
@@ -376,21 +411,28 @@ pub mod lifecycle_port {
             reap_scope,
             &mut probe_degraded,
         );
-        deadline.check("session_residuals")?;
-        let session_residuals = if let Some(session) = session_name.as_ref() {
-            let (residuals, error) = session_residuals_after_reap(
-                transport,
-                &run_workspace,
-                session,
-                !captured_missing_sessions,
-            );
-            if let Some(error) = error {
+        if team.is_none() {
+            deadline.check("shared_socket_cleanup")?;
+            let event_log = crate::event_log::EventLog::new(&run_workspace);
+            let cleanup = bare_shutdown_socket_cleanup(transport, &state, &event_log);
+            for session in cleanup.killed_sessions {
+                push_unique_session(&mut killed_sessions, session);
+            }
+            spared_sessions = cleanup.spared_sessions;
+            if let Some(error) = cleanup.error {
                 kill_error.get_or_insert(error);
             }
-            residuals
-        } else {
-            Vec::new()
-        };
+        }
+        deadline.check("session_residuals")?;
+        let (session_residuals, session_residual_error) = session_residuals_after_reap_many(
+            transport,
+            &run_workspace,
+            &killed_sessions,
+            !captured_missing_sessions,
+        );
+        if let Some(error) = session_residual_error {
+            kill_error.get_or_insert(error);
+        }
         deadline.check("process_residuals")?;
         // C-①: the post-verify gets ONE fresh verification snapshot (reaps changed
         // the world; #248 post-verify facts must be current, not the entry view).
@@ -427,7 +469,7 @@ pub mod lifecycle_port {
         // swallow batch 1: a failed ps probe degrades verification truthfully — the
         // empty table must never read as a clean "no residual processes".
         let verification_degraded = probe_timeout.is_some() || probe_degraded;
-        let session_killed = session_name.is_some()
+        let session_killed = !killed_sessions.is_empty()
             && kill_error.is_none()
             && session_residuals.is_empty()
             && process_residuals.is_empty();
@@ -494,6 +536,8 @@ pub mod lifecycle_port {
                     "team": team,
                     "session_name": session_name.as_ref().map(|s| s.as_str().to_string()),
                     "session_killed": session_killed,
+                    "killed_sessions": killed_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    "spared_sessions": spared_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     "coordinator_status": coordinator_status,
                     "status": status,
                     "phase": phase,
@@ -515,6 +559,8 @@ pub mod lifecycle_port {
             "team": team,
             "session_name": session_name.map(|s| s.as_str().to_string()),
             "session_killed": session_killed,
+            "killed_sessions": killed_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "spared_sessions": spared_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "residuals": {
                 "sessions": session_residuals,
                 "processes": process_residuals,
@@ -673,6 +719,33 @@ pub mod lifecycle_port {
         (sessions, error)
     }
 
+    fn session_residuals_after_reap_many(
+        transport: &dyn crate::transport::Transport,
+        workspace: &Path,
+        sessions: &[crate::transport::SessionName],
+        check_primary_transport: bool,
+    ) -> (Vec<String>, Option<String>) {
+        let mut residuals = Vec::new();
+        let mut error = None;
+        for session in sessions {
+            let (session_residuals, session_error) = session_residuals_after_reap(
+                transport,
+                workspace,
+                session,
+                check_primary_transport,
+            );
+            for residual in session_residuals {
+                if !residuals.iter().any(|seen| seen == &residual) {
+                    residuals.push(residual);
+                }
+            }
+            if let Some(session_error) = session_error {
+                error.get_or_insert(session_error);
+            }
+        }
+        (residuals, error)
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ShutdownReapScope {
         Workspace,
@@ -721,11 +794,7 @@ pub mod lifecycle_port {
     /// pids; Gap 37 escalation order TERM -> grace -> KILL preserved), then a single
     /// bounded wait for the whole union. kill/wait sets derive from the SAME snapshot
     /// as the protected set (N39).
-    fn reap_process_tree(
-        root_pids: &[u32],
-        protected: &ShutdownProtection,
-        table: &[ProcessInfo],
-    ) {
+    fn reap_process_tree(root_pids: &[u32], protected: &ShutdownProtection, table: &[ProcessInfo]) {
         let mut pids = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
         for root in root_pids {
@@ -787,12 +856,21 @@ pub mod lifecycle_port {
             let mut protected = shutdown_protection_set(&round_table);
             extend_protection_with_leader_panes(&mut protected, transport, state, &round_table);
             let residuals = matched_processes(
-                workspace, state, root_pids, root_pgids, &protected, scope, &round_table,
+                workspace,
+                state,
+                root_pids,
+                root_pgids,
+                &protected,
+                scope,
+                &round_table,
             );
             if residuals.is_empty() {
                 return;
             }
-            let residual_pids = residuals.iter().map(|process| process.pid).collect::<Vec<_>>();
+            let residual_pids = residuals
+                .iter()
+                .map(|process| process.pid)
+                .collect::<Vec<_>>();
             reap_process_tree(&residual_pids, &protected, &round_table);
             let pgids = residuals
                 .iter()
@@ -906,7 +984,9 @@ pub mod lifecycle_port {
     /// - E4b team-in-team:子 team state 的 team_owner.pane_id 指父 team worker pane;
     ///   父 team state 的 teams.<child>.team_owner.pane_id 同义(若有该字段)
     ///   → 任一 team 的 shutdown 都不杀任何 team 的 leader 锚 pane
-    pub fn collect_state_leader_anchor_pane_ids(state: &Value) -> std::collections::BTreeSet<String> {
+    pub fn collect_state_leader_anchor_pane_ids(
+        state: &Value,
+    ) -> std::collections::BTreeSet<String> {
         let mut out = std::collections::BTreeSet::new();
         push_anchor_pane_id(state, &mut out);
         if let Some(teams) = state.get("teams").and_then(Value::as_object) {
@@ -1042,7 +1122,10 @@ pub mod lifecycle_port {
         for socket_endpoint in collect_state_recorded_tmux_sockets(state) {
             let cross_backend =
                 crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket_endpoint);
-            let cross_panes = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::list_targets(&cross_backend)
+            let cross_panes =
+                <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::list_targets(
+                    &cross_backend,
+                )
                 .unwrap_or_default();
             leader_pane_pids.extend(
                 cross_panes
@@ -1167,8 +1250,9 @@ pub mod lifecycle_port {
         scope: ShutdownReapScope,
         table: &[ProcessInfo],
     ) -> Vec<Value> {
-        let mut residuals =
-            matched_processes(workspace, state, root_pids, root_pgids, protected, scope, table);
+        let mut residuals = matched_processes(
+            workspace, state, root_pids, root_pgids, protected, scope, table,
+        );
         let mut seen = residuals
             .iter()
             .map(|process| process.pid)
@@ -1891,7 +1975,7 @@ pub mod lifecycle_port {
                 state_path: Some(PathBuf::from("/tmp/state.json")),
                 next_actions: vec!["restart".to_string()],
                 attach_commands: vec![
-                    "tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker".to_string(),
+                    "tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker".to_string()
                 ],
             });
             assert_eq!(
@@ -2157,7 +2241,10 @@ pub mod lifecycle_port {
             let msg = "agent start requirement unmet: agent foo not found";
             let na = error_next_action(msg).expect("not-found must carry next_action");
             assert!(na.contains("add-agent"), "must steer to add-agent: {na}");
-            assert!(na.contains("--role-file"), "must show the role-file flag: {na}");
+            assert!(
+                na.contains("--role-file"),
+                "must show the role-file flag: {na}"
+            );
         }
 
         #[test]
@@ -2176,7 +2263,10 @@ pub mod lifecycle_port {
 
         #[test]
         fn unrelated_error_has_no_next_action() {
-            assert_eq!(error_next_action("state persistence failed: disk full"), None);
+            assert_eq!(
+                error_next_action("state persistence failed: disk full"),
+                None
+            );
         }
 
         #[test]
@@ -2187,7 +2277,10 @@ pub mod lifecycle_port {
             let v = error_value(err);
             assert_eq!(v["ok"], serde_json::json!(false));
             assert!(
-                v["next_action"].as_str().unwrap_or("").contains("add-agent"),
+                v["next_action"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("add-agent"),
                 "error_value must attach the add-agent guidance: {v}"
             );
         }
@@ -2242,8 +2335,8 @@ pub mod diagnose_port {
             .unwrap_or(true);
         // legacy 降级面(legacy_team_invalid)不下拉整体 ok —— 用户没显式让我们
         // 体检这个 team,失败是降级诊断信息,不是 install 自检失败。
-        let legacy_only_failure =
-            !profile_smoke_ok && profile_smoke_value.get("status").and_then(Value::as_str)
+        let legacy_only_failure = !profile_smoke_ok
+            && profile_smoke_value.get("status").and_then(Value::as_str)
                 == Some("legacy_team_invalid");
         let effective_smoke_ok = profile_smoke_ok || legacy_only_failure;
         let ok = workspace_valid && (team_context || workspace_has_entries) && effective_smoke_ok;

@@ -36,12 +36,11 @@ pub(super) fn spawn_agent_window(
         detected_safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
         &detected_safety
     };
-    let command_agent =
-        crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
-            agent,
-            Some(agent_id.as_str()),
-            provider,
-        );
+    let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
+        agent,
+        Some(agent_id.as_str()),
+        provider,
+    );
     let system_prompt =
         crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
@@ -60,7 +59,8 @@ pub(super) fn spawn_agent_window(
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .or_else(|| {
-            let key = crate::messaging::leader_receiver::active_team_key(workspace, &state_for_team);
+            let key =
+                crate::messaging::leader_receiver::active_team_key(workspace, &state_for_team);
             (!key.is_empty()).then_some(key)
         });
     let mcp_config = adapter
@@ -72,8 +72,11 @@ pub(super) fn spawn_agent_window(
         agent_id.as_str(),
         team_id.as_deref().unwrap_or(""),
     );
-    let mcp_config_path =
-        crate::lifecycle::launch::write_worker_mcp_config(workspace, agent_id.as_str(), &mcp_config)?;
+    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
+        workspace,
+        agent_id.as_str(),
+        &mcp_config,
+    )?;
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -81,11 +84,7 @@ pub(super) fn spawn_agent_window(
             agent,
             Some(&mcp_config),
         )?;
-    let command_model = profile_launch
-        .command_overrides
-        .model
-        .as_deref()
-        .or(model);
+    let command_model = profile_launch.command_overrides.model.as_deref().or(model);
     let context = crate::provider::ProviderCommandContext {
         auth_mode,
         mcp_config: Some(&mcp_config),
@@ -252,17 +251,28 @@ pub(super) fn resume_backing_exists_for_agent(
     rollout_path: Option<&RolloutPath>,
 ) -> bool {
     match provider {
+        provider if !provider_supports_resume(provider) => {
+            let _ = (workspace, agent_id, agent, session_id, rollout_path);
+            false
+        }
         Provider::Codex => rollout_path_exists(rollout_path),
         Provider::Claude | Provider::ClaudeCode => {
             rollout_path_exists(rollout_path)
                 || event_log_transcript_exists(workspace, agent_id.as_str(), session_id.as_str())
         }
         Provider::Copilot => copilot_session_store_has_session(session_id.as_str()),
-        Provider::GeminiCli | Provider::Fake => {
-            let _ = agent;
-            true
-        }
+        Provider::GeminiCli | Provider::Fake => false,
     }
+}
+
+pub(super) fn provider_supports_resume(provider: Provider) -> bool {
+    crate::provider::get_adapter(provider).caps().resume
+}
+
+pub(super) fn provider_wire_supports_resume(provider: &str) -> bool {
+    parse_provider(provider)
+        .map(provider_supports_resume)
+        .unwrap_or(false)
 }
 
 fn rollout_path_exists(rollout_path: Option<&RolloutPath>) -> bool {
@@ -308,13 +318,12 @@ fn copilot_session_store_has_session(session_id: &str) -> bool {
     ) else {
         return false;
     };
-    conn
-        .query_row(
-            "select 1 from sessions where id = ?1 limit 1",
-            [session_id],
-            |_| Ok(()),
-        )
-        .is_ok()
+    conn.query_row(
+        "select 1 from sessions where id = ?1 limit 1",
+        [session_id],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 pub(crate) fn refresh_missing_provider_sessions(
@@ -469,7 +478,10 @@ pub(super) fn load_team_spec(workspace: &Path) -> Result<YamlValue, LifecycleErr
     yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))
 }
 
-pub(super) fn find_spec_agent<'a>(spec: &'a YamlValue, agent_id: &AgentId) -> Option<&'a YamlValue> {
+pub(super) fn find_spec_agent<'a>(
+    spec: &'a YamlValue,
+    agent_id: &AgentId,
+) -> Option<&'a YamlValue> {
     let leader_is_agent = spec
         .get("leader")
         .and_then(|v| v.get("id"))
@@ -479,23 +491,23 @@ pub(super) fn find_spec_agent<'a>(spec: &'a YamlValue, agent_id: &AgentId) -> Op
     if leader_is_agent {
         return None;
     }
-    spec.get("agents")?
-        .as_list()?
-        .iter()
-        .find(|agent| {
-            agent
-                .get("id")
-                .and_then(YamlValue::as_str)
-                .map(|id| id == agent_id.as_str())
-                .unwrap_or(false)
-        })
+    spec.get("agents")?.as_list()?.iter().find(|agent| {
+        agent
+            .get("id")
+            .and_then(YamlValue::as_str)
+            .map(|id| id == agent_id.as_str())
+            .unwrap_or(false)
+    })
 }
 
 pub(super) fn unknown_worker(agent_id: &AgentId) -> LifecycleError {
     LifecycleError::RequirementUnmet(format!("unknown worker agent id: {agent_id}"))
 }
 
-pub(super) fn state_session_name_from_spec(state: &serde_json::Value, spec: &YamlValue) -> SessionName {
+pub(super) fn state_session_name_from_spec(
+    state: &serde_json::Value,
+    spec: &YamlValue,
+) -> SessionName {
     state
         .get("session_name")
         .and_then(|v| v.as_str())
@@ -709,9 +721,7 @@ pub(super) fn agent_is_running(
     agent_id: &AgentId,
     transport: &dyn crate::transport::Transport,
 ) -> bool {
-    let agent_state = state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()));
+    let agent_state = state.get("agents").and_then(|v| v.get(agent_id.as_str()));
     let status = agent_state
         .and_then(|v| v.get("status"))
         .and_then(|v| v.as_str())

@@ -1059,23 +1059,13 @@ fn unbound_launched_provider(launched: &serde_json::Value) -> Option<String> {
     {
         return Some(provider);
     }
-    let workspace = launched
-        .get("workspace")
-        .and_then(serde_json::Value::as_str)
-        .filter(|workspace| !workspace.is_empty())?;
     let pane = launched
         .get("team_owner")
         .and_then(|owner| owner.get("pane_id"))
         .and_then(serde_json::Value::as_str)
         .filter(|pane| !pane.is_empty())?;
     let target = PaneId::new(pane);
-    crate::tmux_backend::TmuxBackend::for_workspace(Path::new(workspace))
-        .list_targets()
-        .ok()?
-        .into_iter()
-        .find(|info| info.pane_id == target)
-        .and_then(|info| crate::leader::attribute_pane_provider(&info))
-        .and_then(provider_wire_string)
+    attributed_provider_for_pane_across_tmux_sockets(&target).and_then(provider_wire_string)
 }
 
 fn provider_wire_string(provider: Provider) -> Option<String> {
@@ -1084,9 +1074,38 @@ fn provider_wire_string(provider: Provider) -> Option<String> {
         .and_then(|value| value.as_str().map(str::to_string))
 }
 
+fn attributed_provider_for_pane_across_tmux_sockets(pane: &PaneId) -> Option<Provider> {
+    crate::tmux_backend::tmux_socket_endpoints()
+        .into_iter()
+        .filter_map(|endpoint| {
+            crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&endpoint)
+                .list_targets()
+                .ok()
+        })
+        .flatten()
+        .find(|info| info.pane_id == *pane)
+        .and_then(|info| crate::leader::attribute_pane_provider(&info))
+}
+
+fn caller_provider_for_seed_with_lookup(
+    caller: &crate::state::owner_gate::CallerIdentity,
+    lookup_pane_provider: impl Fn(&PaneId) -> Option<Provider>,
+) -> Option<String> {
+    if !caller.provider.is_empty() {
+        if let Some(provider) = parse_provider(&caller.provider).and_then(provider_wire_string) {
+            return Some(provider);
+        }
+    }
+    (!caller.pane_id.is_empty())
+        .then(|| PaneId::new(&caller.pane_id))
+        .and_then(|pane| lookup_pane_provider(&pane))
+        .and_then(provider_wire_string)
+}
+
 #[cfg(test)]
 mod e22_unbound_owner_provider_tests {
     use super::*;
+    use crate::state::owner_gate::CallerIdentity;
 
     #[test]
     fn unbound_owner_preserves_explicit_copilot_provider() {
@@ -1135,6 +1154,68 @@ mod e22_unbound_owner_provider_tests {
                 .and_then(serde_json::Value::as_str)
                 != Some("codex"),
             "unattributed unbound owner must not silently become codex: {launched}"
+        );
+    }
+
+    fn caller(provider: &str, pane_id: &str) -> CallerIdentity {
+        CallerIdentity {
+            pane_id: pane_id.to_string(),
+            provider: provider.to_string(),
+            machine_fingerprint: "machine".to_string(),
+            leader_session_uuid: "leader-uuid".to_string(),
+            leader_session_uuid_source: "derived".to_string(),
+        }
+    }
+
+    #[test]
+    fn env_seed_attributes_in_tmux_node_form_copilot_from_caller_pane() {
+        let mut state = serde_json::json!({
+            "workspace": "/tmp/team-agent-e22",
+            "leader": {"provider": "copilot"},
+        });
+
+        assert!(seed_launched_owner_from_caller_with_provider_lookup(
+            &mut state,
+            caller("", "%0"),
+            |pane| (pane.as_str() == "%0").then_some(Provider::Copilot),
+        ));
+
+        assert_eq!(
+            state
+                .pointer("/team_owner/provider")
+                .and_then(serde_json::Value::as_str),
+            Some("copilot")
+        );
+        assert_eq!(
+            state
+                .pointer("/leader_receiver/provider")
+                .and_then(serde_json::Value::as_str),
+            Some("copilot")
+        );
+    }
+
+    #[test]
+    fn env_seed_unknown_caller_pane_does_not_default_codex() {
+        let mut state = serde_json::json!({
+            "workspace": "/tmp/team-agent-e22",
+            "leader": {"provider": "copilot"},
+        });
+
+        assert!(!seed_launched_owner_from_caller_with_provider_lookup(
+            &mut state,
+            caller("", "%0"),
+            |_| None,
+        ));
+        assert!(
+            state.get("leader_receiver").is_none(),
+            "unknown caller pane must not seed a codex receiver: {state}"
+        );
+        assert!(
+            state
+                .pointer("/team_owner/provider")
+                .and_then(serde_json::Value::as_str)
+                != Some("codex"),
+            "unknown caller pane must not silently become codex: {state}"
         );
     }
 }
@@ -3711,10 +3792,20 @@ fn seed_launched_owner_from_env(state: &mut serde_json::Value) -> bool {
     ) else {
         return false;
     };
-    let provider = if caller.provider.is_empty() {
-        "codex".to_string()
-    } else {
-        caller.provider
+    seed_launched_owner_from_caller_with_provider_lookup(
+        state,
+        caller,
+        attributed_provider_for_pane_across_tmux_sockets,
+    )
+}
+
+fn seed_launched_owner_from_caller_with_provider_lookup(
+    state: &mut serde_json::Value,
+    caller: crate::state::owner_gate::CallerIdentity,
+    lookup_pane_provider: impl Fn(&PaneId) -> Option<Provider>,
+) -> bool {
+    let Some(provider) = caller_provider_for_seed_with_lookup(&caller, lookup_pane_provider) else {
+        return false;
     };
     let pane_id = caller.pane_id;
     if pane_id.is_empty() {

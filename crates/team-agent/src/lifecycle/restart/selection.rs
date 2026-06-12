@@ -1,5 +1,5 @@
-use super::*;
 use super::common::*;
+use super::*;
 
 /// bug-085 四象限 `start_mode` 决策(`start.py:179-188` + `_resume_rollout_missing` `start.py:66-69`),
 /// **从 start_agent 的整条 lock+spawn 路径里分离出的纯函数**(gate gap:porter 需要单元级 RED
@@ -19,7 +19,8 @@ pub fn decide_start_mode(
     match session_id {
         None => StartMode::Fresh,
         Some(_) => {
-            let missing_resume_backing = resumable_provider_requires_backing(provider) && !rollout_exists;
+            let missing_resume_backing = !provider_wire_supports_resume(provider)
+                || (resumable_provider_requires_backing(provider) && !rollout_exists);
             match (missing_resume_backing, allow_fresh) {
                 (true, true) => StartMode::FreshAfterMissingRollout,
                 (true, false) => StartMode::Noop,
@@ -188,8 +189,10 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         // (leader 从未发消息 → first_send_at=null → interacted=false)会被它静默 fresh 丢上下文。
         let provider = agent_provider(agent);
         let provider_wire = provider_wire(provider);
-        let resume_backing_exists = match (workspace, session_id.as_ref()) {
-            (Some(workspace), Some(session)) => resume_backing_exists_for_agent(
+        let provider_can_resume = provider_supports_resume(provider);
+        let resume_backing_exists = match (workspace, session_id.as_ref(), provider_can_resume) {
+            (_, Some(_), false) => false,
+            (Some(workspace), Some(session), true) => resume_backing_exists_for_agent(
                 workspace,
                 &agent_id,
                 agent,
@@ -197,14 +200,14 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                 session,
                 agent_rollout_path(agent).as_ref(),
             ),
-            (None, Some(_)) if resumable_provider_requires_backing(provider_wire) => {
+            (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
                 agent_rollout_path(agent)
                     .as_ref()
                     .is_some_and(|path| path.as_path().exists())
             }
             _ => true,
         };
-        let decision = if session_id.is_some() && resume_backing_exists {
+        let decision = if session_id.is_some() && provider_can_resume && resume_backing_exists {
             ResumeDecision::Resume
         } else if session_id.is_some() && allow_fresh {
             ResumeDecision::FreshStart

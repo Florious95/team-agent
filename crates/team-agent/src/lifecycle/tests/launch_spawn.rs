@@ -121,12 +121,23 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
 
     let transport = OfflineTransport::new();
     let result = quick_start_with_transport(&team, None, true, true, None, &transport);
-    assert!(matches!(result, Ok(QuickStartReport::Ready { .. })), "quick-start failed: {result:?}");
+    assert!(
+        matches!(result, Ok(QuickStartReport::Ready { .. })),
+        "quick-start failed: {result:?}"
+    );
 
     let state_path = crate::state::persist::runtime_state_path(&workspace);
-    assert!(state_path.exists(), "quick-start .team/current must persist runtime state under project root");
     assert!(
-        !workspace.join(".team").join(".team").join("runtime").join("state.json").exists(),
+        state_path.exists(),
+        "quick-start .team/current must persist runtime state under project root"
+    );
+    assert!(
+        !workspace
+            .join(".team")
+            .join(".team")
+            .join("runtime")
+            .join("state.json")
+            .exists(),
         "quick-start .team/current must not create nested .team/.team runtime state"
     );
 
@@ -137,11 +148,21 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
             crate::state::selector::SelectorMode::RuntimeOnly,
         )
         .expect("status/collect selector should resolve project root");
-        assert_eq!(selected.run_workspace, workspace, "input={}", input.display());
+        assert_eq!(
+            selected.run_workspace,
+            workspace,
+            "input={}",
+            input.display()
+        );
         // E5: selector resolves spec_path to .team/runtime/<team_key>/ (team_key="current").
         let expected_spec = crate::model::paths::runtime_spec_path(&workspace, "current");
         assert_eq!(
-            selected.spec_path.as_deref().map(std::fs::canonicalize).transpose().unwrap(),
+            selected
+                .spec_path
+                .as_deref()
+                .map(std::fs::canonicalize)
+                .transpose()
+                .unwrap(),
             Some(std::fs::canonicalize(&expected_spec).unwrap()),
             "input={}",
             input.display()
@@ -155,14 +176,20 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         summary: false,
         json: true,
     });
-    assert!(status.is_ok(), "status should normalize teamdir to project-root runtime state: {status:?}");
+    assert!(
+        status.is_ok(),
+        "status should normalize teamdir to project-root runtime state: {status:?}"
+    );
 
     let collect = crate::cli::cmd_collect(&crate::cli::CollectArgs {
         result_file: None,
         workspace: team.clone(),
         json: true,
     });
-    assert!(collect.is_ok(), "collect should normalize teamdir to the same project-root state/spec: {collect:?}");
+    assert!(
+        collect.is_ok(),
+        "collect should normalize teamdir to the same project-root state/spec: {collect:?}"
+    );
 }
 
 // P0 — quick_start over an INVALID role doc (missing `provider`) must surface the REAL compile
@@ -222,7 +249,15 @@ fn launch_dry_run_resolves_real_plan_not_stub_error() {
 fn start_agent_proceeds_past_owner_gate_for_unowned_workspace() {
     let ws = unowned_running_ws();
     let transport = OfflineTransport::new();
-    let result = start_agent_with_transport(&ws, &AgentId::new("w1"), false, false, true, None, &transport);
+    let result = start_agent_with_transport(
+        &ws,
+        &AgentId::new("w1"),
+        false,
+        false,
+        true,
+        None,
+        &transport,
+    );
     assert!(
         !matches!(result, Err(LifecycleError::OwnerRefused(_))),
         "start_agent must reach the real chain for a no-owner workspace, not hard-refuse owner; got {result:?}"
@@ -292,7 +327,10 @@ fn fork_agent_proceeds_past_owner_gate_for_unowned_workspace() {
 fn quick_start_full_ready_real_spawn() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let report = quick_start(&team, None, true, true, None).expect("quick_start launches the team");
-    assert!(matches!(report, QuickStartReport::Ready { .. }), "got {report:?}");
+    assert!(
+        matches!(report, QuickStartReport::Ready { .. }),
+        "got {report:?}"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -375,7 +413,9 @@ fn compiled_spec_path_with_paused_agent(team: &std::path::Path) -> PathBuf {
             _ => None,
         })
         .expect("compiled spec must contain agents");
-    let first = agents.first_mut().expect("compiled spec must contain an agent");
+    let first = agents
+        .first_mut()
+        .expect("compiled spec must contain an agent");
     let crate::model::yaml::Value::Map(agent) = first else {
         panic!("compiled agent must be a map");
     };
@@ -422,7 +462,10 @@ fn spine_launch_dry_run_safety_reflects_spec_dangerous() {
     let team = quick_start_team_dir_custom(QS_TEAM_MD_DANGEROUS, QS_VALID_ROLE);
     let spec_path = compiled_spec_path(&team);
     let report = launch(&spec_path, true, false, true).expect("dry_run launch");
-    assert!(report.safety.enabled, "safety must reflect spec.runtime.dangerous_auto_approve=true");
+    assert!(
+        report.safety.enabled,
+        "safety must reflect spec.runtime.dangerous_auto_approve=true"
+    );
     assert_eq!(
         report.safety.source,
         DangerousApprovalSource::RuntimeConfig,
@@ -471,7 +514,14 @@ fn spine_add_agent_rejects_duplicate_agent_id() {
     let role = team.join("dup-role.md");
     std::fs::write(&role, QS_VALID_ROLE).unwrap(); // a role doc named 'implementer' = duplicate
     let transport = OfflineTransport::new();
-    let result = add_agent_with_transport(&team, &AgentId::new("implementer"), &role, false, None, &transport);
+    let result = add_agent_with_transport(
+        &team,
+        &AgentId::new("implementer"),
+        &role,
+        false,
+        None,
+        &transport,
+    );
     let text = format!("{result:?}");
     assert!(
         text.contains("already exists"),
@@ -524,7 +574,7 @@ fn e5_add_agent_does_not_copy_role_into_platform_dir_and_injects_into_spec() {
 #[test]
 fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
     let ws = restart_ws_two_resumable_workers(); // has TEAM.md + agents/{alpha,bravo}.md + state
-    // Edit a role doc AFTER initial compile: change alpha's role text.
+                                                 // Edit a role doc AFTER initial compile: change alpha's role text.
     std::fs::write(
         ws.join("agents").join("alpha.md"),
         "---\nname: alpha\nrole: RENAMED Alpha Role\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nAlpha edited.\n",
@@ -551,10 +601,13 @@ fn e5_restart_rebuilds_runtime_spec_from_role_docs() {
 #[test]
 fn red2_restart_finds_runtime_spec_not_missing_when_user_dir_has_no_spec() {
     let ws = restart_ws_two_resumable_workers(); // has TEAM.md + agents + state
-    // Simulate spec-demote: remove any user-dir spec the fixture wrote; restart must still find
-    // the runtime spec (rebuilt from role docs / read-order B), NOT report "missing spec".
+                                                 // Simulate spec-demote: remove any user-dir spec the fixture wrote; restart must still find
+                                                 // the runtime spec (rebuilt from role docs / read-order B), NOT report "missing spec".
     let _ = std::fs::remove_file(ws.join("team.spec.yaml"));
-    assert!(!ws.join("team.spec.yaml").exists(), "user-dir spec removed (spec-demote condition)");
+    assert!(
+        !ws.join("team.spec.yaml").exists(),
+        "user-dir spec removed (spec-demote condition)"
+    );
     let transport = OfflineTransport::new();
     let result = restart_with_transport(&ws, false, None, &transport);
     // The gate must NOT short-circuit with "missing spec for restart" — restart must proceed
@@ -575,7 +628,10 @@ fn red2_restart_empty_workspace_still_reports_missing() {
     let result = restart_with_transport(&ws, false, None, &transport);
     let text = format!("{result:?}");
     assert!(
-        text.contains("missing spec") || text.to_lowercase().contains("not found") || text.contains("no_local_team_context") || text.to_lowercase().contains("invalid workspace"),
+        text.contains("missing spec")
+            || text.to_lowercase().contains("not found")
+            || text.contains("no_local_team_context")
+            || text.to_lowercase().contains("invalid workspace"),
         "RED-2 negative: empty workspace restart must still error (missing/not-found); got {text}"
     );
     let _ = std::fs::remove_dir_all(&ws);
@@ -595,7 +651,11 @@ fn red2still_entry_gate_resolves_parent_dot_team_form_a() {
     let base = temp_ws();
     let team_dir = base.join("teamdir");
     std::fs::create_dir_all(team_dir.join("agents")).unwrap();
-    std::fs::write(team_dir.join("TEAM.md"), "---\nname: teamdir\nobjective: o\nprovider: codex\n---\nt.\n").unwrap();
+    std::fs::write(
+        team_dir.join("TEAM.md"),
+        "---\nname: teamdir\nobjective: o\nprovider: codex\n---\nt.\n",
+    )
+    .unwrap();
     std::fs::write(team_dir.join("agents").join("w1.md"), QS_VALID_ROLE).unwrap();
     // .team lives in the PARENT (base), with a runtime spec — mirrors quick-start <dir> from base cwd.
     let spec = crate::compiler::compile_team(&team_dir).unwrap();
@@ -622,7 +682,10 @@ fn red2still_entry_gate_resolves_parent_dot_team_form_a() {
     );
     // Full restart on team_dir must NOT early-exit with missing spec.
     let transport = OfflineTransport::new();
-    let text = format!("{:?}", restart_with_transport(&team_dir, false, None, &transport));
+    let text = format!(
+        "{:?}",
+        restart_with_transport(&team_dir, false, None, &transport)
+    );
     assert!(
         !text.contains("missing spec for restart") && !text.contains("active team spec not found"),
         "RED-2-STILL Form A: restart <team_dir> (.team in parent) must not report missing; got {text}"
@@ -635,7 +698,11 @@ fn red2still_entry_gate_same_dir_dot_team_form_b() {
     // Form B: .team in team_dir itself (cwd == team_dir at quick-start time).
     let team_dir = temp_ws();
     std::fs::create_dir_all(team_dir.join("agents")).unwrap();
-    std::fs::write(team_dir.join("TEAM.md"), "---\nname: tb\nobjective: o\nprovider: codex\n---\nt.\n").unwrap();
+    std::fs::write(
+        team_dir.join("TEAM.md"),
+        "---\nname: tb\nobjective: o\nprovider: codex\n---\nt.\n",
+    )
+    .unwrap();
     std::fs::write(team_dir.join("agents").join("w1.md"), QS_VALID_ROLE).unwrap();
     let spec = crate::compiler::compile_team(&team_dir).unwrap();
     let runtime_spec = crate::model::paths::runtime_spec_path(&team_dir, "tb");
@@ -649,7 +716,10 @@ fn red2still_entry_gate_same_dir_dot_team_form_b() {
     )
     .unwrap();
     let transport = OfflineTransport::new();
-    let text = format!("{:?}", restart_with_transport(&team_dir, false, None, &transport));
+    let text = format!(
+        "{:?}",
+        restart_with_transport(&team_dir, false, None, &transport)
+    );
     assert!(
         !text.contains("missing spec for restart") && !text.contains("active team spec not found"),
         "RED-2-STILL Form B: restart <team_dir> (.team in team_dir) must not report missing; got {text}"
@@ -703,7 +773,8 @@ fn e5_add_agent_resolves_team_dir_to_role_dir_when_runtime_spec_exists() {
     )
     .unwrap();
     let transport = OfflineTransport::new();
-    let result = add_agent_with_transport(&team, &AgentId::new("w2"), &role, false, None, &transport);
+    let result =
+        add_agent_with_transport(&team, &AgentId::new("w2"), &role, false, None, &transport);
     // Core decoupling signature: must NOT fail because compile_team looked for TEAM.md/agents under
     // the runtime spec dir. Before the fix, team_dir=spec_workspace(runtime) → "missing TEAM.md".
     let text = format!("{result:?}");
@@ -825,15 +896,29 @@ fn launch_with_transport_records_one_spawn_per_agent_carrying_build_command() {
         "exactly one spawn per started agent; recorded={recorded:?} started={:?}",
         report.started
     );
-    assert!(!report.started.is_empty(), "a real (non-dry-run) launch must spawn >=1 worker");
-    assert!(!report.dry_run, "launch_with_transport(dry_run=false) must report dry_run=false");
-    assert_eq!(recorded[0].0, "spawn_first", "the first worker uses new-session (spawn_first)");
     assert!(
-        recorded.iter().any(|(_, argv)| argv.iter().any(|a| a == "codex")),
+        !report.started.is_empty(),
+        "a real (non-dry-run) launch must spawn >=1 worker"
+    );
+    assert!(
+        !report.dry_run,
+        "launch_with_transport(dry_run=false) must report dry_run=false"
+    );
+    assert_eq!(
+        recorded[0].0, "spawn_first",
+        "the first worker uses new-session (spawn_first)"
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(_, argv)| argv.iter().any(|a| a == "codex")),
         "each spawn argv must carry the agent's provider build_command (codex); got {recorded:?}"
     );
     assert!(
-        report.started.iter().any(|s| s.agent_id.as_str() == "implementer"),
+        report
+            .started
+            .iter()
+            .any(|s| s.agent_id.as_str() == "implementer"),
         "LaunchReport.started must list the compiled agent; got {:?}",
         report.started
     );
@@ -853,8 +938,17 @@ pub(super) fn seed_healthy_coordinator(workspace: &std::path::Path) {
     std::fs::create_dir_all(crate::model::paths::runtime_dir(workspace)).unwrap();
     let _ = crate::message_store::MessageStore::open(workspace).unwrap(); // create db schema (schema.ok)
     let me = crate::coordinator::Pid::new(std::process::id());
-    crate::coordinator::write_coordinator_metadata(&wp, me, crate::coordinator::MetadataSource::Boot).unwrap();
-    std::fs::write(crate::coordinator::coordinator_pid_path(&wp), me.to_string()).unwrap();
+    crate::coordinator::write_coordinator_metadata(
+        &wp,
+        me,
+        crate::coordinator::MetadataSource::Boot,
+    )
+    .unwrap();
+    std::fs::write(
+        crate::coordinator::coordinator_pid_path(&wp),
+        me.to_string(),
+    )
+    .unwrap();
 }
 
 // RED — quick_start_with_transport must drive the REAL spawn path: launch.dry_run==false, started
@@ -889,7 +983,10 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
         launch.started
     );
     assert!(
-        launch.started.iter().any(|s| s.agent_id.as_str() == "implementer"),
+        launch
+            .started
+            .iter()
+            .any(|s| s.agent_id.as_str() == "implementer"),
         "launch.started must list the compiled agent 'implementer'; got {:?}",
         launch.started
     );
@@ -899,9 +996,14 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
         !recorded.is_empty(),
         "quick_start must drive the transport spawn path (>=1 spawn recorded); the dry-run bug records ZERO spawns"
     );
-    assert_eq!(recorded[0].0, "spawn_first", "the first worker uses new-session (spawn_first); got {recorded:?}");
+    assert_eq!(
+        recorded[0].0, "spawn_first",
+        "the first worker uses new-session (spawn_first); got {recorded:?}"
+    );
     assert!(
-        recorded.iter().any(|(_, argv)| argv.iter().any(|a| a == "codex")),
+        recorded
+            .iter()
+            .any(|(_, argv)| argv.iter().any(|a| a == "codex")),
         "the spawn argv must carry the agent's provider build_command (codex); got {recorded:?}"
     );
 }
@@ -917,7 +1019,10 @@ fn quick_start_fresh_ws_spawns_resident_tmux_and_coordinator() {
     let report = quick_start(&team, None, true, true, None).expect("quick_start");
     match report {
         QuickStartReport::Ready { launch, .. } => {
-            assert!(!launch.dry_run, "a real quick_start must spawn (not dry-run)");
+            assert!(
+                !launch.dry_run,
+                "a real quick_start must spawn (not dry-run)"
+            );
             assert!(
                 !launch.started.is_empty(),
                 "a real quick_start must spawn >=1 worker into a live tmux session; got {:?}",
@@ -949,7 +1054,11 @@ pub(super) fn restart_ws_two_resumable_workers() -> PathBuf {
     let bravo_rollout = ws.join("bravo-rollout.jsonl");
     std::fs::write(&alpha_rollout, "{}\n").unwrap();
     std::fs::write(&bravo_rollout, "{}\n").unwrap();
-    std::fs::write(ws.join("TEAM.md"), "---\nname: restartteam\nobjective: Restart probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: restartteam\nobjective: Restart probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile 2-agent team");
@@ -1039,18 +1148,31 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
 
     let ws = restart_ws_two_resumable_workers();
     let dead_after_first = OfflineTransport::new().with_session_absent_after_spawn_first();
-    let result =
-        restart_with_transport_with_readiness_deadline(&ws, false, None, &dead_after_first, Some(0));
+    let result = restart_with_transport_with_readiness_deadline(
+        &ws,
+        false,
+        None,
+        &dead_after_first,
+        Some(0),
+    );
     let recorded = dead_after_first.spawn_records();
     assert_eq!(
         recorded.len(),
-        2,
-        "if the session disappears after alpha, restart must isolate alpha and still try bravo; got result={result:?} recorded={recorded:?}"
+        1,
+        "if a resumed session disappears after alpha, restart must fail fast before bravo; got result={result:?} recorded={recorded:?}"
     );
     assert!(
         recorded.iter().all(|(kind, _)| kind == "spawn_first"),
         "restart must not call spawn_into/new-window against a dead server; result={result:?} recorded={recorded:?}"
     );
+    let result_debug = format!("{result:?}");
+    let report = result.expect("resume integrity failure should return a typed failed report");
+    let RestartReport::Failed { failed_agents, .. } = report else {
+        panic!("resume integrity failure must not be Partial/Restarted; got {report:?}");
+    };
+    assert_eq!(failed_agents.len(), 1);
+    assert_eq!(failed_agents[0].agent_id.as_str(), "alpha");
+    assert_eq!(failed_agents[0].phase, "resume");
     assert!(
         dead_after_first.calls().iter().all(|call| *call != "kill_session"),
         "a single worker/session disappearance must not trigger another shared-session kill; calls={:?}",
@@ -1061,13 +1183,16 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
         .iter()
         .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.agent_failed"))
         .expect("restart.agent_failed event for isolated alpha");
-    assert_eq!(failed.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
+    assert_eq!(
+        failed.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
     assert!(
         failed
             .get("error")
             .and_then(|v| v.as_str())
             .is_some_and(|error| error.contains("session_disappeared_after_spawn")),
-        "restart must report the first resumed agent/session disappearance explicitly; event={failed} result={result:?}"
+        "restart must report the first resumed agent/session disappearance explicitly; event={failed} result={result_debug}"
     );
 }
 
@@ -1088,9 +1213,15 @@ fn restart_spawn_failure_isolated_to_partial_report() {
     else {
         panic!("single worker failure must return RestartReport::Partial; got {report:?}");
     };
-    assert!(coordinator_started, "partial restart still starts coordinator for successful agents");
+    assert!(
+        coordinator_started,
+        "partial restart still starts coordinator for successful agents"
+    );
     assert_eq!(
-        agents.iter().map(|agent| agent.agent_id.as_str()).collect::<Vec<_>>(),
+        agents
+            .iter()
+            .map(|agent| agent.agent_id.as_str())
+            .collect::<Vec<_>>(),
         vec!["alpha"]
     );
     assert_eq!(failed_agents.len(), 1);
@@ -1098,8 +1229,18 @@ fn restart_spawn_failure_isolated_to_partial_report() {
     assert_eq!(failed_agents[0].phase, "spawn");
 
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
-    assert_eq!(state.pointer("/agents/alpha/status").and_then(|v| v.as_str()), Some("running"));
-    assert_eq!(state.pointer("/agents/bravo/status").and_then(|v| v.as_str()), Some("failed"));
+    assert_eq!(
+        state
+            .pointer("/agents/alpha/status")
+            .and_then(|v| v.as_str()),
+        Some("running")
+    );
+    assert_eq!(
+        state
+            .pointer("/agents/bravo/status")
+            .and_then(|v| v.as_str()),
+        Some("failed")
+    );
     assert!(
         state
             .pointer("/agents/bravo/restart_error")
@@ -1113,7 +1254,10 @@ fn restart_spawn_failure_isolated_to_partial_report() {
         .iter()
         .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.completed"))
         .expect("restart.completed event for partial restart");
-    assert_eq!(completed.get("rc").and_then(|v| v.as_str()), Some("partial"));
+    assert_eq!(
+        completed.get("rc").and_then(|v| v.as_str()),
+        Some("partial")
+    );
     assert!(
         completed
             .get("successful_agents")
@@ -1201,10 +1345,14 @@ fn restart_times_out_when_spawned_worker_pane_is_not_addressable() {
     let events = crate::event_log::EventLog::new(&ws).tail(20).unwrap();
     let timeout = events
         .iter()
-        .find(|event| event.get("event").and_then(|v| v.as_str()) == Some("restart.readiness_timeout"))
+        .find(|event| {
+            event.get("event").and_then(|v| v.as_str()) == Some("restart.readiness_timeout")
+        })
         .expect("restart.readiness_timeout event");
     assert_eq!(
-        timeout.get("worker_pane_addressable").and_then(|v| v.as_bool()),
+        timeout
+            .get("worker_pane_addressable")
+            .and_then(|v| v.as_bool()),
         Some(false),
         "timeout event must carry the failed readiness condition: {timeout}"
     );
@@ -1230,7 +1378,15 @@ fn start_agent_with_transport_spawns_resume_not_stub() {
     seed_healthy_coordinator(&ws);
     let transport = OfflineTransport::new();
 
-    let _result = start_agent_with_transport(&ws, &AgentId::new("alpha"), false, false, false, None, &transport);
+    let _result = start_agent_with_transport(
+        &ws,
+        &AgentId::new("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
 
     let recorded = transport.spawn_records();
     assert_eq!(
@@ -1253,14 +1409,25 @@ fn start_agent_with_transport_spawns_resume_not_stub() {
 fn add_agent_with_transport_spawns_new_worker_not_stub() {
     let team = temp_ws().join("addteam");
     std::fs::create_dir_all(team.join("agents")).unwrap();
-    std::fs::write(team.join("TEAM.md"), "---\nname: addteam\nobjective: Add probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: addteam\nobjective: Add probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap(); // existing agent
     let role_file = team.join("worker2-role.md"); // OUTSIDE agents/ -> not a duplicate of an existing agent
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
     let transport = OfflineTransport::new();
 
-    let _result = add_agent_with_transport(&team, &AgentId::new("worker2"), &role_file, false, None, &transport);
+    let _result = add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
 
     // (a) the recompiled spec was written (real subsystem step). E5: under .team/runtime/<team_key>/,
     // NOT the user team dir.
@@ -1306,7 +1473,9 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
-    let workspace = team.parent().expect("team_workspace(<base>/teamdir) = <base>");
+    let workspace = team
+        .parent()
+        .expect("team_workspace(<base>/teamdir) = <base>");
     let state = crate::state::persist::load_runtime_state(workspace)
         .expect("runtime state.json must exist after quick_start");
     // (b) the tasks KEY must always be present and a JSON array (golden launch/core.py:69 default []).
@@ -1318,10 +1487,14 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
             state.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
         ),
     };
-    let tasks = tasks.as_array().expect("`tasks` must be a JSON array (golden default [])");
+    let tasks = tasks
+        .as_array()
+        .expect("`tasks` must be a JSON array (golden default [])");
     // (a) spec.tasks must be carried into runtime state — the doc compiler's default task id.
     assert!(
-        tasks.iter().any(|t| t.get("id").and_then(|v| v.as_str()) == Some("task_initial")),
+        tasks
+            .iter()
+            .any(|t| t.get("id").and_then(|v| v.as_str()) == Some("task_initial")),
         "state.tasks must carry the compiled spec's task (id=task_initial); got {tasks:?}"
     );
 }
@@ -1355,11 +1528,18 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
-    let workspace = team.parent().expect("team_workspace(<base>/teamdir) = <base>");
+    let workspace = team
+        .parent()
+        .expect("team_workspace(<base>/teamdir) = <base>");
     // E5: spec_path in state now points to .team/runtime/<team_key>/, team_dir stays the user role dir.
     let spec_path = quick_start_runtime_spec_path(&team);
     let (raw, state) = raw_runtime_state(workspace);
-    let keys = state.as_object().expect("state root object").keys().cloned().collect::<Vec<_>>();
+    let keys = state
+        .as_object()
+        .expect("state root object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         keys,
         vec![
@@ -1382,7 +1562,10 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
          truth (no shadow copy on the root that callers could read across teams); \
          raw={raw}"
     );
-    assert_eq!(state["spec_path"], json!(spec_path.canonicalize().unwrap().to_string_lossy()));
+    assert_eq!(
+        state["spec_path"],
+        json!(spec_path.canonicalize().unwrap().to_string_lossy())
+    );
     assert_eq!(state["workspace"], json!(workspace.to_string_lossy()));
     assert_eq!(state["team_dir"], json!(team.to_string_lossy()));
     assert_eq!(state["session_name"], json!("team-quickteam"));
@@ -1392,13 +1575,17 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
         "leader must be copied from compiled spec.leader"
     );
     assert!(
-        state["agents"].as_object().is_some_and(|agents| agents.contains_key("implementer")),
+        state["agents"]
+            .as_object()
+            .is_some_and(|agents| agents.contains_key("implementer")),
         "existing agents value must remain seeded from compiled spec; got {:?}",
         state["agents"]
     );
     assert!(
         state["tasks"].as_array().is_some_and(|tasks| {
-            tasks.iter().any(|task| task.get("id").and_then(|id| id.as_str()) == Some("task_initial"))
+            tasks
+                .iter()
+                .any(|task| task.get("id").and_then(|id| id.as_str()) == Some("task_initial"))
         }),
         "existing tasks value must remain seeded from compiled spec; got {:?}",
         state["tasks"]
@@ -1418,17 +1605,23 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
 #[serial(env)]
 fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     const FIXED_SPAWNED_AT: &str = "2026-06-04T00:00:00+00:00";
-    let _clock_guard =
-        EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
+    let _clock_guard = EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
     let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
-    let workspace = team.parent().expect("team_workspace(<base>/teamdir) = <base>");
+    let workspace = team
+        .parent()
+        .expect("team_workspace(<base>/teamdir) = <base>");
     let (raw, state) = raw_runtime_state(workspace);
     let agent = state
         .pointer("/agents/implementer")
         .unwrap_or_else(|| panic!("implementer agent state missing; raw={raw}"));
-    let keys = agent.as_object().expect("agent state object").keys().cloned().collect::<Vec<_>>();
+    let keys = agent
+        .as_object()
+        .expect("agent state object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         keys,
         vec![
@@ -1462,7 +1655,9 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert_eq!(agent["window"], json!("implementer"));
     assert_eq!(
         agent["mcp_config"],
-        json!(workspace.join(".team/runtime/mcp/implementer.json").to_string_lossy())
+        json!(workspace
+            .join(".team/runtime/mcp/implementer.json")
+            .to_string_lossy())
     );
     assert_eq!(
         agent["permissions"],
@@ -1495,7 +1690,9 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
 fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let spec_path = compiled_spec_path_with_paused_agent(&team);
-    let workspace = team.parent().expect("team_workspace(<base>/teamdir) = <base>");
+    let workspace = team
+        .parent()
+        .expect("team_workspace(<base>/teamdir) = <base>");
     crate::state::persist::save_runtime_state(
         workspace,
         &json!({
@@ -1519,7 +1716,12 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
     let agent = state
         .pointer("/agents/implementer")
         .unwrap_or_else(|| panic!("implementer agent state missing; raw={raw}"));
-    let keys = agent.as_object().expect("agent state object").keys().cloned().collect::<Vec<_>>();
+    let keys = agent
+        .as_object()
+        .expect("agent state object")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
         keys,
         vec!["status", "provider"],

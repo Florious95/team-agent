@@ -1041,6 +1041,11 @@ impl Transport for TmuxBackend {
         Ok(SetEnvOutcome::Applied)
     }
 
+    fn kill_server(&self) -> Result<(), TransportError> {
+        TmuxBackend::kill_server(self);
+        Ok(())
+    }
+
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         let argv = self.tmux_argv(&[
             "tmux".to_string(),

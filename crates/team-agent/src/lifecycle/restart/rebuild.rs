@@ -116,10 +116,9 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     // 显式存在性门(下移后):selected.spec_path 经读序 B 已定位 runtime/legacy spec。
     // 缺(空目录 restart 等)→ 报真实期望路径,不误导去用户目录找。
     if !selected.spec_path.as_ref().is_some_and(|p| p.exists()) {
-        let expected = selected
-            .spec_path
-            .clone()
-            .unwrap_or_else(|| crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key));
+        let expected = selected.spec_path.clone().unwrap_or_else(|| {
+            crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key)
+        });
         return Err(LifecycleError::TeamSelect(format!(
             "missing spec for restart: {} (run `team-agent quick-start <teamdir>` first, or restore the team's role docs)",
             expected.display()
@@ -130,9 +129,11 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     // E5 task#3 / RC-A6a + E4(leader 裁定:每次 restart 都从角色定义重建 runtime spec,覆盖):
     // 角色定义=第一真相源。角色齐 → compile_team 重建 + 保留运行期 override(session_name)+
     // 写 runtime spec。角色缺(TEAM.md/agents 不在)→ 显式拒(列缺哪些),旧 spec 原地保留不删不用。
-    let spec = rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
+    let spec =
+        rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
     // 重建后 spec_workspace 恒为 runtime spec 的父目录(.team/runtime/<team_key>/)。
-    let runtime_spec = crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
+    let runtime_spec =
+        crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
     let spec_workspace = runtime_spec.parent().ok_or_else(|| {
         LifecycleError::TeamSelect("active team spec workspace not found".to_string())
     })?;
@@ -173,13 +174,23 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     }
-    let forced_fresh_missing = if convergence.converged {
+    let mut forced_fresh_missing = if convergence.converged {
         std::collections::BTreeSet::new()
     } else {
         convergence.missing.iter().cloned().collect()
     };
     let forced_fresh_convergence = (!convergence.converged).then_some(convergence.clone());
-    let plan = classify_restart_plan_with_resume_validation(Some(&selected.run_workspace), &state, allow_fresh)?;
+    let plan = classify_restart_plan_with_resume_validation(
+        Some(&selected.run_workspace),
+        &state,
+        allow_fresh,
+    )?;
+    for decision in &plan.decisions {
+        if matches!(decision.decision, ResumeDecision::FreshStart) && decision.session_id.is_some()
+        {
+            forced_fresh_missing.insert(decision.agent_id.as_str().to_string());
+        }
+    }
     write_restart_resume_decision_events(
         &selected.run_workspace,
         &state,
@@ -214,10 +225,15 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     }
     let mut successful_agents: Vec<RestartedAgent> = Vec::new();
     let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
+    let mut fatal_resume_failure = false;
     // B5 restart isolation loop: per-agent spawn failures must be recorded and
-    // isolated here. Do not reintroduce `?`, `break`, or `return` inside this loop.
+    // isolated here. G1 resume-integrity failures set a fatal flag and skip later
+    // spawns; do not reintroduce `?`, `break`, or `return` inside this loop.
     // BEGIN_B5_RESTART_ISOLATION_LOOP
     for decision in &plan.decisions {
+        if fatal_resume_failure {
+            continue;
+        }
         let Some(agent) = state
             .get("agents")
             .and_then(|v| v.get(decision.agent_id.as_str()))
@@ -225,7 +241,12 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         else {
             let error = format!("agent {} not found for restart", decision.agent_id);
             mark_agent_restart_failed(&mut state, decision, &error);
-            let _ = write_restart_agent_failed_event(&selected.run_workspace, decision, "spawn", &error);
+            let _ = write_restart_agent_failed_event(
+                &selected.run_workspace,
+                decision,
+                "spawn",
+                &error,
+            );
             failed_agents.push(restart_failed_agent(decision, "spawn", error));
             continue;
         };
@@ -251,8 +272,14 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                     &error,
                 );
                 failed_agents.push(restart_failed_agent(&previous, "resume", error));
+                if is_resume_integrity_failure(&previous, "resume", "") {
+                    fatal_resume_failure = true;
+                }
                 session_live = false;
             }
+        }
+        if fatal_resume_failure {
+            continue;
         }
         let spawn = match spawn_agent_window(
             &selected.run_workspace,
@@ -269,8 +296,17 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             Err(error) => {
                 let error = error.to_string();
                 mark_agent_restart_failed(&mut state, decision, &error);
-                let _ = write_restart_agent_failed_event(&selected.run_workspace, decision, "spawn", &error);
-                failed_agents.push(restart_failed_agent(decision, "spawn", error));
+                let phase = restart_failure_phase(decision, "spawn", &error);
+                let _ = write_restart_agent_failed_event(
+                    &selected.run_workspace,
+                    decision,
+                    phase,
+                    &error,
+                );
+                failed_agents.push(restart_failed_agent(decision, phase, error));
+                if phase == "resume" {
+                    fatal_resume_failure = true;
+                }
                 continue;
             }
         };
@@ -281,13 +317,13 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         {
             let error = error.to_string();
             mark_agent_restart_failed(&mut state, decision, &error);
-            let _ = write_restart_agent_failed_event(
-                &selected.run_workspace,
-                decision,
-                "readiness",
-                &error,
-            );
-            failed_agents.push(restart_failed_agent(decision, "readiness", error));
+            let phase = restart_failure_phase(decision, "readiness", &error);
+            let _ =
+                write_restart_agent_failed_event(&selected.run_workspace, decision, phase, &error);
+            failed_agents.push(restart_failed_agent(decision, phase, error));
+            if phase == "resume" {
+                fatal_resume_failure = true;
+            }
             continue;
         }
         successful_agents.push(decision.clone());
@@ -303,6 +339,22 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     // END_B5_RESTART_ISOLATION_LOOP
     crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if fatal_resume_failure {
+        let attach_commands = Vec::new();
+        let next_actions = restart_failure_next_actions(&failed_agents);
+        write_restart_completed_event(
+            &selected.run_workspace,
+            &successful_agents,
+            &failed_agents,
+            "fail",
+        )?;
+        return Ok(RestartReport::Failed {
+            session_name,
+            failed_agents,
+            next_actions,
+            attach_commands,
+        });
+    }
     if successful_agents.is_empty() && !failed_agents.is_empty() {
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
@@ -555,9 +607,9 @@ fn parse_duration_value_seconds_ms(value: &str) -> Option<u64> {
 }
 
 fn restart_readiness_deadline(requested_ms: Option<u64>) -> std::time::Duration {
-    requested_ms.map(std::time::Duration::from_millis).unwrap_or_else(|| {
-        env_duration_ms(&["TEAM_AGENT_RESTART_READINESS_DEADLINE_MS"], 30_000)
-    })
+    requested_ms
+        .map(std::time::Duration::from_millis)
+        .unwrap_or_else(|| env_duration_ms(&["TEAM_AGENT_RESTART_READINESS_DEADLINE_MS"], 30_000))
 }
 
 fn restart_readiness_poll_interval() -> std::time::Duration {
@@ -595,11 +647,14 @@ fn wait_restart_readiness_or_timeout(
         let elapsed = started.elapsed();
         if elapsed >= deadline {
             write_restart_readiness_timeout_event(workspace, readiness, deadline, elapsed)?;
-            return Err(LifecycleError::RequirementUnmet(restart_readiness_timeout_message(
-                workspace, readiness, deadline,
-            )));
+            return Err(LifecycleError::RequirementUnmet(
+                restart_readiness_timeout_message(workspace, readiness, deadline),
+            ));
         }
-        std::thread::sleep(std::cmp::min(poll_interval, deadline.saturating_sub(elapsed)));
+        std::thread::sleep(std::cmp::min(
+            poll_interval,
+            deadline.saturating_sub(elapsed),
+        ));
     }
 }
 
@@ -615,7 +670,11 @@ fn restart_readiness(
     let coordinator_workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let coordinator_alive =
         crate::coordinator::coordinator_health(&coordinator_workspace).ok && session_created;
-    RestartReadiness { session_created, worker_pane_addressable, coordinator_alive }
+    RestartReadiness {
+        session_created,
+        worker_pane_addressable,
+        coordinator_alive,
+    }
 }
 
 fn restart_worker_panes_addressable(
@@ -727,7 +786,11 @@ fn restart_readiness_missing_summary(readiness: RestartReadiness) -> String {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }
 
 fn verify_spawned_agent_live(
@@ -839,6 +902,33 @@ fn restart_failed_agent(
         phase: phase.into(),
         error,
     }
+}
+
+fn restart_failure_phase(
+    decision: &RestartedAgent,
+    phase: &'static str,
+    error: &str,
+) -> &'static str {
+    if is_resume_integrity_failure(decision, phase, error) {
+        "resume"
+    } else {
+        phase
+    }
+}
+
+fn is_resume_integrity_failure(decision: &RestartedAgent, phase: &str, error: &str) -> bool {
+    if !matches!(decision.restart_mode, StartMode::Resumed) {
+        return false;
+    }
+    if phase == "resume" || phase == "readiness" {
+        return true;
+    }
+    error.contains("session_disappeared_after_spawn")
+        || error.contains("provider_resume_exited")
+        || error.contains("resume_not_ready")
+        || error.contains("resume_atomicity")
+        || error.contains("no live pane")
+        || error.contains("no-pane")
 }
 
 fn mark_agent_restart_failed(
@@ -1157,13 +1247,16 @@ fn rebuild_runtime_spec_from_roles(
     let agents_dir = team_dir.join("agents");
     let has_role_doc = std::fs::read_dir(&agents_dir)
         .map(|entries| {
-            entries.flatten().any(|e| {
-                e.path().extension().and_then(|x| x.to_str()) == Some("md")
-            })
+            entries
+                .flatten()
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
         })
         .unwrap_or(false);
     if !has_role_doc {
-        missing.push(format!("{}/*.md (at least one role doc)", agents_dir.display()));
+        missing.push(format!(
+            "{}/*.md (at least one role doc)",
+            agents_dir.display()
+        ));
     }
     if !missing.is_empty() {
         // N38 三行式:error / action / log。旧 runtime spec 原地保留(不删不用)。

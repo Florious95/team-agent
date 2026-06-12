@@ -12,34 +12,58 @@ use crate::transport::PaneLiveness;
 #[test]
 fn classify_first_send_at_none_is_absent_not_corrupt() {
     // None / 缺失 = 从未交互,可丢弃 fresh —— 不能误判成 corrupt。
-    assert_eq!(classify_first_send_at(&json!(null)), FirstSendAtState::Absent);
+    assert_eq!(
+        classify_first_send_at(&json!(null)),
+        FirstSendAtState::Absent
+    );
 }
 
 #[test]
 fn classify_first_send_at_empty_string_is_corrupt_not_absent() {
     // 陷阱核心:Python truthiness 会把 "" 当 falsey/absent;契约要求 corrupt。
-    assert_eq!(classify_first_send_at(&json!("")), FirstSendAtState::Corrupt);
+    assert_eq!(
+        classify_first_send_at(&json!("")),
+        FirstSendAtState::Corrupt
+    );
 }
 
 #[test]
 fn classify_first_send_at_zero_and_false_are_corrupt() {
     // 0 / False 非 str → corrupt(绝不靠 bool/int truthiness 当 absent)。
     assert_eq!(classify_first_send_at(&json!(0)), FirstSendAtState::Corrupt);
-    assert_eq!(classify_first_send_at(&json!(false)), FirstSendAtState::Corrupt);
-    assert_eq!(classify_first_send_at(&json!(123)), FirstSendAtState::Corrupt);
+    assert_eq!(
+        classify_first_send_at(&json!(false)),
+        FirstSendAtState::Corrupt
+    );
+    assert_eq!(
+        classify_first_send_at(&json!(123)),
+        FirstSendAtState::Corrupt
+    );
 }
 
 #[test]
 fn classify_first_send_at_literal_null_string_is_corrupt() {
     // 字面量字符串 "null"(非 ISO)→ corrupt,而 JSON null → absent(上面已测)。
-    assert_eq!(classify_first_send_at(&json!("null")), FirstSendAtState::Corrupt);
-    assert_eq!(classify_first_send_at(&json!("not-a-date")), FirstSendAtState::Corrupt);
+    assert_eq!(
+        classify_first_send_at(&json!("null")),
+        FirstSendAtState::Corrupt
+    );
+    assert_eq!(
+        classify_first_send_at(&json!("not-a-date")),
+        FirstSendAtState::Corrupt
+    );
 }
 
 #[test]
 fn classify_first_send_at_non_string_containers_are_corrupt() {
-    assert_eq!(classify_first_send_at(&json!([])), FirstSendAtState::Corrupt);
-    assert_eq!(classify_first_send_at(&json!({})), FirstSendAtState::Corrupt);
+    assert_eq!(
+        classify_first_send_at(&json!([])),
+        FirstSendAtState::Corrupt
+    );
+    assert_eq!(
+        classify_first_send_at(&json!({})),
+        FirstSendAtState::Corrupt
+    );
 }
 
 #[test]
@@ -178,7 +202,10 @@ fn plan_condition_rejects_out_of_grammar() {
         "report_result.s == bar",
     ] {
         assert!(
-            matches!(PlanCondition::parse(bad), Err(LifecycleError::InvalidPlan(_))),
+            matches!(
+                PlanCondition::parse(bad),
+                Err(LifecycleError::InvalidPlan(_))
+            ),
             "expected InvalidPlan for {bad:?}"
         );
     }
@@ -228,17 +255,14 @@ fn resolve_backend_recorded_used_when_no_request() {
 fn probe_never_errors_platform_degradation_is_typed_outcome() {
     // C13:能力性降级绝不走 LifecycleError —— 它是 DisplayStatus::Blocked + reason。
     let ws = temp_ws();
-    let probe = probe_display_capabilities(&ws).expect("probe 平台降级必须是 typed outcome,不是 Err");
+    let probe =
+        probe_display_capabilities(&ws).expect("probe 平台降级必须是 typed outcome,不是 Err");
     // 若 blocked,reason 必属 AdaptiveBlockReason 封闭集且与 status 一致。
     match probe.adaptive_status {
-        DisplayStatus::Blocked => assert!(
-            probe.reason.is_some(),
-            "blocked 必带 reason(C16 封闭集)"
-        ),
-        DisplayStatus::Opened => assert!(
-            probe.reason.is_none(),
-            "opened 不应带 block reason"
-        ),
+        DisplayStatus::Blocked => {
+            assert!(probe.reason.is_some(), "blocked 必带 reason(C16 封闭集)")
+        }
+        DisplayStatus::Opened => assert!(probe.reason.is_none(), "opened 不应带 block reason"),
         DisplayStatus::Stopped => {}
     }
 }
@@ -294,7 +318,11 @@ fn adaptive_block_reason_serde_names_match_python_and_set_is_exactly_six() {
         .collect();
     names.sort();
     names.dedup();
-    assert_eq!(names.len(), 6, "ADAPTIVE_BLOCK_REASONS 恰 6 个,无重复无遗漏");
+    assert_eq!(
+        names.len(),
+        6,
+        "ADAPTIVE_BLOCK_REASONS 恰 6 个,无重复无遗漏"
+    );
 }
 
 #[test]
@@ -332,8 +360,14 @@ fn adaptive_blocked_out_of_set_reason_bottoms_to_aggregator_rebuild_failed() {
 #[test]
 fn start_mode_serde_names_match_python_start_mode_strings() {
     // 低价值 wire-format 守卫:start_mode ∈ {"resumed","fresh","fresh_after_missing_rollout","noop"}。
-    assert_eq!(serde_json::to_string(&StartMode::Resumed).unwrap(), "\"resumed\"");
-    assert_eq!(serde_json::to_string(&StartMode::Fresh).unwrap(), "\"fresh\"");
+    assert_eq!(
+        serde_json::to_string(&StartMode::Resumed).unwrap(),
+        "\"resumed\""
+    );
+    assert_eq!(
+        serde_json::to_string(&StartMode::Fresh).unwrap(),
+        "\"fresh\""
+    );
     assert_eq!(
         serde_json::to_string(&StartMode::FreshAfterMissingRollout).unwrap(),
         "\"fresh_after_missing_rollout\""
@@ -368,7 +402,13 @@ fn decide_start_mode_codex_missing_rollout_with_allow_fresh_is_fresh_after_missi
     );
     // rollout 路径存在但文件已不在,同样命中。
     assert_eq!(
-        decide_start_mode("codex", Some(&sid("s1")), Some(&rp("/gone.jsonl")), false, true),
+        decide_start_mode(
+            "codex",
+            Some(&sid("s1")),
+            Some(&rp("/gone.jsonl")),
+            false,
+            true
+        ),
         StartMode::FreshAfterMissingRollout
     );
 }
@@ -385,7 +425,13 @@ fn decide_start_mode_codex_missing_rollout_without_allow_fresh_refuses() {
 #[test]
 fn decide_start_mode_codex_rollout_present_is_resumed_regardless_of_fresh() {
     assert_eq!(
-        decide_start_mode("codex", Some(&sid("s1")), Some(&rp("/r.jsonl")), true, false),
+        decide_start_mode(
+            "codex",
+            Some(&sid("s1")),
+            Some(&rp("/r.jsonl")),
+            true,
+            false
+        ),
         StartMode::Resumed
     );
     assert_eq!(
@@ -432,14 +478,36 @@ fn decide_start_mode_checks_backing_for_all_resumable_providers() {
 }
 
 #[test]
+fn decide_start_mode_refuses_session_id_for_nonresumable_providers() {
+    for provider in ["fake", "gemini_cli"] {
+        assert_eq!(
+            decide_start_mode(provider, Some(&sid("s1")), None, true, false),
+            StartMode::Noop,
+            "{provider} has a persisted session id but caps.resume=false, so it must not resume"
+        );
+        assert_eq!(
+            decide_start_mode(provider, Some(&sid("s1")), None, true, true),
+            StartMode::FreshAfterMissingRollout,
+            "{provider} may only fresh-start a persisted session id under explicit allow_fresh"
+        );
+    }
+}
+
+#[test]
 fn resume_decision_serde_names_match_python() {
     // 低价值 wire-format 守卫:_emit_resume_decisions: "resume"|"fresh_start"|"refuse"。
-    assert_eq!(serde_json::to_string(&ResumeDecision::Resume).unwrap(), "\"resume\"");
+    assert_eq!(
+        serde_json::to_string(&ResumeDecision::Resume).unwrap(),
+        "\"resume\""
+    );
     assert_eq!(
         serde_json::to_string(&ResumeDecision::FreshStart).unwrap(),
         "\"fresh_start\""
     );
-    assert_eq!(serde_json::to_string(&ResumeDecision::Refuse).unwrap(), "\"refuse\"");
+    assert_eq!(
+        serde_json::to_string(&ResumeDecision::Refuse).unwrap(),
+        "\"refuse\""
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -472,13 +540,41 @@ fn classify_restart_plan_interacted_unresumable_no_allow_fresh_yields_refuse() {
         .expect("纯验证不应 Err(资源型失败才走 LifecycleError)");
     assert!(plan.corrupt_entries.is_empty(), "valid ISO 不应判 corrupt");
     // 恰一条决策(每非 paused worker 一条),且为 Refuse。
-    assert_eq!(plan.decisions.len(), 1, "每非 paused worker 恰一条 resume_decision");
+    assert_eq!(
+        plan.decisions.len(),
+        1,
+        "每非 paused worker 恰一条 resume_decision"
+    );
     assert_eq!(plan.decisions[0].agent_id, aid("w1"));
     assert_eq!(plan.decisions[0].decision, ResumeDecision::Refuse);
     // unresumable 收口该 worker,reason 精确。
     assert_eq!(plan.unresumable.len(), 1);
     assert_eq!(plan.unresumable[0].agent_id, aid("w1"));
     assert_eq!(plan.unresumable[0].reason, "no_persisted_session_id");
+}
+
+#[test]
+fn classify_restart_plan_fake_stale_session_refuses_without_allow_fresh() {
+    let state = json!({
+        "session_name": "team-a",
+        "agents": {
+            "w1": {
+                "provider": "fake",
+                "first_send_at": "2026-05-27T10:00:00+00:00",
+                "session_id": "stale-fake-session"
+            }
+        }
+    });
+    let plan = classify_restart_plan(&state, false).expect("pure validation should not Err");
+    assert_eq!(plan.decisions.len(), 1);
+    assert_eq!(plan.decisions[0].decision, ResumeDecision::Refuse);
+    assert_eq!(plan.decisions[0].restart_mode, StartMode::Noop);
+    assert_eq!(plan.unresumable.len(), 1);
+    assert_eq!(plan.unresumable[0].reason, "session_unresumable");
+    assert_eq!(
+        plan.unresumable[0].session_id.as_ref().map(|s| s.as_str()),
+        Some("stale-fake-session")
+    );
 }
 
 #[test]
@@ -517,7 +613,11 @@ fn classify_restart_plan_never_interacted_null_session_refuses_not_fresh() {
         ResumeDecision::Refuse,
         "null-session 自启动 worker 默认必须 Refuse,不许静默 fresh"
     );
-    assert_eq!(plan.unresumable.len(), 1, "Refuse 必入 unresumable(诚实出口)");
+    assert_eq!(
+        plan.unresumable.len(),
+        1,
+        "Refuse 必入 unresumable(诚实出口)"
+    );
     assert_eq!(plan.unresumable[0].reason, "no_persisted_session_id");
 }
 
@@ -756,10 +856,13 @@ fn restart_candidates_empty_workspace_is_empty_list() {
 fn save_snapshot_writes_atomic_state_json_under_teams_dir() {
     let ws = temp_ws();
     let state = json!({"session_name": "team-alpha", "agents": {}});
-    let path = save_team_runtime_snapshot(&ws, &state)
-        .expect("bug-084:写路径返 Result,正常态须 Ok");
+    let path =
+        save_team_runtime_snapshot(&ws, &state).expect("bug-084:写路径返 Result,正常态须 Ok");
     // 末段必为 state.json,且落在 runtime/teams/<safe session> 下。
-    assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("state.json"));
+    assert_eq!(
+        path.file_name().and_then(|s| s.to_str()),
+        Some("state.json")
+    );
     let s = path.to_string_lossy();
     assert!(
         s.contains("teams") && s.contains("team-alpha"),
@@ -884,7 +987,9 @@ fn leader_pane_env_invalid_format_writes_warning_event() {
     validate_active_leader_pane_env_with_workspace(&transport, Some(&ws))
         .expect("invalid format is warning-only");
 
-    let events = crate::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let events = crate::event_log::EventLog::new(&ws)
+        .tail(0)
+        .expect("events");
     let event = events
         .iter()
         .find(|event| {
@@ -947,8 +1052,8 @@ fn leader_pane_env_cross_socket_live_wins() {
 #[test]
 fn leader_pane_env_cross_socket_dead_rejects_without_live() {
     let pane = crate::transport::PaneId::new("%404");
-    let absent = crate::transport::test_support::OfflineTransport::new()
-        .with_pane_presence("%404", false);
+    let absent =
+        crate::transport::test_support::OfflineTransport::new().with_pane_presence("%404", false);
     let dead = crate::transport::test_support::OfflineTransport::new()
         .with_liveness("%404", PaneLiveness::Dead);
 
@@ -963,8 +1068,8 @@ fn leader_pane_env_cross_socket_dead_rejects_without_live() {
 #[test]
 fn leader_pane_env_cross_socket_absent_when_reachable_servers_confirm_missing() {
     let pane = crate::transport::PaneId::new("%9999");
-    let absent = crate::transport::test_support::OfflineTransport::new()
-        .with_pane_presence("%9999", false);
+    let absent =
+        crate::transport::test_support::OfflineTransport::new().with_pane_presence("%9999", false);
     let unknown = crate::transport::test_support::OfflineTransport::new()
         .with_default_liveness(PaneLiveness::Unknown);
 
@@ -1008,13 +1113,17 @@ fn mcp_auto_approval_env_marks_leader_bypass_namespace_only() {
 
     apply_mcp_auto_approval_env(&mut env, &safety);
 
-    assert_eq!(env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str), Some("1"));
+    assert_eq!(
+        env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str),
+        Some("1")
+    );
     assert_eq!(
         env.get("TEAM_AGENT_MCP_AUTO_APPROVE").map(String::as_str),
         Some("team_orchestrator")
     );
     assert_eq!(
-        env.get("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE").map(String::as_str),
+        env.get("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE")
+            .map(String::as_str),
         Some("leader_bypass")
     );
     assert_eq!(
@@ -1030,7 +1139,10 @@ fn mcp_auto_approval_env_clears_when_leader_is_restricted() {
             "TEAM_AGENT_MCP_AUTO_APPROVE".to_string(),
             "team_orchestrator".to_string(),
         ),
-        ("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(), "leader_bypass".to_string()),
+        (
+            "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(),
+            "leader_bypass".to_string(),
+        ),
     ]);
     let safety = DangerousApproval {
         enabled: false,
@@ -1045,7 +1157,10 @@ fn mcp_auto_approval_env_clears_when_leader_is_restricted() {
 
     apply_mcp_auto_approval_env(&mut env, &safety);
 
-    assert_eq!(env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str), Some("0"));
+    assert_eq!(
+        env.get("TEAM_AGENT_LEADER_BYPASS").map(String::as_str),
+        Some("0")
+    );
     assert!(
         !env.contains_key("TEAM_AGENT_MCP_AUTO_APPROVE"),
         "restricted leader must not leave MCP auto-approval env behind: {env:?}"
@@ -1113,7 +1228,12 @@ fn open_worker_displays_blocked_probe_yields_typed_blocked_not_error() {
     // 每个 worker 的 display 在 blocked 平台上应是 Blocked 变体(若有 worker)。
     for (id, d) in rep.displays.iter() {
         assert!(
-            matches!(d, WorkerDisplay::Blocked { reason: AdaptiveBlockReason::NotImplementedThisPlatform }),
+            matches!(
+                d,
+                WorkerDisplay::Blocked {
+                    reason: AdaptiveBlockReason::NotImplementedThisPlatform
+                }
+            ),
             "worker {id} 在 windows 平台应 Blocked(not_implemented):{d:?}"
         );
     }
@@ -1130,7 +1250,11 @@ fn close_team_display_empty_workspace_closes_nothing_not_error() {
     let ws = temp_ws();
     let rep = close_team_display_backends(&ws, &sess("team-a"))
         .expect("C9:无 recorded backend 应 Ok(空报告),不是 Err");
-    assert!(rep.closed.is_empty(), "无 recorded backend 不应关任何东西:{:?}", rep.closed);
+    assert!(
+        rep.closed.is_empty(),
+        "无 recorded backend 不应关任何东西:{:?}",
+        rep.closed
+    );
     assert!(
         rep.orphans_cleaned.is_empty(),
         "空 workspace 无 orphan:{:?}",
@@ -1175,8 +1299,14 @@ fn fork_agent_on_unowned_workspace_does_not_silently_fork() {
 #[test]
 fn add_agent_event_name_constants_match_python_lifecycle_strings() {
     // 锁死发射事件名(顺序被 porter 实现后的事件流锁死;此处锁名)。
-    assert_eq!(event_names::ADD_STEP_COMPLETED, "lifecycle.add_step_completed");
-    assert_eq!(event_names::ADD_STEP_ROLLED_BACK, "lifecycle.add_step_rolled_back");
+    assert_eq!(
+        event_names::ADD_STEP_COMPLETED,
+        "lifecycle.add_step_completed"
+    );
+    assert_eq!(
+        event_names::ADD_STEP_ROLLED_BACK,
+        "lifecycle.add_step_rolled_back"
+    );
     assert_eq!(event_names::ADD_FAILED, "lifecycle.add_failed");
 }
 
@@ -1237,7 +1367,10 @@ fn halt_plan_unknown_id_is_not_found_error() {
     // 未持久化的 plan → "plan not found"(typed/Err),不幂等成 Halted。
     match halt_plan(&ws, &pid, "user_requested") {
         Err(LifecycleError::InvalidPlan(msg)) | Err(LifecycleError::TeamSelect(msg)) => {
-            assert!(msg.contains("not found") || msg.contains("ghost-plan"), "got: {msg}");
+            assert!(
+                msg.contains("not found") || msg.contains("ghost-plan"),
+                "got: {msg}"
+            );
         }
         Ok(PlanProgress::Halted { .. }) => {
             panic!("未找到的 plan 不得返回 Halted(应 not-found)")
@@ -1253,7 +1386,10 @@ fn plan_status_unknown_id_is_not_found() {
     // 读未持久化 plan → not-found error(Rust 入口签名 Result<PlanState,_>)。
     match plan_status(&ws, &pid) {
         Err(LifecycleError::InvalidPlan(msg)) | Err(LifecycleError::TeamSelect(msg)) => {
-            assert!(msg.contains("not found") || msg.contains("ghost-plan"), "got: {msg}");
+            assert!(
+                msg.contains("not found") || msg.contains("ghost-plan"),
+                "got: {msg}"
+            );
         }
         Ok(st) => panic!("未持久化 plan 不得返回 PlanState:{st:?}"),
         other => panic!("意外结果:{other:?}"),

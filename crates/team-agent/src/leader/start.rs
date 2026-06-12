@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
-use crate::transport::{SessionName, Transport};
+use crate::transport::{PaneId, SessionName, Target, Transport};
 
 use super::helpers::{
     provider_wire, resolve_workspace_for_hash, sanitize_session_folder, sha1_hex_prefix,
@@ -125,7 +125,10 @@ pub(crate) fn leader_env_for_identity(
         identity.team_id.as_str().to_string(),
     );
     if provider == Provider::Copilot {
-        leader_env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
+        leader_env.insert(
+            "COPILOT_DISABLE_TERMINAL_TITLE".to_string(),
+            "1".to_string(),
+        );
     }
     leader_env
 }
@@ -171,7 +174,7 @@ pub fn execute_leader_plan(
     let detached = plan.mode == LeaderStartMode::NewTmuxSession
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
-    let status = run_leader_argv(&argv, &plan.leader_env)?;
+    let status = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
     let code = status.code();
     if !status.success() {
         return Err(LeaderError::Start(format!(
@@ -294,6 +297,8 @@ fn insert_detach_flag(argv: &mut Vec<String>) -> bool {
 fn run_leader_argv(
     argv: &[String],
     env: &BTreeMap<String, String>,
+    plan: &LeaderStartPlan,
+    workspace: &Path,
 ) -> Result<std::process::ExitStatus, LeaderError> {
     let Some(program) = argv.first() else {
         return Err(LeaderError::Start(
@@ -307,7 +312,82 @@ fn run_leader_argv(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;
+    if plan.mode == LeaderStartMode::ExecProvider {
+        spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
+    }
     child.wait().map_err(LeaderError::Io)
+}
+
+fn spawn_exec_provider_startup_prompt_handler(provider: Provider, workspace: PathBuf) {
+    let Some(pane_id) = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        write_leader_startup_prompt_event(
+            &workspace,
+            "leader.startup_prompt_skipped",
+            serde_json::json!({
+                "provider": provider_wire(provider),
+                "reason": "tmux_pane_missing",
+                "action": "skip",
+            }),
+        );
+        return;
+    };
+    std::thread::spawn(move || {
+        let transport = tmux_transport_for_current_pane();
+        let _ = handle_exec_provider_startup_prompts(
+            provider, &workspace, &pane_id, &transport, 30, 0.5,
+        );
+    });
+}
+
+fn tmux_transport_for_current_pane() -> TmuxBackend {
+    crate::tmux_backend::socket_name_from_tmux_env()
+        .map(|endpoint| TmuxBackend::for_tmux_endpoint(&endpoint))
+        .unwrap_or_else(TmuxBackend::new)
+}
+
+pub fn handle_exec_provider_startup_prompts(
+    provider: Provider,
+    workspace: &Path,
+    pane_id: &str,
+    transport: &dyn Transport,
+    checks: usize,
+    sleep_s: f64,
+) -> crate::provider::StartupPromptOutcome {
+    let target = Target::Pane(PaneId::new(pane_id.to_string()));
+    let outcome =
+        get_adapter(provider).handle_startup_prompts_outcome(transport, &target, checks, sleep_s);
+    for handled in &outcome.handled {
+        write_leader_startup_prompt_event(
+            workspace,
+            "leader.startup_prompt_handled",
+            serde_json::json!({
+                "provider": provider_wire(provider),
+                "pane_id": pane_id,
+                "prompt": handled.prompt,
+                "action": handled.action,
+            }),
+        );
+    }
+    if let Some(error) = &outcome.capture_error {
+        write_leader_startup_prompt_event(
+            workspace,
+            "leader.startup_prompt_capture_failed",
+            serde_json::json!({
+                "provider": provider_wire(provider),
+                "pane_id": pane_id,
+                "action": "capture",
+                "error": error,
+            }),
+        );
+    }
+    outcome
+}
+
+fn write_leader_startup_prompt_event(workspace: &Path, event: &str, fields: serde_json::Value) {
+    let _ = crate::event_log::EventLog::new(workspace).write(event, fields);
 }
 
 fn ensure_tmux_installed() -> Result<(), LeaderError> {
@@ -386,5 +466,200 @@ fn shlex_quote(raw: &str) -> String {
         raw.to_string()
     } else {
         format!("'{}'", raw.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    use crate::model::enums::PaneLiveness;
+    use crate::provider::{Provider, COPILOT_READY_MARKER, COPILOT_TRUST_PROMPT_MARKER};
+    use crate::transport::{
+        AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+        InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
+        SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+        TurnVerification, WindowName,
+    };
+
+    use super::handle_exec_provider_startup_prompts;
+
+    struct ScriptedTransport {
+        screens: Mutex<Vec<String>>,
+        sent: Mutex<Vec<(Target, Vec<Key>)>>,
+    }
+
+    impl ScriptedTransport {
+        fn new(screens: Vec<String>) -> Self {
+            Self {
+                screens: Mutex::new(screens),
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn sent(&self) -> Vec<(Target, Vec<Key>)> {
+            match self.sent.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Tmux
+        }
+
+        fn spawn_first(
+            &self,
+            _session: &SessionName,
+            _window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            Err(TransportError::Io(std::io::Error::other(
+                "spawn_first not used by startup-prompt test",
+            )))
+        }
+
+        fn spawn_into(
+            &self,
+            _session: &SessionName,
+            _window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            Err(TransportError::Io(std::io::Error::other(
+                "spawn_into not used by startup-prompt test",
+            )))
+        }
+
+        fn inject(
+            &self,
+            _target: &Target,
+            _payload: &InjectPayload,
+            _submit: Key,
+            _bracketed: bool,
+        ) -> Result<InjectReport, TransportError> {
+            Ok(InjectReport {
+                stage_reached: InjectStage::Submit,
+                inject_verification: InjectVerification::CaptureContainsToken,
+                submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+                turn_verification: TurnVerification::NotRequired,
+                attempts: 1,
+            })
+        }
+
+        fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError> {
+            match self.sent.lock() {
+                Ok(mut guard) => guard.push((target.clone(), keys.to_vec())),
+                Err(poisoned) => poisoned.into_inner().push((target.clone(), keys.to_vec())),
+            }
+            Ok(())
+        }
+
+        fn capture(
+            &self,
+            _target: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
+            let text = match self.screens.lock() {
+                Ok(mut guard) => {
+                    if guard.is_empty() {
+                        String::new()
+                    } else {
+                        guard.remove(0)
+                    }
+                }
+                Err(poisoned) => {
+                    let mut guard = poisoned.into_inner();
+                    if guard.is_empty() {
+                        String::new()
+                    } else {
+                        guard.remove(0)
+                    }
+                }
+            };
+            Ok(CapturedText { text, range })
+        }
+
+        fn query(
+            &self,
+            _target: &Target,
+            _field: PaneField,
+        ) -> Result<Option<String>, TransportError> {
+            Ok(None)
+        }
+
+        fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+            Ok(PaneLiveness::Unknown)
+        }
+
+        fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+            Ok(Vec::new())
+        }
+
+        fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+            Ok(false)
+        }
+
+        fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+            Ok(Vec::new())
+        }
+
+        fn set_session_env(
+            &self,
+            _session: &SessionName,
+            _key: &str,
+            _value: &str,
+        ) -> Result<SetEnvOutcome, TransportError> {
+            Ok(SetEnvOutcome::Applied)
+        }
+
+        fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+            Ok(AttachOutcome::Unsupported {
+                reason: "not used by startup-prompt test".to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn exec_provider_leader_startup_prompt_handler_reuses_copilot_adapter() {
+        let transport = ScriptedTransport::new(vec![
+            COPILOT_TRUST_PROMPT_MARKER.to_string(),
+            COPILOT_READY_MARKER.to_string(),
+        ]);
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_red2_leader_startup_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&workspace);
+
+        let outcome = handle_exec_provider_startup_prompts(
+            Provider::Copilot,
+            &workspace,
+            "%0",
+            &transport,
+            5,
+            0.0,
+        );
+
+        assert_eq!(outcome.handled.len(), 1);
+        assert_eq!(outcome.handled[0].prompt, "copilot_workspace_trust");
+        assert_eq!(outcome.handled[0].action, "sent_enter_yes_session");
+        let sent = transport.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, Target::Pane(PaneId::new("%0")));
+        assert_eq!(sent[0].1, vec![Key::Enter]);
     }
 }
