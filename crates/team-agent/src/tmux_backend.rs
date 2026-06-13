@@ -816,22 +816,22 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
     }
 }
 
-/// U1 #7: the delivery-token marker a token payload carries (`[team-agent-token:<id>]`).
-/// Returns the substring to look for in the pre-submit pane capture.
+/// U1 #7: the exact delivery-token marker a token payload carries
+/// (`[team-agent-token:<id>]`). Use the full marker, not only the prefix, so an old
+/// scrollback token cannot verify a new message.
 fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
     match payload {
-        InjectPayload::Text(text) if text.contains("[team-agent-token:") => {
-            Some("[team-agent-token:")
+        InjectPayload::Text(text) => {
+            let start = text.find("[team-agent-token:")?;
+            let marker = &text[start..];
+            let end = marker.find(']')?;
+            Some(&marker[..=end])
         }
         _ => None,
     }
 }
 
-/// U1 #7: capture the pane just before submit and report whether the just-pasted
-/// token marker is actually visible. `Ok(None)` for non-token payloads (nothing to
-/// check). `Ok(Some(false))` means the paste silently dropped — a false-positive that
-/// the static `inject_verification_for_payload` would have reported as success.
-fn pre_submit_token_visible(
+fn token_visible_in_capture(
     backend: &TmuxBackend,
     target: &Target,
     payload: &InjectPayload,
@@ -845,6 +845,42 @@ fn pre_submit_token_visible(
     }
 }
 
+/// U1 #7: capture the pane just before submit and report whether the just-pasted
+/// token marker is actually visible. `Ok(None)` for non-token payloads (nothing to
+/// check). `Ok(Some(false))` means the paste silently dropped — a false-positive that
+/// the static `inject_verification_for_payload` would have reported as success.
+fn pre_submit_token_visible(
+    backend: &TmuxBackend,
+    target: &Target,
+    payload: &InjectPayload,
+) -> Result<Option<bool>, TransportError> {
+    token_visible_in_capture(backend, target, payload)
+}
+
+const TOKEN_POST_SUBMIT_READBACK_POLLS: u32 = 5;
+
+/// Some non-echo panes, including the integration harness' `stty -echo; cat`, only
+/// render the injected line after the submit key. If pre-submit readback missed the
+/// token, do a bounded post-submit check before reporting `CaptureMissingToken`.
+fn post_submit_token_visible(
+    backend: &TmuxBackend,
+    target: &Target,
+    payload: &InjectPayload,
+) -> Result<Option<bool>, TransportError> {
+    if payload_token_marker(payload).is_none() {
+        return Ok(None);
+    }
+    for attempt in 0..TOKEN_POST_SUBMIT_READBACK_POLLS {
+        if let Some(true) = token_visible_in_capture(backend, target, payload)? {
+            return Ok(Some(true));
+        }
+        if attempt + 1 < TOKEN_POST_SUBMIT_READBACK_POLLS {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    Ok(Some(false))
+}
+
 /// U1 #7: downgrade the static token verification to `CaptureMissingToken` when the
 /// pre-submit readback did not see the token in the pane. A `None` readback (non-token
 /// payload, or capture unavailable) falls back to the static verification.
@@ -853,7 +889,7 @@ fn inject_verification_after_readback(
     token_visible_before_submit: Option<bool>,
 ) -> InjectVerification {
     match (payload, token_visible_before_submit) {
-        (InjectPayload::Text(text), Some(visible)) if text.contains("[team-agent-token:") => {
+        (_, Some(visible)) if payload_token_marker(payload).is_some() => {
             if visible {
                 InjectVerification::CaptureContainsToken
             } else {
@@ -1008,8 +1044,8 @@ impl Transport for TmuxBackend {
         bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
         let pane = pane_from_target(target);
-        // U1 #7: pre-submit pane readback signal for the non-pasted-prompt text path.
-        let mut token_visible_before_submit: Option<bool> = None;
+        // U1 #7: pane readback signal for the non-pasted-prompt text path.
+        let mut token_visible_for_report: Option<bool> = None;
         match payload {
             InjectPayload::Empty => {
                 let argv = tmux_empty_inject_argv(&pane, submit);
@@ -1060,22 +1096,27 @@ impl Transport for TmuxBackend {
                         attempts,
                     });
                 }
-                // U1 #7 (efd189b redo, canonical-native): before the final submit, read
+                // U1 #7 (efd189b redo, canonical-native): around the final submit, read
                 // back the pane and confirm the just-pasted token is actually visible.
                 // The static `inject_verification_for_payload` returns CaptureContainsToken
                 // for any token payload WITHOUT checking the pane — a false positive when
-                // the paste silently dropped. Here we downgrade to CaptureMissingToken when
-                // a token payload's token is not visible in the pre-submit capture.
-                token_visible_before_submit =
+                // the paste silently dropped. A no-echo pane may only render after Enter,
+                // so a pre-submit miss gets one bounded post-submit readback before we
+                // downgrade to CaptureMissingToken.
+                token_visible_for_report =
                     pre_submit_token_visible(self, target, payload).unwrap_or(None);
                 self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
+                if matches!(token_visible_for_report, Some(false)) {
+                    token_visible_for_report =
+                        post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
+                }
             }
         }
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,
             inject_verification: inject_verification_after_readback(
                 payload,
-                token_visible_before_submit,
+                token_visible_for_report,
             ),
             submit_verification: submit_verification_for_key(submit),
             turn_verification: match payload {
