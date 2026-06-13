@@ -403,6 +403,7 @@ pub(super) fn resume_backing_exists_for_agent(
         Provider::Claude | Provider::ClaudeCode => {
             rollout_path_exists(rollout_path)
                 || event_log_transcript_exists(workspace, agent_id.as_str(), session_id.as_str())
+                || claude_project_transcript_exists(agent, session_id.as_str())
         }
         Provider::Copilot => copilot_session_store_has_session(session_id.as_str()),
         Provider::GeminiCli | Provider::Fake => false,
@@ -446,6 +447,42 @@ fn event_transcript_path(event: &serde_json::Value) -> Option<PathBuf> {
         .and_then(serde_json::Value::as_str)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+}
+
+/// E36 fix-B: a real Claude worker writes its session transcript to
+/// `<claude_projects_root>/<workspace-slug>/<session_id>.jsonl` even when neither
+/// `rollout_path` was persisted to state nor a `session.captured` event was logged.
+/// That landed transcript is itself a valid resume backing — restart was wrongly
+/// refusing resumable workers because it only checked the two paths above. Scan the
+/// projects root recursively for `<session_id>.jsonl` (session_id is a unique UUID,
+/// so we avoid recomputing the project-dir slug, which is brittle for non-ASCII
+/// workspace paths).
+fn claude_project_transcript_exists(agent: &serde_json::Value, session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
+    let projects_root = agent
+        .get("claude_projects_root")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude").join("projects"))
+        });
+    let Some(projects_root) = projects_root else {
+        return false;
+    };
+    if !projects_root.is_dir() {
+        return false;
+    }
+    let transcript_name = format!("{session_id}.jsonl");
+    let Ok(project_dirs) = std::fs::read_dir(&projects_root) else {
+        return false;
+    };
+    project_dirs
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .any(|entry| entry.path().join(&transcript_name).is_file())
 }
 
 fn copilot_session_store_has_session(session_id: &str) -> bool {
@@ -907,4 +944,70 @@ pub(super) fn is_dynamic_agent(
             .get("forked_from")
             .and_then(YamlValue::as_str)
             .is_some_and(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod e36_transcript_backing_tests {
+    use super::*;
+
+    struct ScratchDir(PathBuf);
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            let pid = std::process::id();
+            let base = std::env::temp_dir().join(format!("ta-e36-{tag}-{pid}"));
+            std::fs::create_dir_all(&base).expect("scratch dir");
+            ScratchDir(base)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // E36 fix-B RED→GREEN: a real Claude worker that sent a message has its session
+    // transcript landed at <projects_root>/<slug>/<session_id>.jsonl, but neither
+    // rollout_path was persisted to state nor a session.captured event was logged.
+    // Before the fix, claude_project_transcript_exists did not exist and restart
+    // refused such a worker. This asserts the landed transcript is recognized.
+    #[test]
+    fn claude_project_transcript_is_recognized_without_rollout_or_capture_event() {
+        let scratch = ScratchDir::new("recognized");
+        let projects_root = scratch.path().join("projects");
+        let slug_dir = projects_root.join("-Users-alauda-Documents-code---rust---9");
+        std::fs::create_dir_all(&slug_dir).expect("mkdir slug");
+        let session_id = "87742d3f-0b4e-4fc1-ad35-447ac2340b65";
+        std::fs::write(slug_dir.join(format!("{session_id}.jsonl")), b"{}\n").expect("transcript");
+
+        let agent = serde_json::json!({
+            "claude_projects_root": projects_root.to_string_lossy(),
+        });
+        assert!(
+            claude_project_transcript_exists(&agent, session_id),
+            "landed claude transcript must count as resume backing (E36 fix-B)"
+        );
+    }
+
+    #[test]
+    fn missing_claude_transcript_is_not_backing() {
+        let scratch = ScratchDir::new("missing");
+        let projects_root = scratch.path().join("projects");
+        std::fs::create_dir_all(&projects_root).expect("mkdir");
+        let agent = serde_json::json!({
+            "claude_projects_root": projects_root.to_string_lossy(),
+        });
+        assert!(
+            !claude_project_transcript_exists(&agent, "deadbeef-0000-0000-0000-000000000000"),
+            "no transcript file => no backing"
+        );
+    }
+
+    #[test]
+    fn empty_session_id_is_not_backing() {
+        let agent = serde_json::json!({});
+        assert!(!claude_project_transcript_exists(&agent, ""));
+    }
 }

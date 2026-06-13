@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.23
+
+- **Fixed: closing a team and reopening it could lose a teammate's conversation, forcing a fresh start.** Previously, after you shut a team down and restarted it, a teammate that had already been chatting could be wrongly judged as "nothing to resume" — even though its full conversation history was safely saved on disk. You were then pushed to start that teammate over from scratch, losing its context. Now the system recognizes the saved conversation and brings the teammate back where it left off, so a normal close-and-reopen keeps everyone's context.
+- **Added guidance for running a team inside a team.** When you ask a teammate to start its own nested team, there's now a clear in-app guide covering where the child team should live (its own folder, never the parent's), how the parent and child talk to each other, and an important safety rule: a child team must never shut down the folder the main team is running in.
+
 ## 0.3.22
 
 - **More reliable message delivery, especially when something goes wrong with one message.** Previously, a single problem message — one whose destination had gone away, or that couldn't be confirmed as delivered — could quietly hold up the whole batch of pending messages behind it, so other teammates' messages stopped arriving too. Now each message is handled on its own: one bad message is set aside and reported, and everything else keeps flowing. The system also double-checks that a message actually landed on the recipient's screen before calling it delivered, and if a teammate's window has moved, it finds the new location instead of sending into a dead one. The result is that normal team chatter keeps moving even when one delivery hits trouble.
