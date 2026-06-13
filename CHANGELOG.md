@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.21
+
+- **Session drift detection no longer mis-classifies normal conversation text as a session id and blocks delivery**: the runtime detector now requires a real session-id shape (not just any token following certain English keywords like `resume` / `thread`) before reporting drift, so a worker message that happens to contain those words no longer trips the false-drift guard and stalls leader-bound delivery. Real session drift is still detected — when the detector does observe an id that doesn't match the worker's recorded session, it now also self-heals by re-binding to the observed id rather than rejecting forever, and the action is recorded as an audit event so the operator can see when drift handling fires. Validated under live-coordinator load: 45 s of real-team traffic produced zero false positives, where 0.3.20 produced a false positive within 1–2 ticks.
+
 ## 0.3.20
 
 - **`team-agent reset` / `stop` / `start` / `remove` / `restart` work on attached and explicit-socket teams again**: the lifecycle transport now resolves the tmux endpoint from the team's recorded `state.leader_receiver.tmux_socket` (and falls back to the workspace-default socket only when no recorded endpoint is present), instead of always going through the workspace-default short `ta-*` socket. A team whose user attached against an explicit socket (`/tmp/<custom>.sock`) — or whose recorded socket is a legacy short name — no longer fails with `error connecting to /private/tmp/tmux-501/ta-... (No such file or directory)` on any of the five lifecycle entry points.

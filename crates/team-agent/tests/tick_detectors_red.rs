@@ -59,7 +59,8 @@ fn tick_reports_compaction_from_real_worker_capture_not_empty_placeholder() {
 
 #[test]
 fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
-    let worker_capture = "Codex resumed. Switched to thread S2-drifted-thread\n❯\n";
+    let worker_capture =
+        "Codex resumed. Switched to thread 22222222-2222-4222-8222-222222222222\n❯\n";
     let fixture = TickFixture::new("drift", worker_capture, "");
     let report = fixture.coord.tick().expect("tick should complete");
     let state = load_runtime_state(&fixture.workspace).expect("load post-tick state");
@@ -67,7 +68,7 @@ fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
     assert!(
         !report.session_drift.is_empty(),
         "TickReport.session_drift must include the codex worker whose captured thread id differs \
-         from stored session_id=S1; report={report:?} state={state}"
+         from stored session_id; report={report:?} state={state}"
     );
     assert_eq!(
         state.pointer("/agents/w1/status").and_then(Value::as_str),
@@ -75,8 +76,10 @@ fn tick_marks_codex_session_drift_and_send_refuses_drifted_worker() {
         "tick must persist agent status=session_drift when capture shows a different thread; state={state}"
     );
     assert_eq!(
-        state.pointer("/agents/w1/session_drift/stored_session_id").and_then(Value::as_str),
-        Some("S1"),
+        state
+            .pointer("/agents/w1/session_drift/stored_session_id")
+            .and_then(Value::as_str),
+        Some("11111111-1111-4111-8111-111111111111"),
         "session_drift payload must retain stored_session_id for operator diagnosis; state={state}"
     );
 
@@ -326,7 +329,7 @@ fn seed_state(workspace: &Path) {
                 "w1": {
                     "provider": "codex",
                     "status": "running",
-                    "session_id": "S1",
+                    "session_id": "11111111-1111-4111-8111-111111111111",
                     "window": "w1",
                     "pane_id": "%w1",
                     "startup_prompts": "handled"
@@ -351,7 +354,7 @@ fn seed_state(workspace: &Path) {
                         "w1": {
                             "provider": "codex",
                             "status": "running",
-                            "session_id": "S1",
+                            "session_id": "11111111-1111-4111-8111-111111111111",
                             "window": "w1",
                             "pane_id": "%w1",
                             "startup_prompts": "handled"
