@@ -158,6 +158,7 @@ For diagnosis, run `team-agent profile show deepseek --workspace . --json`; neve
 - Quick-start generated files stay inside the selected team directory, for example `.team/current/` or `.team/alpha/`; do not create or expect root `team.spec.yaml` or `team_state.md`.
 - Use `team-agent quick-start ./roles --team-id alpha` to create a second generated team under `.team/alpha/`, or pass an existing team directory directly such as `team-agent quick-start .team/alpha`.
 - `quick-start` is for fresh startup from role docs. If stored worker context already exists for that runtime session, follow the returned `team-agent restart . --team <session>` action to resume it. Use `--fresh` only when the user explicitly accepts new blank worker contexts.
+- If the user explicitly asks a worker to create or operate a nested child team, first read `references/team-in-team.md`. Child teams must use an independent child workspace, never the parent `.team/current`.
 - `team-agent send --watch-result coder "Do the bounded task"` sends a direct worker message, returns after delivery, and lets the coordinator collect/report completion asynchronously.
 - After `send --watch-result` succeeds, do not run `sleep`, `status`, `inbox`, or `collect` polling loops unless the user explicitly asks for diagnosis; the coordinator will notify the leader when the result arrives.
 - `team-agent send --task task_initial "Start"` routes by task.
@@ -214,7 +215,7 @@ Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> -
 
 ## Worker Protocol
 
-Workers do not run nested Team Agent teams. Workers only provide the target and content for progress, and a short completion summary at the end:
+Workers normally do not run nested Team Agent teams. When the user or leader explicitly asks for a child team, follow `references/team-in-team.md`; otherwise workers only provide the target and content for progress, and a short completion summary at the end:
 
 ```text
 team_orchestrator.send_message(to="leader", content="short progress or blocker")
