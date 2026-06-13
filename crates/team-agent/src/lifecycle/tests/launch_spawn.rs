@@ -1119,6 +1119,20 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
         "4 default-adaptive workers should create team-w1 with 3 panes, then team-w2"
     );
     assert_eq!(
+        transport
+            .pane_title_records()
+            .iter()
+            .map(|(_, window, pane, title)| (window.as_str(), pane.as_str(), title.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("team-w1", "%0", "w1"),
+            ("team-w1", "%1", "w2"),
+            ("team-w1", "%2", "w3"),
+            ("team-w2", "%3", "w4"),
+        ],
+        "adaptive workers must set tmux pane titles to the agent id"
+    );
+    assert_eq!(
         launch
             .started
             .iter()
@@ -1147,6 +1161,14 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
     );
 
     let (_raw, state) = raw_runtime_state(workspace);
+    assert!(
+        transport
+            .pane_title_records()
+            .iter()
+            .all(|(session, _, _, _)| Some(session.as_str())
+                == state.get("session_name").and_then(serde_json::Value::as_str)),
+        "pane titles must be configured inside the team session"
+    );
     assert_eq!(state["display_backend"], json!("adaptive"));
     assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("team-w1")));
     assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
@@ -1154,6 +1176,14 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
     assert_eq!(
         state.pointer("/agents/w1/display/backend"),
         Some(&json!("adaptive"))
+    );
+    assert_eq!(
+        state.pointer("/agents/w1/display/pane_title"),
+        Some(&json!("w1"))
+    );
+    assert_eq!(
+        state.pointer("/agents/w1/display/linked_session"),
+        Some(&json!(null))
     );
     assert_eq!(
         state.pointer("/agents/w4/layout_window"),

@@ -39,84 +39,106 @@ pub fn fire_due_scheduled_events(
     };
     let mut fired = Vec::new();
     for (id, kind, target, payload_json) in due_events {
-        let scheduled_kind = parse_scheduled_kind(&kind)?;
-        let result = match scheduled_kind {
-            ScheduledKind::Send => {
-                let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
-                let outcome = deliver_stored_message(
-                    workspace,
-                    Some(&target),
-                    payload.get("content").and_then(|v| v.as_str()).unwrap_or(""),
-                    None,
-                    payload.get("sender").and_then(|v| v.as_str()).unwrap_or("leader"),
-                    payload
-                        .get("requires_ack")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    payload
-                        .get("wait_visible")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    payload.get("timeout").and_then(|v| v.as_f64()).unwrap_or(30.0),
-                    None,
-                )?;
-                serde_json::json!({
-                    "ok": outcome.ok,
-                    "status": status_wire(outcome.status),
-                    "message_id": outcome.message_id,
-                })
-            }
-            ScheduledKind::HealthPing => {
-                event_log.write(
-                    "scheduled.health_ping",
-                    serde_json::json!({"event_id": id, "target": target}),
-                )?;
-                serde_json::json!({"ok": true, "status": "logged"})
-            }
-            ScheduledKind::TrustRetry => {
-                let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
-                let outcome = handle_trust_retry_needed(
-                    store,
-                    &TrustRetryPayload {
-                        message_id: payload
-                            .get("message_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string(),
-                        attempt: payload
-                            .get("attempt")
-                            .and_then(|v| v.as_u64())
-                            .and_then(|v| u8::try_from(v).ok())
-                            .unwrap_or(1),
-                        max_attempts: payload
-                            .get("max_attempts")
-                            .and_then(|v| v.as_u64())
-                            .and_then(|v| u8::try_from(v).ok())
-                            .unwrap_or(TRUST_RETRY_MAX_ATTEMPTS),
-                        first_target: PaneId::new(
-                            payload
-                                .get("first_target")
+        // U1 #5: per-event isolation — one poison event (bad payload / fire error) must not
+        // halt the whole pass. The fire body is confined to a closure; on Err we emit
+        // `scheduler.event_failed`, mark the row terminal 'failed' (no re-fire), and continue.
+        let fire_one = || -> Result<serde_json::Value, MessagingError> {
+            let scheduled_kind = parse_scheduled_kind(&kind)?;
+            let result = match scheduled_kind {
+                ScheduledKind::Send => {
+                    let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
+                    let outcome = deliver_stored_message(
+                        workspace,
+                        Some(&target),
+                        payload.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                        None,
+                        payload.get("sender").and_then(|v| v.as_str()).unwrap_or("leader"),
+                        payload
+                            .get("requires_ack")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        payload
+                            .get("wait_visible")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                        payload.get("timeout").and_then(|v| v.as_f64()).unwrap_or(30.0),
+                        None,
+                    )?;
+                    serde_json::json!({
+                        "ok": outcome.ok,
+                        "status": status_wire(outcome.status),
+                        "message_id": outcome.message_id,
+                    })
+                }
+                ScheduledKind::HealthPing => {
+                    event_log.write(
+                        "scheduled.health_ping",
+                        serde_json::json!({"event_id": id, "target": target}),
+                    )?;
+                    serde_json::json!({"ok": true, "status": "logged"})
+                }
+                ScheduledKind::TrustRetry => {
+                    let payload: serde_json::Value = serde_json::from_str(&payload_json)?;
+                    let outcome = handle_trust_retry_needed(
+                        store,
+                        &TrustRetryPayload {
+                            message_id: payload
+                                .get("message_id")
                                 .and_then(|v| v.as_str())
-                                .unwrap_or(""),
-                        ),
-                    },
-                    event_log,
-                )?;
-                serde_json::json!({"ok": outcome.ok, "status": status_wire(outcome.status)})
+                                .unwrap_or_default()
+                                .to_string(),
+                            attempt: payload
+                                .get("attempt")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| u8::try_from(v).ok())
+                                .unwrap_or(1),
+                            max_attempts: payload
+                                .get("max_attempts")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| u8::try_from(v).ok())
+                                .unwrap_or(TRUST_RETRY_MAX_ATTEMPTS),
+                            first_target: PaneId::new(
+                                payload
+                                    .get("first_target")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(""),
+                            ),
+                        },
+                        event_log,
+                    )?;
+                    serde_json::json!({"ok": outcome.ok, "status": status_wire(outcome.status)})
+                }
+            };
+            Ok(result)
+        };
+
+        let (status, result_json) = match fire_one() {
+            Ok(result) => {
+                let ok = result.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                (if ok { "done" } else { "failed" }, result.to_string())
+            }
+            Err(error) => {
+                // Poison event: loud + terminal, never halts the pass or re-fires.
+                let _ = event_log.write(
+                    "scheduler.event_failed",
+                    serde_json::json!({
+                        "event_id": id,
+                        "kind": kind,
+                        "error": error.to_string(),
+                    }),
+                );
+                (
+                    "failed",
+                    serde_json::json!({"ok": false, "status": "failed", "error": error.to_string()})
+                        .to_string(),
+                )
             }
         };
-        let status = if result
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            "done"
-        } else {
-            "failed"
-        };
+        // The row-status write stays `?`: a DB write failure is a real store fault, not a
+        // per-event poison, and should surface (consistent with the rest of the fn).
         conn.execute(
             "update scheduled_events set status = ?2, fired_at = ?3, result_json = ?4 where id = ?1",
-            params![id, status, chrono::Utc::now().to_rfc3339(), result.to_string()],
+            params![id, status, chrono::Utc::now().to_rfc3339(), result_json],
         )?;
         fired.push(id);
     }

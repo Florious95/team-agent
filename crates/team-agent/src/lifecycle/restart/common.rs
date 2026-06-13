@@ -187,6 +187,16 @@ pub(super) fn spawn_agent_window(
         )
     };
     let spawn = result.map_err(|e| LifecycleError::Transport(e.to_string()))?;
+    if layout_placement.is_some() {
+        crate::lifecycle::launch::configure_adaptive_pane_title(
+            workspace,
+            transport,
+            session_name,
+            &window,
+            &spawn.pane_id,
+            agent_id.as_str(),
+        );
+    }
     let _ = adapter.handle_startup_prompts(
         transport,
         &crate::transport::Target::Pane(spawn.pane_id.clone()),
@@ -245,6 +255,72 @@ pub(super) fn persist_effective_approval_policy_for_restart(
     safety: &DangerousApproval,
 ) {
     crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
+}
+
+pub(super) fn save_restart_projected_state(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+) -> Result<(), LifecycleError> {
+    sync_restart_team_projections(state, team_key);
+    crate::state::projection::save_team_scoped_state(workspace, state)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+pub(super) fn restart_projection_team_key(
+    state: &serde_json::Value,
+    team: Option<&str>,
+) -> String {
+    team.filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)
+                .filter(|key| !key.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| crate::state::projection::team_state_key(state))
+}
+
+pub(super) fn sync_restart_team_projections(state: &mut serde_json::Value, team_key: &str) {
+    let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) else {
+        return;
+    };
+    if teams.is_empty() {
+        return;
+    }
+    let compact = crate::state::projection::compact_team_state(state);
+    let active_key = state
+        .get("active_team_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string);
+    let derived_key = crate::state::projection::team_state_key(state);
+    let Some(teams) = state
+        .get_mut("teams")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let mut keys = Vec::new();
+    if !team_key.is_empty() {
+        keys.push(team_key.to_string());
+    }
+    if let Some(active_key) = active_key {
+        keys.push(active_key);
+    }
+    if !derived_key.is_empty() {
+        keys.push(derived_key);
+    }
+    if teams.contains_key("current") {
+        keys.push("current".to_string());
+    }
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        teams.insert(key, compact.clone());
+    }
 }
 
 pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {

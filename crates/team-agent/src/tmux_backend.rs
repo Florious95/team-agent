@@ -669,7 +669,7 @@ impl TmuxBackend {
             "select-layout".to_string(),
             "-t".to_string(),
             target,
-            "tiled".to_string(),
+            "even-horizontal".to_string(),
         ];
         self.run_ok(&layout_argv)?;
         Ok(SpawnResult {
@@ -813,6 +813,54 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
             InjectVerification::CaptureContainsToken
         }
         InjectPayload::Text(_) => InjectVerification::NoToken,
+    }
+}
+
+/// U1 #7: the delivery-token marker a token payload carries (`[team-agent-token:<id>]`).
+/// Returns the substring to look for in the pre-submit pane capture.
+fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
+    match payload {
+        InjectPayload::Text(text) if text.contains("[team-agent-token:") => {
+            Some("[team-agent-token:")
+        }
+        _ => None,
+    }
+}
+
+/// U1 #7: capture the pane just before submit and report whether the just-pasted
+/// token marker is actually visible. `Ok(None)` for non-token payloads (nothing to
+/// check). `Ok(Some(false))` means the paste silently dropped — a false-positive that
+/// the static `inject_verification_for_payload` would have reported as success.
+fn pre_submit_token_visible(
+    backend: &TmuxBackend,
+    target: &Target,
+    payload: &InjectPayload,
+) -> Result<Option<bool>, TransportError> {
+    match payload_token_marker(payload) {
+        None => Ok(None),
+        Some(marker) => {
+            let captured = backend.capture(target, CaptureRange::Tail(80))?;
+            Ok(Some(captured.text.contains(marker)))
+        }
+    }
+}
+
+/// U1 #7: downgrade the static token verification to `CaptureMissingToken` when the
+/// pre-submit readback did not see the token in the pane. A `None` readback (non-token
+/// payload, or capture unavailable) falls back to the static verification.
+fn inject_verification_after_readback(
+    payload: &InjectPayload,
+    token_visible_before_submit: Option<bool>,
+) -> InjectVerification {
+    match (payload, token_visible_before_submit) {
+        (InjectPayload::Text(text), Some(visible)) if text.contains("[team-agent-token:") => {
+            if visible {
+                InjectVerification::CaptureContainsToken
+            } else {
+                InjectVerification::CaptureMissingToken
+            }
+        }
+        _ => inject_verification_for_payload(payload),
     }
 }
 
@@ -960,6 +1008,8 @@ impl Transport for TmuxBackend {
         bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
         let pane = pane_from_target(target);
+        // U1 #7: pre-submit pane readback signal for the non-pasted-prompt text path.
+        let mut token_visible_before_submit: Option<bool> = None;
         match payload {
             InjectPayload::Empty => {
                 let argv = tmux_empty_inject_argv(&pane, submit);
@@ -1010,12 +1060,23 @@ impl Transport for TmuxBackend {
                         attempts,
                     });
                 }
+                // U1 #7 (efd189b redo, canonical-native): before the final submit, read
+                // back the pane and confirm the just-pasted token is actually visible.
+                // The static `inject_verification_for_payload` returns CaptureContainsToken
+                // for any token payload WITHOUT checking the pane — a false positive when
+                // the paste silently dropped. Here we downgrade to CaptureMissingToken when
+                // a token payload's token is not visible in the pre-submit capture.
+                token_visible_before_submit =
+                    pre_submit_token_visible(self, target, payload).unwrap_or(None);
                 self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
             }
         }
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,
-            inject_verification: inject_verification_for_payload(payload),
+            inject_verification: inject_verification_after_readback(
+                payload,
+                token_visible_before_submit,
+            ),
             submit_verification: submit_verification_for_key(submit),
             turn_verification: match payload {
                 InjectPayload::Empty => TurnVerification::NotRequired,
@@ -1205,6 +1266,40 @@ impl Transport for TmuxBackend {
             .filter(|line| !line.is_empty())
             .map(WindowName::new)
             .collect())
+    }
+
+    fn configure_adaptive_pane_title(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        pane: &PaneId,
+        title: &str,
+    ) -> Result<(), TransportError> {
+        let target = format!("{}:{}", session.as_str(), window.as_str());
+        self.run_ok(&[
+            "tmux".to_string(),
+            "set-window-option".to_string(),
+            "-t".to_string(),
+            target.clone(),
+            "pane-border-status".to_string(),
+            "bottom".to_string(),
+        ])?;
+        self.run_ok(&[
+            "tmux".to_string(),
+            "set-window-option".to_string(),
+            "-t".to_string(),
+            target,
+            "pane-border-format".to_string(),
+            " #{pane_title} ".to_string(),
+        ])?;
+        self.run_ok(&[
+            "tmux".to_string(),
+            "select-pane".to_string(),
+            "-t".to_string(),
+            pane.as_str().to_string(),
+            "-T".to_string(),
+            title.to_string(),
+        ])
     }
 
     fn set_session_env(

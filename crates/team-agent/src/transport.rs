@@ -530,6 +530,17 @@ pub trait Transport: Send + Sync {
         session: &SessionName,
     ) -> Result<Vec<WindowName>, TransportError>;
 
+    fn configure_adaptive_pane_title(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        pane: &PaneId,
+        title: &str,
+    ) -> Result<(), TransportError> {
+        let _ = (session, window, pane, title);
+        Ok(())
+    }
+
     /// tmux=`set-environment`;无 server-env 的后端(WezTerm/ConPTY)对 worker 内化为
     /// 「spawn 时注入」(`InternalizedAtSpawn`),对外部 leader pane 返回 typed 不支持
     /// (`UnsupportedForExternalPane`,§4c)。

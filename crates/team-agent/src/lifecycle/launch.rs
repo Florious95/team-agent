@@ -438,6 +438,16 @@ fn spawn_agents(
         if matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Dead)) {
             continue;
         }
+        if placement.is_some() {
+            configure_adaptive_pane_title(
+                workspace,
+                transport,
+                session_name,
+                &window,
+                &spawn.pane_id,
+                agent_id_raw,
+            );
+        }
         let display = if placement.is_some() {
             WorkerDisplay::Adaptive {
                 status: DisplayStatus::Opened,
@@ -2651,6 +2661,34 @@ pub(crate) fn selected_tmux_socket_source(
         Some("workspace")
     } else {
         None
+    }
+}
+
+pub(crate) fn configure_adaptive_pane_title(
+    workspace: &Path,
+    transport: &dyn Transport,
+    session_name: &SessionName,
+    window: &WindowName,
+    pane: &PaneId,
+    agent_id: &str,
+) {
+    if let Err(error) =
+        transport.configure_adaptive_pane_title(session_name, window, pane, agent_id)
+    {
+        let message = format!("adaptive layout pane title failed for {agent_id}: {error}");
+        eprintln!("Warning: {message}");
+        if let Err(event_error) = crate::event_log::EventLog::new(workspace).write(
+            "adaptive_layout.pane_title_failed",
+            serde_json::json!({
+                "agent_id": agent_id,
+                "session": session_name.as_str(),
+                "window": window.as_str(),
+                "pane_id": pane.as_str(),
+                "warning": message,
+            }),
+        ) {
+            eprintln!("Warning: adaptive_layout.pane_title_failed event write failed: {event_error}");
+        }
     }
 }
 

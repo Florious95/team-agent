@@ -19,7 +19,14 @@ pub struct CapturePassReport {
     pub pending: Vec<String>,
     pub assigned: Vec<String>,
     pub ambiguous: Vec<AmbiguousSessionCapture>,
+    pub capture_failures: Vec<SessionCaptureFailure>,
     pub candidate_count_by_agent: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCaptureFailure {
+    pub agent_id: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,13 +147,24 @@ where
         return Ok(CapturePassReport::default());
     };
     let mut pending = Vec::new();
+    let mut capture_failures = Vec::new();
     let mut candidates_by_agent = BTreeMap::new();
     for (agent_id, agent) in agent_map {
         let Some(capture) = pending_session_capture(agent_id, agent, adapter_for) else {
             continue;
         };
         let adapter = adapter_for(capture.provider);
-        let candidates = adapter.capture_session_candidates(&capture.context, timeout_s)?;
+        let candidates = match adapter.capture_session_candidates(&capture.context, timeout_s) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                capture_failures.push(SessionCaptureFailure {
+                    agent_id: capture.agent_id.clone(),
+                    error: error.to_string(),
+                });
+                pending.push(capture);
+                continue;
+            }
+        };
         candidates_by_agent.insert(capture.agent_id.clone(), candidates);
         pending.push(capture);
     }
@@ -164,6 +182,7 @@ where
     };
     let mut report = CapturePassReport {
         pending: pending.iter().map(|item| item.agent_id.clone()).collect(),
+        capture_failures,
         candidate_count_by_agent: candidates_by_agent
             .iter()
             .map(|(agent_id, candidates)| (agent_id.clone(), candidates.len()))
@@ -613,5 +632,246 @@ fn parse_provider(raw: &str) -> Option<Provider> {
         "gemini_cli" => Some(Provider::GeminiCli),
         "fake" => Some(Provider::Fake),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    #[derive(Clone)]
+    pub(crate) struct CaptureCandidatesAdapter {
+        provider: Provider,
+        fail_agent_id: Option<String>,
+        error: String,
+    }
+
+    impl CaptureCandidatesAdapter {
+        pub(crate) fn new(provider: Provider, fail_agent_id: Option<&str>, error: &str) -> Self {
+            Self {
+                provider,
+                fail_agent_id: fail_agent_id.map(str::to_string),
+                error: error.to_string(),
+            }
+        }
+    }
+
+    impl ProviderAdapter for CaptureCandidatesAdapter {
+        fn provider(&self) -> Provider {
+            self.provider
+        }
+
+        fn caps(&self) -> crate::provider::ProviderCaps {
+            crate::provider::ProviderCaps {
+                resume: true,
+                fork: false,
+                native_mcp_config: false,
+                writes_global_settings: false,
+            }
+        }
+
+        fn is_installed(&self) -> bool {
+            true
+        }
+
+        fn version(&self) -> Result<String, ProviderError> {
+            Ok("test".to_string())
+        }
+
+        fn auth_hint(
+            &self,
+            _auth_mode: crate::provider::AuthMode,
+        ) -> crate::provider::AuthHintStatus {
+            crate::provider::AuthHintStatus::Unknown
+        }
+
+        fn build_command(
+            &self,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+            _system_prompt: Option<&str>,
+            _model: Option<&str>,
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn build_command_with_tools(
+            &self,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+            _system_prompt: Option<&str>,
+            _model: Option<&str>,
+            _tools: &[&str],
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn capture_session_id(
+            &self,
+            _agent_id: &str,
+            _spawn_cwd: &std::path::Path,
+            _timeout_s: u64,
+        ) -> Result<Option<CapturedSession>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn capture_session_candidates(
+            &self,
+            context: &CaptureSessionContext,
+            _timeout_s: u64,
+        ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+            if self.fail_agent_id.as_deref() == Some(context.agent_id.as_str()) {
+                return Err(ProviderError::Io(self.error.clone()));
+            }
+            Ok(Vec::new())
+        }
+
+        fn recover_session_id(
+            &self,
+            _agent_id: &str,
+            _spawn_cwd: &std::path::Path,
+        ) -> Result<Option<SessionId>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn session_is_resumable(
+            &self,
+            _session_id: Option<&SessionId>,
+            _auth_mode: crate::provider::AuthMode,
+        ) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+
+        fn build_resume_command(
+            &self,
+            _session_id: Option<&SessionId>,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn build_resume_command_with_context(
+            &self,
+            _session_id: Option<&SessionId>,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+            _system_prompt: Option<&str>,
+            _model: Option<&str>,
+            _tools: &[&str],
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn fork(
+            &self,
+            _session_id: Option<&SessionId>,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn fork_with_context(
+            &self,
+            _session_id: Option<&SessionId>,
+            _auth_mode: crate::provider::AuthMode,
+            _mcp_config: Option<&crate::provider::McpConfig>,
+            _system_prompt: Option<&str>,
+            _model: Option<&str>,
+            _tools: &[&str],
+        ) -> Result<Vec<String>, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn mcp_config(
+            &self,
+            _auth_mode: crate::provider::AuthMode,
+        ) -> Result<crate::provider::McpConfig, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn install_mcp(&self, _config: &crate::provider::McpConfig) -> Result<(), ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn status_patterns(&self) -> Result<crate::provider::StatusPatterns, ProviderError> {
+            Err(ProviderError::CapabilityUnsupported(
+                "test adapter".to_string(),
+            ))
+        }
+
+        fn validate_model(&self, _model: &str) -> Result<bool, ProviderError> {
+            Ok(true)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod u1_tests {
+    use super::*;
+
+    #[test]
+    fn capture_pass_keeps_pending_agent_when_one_adapter_capture_fails() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "bad": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-bad"
+                },
+                "good": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-good"
+                }
+            }
+        });
+        let mut adapter_for = |provider| {
+            Box::new(test_support::CaptureCandidatesAdapter::new(
+                provider,
+                Some("bad"),
+                "capture exploded",
+            )) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("one agent capture failure must not abort the whole pass");
+
+        assert_eq!(report.pending, vec!["bad".to_string(), "good".to_string()]);
+        assert_eq!(report.assigned, Vec::<String>::new());
+        assert_eq!(
+            report.candidate_count_by_agent.get("good"),
+            Some(&0),
+            "the non-failing agent must still be probed"
+        );
+        assert_eq!(
+            report.capture_failures,
+            vec![SessionCaptureFailure {
+                agent_id: "bad".to_string(),
+                error: "provider io error: capture exploded".to_string(),
+            }]
+        );
     }
 }

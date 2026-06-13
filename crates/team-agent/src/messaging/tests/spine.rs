@@ -107,8 +107,21 @@ fn p2_scheduler_unknown_kind_surfaces_error() {
     )
     .unwrap();
     let log = EventLog::new(&ws);
-    let r = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log);
-    assert!(r.is_err(), "an unknown scheduled event kind must surface an error, not a silent ok=false");
+    // U1 #5: unknown kind is isolated to its own row (marked terminal 'failed' +
+    // scheduler.event_failed), NOT propagated as a pass-level Err that would halt the
+    // batch. Failure stays loud (evented) but does not take the whole scheduler down.
+    let fired = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log)
+        .expect("an unknown scheduled event kind must be isolated to its row, not halt the pass");
+    assert_eq!(fired.len(), 1);
+    assert_eq!(scheduled_status_of(&store, fired[0]), "failed");
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("scheduler.event_failed")
+                && event.get("event_id").and_then(serde_json::Value::as_i64) == Some(fired[0])
+        }),
+        "unknown scheduled event kind must leave scheduler.event_failed; events={events:?}"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -310,6 +323,42 @@ fn spine_scheduler_marks_failed_when_result_not_ok() {
         scheduled_status_of(&store, id),
         "failed",
         "a not-ok result (exhausted trust_retry) must mark the scheduled event 'failed', not unconditional 'done'"
+    );
+}
+
+// U1 #5 (RED) — a single poison scheduled event (malformed payload_json that errors at
+// `serde_json::from_str?`) must NOT halt the whole pass: it must be marked terminal 'failed'
+// + emit `scheduler.event_failed`, and a healthy event seeded AFTER it must still fire.
+// Today the bare `?` aborts `fire_due_scheduled_events`, the healthy event never fires → RED.
+#[test]
+fn spine_scheduler_poison_event_does_not_halt_batch() {
+    let ws = tmp_ws("sched-poison");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    // earlier due_at → selected first; malformed JSON payload errors at from_str.
+    let poison = seed_event_due(&store, "send", "2000-01-01T00:00:00+00:00", "{not valid json");
+    // later due_at → selected after poison; healthy.
+    let healthy = seed_event_due(&store, "health_ping", "2000-01-02T00:00:00+00:00", "{}");
+
+    let fired = fire_due_scheduled_events(&ws, &store, &NoopTransport, &log)
+        .expect("a poison event must not propagate as a pass-level Err (must isolate + continue)");
+
+    // poison marked terminal failed (not re-fired every tick).
+    assert_eq!(
+        scheduled_status_of(&store, poison),
+        "failed",
+        "U1 #5: a poison scheduled event must be marked terminal 'failed', not halt the pass"
+    );
+    // healthy event AFTER the poison still fired.
+    assert!(
+        fired.contains(&healthy),
+        "U1 #5: a healthy event after a poison one must still fire (batch not halted); fired={fired:?}"
+    );
+    // failure is loud: scheduler.event_failed event emitted for the poison.
+    let events = read_event_log(&ws);
+    assert!(
+        events.iter().any(|e| e.get("event").and_then(|v| v.as_str()) == Some("scheduler.event_failed")),
+        "U1 #5: a poison event must emit scheduler.event_failed (failure must be loud, not silent)"
     );
 }
 

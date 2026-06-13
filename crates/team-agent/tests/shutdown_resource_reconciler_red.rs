@@ -104,7 +104,7 @@ fn shutdown_entrypoint_uses_stored_tmux_endpoint_for_legacy_live_runtime() {
     let source = include_str!("../src/cli/mod.rs");
     let shutdown_body = slice_between(
         source,
-        "pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>)",
+        "/// `runtime.shutdown`(`cmd_shutdown`)",
         "pub fn shutdown_with_transport",
     );
 

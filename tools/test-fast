@@ -5,12 +5,50 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 run_start_epoch="$(date +%s)"
+run_start_marker="$(mktemp "${TMPDIR:-/tmp}/team-agent-test-fast-start.XXXXXX")"
+touch "$run_start_marker"
+cleanup_test_temp_workspaces_on_exit() {
+  local cleanup_rc=0
+  local removed=0
+  local root root_real pattern path seen_roots=""
+
+  if [[ "${TEAM_AGENT_KEEP_TEST_TMP:-}" == "1" ]]; then
+    echo "test-fast: temp workspace cleanup skipped TEAM_AGENT_KEEP_TEST_TMP=1"
+    return 0
+  fi
+
+  for root in /private/tmp "${TMPDIR:-/tmp}"; do
+    [[ -d "$root" ]] || continue
+    root_real="$(cd "$root" && pwd -P)" || continue
+    if [[ " $seen_roots " == *" $root_real "* ]]; then
+      continue
+    fi
+    seen_roots="$seen_roots $root_real"
+    for pattern in ta-rs-* ta_rs_* ta-bug7-* ta-doctor-*; do
+      for path in "$root_real"/$pattern; do
+        [[ -d "$path" ]] || continue
+        [[ "$path" -nt "$run_start_marker" ]] || continue
+        if rm -rf -- "$path"; then
+          removed=$((removed + 1))
+        else
+          cleanup_rc=1
+          echo "test-fast: temp workspace cleanup failed path=$path" >&2
+        fi
+      done
+    done
+  done
+
+  echo "test-fast: temp workspace cleanup removed=$removed"
+  return "$cleanup_rc"
+}
 cleanup_tmux_residue_on_exit() {
   local rc=$?
   local cleanup_rc=0
   "$ROOT/tools/cleanup-tmux-residue.sh" --created-after-epoch "$run_start_epoch" || cleanup_rc=$?
+  cleanup_test_temp_workspaces_on_exit || cleanup_rc=$?
+  rm -f "$run_start_marker"
   if [[ "$cleanup_rc" -ne 0 ]]; then
-    echo "test-fast: cleanup-tmux-residue failed rc=$cleanup_rc" >&2
+    echo "test-fast: cleanup failed rc=$cleanup_rc" >&2
   fi
   exit "$rc"
 }

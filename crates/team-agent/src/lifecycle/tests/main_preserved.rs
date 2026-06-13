@@ -41,11 +41,11 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
     }
     fn spawn_first(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _cwd: &std::path::Path, _env: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
         self.spawns.lock().unwrap().push(("spawn_first".to_string(), argv.to_vec()));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new("%0"), session: session.clone(), window: window.clone(), child_pid: None })
+        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new("%0"), session: session.clone(), window: window.clone(), child_pid: Some(6856) })
     }
     fn spawn_into(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _cwd: &std::path::Path, _env: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
         self.spawns.lock().unwrap().push(("spawn_into".to_string(), argv.to_vec()));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())), session: session.clone(), window: window.clone(), child_pid: None })
+        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())), session: session.clone(), window: window.clone(), child_pid: Some(6856) })
     }
     fn inject(&self, _t: &crate::transport::Target, _p: &crate::transport::InjectPayload, _s: crate::transport::Key, _b: bool) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
         unimplemented!("not reached by start_agent respawn")
@@ -54,16 +54,19 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
         unimplemented!("not reached")
     }
     fn capture(&self, _t: &crate::transport::Target, _r: crate::transport::CaptureRange) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
-        unimplemented!("not reached")
+        Ok(crate::transport::CapturedText {
+            text: String::new(),
+            range: crate::transport::CaptureRange::Full,
+        })
     }
     fn query(&self, _t: &crate::transport::Target, _f: crate::transport::PaneField) -> Result<Option<String>, crate::transport::TransportError> {
         unimplemented!("not reached")
     }
     fn liveness(&self, _p: &crate::transport::PaneId) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
-        unimplemented!("not reached")
+        Ok(crate::model::enums::PaneLiveness::Live)
     }
     fn list_targets(&self) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
-        unimplemented!("not reached")
+        Ok(Vec::new())
     }
     fn has_session(&self, _s: &crate::transport::SessionName) -> Result<bool, crate::transport::TransportError> {
         Ok(self.session_exists)
@@ -162,6 +165,87 @@ fn reset_agent_discard_session_rebuilds_window_via_start_respawn() {
         recorded.last().unwrap().0, "spawn_into",
         "into a LIVE session (has_session=true) the window rebuild is a new-window (spawn_into); got {recorded:?}"
     );
+}
+
+#[test]
+fn reset_agent_discard_session_syncs_projection_epoch_inputs_for_restart_agent_command() {
+    let ws = restart_ws_two_resumable_workers();
+    let mut state = crate::state::persist::load_runtime_state(&ws).expect("load state");
+    state["team_dir"] = json!(ws.to_string_lossy());
+    state["active_team_key"] = json!("restartteam");
+    state["agents"]["alpha"]["window"] = json!("alpha");
+    state["agents"]["alpha"]["pane_id"] = json!("%old");
+    state["agents"]["alpha"]["pane_pid"] = json!(6304);
+    state["agents"]["alpha"]["spawned_at"] = json!("2026-06-13T01:00:00+00:00");
+    state["agents"]["alpha"]["startup_prompts"] = json!("disabled_for_epoch");
+    state["agents"]["alpha"]["startup_prompt_status"] = json!("disabled_for_epoch");
+    state["agents"]["alpha"]["startup_prompt_probe_epoch"] = json!("pane_pid:6304");
+    state["agents"]["alpha"]["startup_prompt_probe_disabled_at"] =
+        json!("2026-06-13T01:01:00+00:00");
+    let compact = crate::state::projection::compact_team_state(&state);
+    state["teams"] = json!({
+        "current": compact.clone(),
+        "restartteam": compact,
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).expect("save stale projections");
+
+    let before = chrono::Utc::now();
+    let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let transport = SessionProbeRecordingTransport {
+        spawns: std::sync::Arc::clone(&spawns),
+        session_exists: true,
+    };
+    let outcome = reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport)
+        .expect("reset-agent alpha --discard-session --no-display");
+    assert!(
+        matches!(outcome, ResetAgentOutcome::Reset { .. }),
+        "restart-agent alpha --discard-session --no-display must complete reset; got {outcome:?}"
+    );
+
+    let state = crate::state::persist::load_runtime_state(&ws).expect("reload state");
+    for pointer in [
+        "/agents/alpha",
+        "/teams/current/agents/alpha",
+        "/teams/restartteam/agents/alpha",
+    ] {
+        let agent = state.pointer(pointer).expect(pointer);
+        assert_eq!(
+            agent.get("pane_id").and_then(serde_json::Value::as_str),
+            Some("%alpha"),
+            "{pointer} must project the reset-spawned pane, not the stale pre-reset pane"
+        );
+        assert_eq!(
+            agent.get("pane_pid").and_then(serde_json::Value::as_u64),
+            Some(6856),
+            "{pointer} must project the reset-spawned pane pid, not stale pid 6304"
+        );
+        let spawned_at = agent
+            .get("spawned_at")
+            .and_then(serde_json::Value::as_str)
+            .expect("spawned_at refreshed");
+        assert_ne!(
+            spawned_at, "2026-06-13T01:00:00+00:00",
+            "{pointer} must not retain stale spawned_at"
+        );
+        let spawned_at = chrono::DateTime::parse_from_rfc3339(spawned_at)
+            .expect("spawned_at rfc3339")
+            .with_timezone(&chrono::Utc);
+        assert!(
+            spawned_at >= before - chrono::Duration::seconds(1),
+            "{pointer} must get a fresh startup-probe grace epoch; spawned_at={spawned_at}, before={before}"
+        );
+        for key in [
+            "startup_prompts",
+            "startup_prompt_status",
+            "startup_prompt_probe_epoch",
+            "startup_prompt_probe_disabled_at",
+        ] {
+            assert!(
+                agent.get(key).is_none(),
+                "{pointer} must not retain old startup probe epoch field {key}"
+            );
+        }
+    }
 }
 // item ② — remove invoked with a NON-canonical input (the workspace's own `.team` subpath) must resolve
 // the CANONICAL live run-workspace and apply the removal to the LIVE roster — not the subpath's detached

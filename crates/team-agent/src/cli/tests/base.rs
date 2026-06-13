@@ -363,6 +363,32 @@ latest result: none";
         assert!(!line2.contains("interacted"), "no marker when interacted==0");
     }
 
+    #[test]
+    fn format_status_csv_preserves_agent_order_and_collapses_errors() {
+        let data = json!({
+            "agents": {
+                "zeta": {"status": "idle", "pane_id": "%1"},
+                "alpha": {"status": "running", "pane_id": "%2"},
+                "err_failed": {"status": "failed", "pane_id": "%3"},
+                "err_missing_pane": {"status": "running"},
+                "err_unknown": {"status": "mystery", "pane_id": "%4"},
+                "err_stopped": {"status": "stopped", "pane_id": "%5"}
+            },
+            "agent_health": {
+                "alpha": {"status": "working"}
+            }
+        });
+        assert_eq!(
+            format_status_csv(&data),
+            "zeta,空闲\nalpha,工作\nerr_failed,错误\nerr_missing_pane,错误\nerr_unknown,错误\nerr_stopped,错误"
+        );
+    }
+
+    #[test]
+    fn format_status_csv_zero_workers_is_empty() {
+        assert_eq!(format_status_csv(&json!({"agents": {}, "agent_health": {}})), "");
+    }
+
     // =========================================================================
     // emit(helpers.py:12-23):--json sort_keys+indent=2 | dict 逐键 | 非 dict
     // =========================================================================

@@ -127,8 +127,8 @@ use rusqlite::params;
                 format_agent_status(workspace, &status, agent)
             }
             None => {
-                let status = status_scoped(workspace, state, owner_team_id, true, false)?;
-                Ok(crate::cli::format_status_summary(&status))
+                let status = status_scoped(workspace, state, owner_team_id, false, false)?;
+                Ok(crate::cli::format_status_csv(&status))
             }
         }
     }

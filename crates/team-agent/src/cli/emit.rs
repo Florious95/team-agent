@@ -218,7 +218,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("fallback-send-leader") => "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use.".to_string(),
         Some("fallback-report-result") => "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use.".to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
-        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]".to_string(),
+        Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
         Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]".to_string(),
@@ -1661,6 +1661,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_help_mentions_summary_for_error_details() {
+        assert!(
+            command_help(Some("status")).contains("错误细分走 status --summary"),
+            "status help must tell users where detailed error classes live"
+        );
     }
 
     #[test]

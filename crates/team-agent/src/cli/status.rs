@@ -145,6 +145,67 @@ pub fn format_status_summary(data: &Value) -> String {
     )
 }
 
+pub fn format_status_csv(data: &Value) -> String {
+    let Some(agents) = data.get("agents").and_then(Value::as_object) else {
+        return String::new();
+    };
+    let health = data.get("agent_health").and_then(Value::as_object);
+    agents
+        .iter()
+        .map(|(agent_id, agent)| {
+            let status = csv_agent_status(agent_id, agent, health);
+            format!("{agent_id},{status}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn csv_agent_status(
+    agent_id: &str,
+    agent: &Value,
+    health: Option<&serde_json::Map<String, Value>>,
+) -> &'static str {
+    let raw = agent
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let hstatus = health
+        .and_then(|map| map.get(agent_id))
+        .and_then(|v| v.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(raw.as_str(), "failed" | "error" | "spawn_failed")
+        || matches!(hstatus.as_str(), "failed" | "error" | "spawn_failed")
+        || matches!(raw.as_str(), "stopped" | "done")
+    {
+        return "错误";
+    }
+    let pane_present = agent
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .is_some()
+        || agent
+            .pointer("/display/pane_id")
+            .and_then(Value::as_str)
+            .filter(|pane| !pane.is_empty())
+            .is_some();
+    if matches!(raw.as_str(), "running" | "busy" | "working") && !pane_present {
+        return "错误";
+    }
+    if raw == "idle" || hstatus == "idle" {
+        return "空闲";
+    }
+    if matches!(raw.as_str(), "running" | "busy" | "working")
+        || matches!(hstatus.as_str(), "running" | "working" | "busy")
+    {
+        return "工作";
+    }
+    "错误"
+}
+
 /// `_latest_result_line`(`commands.py:333-337`):agent_id/summary/created_at 渲染单行。
 /// summary `\n`→` ` 后 [:80] 截断、空 → `-`;agent_id 空 → `-`;created_at 经 age_text。
 pub(crate) fn format_latest_result(value: &Value) -> String {

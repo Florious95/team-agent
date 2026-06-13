@@ -349,6 +349,81 @@
         assert_eq!(result.pane_id.as_str(), "%4");
     }
 
+    #[test]
+    fn spawn_split_selects_even_horizontal_not_tiled() {
+        let (be, rec) = backend_with(
+            MockResp::Out(ok("")),
+            vec![MockResp::Out(ok("%5")), MockResp::Out(ok(""))],
+        );
+        let s = SessionName::new("teamsess");
+        let w = WindowName::new("team-w1");
+        let result = be
+            .spawn_split_with_env_unset(
+                &s,
+                &w,
+                &svec(&["provider-bin"]),
+                Path::new("/work/dir"),
+                &BTreeMap::new(),
+                &[],
+            )
+            .expect("spawn_split");
+        assert_eq!(result.pane_id.as_str(), "%5");
+        let calls = rec.lock().unwrap().clone();
+        assert_eq!(
+            calls[0][0..4],
+            svec(&["tmux", "split-window", "-t", "teamsess:team-w1"])
+        );
+        assert_eq!(
+            calls[1],
+            svec(&[
+                "tmux",
+                "select-layout",
+                "-t",
+                "teamsess:team-w1",
+                "even-horizontal",
+            ])
+        );
+        assert!(
+            !calls.iter().flatten().any(|arg| arg == "tiled"),
+            "adaptive split must not leave tmux tiled layout in the command stream: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn configure_adaptive_pane_title_sets_border_and_pane_title() {
+        let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
+        be.configure_adaptive_pane_title(
+            &SessionName::new("teamsess"),
+            &WindowName::new("team-w1"),
+            &PaneId::new("%7"),
+            "builder",
+        )
+        .expect("configure title");
+        let calls = rec.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                svec(&[
+                    "tmux",
+                    "set-window-option",
+                    "-t",
+                    "teamsess:team-w1",
+                    "pane-border-status",
+                    "bottom",
+                ]),
+                svec(&[
+                    "tmux",
+                    "set-window-option",
+                    "-t",
+                    "teamsess:team-w1",
+                    "pane-border-format",
+                    " #{pane_title} ",
+                ]),
+                svec(&["tmux", "select-pane", "-t", "%7", "-T", "builder"]),
+            ]
+        );
+    }
+
     // ── 3. set_session_env: argv = `tmux set-environment -t <s> <k> <v>`; success -> Applied ───────
     #[test]
     fn set_session_env_argv_and_applied_outcome() {
@@ -414,8 +489,10 @@
 
     #[test]
     fn inject_large_text_load_buffer_writes_stdin_and_token_report() {
-        let (be, rec, stdin_rec) = backend_with_stdin(MockResp::Out(ok("")), vec![]);
         let text = format!("{}{}", "x".repeat(16 * 1024), " [team-agent-token:abc]");
+        // U1 #7: the pre-submit readback captures the pane; a pane that ECHOES the token
+        // back (default capture returns the text) → CaptureContainsToken (true positive).
+        let (be, rec, stdin_rec) = backend_with_stdin(MockResp::Out(ok(&text)), vec![]);
         let report = be
             .inject(&Target::Pane(PaneId::new("%7")), &InjectPayload::Text(text.clone()), Key::Down, true)
             .expect("inject large text");
@@ -428,6 +505,25 @@
         let calls = rec.lock().unwrap().clone();
         assert_eq!(calls[0], svec(&["tmux", "load-buffer", "-b", "team-agent-send-abc", "-"]));
         assert_eq!(stdin_rec.lock().unwrap()[0], text);
+    }
+
+    // U1 #7 (RED→GREEN) — pre-submit pane readback: a token payload whose token is NOT
+    // visible in the pane before submit (paste silently dropped) must report
+    // CaptureMissingToken, not the static false-positive CaptureContainsToken.
+    #[test]
+    fn inject_token_not_visible_in_pane_reports_capture_missing_token() {
+        let text = format!("{}{}", "x".repeat(16 * 1024), " [team-agent-token:zzz]");
+        // default capture returns empty → token not visible → readback says missing.
+        let (be, _rec, _stdin) = backend_with_stdin(MockResp::Out(ok("")), vec![]);
+        let report = be
+            .inject(&Target::Pane(PaneId::new("%9")), &InjectPayload::Text(text), Key::Down, true)
+            .expect("inject runs");
+        assert_eq!(
+            report.inject_verification,
+            InjectVerification::CaptureMissingToken,
+            "U1 #7: a token that never appeared in the pane must read back as \
+CaptureMissingToken, not the static CaptureContainsToken false-positive"
+        );
     }
 
     #[test]

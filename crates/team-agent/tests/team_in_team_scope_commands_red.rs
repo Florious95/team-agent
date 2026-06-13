@@ -210,7 +210,7 @@ fn global_shutdown_without_team_keeps_existing_global_session_contract() {
 #[test]
 fn scoped_shutdown_source_guard_does_not_unconditionally_kill_shared_server() {
     let source = std::fs::read_to_string("src/cli/mod.rs").expect("read cli/mod.rs");
-    let shutdown = function_body(&source, "pub fn shutdown(workspace:");
+    let shutdown = function_body(&source, "shutdown");
     assert!(
         !shutdown.contains("\n        transport.kill_server();\n        result"),
         "shutdown --team must not unconditionally call kill_server after shutdown_with_transport; kill_server is reserved for the no-team/global shutdown path"
@@ -275,8 +275,9 @@ fn collected_result_ids(value: &Value) -> Vec<String> {
         .collect()
 }
 
-fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
-    let start = source.find(signature).expect("function signature exists");
+fn function_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let signature = format!("fn {name}");
+    let start = source.find(&signature).expect("function signature exists");
     let rest = &source[start..];
     let end = rest
         .find("\n    pub fn ")

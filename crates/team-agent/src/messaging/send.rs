@@ -351,6 +351,9 @@ fn backfill_leader_binding_for_delivery_view(
     state: &mut serde_json::Value,
     raw_state: &serde_json::Value,
 ) {
+    if !can_backfill_top_level_leader_binding(raw_state) {
+        return;
+    }
     let Some(obj) = state.as_object_mut() else {
         return;
     };
@@ -364,6 +367,13 @@ fn backfill_leader_binding_for_delivery_view(
             obj.insert("team_owner".to_string(), owner.clone());
         }
     }
+}
+
+fn can_backfill_top_level_leader_binding(raw_state: &serde_json::Value) -> bool {
+    raw_state
+        .get("teams")
+        .and_then(serde_json::Value::as_object)
+        .is_none_or(|teams| teams.len() <= 1)
 }
 
 fn send_owner_gate_refusal(

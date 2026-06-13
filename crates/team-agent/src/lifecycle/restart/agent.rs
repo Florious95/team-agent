@@ -97,8 +97,8 @@ pub(crate) fn start_agent_at_paths(
     };
     if !force && agent_live {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
-        crate::state::projection::save_team_scoped_state(workspace, &state)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        let team_key = restart_projection_team_key(&state, team);
+        save_restart_projected_state(workspace, &mut state, &team_key)?;
         if let Ok(spec) = load_team_spec(spec_workspace) {
             write_team_state(spec_workspace, &spec, &state)?;
         }
@@ -184,9 +184,9 @@ pub(crate) fn start_agent_at_paths(
         layout_placement.as_ref(),
         None,
     )?;
-    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, &safety)?;
-    crate::state::projection::save_team_scoped_state(workspace, &state)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, transport, &safety)?;
+    let team_key = restart_projection_team_key(&state, team);
+    save_restart_projected_state(workspace, &mut state, &team_key)?;
     write_start_agent_start_event(
         workspace,
         agent_id,
@@ -410,6 +410,7 @@ fn mark_agent_started(
     agent_id: &AgentId,
     window: &str,
     spawn: &SpawnedAgentWindow,
+    transport: &dyn crate::transport::Transport,
     safety: &DangerousApproval,
 ) -> Result<(), LifecycleError> {
     let Some(agent) = state
@@ -430,9 +431,23 @@ fn mark_agent_started(
         "pane_id".to_string(),
         serde_json::json!(spawn.spawn.pane_id.as_str()),
     );
-    if let Some(pane_pid) = spawn.spawn.child_pid {
+    let pane_pid = spawn.spawn.child_pid.or_else(|| {
+        transport
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|pane| pane.pane_id == spawn.spawn.pane_id)
+            .and_then(|pane| pane.pane_pid)
+    });
+    if let Some(pane_pid) = pane_pid {
         agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+    } else {
+        agent.remove("pane_pid");
     }
+    agent.insert(
+        "spawned_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
     crate::lifecycle::launch::persist_command_plan_state(
         agent,
         &spawn.plan,
@@ -467,6 +482,10 @@ fn mark_agent_started(
             }),
         );
     }
+    agent.remove("startup_prompts");
+    agent.remove("startup_prompt_status");
+    agent.remove("startup_prompt_probe_epoch");
+    agent.remove("startup_prompt_probe_disabled_at");
     Ok(())
 }
 
@@ -551,6 +570,8 @@ fn reset_agent_at_paths(
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
     let spec = load_team_spec(spec_workspace)?;
     discard_agent_session_fields(&mut state, agent_id)?;
+    let team_key = restart_projection_team_key(&state, team);
+    sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.
     crate::state::projection::save_team_scoped_state_with_tombstoned_agents(

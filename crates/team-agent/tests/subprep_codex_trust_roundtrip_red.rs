@@ -12,11 +12,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+
+#[path = "support/temp_workspace.rs"]
+mod temp_workspace;
 
 use rusqlite::params;
 use serde_json::json;
+use temp_workspace::TempWorkspace;
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::launch_with_transport;
 use team_agent::message_store::MessageStore;
@@ -95,21 +98,34 @@ const SUBROOT_FULL_TRUST_PANE_AFTER_QUICKSTART: &str = r#"> You are in /private/
 
 "#;
 
-fn tmp_dir(tag: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let tmp_root = if Path::new("/private/tmp").is_dir() {
-        PathBuf::from("/private/tmp")
-    } else {
-        std::env::temp_dir()
-    };
-    let dir = tmp_root.join(format!(
-        "ta-rs-subprep-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(dir).unwrap()
+fn tmp_dir(tag: &str) -> TempWorkspace {
+    TempWorkspace::new("ta-rs-subprep", tag)
+}
+
+#[test]
+fn temp_workspace_guard_cleans_after_panic_unwind() {
+    if TempWorkspace::keep_enabled() {
+        return;
+    }
+
+    let mut created = None;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ws = tmp_dir("guard-panic");
+        std::fs::write(ws.join("marker"), "created").unwrap();
+        created = Some(ws.to_path_buf());
+        panic!("intentional panic to prove TempWorkspace Drop cleanup");
+    }));
+
+    assert!(
+        result.is_err(),
+        "fixture sanity: panic branch must actually unwind for cleanup verification"
+    );
+    let created = created.expect("fixture sanity: panic branch should record temp path");
+    assert!(
+        !created.exists(),
+        "TempWorkspace must remove its root during panic unwinding unless TEAM_AGENT_KEEP_TEST_TMP=1; leaked={}",
+        created.display()
+    );
 }
 
 fn manifest_dir() -> PathBuf {
@@ -202,7 +218,7 @@ fn contract_a_subroot_tick_answers_full_pane_trust_and_persists_startup_handled(
     .with_session_present(true)
     .with_windows(vec![WindowName::new("w1")]);
     let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
+        WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
         Box::new(transport.clone()),
     );
@@ -292,7 +308,7 @@ fn contract_a_step1_trust_auto_answer_is_idempotent_across_repeated_ticks() {
     .with_session_present(true)
     .with_windows(vec![WindowName::new("w1")]);
     let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
+        WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
         Box::new(transport.clone()),
     );
@@ -433,7 +449,7 @@ fn contract_a_probe5_quick_start_ready_is_invalid_while_actionable_trust_remains
     .unwrap();
 
     let result = cmd_wait_ready(&WaitReadyArgs {
-        workspace: ws.clone(),
+        workspace: ws.to_path_buf(),
         timeout: 0.0,
         json: true,
     })
@@ -796,7 +812,7 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     );
 
     let coord = Coordinator::new(
-        WorkspacePath::new(ws.clone()),
+        WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
         Box::new(transport.clone()),
     );

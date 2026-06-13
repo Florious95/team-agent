@@ -307,5 +307,6 @@ mod spine;
 mod health_sync;
 mod takeover;
 mod daemon;
+mod energy;
 mod main_preserved;
 mod a0_lostupdate;

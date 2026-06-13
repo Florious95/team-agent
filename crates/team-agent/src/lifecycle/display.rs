@@ -105,6 +105,7 @@ pub fn rebuild_adaptive_display_after_rebind(
 struct DisplayTarget {
     agent_id: String,
     window: Option<WindowName>,
+    pane_id: Option<PaneId>,
     role: Option<String>,
 }
 
@@ -128,6 +129,11 @@ fn worker_display_targets(
         targets.push(DisplayTarget {
             agent_id: agent_id.clone(),
             window: Some(WindowName::new(window)),
+            pane_id: agent
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|pane| !pane.is_empty())
+                .map(PaneId::new),
             role: agent
                 .get("role")
                 .and_then(serde_json::Value::as_str)
@@ -190,81 +196,26 @@ fn open_adaptive_worker_displays(
     probe: &DisplayProbe,
 ) -> Result<BTreeMap<String, WorkerDisplay>, LifecycleError> {
     let targets = worker_display_targets(workspace, session_name)?;
-    if targets.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    if probe.adaptive_status != DisplayStatus::Opened {
-        return Ok(targets
-            .into_iter()
-            .map(|target| {
-                (
-                    target.agent_id,
-                    WorkerDisplay::Blocked {
-                        reason: probe
-                            .reason
-                            .unwrap_or(AdaptiveBlockReason::AggregatorRebuildFailed),
-                    },
-                )
-            })
-            .collect());
-    }
-    let Some(leader_session) = probe.leader_session.as_ref() else {
-        return Ok(blocked_displays(
-            targets,
-            AdaptiveBlockReason::LeaderNotInTmux,
-        ));
-    };
-    let mut linked_jobs = Vec::new();
-    for target in &targets {
-        match create_linked_worker_session(session_name, target) {
-            Ok(linked_session) => linked_jobs.push((target.clone(), linked_session)),
-            Err(reason) => {
-                kill_linked_sessions(linked_jobs.iter().map(|(_, linked)| linked.as_str()));
-                return Ok(blocked_displays(targets, reason));
-            }
-        }
-    }
-    close_adaptive_windows(leader_session.as_str(), session_name.as_str());
-    let panes = match prepare_tmux_attached_panes(
-        leader_session.as_str(),
-        session_name.as_str(),
-        &linked_jobs,
-    ) {
-        Ok(panes) => panes,
-        Err(reason) => {
-            close_adaptive_windows(leader_session.as_str(), session_name.as_str());
-            kill_linked_sessions(linked_jobs.iter().map(|(_, linked)| linked.as_str()));
-            return Ok(blocked_displays(
-                linked_jobs.into_iter().map(|(target, _)| target).collect(),
-                reason,
-            ));
-        }
-    };
-    Ok(linked_jobs
+    Ok(targets
         .into_iter()
-        .filter_map(|(target, linked_session)| {
-            let pane = panes.get(&target.agent_id)?;
-            let pane_title = display_pane_title(&target);
-            Some((
-                target.agent_id,
+        .map(|target| {
+            let agent_id = target.agent_id.clone();
+            (
+                agent_id.clone(),
                 WorkerDisplay::Adaptive {
-                    status: DisplayStatus::Opened,
-                    window: Some(WindowName::new(pane.window_name.clone())),
-                    workspace_window: Some(WindowName::new(pane.window_name.clone())),
-                    pane_id: Some(PaneId::new(pane.pane_id.clone())),
-                    pane_title: Some(pane_title),
-                    target: Some(format!("{}:{}", session_name.as_str(), pane.agent_id)),
-                    target_worker_session: Some(format!(
-                        "{}:{}",
-                        session_name.as_str(),
-                        pane.agent_id
-                    )),
-                    linked_session: Some(linked_session),
-                    leader_session: Some(leader_session.clone()),
-                    display_session: Some(leader_session.clone()),
-                    fallback: Some("tmux_headless".to_string()),
+                    status: probe.adaptive_status,
+                    window: target.window.clone(),
+                    workspace_window: target.window.clone(),
+                    pane_id: target.pane_id.clone(),
+                    pane_title: Some(agent_id),
+                    target: target.pane_id.as_ref().map(|pane| pane.as_str().to_string()),
+                    target_worker_session: Some(session_name.as_str().to_string()),
+                    linked_session: None,
+                    leader_session: Some(session_name.clone()),
+                    display_session: Some(session_name.clone()),
+                    fallback: None,
                 },
-            ))
+            )
         })
         .collect())
 }
@@ -407,13 +358,6 @@ struct TmuxOutput {
     stderr: String,
 }
 
-#[derive(Debug, Clone)]
-struct PaneRecord {
-    agent_id: String,
-    pane_id: String,
-    window_name: String,
-}
-
 fn in_wsl() -> bool {
     std::env::var("WSL_DISTRO_NAME").is_ok_and(|value| !value.is_empty())
         || std::env::var("WSL_INTEROP").is_ok_and(|value| !value.is_empty())
@@ -508,161 +452,6 @@ fn parse_tmux_info(stdout: &str) -> Option<LeaderTmuxInfo> {
     }
 }
 
-fn create_linked_worker_session(
-    session_name: &SessionName,
-    target: &DisplayTarget,
-) -> Result<String, AdaptiveBlockReason> {
-    let linked_session = adaptive_linked_session_name(session_name.as_str(), &target.agent_id);
-    let worker_window = target
-        .window
-        .as_ref()
-        .map(WindowName::as_str)
-        .unwrap_or(target.agent_id.as_str());
-    let _ = run_tmux(&["kill-session", "-t", linked_session.as_str()]);
-    run_tmux(&[
-        "new-session",
-        "-d",
-        "-t",
-        session_name.as_str(),
-        "-s",
-        linked_session.as_str(),
-    ])
-    .map_err(|_| AdaptiveBlockReason::WorkerSessionMissing)
-    .or_else(|reason| {
-        if running_inside_tmux() {
-            Err(reason)
-        } else {
-            Ok(TmuxOutput {
-                ok: true,
-                stdout: String::new(),
-                stderr: String::new(),
-            })
-        }
-    })?;
-    if run_tmux(&[
-        "select-window",
-        "-t",
-        &format!("{linked_session}:{worker_window}"),
-    ])
-    .is_err()
-    {
-        if !running_inside_tmux() {
-            return Ok(linked_session);
-        }
-        let _ = run_tmux(&["kill-session", "-t", linked_session.as_str()]);
-        return Err(AdaptiveBlockReason::WorkerSessionMissing);
-    }
-    Ok(linked_session)
-}
-
-fn prepare_tmux_attached_panes(
-    leader_session: &str,
-    session_name: &str,
-    linked_jobs: &[(DisplayTarget, String)],
-) -> Result<BTreeMap<String, PaneRecord>, AdaptiveBlockReason> {
-    let mut panes = BTreeMap::new();
-    for (window_index, window_jobs) in linked_jobs.chunks(3).enumerate() {
-        let window_name = adaptive_window_name(session_name, window_index);
-        let (first_target, first_linked_session) = &window_jobs[0];
-        let first_pane = run_tmux(&[
-            "new-window",
-            "-t",
-            leader_session,
-            "-n",
-            window_name.as_str(),
-            "-P",
-            "-F",
-            "#{pane_id}",
-            &tmux_attach_pane_command(first_linked_session),
-        ]);
-        let first_pane_id = match first_pane {
-            Ok(output) => tmux_stdout_last_line(&output.stdout)
-                .unwrap_or_else(|| format!("%ta{window_index}0")),
-            Err(_) if !running_inside_tmux() => format!("%ta{window_index}0"),
-            Err(_) => return Err(AdaptiveBlockReason::WindowCreateFailed),
-        };
-        if running_inside_tmux() {
-            set_display_pane_title(&first_pane_id, first_target)?;
-        } else {
-            let _ = set_display_pane_title(&first_pane_id, first_target);
-        }
-        panes.insert(
-            first_target.agent_id.clone(),
-            PaneRecord {
-                agent_id: first_target.agent_id.clone(),
-                pane_id: first_pane_id,
-                window_name: window_name.clone(),
-            },
-        );
-        let remain = run_tmux(&[
-            "set-window-option",
-            "-t",
-            &format!("{leader_session}:{window_name}"),
-            "remain-on-exit",
-            "on",
-        ]);
-        if running_inside_tmux() && remain.is_err() {
-            return Err(AdaptiveBlockReason::AggregatorRebuildFailed);
-        }
-        for (pane_index, (target, linked_session)) in window_jobs.iter().enumerate().skip(1) {
-            let split = run_tmux(&[
-                "split-window",
-                "-t",
-                &format!("{leader_session}:{window_name}"),
-                "-h",
-                "-P",
-                "-F",
-                "#{pane_id}",
-                &tmux_attach_pane_command(linked_session),
-            ]);
-            let pane_id = match split {
-                Ok(output) => tmux_stdout_last_line(&output.stdout)
-                    .unwrap_or_else(|| format!("%ta{window_index}{pane_index}")),
-                Err(_) if !running_inside_tmux() => format!("%ta{window_index}{pane_index}"),
-                Err(_) => return Err(AdaptiveBlockReason::SplitFailed),
-            };
-            if running_inside_tmux() {
-                set_display_pane_title(&pane_id, target)?;
-            } else {
-                let _ = set_display_pane_title(&pane_id, target);
-            }
-            panes.insert(
-                target.agent_id.clone(),
-                PaneRecord {
-                    agent_id: target.agent_id.clone(),
-                    pane_id,
-                    window_name: window_name.clone(),
-                },
-            );
-        }
-        let layout = run_tmux(&[
-            "select-layout",
-            "-t",
-            &format!("{leader_session}:{window_name}"),
-            "even-horizontal",
-        ]);
-        if running_inside_tmux() && layout.is_err() {
-            return Err(AdaptiveBlockReason::AggregatorRebuildFailed);
-        }
-    }
-    Ok(panes)
-}
-
-fn set_display_pane_title(
-    pane_id: &str,
-    target: &DisplayTarget,
-) -> Result<(), AdaptiveBlockReason> {
-    run_tmux(&[
-        "select-pane",
-        "-t",
-        pane_id,
-        "-T",
-        &display_pane_title(target),
-    ])
-    .map(|_| ())
-    .map_err(|_| AdaptiveBlockReason::AggregatorRebuildFailed)
-}
-
 fn close_adaptive_windows(leader_session: &str, session_name: &str) -> Vec<String> {
     let prefix = format!("team-agent:{session_name}:overview");
     let Ok(output) = run_tmux(&["list-windows", "-t", leader_session, "-F", "#{window_name}"])
@@ -680,17 +469,6 @@ fn close_adaptive_windows(leader_session: &str, session_name: &str) -> Vec<Strin
             } else {
                 None
             }
-        })
-        .collect()
-}
-
-fn kill_linked_sessions<'a>(sessions: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    sessions
-        .into_iter()
-        .filter_map(|session| {
-            run_tmux(&["kill-session", "-t", session])
-                .ok()
-                .map(|_| session.to_string())
         })
         .collect()
 }
@@ -718,13 +496,6 @@ fn adaptive_leader_session(state: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn adaptive_linked_session_name(session_name: &str, agent_id: &str) -> String {
-    let digest = crate::leader::sha1_hex_prefix(format!("{session_name}:{agent_id}").as_bytes(), 8);
-    let safe_session = sanitize_tmux_name(session_name, 80, "team");
-    let safe_agent = sanitize_tmux_name(agent_id, 40, "agent");
-    format!("{safe_session}__display__{safe_agent}__{digest}")
-}
-
 fn adaptive_window_name(session_name: &str, index: usize) -> String {
     if index == 0 {
         format!("team-agent:{session_name}:overview")
@@ -738,52 +509,12 @@ fn adaptive_window_is_tagged(session_name: &str, window: &str) -> bool {
     window == prefix || window.starts_with(&format!("{prefix}-"))
 }
 
-fn tmux_attach_pane_command(linked_session: &str) -> String {
-    format!(
-        "TMUX= tmux attach-session -t {}",
-        shell_quote(linked_session)
-    )
-}
-
 fn display_pane_title(target: &DisplayTarget) -> String {
     format!(
         "team-agent:{}:{}",
         target.agent_id,
         target.role.as_deref().unwrap_or("")
     )
-}
-
-fn sanitize_tmux_name(raw: &str, max_len: usize, fallback: &str) -> String {
-    let sanitized = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized
-        .chars()
-        .take(max_len)
-        .collect::<String>()
-        .trim_matches(&['.', '_', '-'][..])
-        .to_string();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed
-    }
-}
-
-fn tmux_stdout_last_line(stdout: &str) -> Option<String> {
-    stdout
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
 }
 
 fn string_field(display: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
@@ -813,14 +544,4 @@ fn run_tmux(args: &[&str]) -> Result<TmuxOutput, LifecycleError> {
             result.stderr.trim()
         )))
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }

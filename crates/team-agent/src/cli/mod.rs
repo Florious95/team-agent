@@ -269,6 +269,21 @@ pub mod lifecycle_port {
         error: Option<String>,
     }
 
+    #[derive(Debug)]
+    struct OwnedShutdownEndpoint {
+        endpoint: String,
+        socket_file: Option<PathBuf>,
+    }
+
+    #[derive(Debug, Default)]
+    struct OwnedEndpointCleanup {
+        residual_files: Vec<String>,
+        removed_files: Vec<String>,
+        skipped_files: Vec<String>,
+        remaining_sessions: Vec<String>,
+        error: Option<String>,
+    }
+
     fn push_unique_session(
         sessions: &mut Vec<crate::transport::SessionName>,
         session: crate::transport::SessionName,
@@ -419,6 +434,119 @@ pub mod lifecycle_port {
         }
     }
 
+    fn owned_shutdown_endpoint(
+        workspace: &Path,
+        state: &Value,
+        transport: &dyn crate::transport::Transport,
+    ) -> Option<OwnedShutdownEndpoint> {
+        if state_uses_external_leader(state) {
+            return None;
+        }
+        if state.get("tmux_socket_source").and_then(Value::as_str) == Some("leader_env") {
+            return None;
+        }
+        let endpoint = legacy_worker_tmux_endpoint(state)
+            .map(str::to_string)
+            .or_else(|| transport.tmux_endpoint())
+            .unwrap_or_else(|| crate::tmux_backend::socket_name_for_workspace(workspace));
+        if endpoint.is_empty() || endpoint == "default" {
+            return None;
+        }
+        let workspace_socket = crate::tmux_backend::socket_name_for_workspace(workspace);
+        let source = state.get("tmux_socket_source").and_then(Value::as_str);
+        let owned = source == Some("workspace")
+            || source.is_none()
+                && endpoint_matches_workspace_socket(&endpoint, workspace, &workspace_socket);
+        if !owned {
+            return None;
+        }
+        let socket_file = socket_file_for_endpoint(&endpoint);
+        Some(OwnedShutdownEndpoint {
+            endpoint,
+            socket_file,
+        })
+    }
+
+    fn endpoint_matches_workspace_socket(
+        endpoint: &str,
+        workspace: &Path,
+        workspace_socket: &str,
+    ) -> bool {
+        if endpoint == workspace_socket {
+            return true;
+        }
+        let Some(workspace_path) = crate::tmux_backend::socket_path_for_workspace(workspace) else {
+            return false;
+        };
+        Path::new(endpoint) == workspace_path
+    }
+
+    fn socket_file_for_endpoint(endpoint: &str) -> Option<PathBuf> {
+        if Path::new(endpoint).is_absolute() {
+            Some(PathBuf::from(endpoint))
+        } else {
+            crate::tmux_backend::socket_path_for_name(endpoint)
+        }
+    }
+
+    fn cleanup_owned_empty_endpoint(
+        transport: &dyn crate::transport::Transport,
+        endpoint: &OwnedShutdownEndpoint,
+        event_log: &crate::event_log::EventLog,
+    ) -> OwnedEndpointCleanup {
+        let mut cleanup = OwnedEndpointCleanup::default();
+        cleanup.remaining_sessions = transport
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|pane| pane.session.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !cleanup.remaining_sessions.is_empty() {
+            if let Some(path) = endpoint.socket_file.as_ref() {
+                cleanup.skipped_files.push(path.display().to_string());
+            }
+            let _ = event_log.write(
+                "shutdown.owned_endpoint_cleanup_skipped",
+                json!({
+                    "endpoint": endpoint.endpoint,
+                    "reason": "sessions_remain",
+                    "remaining_sessions": cleanup.remaining_sessions.clone(),
+                    "skipped_files": cleanup.skipped_files.clone(),
+                }),
+            );
+            return cleanup;
+        }
+        if let Err(error) = transport.kill_server() {
+            cleanup.error = Some(error.to_string());
+        }
+        if let Some(path) = endpoint.socket_file.as_ref() {
+            if path.exists() {
+                match std::fs::remove_file(path) {
+                    Ok(()) => cleanup.removed_files.push(path.display().to_string()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        cleanup.error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+            }
+            if path.exists() {
+                cleanup.residual_files.push(path.display().to_string());
+            }
+        }
+        let _ = event_log.write(
+            "shutdown.owned_endpoint_cleanup",
+            json!({
+                "endpoint": endpoint.endpoint,
+                "removed_files": cleanup.removed_files.clone(),
+                "residual_files": cleanup.residual_files.clone(),
+                "error": cleanup.error.clone(),
+            }),
+        );
+        cleanup
+    }
+
     pub fn shutdown_with_transport(
         workspace: &Path,
         keep_logs: bool,
@@ -506,6 +634,7 @@ pub mod lifecycle_port {
                     kill_error = Some(error.to_string());
                 }
             }
+            let _ = crate::lifecycle::display::close_team_display_backends(&run_workspace, session);
         }
         deadline.check("reap_workspace_residuals")?;
         reap_workspace_process_residuals(
@@ -539,6 +668,20 @@ pub mod lifecycle_port {
         if let Some(error) = session_residual_error {
             kill_error.get_or_insert(error);
         }
+        let event_log = crate::event_log::EventLog::new(&run_workspace);
+        let owned_endpoint = owned_shutdown_endpoint(&run_workspace, &state, transport);
+        let owned_cleanup = owned_endpoint
+            .as_ref()
+            .map(|endpoint| cleanup_owned_empty_endpoint(transport, endpoint, &event_log))
+            .unwrap_or_default();
+        if let Some(error) = owned_cleanup.error.as_ref() {
+            kill_error.get_or_insert_with(|| error.clone());
+        }
+        let owned_file_residuals = owned_cleanup
+            .residual_files
+            .iter()
+            .map(|path| json!({ "path": path }))
+            .collect::<Vec<_>>();
         deadline.check("process_residuals")?;
         // C-①: the post-verify gets ONE fresh verification snapshot (reaps changed
         // the world; #248 post-verify facts must be current, not the entry view).
@@ -597,7 +740,8 @@ pub mod lifecycle_port {
         let session_killed = !killed_sessions.is_empty()
             && kill_error.is_none()
             && session_residuals.is_empty()
-            && process_residuals.is_empty();
+            && process_residuals.is_empty()
+            && owned_file_residuals.is_empty();
         mark_agents_stopped(&mut state);
         deadline.check("save_state")?;
         if team.is_some() {
@@ -624,6 +768,7 @@ pub mod lifecycle_port {
             kill_error: kill_error.is_some(),
             session_residuals: !session_residuals.is_empty(),
             process_residuals: !process_residuals.is_empty(),
+            owned_file_residuals: !owned_file_residuals.is_empty(),
             cleanup_truth_degraded,
             coordinator_timeout,
             coordinator_stop_ok: stopped.as_ref().map(|stopped| stopped.ok),
@@ -655,6 +800,10 @@ pub mod lifecycle_port {
                     "verification_degraded": verification_degraded,
                     "probe_timeout_kind": probe_timeout_kind,
                     "probe_timeout": probe_timeout_value,
+                    "owned_endpoint": owned_endpoint.as_ref().map(|endpoint| endpoint.endpoint.clone()),
+                    "owned_files_removed": owned_cleanup.removed_files.clone(),
+                    "owned_files_skipped": owned_cleanup.skipped_files.clone(),
+                    "owned_file_residuals": owned_file_residuals.clone(),
                 }),
             )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -675,6 +824,7 @@ pub mod lifecycle_port {
             "residuals": {
                 "sessions": session_residuals,
                 "processes": process_residuals,
+                "owned_files": owned_file_residuals,
             },
             "error": kill_error,
             "coordinator": {
@@ -706,6 +856,7 @@ pub mod lifecycle_port {
         pub(crate) kill_error: bool,
         pub(crate) session_residuals: bool,
         pub(crate) process_residuals: bool,
+        pub(crate) owned_file_residuals: bool,
         pub(crate) cleanup_truth_degraded: bool,
         pub(crate) coordinator_timeout: bool,
         pub(crate) coordinator_stop_ok: Option<bool>,
@@ -724,6 +875,7 @@ pub mod lifecycle_port {
             && !input.kill_error
             && !input.session_residuals
             && !input.process_residuals
+            && !input.owned_file_residuals
             && !input.cleanup_truth_degraded;
         if ok {
             return ShutdownOutcome {
@@ -736,7 +888,11 @@ pub mod lifecycle_port {
             ("timeout", Some("stop_coordinator"))
         } else if input.cleanup_truth_degraded {
             ("partial", Some("os_probe"))
-        } else if input.kill_error {
+        } else if input.kill_error
+            || input.session_residuals
+            || input.process_residuals
+            || input.owned_file_residuals
+        {
             ("failed", None)
         } else {
             ("partial", None)

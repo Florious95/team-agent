@@ -6,8 +6,8 @@
 
 use crate::cli::lifecycle_port::{sessions_to_kill, KillDecision};
 use crate::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, Transport,
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
+    PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, Transport,
     TransportError, WindowName,
 };
 use serde_json::json;
@@ -33,7 +33,10 @@ fn rc4_exclusive_socket_kills_server() {
     // 空 session 集 → 逐 kill(no-op),不整 server 拆(没东西可拆)。
     assert_eq!(
         sessions_to_kill(&[], &BTreeSet::new()),
-        KillDecision::KillIndividually { to_kill: vec![], spared: vec![] }
+        KillDecision::KillIndividually {
+            to_kill: vec![],
+            spared: vec![]
+        }
     );
 }
 
@@ -45,8 +48,16 @@ fn rc1_in_tmux_no_prefix_anchor_spares_user_session() {
     let decision = sessions_to_kill(&sessions, &anchor);
     match decision {
         KillDecision::KillIndividually { to_kill, spared } => {
-            assert_eq!(to_kill, names(&["team-x"]), "only non-anchor session killed");
-            assert_eq!(spared, names(&["team-coder-team"]), "user/leader session spared by anchor");
+            assert_eq!(
+                to_kill,
+                names(&["team-x"]),
+                "only non-anchor session killed"
+            );
+            assert_eq!(
+                spared,
+                names(&["team-coder-team"]),
+                "user/leader session spared by anchor"
+            );
         }
         other => panic!("anchor session must force per-session kill, not {other:?}"),
     }
@@ -106,7 +117,10 @@ fn union_prefix_and_anchor_no_double_count() {
     let decision = sessions_to_kill(&sessions, &anchor);
     assert_eq!(
         decision,
-        KillDecision::KillIndividually { to_kill: vec![], spared: names(&["team-agent-leader-claude-ws-beef"]) }
+        KillDecision::KillIndividually {
+            to_kill: vec![],
+            spared: names(&["team-agent-leader-claude-ws-beef"])
+        }
     );
 }
 
@@ -136,12 +150,214 @@ fn missing_coordinator_is_ok_when_shutdown_cleaned_session() {
     .expect("shutdown should complete");
     assert_eq!(out["coordinator"]["status"], json!("missing"));
     assert_eq!(
-        out["ok"], json!(true),
+        out["ok"],
+        json!(true),
         "coordinator.status=missing alone must not make a fully cleaned shutdown partial: {out}"
     );
     assert_eq!(out["status"], json!("ok"));
     assert_eq!(out["residuals"]["sessions"], json!([]));
     assert_eq!(out["residuals"]["processes"], json!([]));
+    assert_eq!(out["residuals"]["owned_files"], json!([]));
+}
+
+#[test]
+fn owned_empty_endpoint_cleanup_removes_socket_file_before_reporting_ok() {
+    let ws = tmp_shutdown_workspace("owned-empty-endpoint-clean");
+    let socket = ws.join("owned.sock");
+    std::fs::write(&socket, b"socket").unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-owned-clean",
+            "tmux_endpoint": socket.to_string_lossy(),
+            "tmux_socket": socket.to_string_lossy(),
+            "tmux_socket_source": "workspace",
+            "is_external_leader": false,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["status"], json!("ok"));
+    assert_eq!(out["residuals"]["owned_files"], json!([]));
+    assert!(
+        !socket.exists(),
+        "owned empty endpoint socket file must be removed"
+    );
+    assert!(
+        transport.kill_server_called(),
+        "owned empty endpoint should be torn down after session cleanup"
+    );
+}
+
+#[test]
+fn leader_env_endpoint_is_not_owned_or_removed() {
+    let ws = tmp_shutdown_workspace("leader-env-endpoint-spared");
+    let socket = ws.join("leader-env.sock");
+    std::fs::write(&socket, b"socket").unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-external",
+            "tmux_endpoint": socket.to_string_lossy(),
+            "tmux_socket": socket.to_string_lossy(),
+            "tmux_socket_source": "leader_env",
+            "is_external_leader": true,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["residuals"]["owned_files"], json!([]));
+    assert!(socket.exists(), "leader_env socket is not team-owned");
+    assert!(
+        !transport.kill_server_called(),
+        "leader_env/shared socket must never be torn down by owned cleanup"
+    );
+}
+
+#[test]
+fn owned_file_residual_makes_shutdown_failed_not_partial() {
+    let ws = tmp_shutdown_workspace("owned-file-residual-failed");
+    let socket_dir = ws.join("owned-dir.sock");
+    std::fs::create_dir_all(&socket_dir).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-owned-residual",
+            "tmux_endpoint": socket_dir.to_string_lossy(),
+            "tmux_socket": socket_dir.to_string_lossy(),
+            "tmux_socket_source": "workspace",
+            "is_external_leader": false,
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(false));
+    assert_eq!(out["status"], json!("failed"));
+    assert_eq!(out["phase"], json!(null));
+    assert_eq!(
+        out["residuals"]["owned_files"],
+        json!([{ "path": socket_dir.display().to_string() }])
+    );
+}
+
+#[test]
+fn scoped_shutdown_keeps_owned_endpoint_when_sibling_session_remains() {
+    let ws = tmp_shutdown_workspace("scoped-owned-endpoint-sibling");
+    let socket = ws.join("owned-shared.sock");
+    std::fs::write(&socket, b"socket").unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "active_team_key": "team-a",
+            "teams": {
+                "team-a": {
+                    "team_key": "team-a",
+                    "status": "alive",
+                    "session_name": "team-a",
+                    "tmux_endpoint": socket.to_string_lossy(),
+                    "tmux_socket": socket.to_string_lossy(),
+                    "tmux_socket_source": "workspace",
+                    "is_external_leader": false,
+                    "agents": {}
+                },
+                "team-b": {
+                    "team_key": "team-b",
+                    "status": "alive",
+                    "session_name": "team-b",
+                    "tmux_endpoint": socket.to_string_lossy(),
+                    "tmux_socket": socket.to_string_lossy(),
+                    "tmux_socket_source": "workspace",
+                    "is_external_leader": false,
+                    "agents": {}
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![PaneInfo {
+            pane_id: PaneId::new("%2"),
+            session: SessionName::new("team-b"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("worker")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("fake".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: None,
+            leader_env: BTreeMap::new(),
+        }])
+        .with_targets_persist_after_kill();
+
+    let out =
+        crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, Some("team-a"), &transport)
+            .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true));
+    assert_eq!(out["residuals"]["owned_files"], json!([]));
+    assert!(
+        socket.exists(),
+        "owned endpoint stays while sibling team session remains"
+    );
+    assert!(
+        !transport.kill_server_called(),
+        "scoped shutdown must not tear down a non-empty shared owned endpoint"
+    );
+}
+
+#[test]
+fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
+    let ws = tmp_shutdown_workspace("owned-loop-no-growth");
+    let sockets = (0..20)
+        .map(|idx| ws.join(format!("owned-loop-{idx}.sock")))
+        .collect::<Vec<_>>();
+    let starting = sockets.iter().filter(|path| path.exists()).count();
+    for socket in &sockets {
+        std::fs::write(socket, b"socket").unwrap();
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &json!({
+                "session_name": "team-owned-loop",
+                "tmux_endpoint": socket.to_string_lossy(),
+                "tmux_socket": socket.to_string_lossy(),
+                "tmux_socket_source": "workspace",
+                "is_external_leader": false,
+                "agents": {}
+            }),
+        )
+        .unwrap();
+        let out = crate::cli::lifecycle_port::shutdown_with_transport(
+            &ws,
+            true,
+            None,
+            &CleanShutdownTransport::new(),
+        )
+        .expect("shutdown should complete");
+        assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+    }
+    let ending = sockets.iter().filter(|path| path.exists()).count();
+    assert_eq!(
+        ending, starting,
+        "owned socket files must not grow across loops"
+    );
 }
 
 fn tmp_shutdown_workspace(tag: &str) -> PathBuf {
@@ -241,7 +457,10 @@ impl Transport for CleanShutdownTransport {
         _target: &Target,
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
@@ -337,7 +556,9 @@ fn lsof_cwd_timeout_is_diagnostic_not_shutdown_partial() {
     assert_eq!(out["residuals"]["sessions"], json!([]));
     assert_eq!(out["residuals"]["processes"], json!([]));
 
-    let events = crate::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let events = crate::event_log::EventLog::new(&ws)
+        .tail(0)
+        .expect("events");
     let shutdown = events
         .iter()
         .find(|event| {
@@ -412,6 +633,7 @@ fn shutdown_outcome_late_or_postcheck_gone_is_ok_with_lsof_diagnostic() {
             kill_error: false,
             session_residuals: false,
             process_residuals: false,
+            owned_file_residuals: false,
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
@@ -431,6 +653,7 @@ fn shutdown_outcome_coordinator_timeout_still_running_is_timeout() {
             kill_error: false,
             session_residuals: false,
             process_residuals: false,
+            owned_file_residuals: false,
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
@@ -450,6 +673,7 @@ fn shutdown_outcome_ps_table_degraded_still_partial_after_coordinator_gone() {
             kill_error: false,
             session_residuals: false,
             process_residuals: false,
+            owned_file_residuals: false,
             cleanup_truth_degraded: true,
             coordinator_timeout: true,
             coordinator_stop_ok: None,

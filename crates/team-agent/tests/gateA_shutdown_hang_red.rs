@@ -48,7 +48,7 @@ fn shutdown_cleanup_transport_does_not_read_leader_receiver_socket() {
     let source = include_str!("../src/cli/mod.rs");
     let shutdown_body = slice_between(
         source,
-        "pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>)",
+        "/// `runtime.shutdown`(`cmd_shutdown`)",
         "pub fn shutdown_with_transport",
     );
     let shutdown_with_state_body = slice_between(

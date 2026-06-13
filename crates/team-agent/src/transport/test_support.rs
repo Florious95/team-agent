@@ -33,6 +33,7 @@ struct OfflineState {
     default_liveness: PaneLiveness,
     calls: Vec<&'static str>,
     spawns: Vec<SpawnRecord>,
+    pane_titles: Vec<(String, String, String, String)>,
     inject_targets: Vec<Target>,
     inject_payloads: Vec<String>,
     tmux_endpoint: Option<String>,
@@ -52,6 +53,7 @@ impl Default for OfflineState {
             default_liveness: PaneLiveness::Unknown,
             calls: Vec::new(),
             spawns: Vec::new(),
+            pane_titles: Vec::new(),
             inject_targets: Vec::new(),
             inject_payloads: Vec::new(),
             tmux_endpoint: None,
@@ -147,6 +149,10 @@ impl OfflineTransport {
                 .map(|record| (record.kind.clone(), record.window.as_str().to_string()))
                 .collect()
         })
+    }
+
+    pub fn pane_title_records(&self) -> Vec<(String, String, String, String)> {
+        self.with_state(|state| state.pane_titles.clone())
     }
 
     pub fn inject_targets(&self) -> Vec<Target> {
@@ -348,6 +354,25 @@ impl Transport for OfflineTransport {
                 state.windows.clone()
             }
         }))
+    }
+
+    fn configure_adaptive_pane_title(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        pane: &PaneId,
+        title: &str,
+    ) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("configure_adaptive_pane_title");
+            state.pane_titles.push((
+                session.as_str().to_string(),
+                window.as_str().to_string(),
+                pane.as_str().to_string(),
+                title.to_string(),
+            ));
+        });
+        Ok(())
     }
 
     fn set_session_env(

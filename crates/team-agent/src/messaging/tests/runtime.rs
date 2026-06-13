@@ -1,4 +1,21 @@
 use super::*;
+use crate::transport::test_support::OfflineTransport;
+
+fn pane_info(pane_id: &str, session: &str, window: &str) -> PaneInfo {
+    PaneInfo {
+        pane_id: PaneId::new(pane_id),
+        session: SessionName::new(session),
+        window_index: None,
+        window_name: Some(WindowName::new(window)),
+        pane_index: None,
+        tty: None,
+        current_command: None,
+        current_path: None,
+        active: true,
+        pane_pid: None,
+        leader_env: BTreeMap::new(),
+    }
+}
 
 // ════════════════════════════════════════════════════════════════════════
 // GROUP E — _fail_leader_delivery: bug-52 fallback-log semantics. ok=True but
@@ -1336,6 +1353,202 @@ impl Transport for UnverifiedInjectTransport {
     }
 }
 
+struct FailingInjectTransport {
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Transport for FailingInjectTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn spawn_into(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn inject(
+        &self,
+        t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
+        if matches!(t, Target::Pane(pane) if pane.as_str() == "%1") {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Err(TransportError::Inject {
+            stage: crate::transport::InjectStage::PasteBuffer,
+            source: std::io::Error::other("paste-buffer failed"),
+        })
+    }
+    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
+    }
+    fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
+        Ok(None)
+    }
+    fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
+        Ok(PaneLiveness::Unknown)
+    }
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn has_session(&self, _s: &SessionName) -> Result<bool, TransportError> {
+        Ok(true)
+    }
+    fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+}
+
+// U1 #7 step-2 (RED→GREEN) — pane-readback gate: a token payload whose token was NOT
+// read back as visible in the pane (`InjectVerification::CaptureMissingToken`, surfaced by
+// the step-1 tmux_backend readback) must NOT be counted delivered, even when the SUBMIT
+// itself verified. Today the delivery gate only consulted submit_verification → a silent
+// paste-drop reported delivered (false green). This transport returns a verified submit
+// (KeySentAfterVisibleToken) but a missing-token readback.
+struct ReadbackMissingTransport;
+impl Transport for ReadbackMissingTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn spawn_first(&self, _: &SessionName, _: &WindowName, _: &[String], _: &Path, _: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn spawn_into(&self, _: &SessionName, _: &WindowName, _: &[String], _: &Path, _: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        unimplemented!("not reached in delivery")
+    }
+    fn inject(&self, _: &Target, _: &InjectPayload, _: Key, _: bool) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: crate::transport::InjectStage::Submit,
+            // submit verified, but the token never appeared in the pane → readback missing.
+            inject_verification: crate::transport::InjectVerification::CaptureMissingToken,
+            submit_verification: crate::transport::SubmitVerification::KeySentAfterVisibleToken {
+                key: Key::Enter,
+            },
+            turn_verification: crate::transport::TurnVerification::NotYetObserved,
+            attempts: 1,
+        })
+    }
+    fn send_keys(&self, _: &Target, _: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn capture(&self, _: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText { text: String::new(), range })
+    }
+    fn query(&self, _: &Target, _: PaneField) -> Result<Option<String>, TransportError> {
+        Ok(None)
+    }
+    fn liveness(&self, _: &PaneId) -> Result<PaneLiveness, TransportError> {
+        Ok(PaneLiveness::Unknown)
+    }
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn has_session(&self, _: &SessionName) -> Result<bool, TransportError> {
+        Ok(true)
+    }
+    fn list_windows(&self, _: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(Vec::new())
+    }
+    fn set_session_env(&self, _: &SessionName, _: &str, _: &str) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+}
+
+#[test]
+fn deliver_pending_readback_missing_token_is_not_delivered() {
+    let ws = tmp_ws("readbackmiss");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-readbackmiss",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &ReadbackMissingTransport,
+        &message_id,
+        &log,
+        &state,
+    )
+    .unwrap();
+
+    assert!(
+        !out.ok,
+        "U1 #7: a submit-verified inject whose token was NOT read back (CaptureMissingToken) \
+must NOT be delivered — readback gate catches the silent paste drop"
+    );
+    assert_ne!(
+        out.message_status.0, "delivered",
+        "U1 #7: readback-missing must not mark the message delivered (false green)"
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| event
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .map(|r| r.contains("pane_readback_unverified"))
+            .unwrap_or(false)),
+        "U1 #7: the failure reason must name pane_readback_unverified (loud, not silent); got {events:?}"
+    );
+}
+
 #[test]
 fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
     let ws = tmp_ws("sendfailed");
@@ -1377,6 +1590,253 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
         ),
         "exhausted unverified send must queue a leader-visible notification; got {events:?}"
     );
+}
+
+#[test]
+fn slice1_inject_failures_are_bounded_and_stop_retrying_same_message() {
+    let ws = tmp_ws("injectstorm");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-injectstorm",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let transport = FailingInjectTransport {
+        attempts: std::sync::Arc::clone(&attempts),
+    };
+
+    for _ in 0..(usize::from(SEND_RETRY_MAX_ATTEMPTS) + 2) {
+        let _ = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
+    }
+
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        usize::from(SEND_RETRY_MAX_ATTEMPTS),
+        "same message/target must stop retrying after the bounded inject-failure threshold"
+    );
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let (status, delivery_attempts, error): (String, i64, Option<String>) = conn
+        .query_row(
+            "select status, delivery_attempts, error from messages where message_id = ?1",
+            [&message_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(delivery_attempts, i64::from(SEND_RETRY_MAX_ATTEMPTS));
+    assert_eq!(error.as_deref(), Some("send_inject_exhausted"));
+    let events = log.tail(0).unwrap();
+    let inject_failures = events
+        .iter()
+        .filter(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("send.inject_failed")
+        })
+        .count();
+    assert_eq!(
+        inject_failures,
+        usize::from(SEND_RETRY_MAX_ATTEMPTS),
+        "failed physical injects should be audited only until the bounded threshold; events={events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("send.failed")
+                && event.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("send_inject_exhausted")
+        }),
+        "terminal inject exhaustion must emit send.failed; events={events:?}"
+    );
+}
+
+#[test]
+fn u1_projection_refused_emits_delivery_event() {
+    let ws = tmp_ws("u1projref");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-a",
+        "active_team_key": "team-a",
+        "teams": {
+            "team-a": {
+                "session_name": "team-a",
+                "agents": {"w1": {"provider": "fake", "window": "w1"}}
+            }
+        },
+        "agents": {"w1": {"provider": "fake", "window": "w1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(
+            None,
+            "leader",
+            "w1",
+            "wrong team",
+            None,
+            false,
+            Some("missing-team"),
+        )
+        .unwrap();
+
+    let delivered = deliver_pending_messages(&ws, &state, &OfflineTransport::new(), &log)
+        .expect("projection refusal must not abort the delivery batch");
+
+    assert!(
+        delivered.is_empty(),
+        "the refused owner-team row must not be delivered"
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("delivery.projection_refused")
+                && event.get("message_id").and_then(serde_json::Value::as_str)
+                    == Some(message_id.as_str())
+                && event
+                    .get("owner_team_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("missing-team")
+        }),
+        "OwnerTeamProjection::Refused must leave a delivery.projection_refused audit event; events={events:?}"
+    );
+}
+
+#[test]
+fn u1_deliver_item_error_does_not_halt_remaining_batch() {
+    let ws = tmp_ws("u1itemblock");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-u1itemblock",
+        "agents": {
+            "w1": {"provider": "fake", "window": "w1"},
+            "w2": {"provider": "fake", "window": "w2"}
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let blocked = store
+        .create_message(None, "leader", "w1", "poison", None, false, None)
+        .unwrap();
+    let delivered_id = store
+        .create_message(None, "peer", "w2", "still deliver", None, false, None)
+        .unwrap();
+
+    let state_path = crate::state::persist::runtime_state_path(&ws);
+    std::fs::remove_file(&state_path).unwrap();
+    std::fs::create_dir(&state_path).unwrap();
+    let transport = OfflineTransport::new();
+
+    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
+        .expect("one item error must not halt the whole pending batch");
+
+    assert_eq!(
+        delivered,
+        vec![delivered_id.clone()],
+        "a poison item must be isolated while later pending rows still deliver"
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("delivery.item_blocked")
+                && event.get("message_id").and_then(serde_json::Value::as_str)
+                    == Some(blocked.as_str())
+        }),
+        "the isolated poison item must emit delivery.item_blocked; events={events:?}"
+    );
+}
+
+#[test]
+fn u1_resolve_inject_target_uses_live_pane_when_cached_pane_drifted() {
+    let ws = tmp_ws("u1drift");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-u1drift",
+        "agents": {
+            "w1": {
+                "provider": "fake",
+                "pane_id": "%stale",
+                "window": "w1"
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let _ = store
+        .create_message(None, "peer", "w1", "drift-safe", None, false, None)
+        .unwrap();
+    let transport =
+        OfflineTransport::new().with_targets(vec![pane_info("%live", "team-u1drift", "w1")]);
+
+    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
+        .expect("live target re-resolution must not fail");
+
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        transport.inject_targets(),
+        vec![Target::Pane(PaneId::new("%live"))],
+        "delivery must validate the cached pane against live targets and re-resolve by session/window when it drifted"
+    );
+}
+
+#[test]
+fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
+    let ws = tmp_ws("u1backfill");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "leader_receiver": {"status": "unbound", "pane_id": "__team_agent_unbound__"},
+            "team_owner": {"pane_id": "__team_agent_unbound__"},
+            "teams": {
+                "team-a": {
+                    "session_name": "team-a",
+                    "leader_receiver": {"status": "unbound", "pane_id": "__team_agent_unbound__"},
+                    "agents": {}
+                },
+                "team-b": {
+                    "session_name": "team-b",
+                    "agents": {}
+                }
+            },
+            "agents": {}
+        }),
+    )
+    .unwrap();
+    let opts = SendOptions {
+        team: Some(TeamKey::new("team-b")),
+        requires_ack: false,
+        ..SendOptions::default()
+    };
+
+    let out = send_message(
+        &ws,
+        &MessageTarget::Single("leader".to_string()),
+        "hello team-b",
+        &opts,
+    )
+    .unwrap();
+
+    assert_eq!(
+        out.status,
+        DeliveryStatus::Queued,
+        "team-b leader send must not inherit team-a/top-level unbound leader binding"
+    );
+    let message_id = out.message_id.expect("queued leader message id");
+    let store = store_for(&ws);
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let owner_team_id: Option<String> = conn
+        .query_row(
+            "select owner_team_id from messages where message_id = ?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(owner_team_id.as_deref(), Some("team-b"));
 }
 
 // ════════════════════════════════════════════════════════════════════════

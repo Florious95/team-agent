@@ -23,8 +23,7 @@ pub fn restart_with_session_convergence_deadline(
     session_converge_deadline_ms: Option<u64>,
 ) -> Result<RestartReport, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     restart_with_transport_with_session_convergence_deadline(
         workspace,
         allow_fresh,
@@ -148,12 +147,10 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         allow_fresh,
     )?;
     if convergence.converged && convergence.changed {
-        crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
     if repair_resume_sessions_from_event_log(&selected.run_workspace, &mut state)? {
-        crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
         let missing_after_repair = restart_required_missing_session_agent_ids(&state);
         convergence.changed = true;
         convergence.converged = missing_after_repair.is_empty();
@@ -173,8 +170,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         });
     }
     if !convergence.converged && convergence.changed {
-        crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
     let mut forced_fresh_missing = if convergence.converged {
         std::collections::BTreeSet::new()
@@ -222,8 +218,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;
         mark_leader_receiver_rebind_required(&mut state, &session_name);
         mark_restart_targets_stopped_after_teardown(&mut state, &plan.decisions);
-        crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
-            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
     let mut successful_agents: Vec<RestartedAgent> = Vec::new();
     let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
@@ -353,8 +348,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         }
     }
     // END_B5_RESTART_ISOLATION_LOOP
-    crate::state::projection::save_team_scoped_state(&selected.run_workspace, &state)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     if fatal_resume_failure {
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
@@ -868,6 +862,14 @@ fn mark_restart_targets_stopped_after_teardown(
     }
 }
 
+fn save_restart_state(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+) -> Result<(), LifecycleError> {
+    save_restart_projected_state(workspace, state, team_key)
+}
+
 fn mark_agent_respawned(
     state: &mut serde_json::Value,
     agent_id: &AgentId,
@@ -906,7 +908,13 @@ fn mark_agent_respawned(
     });
     if let Some(pane_pid) = pane_pid {
         agent.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+    } else {
+        agent.remove("pane_pid");
     }
+    agent.insert(
+        "spawned_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
@@ -929,7 +937,10 @@ fn mark_agent_respawned(
             "layout_index".to_string(),
             serde_json::json!(placement.layout_index),
         );
-        agent.insert("pane_index".to_string(), serde_json::json!(placement.pane_index));
+        agent.insert(
+            "pane_index".to_string(),
+            serde_json::json!(placement.pane_index),
+        );
         agent.insert(
             "display".to_string(),
             serde_json::json!({
@@ -963,6 +974,8 @@ fn mark_agent_respawned(
     }
     agent.remove("startup_prompts");
     agent.remove("startup_prompt_status");
+    agent.remove("startup_prompt_probe_epoch");
+    agent.remove("startup_prompt_probe_disabled_at");
     Ok(())
 }
 
@@ -1402,4 +1415,273 @@ fn restart_candidate_has_context(state: &serde_json::Value) -> bool {
                     })
             })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use crate::transport::{
+        AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
+        PaneField, PaneInfo, PaneLiveness, SetEnvOutcome, SpawnResult, Target, Transport,
+        TransportError,
+    };
+
+    struct RespawnEpochTransport;
+
+    impl Transport for RespawnEpochTransport {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Tmux
+        }
+
+        fn spawn_first(
+            &self,
+            _session: &SessionName,
+            _window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            unimplemented!("not used by respawn epoch test")
+        }
+
+        fn spawn_into(
+            &self,
+            _session: &SessionName,
+            _window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            unimplemented!("not used by respawn epoch test")
+        }
+
+        fn inject(
+            &self,
+            _target: &Target,
+            _payload: &InjectPayload,
+            _submit: Key,
+            _bracketed: bool,
+        ) -> Result<InjectReport, TransportError> {
+            unimplemented!("not used by respawn epoch test")
+        }
+
+        fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
+            unimplemented!("not used by respawn epoch test")
+        }
+
+        fn capture(
+            &self,
+            _target: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
+            Ok(CapturedText {
+                text: String::new(),
+                range,
+            })
+        }
+
+        fn query(
+            &self,
+            _target: &Target,
+            _field: PaneField,
+        ) -> Result<Option<String>, TransportError> {
+            Ok(None)
+        }
+
+        fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+            Ok(PaneLiveness::Live)
+        }
+
+        fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+            Ok(Vec::new())
+        }
+
+        fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+            Ok(true)
+        }
+
+        fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+            Ok(Vec::new())
+        }
+
+        fn set_session_env(
+            &self,
+            _session: &SessionName,
+            _key: &str,
+            _value: &str,
+        ) -> Result<SetEnvOutcome, TransportError> {
+            Ok(SetEnvOutcome::Applied)
+        }
+
+        fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+            Ok(AttachOutcome::Attached)
+        }
+    }
+
+    fn disabled_safety() -> DangerousApproval {
+        DangerousApproval {
+            enabled: false,
+            source: DangerousApprovalSource::Disabled,
+            inherited: false,
+            provider: None,
+            flag: None,
+            worker_capability_above_leader: false,
+            ancestry_binary_name: None,
+            unexpected_binary: false,
+        }
+    }
+
+    #[test]
+    fn respawn_refreshes_startup_probe_epoch_inputs() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "w1": {
+                    "status": "running",
+                    "window": "w1-old",
+                    "pane_id": "%old",
+                    "pane_pid": 1010,
+                    "spawned_at": "2026-06-01T00:00:00+00:00",
+                    "startup_prompts": "disabled_for_epoch",
+                    "startup_prompt_status": "disabled_for_epoch",
+                    "startup_prompt_probe_epoch": "pane_pid:1010",
+                    "startup_prompt_probe_disabled_at": "2026-06-01T00:02:30+00:00"
+                }
+            }
+        });
+        let spawn = SpawnedAgentWindow {
+            spawn: SpawnResult {
+                pane_id: PaneId::new("%new"),
+                session: SessionName::new("team-epoch"),
+                window: WindowName::new("w1"),
+                child_pid: Some(2020),
+            },
+            plan: crate::provider::CommandPlan::argv_only(vec!["codex".to_string()]),
+            profile_launch: crate::provider::ProviderProfileLaunch::default(),
+            layout_placement: None,
+        };
+        let before = chrono::Utc::now();
+
+        mark_agent_respawned(
+            &mut state,
+            &AgentId::new("w1"),
+            StartMode::Resumed,
+            &spawn,
+            &RespawnEpochTransport,
+            &disabled_safety(),
+        )
+        .expect("mark respawned");
+
+        let agent = state.pointer("/agents/w1").expect("agent");
+        assert_eq!(
+            agent.get("pane_id").and_then(serde_json::Value::as_str),
+            Some("%new")
+        );
+        assert_eq!(
+            agent.get("pane_pid").and_then(serde_json::Value::as_u64),
+            Some(2020)
+        );
+        let spawned_at = agent
+            .get("spawned_at")
+            .and_then(serde_json::Value::as_str)
+            .expect("spawned_at refreshed");
+        let spawned_at = chrono::DateTime::parse_from_rfc3339(spawned_at)
+            .expect("spawned_at rfc3339")
+            .with_timezone(&chrono::Utc);
+        assert!(
+            spawned_at >= before - chrono::Duration::seconds(1),
+            "respawn must start a fresh startup-probe grace window; spawned_at={spawned_at}, before={before}"
+        );
+        for key in [
+            "startup_prompts",
+            "startup_prompt_status",
+            "startup_prompt_probe_epoch",
+            "startup_prompt_probe_disabled_at",
+        ] {
+            assert!(
+                agent.get(key).is_none(),
+                "respawned pane must not inherit old startup prompt epoch field {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_projection_sync_updates_active_team_and_current_alias() {
+        let mut state = serde_json::json!({
+            "active_team_key": "team-alpha",
+            "team_dir": "/tmp/team-alpha",
+            "session_name": "team-alpha",
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "pane_id": "%new",
+                    "pane_pid": 47650,
+                    "spawned_at": "2026-06-13T04:00:00+00:00"
+                }
+            },
+            "teams": {
+                "current": {
+                    "team_dir": "/tmp/team-alpha",
+                    "session_name": "team-alpha",
+                    "agents": {
+                        "alpha": {
+                            "status": "running",
+                            "pane_id": "%new",
+                            "pane_pid": 47650,
+                            "spawned_at": "2026-06-13T04:00:00+00:00"
+                        }
+                    }
+                },
+                "team-alpha": {
+                    "team_dir": "/tmp/team-alpha",
+                    "session_name": "team-alpha",
+                    "agents": {
+                        "alpha": {
+                            "status": "running",
+                            "pane_id": "%old",
+                            "pane_pid": 46784,
+                            "spawned_at": "2026-06-13T03:00:00+00:00",
+                            "startup_prompt_probe_epoch": "pane_pid:46784"
+                        }
+                    }
+                }
+            }
+        });
+
+        sync_restart_team_projections(&mut state, "team-alpha");
+
+        for pointer in [
+            "/agents/alpha",
+            "/teams/current/agents/alpha",
+            "/teams/team-alpha/agents/alpha",
+        ] {
+            let agent = state.pointer(pointer).expect(pointer);
+            assert_eq!(
+                agent.get("pane_id").and_then(serde_json::Value::as_str),
+                Some("%new")
+            );
+            assert_eq!(
+                agent.get("pane_pid").and_then(serde_json::Value::as_u64),
+                Some(47650)
+            );
+            assert_eq!(
+                agent.get("spawned_at").and_then(serde_json::Value::as_str),
+                Some("2026-06-13T04:00:00+00:00")
+            );
+            assert!(
+                agent.get("startup_prompt_probe_epoch").is_none(),
+                "{pointer} must not retain the old startup probe epoch"
+            );
+        }
+    }
 }

@@ -29,6 +29,11 @@ use super::types::{
     IdleAlert, LeaderApiError, SessionDriftResult,
 };
 
+const STARTUP_PROMPT_GRACE_SECS: i64 = 120;
+const RUNTIME_APPROVAL_INITIAL_BACKOFF_SECS: i64 = 30;
+const RUNTIME_APPROVAL_MAX_BACKOFF_SECS: i64 = 300;
+const IDLE_HEALTH_CAPTURE_INTERVAL_SECS: i64 = 60;
+
 // ===========================================================================
 // TickReport / TickError(§10:tick(..) -> Result<TickReport, TickError>)
 // ===========================================================================
@@ -213,13 +218,30 @@ impl Coordinator {
         }
 
         self.record_step("capture_missing");
-        self.capture_missing_sessions(&mut state, &event_log)?;
+        if let Err(error) = self.capture_missing_sessions(&mut state, &event_log) {
+            let _ = event_log.write(
+                "coordinator.tick.capture_missing_failed",
+                serde_json::json!({"error": error.to_string()}),
+            );
+        }
+
+        // Slice 1 energy gate: one pane snapshot per tick feeds probe eligibility,
+        // health sync, and abnormal-exit detection. Missing panes are filtered
+        // before any capture-pane call.
+        let pane_snapshot = self.transport.list_targets().unwrap_or_default();
+        let window_snapshot = state
+            .get("session_name")
+            .and_then(Value::as_str)
+            .map(crate::transport::SessionName::new)
+            .and_then(|session| self.transport.list_windows(&session).ok())
+            .unwrap_or_default();
+        let has_work_obligation = tick_has_work_obligation(&store);
 
         self.record_step("refresh_statuses");
         // TODO(spine slice 2b): split lightweight runtime status refresh from health sync.
 
         self.record_step("startup_prompts");
-        self.handle_startup_prompts(&mut state, &event_log);
+        self.handle_startup_prompts(&mut state, &event_log, &pane_snapshot, &window_snapshot);
 
         // #229 step2-retry: once an agent's `startup_prompts` flipped to `handled`
         // (this tick OR earlier), `queued_until_trust` messages for that recipient
@@ -241,7 +263,12 @@ impl Coordinator {
         // bug-084 哲学 + A-6 同族:每步独立 try,失败写 `coordinator.tick.<step>_failed`
         // 事件后继续走下一步;tick 本身仍返 Ok。
         self.record_step("runtime_prompts");
-        if let Err(error) = self.handle_runtime_approval_prompts(&mut state, &event_log) {
+        if let Err(error) = self.handle_runtime_approval_prompts(
+            &mut state,
+            &event_log,
+            &pane_snapshot,
+            &window_snapshot,
+        ) {
             let _ = event_log.write(
                 "coordinator.tick.runtime_prompts_failed",
                 serde_json::json!({"error": error.to_string()}),
@@ -252,18 +279,23 @@ impl Coordinator {
         // P5 (C-P5-1, N3): ONE pane snapshot per tick, shared by sync_health and the
         // abnormal-exit pass (same-tick reuse only — the snapshot does not outlive
         // this tick; every tick re-reads).
-        let pane_snapshot = self.transport.list_targets().unwrap_or_default();
-        let captures_by_agent =
-            match self.sync_agent_health(&mut state, &store, &event_log, &pane_snapshot) {
-                Ok(captures) => captures,
-                Err(error) => {
-                    let _ = event_log.write(
-                        "coordinator.tick.sync_health_failed",
-                        serde_json::json!({"error": error.to_string()}),
-                    );
-                    BTreeMap::new()
-                }
-            };
+        let captures_by_agent = match self.sync_agent_health(
+            &mut state,
+            &store,
+            &event_log,
+            &pane_snapshot,
+            &window_snapshot,
+            has_work_obligation,
+        ) {
+            Ok(captures) => captures,
+            Err(error) => {
+                let _ = event_log.write(
+                    "coordinator.tick.sync_health_failed",
+                    serde_json::json!({"error": error.to_string()}),
+                );
+                BTreeMap::new()
+            }
+        };
         if let Err(error) = self.detect_abnormal_exits(&mut state, &event_log, &pane_snapshot) {
             let _ = event_log.write(
                 "coordinator.tick.detect_abnormal_failed",
@@ -374,6 +406,15 @@ impl Coordinator {
             true,
             0,
         )?;
+        for failure in report.capture_failures {
+            event_log.write(
+                "coordinator.tick.capture_missing_failed",
+                serde_json::json!({
+                    "agent_id": failure.agent_id,
+                    "error": failure.error,
+                }),
+            )?;
+        }
         for ambiguous in report.ambiguous {
             event_log.write(
                 "provider.session.attribution_ambiguous",
@@ -392,6 +433,8 @@ impl Coordinator {
         store: &crate::message_store::MessageStore,
         event_log: &EventLog,
         pane_infos: &[crate::transport::PaneInfo],
+        window_snapshot: &[crate::transport::WindowName],
+        has_work_obligation: bool,
     ) -> Result<BTreeMap<AgentId, CapturedRuntimeFact>, TickError> {
         let mut captures = BTreeMap::new();
         let snapshot = state.clone();
@@ -413,10 +456,16 @@ impl Coordinator {
             String,
             Result<Vec<crate::transport::WindowName>, String>,
         > = BTreeMap::new();
+        if let Some(session_name) = session_name.as_deref() {
+            windows_by_session.insert(session_name.to_string(), Ok(window_snapshot.to_vec()));
+        }
         let Some(agents) = state.get_mut("agents").and_then(Value::as_object_mut) else {
             return Ok(captures);
         };
         for (agent_id, agent) in agents {
+            if !agent_probe_base_eligible(agent) {
+                continue;
+            }
             let Some((session, window, target)) =
                 capture_window_target(agent, session_name.as_deref())
             else {
@@ -444,6 +493,9 @@ impl Coordinator {
                 }
             };
             if !windows.iter().any(|known| known == &window) {
+                continue;
+            }
+            if warm_idle_capture_suppressed(agent, has_work_obligation) {
                 continue;
             }
             let captured = match self
@@ -499,6 +551,7 @@ impl Coordinator {
                 current_command.as_deref(),
                 last_output_at_now.as_deref(),
             );
+            remember_idle_capture_schedule(agent, &activity);
             write_activity(agent, &activity, false);
             let last_output_at = last_output_at_now;
             write_agent_health(
@@ -755,7 +808,13 @@ impl Coordinator {
         Ok(())
     }
 
-    fn handle_startup_prompts(&self, state: &mut Value, event_log: &EventLog) {
+    fn handle_startup_prompts(
+        &self,
+        state: &mut Value,
+        event_log: &EventLog,
+        pane_infos: &[crate::transport::PaneInfo],
+        windows: &[crate::transport::WindowName],
+    ) {
         let session_name = state
             .get("session_name")
             .and_then(Value::as_str)
@@ -764,6 +823,9 @@ impl Coordinator {
             return;
         };
         for (agent_id, agent) in agents {
+            if !agent_probe_base_eligible(agent) {
+                continue;
+            }
             // #229 step1-idem: once trust is auto-answered, the row carries
             // `startup_prompts = "handled"` (or "complete"). Both are terminal for
             // this tick loop — repeated ticks must not re-classify, re-send Enter,
@@ -783,9 +845,22 @@ impl Coordinator {
             else {
                 continue;
             };
-            let Some((_, _, target)) = capture_window_target(agent, session_name.as_deref()) else {
+            let Some((session, window, target)) =
+                capture_window_target(agent, session_name.as_deref())
+            else {
                 continue;
             };
+            if !agent_window_present(agent, &session, &window, pane_infos, windows) {
+                continue;
+            }
+            clear_startup_probe_disable_if_epoch_changed(agent);
+            if startup_probe_disabled_for_epoch(agent) {
+                continue;
+            }
+            if !startup_probe_within_grace(agent) {
+                disable_startup_probe_for_epoch(agent);
+                continue;
+            }
             let adapter = self.provider_registry.adapter_for(provider);
             let outcome =
                 adapter.handle_startup_prompts_outcome(self.transport.as_ref(), &target, 1, 0.0);
@@ -835,6 +910,7 @@ impl Coordinator {
                 "startup_prompt_status".to_string(),
                 serde_json::json!("handled"),
             );
+            agent_obj.remove("startup_prompt_probe_disabled_at");
             agent_obj.insert("startup_prompt_handled".to_string(), handled_payload);
         }
     }
@@ -895,6 +971,8 @@ impl Coordinator {
         &self,
         state: &mut Value,
         event_log: &EventLog,
+        pane_infos: &[crate::transport::PaneInfo],
+        windows: &[crate::transport::WindowName],
     ) -> Result<(), TickError> {
         let snapshot = state.clone();
         let team = crate::state::projection::team_state_key(&snapshot);
@@ -908,6 +986,10 @@ impl Coordinator {
                 return Ok(());
             };
             for (agent_id, agent) in agents {
+                if !agent_probe_base_eligible(agent) {
+                    clear_awaiting_human_confirm(agent);
+                    continue;
+                }
                 let approval_policy = runtime_approval_policy_from_agent(agent);
                 let auto_answer_allowed = approval_policy.auto_answer_allowed();
                 let Some(target) = runtime_approval_target(agent, session_name.as_deref()) else {
@@ -918,6 +1000,19 @@ impl Coordinator {
                     });
                     continue;
                 };
+                let target_present = capture_window_target(agent, session_name.as_deref())
+                    .map_or_else(
+                        || runtime_approval_target_present(&target, pane_infos, windows),
+                        |(session, window, _)| {
+                            agent_window_present(agent, &session, &window, pane_infos, windows)
+                        },
+                    );
+                if !target_present {
+                    continue;
+                }
+                if runtime_approval_backoff_active(agent) {
+                    continue;
+                }
                 let captured = match self
                     .transport
                     .capture(&target, crate::transport::CaptureRange::Tail(80))
@@ -932,6 +1027,7 @@ impl Coordinator {
                                 "error": error.to_string(),
                             }),
                         )?;
+                        remember_runtime_approval_backoff(agent);
                         continue;
                     }
                 };
@@ -941,8 +1037,10 @@ impl Coordinator {
                         team: team.clone(),
                         agent_id: agent_id.to_string(),
                     });
+                    remember_runtime_approval_backoff(agent);
                     continue;
                 };
+                clear_runtime_approval_backoff(agent);
                 match runtime_approval_decision(&prompt, auto_answer_allowed) {
                     RuntimeApprovalDecision::AutoApprove => {
                         clear_awaiting_human_confirm(agent);
@@ -2132,6 +2230,256 @@ fn capture_window_target(
     ))
 }
 
+fn tick_has_work_obligation(store: &crate::message_store::MessageStore) -> bool {
+    let Ok(conn) = crate::db::schema::open_db(store.db_path()) else {
+        return true;
+    };
+    let pending: i64 = conn.query_row(
+        "select count(*) from messages where status in ('pending', 'accepted', 'target_resolved')",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(1);
+    if pending > 0 {
+        return true;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let due: i64 = conn
+        .query_row(
+            "select count(*) from scheduled_events where status = 'pending' and due_at <= ?1",
+            [now],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    due > 0
+}
+
+fn agent_probe_base_eligible(agent: &Value) -> bool {
+    let status = agent.get("status").and_then(Value::as_str);
+    !matches!(
+        status,
+        Some("missing" | "stopped" | "dead" | "exited" | "terminated" | "removed" | "failed")
+    )
+}
+
+fn agent_window_present(
+    agent: &Value,
+    session: &crate::transport::SessionName,
+    window: &crate::transport::WindowName,
+    pane_infos: &[crate::transport::PaneInfo],
+    windows: &[crate::transport::WindowName],
+) -> bool {
+    if let Some(pane_id) = agent_pane_id(agent) {
+        if pane_infos.iter().any(|info| info.pane_id == pane_id) {
+            return true;
+        }
+    }
+    if pane_infos.iter().any(|info| {
+        &info.session == session
+            && info
+                .window_name
+                .as_ref()
+                .is_some_and(|known_window| known_window == window)
+    }) {
+        return true;
+    }
+    if !pane_infos.is_empty() {
+        return false;
+    }
+    windows.is_empty() || windows.iter().any(|known| known == window)
+}
+
+fn runtime_approval_target_present(
+    target: &crate::transport::Target,
+    pane_infos: &[crate::transport::PaneInfo],
+    windows: &[crate::transport::WindowName],
+) -> bool {
+    match target {
+        crate::transport::Target::Pane(pane) => {
+            if pane_infos.iter().any(|info| &info.pane_id == pane) {
+                return true;
+            }
+            pane_infos.is_empty()
+        }
+        crate::transport::Target::SessionWindow { session, window } => {
+            if pane_infos.iter().any(|info| {
+                &info.session == session
+                    && info
+                        .window_name
+                        .as_ref()
+                        .is_some_and(|known_window| known_window == window)
+            }) {
+                return true;
+            }
+            if !pane_infos.is_empty() {
+                return false;
+            }
+            windows.is_empty() || windows.iter().any(|known| known == window)
+        }
+    }
+}
+
+fn agent_process_epoch(agent: &Value) -> String {
+    if let Some(pid) = agent.get("pane_pid").and_then(Value::as_u64) {
+        return format!("pane_pid:{pid}");
+    }
+    if let Some(spawned_at) = agent.get("spawned_at").and_then(Value::as_str) {
+        return format!("spawned_at:{spawned_at}");
+    }
+    if let Some(pane_id) = agent.get("pane_id").and_then(Value::as_str) {
+        return format!("pane:{pane_id}");
+    }
+    agent
+        .get("window")
+        .and_then(Value::as_str)
+        .map(|window| format!("window:{window}"))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn startup_probe_disabled_for_epoch(agent: &Value) -> bool {
+    let epoch = agent_process_epoch(agent);
+    agent.get("startup_prompt_status").and_then(Value::as_str) == Some("disabled_for_epoch")
+        && agent
+            .get("startup_prompt_probe_epoch")
+            .and_then(Value::as_str)
+            == Some(epoch.as_str())
+}
+
+fn clear_startup_probe_disable_if_epoch_changed(agent: &mut Value) {
+    if agent.get("startup_prompt_status").and_then(Value::as_str) != Some("disabled_for_epoch") {
+        return;
+    }
+    let epoch = agent_process_epoch(agent);
+    if agent
+        .get("startup_prompt_probe_epoch")
+        .and_then(Value::as_str)
+        == Some(epoch.as_str())
+    {
+        return;
+    }
+    if let Some(agent) = agent.as_object_mut() {
+        agent.remove("startup_prompt_status");
+        agent.remove("startup_prompts");
+        agent.remove("startup_prompt_probe_disabled_at");
+    }
+}
+
+fn startup_probe_within_grace(agent: &Value) -> bool {
+    let Some(spawned_at) = agent.get("spawned_at").and_then(Value::as_str) else {
+        return true;
+    };
+    let Some(spawned_at) = parse_rfc3339_utc(spawned_at) else {
+        return true;
+    };
+    chrono::Utc::now()
+        .signed_duration_since(spawned_at)
+        .num_seconds()
+        <= STARTUP_PROMPT_GRACE_SECS
+}
+
+fn disable_startup_probe_for_epoch(agent: &mut Value) {
+    let epoch = agent_process_epoch(agent);
+    if let Some(agent) = agent.as_object_mut() {
+        agent.insert(
+            "startup_prompt_status".to_string(),
+            serde_json::json!("disabled_for_epoch"),
+        );
+        agent.insert(
+            "startup_prompts".to_string(),
+            serde_json::json!("disabled_for_epoch"),
+        );
+        agent.insert(
+            "startup_prompt_probe_epoch".to_string(),
+            serde_json::json!(epoch),
+        );
+        agent.insert(
+            "startup_prompt_probe_disabled_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+}
+
+fn runtime_approval_backoff_active(agent: &Value) -> bool {
+    let Some(next) = agent
+        .pointer("/runtime_approval_probe/next_probe_at")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+    else {
+        return false;
+    };
+    next > chrono::Utc::now()
+}
+
+fn remember_runtime_approval_backoff(agent: &mut Value) {
+    let previous = agent
+        .pointer("/runtime_approval_probe/backoff_secs")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let backoff = if previous <= 0 {
+        RUNTIME_APPROVAL_INITIAL_BACKOFF_SECS
+    } else {
+        previous
+            .saturating_mul(2)
+            .min(RUNTIME_APPROVAL_MAX_BACKOFF_SECS)
+    };
+    let next = chrono::Utc::now() + chrono::Duration::seconds(backoff);
+    if let Some(agent) = agent.as_object_mut() {
+        agent.insert(
+            "runtime_approval_probe".to_string(),
+            serde_json::json!({
+                "backoff_secs": backoff,
+                "next_probe_at": next.to_rfc3339(),
+            }),
+        );
+    }
+}
+
+fn clear_runtime_approval_backoff(agent: &mut Value) {
+    if let Some(agent) = agent.as_object_mut() {
+        agent.remove("runtime_approval_probe");
+    }
+}
+
+fn warm_idle_capture_suppressed(agent: &Value, has_work_obligation: bool) -> bool {
+    if has_work_obligation {
+        return false;
+    }
+    let status = agent
+        .pointer("/activity/status")
+        .and_then(Value::as_str)
+        .or_else(|| agent.get("status").and_then(Value::as_str));
+    if status != Some("idle") {
+        return false;
+    }
+    if runtime_approval_backoff_active(agent) {
+        return true;
+    }
+    agent
+        .get("coordinator_idle_capture_next_at")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+        .is_some_and(|next| next > chrono::Utc::now())
+}
+
+fn remember_idle_capture_schedule(agent: &mut Value, activity: &crate::messaging::AgentActivity) {
+    if activity.status != crate::messaging::ActivityStatus::Idle {
+        return;
+    }
+    if let Some(agent) = agent.as_object_mut() {
+        let next =
+            chrono::Utc::now() + chrono::Duration::seconds(IDLE_HEALTH_CAPTURE_INTERVAL_SECS);
+        agent.insert(
+            "coordinator_idle_capture_next_at".to_string(),
+            serde_json::json!(next.to_rfc3339()),
+        );
+    }
+}
+
+fn parse_rfc3339_utc(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|value| value.with_timezone(&chrono::Utc))
+}
+
 fn matching_capture_pane_info(
     agent: &Value,
     session: &crate::transport::SessionName,
@@ -2597,4 +2945,91 @@ fn notify_session_missing(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod u1_tests {
+    use super::*;
+
+    struct CaptureFailureRegistry;
+
+    impl ProviderRegistry for CaptureFailureRegistry {
+        fn adapter_for(
+            &self,
+            provider: crate::provider::Provider,
+        ) -> Box<dyn crate::provider::ProviderAdapter> {
+            Box::new(
+                crate::session_capture::test_support::CaptureCandidatesAdapter::new(
+                    provider,
+                    Some("w1"),
+                    "capture exploded",
+                ),
+            )
+        }
+
+        fn error_lists(
+            &self,
+            _provider: crate::provider::Provider,
+        ) -> super::super::types::ErrorLists {
+            super::super::types::ErrorLists::default()
+        }
+    }
+
+    #[test]
+    fn tick_logs_capture_missing_failure_and_continues() {
+        let dir = std::env::temp_dir().join(format!(
+            "team-agent-u1-capture-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::state::persist::save_runtime_state(
+            &dir,
+            &serde_json::json!({
+                "agents": {
+                    "w1": {
+                        "provider": "codex",
+                        "status": "running",
+                        "spawn_cwd": dir.to_string_lossy()
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        let coordinator = Coordinator::for_test(
+            WorkspacePath::new(dir.clone()),
+            Box::new(CaptureFailureRegistry),
+            Box::new(crate::transport::test_support::OfflineTransport::new()),
+            None,
+            None,
+        );
+
+        let report = coordinator
+            .tick()
+            .expect("capture_missing failure must be logged and not abort the tick");
+
+        assert!(report.ok, "tick should continue to a successful report");
+        let events_path = crate::model::paths::logs_dir(&dir).join("events.jsonl");
+        let events = std::fs::read_to_string(events_path).unwrap();
+        let has_capture_failure = events.lines().any(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()
+                .and_then(|event| {
+                    event
+                        .get("event")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .as_deref()
+                == Some("coordinator.tick.capture_missing_failed")
+        });
+        assert!(
+            has_capture_failure,
+            "capture_missing failure must be visible in events.jsonl; got {events}"
+        );
+    }
 }
