@@ -6,36 +6,104 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const modulePath = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(modulePath);
 const packageRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
 const DOCTOR_TIMEOUT_MS = 5000;
 const VERSION_SMOKE_TIMEOUT_MS = 5000;
 
-const command = process.argv[2] || "install";
-const args = process.argv.slice(3);
-
-if (["-h", "--help", "help"].includes(command)) {
-  printHelp();
-  process.exit(0);
+if (isCliEntrypoint()) {
+  main();
 }
 
-try {
-  if (command === "install" || command === "update") {
-    install(args);
-  } else if (command === "doctor") {
-    runDoctor(args);
-  } else if (command === "uninstall") {
-    uninstall(args);
-  } else {
-    console.error(`unknown command: ${command}`);
+function main() {
+  const command = process.argv[2] || "install";
+  const args = process.argv.slice(3);
+
+  if (["-h", "--help", "help"].includes(command)) {
     printHelp();
-    process.exit(2);
+    process.exit(0);
   }
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
+
+  try {
+    if (command === "install" || command === "update") {
+      install(args);
+    } else if (command === "doctor") {
+      runDoctor(args);
+    } else if (command === "uninstall") {
+      uninstall(args);
+    } else {
+      console.error(`unknown command: ${command}`);
+      printHelp();
+      process.exit(2);
+    }
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
+function isCliEntrypoint() {
+  if (!process.argv[1]) {
+    return false;
+  }
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(modulePath);
+  } catch {
+    return path.resolve(process.argv[1]) === modulePath;
+  }
+}
+
+export function doctorSelfCheckVerdict(doctorBody, spawnMeta = {}) {
+  if (spawnMeta.error || spawnMeta.signal) {
+    return { kind: "advisory", blockers: [] };
+  }
+
+  let body;
+  try {
+    body = JSON.parse(doctorBody || "");
+  } catch {
+    return { kind: "advisory", blockers: [] };
+  }
+
+  const blockers = [];
+  // Doctor JSON source: crates/team-agent/src/cli/mod.rs:2739-2764.
+  if (body?.tmux?.installed === false) {
+    blockers.push("tmux not installed");
+  }
+  if (!body?.mcp?.server_command) {
+    blockers.push("MCP server command missing");
+  }
+  const profileSmokeStatus = body?.profile_smoke?.status;
+  const profileSmokeNonBlocking =
+    profileSmokeStatus === "legacy_team_invalid" || profileSmokeStatus === "not_required";
+  if (
+    body?.error === "profile_smoke_failed" ||
+    (body?.profile_smoke?.ok === false && !profileSmokeNonBlocking)
+  ) {
+    blockers.push("profile smoke failed");
+  }
+
+  if (blockers.length > 0) {
+    return { kind: "blockers", blockers };
+  }
+
+  const noContext =
+    body?.ok === false && body?.error === "workspace has no Team Agent spec or runtime context";
+  if (body?.ok === true || noContext) {
+    return { kind: "ok", blockers: [] };
+  }
+
+  return { kind: "advisory", blockers: [] };
+}
+
+export function doctorSelfCheckLine(verdict) {
+  if (verdict.kind === "blockers") {
+    return `doctor: found blockers (${verdict.blockers.join("; ")}); run team-agent doctor in your project for details`;
+  }
+  return "doctor: ok (run team-agent doctor inside a team workspace for a full report)";
 }
 
 function printHelp() {
@@ -116,11 +184,8 @@ function install(argv) {
       encoding: "utf8",
       timeout: DOCTOR_TIMEOUT_MS,
     });
-    if (doctor.status === 0) {
-      console.log("doctor: ok");
-    } else {
-      console.log("doctor: has blockers; run `team-agent doctor` after updating PATH");
-    }
+    const verdict = doctorSelfCheckVerdict(doctor.stdout, doctor);
+    console.log(doctorSelfCheckLine(verdict));
   } finally {
     fs.rmSync(doctorWorkspace, { recursive: true, force: true });
   }
