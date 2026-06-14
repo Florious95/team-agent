@@ -845,16 +845,28 @@ fn token_visible_in_capture(
     }
 }
 
-/// U1 #7: capture the pane just before submit and report whether the just-pasted
-/// token marker is actually visible. `Ok(None)` for non-token payloads (nothing to
-/// check). `Ok(Some(false))` means the paste silently dropped — a false-positive that
-/// the static `inject_verification_for_payload` would have reported as success.
+/// U1 #7 / E31: wait briefly for the just-pasted token marker before submitting.
+/// `Ok(None)` for non-token payloads (nothing to check). `Ok(Some(false))` means the
+/// paste did not become visible before the Python-parity fallback delay.
 fn pre_submit_token_visible(
     backend: &TmuxBackend,
     target: &Target,
     payload: &InjectPayload,
 ) -> Result<Option<bool>, TransportError> {
-    token_visible_in_capture(backend, target, payload)
+    if payload_token_marker(payload).is_none() {
+        return Ok(None);
+    }
+    for attempt in 0..PASTED_CONTENT_APPEAR_POLLS {
+        if let Some(true) = token_visible_in_capture(backend, target, payload)? {
+            return Ok(Some(true));
+        }
+        if attempt + 1 < PASTED_CONTENT_APPEAR_POLLS {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    // Python waits 250ms between paste-buffer and Enter to let bracketed paste settle.
+    std::thread::sleep(Duration::from_millis(250));
+    Ok(Some(false))
 }
 
 const TOKEN_POST_SUBMIT_READBACK_POLLS: u32 = 5;

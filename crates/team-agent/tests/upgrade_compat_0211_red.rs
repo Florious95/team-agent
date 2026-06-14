@@ -123,7 +123,7 @@ fn upgrade_legacy_owner_team_id_delivery_projects_state_team() {
 
 #[test]
 #[serial(env)]
-fn upgrade_spec_name_owner_team_id_is_rejected_or_migrated() {
+fn upgrade_spec_name_owner_team_id_projects_without_read_side_migration() {
     let fixture = UpgradeFixture::new("delivery-legacy-name");
     fixture.seed_dual_team_state(SIBLING_KEY);
     let store = MessageStore::open(&fixture.workspace).unwrap();
@@ -144,15 +144,27 @@ fn upgrade_spec_name_owner_team_id_is_rejected_or_migrated() {
     .expect("delivery should return an explicit outcome");
     let owner_after = owner_team_id_for_message(&fixture.workspace, &message_id);
     let status_after = message_status(&fixture.workspace, &message_id);
-    let migrated = owner_after.as_deref() == Some(TEAM_KEY);
-    let explicitly_rejected = !outcome.ok && matches!(status_after.as_deref(), Some("failed" | "queued_until_rebind" | "rebind_required"));
 
+    assert!(outcome.ok, "legacy alias must still project to canonical state; outcome={outcome:?}");
+    assert_eq!(
+        owner_after.as_deref(),
+        Some(LEGACY_NAME),
+        "U0-B: read-side compatibility must not UPDATE owner_team_id rows; owner_after={owner_after:?}"
+    );
+    assert_eq!(
+        status_after.as_deref(),
+        Some("delivered"),
+        "legacy alias delivery should be explicit, not silently dropped; status_after={status_after:?}"
+    );
+    assert_eq!(
+        transport.injected_windows(),
+        vec![(format!("team-{TEAM_KEY}"), "upgrade-window".to_string())],
+        "owner_team_id=legacy-name must project to upgrade-key without mutating the DB row"
+    );
     assert!(
-        migrated || explicitly_rejected,
-        "owner_team_id=legacy-name must be explicitly migrated/aliased to upgrade-key or rejected; \
-         silent delivery is a misroute. outcome={outcome:?} owner_after={owner_after:?} \
-         status_after={status_after:?} injected={:?}",
-        transport.injected_windows()
+        events_text(&fixture.workspace).contains("owner_team_id.compatibility_alias_detected"),
+        "legacy alias projection must leave a read-only audit event; events={}",
+        events_text(&fixture.workspace)
     );
 }
 
@@ -735,6 +747,11 @@ fn message_status(workspace: &Path, message_id: &str) -> Option<String> {
         |row| row.get(0),
     )
     .unwrap()
+}
+
+fn events_text(workspace: &Path) -> String {
+    std::fs::read_to_string(workspace.join(".team").join("logs").join("events.jsonl"))
+        .unwrap_or_default()
 }
 
 fn distinct_owner_ids(db_path: &Path, table: &str) -> Vec<String> {

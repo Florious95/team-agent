@@ -527,6 +527,52 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
     }
 
     #[test]
+    fn inject_waits_for_token_visibility_before_enter() {
+        let text = "hello [team-agent-token:e31]".to_string();
+        let marker_visible = format!("{text}\n");
+        let (be, rec) = backend_with(
+            MockResp::Out(ok("")),
+            vec![
+                MockResp::Out(ok("")), // set-buffer
+                MockResp::Out(ok("")), // paste-buffer
+                MockResp::Out(ok("")), // delete-buffer
+                MockResp::Out(ok("")), // pasted-content prompt poll 1
+                MockResp::Out(ok("")), // pasted-content prompt poll 2
+                MockResp::Out(ok("")), // pasted-content prompt poll 3
+                MockResp::Out(ok("")), // pasted-content prompt poll 4
+                MockResp::Out(ok("")), // pasted-content prompt poll 5
+                MockResp::Out(ok("")), // token gate: not visible yet
+                MockResp::Out(ok("")), // token gate: still not visible
+                MockResp::Out(ok(&marker_visible)), // token gate: visible, Enter may fire
+                MockResp::Out(ok("")), // send-keys Enter
+            ],
+        );
+
+        let report = be
+            .inject(&Target::Pane(PaneId::new("%7")), &InjectPayload::Text(text), Key::Enter, true)
+            .expect("inject");
+        let calls = rec.lock().unwrap().clone();
+        let submit_index = calls
+            .iter()
+            .position(|argv| argv.get(1).map(String::as_str) == Some("send-keys"))
+            .expect("inject must eventually send Enter");
+        let captures_before_submit = calls[..submit_index]
+            .iter()
+            .filter(|argv| argv.get(1).map(String::as_str) == Some("capture-pane"))
+            .count();
+
+        assert!(
+            captures_before_submit >= super::PASTED_CONTENT_APPEAR_POLLS as usize + 3,
+            "Enter must wait until the pasted token is visible; calls={calls:?}"
+        );
+        assert_eq!(report.inject_verification, InjectVerification::CaptureContainsToken);
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+        );
+    }
+
+    #[test]
     fn send_keys_cancel_mode_queries_mode_and_dispatches_cancel_argv() {
         let (be, rec) = backend_with(
             MockResp::Out(ok("")),

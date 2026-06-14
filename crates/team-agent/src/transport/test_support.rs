@@ -37,6 +37,18 @@ struct OfflineState {
     inject_targets: Vec<Target>,
     inject_payloads: Vec<String>,
     tmux_endpoint: Option<String>,
+    /// U1-B contract: when set, `list_targets()` returns `TransportError::MuxUnavailable`
+    /// — used to model tmux server jitter (subprocess-fork-failed level). The whole
+    /// resolve must DEFER, not silently coerce to an empty vec.
+    list_targets_error: Option<String>,
+    /// U1-C / general: pre-staged `capture()` payload, keyed by target stringification.
+    /// `Target::Pane(p)` keys as `p.as_str()`; `Target::SessionWindow{session,window}`
+    /// keys as `format!("{session}:{window}")`. A miss returns empty text (current
+    /// default behaviour).
+    capture_text: BTreeMap<String, String>,
+    /// U1-C Tail-peek contract: every `capture()` call records its `CaptureRange`,
+    /// in order, so a test can prove the delivery peek site narrowed Full → Tail(80).
+    capture_ranges: Vec<CaptureRange>,
 }
 
 impl Default for OfflineState {
@@ -57,6 +69,9 @@ impl Default for OfflineState {
             inject_targets: Vec::new(),
             inject_payloads: Vec::new(),
             tmux_endpoint: None,
+            list_targets_error: None,
+            capture_text: BTreeMap::new(),
+            capture_ranges: Vec::new(),
         }
     }
 }
@@ -127,6 +142,40 @@ impl OfflineTransport {
         self
     }
 
+    /// U1-B: stage a `list_targets()` error to model tmux server jitter. While set,
+    /// every call returns `Err(TransportError::MuxUnavailable{detail})`. Pass an
+    /// empty string to clear via re-builder if needed.
+    pub fn with_list_targets_error(self, detail: impl Into<String>) -> Self {
+        self.with_state(|state| state.list_targets_error = Some(detail.into()));
+        self
+    }
+
+    /// Pre-stage `capture()` output for a `Target::Pane(pane_id)` key.
+    pub fn with_capture_for_pane(
+        self,
+        pane_id: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        self.with_state(|state| {
+            state.capture_text.insert(pane_id.into(), text.into());
+        });
+        self
+    }
+
+    /// Pre-stage `capture()` output for a `Target::SessionWindow{session,window}` key.
+    pub fn with_capture_for_session_window(
+        self,
+        session: impl Into<String>,
+        window: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let key = format!("{}:{}", session.into(), window.into());
+        self.with_state(|state| {
+            state.capture_text.insert(key, text.into());
+        });
+        self
+    }
+
     pub fn calls(&self) -> Vec<&'static str> {
         self.with_state(|state| state.calls.clone())
     }
@@ -161,6 +210,12 @@ impl OfflineTransport {
 
     pub fn inject_payloads(&self) -> Vec<String> {
         self.with_state(|state| state.inject_payloads.clone())
+    }
+
+    /// All `capture()` ranges observed, in call order. Used by U1-C Tail-peek
+    /// contracts to prove the delivery peek site requested Tail rather than Full.
+    pub fn capture_ranges(&self) -> Vec<CaptureRange> {
+        self.with_state(|state| state.capture_ranges.clone())
     }
 
     fn record(&self, call: &'static str) {
@@ -294,11 +349,21 @@ impl Transport for OfflineTransport {
 
     fn capture(
         &self,
-        _target: &Target,
+        target: &Target,
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
-        self.record("capture");
-        Ok(CapturedText { text: String::new(), range })
+        let key = match target {
+            Target::Pane(p) => p.as_str().to_string(),
+            Target::SessionWindow { session, window } => {
+                format!("{}:{}", session.as_str(), window.as_str())
+            }
+        };
+        let text = self.with_state(|state| {
+            state.calls.push("capture");
+            state.capture_ranges.push(range);
+            state.capture_text.get(&key).cloned().unwrap_or_default()
+        });
+        Ok(CapturedText { text, range })
     }
 
     fn query(
@@ -329,10 +394,18 @@ impl Transport for OfflineTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(self.with_state(|state| {
+        // U1-B: when `with_list_targets_error` is set, return a real Err so the
+        // caller sees server jitter rather than a coerced empty vec.
+        if let Some(detail) = self.with_state(|state| {
             state.calls.push("list_targets");
-            state.targets.clone()
-        }))
+            state.list_targets_error.clone()
+        }) {
+            return Err(TransportError::MuxUnavailable {
+                backend: BackendKind::Tmux,
+                detail,
+            });
+        }
+        Ok(self.with_state(|state| state.targets.clone()))
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {

@@ -16,20 +16,28 @@ pub fn save_team_runtime_snapshot(
         .get("session_name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LifecycleError::StatePersist("session_name is required".to_string()))?;
-    let safe = safe_snapshot_name(session_name);
     // golden restart/snapshot.py:46-47 — team_runtime_snapshot_dir = runtime_dir(workspace)/teams/<safe>,
     // and paths.py:25-26 runtime_dir = workspace/.team/runtime. Use the crate path helper so the snapshot
     // lands at <ws>/.team/runtime/teams/<safe>, matching golden AND the rest of the crate (not the
     // ".team"-less <ws>/runtime/teams that the original port wrote).
-    let dir = crate::model::paths::runtime_dir(workspace).join("teams").join(safe);
+    let path = team_snapshot_path(workspace, session_name);
+    let dir = path
+        .parent()
+        .ok_or_else(|| LifecycleError::StatePersist("snapshot path has no parent".to_string()))?;
     fs::create_dir_all(&dir).map_err(|e| persist_err("create snapshot dir", &e))?;
-    let path = dir.join("state.json");
     let tmp = dir.join("state.json.tmp");
     let data = serde_json::to_vec_pretty(state)
         .map_err(|e| LifecycleError::StatePersist(format!("serialize snapshot: {e}")))?;
     fs::write(&tmp, data).map_err(|e| persist_err("write snapshot temp", &e))?;
     fs::rename(&tmp, &path).map_err(|e| persist_err("replace snapshot", &e))?;
     Ok(path)
+}
+
+pub fn team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf {
+    crate::model::paths::runtime_dir(workspace)
+        .join("teams")
+        .join(safe_snapshot_name(session_name))
+        .join("state.json")
 }
 
 fn persist_err(action: &str, err: &io::Error) -> LifecycleError {

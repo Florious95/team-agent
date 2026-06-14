@@ -145,6 +145,85 @@ use super::*;
         );
     }
 
+    #[test]
+    fn lease_divergence_reads_restart_snapshot_for_special_session_names() {
+        let ws = std::env::temp_dir().join(format!("ta_rs_dual_special_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let state = serde_json::json!({
+            "session_name": "team:proj-中文",
+            "team_owner": {"pane_id": "%1", "owner_epoch": 2, "leader_session_uuid": "uuuu"},
+            "leader_receiver": {"pane_id": "%1", "owner_epoch": 2},
+        });
+        write_lease_dual_state(&ws, &state).unwrap();
+        let safe_path = crate::lifecycle::helpers::team_snapshot_path(&ws, "team:proj-中文");
+        let raw_path = crate::model::paths::runtime_dir(&ws)
+            .join("teams")
+            .join("team:proj-中文")
+            .join("state.json");
+        assert!(
+            safe_path.exists(),
+            "lease snapshot must use the restart-safe path: {}",
+            safe_path.display()
+        );
+        assert!(
+            !raw_path.exists(),
+            "new lease writes must not create the legacy raw session path: {}",
+            raw_path.display()
+        );
+
+        let restart_state = serde_json::json!({
+            "session_name": "team:proj-中文",
+            "team_owner": {"pane_id": "%9", "owner_epoch": 2, "leader_session_uuid": "uuuu"},
+            "leader_receiver": {"pane_id": "%9", "owner_epoch": 2},
+        });
+        let restart_path = crate::lifecycle::save_team_runtime_snapshot(&ws, &restart_state).unwrap();
+        assert_eq!(restart_path, safe_path);
+        assert!(
+            restart_path.exists(),
+            "restart snapshot must be written to a real file: {}",
+            restart_path.display()
+        );
+
+        let d = detect_dual_state_divergence(&ws, &state)
+            .unwrap()
+            .expect("divergence detector must read the restart-written snapshot");
+        assert_eq!(d["workspace_owner_pane"], serde_json::json!("%1"));
+        assert_eq!(d["team_owner_pane"], serde_json::json!("%9"));
+        assert_eq!(d["workspace_receiver_pane"], serde_json::json!("%1"));
+        assert_eq!(d["team_receiver_pane"], serde_json::json!("%9"));
+    }
+
+    #[test]
+    fn detect_dual_state_divergence_reads_legacy_raw_snapshot_when_safe_absent() {
+        let ws = std::env::temp_dir().join(format!("ta_rs_dual_legacy_{}", std::process::id()));
+        std::fs::create_dir_all(&ws).unwrap();
+        let state = serde_json::json!({
+            "session_name": "team:legacy-中文",
+            "team_owner": {"pane_id": "%1", "leader_session_uuid": "uuuu", "owner_epoch": 2},
+            "leader_receiver": {"pane_id": "%1", "owner_epoch": 2},
+        });
+        let safe_path = crate::lifecycle::helpers::team_snapshot_path(&ws, "team:legacy-中文");
+        assert!(!safe_path.exists(), "test setup requires safe path absent");
+        let raw_dir = crate::model::paths::runtime_dir(&ws)
+            .join("teams")
+            .join("team:legacy-中文");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        let snap = serde_json::json!({
+            "session_name": "team:legacy-中文",
+            "team_owner": {"pane_id": "%8", "leader_session_uuid": "uuuu", "owner_epoch": 2},
+            "leader_receiver": {"pane_id": "%8", "owner_epoch": 2},
+        });
+        std::fs::write(raw_dir.join("state.json"), serde_json::to_string(&snap).unwrap()).unwrap();
+
+        let d = detect_dual_state_divergence(&ws, &state)
+            .unwrap()
+            .expect("legacy raw snapshot fallback must preserve old teams");
+        assert_eq!(d["workspace_owner_pane"], serde_json::json!("%1"));
+        assert_eq!(d["team_owner_pane"], serde_json::json!("%8"));
+        assert_eq!(d["workspace_receiver_pane"], serde_json::json!("%1"));
+        assert_eq!(d["team_receiver_pane"], serde_json::json!("%8"));
+    }
+
     // detect_dual_state_divergence:无 session_name → None(__init__.py:560-561);unimplemented → RED。
     #[test]
     fn detect_dual_state_divergence_none_without_session_name() {

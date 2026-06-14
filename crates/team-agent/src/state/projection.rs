@@ -298,6 +298,11 @@ pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
         team_entry_from_state(state, team_key).and_then(Value::as_object).cloned().unwrap_or_default();
     let mut p = entry_obj.clone(); // projection = deepcopy(entry)
     // setdefault session_name/team_dir ← entry.get(...)(缺则插,值可为 null)。
+    // **0.3.24 excision** (U1-A real-machine RED v2): the ff38ab9 root-state
+    // `or_else` fallback was reverted along with the wave-2 U1-A drift fallback,
+    // since this projection change had no other consumer. v0.3.25 will re-introduce
+    // this together with the writer-shape + rediscover-writer fix — see
+    // `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md`.
     if !p.contains_key("session_name") {
         p.insert("session_name".to_string(), entry_obj.get("session_name").cloned().unwrap_or(Value::Null));
     }

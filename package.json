@@ -1,6 +1,6 @@
 {
   "name": "@team-agent/installer",
-  "version": "0.3.23",
+  "version": "0.3.24",
   "description": "npx installer for Team Agent",
   "keywords": [
     "codex",

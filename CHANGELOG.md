@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.24
+
+- **Fixed: after pasting text into a teammate's input box, pressing Enter could sometimes do nothing and the message was not actually sent.** Previously, Team Agent could paste the text and press Enter immediately, before the pasted content had fully appeared in the teammate's interface. That left the message sitting in the input box instead of sending it. Team Agent now waits until the pasted content is visible before pressing Enter, so pasted messages are delivered reliably.
+- **More reliable message delivery and team bookkeeping.** Team Agent is steadier when a team is closed and reopened, when multiple teams share the same folder, or when windows move around. Message addressing and team state records now line up more consistently, reducing edge-case delivery failures.
+
 ## 0.3.23
 
 - **Fixed: closing a team and reopening it could lose a teammate's conversation, forcing a fresh start.** Previously, after you shut a team down and restarted it, a teammate that had already been chatting could be wrongly judged as "nothing to resume" — even though its full conversation history was safely saved on disk. You were then pushed to start that teammate over from scratch, losing its context. Now the system recognizes the saved conversation and brings the teammate back where it left off, so a normal close-and-reopen keeps everyone's context.

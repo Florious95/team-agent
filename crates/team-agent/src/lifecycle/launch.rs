@@ -213,8 +213,7 @@ fn spawn_agents(
             safety,
         )?;
         let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-        let mcp_team_id =
-            runtime_active_team_key_for_spawn(workspace, spec_path, spec, session_name);
+        let mcp_team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
         let mcp_config = adapter
             .mcp_config(auth_mode)
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
@@ -724,8 +723,7 @@ fn persist_spawn_agent_state(
     } else {
         serde_json::json!({"agents": {}})
     };
-    let team_id = explicit_active_team_key(&state)
-        .unwrap_or_else(|| runtime_team_key_for_spec(spec_path, spec, session_name));
+    let team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
     let worker_tmux_socket = launched_worker_tmux_socket(transport, workspace);
     drop_worker_pane_seeded_owner(&mut state, &team_id, started, worker_tmux_socket.as_deref());
     // Only persist running state for agents whose spawn still has a live target.
@@ -2328,18 +2326,6 @@ fn spec_team_id(spec: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| spec.get("name").and_then(Value::as_str).map(str::to_string))
-}
-
-fn runtime_active_team_key_for_spawn(
-    workspace: &Path,
-    spec_path: &Path,
-    spec: &Value,
-    session_name: &SessionName,
-) -> String {
-    load_runtime_state(workspace)
-        .ok()
-        .and_then(|state| explicit_active_team_key(&state))
-        .unwrap_or_else(|| runtime_team_key_for_spec(spec_path, spec, session_name))
 }
 
 fn explicit_active_team_key(state: &serde_json::Value) -> Option<String> {

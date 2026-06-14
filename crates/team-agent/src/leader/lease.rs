@@ -2,7 +2,7 @@
 //! + 双写 / 分叉检测。
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -1024,14 +1024,27 @@ fn state_owner(state: &Value) -> Option<TeamOwner> {
 pub fn write_lease_dual_state(workspace: &Path, state: &Value) -> Result<(), LeaderError> {
     crate::state::persist::save_runtime_state(workspace, state)?;
     if let Some(session_name) = state.get("session_name").and_then(Value::as_str) {
-        let snap_path = crate::model::paths::runtime_dir(workspace)
-            .join("teams")
-            .join(session_name)
-            .join("state.json");
-        if let Some(parent) = snap_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(snap_path, serde_json::to_string_pretty(state)?)?;
+        write_team_snapshot_atomic(workspace, session_name, state)?;
+    }
+    Ok(())
+}
+
+fn write_team_snapshot_atomic(
+    workspace: &Path,
+    session_name: &str,
+    state: &Value,
+) -> Result<(), LeaderError> {
+    let snap_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name);
+    let parent = snap_path
+        .parent()
+        .ok_or_else(|| LeaderError::Validation("team snapshot path has no parent".to_string()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!("state.json.tmp-{}", std::process::id()));
+    let data = serde_json::to_vec_pretty(state)?;
+    std::fs::write(&tmp, data)?;
+    if let Err(error) = std::fs::rename(&tmp, &snap_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error.into());
     }
     Ok(())
 }
@@ -1113,10 +1126,7 @@ pub fn detect_dual_state_divergence(
     let Some(session_name) = state.get("session_name").and_then(Value::as_str) else {
         return Ok(None);
     };
-    let snap_path = crate::model::paths::runtime_dir(workspace)
-        .join("teams")
-        .join(session_name)
-        .join("state.json");
+    let snap_path = readable_team_snapshot_path(workspace, session_name);
     if !snap_path.exists() {
         return Ok(None);
     }
@@ -1148,6 +1158,17 @@ pub fn detect_dual_state_divergence(
         "workspace_owner_epoch": workspace_epoch,
         "team_owner_epoch": team_epoch,
     })))
+}
+
+fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf {
+    let safe_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name);
+    if safe_path.exists() {
+        return safe_path;
+    }
+    crate::model::paths::runtime_dir(workspace)
+        .join("teams")
+        .join(session_name)
+        .join("state.json")
 }
 
 #[cfg(test)]

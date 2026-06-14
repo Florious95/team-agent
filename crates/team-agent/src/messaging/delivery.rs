@@ -203,8 +203,42 @@ pub fn deliver_pending_message(
     let delivery_transport =
         delivery_transport_for_recipient(workspace, transport, state, &message.recipient);
     let transport = delivery_transport.as_transport();
+    // U1-B: probe `list_targets()` ONCE per delivery and DEFER on Err. The prior
+    // `.unwrap_or_default()` coerced server jitter (Err = subprocess fork failed)
+    // to an empty vec, and the downstream cache-reuse branch
+    // (`live_targets.is_empty() && !known_dead`) would then inject into a
+    // never-validated cached pane on every tmux hiccup. Err is OBSERVED here as
+    // jitter and the delivery is deferred (status stays `target_resolved`, no
+    // inject attempted) so the next tick gets a fresh probe.
+    let live_targets = match transport.list_targets() {
+        Ok(targets) => targets,
+        Err(err) => {
+            let reason = format!("list_targets_server_jitter:{err}");
+            event_log.write(
+                "delivery.deferred_list_targets_jitter",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": message.recipient,
+                    "reason": reason,
+                }),
+            )?;
+            store.mark(message_id, "target_resolved", Some(&reason))?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Degraded,
+                message_status: MessageStatusShadow("target_resolved".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(reason),
+                stage: None,
+                reason: None,
+                channel: None,
+            });
+        }
+    };
     // Do not inject queued leader messages into a synthetic "leader" window.
-    if message.recipient == "leader" && !leader_receiver_pane_is_usable(transport, state) {
+    if message.recipient == "leader"
+        && !leader_receiver_pane_is_usable(transport, state, &live_targets)
+    {
         store.mark(message_id, "failed", Some("leader_not_attached"))?;
         event_log.write(
             "leader_receiver.delivery_blocked",
@@ -227,7 +261,7 @@ pub fn deliver_pending_message(
             channel: Some("rebind_required".to_string()),
         });
     }
-    let target = resolve_inject_target(state, &message.recipient, transport);
+    let target = resolve_inject_target(state, &message.recipient, transport, &live_targets);
     // Contract B / MUST-10 / N31/N32: physical paste+Enter into a startup trust/update
     // menu is NOT provider delivery — the menu consumes the Enter and the task text
     // is lost (PROBE-2 root-cause). Before injection, peek at the recipient's pane for
@@ -473,12 +507,24 @@ fn render_message(sender: &str, task_id: Option<&str>, content: &str, message_id
 ///
 /// Leader delivery uses the bound leader receiver pane. The leader is not a worker agent and
 /// must not fall through to a synthetic `SessionWindow{window="leader"}` target.
+///
+/// `live_targets` is passed in BY THE CALLER (probed ONCE per delivery — see U1-B); this fn is
+/// pure w.r.t. transport state. The caller must DEFER on `list_targets()` Err and never coerce
+/// to an empty vec.
+///
+/// **0.3.24 excision (U1-A real-machine RED v2, macmini fixture res_e4b40473d36f)**:
+/// the wave-2 LEADER drift fallback chain (session+window probe) was removed — see
+/// `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md` for the root-cause analysis.
+/// Drift now fails loudly as `leader_not_attached` rather than silently selecting a stale
+/// pane. U1-A real-machine fix is deferred to v0.3.25 (writer-shape + projection +
+/// rediscover-writer triad). U1-B jitter defer at try_deliver_message:213-237 and
+/// U1-C-Tail at the startup-prompt peek site are unchanged.
 fn resolve_inject_target(
     state: &serde_json::Value,
     recipient: &str,
     transport: &dyn Transport,
+    live_targets: &[PaneInfo],
 ) -> Target {
-    let live_targets = transport.list_targets().unwrap_or_default();
     if recipient == "leader" {
         if let Some(pane_id) = leader_receiver_pane_id(state) {
             return Target::Pane(PaneId::new(pane_id));
@@ -507,7 +553,7 @@ fn resolve_inject_target(
             return Target::Pane(pane.clone());
         }
     }
-    if let Some(live_pane) = live_pane_for_session_window(&live_targets, session, window) {
+    if let Some(live_pane) = live_pane_for_session_window(live_targets, session, window) {
         return Target::Pane(live_pane);
     }
     if let Some(pane) = cached_pane {
@@ -552,16 +598,21 @@ fn leader_receiver_pane_id(state: &serde_json::Value) -> Option<&str> {
         .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_id_in_state))
 }
 
-fn leader_receiver_pane_is_usable(transport: &dyn Transport, state: &serde_json::Value) -> bool {
+/// `state` is "usable" for leader delivery when the bound `leader_receiver.pane_id`
+/// is present and alive (in `live_targets` or `liveness` probe returns not-Dead).
+///
+/// **0.3.24 excision (U1-A real-machine RED v2)**: the wave-2 session+window drift
+/// fallback was removed. Drift now fails loudly as `leader_not_attached` —
+/// see resolve_inject_target and `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md`.
+fn leader_receiver_pane_is_usable(
+    transport: &dyn Transport,
+    state: &serde_json::Value,
+    live_targets: &[PaneInfo],
+) -> bool {
     let Some(pane_id) = leader_receiver_pane_id(state) else {
         return false;
     };
-    if transport
-        .list_targets()
-        .unwrap_or_default()
-        .iter()
-        .any(|target| target.pane_id.as_str() == pane_id)
-    {
+    if live_targets.iter().any(|target| target.pane_id.as_str() == pane_id) {
         return true;
     }
     !matches!(
@@ -956,8 +1007,16 @@ fn recipient_pane_has_actionable_startup_prompt(
     if matches!(startup_prompts, Some("handled" | "complete")) {
         return false;
     }
+    // U1-C wave-2: Tail(80) instead of Full. The peek is the DELIVERY-SITE pre-check
+    // (NOT the startup-prompts dismissal phase, which legitimately needs the full
+    // scrollback to anchor recency). Limiting to the visible screen avoids matching
+    // residual already-answered trust modals that scrolled off — while a live trust
+    // modal would still appear in the last 80 lines because Codex pins it to the
+    // visible region until dismissed. Pair this with the U1-C recency guard in
+    // `has_actionable_trust_shape`: either fix alone covers the symptom; both
+    // together defend against both scrollback-residue AND pre-render pathologies.
     let captured = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        transport.capture(target, crate::transport::CaptureRange::Full)
+        transport.capture(target, crate::transport::CaptureRange::Tail(80))
     })) {
         Ok(Ok(captured)) => captured.text,
         _ => return false,
@@ -1351,27 +1410,15 @@ pub(crate) fn normalize_owner_team_id_rows(
     if requested == canonical {
         return Ok(());
     }
-    let store = MessageStore::open(workspace)?;
-    let conn = crate::db::schema::open_db(store.db_path())?;
-    for table in [
-        "messages",
-        "results",
-        "scheduled_events",
-        "agent_health",
-        "result_watchers",
-        "leader_notification_log",
-    ] {
-        let sql =
-            format!("update or ignore {table} set owner_team_id = ?1 where owner_team_id = ?2");
-        conn.execute(&sql, params![canonical, requested])?;
-    }
     if let Some(event_log) = event_log {
         event_log.write(
-            "owner_team_id.compatibility_alias_migrated",
+            "owner_team_id.compatibility_alias_detected",
             serde_json::json!({
                 "requested_owner_team_id": requested,
                 "canonical_owner_team_id": canonical,
                 "message_id": message_id,
+                "action": "read_only_no_db_update",
+                "workspace": workspace.to_string_lossy().to_string(),
             }),
         )?;
     }
