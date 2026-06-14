@@ -469,7 +469,19 @@ fn inject_submit_verified(report: &InjectReport) -> bool {
         SubmitVerification::PastedContentPromptStillPresentAfterSubmit => false,
         SubmitVerification::PastedContentPromptAbsentAfterSubmit => true,
         SubmitVerification::KeySentAfterVisibleToken { .. } => true,
+        // MUST-10 preserved: EnterSentWithoutPlaceholderCheck still ⇒ delivered
+        // (provider_submit_verification_red.rs:113-159 contract). E46 narrows
+        // when transport returns this variant: it is now emitted ONLY after
+        // post-Enter input-consumption confirmation succeeds. Fresh TUI
+        // (bracketed-paste-stuck) instead returns SubmitConsumptionUnverified
+        // so this branch keeps delivered semantics intact.
         SubmitVerification::EnterSentWithoutPlaceholderCheck => true,
+        // E46 (0.3.24 bug#5): Enter was sent but post-Enter consumption was
+        // NOT observed within the bounded resend cap. Treat as not delivered
+        // (submitted_unverified / failed) — prevents the macmini假阳 where
+        // demo-director's stuck bracketed-paste swallowed the Enter and
+        // delivery still reported delivered.
+        SubmitVerification::SubmitConsumptionUnverified => false,
     }
 }
 

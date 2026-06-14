@@ -112,9 +112,20 @@ pub(crate) fn parse_scheduled_kind(kind: &str) -> Result<ScheduledKind, Messagin
 }
 
 pub(crate) fn working_seconds(scrollback: &str) -> Option<u64> {
-    let lower = scrollback.to_ascii_lowercase();
+    // E47 ROOT-FIX#1 (0.3.24 P0, idle/busy 假阳): the pre-fix `lower.find(...)`
+    // scanned the WHOLE scrollback (Tail(40) lines) and matched historical
+    // working markers — e.g. an old `• Working (514s · esc to interrupt)`
+    // still in the 40-line window after the worker idled. That stale token
+    // flipped a truly-idle agent to Stuck whenever the historical seconds
+    // exceeded 300. Real fix: only consult the LIVE composer / status line
+    // (last non-empty line). If the current bottom line is something like
+    // `❯ Run /review`, `Worked for 8m 34s`, or an empty composer prompt,
+    // there is no LIVE working indicator and we return None — handing off
+    // to the structural latest_prompt_signal / IRON LAW Uncertain path.
+    let last_non_empty = scrollback.lines().rev().find(|line| !line.trim().is_empty())?;
+    let lower = last_non_empty.to_ascii_lowercase();
     let start = lower.find("working (")?;
-    let rest = scrollback.get(start + "Working (".len()..)?;
+    let rest = last_non_empty.get(start + "Working (".len()..)?;
     let seconds = rest.split_once('s')?.0;
     seconds.parse::<u64>().ok()
 }
@@ -129,32 +140,61 @@ pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
 }
 
 pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
-    let lower = scrollback.to_ascii_lowercase();
-    let idle_pos = latest_idle_prompt_pos(scrollback);
-    let working_pos = [
-        "working", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-    ]
-    .iter()
-    .filter_map(|needle| lower.rfind(needle))
-    .max();
-    match (idle_pos, working_pos) {
-        (Some(i), Some(w)) if i > w => Some(idle_activity()),
-        (Some(_), None) => Some(idle_activity()),
-        (_, Some(_)) => Some(AgentActivity {
+    // E47 ROOT-FIX#2 (0.3.24 P0, idle/busy 假阳): limit the scan to the
+    // BOTTOM ACTIVE REGION (last 1-3 non-empty lines = composer / status
+    // line). The pre-fix `rfind` across the whole Tail(40) buffer let a
+    // historical spinner/`Working` token out-position the live `❯`/`›`
+    // composer (the rfind-recency family bug — same shape as the #320
+    // codex prompt residue). When the composer line is `❯ Run /review`
+    // (idle), a scrollback `Working (514s)` 20 lines up should NOT win.
+    //
+    // IRON LAW (activity.rs:3 / bug-071/077/085): no-signal in the bottom
+    // region must be Uncertain (caller treats None here as "no decisive
+    // signal" and surfaces Uncertain), NEVER silently flipped to Idle.
+    let active_region: Vec<&str> = scrollback
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(3)
+        .collect();
+    if active_region.is_empty() {
+        return None;
+    }
+    let mut has_idle_prompt = false;
+    let mut has_live_working_indicator = false;
+    for line in &active_region {
+        let lower = line.to_ascii_lowercase();
+        if line.contains('❯') || line.contains('›') {
+            has_idle_prompt = true;
+        }
+        // codex live spinner shapes (provider/adapter.rs:875-876 markers):
+        // braille spinner, `• Working (`, `Thinking`; claude `✶`/`✢` per
+        // adapter; we look for STRUCTURAL composer signals.
+        if [
+            "working (", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦",
+            "⠧", "⠇", "⠏", "✶", "✢",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+        {
+            has_live_working_indicator = true;
+        }
+    }
+    // Working indicator IN the active region wins over a stale `❯`/`›`
+    // (composer may show a prompt char before the live spinner refreshes).
+    if has_live_working_indicator {
+        return Some(AgentActivity {
             status: ActivityStatus::Working,
             confidence: 0.9,
             rationale: "working_indicator".to_string(),
-        }),
-        (None, None) => None,
+        });
     }
-}
-
-fn latest_idle_prompt_pos(scrollback: &str) -> Option<usize> {
-    scrollback
-        .match_indices('❯')
-        .map(|(idx, _)| idx)
-        .chain(scrollback.match_indices('›').map(|(idx, _)| idx))
-        .max()
+    if has_idle_prompt {
+        return Some(idle_activity());
+    }
+    // No structural signal in the bottom region → caller (activity.rs:184)
+    // gets None and treats as no-decisive-signal → Uncertain (IRON LAW).
+    None
 }
 
 fn idle_activity() -> AgentActivity {

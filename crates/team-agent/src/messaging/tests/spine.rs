@@ -71,7 +71,14 @@ fn p2_owner_bypass_denies_on_env_agent_id_mismatch() {
 }
 
 // P1 — classify_agent_activity must read current_command, stale last_output, multiline /
-// Codex idle prompts, and Thinking/lowercase-working (activity_detector.py:90-146).
+// Codex idle prompts, and Thinking/codex-spinner working indicators
+// (activity_detector.py:90-146). **E47 amendment (0.3.24 P0)**: the
+// working-indicator probe is now bottom-active-region scoped (last 1-3
+// non-empty lines) and looks for STRUCTURAL spinner markers (codex
+// `• Working (`/`Thinking`/braille; claude `✶`/`✢`), not bare lowercase
+// `working` anywhere in the scrollback. Pre-fix rfind across the whole
+// Tail(40) buffer is the macmini假阳 root cause (historical Working tokens
+// out-positioning a live idle composer).
 #[test]
 fn p2_classify_activity_reads_command_stale_and_prompts() {
     let st = serde_json::json!({});
@@ -85,12 +92,28 @@ fn p2_classify_activity_reads_command_stale_and_prompts() {
     // (3) embedded multiline idle prompt (Codex ❯ not on its own trimmed line) → idle 0.9.
     let c = classify_agent_activity(&st, "some line\n❯\nmore", false, None, None);
     assert_eq!((c.status, c.confidence), (ActivityStatus::Idle, 0.9));
-    // (4) 'Thinking' working indicator → working 0.9.
+    // (4) 'Thinking' working indicator in the bottom active region → working 0.9.
     let d = classify_agent_activity(&st, "Thinking about it", false, None, None);
     assert_eq!((d.status, d.confidence), (ActivityStatus::Working, 0.9));
-    // (5) lowercase 'working' indicator → working 0.9.
+    // (5) E47 amendment: bare lowercase 'working on it' is NOT a structural
+    // spinner marker; the live codex spinner is `• Working (Ns · esc to
+    // interrupt)`. Treat as no-decisive-signal → Uncertain. The pre-fix
+    // expectation here is exactly the macmini假阳 shape — a stale 'working'
+    // token (without the parenthesised seconds + esc-to-interrupt tail) is
+    // either scrollback residue or unrelated text, not a live working
+    // indicator. To assert the Working path use the structural codex shape.
     let e = classify_agent_activity(&st, "working on it", false, None, None);
-    assert_eq!((e.status, e.confidence), (ActivityStatus::Working, 0.9));
+    assert_eq!((e.status, e.confidence), (ActivityStatus::Uncertain, 0.5));
+    // (5b) E47 structural Working: a real codex live spinner in the bottom
+    // active region must still classify Working 0.9.
+    let e_struct = classify_agent_activity(
+        &st,
+        "• Working (12s · esc to interrupt)",
+        false,
+        None,
+        None,
+    );
+    assert_eq!((e_struct.status, e_struct.confidence), (ActivityStatus::Working, 0.9));
 }
 
 // P1 — scheduler dispatch must be exhaustive: an unknown kind surfaces an error, not a
@@ -482,5 +505,135 @@ fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
         payload.contains(&token_line),
         "the rendered block must end with the token line {token_line:?} (token == message_id) so the \
          worker builds a result_envelope; got {payload:?}"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E47 (0.3.24 P0, idle/busy 假阳) — TUI keyword grep is structurally bounded.
+//
+// Real-machine repro (macmini): a Tail(40) capture of an idle codex worker
+// still carries historical `• Working (514s · esc to interrupt)` plus a
+// `─ Worked for 8m 34s ─` summary plus a fresh `❯ Run /review` prompt. The
+// pre-fix `working_seconds` full-buffer find matched the 514s token and
+// returned ≥300 → Stuck. The pre-fix `latest_prompt_signal` rfind let the
+// historical spinner out-position the bottom `❯` → Working. E47 narrows
+// both probes to the bottom active region (last 1-3 non-empty lines).
+//
+// The authoritative provider JSONL classify is wired in coordinator/tick.rs
+// (jsonl_activity_for_agent); these unit tests pin the TUI fallback layer.
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn e47_codex_idle_with_historical_working_in_scrollback_is_idle_not_stuck_or_working() {
+    // Exact macmini repro shape from the architect locate (E47).
+    let scrollback = "• Working (514s · esc to interrupt)\n\
+                      tool call 1\n\
+                      tool call 2\n\
+                      ─ Worked for 8m 34s ─\n\
+                      › Run /review\n\
+                      ❯ ";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Idle,
+        "E47 (RED-1): codex idle worker whose scrollback still carries \
+         historical `• Working (514s · esc to interrupt)` must classify IDLE \
+         (bottom active region is `❯`+`› Run /review` = idle composer). \
+         pre-fix: Stuck/Working via rfind-recency. Got {a:?}"
+    );
+}
+
+#[test]
+fn e47_past_tense_worked_for_is_not_stale_working_indicator() {
+    // RED-2: past-tense `Worked for` summary line must NOT trigger
+    // working_seconds Stuck. The pre-fix scanned the whole buffer and would
+    // match the embedded `8m 34s ─` against `working (` if formatted slightly
+    // differently — but more importantly this test pins the "past-tense
+    // summary is idle context" semantics.
+    let scrollback = "─ Worked for 8m 34s ─\n❯ ";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_ne!(
+        a.status,
+        ActivityStatus::Stuck,
+        "E47 (RED-2): past-tense `Worked for 8m 34s` must NOT trigger \
+         stale_working_indicator Stuck. Got {a:?}"
+    );
+    assert_eq!(
+        a.status,
+        ActivityStatus::Idle,
+        "E47 (RED-2): bottom `❯` composer = idle. Got {a:?}"
+    );
+}
+
+#[test]
+fn e47_claude_idle_with_historical_spinner_classifies_idle() {
+    // RED-3: claude idle worker; historical spinner shape (`✶` per
+    // adapter.rs:875-876) earlier in the buffer (>= 3 non-empty lines deep),
+    // bottom composer is idle (`›` glyph variant or `> ` claude prompt).
+    // The bottom active region (last 3 non-empty lines) has NO spinner.
+    let scrollback = "✶ Working on plan\n\
+                      tool 1\n\
+                      tool 2\n\
+                      assistant reply text\n\
+                      summary line A\n\
+                      summary line B\n\
+                      › Continue?";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Idle,
+        "E47 (RED-3): claude idle worker — historical ✶ above, idle `›` \
+         below — must classify IDLE. Got {a:?}"
+    );
+}
+
+#[test]
+fn e47_codex_live_spinner_in_bottom_active_region_classifies_working() {
+    // RED-4 (defence vs over-tightening 假阴): a TRULY busy codex worker
+    // whose bottom active region carries the live spinner must still be
+    // Working. No idle composer present.
+    let scrollback = "tool call x\nassistant response so far\n• Working (12s · esc to interrupt)";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Working,
+        "E47 (RED-4): live codex spinner in bottom active region must \
+         classify Working. Got {a:?}"
+    );
+}
+
+#[test]
+fn e47_claude_live_working_in_bottom_active_region_classifies_working() {
+    // RED-5: a TRULY busy claude worker showing `✶ Working` at the bottom
+    // active region must be Working — even without the `(Ns)` codex shape.
+    let scrollback = "earlier output\nmore output\n✶ Working through the request";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Working,
+        "E47 (RED-5): claude ✶ Working in bottom active region → Working. \
+         Got {a:?}"
+    );
+}
+
+#[test]
+fn e47_iron_law_no_signal_in_bottom_region_stays_uncertain_not_idle() {
+    // Defence: IRON LAW (activity.rs:3 / bug-071/077/085). When the bottom
+    // active region has no spinner AND no `❯`/`›` AND no other decisive
+    // signal, classify_agent_activity falls through to no_decisive_signal →
+    // Uncertain — NEVER silently to Idle.
+    let scrollback = "some neutral text\nmore neutral text\nstill nothing decisive";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, None, None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Uncertain,
+        "E47 IRON LAW guard: bottom region carries no spinner and no idle \
+         composer → Uncertain, never silently Idle. Got {a:?}"
     );
 }

@@ -572,6 +572,257 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
         );
     }
 
+    // ═════════════════════════════════════════════════════════════════════════════
+    // E46 0.3.24 task#327 P0 — submit verification false-positive / false-negative.
+    //
+    // Architect + Workflow C1: do NOT flip `EnterSentWithoutPlaceholderCheck =>
+    // false` (breaks MUST-10 in provider_submit_verification_red.rs:113-159).
+    // Instead introduce SubmitConsumptionUnverified and only emit it from the
+    // bracketed-paste / Enter path when post-Enter input consumption is NOT
+    // observed within a bounded resend cap.
+    //
+    // Real-machine truth source (macmini): a fresh claude TUI's bracketed
+    // paste swallows the framework's Enter as paste content; the framework
+    // must (a) send Escape first to exit the paste bracket and (b) verify
+    // post-Enter consumption by structural input-empty probe (token marker
+    // no longer in the bottom 5 lines of the pane = composer cleared).
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /// **E46 RED-1 (核心假阳)**: token-bearing Text + Enter + bracketed paste.
+    /// Token is visible in the pane after submit AND remains in the bottom of
+    /// the pane (input region — consumption was NOT observed). Submit must
+    /// report `SubmitConsumptionUnverified`, NOT
+    /// `EnterSentWithoutPlaceholderCheck`. Otherwise delivery emits delivered
+    /// + message.delivered (假阳) even though the worker never consumed it.
+    #[test]
+    fn e46_inject_text_with_token_unconsumed_in_tail_reports_submit_consumption_unverified() {
+        // Mock always returns the token in the captured tail — simulates the
+        // macmini fresh claude TUI where the paste lands but the input never
+        // clears (Enter swallowed by bracketed-paste).
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
+        let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::SubmitConsumptionUnverified,
+            "E46 RED-1: when token remains in the pane input region after \
+             Enter + resend cap, transport must report SubmitConsumptionUnverified \
+             (not EnterSentWithoutPlaceholderCheck which delivery treats as \
+             delivered). Got {:?}",
+            report.submit_verification
+        );
+        // turn_verification stays NotYetObserved (Gap42: metadata only).
+        assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    }
+
+    /// **E46 RED-2 (正向消费确认 → delivered)**: token-bearing Text + Enter +
+    /// bracketed paste. Token VISIBLE on first capture (pre/post-submit token
+    /// readback) BUT then GONE from the post-submit input-consumption probe
+    /// (composer cleared after Enter). Submit must report
+    /// `EnterSentWithoutPlaceholderCheck` (MUST-10 path) — delivery proceeds
+    /// to delivered. Guards against regression on crd's existing-worker path.
+    #[test]
+    fn e46_inject_text_with_token_consumed_after_enter_keeps_enter_sent_without_placeholder_check() {
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red2]";
+        // First captures (token visibility probes pre/post-Enter) return text
+        // with token; the LAST capture (consumption probe) returns text WITHOUT
+        // the token in the tail (composer cleared). MockCommandRunner drains
+        // `queued` first then defaults — we queue the early "token visible"
+        // captures, then drop to the empty default for the consumption probe.
+        let visible = ok(token_text);
+        let queued = vec![
+            MockResp::Out(ok("")),                // set-buffer
+            MockResp::Out(ok("")),                // paste-buffer
+            MockResp::Out(ok("")),                // delete-buffer
+            MockResp::Out(visible.clone()),        // pasted-content prompt poll: none → continue
+            MockResp::Out(visible.clone()),        // pre-submit token visibility: visible
+            MockResp::Out(ok("")),                // Escape send-keys (no stdout needed)
+            MockResp::Out(ok("")),                // Enter send-keys
+            // From here on, the default response is `ok("")` (empty pane tail) so
+            // post-Enter consumption probe sees no token in tail → consumed=true.
+        ];
+        let (be, _rec) = backend_with(MockResp::Out(ok("")), queued);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "E46 RED-2: when post-Enter consumption is observed (token gone \
+             from input region tail), submit must report the canonical \
+             EnterSentWithoutPlaceholderCheck so MUST-10 delivery semantics \
+             hold (provider_submit_verification_red.rs:113-159). Got {:?}",
+            report.submit_verification
+        );
+    }
+
+    /// **E46 RED-3 (resend-to-cap, no double-submit)**: when the FIRST Enter
+    /// landed on the composer but our readback was slow, the re-check BEFORE
+    /// resend must observe the now-empty input and STOP — must NOT fire a
+    /// second Enter into an empty composer (would open an empty turn).
+    #[test]
+    fn e46_inject_text_resend_rechecks_input_before_resending_to_avoid_double_submit() {
+        // Same mock as RED-2: post-Enter consumption probe sees empty tail.
+        // The implementation should issue only ONE Enter (no resend) once
+        // consumption is observed.
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red3]";
+        let queued = vec![
+            MockResp::Out(ok("")),                // set-buffer
+            MockResp::Out(ok("")),                // paste-buffer
+            MockResp::Out(ok("")),                // delete-buffer
+            MockResp::Out(ok(token_text)),         // pasted-content prompt: not matched
+            MockResp::Out(ok(token_text)),         // pre-submit token visibility
+            MockResp::Out(ok("")),                // Escape
+            MockResp::Out(ok("")),                // Enter
+        ];
+        let (be, rec) = backend_with(MockResp::Out(ok("")), queued);
+        let _report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        let calls = rec.lock().unwrap().clone();
+        // Count `send-keys ... Enter` invocations. There must be EXACTLY ONE
+        // (the canonical submit). A second one indicates the resend loop
+        // didn't honour C3 (re-check input before resend).
+        let enter_count = calls
+            .iter()
+            .filter(|argv| {
+                argv.get(1).map(String::as_str) == Some("send-keys")
+                    && argv.contains(&"Enter".to_string())
+            })
+            .count();
+        assert_eq!(
+            enter_count, 1,
+            "E46 RED-3: when consumption is observed (or already happened \
+             between Enter and probe), the resend loop must STOP and NOT \
+             issue a second Enter. Got {enter_count} Enter sends. \
+             calls={calls:?}"
+        );
+    }
+
+    /// **E46 RED-5 (provider-agnostic detector)**: the consumption probe must
+    /// NOT hard-code provider UI strings (claude `>`, codex `╰`, ...). It uses
+    /// the token marker absence in the bottom of the pane — works for any
+    /// provider. Here we run a non-claude-shaped pane (no claude markers) and
+    /// confirm the same delivered semantics when consumption happens.
+    #[test]
+    fn e46_consumption_detector_works_on_codex_shaped_pane_without_provider_strings() {
+        // Codex-shaped fake: prompt looks like `codex>` with no claude markers.
+        // After Enter, the composer clears (empty default returns ok("")).
+        let token_text =
+            "Team Agent message from leader:\n\ncodex msg\n\n[team-agent-token:msg_red5]";
+        let queued = vec![
+            MockResp::Out(ok("")),                // set-buffer
+            MockResp::Out(ok("")),                // paste-buffer
+            MockResp::Out(ok("")),                // delete-buffer
+            MockResp::Out(ok("codex>\n")),         // pasted-content prompt: no match
+            MockResp::Out(ok(token_text)),         // pre-submit token visibility
+            MockResp::Out(ok("")),                // Escape
+            MockResp::Out(ok("")),                // Enter
+            // post-Enter: default returns ok("") (composer cleared) → token gone
+        ];
+        let (be, _rec) = backend_with(MockResp::Out(ok("")), queued);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "E46 RED-5: provider-agnostic detector — codex-shaped pane (no \
+             claude UI string) where composer clears post-Enter must still \
+             report EnterSentWithoutPlaceholderCheck via structural \
+             input-empty check. Got {:?}",
+            report.submit_verification
+        );
+    }
+
+    /// **E46 Escape pre-Enter**: when bracketed=true + Text payload + submit=Enter,
+    /// the inject must send Escape BEFORE the Enter (exits bracketed-paste
+    /// mode on stuck composer). Non-Enter submits (e.g. Key::Down for codex
+    /// menu) must NOT receive the Escape pre-step.
+    #[test]
+    fn e46_inject_text_enter_emits_escape_before_enter_on_bracketed_paste() {
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_esc]";
+        let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
+        let _report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        let calls = rec.lock().unwrap().clone();
+        let escape_idx = calls.iter().position(|argv| {
+            argv.get(1).map(String::as_str) == Some("send-keys")
+                && argv.contains(&"Escape".to_string())
+        });
+        let enter_idx = calls.iter().position(|argv| {
+            argv.get(1).map(String::as_str) == Some("send-keys")
+                && argv.contains(&"Enter".to_string())
+        });
+        let escape_idx = escape_idx.expect("E46: bracketed text + Enter must send Escape pre-step");
+        let enter_idx = enter_idx.expect("E46: must still send the final Enter");
+        assert!(
+            escape_idx < enter_idx,
+            "E46: Escape must be sent BEFORE Enter (closes bracketed-paste \
+             so Enter is interpreted as submit). escape_idx={escape_idx} \
+             enter_idx={enter_idx} calls={calls:?}"
+        );
+    }
+
+    /// **E46 regression guard**: non-Enter submit (codex menu navigation,
+    /// `Key::Down`) does NOT trigger the Escape pre-step (would interfere
+    /// with the menu).
+    #[test]
+    fn e46_inject_text_non_enter_submit_does_not_emit_escape_prestep() {
+        let token_text = "menu interaction\n[team-agent-token:msg_down]";
+        let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
+        let _report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Down,
+                true,
+            )
+            .expect("inject runs");
+        let calls = rec.lock().unwrap().clone();
+        let escape_count = calls
+            .iter()
+            .filter(|argv| {
+                argv.get(1).map(String::as_str) == Some("send-keys")
+                    && argv.contains(&"Escape".to_string())
+            })
+            .count();
+        assert_eq!(
+            escape_count, 0,
+            "E46 regression guard: Key::Down submits (codex menu navigation) \
+             must NOT receive Escape pre-step. Got {escape_count}. \
+             calls={calls:?}"
+        );
+    }
+
     #[test]
     fn send_keys_cancel_mode_queries_mode_and_dispatches_cancel_argv() {
         let (be, rec) = backend_with(

@@ -927,6 +927,51 @@ fn capture_has_pasted_content_prompt(text: &str) -> bool {
 const PASTED_CONTENT_APPEAR_POLLS: u32 = 5;
 const PASTED_CONTENT_SUBMIT_ATTEMPTS: u32 = 3;
 
+/// E46 (0.3.24 bug#5): bounded resend cap for post-Enter consumption probe.
+/// Mirrors PASTED_CONTENT_SUBMIT_ATTEMPTS shape: try Enter then bounded
+/// re-checks of the pane's input region. Each iteration first re-checks that
+/// the input still has content before resending Enter — guards against double
+/// submission when the first Enter was consumed but our readback was slow.
+const POST_SUBMIT_CONSUMPTION_ATTEMPTS: u32 = 3;
+const POST_SUBMIT_CONSUMPTION_POLL_MS: u64 = 60;
+
+/// E46 (0.3.24 bug#5, C5 provider-agnostic detector): the pane's input region
+/// is "consumed" when the token text that was just visible BEFORE the Enter
+/// is no longer present in the captured tail. Structural signal — no
+/// provider-specific UI string. Works across claude / codex / copilot because
+/// every provider's composer clears the input area after a successful submit
+/// (the content scrolls into history, leaving the prompt empty).
+///
+/// Returns:
+///   * `Some(true)`  — token was visible BEFORE submit and is GONE from
+///     the visible input area now → consumption confirmed.
+///   * `Some(false)` — token still visible (or other reason to think not yet
+///     consumed).
+///   * `None` — payload has no token marker (peer message without token,
+///     empty payload) so we can't structurally check; caller treats this as
+///     non-blocking (the pre-existing `EnterSentWithoutPlaceholderCheck`
+///     path).
+fn post_submit_input_consumed(
+    backend: &TmuxBackend,
+    target: &Target,
+    payload: &InjectPayload,
+) -> Result<Option<bool>, TransportError> {
+    let Some(marker) = payload_token_marker(payload) else {
+        return Ok(None);
+    };
+    let captured = backend.capture(target, CaptureRange::Tail(30))?;
+    // The token may legitimately appear in scrollback (a successful submit
+    // pushes it into history). We only treat the BOTTOM-of-pane region (last
+    // few lines, where the input area lives) as the consumption signal. Tail
+    // 30 lines is small enough that the input area still dominates if the
+    // submit didn't go through, while a successful submit has pushed the
+    // token marker out of the bottom 5 lines by the time the response
+    // composer redraws.
+    let tail_lines: Vec<&str> = captured.text.lines().rev().take(5).collect();
+    let token_in_tail = tail_lines.iter().any(|line| line.contains(marker));
+    Ok(Some(!token_in_tail))
+}
+
 fn shell_command(
     argv: &[String],
     cwd: &Path,
@@ -1117,11 +1162,94 @@ impl Transport for TmuxBackend {
                 // downgrade to CaptureMissingToken.
                 token_visible_for_report =
                     pre_submit_token_visible(self, target, payload).unwrap_or(None);
+                // E46 (0.3.24 bug#5, demo-director卡 bracketed paste root cause):
+                // bracketed-paste-mode on a fresh provider TUI swallows the framework's
+                // Enter as paste content. Send `Escape` first to exit the paste bracket
+                // so the subsequent Enter is interpreted as submit. Safe across
+                // claude/codex/copilot: Escape on an empty composer is a no-op
+                // (cancel any pending mode), it only matters when bracketed-paste is
+                // actually open. Architect-approved + macmini real-machine verified.
+                // Only Enter benefits — explicit menu navigation (Key::Down etc.)
+                // should not pre-cancel mode.
+                if bracketed
+                    && matches!(payload, InjectPayload::Text(_))
+                    && matches!(submit, Key::Enter)
+                {
+                    let escape_argv = tmux_send_keys_argv(&pane, &[Key::Escape]);
+                    // We don't fail the whole inject on Escape error — Escape failure
+                    // would surface downstream as the same SubmitConsumptionUnverified
+                    // when post-Enter probe still sees the token in the input region.
+                    let _ = self.run_inject_stage(&escape_argv, InjectStage::Submit);
+                }
                 self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
                 if matches!(token_visible_for_report, Some(false)) {
                     token_visible_for_report =
                         post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
                 }
+                // E46 C2 + C3: post-Enter consumption gate with bounded resend cap.
+                // Only fires for:
+                //   - submit key == Enter (other keys like Down/Up are explicit
+                //     menu navigation; codex uses `Down Enter` to dismiss a
+                //     prompt — those carry their own verification semantics
+                //     via KeySentAfterVisibleToken),
+                //   - token-bearing Text payloads (the structural input-empty
+                //     signal needs a token marker to anchor on).
+                // Each iteration RE-CHECKS that the input still contains the
+                // token BEFORE resending Enter — guards against the C3
+                // double-submit hazard when the first Enter was consumed but
+                // our readback was slow to catch the empty-input state.
+                let mut consumption_attempts: u32 = 1;
+                let mut consumed = if matches!(submit, Key::Enter) {
+                    post_submit_input_consumed(self, target, payload).unwrap_or(None)
+                } else {
+                    None
+                };
+                if matches!(consumed, Some(false)) {
+                    for _ in 1..POST_SUBMIT_CONSUMPTION_ATTEMPTS {
+                        std::thread::sleep(Duration::from_millis(
+                            POST_SUBMIT_CONSUMPTION_POLL_MS,
+                        ));
+                        // C3 critical: re-check BEFORE resending. If the input
+                        // is now empty (= first Enter actually consumed, just
+                        // observable now), DO NOT resend — bumping a spurious
+                        // empty Enter would open an empty turn.
+                        consumed = post_submit_input_consumed(self, target, payload)
+                            .unwrap_or(None);
+                        if !matches!(consumed, Some(false)) {
+                            break;
+                        }
+                        consumption_attempts += 1;
+                        let _ = self.run_inject_stage(&submit_argv, InjectStage::Submit);
+                    }
+                }
+                let submit_verification = match consumed {
+                    // Consumption confirmed → MUST-10 path: keep the canonical
+                    // EnterSentWithoutPlaceholderCheck so the existing
+                    // provider_submit_verification_red contract holds.
+                    Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
+                    // Consumption explicitly NOT observed (token still in tail
+                    // after resend cap) → E46's new variant. Delivery treats
+                    // as not delivered.
+                    Some(false) => SubmitVerification::SubmitConsumptionUnverified,
+                    // No structural anchor (non-token payload) → preserve the
+                    // historic non-checked variant; the pre-existing
+                    // pre/post-submit token readback + U1 #7 cover the other
+                    // false-positive (silent paste drop).
+                    None => submit_verification_for_key(submit),
+                };
+                return Ok(InjectReport {
+                    stage_reached: InjectStage::Submit,
+                    inject_verification: inject_verification_after_readback(
+                        payload,
+                        token_visible_for_report,
+                    ),
+                    submit_verification,
+                    turn_verification: match payload {
+                        InjectPayload::Empty => TurnVerification::NotRequired,
+                        InjectPayload::Text(_) => TurnVerification::NotYetObserved,
+                    },
+                    attempts: consumption_attempts,
+                });
             }
         }
         Ok(InjectReport {

@@ -555,11 +555,25 @@ pub(crate) fn adaptive_placement_for_agent(
     if !state_uses_adaptive_layout(state) {
         return None;
     }
-    let live_panes: BTreeSet<String> = transport
-        .list_targets()
-        .unwrap_or_default()
-        .into_iter()
+    // E43 Fix A (0.3.24 bug#3, demo-director blocker): cross-check live panes
+    // by both pane_id AND window_name. Real-machine state can carry a stale
+    // `layout_window` residue (e.g. "team-w2") while the live pane for that
+    // agent actually lives under a DIFFERENT window_name (e.g. "architect").
+    // The prior pane_id-only check let the stale claim slip through, and the
+    // resulting placement asked spawn_agent_window to split a phantom window.
+    let live_targets = transport.list_targets().unwrap_or_default();
+    let live_panes: BTreeSet<String> = live_targets
+        .iter()
         .map(|pane| pane.pane_id.as_str().to_string())
+        .collect();
+    // Map pane_id → window_name for the window-name cross-check.
+    let live_pane_window: BTreeMap<String, String> = live_targets
+        .iter()
+        .filter_map(|pane| {
+            pane.window_name
+                .as_ref()
+                .map(|name| (pane.pane_id.as_str().to_string(), name.as_str().to_string()))
+        })
         .collect();
     let live_windows: BTreeSet<String> = transport
         .list_windows(session_name)
@@ -581,10 +595,32 @@ pub(crate) fn adaptive_placement_for_agent(
             else {
                 continue;
             };
-            let pane_live = agent
+            // E45 (0.3.24 bug#4): only canonical `team-w<N>[-suffix]` windows
+            // count as adaptive layout windows. Per-agent windows (named
+            // after agent_id like `developer`) are NOT layout windows even if
+            // the state's `layout_window`/`layout_index` carries them — those
+            // are residue from a prior launch or explicit per-agent topology.
+            // Treating them as adaptive caused add-agent to split into the
+            // developer worker's pane on macmini (split-window -t :developer
+            // succeeded → 2 panes in developer window, no new window for
+            // demo-director).
+            if !is_adaptive_layout_window(window) {
+                continue;
+            }
+            let pane_id = agent
                 .get("pane_id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|pane| live_panes.contains(pane));
+                .and_then(serde_json::Value::as_str);
+            let pane_live = pane_id.is_some_and(|pane| live_panes.contains(pane));
+            // E43 Fix A: window_name match — when the agent's pane is live,
+            // its live window_name MUST equal the claimed `window`; otherwise
+            // the claim is stale residue from a respawn/rename and must not
+            // count toward the layout map.
+            let pane_window_matches = pane_id
+                .and_then(|pane| live_pane_window.get(pane))
+                .is_some_and(|name| name == window);
+            if pane_live && !pane_window_matches {
+                continue;
+            }
             if !pane_live && (!live_panes.is_empty() || !live_windows.contains(window)) {
                 continue;
             }
@@ -610,6 +646,17 @@ pub(crate) fn adaptive_placement_for_agent(
                 starts_window: false,
             });
         }
+    }
+    // E45 (0.3.24 bug#4): when the live session has NO real adaptive layout
+    // window (the topology is effectively per-agent, even though state says
+    // display_backend=adaptive), DO NOT synthesise a fresh `team-w<N>`
+    // window — that would force the new agent into an adaptive-layout pane
+    // shape the rest of the session does not actually use. Return None so
+    // the caller (`start_agent_at_paths` → `spawn_agent_window`) falls back
+    // to its non-placement path, which opens a new window named after the
+    // agent_id (canonical per-agent pattern, matches the existing 7 workers).
+    if windows.is_empty() {
+        return None;
     }
     let next_index = windows.keys().next_back().map(|idx| idx + 1).unwrap_or(0);
     let base = format!("team-w{}", next_index + 1);
@@ -637,6 +684,14 @@ pub(crate) fn adaptive_existing_placement_for_agent(
         .or_else(|| agent.get("window"))
         .and_then(serde_json::Value::as_str)
         .filter(|window| !window.is_empty())?;
+    // E45 (0.3.24 bug#4): existing-placement is meaningless for a per-agent
+    // window name (e.g. `developer`). Return None and let the caller fall
+    // back to its non-placement spawn path, which opens / reuses a window
+    // named after the agent_id. Only canonical `team-w<N>` windows are
+    // honored as existing adaptive placements.
+    if !is_adaptive_layout_window(window) {
+        return None;
+    }
     let layout_index = agent
         .get("layout_index")
         .and_then(serde_json::Value::as_u64)
@@ -655,12 +710,18 @@ pub(crate) fn adaptive_existing_placement_for_agent(
         .map(|window| window.as_str().to_string())
         .collect();
     if !live_windows.contains(window) {
+        // E43 Fix B (0.3.24 bug#3): the claimed `layout_window` is NOT in
+        // live_windows — it's stale residue. The session is effectively
+        // per-agent (live windows are named after agent_ids), so fall back
+        // to a new window named after the agent_id itself instead of
+        // synthesising a fresh phantom-named window the next spawn would
+        // try (and fail) to split.
         return Some(LayoutPlacement {
             agent_id: agent_id.clone(),
-            layout_window: WindowName::new(window),
+            layout_window: WindowName::new(agent_id.as_str()),
             layout_index,
-            pane_index: desired_pane_index,
-            starts_window: desired_pane_index == 0,
+            pane_index: 0,
+            starts_window: true,
         });
     }
     let existing_panes = transport
@@ -690,6 +751,28 @@ fn parse_team_layout_index(window: &str) -> Option<usize> {
         .and_then(|rest| rest.split('-').next())
         .and_then(|raw| raw.parse::<usize>().ok())
         .and_then(|idx| idx.checked_sub(1))
+}
+
+/// E45 (0.3.24 bug#4, demo-director second-layer drift): a window name is a
+/// REAL adaptive layout window only when it matches the canonical
+/// `team-w<N>[-suffix]` shape (i.e. `parse_team_layout_index` returns Some).
+/// Per-agent window names like `developer` / `architect` / `demo-director`
+/// are NOT adaptive layout windows even if state happens to carry them in
+/// the agent's `layout_window` or `layout_index` field — they are residue
+/// from a prior launch / explicit per-agent topology. Treating them as
+/// adaptive caused the macmini repro: add-agent demo-director split into
+/// the developer worker's window @453 instead of opening its own.
+fn is_adaptive_layout_window(window: &str) -> bool {
+    parse_team_layout_index(window).is_some()
+}
+
+/// Crate-public wrapper for the defensive guard at
+/// `restart/common.rs::spawn_agent_window`. Same semantics as the private
+/// helper above; promoted to `pub(crate)` so the spawn-time defence-in-depth
+/// layer can refuse to split into a per-agent window even if a stale
+/// placement asks for it.
+pub(crate) fn is_adaptive_layout_window_pub(window: &str) -> bool {
+    is_adaptive_layout_window(window)
 }
 
 fn unique_layout_window_name(base: &str, live_windows: &BTreeSet<String>) -> WindowName {
@@ -2917,7 +3000,13 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     })
 }
 
-fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, transport: &dyn Transport, workspace: &Path) {
+/// Annotate `state.tmux_endpoint` / `state.tmux_socket` (and `tmux_socket_source`)
+/// from the active transport. Originally only called at `launch_with_transport`
+/// init time; **`0.3.24` opened this to `pub(crate)` so restart/add/fork can keep
+/// the persisted endpoint synchronized with the transport they actually used,
+/// closing the silent socket-drift gap** (single state-save path; no parallel
+/// "annotate after spawn" race with coordinator).
+pub(crate) fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, transport: &dyn Transport, workspace: &Path) {
     let Some(endpoint) = transport.tmux_endpoint() else {
         return;
     };
@@ -3360,19 +3449,41 @@ pub fn add_agent(
     ) {
         Ok(selected) => selected,
         Err(_) if workspace.join("TEAM.md").exists() => {
+            // **0.3.24 add-agent socket drift fix**: even on the TEAM.md fallback
+            // path (no spec yet), prefer the state-aware resolver. It reads the
+            // team's persisted `tmux_endpoint` (set at `team-agent launch` time)
+            // and routes the new agent's spawn to the SAME tmux socket the live
+            // team uses. Cold workspaces / first-agent paths safely fall back to
+            // `TmuxBackend::for_workspace(team_workspace)` inside the resolver.
+            let team_ws = team_workspace(workspace);
+            let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+                &team_ws, team,
+            )
+            .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&team_ws));
             return add_agent_with_transport(
                 workspace,
                 agent_id,
                 role_file_path,
                 open_display,
                 team,
-                &crate::tmux_backend::TmuxBackend::for_workspace(&team_workspace(workspace)),
+                &transport,
             );
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
+    // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
+    // tmux endpoint (NOT the workspace-hash for_workspace socket). Without this,
+    // `add-agent` spawns into an orphan socket (e.g. `ta-<hash>/termclaud`) while
+    // the live team runs on its persisted default socket — the leader can't see
+    // the new window, state never registers, and the orphaned `claude` process
+    // floats forever (macmini repro: `demo-director` startup blocker).
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &selected.run_workspace,
+        Some(selected.team_key.as_str()),
+    )
+    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
     add_agent_with_transport_at_paths(
         &selected.run_workspace,
         &team_dir,
@@ -3380,7 +3491,7 @@ pub fn add_agent(
         role_file_path,
         open_display,
         Some(selected.team_key.as_str()),
-        &crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace),
+        &transport,
     )
 }
 
@@ -3463,18 +3574,40 @@ fn add_agent_with_transport_at_paths(
     let safety = effective_runtime_config(&spec)?;
     // E5 spec 迁移:重编译的 spec 原子写到 .team/runtime/<team_key>/(不落用户目录 team_dir)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, &canonical_team_key);
+    // E42 (0.3.24 P0): capture pre-write bytes for atomic rollback. If anything
+    // downstream of write_spec_atomic + upsert_agent_state_from_role + spawn
+    // fails, restore the prior bytes so the canonical spec / runtime state never
+    // get a half-written row that disagrees with what remove-agent can see.
+    let pre_spec_text = match std::fs::read_to_string(&spec_path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(LifecycleError::StatePersist(format!("read spec: {e}"))),
+    };
+    let pre_runtime_state = crate::state::persist::load_runtime_state(run_workspace).ok();
     write_spec_atomic(&spec_path, &spec)?;
     let (meta, _) = crate::compiler::read_front_matter(role_file_path)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
-    upsert_agent_state_from_role(
+    // upsert writes status="starting" (E42) — start_agent_at_paths::mark_agent_started
+    // promotes to "running" on Ok. If anything fails between here and the Ok
+    // return below, rollback restores the captured pre-bytes.
+    if let Err(error) = upsert_agent_state_from_role(
         run_workspace,
         &canonical_team_key,
         agent_id,
         &meta,
         role_file_path,
         &safety,
-    )?;
-    let started = crate::lifecycle::restart::start_agent_at_paths(
+    ) {
+        rollback_add_agent_atomic(
+            run_workspace,
+            &spec_path,
+            pre_spec_text.as_deref(),
+            pre_runtime_state.as_ref(),
+            agent_id,
+        );
+        return Err(error);
+    }
+    let started = match crate::lifecycle::restart::start_agent_at_paths(
         run_workspace,
         team_dir,
         agent_id,
@@ -3483,13 +3616,32 @@ fn add_agent_with_transport_at_paths(
         true,
         Some(&canonical_team_key),
         transport,
-    )?;
+    ) {
+        Ok(started) => started,
+        Err(error) => {
+            rollback_add_agent_atomic(
+                run_workspace,
+                &spec_path,
+                pre_spec_text.as_deref(),
+                pre_runtime_state.as_ref(),
+                agent_id,
+            );
+            return Err(error);
+        }
+    };
     let (env, start_mode) = match started {
         StartAgentOutcome::Running {
             env, start_mode, ..
         } => (env, start_mode),
         StartAgentOutcome::Noop { env, .. } => (env, StartMode::Noop),
         StartAgentOutcome::Paused { .. } => {
+            rollback_add_agent_atomic(
+                run_workspace,
+                &spec_path,
+                pre_spec_text.as_deref(),
+                pre_runtime_state.as_ref(),
+                agent_id,
+            );
             return Err(LifecycleError::RequirementUnmet(format!(
                 "added agent {agent_id} is paused"
             )));
@@ -3500,6 +3652,40 @@ fn add_agent_with_transport_at_paths(
         start_mode,
         role_file: role_file_path.to_path_buf(),
     })
+}
+
+/// E42 (0.3.24 P0, double-spec deadlock): best-effort atomic rollback for a
+/// failed add-agent. Restores the canonical spec to its pre-write bytes (or
+/// removes the file if it didn't exist), and restores runtime state to its
+/// pre-write JSON (so the half-written `status:starting` row is gone). The
+/// caller propagates the ORIGINAL operation error after rollback; rollback
+/// errors are swallowed (best-effort, no panic).
+fn rollback_add_agent_atomic(
+    run_workspace: &Path,
+    spec_path: &Path,
+    pre_spec_text: Option<&str>,
+    pre_runtime_state: Option<&serde_json::Value>,
+    agent_id: &AgentId,
+) {
+    if let Some(text) = pre_spec_text {
+        let _ = std::fs::write(spec_path, text);
+    } else {
+        let _ = std::fs::remove_file(spec_path);
+    }
+    if let Some(state) = pre_runtime_state {
+        let _ = crate::state::persist::save_runtime_state(run_workspace, state);
+    } else {
+        // No prior runtime state — drop just the agent we added (load → strip → save).
+        if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
+            if let Some(agents) = state
+                .get_mut("agents")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                agents.remove(agent_id.as_str());
+            }
+            let _ = crate::state::persist::save_runtime_state(run_workspace, &state);
+        }
+    }
 }
 
 fn upsert_agent_state_from_role(
@@ -3544,11 +3730,15 @@ fn upsert_agent_state_from_role(
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or_else(|| agent_id.as_str());
+    // E42 (0.3.24 P0, double-spec deadlock): persist the initial state row as
+    // "starting" (not "running"). The caller (add_agent_with_transport_at_paths)
+    // promotes to "running" only after start_agent_at_paths returns Running.
+    // If the spawn fails, the rollback below removes the entry entirely.
     let mut entry = serde_json::json!({
         "provider": provider,
         "auth_mode": auth_mode,
         "role": role,
-        "status": "running",
+        "status": "starting",
         "dynamic_role_file": dynamic_role_file.to_string_lossy().to_string(),
     });
     if let Some(model) = meta.get("model").and_then(Value::as_str) {
@@ -3675,6 +3865,14 @@ pub fn fork_agent(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    // **0.3.24 add-agent socket drift fix** (same root cause): fork-agent must
+    // also route to the live team's persisted tmux endpoint, not the workspace-
+    // hash for_workspace socket. Same orphan-on-wrong-socket pathology.
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &selected.run_workspace,
+        Some(selected.team_key.as_str()),
+    )
+    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
     fork_agent_with_transport(
         workspace,
         source_agent_id,
@@ -3682,7 +3880,7 @@ pub fn fork_agent(
         label,
         open_display,
         team,
-        &crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace),
+        &transport,
     )
 }
 

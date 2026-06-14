@@ -34,6 +34,10 @@ mod team_state;
 pub use agent::{reset_agent, reset_agent_with_transport, start_agent, start_agent_with_transport, stop_agent, stop_agent_with_transport};
 pub(crate) use agent::start_agent_at_paths;
 pub(crate) use common::refresh_missing_provider_sessions;
+// 0.3.24 add-agent socket drift fix: state-aware tmux resolver shared with
+// `lifecycle::launch::add_agent` / `fork_agent` so all three (restart / add / fork)
+// route to the SAME tmux socket the live team uses.
+pub(crate) use common::lifecycle_worker_tmux_backend_for_selected_state;
 pub use orchestrator::{halt_plan, plan_status};
 pub use rebuild::{
     restart, restart_candidates, restart_with_session_convergence_deadline, restart_with_transport,
@@ -66,8 +70,21 @@ fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePath
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
-    let spec_workspace = selected_state_spec_workspace(&selected.state)
-        .or(selected.spec_workspace)
+    // E42 (0.3.24 P0, double-spec deadlock): canonical-first. The selector at
+    // state/selector.rs:71-74 already sets `selected.spec_workspace` to the
+    // canonical runtime spec parent (.team/runtime/<key>/) whenever the
+    // runtime spec exists; only when the runtime spec is missing does it fall
+    // back to the legacy user-dir spec_workspace. Honoring that first stops
+    // remove-agent / stop-agent / reset-agent / fork-agent from reading a
+    // stale `state.spec_path` (legacy `.team/<key>/team.spec.yaml`) that
+    // disagrees with what add-agent writes to canonical
+    // (lifecycle/launch.rs:3576-3577). Pre-fix order let the legacy stale
+    // spec win and remove-agent couldn't see agents add-agent had just
+    // added — the macmini e46-probe deadlock truth source.
+    let spec_workspace = selected
+        .spec_workspace
+        .clone()
+        .or_else(|| selected_state_spec_workspace(&selected.state))
         .ok_or_else(|| LifecycleError::TeamSelect("active team spec workspace not found".to_string()))?;
     Ok(LifecyclePaths {
         run_workspace: selected.run_workspace,

@@ -157,6 +157,13 @@ pub enum Key {
     Char(char),
     /// `\x03`。
     CtrlC,
+    /// E46 (0.3.24 bug#5): pre-submit Escape to exit bracketed-paste mode on
+    /// fresh provider TUIs (claude). When a bracketed paste lands on a TUI
+    /// whose composer is still initialising, the framework's plain `Enter`
+    /// gets interpreted as paste content, not submit. Sending `Escape` first
+    /// closes the paste bracket so the subsequent `Enter` submits.
+    /// Real-machine truth source: macmini demo-director repro.
+    Escape,
     /// tmux `-X cancel` / `q` / `d`;非 tmux 后端无 copy-mode 概念 → no-op。
     CancelMode,
 }
@@ -287,7 +294,10 @@ pub enum InjectVerification {
 /// `{key}_sent_after_visible_token` 是模板 → 用携带 Key 的 variant 表达。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitVerification {
-    /// `enter_sent_without_placeholder_check`。
+    /// `enter_sent_without_placeholder_check`。MUST-10:此 variant 代表 paste+Enter
+    /// 完成且无需 placeholder probe(纯 peer 消息路径)。**保留** ⇒ delivered 语义;
+    /// E46 后只有 post-Enter consumption 确认通过(input 清空 / Working 信号)才返回
+    /// 此 variant — fresh TUI 未消费走 [`Self::SubmitConsumptionUnverified`]。
     EnterSentWithoutPlaceholderCheck,
     /// `pasted_content_prompt_absent_after_submit`。
     PastedContentPromptAbsentAfterSubmit,
@@ -297,6 +307,14 @@ pub enum SubmitVerification {
     KeySentAfterVisibleToken { key: Key },
     /// `send_keys_failed`。
     SendKeysFailed,
+    /// E46 (0.3.24 bug#5, demo-director 卡 bracketed paste): Enter 已发但
+    /// post-Enter 接收侧消费信号(input 行清空 / provider 进 Working)在 bounded
+    /// resend 上限内未观察到。**delivery 不当作 delivered**;走 submitted_unverified /
+    /// failed 路径。区别于
+    /// [`Self::PastedContentPromptStillPresentAfterSubmit`](claude paste-prompt
+    /// 折叠场景)— 本 variant 是结构化 input-empty 检测,适配 demo-director
+    /// 直接渲染文本路径。
+    SubmitConsumptionUnverified,
 }
 
 /// turn-boundary 观测(tmux_io.py:224-260,09-transport.md 表 §40)。
@@ -621,6 +639,10 @@ pub fn tmux_key_name(key: Key) -> &'static str {
         Key::Char('8') => "8",
         Key::Char('9') => "9",
         Key::CtrlC => "C-c",
+        // E46 (0.3.24 bug#5): tmux supports `Escape` as a key name; sending
+        // it as a send-keys arg emits `\x1b` to the pane (closes bracketed
+        // paste mode on a stuck TUI composer).
+        Key::Escape => "Escape",
         Key::CancelMode | Key::Char(_) => "",
     }
 }
@@ -850,6 +872,9 @@ pub fn submit_verification_wire(v: SubmitVerification) -> String {
             format!("{}_sent_after_visible_token", tmux_key_name(key))
         }
         SubmitVerification::SendKeysFailed => "send_keys_failed".to_string(),
+        SubmitVerification::SubmitConsumptionUnverified => {
+            "submit_consumption_unverified".to_string()
+        }
     }
 }
 

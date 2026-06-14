@@ -2526,3 +2526,997 @@ fn quick_start_paused_agent_state_is_paused_provider_only_and_not_spawned() {
         transport.spawn_records()
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 0.3.24 add-agent socket drift fix (macmini demo-director startup blocker).
+//
+// Root cause: `launch.rs::add_agent` / `fork_agent` hardcoded
+// `TmuxBackend::for_workspace(...)` (workspace-hash socket, e.g.
+// `/private/tmp/tmux-501/ta-<hash>/termclaud`) instead of consulting the
+// team's persisted `tmux_endpoint` (set at `team-agent launch` time, e.g.
+// `/private/tmp/tmux-501/default`). The orphan `claude` process then spawned
+// onto the wrong socket; the leader (running on the persisted socket) never
+// saw the window; state never registered; `add_agent` returned `ok=true`
+// (假绿) because the lifecycle layer didn't verify reachability post-spawn.
+//
+// Architect-approved fix has 4 调整:
+//   1. Reuse state-aware resolver (`lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state`).
+//   2. fork-agent same path.
+//   3. Endpoint annotate folded into start_agent state-save (no parallel
+//      `annotate_runtime_tmux_endpoint` race with coordinator).
+//   4. Strict-non-capture reachability gate post-spawn (uses `has_pane` /
+//      `liveness` / `list_targets` only — never `capture` to avoid E31 timing).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **RED**: `add_agent` must read the team's persisted `tmux_endpoint` (set at
+/// `team-agent launch` time and stored in the runtime state) and resolve the
+/// transport's socket to that endpoint — NOT the workspace-hash for_workspace
+/// socket. We exercise the resolver directly (the public surface
+/// `lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state`) so
+/// the contract is independent of CLI plumbing.
+#[test]
+fn add_agent_resolves_to_persisted_endpoint_socket_not_workspace_hash() {
+    let team = temp_ws().join("addteam-persisted-endpoint");
+    std::fs::create_dir_all(&team).unwrap();
+    let live_endpoint = "/private/tmp/tmux-501/default".to_string();
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-persisted",
+            "tmux_endpoint": live_endpoint.clone(),
+            "tmux_socket": live_endpoint.clone(),
+            "agents": {}
+        }),
+    )
+    .unwrap();
+
+    let resolved = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &team, None,
+    )
+    .expect("resolver must succeed when state is present");
+
+    let endpoint = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
+    assert_eq!(
+        endpoint.as_deref(),
+        Some(live_endpoint.as_str()),
+        "0.3.24 add-agent socket drift fix: the state-aware resolver must \
+         route to the PERSISTED tmux_endpoint ({live_endpoint}), not the \
+         workspace-hash for_workspace socket. Got: {endpoint:?}. macmini \
+         repro: add-agent demo-director spawned `claude` on the wrong socket \
+         while the live team ran on the persisted default socket — orphan \
+         process + ok=true假绿."
+    );
+}
+
+/// **Regression guard**: cold workspace (no persisted endpoint) must safely
+/// fall back to `TmuxBackend::for_workspace(workspace)`. Encodes the
+/// first-agent / fresh-launch path so a future refactor doesn't accidentally
+/// panic/None there.
+#[test]
+fn add_agent_resolver_falls_back_to_workspace_socket_when_no_persisted_endpoint() {
+    let team = temp_ws().join("addteam-cold-fallback");
+    std::fs::create_dir_all(&team).unwrap();
+    // NOTE: no save_runtime_state — cold workspace, no persisted endpoint.
+
+    let resolved = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &team, None,
+    )
+    .expect("resolver must succeed (fall back to for_workspace) on cold workspace");
+
+    let endpoint = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
+    let fallback = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(
+        &crate::tmux_backend::TmuxBackend::for_workspace(&team),
+    );
+    assert_eq!(
+        endpoint, fallback,
+        "0.3.24 regression guard: when state has no persisted tmux_endpoint, \
+         resolver must fall back to TmuxBackend::for_workspace (workspace-hash \
+         socket). Got endpoint={endpoint:?} expected fallback={fallback:?}."
+    );
+}
+
+/// **RED**: `add_agent` must verify reachability AFTER spawn (strict,
+/// non-capture). A spawn that lands on the wrong tmux socket (or on the right
+/// socket but produces no addressable pane) must surface as a structured
+/// `Err`, NOT `ok=true`. Models the macmini假绿 root cause: the spawn
+/// recorded into the OfflineTransport but `has_pane` / `liveness` /
+/// `list_targets` all say "not addressable" (`spawned_panes_addressable=false`).
+#[test]
+fn add_agent_reachability_gate_returns_error_when_spawn_pane_not_addressable() {
+    let team = temp_ws().join("addteam-reachability-gate");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: reachgate\nobjective: Reachability probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("worker2-role.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    seed_healthy_coordinator(&team);
+
+    // Models "spawn to wrong socket" / "spawn succeeded but pane orphan": the
+    // OfflineTransport records the spawn but reports the new pane is NOT
+    // addressable (has_pane→Some(false), liveness defaults to Unknown=fall
+    // through, list_targets doesn't include it).
+    let transport = OfflineTransport::new()
+        .with_spawned_panes_addressable(false)
+        .with_default_liveness(crate::transport::PaneLiveness::Dead);
+
+    let result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+
+    // The spawn DID record (proving we reached the spawn step), but the gate
+    // must NOT let the function return Ok — pane is not addressable so the
+    // caller must see the structured failure and roll back / retry.
+    assert!(
+        !transport.spawn_records().is_empty(),
+        "add-agent must still attempt the spawn (gate fires post-spawn); \
+         got no spawn records — indicates a regression where the gate fires \
+         too early."
+    );
+    assert!(
+        result.is_err(),
+        "0.3.24 reachability gate: add-agent must return Err when the spawned \
+         pane is not addressable on the transport's socket (macmini假绿 root \
+         cause). Got Ok(...) — gate did not fire."
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("unreachable") || err_msg.contains("not addressable") || err_msg.contains("socket drift"),
+        "0.3.24 reachability gate: error message must name the unreachable / \
+         socket-drift symptom so operators can diagnose. Got: {err_msg}"
+    );
+}
+
+/// **Regression guard**: when the spawned pane IS addressable (default
+/// `OfflineTransport` state), reachability gate passes and add-agent returns
+/// Ok as before. Ensures the gate is precision, not blanket.
+#[test]
+fn add_agent_reachability_gate_passes_when_spawn_pane_addressable() {
+    let team = temp_ws().join("addteam-gate-pass");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: gatepass\nobjective: Gate-pass probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("worker2-role.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    seed_healthy_coordinator(&team);
+
+    // Default OfflineTransport: spawned_panes_addressable=true, liveness=Unknown
+    // (treated as not-Dead by the gate's fallthrough).
+    let transport = OfflineTransport::new();
+
+    let result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+
+    assert!(
+        result.is_ok(),
+        "0.3.24 reachability gate regression guard: when spawn pane is \
+         addressable, add-agent must still return Ok. Got: {result:?}"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E43 add-agent window layout drift (0.3.24 bug#3, demo-director startup blocker).
+//
+// Root cause (architect res_f27ff9b29957): with `display_backend=adaptive` in
+// state AND stale `agents.<id>.layout_window="team-w2"` residue, the existing
+// `adaptive_placement_for_agent` validates a layout_window claim by checking
+// whether the existing agent's `pane_id` is in `live_panes` — but it does NOT
+// verify that the live pane's `window_name` actually equals the claimed
+// `layout_window`. So a live `%X` whose REAL window_name is "architect" still
+// "validates" the stale "team-w2" claim, the placement returns
+// `layout_window=team-w2, starts_window=false`, and `spawn_agent_window`
+// issues `tmux split-window -t :team-w2` which fails with
+// "can't find window: team-w2". macmini repro: demo-director add-agent blocks.
+//
+// Architect-approved minimal fix (3 调整, NO restructure of display/topology):
+//   Fix A — `adaptive_placement_for_agent`: validate the live pane's
+//     window_name MATCHES the agent's claimed layout_window. If pane_id is
+//     live but lives under a different window_name, treat the agent's
+//     layout_window claim as stale and skip it (don't count toward the
+//     "windows with room" map).
+//   Fix B — `adaptive_existing_placement_for_agent`: when the agent's
+//     claimed layout_window is NOT present in live_windows, fall back to a
+//     `starts_window=true` placement with `layout_window=agent_id` instead
+//     of synthesising a fresh stale-named window.
+//   Fix C — `spawn_agent_window`: pre-split guard. When `!starts_window` and
+//     the target window is NOT in live_windows, downgrade to spawn_into
+//     (a new window named `agent_id`) instead of splitting a phantom.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **RED — Fix A**: `adaptive_placement_for_agent` must skip an existing
+/// agent whose live pane resides under a window_name that differs from the
+/// agent's claimed `layout_window`. Real-machine state: agent "architect"
+/// carries `layout_window="team-w2"` (stale residue) but its live pane lives
+/// under `window_name="architect"`. The new placement for demo-director must
+/// NOT inherit the stale "team-w2" claim.
+#[test]
+fn e43_adaptive_placement_skips_existing_agent_whose_live_pane_window_name_differs_from_claim() {
+    use crate::lifecycle::launch::{adaptive_placement_for_agent, LayoutPlacement};
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "architect": {
+                "status": "running",
+                "provider": "codex",
+                "window": "architect",
+                // Stale residue — placement must NOT inherit this name.
+                "layout_window": "team-w2",
+                "pane_id": "%1",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "architect", "%1", 0)])
+        .with_windows(vec![WindowName::new("architect")]);
+
+    let placement = adaptive_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("demo-director"),
+    );
+
+    // **E45 amendment (0.3.24 bug#4)**: when the live session has NO real
+    // adaptive layout window (the topology is effectively per-agent — live
+    // windows are `architect` not `team-wN`), placement returns None. The
+    // caller (`start_agent_at_paths` → `spawn_agent_window`) then falls back
+    // to opening a new window named after `agent_id`. This is the macmini
+    // demo-director repro fix: per-agent topology must NOT be tricked into
+    // adaptive mode by stale `layout_window=team-w2` residue.
+    //
+    // Pre-E45 expectation was Some(starts_window=true) with a fresh
+    // team-w<next> name, but that forced an adaptive shape onto a session
+    // that was already per-agent — which led to E45 bug#4 (split-window
+    // into the developer worker after stale state pointed there).
+    if let Some(p) = placement {
+        // If we ever do return Some here, the STALE name must still not
+        // survive — this branch shouldn't fire post-E45 but guards against
+        // future regressions where placement re-enables adaptive on
+        // per-agent live topology.
+        assert_ne!(
+            p.layout_window.as_str(),
+            "team-w2",
+            "E43 Fix A still applies: stale layout_window 'team-w2' must \
+             NEVER survive. Got {p:?}"
+        );
+        let _: LayoutPlacement = p; // type witness
+    }
+}
+
+/// **Regression guard — Fix A**: when an existing agent's live pane DOES
+/// reside under the claimed layout_window, placement keeps the prior
+/// behaviour (groups the new agent into that window). This is the canonical
+/// adaptive 1-window-multiple-panes use case.
+#[test]
+fn e43_adaptive_placement_groups_into_layout_window_when_live_pane_matches_claim() {
+    use crate::lifecycle::launch::adaptive_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "alpha": {
+                "status": "running",
+                "provider": "codex",
+                "layout_window": "team-w1",
+                "pane_id": "%1",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "team-w1", "%1", 0)])
+        .with_windows(vec![WindowName::new("team-w1")]);
+
+    let placement = adaptive_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("beta"),
+    )
+    .expect("placement should succeed");
+
+    assert_eq!(
+        placement.layout_window.as_str(),
+        "team-w1",
+        "E43 Fix A regression guard: when alpha's live pane DOES live under \
+         layout_window 'team-w1', the new agent beta should be grouped into \
+         the same window (canonical adaptive behaviour). Got {placement:?}"
+    );
+    assert!(
+        !placement.starts_window,
+        "E43 Fix A regression guard: grouping into an existing window means \
+         starts_window=false (split into the window). Got {placement:?}"
+    );
+}
+
+/// **RED — Fix B**: `adaptive_existing_placement_for_agent` must NOT return a
+/// `starts_window=true` placement that names a window NOT present in
+/// `live_windows`. When the agent's claimed `layout_window` is stale and the
+/// session is effectively per-agent (live windows are named after agent_ids),
+/// the placement must fall back to a per-agent window named after the
+/// agent_id itself — so the subsequent spawn opens a new window, not a split
+/// of a phantom.
+#[test]
+fn e43_adaptive_existing_placement_falls_back_to_agent_id_window_when_claim_missing_from_live() {
+    use crate::lifecycle::launch::adaptive_existing_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "demo-director": {
+                "status": "running",
+                "provider": "codex",
+                // Stale claim — live session has no team-w2 window.
+                "layout_window": "team-w2",
+                "pane_id": "%99",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![
+            layout_pane("team-iso", "architect", "%1", 0),
+            layout_pane("team-iso", "test-engineer", "%2", 0),
+        ])
+        .with_windows(vec![
+            WindowName::new("architect"),
+            WindowName::new("test-engineer"),
+        ]);
+
+    let placement = adaptive_existing_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("demo-director"),
+    )
+    .expect("placement should resolve");
+
+    assert_ne!(
+        placement.layout_window.as_str(),
+        "team-w2",
+        "E43 Fix B: stale claim 'team-w2' is not in live_windows; placement \
+         must NOT reuse that name (otherwise spawn issues split -t :team-w2 \
+         and tmux says 'can't find window: team-w2'). Got {placement:?}"
+    );
+    assert_eq!(
+        placement.layout_window.as_str(),
+        "demo-director",
+        "E43 Fix B: when the claim is stale and the live layout is \
+         per-agent-named, fall back to a window named after the agent_id \
+         (canonical per-agent pattern). Got {placement:?}"
+    );
+    assert!(
+        placement.starts_window,
+        "E43 Fix B: the fallback opens a NEW window (starts_window=true); \
+         do not try to split an existing window with the wrong name. Got \
+         {placement:?}"
+    );
+}
+
+/// **Regression guard — Fix B**: when the agent's claimed layout_window IS
+/// in live_windows, the existing-placement path keeps its current behaviour
+/// (return a starts_window=false placement that splits into the existing
+/// window).
+#[test]
+fn e43_adaptive_existing_placement_keeps_starts_window_false_when_claim_in_live_windows() {
+    use crate::lifecycle::launch::adaptive_existing_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "alpha": {
+                "status": "running",
+                "provider": "codex",
+                "layout_window": "team-w1",
+                "pane_id": "%1",
+                "pane_index": 1u64,
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "team-w1", "%1", 0)])
+        .with_windows(vec![WindowName::new("team-w1")]);
+
+    let placement = adaptive_existing_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("alpha"),
+    )
+    .expect("placement should resolve");
+
+    assert_eq!(
+        placement.layout_window.as_str(),
+        "team-w1",
+        "E43 Fix B regression guard: when claim 'team-w1' IS in live_windows, \
+         existing-placement must keep it. Got {placement:?}"
+    );
+    // pane_index=1 → starts_window=false in the existing behaviour.
+    assert!(
+        !placement.starts_window,
+        "E43 Fix B regression guard: existing window + pane_index>0 → \
+         starts_window=false. Got {placement:?}"
+    );
+}
+
+/// **RED — Fix C end-to-end**: `add_agent` end-to-end must NOT emit a
+/// spawn_split with the stale window name. With state carrying
+/// `display_backend=adaptive` + stale `layout_window=team-w2` residue and
+/// live tmux windows named per-agent, the spawn must be a `spawn_into`
+/// (new window) — NOT `spawn_split` against the missing 'team-w2'.
+#[test]
+fn e43_add_agent_does_not_split_against_phantom_layout_window() {
+    use crate::transport::WindowName;
+
+    let team = temp_ws().join("e43-add-agent-phantom-window");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: e43probe\nobjective: E43 probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("architect.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("worker2-role.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    // Real-machine repro: existing 'architect' carries stale layout_window=team-w2
+    // residue; live tmux shows it under window_name='architect' (per-agent
+    // layout). adaptive_layout flag is on.
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-iso",
+            "display_backend": "adaptive",
+            "agents": {
+                "architect": {
+                    "status": "running",
+                    "provider": "codex",
+                    "window": "architect",
+                    "layout_window": "team-w2",
+                    "pane_id": "%1",
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&team);
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "architect", "%1", 0)])
+        .with_windows(vec![WindowName::new("architect")])
+        .with_session_present(true);
+
+    let _result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+
+    let spawn_window_records = transport.spawn_window_records();
+    // The macmini failure mode: split-window -t :team-w2. We must not split,
+    // and we definitely must not target "team-w2".
+    let stale_split = spawn_window_records
+        .iter()
+        .any(|(kind, window)| kind == "spawn_split" && window == "team-w2");
+    assert!(
+        !stale_split,
+        "E43 Fix C end-to-end: add-agent must NOT issue spawn_split with \
+         stale window name 'team-w2' (real-machine macmini error: \
+         'tmux split-window -t :team-w2 → can't find window: team-w2'). \
+         spawn_window_records={spawn_window_records:?}"
+    );
+    // The agent must actually be spawned somewhere (new window or split into
+    // a valid live window). We at least expect one spawn recorded.
+    assert!(
+        !spawn_window_records.is_empty(),
+        "E43 Fix C: add-agent must still attempt the spawn; got no records."
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E45 per-agent window drift (0.3.24 task#326 P0).
+//
+// Surfaced AFTER E43 (c5ed576) fixed the team-w2 phantom split. New repro:
+// state has display_backend=adaptive + an existing `developer` worker whose
+// state row carries `layout_window=developer, layout_index=0, pane_id=%519`,
+// live tmux shows `developer` window with that pane. add-agent demo-director
+// resolves placement via `adaptive_placement_for_agent`, which finds the
+// `developer` window valid (pane_id live + window_name matches), groups
+// demo-director into it (count<3) → returns
+// `layout_window=developer, starts_window=false` → `spawn_agent_window`
+// issues `split-window -t :developer` which SUCCEEDS — splitting into the
+// developer worker's pane. macmini repro: add-agent demo-director hijacked
+// the developer worker's window @453 (2 panes), no new window.
+//
+// Root cause (architect): adaptive_placement_for_agent accepts ANY state
+// layout_window/window as adaptive (including per-agent names like
+// `developer`). E45 fix: only canonical `team-w<N>[-suffix]` windows count
+// as adaptive layout windows.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **RED — Fix #2**: `adaptive_placement_for_agent` must NOT count a
+/// per-agent window (e.g. `developer`) as adaptive layout space, even when
+/// it has matching live pane + window_name. With no real adaptive
+/// `team-w<N>` window in the live session, placement returns None so the
+/// caller opens a new per-agent window.
+#[test]
+fn e45_adaptive_placement_returns_none_when_no_real_team_w_window_present_in_state() {
+    use crate::lifecycle::launch::adaptive_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    // Real-machine state: adaptive on, developer's layout_window is
+    // literally `developer` (per-agent name, NOT team-wN), pane_id %519
+    // lives under the `developer` window.
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "developer": {
+                "status": "running",
+                "provider": "codex",
+                "window": "developer",
+                "layout_window": "developer",
+                "layout_index": 0u64,
+                "pane_id": "%519",
+            },
+            "test-engineer": {
+                "status": "running",
+                "provider": "codex",
+                "window": "test-engineer",
+                "layout_window": "test-engineer",
+                "pane_id": "%521",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![
+            layout_pane("team-iso", "developer", "%519", 0),
+            layout_pane("team-iso", "test-engineer", "%521", 0),
+        ])
+        .with_windows(vec![
+            WindowName::new("developer"),
+            WindowName::new("test-engineer"),
+        ]);
+
+    let placement = adaptive_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("demo-director"),
+    );
+
+    assert!(
+        placement.is_none(),
+        "E45 (0.3.24 bug#4): placement must return None when the live \
+         session has NO real `team-w<N>` adaptive window. Per-agent windows \
+         like `developer` are NOT adaptive layout windows — they are \
+         per-agent topology, even if display_backend=adaptive lingers in \
+         state. With no real adaptive layout, the caller falls back to \
+         opening a new per-agent window named after agent_id. Got \
+         {placement:?} — must be None to prevent split-window -t :developer \
+         hijacking the developer worker's pane (macmini repro)."
+    );
+}
+
+/// **RED — Fix #3**: `adaptive_existing_placement_for_agent` must return
+/// None when the agent's claimed layout_window is per-agent (not team-wN).
+/// The caller then falls back to non-placement spawn path which opens /
+/// reuses a window named after agent_id.
+#[test]
+fn e45_adaptive_existing_placement_returns_none_when_claim_is_per_agent_window() {
+    use crate::lifecycle::launch::adaptive_existing_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "developer": {
+                "status": "running",
+                "provider": "codex",
+                "window": "developer",
+                "layout_window": "developer",
+                "layout_index": 0u64,
+                "pane_id": "%519",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "developer", "%519", 0)])
+        .with_windows(vec![WindowName::new("developer")]);
+
+    let placement = adaptive_existing_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("developer"),
+    );
+
+    assert!(
+        placement.is_none(),
+        "E45 (0.3.24 bug#4): existing-placement must return None when \
+         claimed layout_window is per-agent (e.g. `developer`). Only real \
+         `team-w<N>[-suffix]` windows are honored as existing adaptive \
+         placements. Got {placement:?}."
+    );
+}
+
+/// **RED — end-to-end Fix #2 + Fix #3 + defence**: add-agent against a
+/// per-agent live topology + adaptive backend in state must issue
+/// spawn_into (new window named after agent_id) and MUST NOT spawn_split
+/// into any existing per-agent window. macmini repro: split-window
+/// -t :developer would hijack the developer worker's pane.
+#[test]
+fn e45_add_agent_opens_new_window_does_not_split_into_per_agent_window() {
+    use crate::transport::WindowName;
+
+    let team = temp_ws().join("e45-per-agent-no-split");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: e45probe\nobjective: E45 probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("developer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("worker2-role.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+
+    // Real-machine state: display_backend=adaptive, but the existing
+    // `developer` worker carries per-agent layout_window=developer with
+    // layout_index=0. macmini-equivalent state shape.
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-iso",
+            "display_backend": "adaptive",
+            "agents": {
+                "developer": {
+                    "status": "running",
+                    "provider": "codex",
+                    "window": "developer",
+                    "layout_window": "developer",
+                    "layout_index": 0u64,
+                    "pane_id": "%519",
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&team);
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "developer", "%519", 0)])
+        .with_windows(vec![WindowName::new("developer")])
+        .with_session_present(true);
+
+    let _result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+
+    let spawn_records = transport.spawn_window_records();
+    // PRIMARY assertion: no spawn_split anywhere — adaptive placement
+    // refused to group into the per-agent `developer` window.
+    let any_split = spawn_records.iter().any(|(kind, _)| kind == "spawn_split");
+    assert!(
+        !any_split,
+        "E45 end-to-end: add-agent against a per-agent live topology must \
+         NOT issue spawn_split into any window (macmini repro: \
+         split-window -t :developer would hijack the developer worker's \
+         pane). Got spawn_records={spawn_records:?}"
+    );
+    // Defence: the spawn target name must not be `developer` (the existing
+    // per-agent window) — if it were, the spawn would hijack.
+    let spawned_into_developer = spawn_records
+        .iter()
+        .any(|(_, window)| window == "developer");
+    assert!(
+        !spawned_into_developer,
+        "E45 end-to-end: spawn target must NOT be `developer` (the existing \
+         worker's window). Got spawn_records={spawn_records:?}"
+    );
+    // The new worker must have been spawned somewhere (proves we reached
+    // the spawn step and didn't refuse silently).
+    assert!(
+        !spawn_records.is_empty(),
+        "E45 end-to-end: add-agent must still attempt the spawn; got no \
+         records."
+    );
+}
+
+/// **Regression guard**: when the live session DOES have a real `team-w1`
+/// adaptive window with a live pane that matches state's claim, the
+/// existing E43+adaptive grouping behaviour is preserved (split into team-w1
+/// as before). E45 only changes behaviour for per-agent windows.
+#[test]
+fn e45_real_team_w_adaptive_layout_still_groups_into_layout_window() {
+    use crate::lifecycle::launch::adaptive_placement_for_agent;
+    use crate::model::ids::AgentId;
+    use crate::transport::{SessionName, WindowName};
+
+    let state = json!({
+        "display_backend": "adaptive",
+        "session_name": "team-iso",
+        "agents": {
+            "alpha": {
+                "status": "running",
+                "provider": "codex",
+                "layout_window": "team-w1",
+                "layout_index": 0u64,
+                "pane_id": "%1",
+            }
+        }
+    });
+
+    let transport = OfflineTransport::new()
+        .with_targets(vec![layout_pane("team-iso", "team-w1", "%1", 0)])
+        .with_windows(vec![WindowName::new("team-w1")]);
+
+    let placement = adaptive_placement_for_agent(
+        &state,
+        &transport,
+        &SessionName::new("team-iso"),
+        &AgentId::new("beta"),
+    )
+    .expect("E45 regression guard: real team-w1 adaptive layout must still group new agents in");
+
+    assert_eq!(
+        placement.layout_window.as_str(),
+        "team-w1",
+        "E45 regression guard: real `team-w1` adaptive window must still \
+         host new agents (canonical adaptive behaviour). Got {placement:?}"
+    );
+    assert!(
+        !placement.starts_window,
+        "E45 regression guard: grouping into existing team-w1 → \
+         starts_window=false. Got {placement:?}"
+    );
+}
+
+/// **Regression guard**: helper `is_adaptive_layout_window` golden cases.
+/// `team-w1`, `team-w42`, `team-w7-foo` are adaptive; agent_id names and
+/// other shapes are not.
+#[test]
+fn e45_is_adaptive_layout_window_recognises_team_w_pattern_only() {
+    use crate::lifecycle::launch::is_adaptive_layout_window_pub as is_adapt;
+
+    assert!(is_adapt("team-w1"), "team-w1 must be adaptive");
+    assert!(is_adapt("team-w2"), "team-w2 must be adaptive");
+    assert!(is_adapt("team-w42"), "team-w42 must be adaptive");
+    assert!(is_adapt("team-w7-suffix"), "team-w7-suffix must be adaptive");
+
+    assert!(!is_adapt("developer"), "developer is per-agent, not adaptive");
+    assert!(!is_adapt("architect"), "architect is per-agent, not adaptive");
+    assert!(!is_adapt("demo-director"), "demo-director is per-agent");
+    assert!(!is_adapt("leader"), "leader is not adaptive");
+    assert!(!is_adapt(""), "empty is not adaptive");
+    assert!(!is_adapt("team-w"), "team-w (no index) is not adaptive");
+    assert!(!is_adapt("team-w0"), "team-w0 (index 0 invalid post-subtract) is not adaptive");
+    assert!(!is_adapt("team-wfoo"), "team-wfoo (non-numeric) is not adaptive");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// E42 (0.3.24 P0, double-spec deadlock) — add-agent / remove-agent must read
+// the SAME canonical spec, and add-agent's writes must be atomic (rollback on
+// any downstream failure).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// **E42 RED (a) round-trip**: stale `state.spec_path` points at a legacy
+/// user-dir spec while the canonical runtime spec is authoritative.
+/// add-agent writes to canonical; remove-agent (from_spec=true, force=true)
+/// must succeed because the fix routes lifecycle_paths::spec_workspace to
+/// canonical, not the stale legacy path.
+#[test]
+fn e42_add_then_remove_round_trip_resolves_canonical_spec_not_legacy() {
+    let team = temp_ws().join("e42-roundtrip");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: e42rt\nobjective: E42 round-trip probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("newagent.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    seed_healthy_coordinator(&team);
+    // Pre-populate the state with a STALE spec_path pointing at a legacy
+    // user-dir spec that does NOT carry the new agent we are about to add.
+    // canonical runtime spec is what add-agent writes to.
+    let team_ws = crate::model::paths::team_workspace(&team).unwrap();
+    let legacy_spec_dir = team_ws.join(".team").join("e42rt");
+    std::fs::create_dir_all(&legacy_spec_dir).unwrap();
+    let legacy_spec_path = legacy_spec_dir.join("team.spec.yaml");
+    std::fs::write(
+        &legacy_spec_path,
+        "name: e42rt\nagents: []\nrouting:\n  rules: []\n",
+    )
+    .unwrap();
+    crate::state::persist::save_runtime_state(
+        &team,
+        &json!({
+            "session_name": "team-iso",
+            "spec_path": legacy_spec_path.to_string_lossy(),
+            "agents": {
+                "implementer": {"status": "running", "provider": "codex", "window": "implementer"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = OfflineTransport::new();
+
+    // (1) add-agent succeeds (writes canonical spec + state)
+    let add_result = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+    assert!(
+        add_result.is_ok(),
+        "E42 (a) round-trip: add-agent must succeed even with stale state.spec_path; \
+         got {add_result:?}"
+    );
+    // (2) remove-agent must find the agent (lifecycle_paths resolves canonical,
+    // not the stale legacy spec)
+    let remove_result = crate::lifecycle::remove_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        true,
+        true,
+        None,
+        &transport,
+    );
+    assert!(
+        remove_result.is_ok(),
+        "E42 (a) round-trip: remove-agent must find the agent add-agent just wrote \
+         (canonical-first lifecycle_paths). Pre-fix: stale state.spec_path wins → \
+         remove sees legacy spec without the new agent → 'unknown'. Got {remove_result:?}"
+    );
+}
+
+/// **E42 RED (b) re-add symmetry**: after add(x), a second add(x) must say
+/// "already exists" AND remove(x) must recognise x — never give relative
+/// existence judgments. Same canonical truth source on both sides.
+#[test]
+fn e42_re_add_and_remove_agree_on_existence_after_add() {
+    let team = temp_ws().join("e42-readdsym");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: e42sym\nobjective: E42 symmetry probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("newagent.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    seed_healthy_coordinator(&team);
+    let transport = OfflineTransport::new();
+    // (1) first add
+    let r1 = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+    assert!(r1.is_ok(), "first add must succeed; got {r1:?}");
+    // (2) second add must report already-exists Err (not Ok)
+    let r2 = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
+    assert!(
+        r2.is_err(),
+        "E42 (b) symmetry: second add must Err 'already exists'; got {r2:?}"
+    );
+    // (3) remove must also see the agent (no relative judgments)
+    let r3 = crate::lifecycle::remove_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        true,
+        true,
+        None,
+        &transport,
+    );
+    assert!(
+        r3.is_ok(),
+        "E42 (b) symmetry: remove must see what add wrote — both reading canonical. \
+         Got {r3:?}"
+    );
+}
+
+/// **E42 RED (d) projection consistency**: after add(x), canonical runtime
+/// spec AND runtime state agents map BOTH contain x; lifecycle_paths
+/// resolves spec_workspace to canonical (not legacy).
+#[test]
+fn e42_add_writes_to_canonical_runtime_spec_and_state_consistently() {
+    let team = temp_ws().join("e42-projection");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: e42proj\nobjective: E42 projection probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    let role_file = team.join("newagent.md");
+    std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
+    seed_healthy_coordinator(&team);
+    let transport = OfflineTransport::new();
+    let _ = crate::lifecycle::add_agent_with_transport(
+        &team,
+        &AgentId::new("worker2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    )
+    .expect("add must succeed");
+
+    // (a) runtime state has worker2 — read same way add_agent does (team_workspace
+    // resolves the run_workspace, and select_runtime_state reads canonical-scoped).
+    let state = crate::state::persist::load_runtime_state(&team).unwrap();
+    assert!(
+        state.pointer("/agents/worker2").is_some(),
+        "E42 (d): runtime state must contain worker2 after add; state={state}"
+    );
+
+    // (b) canonical runtime spec has worker2
+    let runtime_spec = find_runtime_spec(&team, "e42proj");
+    let canonical_spec_path = runtime_spec.expect("canonical runtime spec must exist");
+    let canonical_spec_text = std::fs::read_to_string(&canonical_spec_path).unwrap();
+    assert!(
+        canonical_spec_text.contains("worker2"),
+        "E42 (d): canonical runtime spec must contain worker2; \
+         canonical_spec={canonical_spec_text}"
+    );
+}

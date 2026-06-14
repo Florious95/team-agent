@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.25
+
+- **Fixed: adding a teammate to a running team could leave it unusable and impossible to remove.** In some cases, add said the teammate already existed while remove said it was unknown, because the two commands were reading different copies of the team record. They now use the same record, so add, re-add, and remove agree with each other. A failed add no longer leaves a half-created teammate behind.
+- **Fixed: a new teammate added to a running team might not receive messages.** The first message could land in the new teammate's input box without being submitted. Team Agent now verifies that the message is submitted and the teammate starts working.
+- **Fixed: a new teammate could be opened on top of an existing teammate's window.** Adding a teammate used to split into another teammate's window in some cases. New teammates now always get their own window.
+- **Fixed: an idle teammate could be wrongly shown as busy or stuck.** Older versions guessed busy or idle state from screen text, which could be fooled by leftover text from a completed task. Team Agent now uses the actual conversation record to decide whether a teammate is working or idle.
+- **Fixed: a misleading "has blockers" warning right after install.** The installer self-check could run doctor in an empty folder and mistake "no project here" for a real blocker. It now separates real problems from an empty-folder check.
+
 ## 0.3.24
 
 - **Fixed: after pasting text into a teammate's input box, pressing Enter could sometimes do nothing and the message was not actually sent.** Previously, Team Agent could paste the text and press Enter immediately, before the pasted content had fully appeared in the teammate's interface. That left the message sitting in the input box instead of sending it. Team Agent now waits until the pasted content is visible before pressing Enter, so pasted messages are delivered reliably.

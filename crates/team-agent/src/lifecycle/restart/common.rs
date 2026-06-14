@@ -157,6 +157,29 @@ pub(super) fn spawn_agent_window(
                     &env_unset,
                 )
             }
+        } else if !window_present_in_live(transport, session_name, &window)
+            || !crate::lifecycle::launch::is_adaptive_layout_window_pub(window.as_str())
+        {
+            // E43 Fix C + E45 (0.3.24 bug#3 → bug#4): never split into a
+            // window that either does not exist on live tmux OR is a
+            // per-agent window (`developer`, `architect`, ...) that the
+            // upstream placement guards should have refused. This is the
+            // defence-in-depth layer; the primary fix is in
+            // `adaptive_placement_for_agent` / `adaptive_existing_placement_for_agent`,
+            // but a placement built from stale `pane_index>0` state can
+            // still ask to split a per-agent window — and the macmini repro
+            // showed split-window -t :developer would otherwise succeed and
+            // hijack the developer worker's pane. Downgrade to spawn_into
+            // (new window named after agent_id) — canonical per-agent
+            // fallback the existing 7 workers use.
+            transport.spawn_into_with_env_unset(
+                session_name,
+                &WindowName::new(agent_id.as_str()),
+                &plan.argv,
+                spawn_cwd,
+                &env,
+                &env_unset,
+            )
         } else {
             transport.spawn_split_with_env_unset(
                 session_name,
@@ -211,6 +234,33 @@ pub(super) fn spawn_agent_window(
     })
 }
 
+/// E43 Fix C helper (0.3.24 bug#3): probe live tmux for a window's existence
+/// before issuing `split-window -t :<window>`. Uses `list_windows` first
+/// (cheaper, authoritative when present); falls back to `list_targets` so
+/// transports that don't seed `windows` directly still surface real entries.
+fn window_present_in_live(
+    transport: &dyn crate::transport::Transport,
+    session: &SessionName,
+    window: &WindowName,
+) -> bool {
+    if let Ok(windows) = transport.list_windows(session) {
+        if windows.iter().any(|w| w.as_str() == window.as_str()) {
+            return true;
+        }
+    }
+    if let Ok(targets) = transport.list_targets() {
+        if targets.iter().any(|t| {
+            t.session.as_str() == session.as_str()
+                && t.window_name
+                    .as_ref()
+                    .is_some_and(|n| n.as_str() == window.as_str())
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, LifecycleError> {
     let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
     crate::coordinator::start_coordinator(&workspace)
@@ -218,7 +268,22 @@ pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, 
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
-pub(super) fn lifecycle_worker_tmux_backend_for_selected_state(
+/// State-aware tmux backend resolver. Reads the team's persisted
+/// `tmux_endpoint` (set at `team-agent launch` time and shared across
+/// restart/add-agent/fork-agent) and constructs a TmuxBackend on THAT socket,
+/// so add-agent / fork-agent / restart all spawn into the SAME tmux socket
+/// the live team already runs on.
+///
+/// First-agent / cold workspace (no persisted endpoint) safely falls back to
+/// `TmuxBackend::for_workspace(run_workspace)` — the canonical workspace-hash
+/// socket. No panic, no None.
+///
+/// **Exposed `pub(crate)` for `lifecycle::launch::add_agent` / `fork_agent`
+/// (`0.3.24 add-agent socket drift fix`). Previously `pub(super)` and shared
+/// only within `lifecycle::restart`. Sharing the resolver across the lifecycle
+/// module is the correct ownership: restart/add/fork all need the SAME socket
+/// the live team uses, and duplicating the lookup invited drift.**
+pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
     run_workspace: &Path,
     team: Option<&str>,
 ) -> Result<crate::tmux_backend::TmuxBackend, LifecycleError> {

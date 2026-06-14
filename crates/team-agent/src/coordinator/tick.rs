@@ -544,13 +544,27 @@ impl Coordinator {
                 .get("last_output_at")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let activity = crate::messaging::classify_agent_activity(
-                &snapshot,
-                &captured.text,
-                pane_in_mode,
-                current_command.as_deref(),
-                last_output_at_now.as_deref(),
-            );
+            // E47 (0.3.24 P0, idle/busy 假阳): consult the AUTHORITATIVE
+            // provider JSONL classifier BEFORE the TUI keyword scan. The
+            // scrollback Tail(40) keeps historical `• Working (...· esc to
+            // interrupt)` + spinners within the 40-line window long after a
+            // turn completed, so `classify_agent_activity`'s rfind-recency
+            // grep flips a truly-idle worker to Working/Stuck. The provider
+            // JSONL (codex task_complete / claude end_turn) is the single
+            // source of truth for "turn closed". Only fall back to TUI
+            // scanning when the JSONL is unreadable or no lifecycle fact has
+            // been written yet (TurnState::Unknown) — never silently fall
+            // through into the leaky grep on a CONFIRMED IDLE.
+            let activity_from_jsonl = jsonl_activity_for_agent(agent);
+            let activity = activity_from_jsonl.unwrap_or_else(|| {
+                crate::messaging::classify_agent_activity(
+                    &snapshot,
+                    &captured.text,
+                    pane_in_mode,
+                    current_command.as_deref(),
+                    last_output_at_now.as_deref(),
+                )
+            });
             remember_idle_capture_schedule(agent, &activity);
             write_activity(agent, &activity, false);
             let last_output_at = last_output_at_now;
@@ -2517,6 +2531,40 @@ fn agent_rollout_path(agent: &Value) -> Option<PathBuf> {
         .find_map(|key| agent.get(key).and_then(Value::as_str))
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+}
+
+/// E47 (0.3.24 P0, idle/busy 假阳): consult the authoritative provider JSONL
+/// classifier and map to neutral `AgentActivity`. Returns `None` when the
+/// classifier reports `TurnState::Unknown` (unreadable JSONL / no lifecycle
+/// fact yet) so the caller falls back to the TUI scan — this honours the
+/// IRON LAW (activity.rs:3 / bug-071/077/085): no-signal = Uncertain (not
+/// silently coerced to Idle); but here Unknown means "JSONL gave no signal",
+/// so we hand off to the TUI scanner which has its OWN no-signal → Uncertain
+/// path. Copilot/Gemini/Fake providers (which don't have JSONL — classify.rs
+/// returns Unknown for them) thus keep using TUI scanning unchanged.
+fn jsonl_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentActivity> {
+    let rollout_path = agent_rollout_path(agent)?;
+    let provider = agent
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider)?;
+    let log_text = std::fs::read_to_string(&rollout_path).ok()?;
+    let process = explicit_process_liveness(agent).unwrap_or(ProcessLiveness::Unverifiable);
+    let result = crate::provider::classify(provider, &log_text, process, 0.0).ok()?;
+    use crate::messaging::{ActivityStatus, AgentActivity};
+    use crate::provider::types::TurnState;
+    let status = match result.state {
+        TurnState::Idle => ActivityStatus::Idle,
+        TurnState::IdleInterrupted => ActivityStatus::Idle,
+        TurnState::Working => ActivityStatus::Working,
+        TurnState::BlockedOnHuman | TurnState::Abnormal => ActivityStatus::Uncertain,
+        TurnState::Unknown => return None,
+    };
+    Some(AgentActivity {
+        status,
+        confidence: 0.95,
+        rationale: format!("provider_jsonl:{}", result.reason),
+    })
 }
 
 fn runtime_approval_target(
