@@ -13,6 +13,10 @@ const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
 const DOCTOR_TIMEOUT_MS = 5000;
 const VERSION_SMOKE_TIMEOUT_MS = 5000;
+const INSTALL_MANIFEST = "install-manifest.json";
+const PATH_MARKER = "# team-agent PATH (E48)";
+const WRAPPER_MARKER = "# team-agent installer wrapper";
+const WRAPPER_NAMES = ["team-agent", "team_orchestrator", "team-agent-coordinator"];
 
 if (isCliEntrypoint()) {
   main();
@@ -115,7 +119,7 @@ Usage:
   npx @team-agent/installer@latest uninstall
 
 Options:
-  --prefix <dir>       wrapper install prefix, default ~/.local
+  --prefix <dir>       fallback wrapper prefix when no writable PATH dir exists, default ~/.local
   --runtime-dir <dir>  stable runtime root, default ~/.team-agent/runtime
   --purge-runtime      uninstall also removes the runtime root
 `);
@@ -123,9 +127,9 @@ Options:
 
 function install(argv) {
   const opts = parseOptions(argv);
-  const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
-  const binDir = path.join(prefix, "bin");
   const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
+  const installTarget = resolveInstallBinDir({ env: process.env, home: os.homedir(), prefix: opts.prefix });
+  const binDir = installTarget.binDir;
   const version = packageJson.version || "dev";
   const dest = path.join(runtimeRoot, version);
   const tmp = path.join(runtimeRoot, `.${version}.${process.pid}.tmp`);
@@ -149,13 +153,29 @@ function install(argv) {
   writeExecWrapper(path.join(binDir, "team_orchestrator"), runtimeBinary, ["mcp-server"]);
   writeExecWrapper(path.join(binDir, "team-agent-coordinator"), runtimeBinary, ["coordinator"]);
   installSkills(runtimeBinary);
+  writeInstallManifest(runtimeRoot, {
+    version,
+    binDir,
+    runtimeRoot,
+    runtimeBinary,
+    installedAt: new Date().toISOString(),
+    installTargetKind: installTarget.kind,
+  });
 
   const teamAgent = path.join(binDir, "team-agent");
   console.log(`installed: ${teamAgent}`);
+  if (installTarget.readyNow) {
+    console.log(`installed to ${binDir} (on PATH, ready now)`);
+  } else if (installTarget.rc?.files?.length > 0) {
+    console.log(`installed to ${binDir}; added ${binDir} to ${installTarget.rc.files.join(", ")}; restart terminal or open a new shell to use team-agent`);
+  } else if (installTarget.rc?.skipped?.length > 0) {
+    console.log(`installed to ${binDir}; PATH entry already present in ${installTarget.rc.skipped.join(", ")}; restart terminal or open a new shell to use team-agent`);
+  } else {
+    console.log(`installed to ${binDir}; add it to PATH to use team-agent by name`);
+  }
   console.log(`runtime: ${dest}`);
   console.log(`binary: ${platformBinary.packageName}`);
   console.log("skill: installed for Codex, Claude and Copilot");
-  console.log(`PATH: ensure ${binDir} is on PATH`);
 
   // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
   // 子命令,因为 0.3.x CLI 现阶段没有 --version)。真跑一次 binary 才能抓住
@@ -193,8 +213,8 @@ function install(argv) {
 
 function runDoctor(argv) {
   const opts = parseOptions(argv);
-  const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
-  const teamAgent = path.join(prefix, "bin", "team-agent");
+  const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
+  const teamAgent = path.join(installedBinDir(runtimeRoot, opts), "team-agent");
   if (!fs.existsSync(teamAgent)) {
     console.error(`team-agent wrapper not found: ${teamAgent}`);
     process.exit(1);
@@ -213,10 +233,11 @@ function runDoctor(argv) {
 
 function uninstall(argv) {
   const opts = parseOptions(argv);
-  const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
+  const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
+  const binDir = installedBinDir(runtimeRoot, opts);
   // 卸载 skill 走二进制单源(同一 SkillTarget 表 codex/claude/copilot),在删 wrapper 前调
   // (删 wrapper 后 PATH 上的 team-agent 没了,但 runtime 二进制仍在;用 runtime 二进制直调)。
-  const teamAgentBin = path.join(prefix, "bin", "team-agent");
+  const teamAgentBin = path.join(binDir, "team-agent");
   if (fs.existsSync(teamAgentBin)) {
     const res = spawnSync(teamAgentBin, ["install-skill", "--target", "all", "--uninstall", "--json"], {
       text: true,
@@ -227,13 +248,12 @@ function uninstall(argv) {
       console.error(`WARN: skill uninstall via binary failed (status=${res.status ?? "signal"}); skill dirs may remain under ~/.codex|.claude|.copilot/skills/team-agent`);
     }
   }
-  for (const name of ["team-agent", "team_orchestrator", "team-agent-coordinator"]) {
-    fs.rmSync(path.join(prefix, "bin", name), { force: true });
+  for (const name of WRAPPER_NAMES) {
+    fs.rmSync(path.join(binDir, name), { force: true });
   }
-  console.log(`removed wrappers from ${path.join(prefix, "bin")}`);
+  console.log(`removed wrappers from ${binDir}`);
   console.log("removed skills from ~/.codex, ~/.claude and ~/.copilot skills/team-agent");
   if (opts.purgeRuntime) {
-    const runtimeRoot = path.resolve(expandHome(opts.runtimeDir || path.join(os.homedir(), ".team-agent", "runtime")));
     fs.rmSync(runtimeRoot, { recursive: true, force: true });
     console.log(`removed runtime root ${runtimeRoot}`);
   } else {
@@ -260,6 +280,182 @@ function parseOptions(argv) {
     }
   }
   return opts;
+}
+
+export function resolveInstallBinDir(options = {}) {
+  const env = options.env || process.env;
+  const home = options.home || os.homedir();
+  const entries = uniquePathEntries(env.PATH || "", home);
+  for (const entry of entries) {
+    if (isVersionManagedPath(entry) || !canWriteDir(entry) || hasForeignWrapper(entry)) {
+      continue;
+    }
+    return { binDir: entry, kind: "path", readyNow: true, rc: null };
+  }
+
+  for (const entry of entries) {
+    if (isVersionManagedPath(entry) || !isReasonableUserBinDir(entry, home) || !canWriteDir(entry) || hasForeignWrapper(entry)) {
+      continue;
+    }
+    return { binDir: entry, kind: "path_user", readyNow: true, rc: null };
+  }
+
+  const fallbackPrefix = options.prefix
+    ? path.resolve(expandHomeFor(options.prefix, home))
+    : path.join(home, ".local");
+  const binDir = path.join(fallbackPrefix, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const rc = ensureBinDirOnShellRc(binDir, { env, home });
+  return { binDir, kind: "shell_rc", readyNow: false, rc };
+}
+
+function uniquePathEntries(searchPath, home) {
+  const seen = new Set();
+  const entries = [];
+  for (const raw of searchPath.split(path.delimiter)) {
+    if (!raw) {
+      continue;
+    }
+    const resolved = path.resolve(expandHomeFor(raw, home));
+    if (seen.has(resolved)) {
+      continue;
+    }
+    seen.add(resolved);
+    entries.push(resolved);
+  }
+  return entries;
+}
+
+function isVersionManagedPath(dir) {
+  const value = dir.replace(/\\/g, "/");
+  return [
+    "/.nvm/versions/",
+    "/Cellar/",
+    "/volta/tools/image/",
+    "/fnm/node-versions/",
+    "/.asdf/installs/",
+    "/node_modules/.bin",
+    "/.npm/_npx/",
+    "/_npx/",
+  ].some((marker) => value.includes(marker));
+}
+
+function isReasonableUserBinDir(dir, home) {
+  const relative = path.relative(home, dir);
+  return Boolean(relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function canWriteDir(dir) {
+  try {
+    const probe = path.join(dir, `.team-agent-write-test-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probe, "");
+    fs.rmSync(probe, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasForeignWrapper(binDir) {
+  return WRAPPER_NAMES.some((name) => {
+    const file = path.join(binDir, name);
+    return fs.existsSync(file) && !isInstallerManagedWrapper(file);
+  });
+}
+
+function isInstallerManagedWrapper(file) {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    if (text.includes(WRAPPER_MARKER)) {
+      return true;
+    }
+    return /^#!\/usr\/bin\/env sh\nexec '[^']+\/bin\/team-agent'(?: '[^']+')? "\$@"\n$/.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function ensureBinDirOnShellRc(binDir, options = {}) {
+  const env = options.env || process.env;
+  const home = options.home || os.homedir();
+  const shell = path.basename(env.SHELL || "");
+  const rc = shellRcTargets(shell, home);
+  if (!rc) {
+    return { files: [], skipped: [], unsupported: true };
+  }
+  const block = rc.style === "fish"
+    ? `\n${PATH_MARKER}\nset -gx PATH ${shellQuote(binDir)} $PATH\n`
+    : `\n${PATH_MARKER}\nexport PATH=\"${escapeDoubleQuoted(binDir)}:$PATH\"\n`;
+  const files = [];
+  const skipped = [];
+  for (const file of rc.files) {
+    let existing = "";
+    try {
+      existing = fs.readFileSync(file, "utf8");
+    } catch {
+      existing = "";
+    }
+    if (existing.includes(PATH_MARKER)) {
+      skipped.push(file);
+      continue;
+    }
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, block);
+      files.push(file);
+    } catch {
+      continue;
+    }
+  }
+  return { files, skipped, unsupported: false };
+}
+
+function shellRcTargets(shell, home) {
+  if (shell === "zsh") {
+    return { files: [path.join(home, ".zshrc")], style: "posix" };
+  }
+  if (shell === "bash") {
+    return { files: [path.join(home, ".bashrc"), path.join(home, ".bash_profile")], style: "posix" };
+  }
+  if (shell === "fish") {
+    return { files: [path.join(home, ".config", "fish", "config.fish")], style: "fish" };
+  }
+  if (!shell || shell === "sh") {
+    return {
+      files: [process.platform === "darwin" ? path.join(home, ".zshrc") : path.join(home, ".profile")],
+      style: "posix",
+    };
+  }
+  return null;
+}
+
+function installedBinDir(runtimeRoot, opts) {
+  const manifest = readInstallManifest(runtimeRoot);
+  if (typeof manifest?.binDir === "string" && manifest.binDir) {
+    return manifest.binDir;
+  }
+  const prefix = path.resolve(expandHome(opts.prefix || path.join(os.homedir(), ".local")));
+  return path.join(prefix, "bin");
+}
+
+function installManifestPath(runtimeRoot) {
+  return path.join(runtimeRoot, INSTALL_MANIFEST);
+}
+
+export function readInstallManifest(runtimeRoot) {
+  try {
+    return JSON.parse(fs.readFileSync(installManifestPath(runtimeRoot), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function writeInstallManifest(runtimeRoot, manifest) {
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const file = installManifestPath(runtimeRoot);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.renameSync(tmp, file);
 }
 
 function resolvePlatformBinary() {
@@ -304,9 +500,13 @@ function copyExecutable(src, dest) {
 }
 
 function writeExecWrapper(file, binary, fixedArgs) {
+  if (fs.existsSync(file) && !isInstallerManagedWrapper(file)) {
+    throw new Error(`refusing to overwrite non-Team Agent installer wrapper: ${file}`);
+  }
   const args = fixedArgs.map(shellQuote).join(" ");
   const argPrefix = args ? `${args} ` : "";
   const content = `#!/usr/bin/env sh
+${WRAPPER_MARKER}
 exec ${shellQuote(binary)} ${argPrefix}"$@"
 `;
   fs.writeFileSync(file, content, { mode: 0o755 });
@@ -340,13 +540,21 @@ function makeDoctorWorkspace() {
 }
 
 function expandHome(value) {
+  return expandHomeFor(value, os.homedir());
+}
+
+function expandHomeFor(value, home) {
   if (value === "~") {
-    return os.homedir();
+    return home;
   }
   if (value.startsWith("~/")) {
-    return path.join(os.homedir(), value.slice(2));
+    return path.join(home, value.slice(2));
   }
   return value;
+}
+
+function escapeDoubleQuoted(value) {
+  return String(value).replace(/["\\`$]/g, "\\$&");
 }
 
 function shellQuote(value) {
