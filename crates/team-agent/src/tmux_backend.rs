@@ -642,9 +642,15 @@ impl TmuxBackend {
     ) -> Result<SpawnResult, TransportError> {
         let command = shell_command(argv, cwd, env, env_unset);
         let target = format!("{}:{}", session.as_str(), window.as_str());
+        // E53 (0.3.26, adaptive layout same-session tabs): `-d` prevents the
+        // new split pane from stealing focus from the leader's active pane.
+        // Same rationale as the `-d` on `new-window` in transport.rs; for
+        // adaptive layout the leader and all workers share the same tmux
+        // session, and every focus-stealing spawn is a disruption.
         let split_argv = vec![
             "tmux".to_string(),
             "split-window".to_string(),
+            "-d".to_string(),
             "-t".to_string(),
             target.clone(),
             "-h".to_string(),
@@ -920,8 +926,202 @@ fn submit_verification_for_key(key: Key) -> SubmitVerification {
 }
 
 fn capture_has_pasted_content_prompt(text: &str) -> bool {
+    pasted_prompt_match(text).is_some()
+}
+
+/// E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断): factor `capture_has_pasted_content_prompt`
+/// so the diagnostic layer can recover the MATCHED LITERAL and its position
+/// in the tail. Returns `(literal, line_index_from_bottom)` on a match.
+/// Byte-identical match semantics — `capture_has_pasted_content_prompt`'s
+/// `bool` wrapper preserves the legacy `true/false` contract for the three
+/// existing callers (the appear-gate poll at :1122-1128 + the legacy submit
+/// loop matcher at :1138 + post-flip clearer at :1138).
+///
+/// **Where-in-tail rationale**: a `pasted content` literal that lives in
+/// the SCROLLBACK (line 6+ from bottom) is NOT the live composer
+/// placeholder — codex's successful submit scrolls the block into history
+/// where it remains in the last 80 lines. The current matcher cannot
+/// distinguish that from a live placeholder; this fn surfaces the data
+/// the operator needs to see (PR-2 will USE it to fix the criterion).
+pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
     let lower = text.to_ascii_lowercase();
-    lower.contains("pasted content") || lower.contains("pasted text")
+    let lit = if lower.contains("pasted content") {
+        "pasted content"
+    } else if lower.contains("pasted text") {
+        "pasted text"
+    } else {
+        return None;
+    };
+    // Distance from the bottom of the tail in non-empty lines.
+    let non_empty: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let mut from_bottom: u32 = 0;
+    for line in non_empty.iter().rev() {
+        if line.to_ascii_lowercase().contains(lit) {
+            return Some((lit, from_bottom));
+        }
+        from_bottom = from_bottom.saturating_add(1);
+    }
+    // Literal appeared only in trimmed-away whitespace lines — treat as
+    // bottom (defensive; rare).
+    Some((lit, 0))
+}
+
+/// E50 PR-1 (0.3.24 P0): scrub a pane capture for safe inclusion in
+/// `events.jsonl`. Steps:
+///   1. Strip CSI / OSC ANSI escapes.
+///   2. Take the bottom `tail_lines` of non-empty lines.
+///   3. Redact common secret shapes (sk-, ghp_, AKIA, Bearer ..., 32+ hex).
+///   4. Cap at ~1200 bytes (UTF-8 safe truncation).
+/// Returns `(excerpt, line_count)`. Designed to be CHEAP — no regex crate
+/// dependency, simple byte scanning.
+pub(crate) fn scrub_pane_excerpt(raw: &str, tail_lines: usize) -> (String, u32) {
+    let stripped = strip_ansi_escapes_inplace(raw);
+    let lines: Vec<&str> = stripped
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let tail = if lines.len() > tail_lines {
+        &lines[lines.len() - tail_lines..]
+    } else {
+        &lines[..]
+    };
+    let mut out = tail
+        .iter()
+        .map(|line| scrub_secrets(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if out.len() > 1200 {
+        // Truncate at UTF-8 char boundary.
+        let mut cut = 1200;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("…[truncated]");
+    }
+    (out, tail.len() as u32)
+}
+
+fn strip_ansi_escapes_inplace(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            // CSI: ESC [ ... <final byte 0x40-0x7e>
+            if bytes[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < bytes.len() && !(0x40..=0x7e).contains(&bytes[j]) {
+                    j += 1;
+                }
+                i = j.saturating_add(1).min(bytes.len());
+                continue;
+            }
+            // OSC: ESC ] ... BEL or ESC \
+            if bytes[i + 1] == b']' {
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    if bytes[j] == 0x07 {
+                        j += 1;
+                        break;
+                    }
+                    if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                        j += 2;
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j.min(bytes.len());
+                continue;
+            }
+            // Other single-char ESC sequence — skip ESC + next byte.
+            i += 2;
+            continue;
+        }
+        let ch = bytes[i];
+        out.push(ch as char);
+        i += 1;
+    }
+    // Re-decode from bytes to recover UTF-8 (since we pushed bytes as chars,
+    // multi-byte UTF-8 is preserved correctly because we only skip on the
+    // single-byte ESC start). For pane text this is good enough; pathological
+    // UTF-8 inside CSI parameter bytes is invalid anyway.
+    out
+}
+
+fn scrub_secrets(line: &str) -> String {
+    // Five shapes: sk-XXXX, ghp_XXXX, AKIAXXXX (16-char uppercase id), Bearer XXXX,
+    // 32+ hex (token).
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // sk- / ghp_ / AKIA prefixes: detect and redact through end-of-token.
+        if matches_prefix(bytes, i, b"sk-") || matches_prefix(bytes, i, b"ghp_") {
+            let prefix_len = if bytes[i] == b's' { 3 } else { 4 };
+            let token_end = scan_token_end(bytes, i + prefix_len);
+            out.push_str(&line[i..i + prefix_len]);
+            out.push_str("REDACTED");
+            i = token_end;
+            continue;
+        }
+        if matches_prefix(bytes, i, b"AKIA") {
+            let token_end = scan_token_end(bytes, i + 4);
+            out.push_str("AKIA");
+            out.push_str("REDACTED");
+            i = token_end;
+            continue;
+        }
+        if matches_prefix_case_insensitive(bytes, i, b"Bearer ") {
+            let token_end = scan_token_end(bytes, i + 7);
+            out.push_str(&line[i..i + 7]);
+            out.push_str("REDACTED");
+            i = token_end;
+            continue;
+        }
+        // 32+ hex run.
+        if is_hex_byte(bytes[i]) {
+            let mut j = i;
+            while j < bytes.len() && is_hex_byte(bytes[j]) {
+                j += 1;
+            }
+            if j - i >= 32 {
+                out.push_str("REDACTED_HEX");
+                i = j;
+                continue;
+            }
+        }
+        // Default: passthrough byte.
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn matches_prefix(bytes: &[u8], i: usize, prefix: &[u8]) -> bool {
+    bytes.get(i..i + prefix.len()).is_some_and(|s| s == prefix)
+}
+
+fn matches_prefix_case_insensitive(bytes: &[u8], i: usize, prefix: &[u8]) -> bool {
+    bytes
+        .get(i..i + prefix.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(prefix))
+}
+
+fn scan_token_end(bytes: &[u8], start: usize) -> usize {
+    let mut j = start;
+    while j < bytes.len() && is_token_byte(bytes[j]) {
+        j += 1;
+    }
+    j
+}
+
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+fn is_hex_byte(b: u8) -> bool {
+    b.is_ascii_hexdigit()
 }
 
 const PASTED_CONTENT_APPEAR_POLLS: u32 = 5;
@@ -1118,6 +1318,10 @@ impl Transport for TmuxBackend {
                         self.run_inject_stage(&argv, stage)?;
                     }
                 }
+                // E50 PR-1 (0.3.24 P0): record appear-gate timing + per-attempt
+                // observations. Pure diagnostic — no behavioural change. The
+                // existing matcher / windows / actions are byte-identical.
+                let appear_gate_start = std::time::Instant::now();
                 let mut saw_pasted_prompt = false;
                 for _ in 0..PASTED_CONTENT_APPEAR_POLLS {
                     let captured = self.capture(target, CaptureRange::Tail(80))?;
@@ -1127,8 +1331,25 @@ impl Transport for TmuxBackend {
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
+                let appear_gate_elapsed_ms = appear_gate_start.elapsed().as_millis() as u64;
                 let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
-                if saw_pasted_prompt {
+                // E50 PR-2 Fix-B (0.3.26 P0): when the payload carries a token
+                // marker (ALL delivery messages do via render_message), SKIP the
+                // legacy pasted-prompt weak loop even if `saw_pasted_prompt` is
+                // true. Fall through to the E46 token-based consumption gate
+                // (Escape pre-Enter + post_submit_input_consumed + resend cap
+                // with C3 re-check), which has NONE of the two defects:
+                //   A. E46 gate uses 60ms sleep + 3 retries (not zero-sleep).
+                //   B. E46 gate anchors on the token marker in the bottom 5
+                //      lines (composer region), not a substring match on
+                //      Tail(80) that catches scrollback residue.
+                //
+                // Non-token payloads (rare: test harness / trust prompt Empty)
+                // still use the legacy loop for backward compatibility with
+                // provider_submit_verification_red.rs::PastePromptRunner tests.
+                let has_token = payload_token_marker(payload).is_some();
+                if saw_pasted_prompt && !has_token {
+                    // Legacy weak loop preserved for non-token payloads (test harness).
                     let mut attempts = 0;
                     let mut cleared = false;
                     for _ in 0..PASTED_CONTENT_SUBMIT_ATTEMPTS {
@@ -1151,6 +1372,7 @@ impl Transport for TmuxBackend {
                         },
                         turn_verification: TurnVerification::NotYetObserved,
                         attempts,
+                        submit_diagnostics: None,
                     });
                 }
                 // U1 #7 (efd189b redo, canonical-native): around the final submit, read
@@ -1237,6 +1459,11 @@ impl Transport for TmuxBackend {
                     // false-positive (silent paste drop).
                     None => submit_verification_for_key(submit),
                 };
+                // E50 PR-1: surface appear-gate timing on the E46 token path too.
+                // saw_pasted_prompt=false here; the placeholder never appeared
+                // within PASTED_CONTENT_APPEAR_POLLS, so the route is E46. The
+                // gate elapsed_ms still helps operators see how long we waited
+                // (e.g. codex slow-render).
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
@@ -1249,6 +1476,12 @@ impl Transport for TmuxBackend {
                         InjectPayload::Text(_) => TurnVerification::NotYetObserved,
                     },
                     attempts: consumption_attempts,
+                    submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
+                        appear_gate_elapsed_ms,
+                        appear_gate_matched: false,
+                        total_elapsed_ms: appear_gate_elapsed_ms,
+                        attempts_detail: Vec::new(),
+                    }),
                 });
             }
         }
@@ -1264,6 +1497,9 @@ impl Transport for TmuxBackend {
                 InjectPayload::Text(_) => TurnVerification::NotYetObserved,
             },
             attempts: 1,
+            // E50 PR-1: Empty payload / non-Text fallthrough path — no submit
+            // diagnostics applicable.
+            submit_diagnostics: None,
         })
     }
 

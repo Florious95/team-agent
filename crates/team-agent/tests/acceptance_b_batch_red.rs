@@ -576,6 +576,7 @@ impl Transport for MonitorFailTransport {
             submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
 }
@@ -610,7 +611,7 @@ impl Transport for QuietTransport {
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
     fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
     fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1 })
+        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
     }
 
 }
@@ -646,7 +647,7 @@ impl Transport for WindowedTransport {
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
     fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
     fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1 })
+        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
     }
 
 }
@@ -686,7 +687,7 @@ impl Transport for DeadPaneTransport {
     fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
     fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
     fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1 })
+        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
     }
 
 }

@@ -395,6 +395,7 @@ impl team_agent::transport::Transport for AliasDeliveryTransport {
                 team_agent::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: team_agent::transport::TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
 

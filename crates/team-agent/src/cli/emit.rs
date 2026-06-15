@@ -887,6 +887,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         confirm_human: parsed.confirm_human,
         json: parsed.json,
         message_id: parsed.message_id,
+        pane: parsed.pane.clone(),
     })
 }
 

@@ -150,6 +150,7 @@ use super::*;
             confirm_human: false,
             json: false,
             message_id: None,
+            pane: None,
         }
     }
 

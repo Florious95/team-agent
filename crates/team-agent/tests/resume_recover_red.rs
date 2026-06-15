@@ -301,6 +301,7 @@ impl Transport for ResumeTransport {
             submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: TurnVerification::NotRequired,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
 

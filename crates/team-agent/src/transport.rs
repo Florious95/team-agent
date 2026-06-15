@@ -337,6 +337,75 @@ pub struct InjectReport {
     /// Gap42:仅 metadata,`not_yet_observed` 也算成功。
     pub turn_verification: TurnVerification,
     pub attempts: u32,
+    /// E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断): per-attempt observations
+    /// emitted by the paste-prompt + Enter loop in `tmux_backend.rs::inject`.
+    /// `None` when the inject path did not exercise the diagnostic
+    /// instrumentation (peer payloads, empty payloads, non-bracketed Text,
+    /// or any path that bypasses `capture_has_pasted_content_prompt`). When
+    /// present, downstream `send.unverified` / `send.failed` events surface
+    /// it as `submit_attempts_detail[]` so operators see live pane state
+    /// per attempt (matched literal, where-in-tail offset, scrubbed pane
+    /// excerpt, elapsed ms) — the missing forensic data the user has been
+    /// asking for for many rounds.
+    ///
+    /// Tests / mocks should default this to `None` via `Default`. Wire
+    /// byte-lock (`transport::tests::wire`) is untouched: this field is NOT
+    /// serialised on the typed wire — it lives only in the in-process
+    /// `InjectReport` and is rendered into JSON manually by the delivery
+    /// layer when emitting forensic events.
+    pub submit_diagnostics: Option<SubmitDiagnostics>,
+}
+
+/// E50 PR-1 diagnostic payload — one entry per submit attempt in the
+/// pasted-prompt branch + (informational) for the appear-gate poll.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubmitDiagnostics {
+    /// Time spent in the appear-gate (poll for the pasted-content placeholder
+    /// before Enter). When `saw_pasted_prompt == false` this is the time we
+    /// spent polling before falling through to the E46 token path.
+    pub appear_gate_elapsed_ms: u64,
+    /// Did the appear-gate ever match the `pasted content` / `pasted text`
+    /// literal? When `false`, the inject took the E46 token path; the
+    /// `attempts_detail` may still capture observations the operator wants.
+    pub appear_gate_matched: bool,
+    /// Total elapsed across the whole submit gate (appear-gate + Enter
+    /// loop). Useful to triage real-machine slow-paste (codex large-paste
+    /// collapse can take >100 s while the framework's loop is sub-second).
+    pub total_elapsed_ms: u64,
+    /// Per-attempt observations of the post-Enter capture in the pasted-
+    /// prompt loop. Empty when `saw_pasted_prompt == false` and the inject
+    /// went through the E46 token path.
+    pub attempts_detail: Vec<SubmitAttemptObservation>,
+}
+
+/// E50 PR-1 single attempt observation (one Enter + one capture). All fields
+/// are forensic — they exist to make `send.unverified` / `send.failed` events
+/// self-describing rather than requiring the operator to guess.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SubmitAttemptObservation {
+    /// 1-based attempt index (mirrors the `attempts` counter that already
+    /// ships in `InjectReport.attempts`).
+    pub attempt_index: u32,
+    /// Did this attempt's post-Enter capture STILL match the pasted-prompt
+    /// literal? `true` means the inject saw the placeholder; `false` means
+    /// the placeholder cleared (= submit succeeded by the legacy criterion).
+    pub matched: bool,
+    /// The matched literal substring (`pasted content` / `pasted text`)
+    /// when `matched == true`. `None` otherwise.
+    pub matched_literal: Option<String>,
+    /// Distance from the bottom of the tail where the match occurred:
+    /// `Some(0)` = bottom-most line (composer), `Some(N)` = N lines above
+    /// bottom (likely scrollback), `None` = no match. Critical for the
+    /// false-negative root cause: a `pasted content` literal in scrollback
+    /// is NOT the live composer placeholder.
+    pub where_in_tail: Option<u32>,
+    /// Scrubbed last 20 / 80 lines of the captured tail, ANSI-stripped,
+    /// capped ~1200 bytes. Secrets scrubbed (sk-/ghp_/AKIA/Bearer/hex32+).
+    pub pane_tail_excerpt: String,
+    /// Number of non-empty lines in `pane_tail_excerpt`.
+    pub pane_tail_lines: u32,
+    /// Time elapsed for THIS attempt (Enter + capture + match).
+    pub elapsed_ms: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -761,9 +830,17 @@ pub fn tmux_spawn_argv(
             command.to_string(),
         ]
     } else {
+        // E53 (0.3.26, adaptive layout same-session tabs): `-d` makes the new
+        // window start without switching the client's active window to it. The
+        // leader stays on its own window; the worker opens as a background tab.
+        // Without `-d` every `new-window` call yanks the leader's terminal to
+        // the freshly spawned worker window, disrupting whatever the leader is
+        // doing. `-d` matches the Python golden: the managed leader and all
+        // workers share the same tmux session (= same terminal window tabs).
         vec![
             "tmux".to_string(),
             "new-window".to_string(),
+            "-d".to_string(),
             "-t".to_string(),
             session.as_str().to_string(),
             "-n".to_string(),

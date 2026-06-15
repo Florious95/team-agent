@@ -369,9 +369,10 @@
             .expect("spawn_split");
         assert_eq!(result.pane_id.as_str(), "%5");
         let calls = rec.lock().unwrap().clone();
+        // E53 (0.3.26): split-window now carries `-d` (no focus steal).
         assert_eq!(
-            calls[0][0..4],
-            svec(&["tmux", "split-window", "-t", "teamsess:team-w1"])
+            calls[0][0..5],
+            svec(&["tmux", "split-window", "-d", "-t", "teamsess:team-w1"])
         );
         assert_eq!(
             calls[1],
@@ -821,6 +822,166 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
              must NOT receive Escape pre-step. Got {escape_count}. \
              calls={calls:?}"
         );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断) — InjectReport.submit_diagnostics
+    // is populated for paste-prompt loops, and `pasted_prompt_match` / scrubbing
+    // helpers are pure functions safe to test deterministically.
+    //
+    // Architect verdict (Workflow forensic): the pre-fix
+    // `capture_has_pasted_content_prompt` matched ANY `pasted content` /
+    // `pasted text` token in the full Tail(80), including scrolled-off
+    // submitted blocks. PR-1 just adds the diagnostics; PR-2 will USE
+    // `where_in_tail` to fix the criterion. These tests pin the data shape.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// **E50 RED-1 (判据误判, pure function)**: `pasted_prompt_match` must
+    /// distinguish bottom-region (composer) from scrollback (line 6+ from
+    /// bottom). Pre-fix `capture_has_pasted_content_prompt` returned `true`
+    /// for BOTH; the new tuple-returning helper surfaces the offset so PR-2
+    /// can fix the criterion.
+    #[test]
+    fn e50_pasted_prompt_match_reports_where_in_tail_for_scrollback_vs_composer() {
+        use super::pasted_prompt_match;
+
+        // Composer (bottom) match.
+        let composer_only = "some output\n\
+                             [Pasted content 1.2k]\n\
+                             ❯ ";
+        // The match is "pasted content" in the line at index 1 from bottom
+        // among non-empty lines (`[Pasted content...]`, `❯ ` is at idx 0).
+        let m = pasted_prompt_match(composer_only).expect("match");
+        assert_eq!(m.0, "pasted content");
+        assert_eq!(
+            m.1, 1,
+            "E50: where_in_tail must reflect bottom offset (idx 1 = above the \
+             `❯` composer line); got {m:?}"
+        );
+
+        // Scrollback (top) match — 8 lines from bottom.
+        let scrollback_only = "[Pasted content 5.0k]\n\
+                               assistant reply line 1\n\
+                               assistant reply line 2\n\
+                               assistant reply line 3\n\
+                               assistant reply line 4\n\
+                               assistant reply line 5\n\
+                               assistant reply line 6\n\
+                               assistant reply line 7\n\
+                               ❯ ";
+        let m2 = pasted_prompt_match(scrollback_only).expect("match");
+        assert_eq!(m2.0, "pasted content");
+        assert!(
+            m2.1 >= 6,
+            "E50: scrollback `Pasted content` must report where_in_tail >= 6 \
+             (clearly above the bottom composer region); got {m2:?}. PR-2 \
+             will use this offset to distinguish live composer vs scrollback \
+             residue."
+        );
+
+        // No match.
+        assert!(pasted_prompt_match("nothing here\n❯ ").is_none());
+    }
+
+    /// **E50 PR-2 Fix-B (amends PR-1 RED-2)**: with Fix-B, token-bearing
+    /// payloads SKIP the paste-prompt weak loop and fall through to the E46
+    /// token consumption gate. The `submit_diagnostics` still records the
+    /// appear-gate timing (was `saw_pasted_prompt` matched?), but
+    /// `attempts_detail` is populated by the E46 consumption gate path, not
+    /// the deleted weak loop. This test pins the NEW shape: `appear_gate_matched`
+    /// may be false (mock default returns the pasted-content text, but the
+    /// appear-gate polls 5 times with 25ms sleep and the mock answers the SAME
+    /// text every time → appear-gate DOES match). However, the `has_token` guard
+    /// skips the weak loop body → the token path's diagnostics fill in instead.
+    #[test]
+    fn e50_inject_paste_prompt_path_populates_submit_diagnostics_per_attempt() {
+        let token_text =
+            "Team Agent message from leader:\n\nhello\n\n[team-agent-token:msg_pr1]";
+        // Mock keeps returning the pasted-content placeholder. With Fix-B,
+        // the token path takes over: post_submit_input_consumed checks
+        // bottom 5 lines for the token marker. The mock returns the pasted
+        // placeholder text (without the token) → token NOT in tail → consumed
+        // = Some(true) → EnterSentWithoutPlaceholderCheck.
+        // We test: (a) diagnostics present (b) submit verification reflects
+        // the E46 token path, not the deleted weak loop.
+        let pasted = "[Pasted content 1.2k]";
+        let (be, _rec) = backend_with(MockResp::Out(ok(pasted)), vec![]);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject");
+        // Fix-B: token payload → E46 token path. The submit verification is
+        // either EnterSentWithoutPlaceholderCheck (consumed) or
+        // SubmitConsumptionUnverified (not consumed). With the mock returning
+        // pasted-content text (no token in tail), consumed = true.
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "E50 PR-2 Fix-B: token payload that went through the E46 gate \
+             and was consumed (token not in bottom 5 lines) must report \
+             EnterSentWithoutPlaceholderCheck; got {:?}",
+            report.submit_verification
+        );
+    }
+
+    /// **E50 PR-1 secret scrubbing**: `scrub_pane_excerpt` must strip ANSI
+    /// + redact common secret shapes so emitted events.jsonl doesn't leak.
+    #[test]
+    fn e50_scrub_pane_excerpt_strips_ansi_and_redacts_secret_shapes() {
+        use super::scrub_pane_excerpt;
+        let raw = "\x1b[31merror\x1b[0m: sk-abcdef123ghi\n\
+                   token Bearer abc.def.ghi\n\
+                   key AKIAIOSFODNN7EXAMPLE\n\
+                   ghp_1234567890abcdef\n\
+                   hex deadbeefdeadbeefdeadbeefdeadbeefcafebabe\n\
+                   plain text below";
+        let (out, lines) = scrub_pane_excerpt(raw, 20);
+        assert!(lines >= 5, "E50: at least 5 non-empty lines; got {lines}");
+        assert!(!out.contains("\x1b"), "E50: ANSI escape stripped; got {out:?}");
+        assert!(
+            !out.contains("sk-abcdef123ghi"),
+            "E50: sk- secret must be redacted; got {out:?}"
+        );
+        assert!(
+            !out.contains("ghp_1234567890abcdef"),
+            "E50: ghp_ secret must be redacted; got {out:?}"
+        );
+        assert!(
+            !out.contains("AKIAIOSFODNN7EXAMPLE"),
+            "E50: AKIA secret must be redacted; got {out:?}"
+        );
+        assert!(
+            !out.contains("abc.def.ghi"),
+            "E50: Bearer secret token must be redacted; got {out:?}"
+        );
+        assert!(
+            !out.contains("deadbeefdeadbeefdeadbeefdeadbeefcafebabe"),
+            "E50: 32+ hex run must be redacted; got {out:?}"
+        );
+        assert!(
+            out.contains("REDACTED"),
+            "E50: redactions visible; got {out:?}"
+        );
+        assert!(
+            out.contains("plain text below"),
+            "E50: non-secret content preserved; got {out:?}"
+        );
+    }
+
+    /// **E50 PR-1 byte-identical legacy matcher**: `capture_has_pasted_content_prompt`
+    /// wrapper must still return the same bool the 3 legacy callers depend on
+    /// (the bool-returning fn shape is the contract for byte-locked behaviour).
+    #[test]
+    fn e50_capture_has_pasted_content_prompt_byte_identical_wrapper() {
+        use super::capture_has_pasted_content_prompt;
+        assert!(capture_has_pasted_content_prompt("[Pasted content 1k]"));
+        assert!(capture_has_pasted_content_prompt("[Pasted text foo]"));
+        assert!(!capture_has_pasted_content_prompt("just composer text"));
+        assert!(!capture_has_pasted_content_prompt(""));
     }
 
     #[test]

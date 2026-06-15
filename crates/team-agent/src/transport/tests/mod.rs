@@ -74,6 +74,7 @@
                 submit_verification,
                 turn_verification,
                 attempts: 1,
+                submit_diagnostics: None,
             })
         }
         fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {

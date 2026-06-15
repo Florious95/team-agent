@@ -271,7 +271,8 @@
                 "sh",
                 false,
             ),
-            vec!["tmux", "new-window", "-t", "team-sess", "-n", "worker-2", "sh", "-lc", "sh"]
+            // E53 (0.3.26): new-window now carries `-d` (detached, no focus steal).
+            vec!["tmux", "new-window", "-d", "-t", "team-sess", "-n", "worker-2", "sh", "-lc", "sh"]
         );
     }
 

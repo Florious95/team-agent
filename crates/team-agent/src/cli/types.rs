@@ -312,6 +312,13 @@ pub struct SendArgs {
     /// When set, the store insert uses this id verbatim; a repeat with the same
     /// id returns a `Duplicate` refusal instead of creating a second row.
     pub message_id: Option<String>,
+    /// F1 (0.3.26): `--pane <pane_id>` — direct pane-id targeting. Mutually
+    /// exclusive with `target` / `targets`. When set, the message is injected
+    /// directly into the specified tmux pane via `transport.inject`, bypassing
+    /// the agent-name → pane-id resolution + team-membership check. This is
+    /// the **cross-team communication** primitive: the target pane does not
+    /// need to be in the sender's team.
+    pub pane: Option<String>,
 }
 
 /// E23 worker-side emergency fallback for `team_orchestrator.send_message`

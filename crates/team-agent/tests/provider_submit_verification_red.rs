@@ -209,6 +209,7 @@ fn verified_report(attempts: u32) -> InjectReport {
         submit_verification: SubmitVerification::PastedContentPromptAbsentAfterSubmit,
         turn_verification: TurnVerification::NotYetObserved,
         attempts,
+        submit_diagnostics: None,
     }
 }
 
@@ -223,6 +224,7 @@ fn enter_sent_without_placeholder_report() -> InjectReport {
         submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
         turn_verification: TurnVerification::NotYetObserved,
         attempts: 1,
+        submit_diagnostics: None,
     }
 }
 
@@ -233,6 +235,7 @@ fn failed_submit_report() -> InjectReport {
         submit_verification: SubmitVerification::SendKeysFailed,
         turn_verification: TurnVerification::NotYetObserved,
         attempts: 3,
+        submit_diagnostics: None,
     }
 }
 

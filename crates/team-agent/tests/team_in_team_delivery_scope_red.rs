@@ -259,6 +259,7 @@ impl Transport for RecordingDeliveryTransport {
             submit_verification: SubmitVerification::PastedContentPromptAbsentAfterSubmit,
             turn_verification: TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
 

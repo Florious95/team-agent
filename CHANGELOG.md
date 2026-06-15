@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.26
+
+- **Fixed: on a fresh Mac, the `team-agent` command was not found after install.** The installer now places it in a directory already on your `PATH`, so it works immediately.
+- **Fixed: shutting down a team could close the leader terminal.** Shutdown now only closes worker windows and leaves the leader intact.
+- **Fixed: starting a new teammate could steal the leader terminal focus.** New workers now open in the background.
+- **Fixed: in rare cases the framework could mistake a worker window for the leader, causing messages to loop back.** The framework now refuses to rebind the leader to a registered worker pane.
+- **Improved: message delivery diagnostics.** When delivery is retried, the framework now logs what it saw on screen, making it easier to diagnose delivery issues. It also uses the proven token-consumption gate for the Codex paste-prompt path, so submit verification is more reliable.
+- **Added: send messages directly to any tmux pane with `team-agent send --pane`.** This works across teams for cross-team communication.
+
 ## 0.3.25
 
 - **Fixed: adding a teammate to a running team could leave it unusable and impossible to remove.** In some cases, add said the teammate already existed while remove said it was unknown, because the two commands were reading different copies of the team record. They now use the same record, so add, re-add, and remove agree with each other. A failed add no longer leaves a half-created teammate behind.

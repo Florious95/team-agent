@@ -345,6 +345,7 @@ impl Transport for ScriptedTransport {
             submit_verification: SubmitVerification::PastedContentPromptAbsentAfterSubmit,
             turn_verification: TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
 

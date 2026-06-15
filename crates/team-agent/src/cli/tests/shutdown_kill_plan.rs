@@ -378,6 +378,12 @@ struct CleanShutdownTransport {
     kill_server_called: Mutex<bool>,
     probe_timeout_kind: Option<&'static str>,
     targets_persist_after_kill: bool,
+    // E49 (0.3.24 P0, shutdown kills leader CLI): record per-pane / per-window /
+    // per-session kill targets so RED contracts can assert (a) the leader pane is
+    // never killed and (b) worker panes ARE killed via the new per-pane path.
+    killed_panes: Mutex<Vec<String>>,
+    killed_window_targets: Mutex<Vec<String>>,
+    killed_sessions: Mutex<Vec<String>>,
 }
 
 impl CleanShutdownTransport {
@@ -388,6 +394,9 @@ impl CleanShutdownTransport {
             kill_server_called: Mutex::new(false),
             probe_timeout_kind: None,
             targets_persist_after_kill: false,
+            killed_panes: Mutex::new(Vec::new()),
+            killed_window_targets: Mutex::new(Vec::new()),
+            killed_sessions: Mutex::new(Vec::new()),
         }
     }
 
@@ -408,6 +417,21 @@ impl CleanShutdownTransport {
     fn with_targets_persist_after_kill(mut self) -> Self {
         self.targets_persist_after_kill = true;
         self
+    }
+
+    /// E49 (0.3.24 P0): observed per-pane kill targets, in call order.
+    fn killed_panes(&self) -> Vec<String> {
+        self.killed_panes.lock().unwrap().clone()
+    }
+
+    /// E49 (0.3.24 P0): observed per-window kill targets (target stringified).
+    fn killed_window_targets(&self) -> Vec<String> {
+        self.killed_window_targets.lock().unwrap().clone()
+    }
+
+    /// E49 (0.3.24 P0): observed per-session kill targets, in call order.
+    fn killed_sessions_observed(&self) -> Vec<String> {
+        self.killed_sessions.lock().unwrap().clone()
     }
 }
 
@@ -499,10 +523,14 @@ impl Transport for CleanShutdownTransport {
         Ok(SetEnvOutcome::Applied)
     }
 
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+    fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
         if let Some(probe) = self.probe_timeout_kind {
             crate::os_probe::set_probe_timeout_for_test(probe, None, 900);
         }
+        self.killed_sessions
+            .lock()
+            .unwrap()
+            .push(session.as_str().to_string());
         *self.session_present.lock().unwrap() = false;
         Ok(())
     }
@@ -512,7 +540,19 @@ impl Transport for CleanShutdownTransport {
         Ok(())
     }
 
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+    fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+        self.killed_window_targets
+            .lock()
+            .unwrap()
+            .push(format!("{target:?}"));
+        Ok(())
+    }
+
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        self.killed_panes
+            .lock()
+            .unwrap()
+            .push(pane.as_str().to_string());
         Ok(())
     }
 
@@ -730,24 +770,240 @@ fn leader_env_tmux_socket_never_kills_server_even_when_sessions_look_exclusive()
     );
 }
 
+/// E49 (0.3.24 P0, shutdown kills leader CLI): managed-leader topology with
+/// leader anchor pane + worker panes in the SAME tmux session.
+///
+/// Pre-fix (cli/mod.rs:629-638): `transport.kill_session(state.session_name)`
+/// killed the session unconditionally — including the leader's own pane.
+/// User truth: "执行命令绝不能关掉启动自己的那个 leader CLI". macmini repro:
+/// run `team-agent quick-start ...`, then `team-agent shutdown` from the
+/// same terminal → leader CLI dies.
+///
+/// Architect-approved fix:
+///   * pre :629 guard: when state is managed (NOT external leader) and the
+///     leader_receiver / team_owner anchor pane is in `state.session_name`,
+///     do NOT call kill_session(state.session_name). Instead kill workers
+///     per-pane via `kill_pane`, deriving pane_ids from state.agents +
+///     teams[*].agents and EXCLUDING the leader anchor pane ids
+///     (`collect_state_leader_anchor_pane_ids`).
+///   * cli/mod.rs:384-435 managed_leader_socket_cleanup: spare any session
+///     carrying a leader anchor; never kill_session it.
+///
+/// Pre-fix test asserted `killed_sessions=["team-current"]` — that was
+/// LOCKING THE BUG (the architect explicitly named it). Post-fix:
+///   * spared_sessions contains "team-current"
+///   * killed_sessions does NOT contain "team-current"
+///   * killed_panes contains worker panes %w1, %w2
+///   * killed_panes does NOT contain %leader
+///   * no kill_server call
 #[test]
-fn managed_leader_shutdown_never_kills_server_even_when_socket_looks_exclusive() {
-    let ws = tmp_shutdown_workspace("managed-leader-no-kill-server");
+fn e49_managed_leader_shutdown_spares_leader_session_and_kills_workers_per_pane() {
+    let ws = tmp_shutdown_workspace("e49-managed-leader-spares-session");
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-current",
             "is_external_leader": false,
-            "agents": {}
+            "leader_receiver": {"pane_id": "%leader"},
+            "team_owner": {"pane_id": "%leader"},
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"},
+                "w2": {"status": "running", "provider": "codex", "window": "w2", "pane_id": "%w2"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![
+            // Leader anchor pane
+            PaneInfo {
+                pane_id: PaneId::new("%leader"),
+                session: SessionName::new("team-current"),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("leader")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+            // Worker pane 1
+            PaneInfo {
+                pane_id: PaneId::new("%w1"),
+                session: SessionName::new("team-current"),
+                window_index: Some(1),
+                window_name: Some(WindowName::new("w1")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: false,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+            // Worker pane 2
+            PaneInfo {
+                pane_id: PaneId::new("%w2"),
+                session: SessionName::new("team-current"),
+                window_index: Some(2),
+                window_name: Some(WindowName::new("w2")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: false,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+        ])
+        .with_targets_persist_after_kill();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    let killed_sessions = transport.killed_sessions_observed();
+    assert!(
+        !killed_sessions.iter().any(|s| s == "team-current"),
+        "E49 (RED): managed-leader shutdown must NEVER kill_session(team-current) — \
+         that ends the leader's own pane (the user's CLI). Got transport \
+         killed_sessions={killed_sessions:?}"
+    );
+    let killed_panes = transport.killed_panes();
+    assert!(
+        !killed_panes.iter().any(|p| p == "%leader"),
+        "E49 (RED): leader anchor pane %leader must NEVER be killed. Got \
+         killed_panes={killed_panes:?}"
+    );
+    assert!(
+        killed_panes.iter().any(|p| p == "%w1"),
+        "E49: worker pane %w1 must be killed per-pane (workers cleared, leader spared). \
+         Got killed_panes={killed_panes:?}"
+    );
+    assert!(
+        killed_panes.iter().any(|p| p == "%w2"),
+        "E49: worker pane %w2 must be killed per-pane. Got killed_panes={killed_panes:?}"
+    );
+    assert!(
+        !transport.kill_server_called(),
+        "E49: managed topology must never kill the tmux server (would end leader pane)."
+    );
+    // Report-level assertions: the leader session must appear in spared_sessions,
+    // not killed_sessions.
+    let out_killed = out["killed_sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let out_spared = out["spared_sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !out_killed
+            .iter()
+            .any(|v| v.as_str() == Some("team-current")),
+        "E49: report's killed_sessions must NOT contain the leader session. Got {out_killed:?}"
+    );
+    assert!(
+        out_spared
+            .iter()
+            .any(|v| v.as_str() == Some("team-current")),
+        "E49: report's spared_sessions MUST contain the leader session. Got {out_spared:?}"
+    );
+    assert_eq!(out["ok"], json!(true));
+}
+
+/// E49 regression guard: external-leader topology (is_external_leader=true)
+/// must STILL kill_session unconditionally. In that topology the team session
+/// is a disposable worker session and the leader pane lives elsewhere
+/// (a separate terminal / different socket). Sparing the session here would
+/// leak worker processes after shutdown.
+#[test]
+fn e49_external_leader_shutdown_still_kills_team_session_unconditionally() {
+    let ws = tmp_shutdown_workspace("e49-external-leader-still-kills");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-external",
+            "is_external_leader": true,
+            "leader_receiver": {"pane_id": "%leaderelsewhere"},
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"}
+            }
+        }),
+    )
+    .unwrap();
+    let transport = CleanShutdownTransport::new()
+        .with_targets(vec![
+            // Worker pane in team session
+            PaneInfo {
+                pane_id: PaneId::new("%w1"),
+                session: SessionName::new("team-external"),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("w1")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+            // Leader pane is in a DIFFERENT session (external topology)
+            PaneInfo {
+                pane_id: PaneId::new("%leaderelsewhere"),
+                session: SessionName::new("user-shell"),
+                window_index: Some(0),
+                window_name: Some(WindowName::new("shell")),
+                pane_index: Some(0),
+                tty: None,
+                current_command: Some("zsh".to_string()),
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            },
+        ])
+        .with_targets_persist_after_kill();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
+        .expect("shutdown should complete");
+
+    let killed_sessions = transport.killed_sessions_observed();
+    assert!(
+        killed_sessions.iter().any(|s| s == "team-external"),
+        "E49 regression guard: external-leader topology must STILL kill_session \
+         the team session — leader pane lives elsewhere so this is safe. Got \
+         transport killed_sessions={killed_sessions:?}"
+    );
+    assert_eq!(out["ok"], json!(true));
+}
+
+/// E49 regression guard: managed topology where the leader anchor pane is NOT
+/// in `state.session_name` (e.g. a stale state from an aborted launch where
+/// only worker panes exist in the session). The pre-fix behaviour (kill_session)
+/// is preserved here — no leader pane is at risk.
+#[test]
+fn e49_managed_leader_without_anchor_in_session_still_kills_session() {
+    let ws = tmp_shutdown_workspace("e49-managed-no-anchor-in-session");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-orphan",
+            "is_external_leader": false,
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "window": "w1", "pane_id": "%w1"}
+            }
         }),
     )
     .unwrap();
     let transport = CleanShutdownTransport::new()
         .with_targets(vec![PaneInfo {
-            pane_id: PaneId::new("%1"),
-            session: SessionName::new("team-current"),
+            pane_id: PaneId::new("%w1"),
+            session: SessionName::new("team-orphan"),
             window_index: Some(0),
-            window_name: Some(WindowName::new("leader")),
+            window_name: Some(WindowName::new("w1")),
             pane_index: Some(0),
             tty: None,
             current_command: Some("codex".to_string()),
@@ -761,13 +1017,14 @@ fn managed_leader_shutdown_never_kills_server_even_when_socket_looks_exclusive()
     let out = crate::cli::lifecycle_port::shutdown_with_transport(&ws, true, None, &transport)
         .expect("shutdown should complete");
 
-    assert_eq!(out["ok"], json!(true));
-    assert_eq!(out["killed_sessions"], json!(["team-current"]));
-    assert_eq!(out["spared_sessions"], json!([]));
+    let killed_sessions = transport.killed_sessions_observed();
     assert!(
-        !transport.kill_server_called(),
-        "managed topology must clear the team session/window without kill-server"
+        killed_sessions.iter().any(|s| s == "team-orphan"),
+        "E49 regression guard: when no leader anchor pane is in the session, \
+         the pre-fix kill_session path is preserved (no leader is at risk). \
+         Got transport killed_sessions={killed_sessions:?}"
     );
+    assert_eq!(out["ok"], json!(true));
 }
 
 #[test]

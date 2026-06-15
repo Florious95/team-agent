@@ -173,6 +173,7 @@ impl Transport for DeliverOkTransport {
             submit_verification: crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
     fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {

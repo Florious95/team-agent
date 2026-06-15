@@ -95,6 +95,16 @@ pub(crate) fn start_agent_at_paths(
     } else {
         window_exists(transport, &session_name, &window)
     };
+    // E51 (0.3.26 P0, restart self-heal): even if the pane is structurally
+    // alive, it must not be considered "this agent's pane" if it's actually
+    // the leader anchor pane or another agent's pane. When lease corruption
+    // (E51 root cause) left `agent.pane_id == leader_receiver.pane_id`,
+    // start_agent would short-circuit to Noop (the pane IS live — it's just
+    // the wrong pane). Force a fresh spawn by treating the pane as not-live
+    // when it conflicts with the leader or a different agent.
+    let agent_live = agent_live && !pane_conflicts_with_leader_or_other(
+        &state, agent_id, &agent,
+    );
     if !force && agent_live {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
         let team_key = restart_projection_team_key(&state, team);
@@ -269,6 +279,51 @@ fn spawned_pane_is_reachable(
     if let Ok(targets) = transport.list_targets() {
         if targets.iter().any(|t| t.pane_id.as_str() == pane.as_str()) {
             return true;
+        }
+    }
+    false
+}
+
+/// E51 (0.3.26 P0, restart self-heal): returns `true` when the agent's pane_id
+/// is the same as the leader_receiver/team_owner pane_id OR is owned by a
+/// different agent in the state. In both cases `start_agent` must NOT treat the
+/// pane as "this agent's live pane" (it should spawn fresh).
+fn pane_conflicts_with_leader_or_other(
+    state: &serde_json::Value,
+    agent_id: &crate::model::ids::AgentId,
+    agent: &serde_json::Value,
+) -> bool {
+    let Some(pane_id) = agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    // Check leader anchor.
+    for key in ["leader_receiver", "team_owner"] {
+        if state
+            .get(key)
+            .and_then(|v| v.get("pane_id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|lp| lp == pane_id)
+        {
+            return true;
+        }
+    }
+    // Check other agents.
+    if let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) {
+        for (id, other) in agents {
+            if id == agent_id.as_str() {
+                continue;
+            }
+            if other
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|op| op == pane_id)
+            {
+                return true;
+            }
         }
     }
     false

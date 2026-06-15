@@ -7,6 +7,32 @@ use crate::messaging::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, Delivery
 /// `cmd_send`(`commands.py:164`)。解析 target(`--to` fanout / 单 target / `*`)→ [`MessageTarget`],
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
+    // F1 (0.3.26, cross-team send): --pane <pane_id> direct targeting.
+    // Mutually exclusive with target / --to (agent-name routing).
+    if let Some(ref pane_id) = args.pane {
+        if args.target.is_some() || args.targets.is_some() {
+            return Err(CliError::Usage(
+                "--pane and TARGET/--to are mutually exclusive: \
+                 --pane bypasses agent-name routing and injects directly into the \
+                 specified tmux pane (cross-team capable)"
+                    .to_string(),
+            ));
+        }
+        let content = args.message.join(" ");
+        if content.is_empty() {
+            return Err(CliError::Usage("--pane requires a non-empty message".to_string()));
+        }
+        let value = send_to_pane_direct(
+            &args.workspace,
+            pane_id,
+            &content,
+            &args.sender,
+            args.task.as_deref(),
+            args.team.as_deref(),
+            args.json,
+        )?;
+        return Ok(CmdResult::from_json(value, args.json));
+    }
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
         args.team.as_deref(),
@@ -35,6 +61,86 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         }
     }
     Ok(CmdResult::from_json(value, args.json))
+}
+
+/// F1 (0.3.26): direct pane-id send — bypasses agent-name routing + team
+/// membership check. Constructs `Target::Pane`, renders the message with
+/// the standard protocol block (Team Agent message from sender + token),
+/// injects via the default tmux backend, and surfaces the inject report as
+/// a JSON result. Cross-team capable: no restriction on which tmux session
+/// or socket the pane belongs to.
+fn send_to_pane_direct(
+    workspace: &Path,
+    pane_id: &str,
+    content: &str,
+    sender: &str,
+    task_id: Option<&str>,
+    team: Option<&str>,
+    json: bool,
+) -> Result<serde_json::Value, CliError> {
+    use crate::messaging::delivery::render_message;
+    use crate::transport::{InjectPayload, Key, PaneId, Target};
+
+    let message_id = format!("pane_send_{}", chrono::Utc::now().timestamp_millis());
+    let rendered = render_message(sender, task_id, content, &message_id);
+    let target = Target::Pane(PaneId::new(pane_id));
+    let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &run_workspace,
+        team,
+    )
+    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&run_workspace));
+    let event_log = crate::event_log::EventLog::new(&run_workspace);
+    // Warn if the pane is not in the team's known agents (cross-team usage).
+    let state = crate::state::persist::load_runtime_state(&run_workspace).ok();
+    let in_team = state
+        .as_ref()
+        .and_then(|s| s.get("agents"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|agents| {
+            agents.values().any(|agent| {
+                agent
+                    .get("pane_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|p| p == pane_id)
+            })
+        });
+    if !in_team {
+        eprintln!(
+            "warning: pane {pane_id} is not in the team's known agents — \
+             cross-team delivery (F1)"
+        );
+    }
+    let transport: &dyn crate::transport::Transport = &transport;
+    let report = transport
+        .inject(&target, &InjectPayload::Text(rendered), Key::Enter, true)
+        .map_err(|e| CliError::Runtime(format!("inject to pane {pane_id} failed: {e}")))?;
+    let _ = event_log.write(
+        "send.pane_direct",
+        serde_json::json!({
+            "pane_id": pane_id,
+            "sender": sender,
+            "message_id": message_id,
+            "submit_verification": crate::transport::submit_verification_wire(report.submit_verification),
+            "inject_verification": format!("{:?}", report.inject_verification),
+            "in_team": in_team,
+        }),
+    );
+    let ok = matches!(
+        report.submit_verification,
+        crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck
+            | crate::transport::SubmitVerification::PastedContentPromptAbsentAfterSubmit
+            | crate::transport::SubmitVerification::KeySentAfterVisibleToken { .. }
+    );
+    Ok(serde_json::json!({
+        "ok": ok,
+        "pane_id": pane_id,
+        "message_id": message_id,
+        "submit_verification": crate::transport::submit_verification_wire(report.submit_verification),
+        "inject_verification": format!("{:?}", report.inject_verification),
+        "in_team": in_team,
+    }))
 }
 
 pub fn cmd_fallback_send_leader(args: &FallbackSendLeaderArgs) -> Result<CmdResult, CliError> {

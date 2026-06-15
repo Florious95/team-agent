@@ -49,6 +49,7 @@ use super::*;
             confirm_human: false,
             json: true,
             message_id: None,
+            pane: None,
         };
         let _ = cmd_send(&args);
 

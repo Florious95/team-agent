@@ -348,6 +348,7 @@ pub fn deliver_pending_message(
                         attempt,
                         "send_inject_exhausted",
                         &reason,
+                        None,
                     )?;
                     return Ok(DeliveryOutcome {
                         ok: false,
@@ -387,6 +388,13 @@ pub fn deliver_pending_message(
                 submit_verification_wire(inject_report.submit_verification)
             )
         };
+        // E50 PR-1 (0.3.24 P0): render forensic submit_diagnostics into the
+        // event so operators see per-attempt pane state without grepping. The
+        // legacy keys (`message_id` / `recipient` / `reason` / `attempts`)
+        // are preserved byte-for-byte for grep compatibility; new keys are
+        // ADDITIONAL.
+        let submit_attempts_detail =
+            render_submit_diagnostics(&inject_report);
         event_log.write(
             "send.unverified",
             serde_json::json!({
@@ -394,6 +402,7 @@ pub fn deliver_pending_message(
                 "recipient": message.recipient,
                 "reason": reason,
                 "attempts": inject_report.attempts,
+                "submit_attempts_detail": submit_attempts_detail,
             }),
         )?;
         if inject_report.attempts >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
@@ -407,6 +416,7 @@ pub fn deliver_pending_message(
                 inject_report.attempts,
                 "send_unverified_exhausted",
                 &reason,
+                Some(&inject_report),
             )?;
             return Ok(DeliveryOutcome {
                 ok: false,
@@ -504,7 +514,8 @@ fn pane_readback_verified(report: &InjectReport) -> bool {
 /// [team-agent-token:{message_id}]`. The worker (fake or real provider) only builds a result_envelope
 /// when it sees this block + extracts the token — the bare content gives WORKING but never a report
 /// (rt-host-a loop #4). token == message_id (exactly-once correlation).
-fn render_message(sender: &str, task_id: Option<&str>, content: &str, message_id: &str) -> String {
+/// F1 (0.3.26): promoted to `pub` for direct pane send in cli/send.rs.
+pub fn render_message(sender: &str, task_id: Option<&str>, content: &str, message_id: &str) -> String {
     let mut header = format!("Team Agent message from {sender}");
     if let Some(task_id) = task_id.filter(|t| !t.is_empty()) {
         header.push_str(&format!(" for {task_id}"));
@@ -557,7 +568,23 @@ fn resolve_inject_target(
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
         .map(PaneId::new);
+    // E51 (0.3.26 P0, delivery loop guard): if the worker's cached pane_id is
+    // the SAME as leader_receiver.pane_id (the leader's handle), injecting into
+    // it would deliver the worker's message back to the leader pane — a routing
+    // loop that the macmini "hand-handle mapping 灾難" truth source exposed. Fail
+    // loud with a SessionWindow target that will surface as a structured error
+    // (the SessionWindow "leader" target trips the existing leader_not_attached
+    // guard on any subsequent delivery attempt for this message). The root fix
+    // is in lease.rs (E51 guard #1) which prevents the conflation; this is the
+    // defence-in-depth in the delivery layer.
     if let Some(pane) = cached_pane.as_ref() {
+        let leader_pane = leader_receiver_pane_id(state);
+        if leader_pane.is_some_and(|lp| lp == pane.as_str()) {
+            return Target::SessionWindow {
+                session: SessionName::new(session),
+                window: WindowName::new(format!("{recipient}_pane_conflicts_with_leader")),
+            };
+        }
         if live_targets
             .iter()
             .any(|target| target.pane_id.as_str() == pane.as_str())
@@ -755,6 +782,34 @@ fn leader_receiver_field_in_state<'a>(
         .filter(|value| !value.is_empty())
 }
 
+/// E50 PR-1 (0.3.24 P0): render `InjectReport.submit_diagnostics` as a JSON
+/// array suitable for inclusion in `send.unverified` / `send.failed` events.
+/// `null` if no diagnostics were attached (e.g. the inject went through a
+/// path that bypassed the paste-prompt + Enter instrumentation, or this is
+/// the pre-PR-2 inject-failed path with no `InjectReport`).
+fn render_submit_diagnostics(report: &InjectReport) -> serde_json::Value {
+    let Some(diag) = report.submit_diagnostics.as_ref() else {
+        return serde_json::Value::Null;
+    };
+    serde_json::Value::Array(
+        diag.attempts_detail
+            .iter()
+            .map(|obs| {
+                serde_json::json!({
+                    "attempt_index": obs.attempt_index,
+                    "matched": obs.matched,
+                    "matched_literal": obs.matched_literal,
+                    "where_in_tail": obs.where_in_tail,
+                    "pane_tail_excerpt": obs.pane_tail_excerpt,
+                    "pane_tail_lines": obs.pane_tail_lines,
+                    "elapsed_ms": obs.elapsed_ms,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_send_failed_exhausted(
     workspace: &Path,
     state: &serde_json::Value,
@@ -764,7 +819,26 @@ fn emit_send_failed_exhausted(
     attempts: u32,
     failure_reason: &str,
     verification: &str,
+    inject_report: Option<&InjectReport>,
 ) -> Result<(), MessagingError> {
+    // E50 PR-1 (0.3.24 P0): forensic fields on send.failed. Legacy keys
+    // (`message_id` / `recipient` / `attempts` / `max_attempts` / `reason` /
+    // `verification`) preserved byte-for-byte for grep compatibility.
+    let submit_attempts_detail = inject_report
+        .map(render_submit_diagnostics)
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let total_elapsed_ms = inject_report
+        .and_then(|r| r.submit_diagnostics.as_ref())
+        .map(|d| d.total_elapsed_ms)
+        .unwrap_or(0);
+    let last_matched_literal = inject_report
+        .and_then(|r| r.submit_diagnostics.as_ref())
+        .and_then(|d| d.attempts_detail.last())
+        .and_then(|a| a.matched_literal.clone());
+    let last_pane_tail_excerpt = inject_report
+        .and_then(|r| r.submit_diagnostics.as_ref())
+        .and_then(|d| d.attempts_detail.last())
+        .map(|a| a.pane_tail_excerpt.clone());
     event_log.write(
         "send.failed",
         serde_json::json!({
@@ -774,6 +848,10 @@ fn emit_send_failed_exhausted(
             "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
             "reason": failure_reason,
             "verification": verification,
+            "submit_attempts_detail": submit_attempts_detail,
+            "total_elapsed_ms": total_elapsed_ms,
+            "last_matched_literal": last_matched_literal,
+            "last_pane_tail_excerpt": last_pane_tail_excerpt,
         }),
     )?;
     let content = format!(

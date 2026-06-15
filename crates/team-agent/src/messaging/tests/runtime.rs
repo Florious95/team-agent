@@ -1308,6 +1308,7 @@ impl Transport for UnverifiedInjectTransport {
                 crate::transport::SubmitVerification::PastedContentPromptStillPresentAfterSubmit,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: u32::from(SEND_RETRY_MAX_ATTEMPTS),
+            submit_diagnostics: None,
         })
     }
     fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
@@ -1467,6 +1468,7 @@ impl Transport for ReadbackMissingTransport {
             },
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
+            submit_diagnostics: None,
         })
     }
     fn send_keys(&self, _: &Target, _: &[Key]) -> Result<(), TransportError> {

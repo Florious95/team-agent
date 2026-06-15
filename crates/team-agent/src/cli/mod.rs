@@ -392,9 +392,23 @@ pub mod lifecycle_port {
             .and_then(Value::as_str)
             .filter(|session| !session.is_empty())
             .map(crate::transport::SessionName::new);
+        // E49 (0.3.24 P0, shutdown kills leader CLI): for managed leader topology
+        // the target session may carry the leader anchor pane. The pre-fix code
+        // pushed it into `to_kill` and then issued `kill_session` — which ended
+        // the leader pane (= leader CLI). When the target session has a live
+        // anchor pane in `list_targets`, spare it instead.
+        let leader_anchor_ids = collect_state_leader_anchor_pane_ids(state);
+        let live_targets = transport.list_targets().unwrap_or_default();
         let mut to_kill = Vec::new();
+        let mut target_spared_for_anchor: Option<crate::transport::SessionName> = None;
         if let Some(target) = target {
-            if sessions.is_empty()
+            let target_has_anchor = live_targets.iter().any(|t| {
+                t.session.as_str() == target.as_str()
+                    && leader_anchor_ids.contains(t.pane_id.as_str())
+            });
+            if target_has_anchor {
+                target_spared_for_anchor = Some(target);
+            } else if sessions.is_empty()
                 || sessions
                     .iter()
                     .any(|session| session.as_str() == target.as_str())
@@ -402,7 +416,7 @@ pub mod lifecycle_port {
                 to_kill.push(target);
             }
         }
-        let spared = sessions
+        let mut spared = sessions
             .iter()
             .filter(|session| {
                 !to_kill
@@ -411,6 +425,14 @@ pub mod lifecycle_port {
             })
             .cloned()
             .collect::<Vec<_>>();
+        if let Some(anchored) = target_spared_for_anchor {
+            if !spared
+                .iter()
+                .any(|s| s.as_str() == anchored.as_str())
+            {
+                spared.push(anchored);
+            }
+        }
         let _ = event_log.write(
             "shutdown.kill_server_skipped_managed_leader",
             json!({
@@ -628,13 +650,63 @@ pub mod lifecycle_port {
         let mut spared_sessions = Vec::new();
         deadline.check("kill_session")?;
         if let Some(session) = session_name.as_ref() {
-            push_unique_session(&mut killed_sessions, session.clone());
-            if let Err(error) = transport.kill_session(session) {
-                if !tmux_absent_error(&error.to_string()) {
-                    kill_error = Some(error.to_string());
+            // E49 (0.3.24 P0, shutdown kills leader CLI): managed-leader topology
+            // means the leader pane lives INSIDE state.session_name. The pre-fix
+            // `transport.kill_session(state.session_name)` ended the leader pane —
+            // i.e. terminated the user's own CLI. User truth: shutdown must never
+            // close the leader CLI that launched it. Detect via state.is_external_leader
+            // (state_is_managed_leader = !external) AND the presence of a leader
+            // anchor pane id (leader_receiver / team_owner) that lives in this
+            // session per `list_targets`. When managed-leader, switch to per-pane
+            // cleanup: kill the workers individually and SPARE the leader's pane.
+            //
+            // External leader (is_external_leader=true) keeps the unconditional
+            // kill_session — the team session is a disposable worker session in
+            // that topology, the leader pane lives elsewhere.
+            let leader_anchor_ids = collect_state_leader_anchor_pane_ids(&state);
+            let live_targets_now = transport.list_targets().unwrap_or_default();
+            let session_has_leader_anchor = live_targets_now.iter().any(|target| {
+                target.session.as_str() == session.as_str()
+                    && leader_anchor_ids.contains(target.pane_id.as_str())
+            });
+            if crate::state::projection::state_is_managed_leader(&state)
+                && session_has_leader_anchor
+            {
+                let _ = event_log_write_session_spared(
+                    &run_workspace,
+                    session,
+                    &leader_anchor_ids,
+                );
+                push_unique_session(&mut spared_sessions, session.clone());
+                let worker_panes = collect_session_worker_panes(
+                    &state,
+                    session.as_str(),
+                    &leader_anchor_ids,
+                    &live_targets_now,
+                );
+                for pane in &worker_panes {
+                    if let Err(error) = transport.kill_pane(pane) {
+                        if !tmux_absent_error(&error.to_string()) {
+                            kill_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
                 }
+                let _ = crate::lifecycle::display::close_team_display_backends(
+                    &run_workspace,
+                    session,
+                );
+            } else {
+                push_unique_session(&mut killed_sessions, session.clone());
+                if let Err(error) = transport.kill_session(session) {
+                    if !tmux_absent_error(&error.to_string()) {
+                        kill_error = Some(error.to_string());
+                    }
+                }
+                let _ = crate::lifecycle::display::close_team_display_backends(
+                    &run_workspace,
+                    session,
+                );
             }
-            let _ = crate::lifecycle::display::close_team_display_backends(&run_workspace, session);
         }
         deadline.check("reap_workspace_residuals")?;
         reap_workspace_process_residuals(
@@ -1366,6 +1438,120 @@ pub mod lifecycle_port {
             }
         }
         out
+    }
+
+    /// E49 (0.3.24 P0, shutdown kills leader CLI): collect worker pane ids on the
+    /// given `session` from state.agents + teams[*].agents, EXCLUDING any pane id
+    /// in `leader_anchor_ids`. If an agent has no `pane_id` but its window appears
+    /// in `live_targets` under the same session, fall back to the live `pane_id`
+    /// for that window — so we still kill the worker pane via the structural
+    /// addressing path rather than the session-level `kill_session` that would
+    /// also end the leader pane (the E49 bug).
+    fn collect_session_worker_panes(
+        state: &Value,
+        session: &str,
+        leader_anchor_ids: &std::collections::BTreeSet<String>,
+        live_targets: &[crate::transport::PaneInfo],
+    ) -> Vec<crate::transport::PaneId> {
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut out: Vec<crate::transport::PaneId> = Vec::new();
+        collect_session_worker_panes_from_agents(
+            state.get("agents"),
+            session,
+            leader_anchor_ids,
+            live_targets,
+            &mut seen,
+            &mut out,
+        );
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            for (_, team_state) in teams {
+                collect_session_worker_panes_from_agents(
+                    team_state.get("agents"),
+                    session,
+                    leader_anchor_ids,
+                    live_targets,
+                    &mut seen,
+                    &mut out,
+                );
+            }
+        }
+        out
+    }
+
+    fn collect_session_worker_panes_from_agents(
+        agents: Option<&Value>,
+        session: &str,
+        leader_anchor_ids: &std::collections::BTreeSet<String>,
+        live_targets: &[crate::transport::PaneInfo],
+        seen: &mut std::collections::BTreeSet<String>,
+        out: &mut Vec<crate::transport::PaneId>,
+    ) {
+        let Some(map) = agents.and_then(Value::as_object) else {
+            return;
+        };
+        for (agent_id, agent) in map {
+            let claimed_pane = agent
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            // Try state-claimed pane id first; cross-check with live_targets to
+            // skip dead state entries (a stale pane_id from a respawn).
+            if let Some(pane_id) = claimed_pane {
+                if leader_anchor_ids.contains(pane_id) {
+                    continue;
+                }
+                let in_live = live_targets
+                    .iter()
+                    .any(|info| info.pane_id.as_str() == pane_id);
+                if in_live && seen.insert(pane_id.to_string()) {
+                    out.push(crate::transport::PaneId::new(pane_id));
+                    continue;
+                }
+            }
+            // Fallback: agent window + session match a live pane (E43 lineage:
+            // tmux respawn-pane bumps the %id while the window stays). Use the
+            // live pane id for that window.
+            let window = agent
+                .get("window")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(agent_id.as_str());
+            if let Some(info) = live_targets.iter().find(|info| {
+                info.session.as_str() == session
+                    && info
+                        .window_name
+                        .as_ref()
+                        .is_some_and(|name| name.as_str() == window)
+            }) {
+                let pane_str = info.pane_id.as_str();
+                if leader_anchor_ids.contains(pane_str) {
+                    continue;
+                }
+                if seen.insert(pane_str.to_string()) {
+                    out.push(info.pane_id.clone());
+                }
+            }
+        }
+    }
+
+    /// E49 (0.3.24 P0): emit a structured event documenting the session was
+    /// spared because it carries a managed-leader anchor pane. Lets operators
+    /// see why kill_session was skipped.
+    fn event_log_write_session_spared(
+        workspace: &Path,
+        session: &crate::transport::SessionName,
+        leader_anchor_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<(), CliError> {
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let _ = event_log.write(
+            "shutdown.session_spared_managed_leader",
+            json!({
+                "session": session.as_str(),
+                "reason": "managed_leader_anchor_in_session",
+                "leader_anchor_pane_ids": leader_anchor_ids.iter().collect::<Vec<_>>(),
+            }),
+        );
+        Ok(())
     }
 
     /// 单帧扫 team_owner.pane_id + leader_receiver.pane_id → BTreeSet 累加。
