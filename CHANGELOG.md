@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.27
+
+- **Improved: message delivery now uses one consistent path.** Team Agent no longer has a separate side path for one kind of pasted message, so delivery checks behave the same way across providers and avoid branch-specific surprises.
+- **Fixed: leader delivery now verifies the real leader pane before sending.** This prevents rare cases where the system could mistake a teammate window for the leader and send messages back into the wrong place.
+- **Fixed: Copilot teammates keep the expected bypass flags during launch and delivery checks.** Teams using Copilot now preserve the intended startup flags instead of drifting into a stricter or inconsistent prompt flow.
+
 ## 0.3.26
 
 - **Fixed: on a fresh Mac, the `team-agent` command was not found after install.** The installer now places it in a directory already on your `PATH`, so it works immediately.

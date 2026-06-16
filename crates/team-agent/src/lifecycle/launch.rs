@@ -3292,6 +3292,13 @@ fn dangerous_leader_flags() -> &'static [(&'static str, &'static str)] {
         ("claude", "--dangerously-skip-permissions"),
         ("claude", "--dangerously-skip-permission"),
         ("codex", "--dangerously-bypass-approvals-and-sandbox"),
+        // 0.3.27 P1 (E54 symptom 2): copilot's full-permission flags. Without
+        // these entries, a copilot leader running with --allow-all / --yolo would
+        // NOT propagate bypass to claude/codex workers because
+        // detect_dangerous_approval scans the coordinator's ancestor argv and
+        // only matches entries in THIS table.
+        ("copilot", "--allow-all"),
+        ("copilot", "--yolo"),
     ]
 }
 
@@ -3299,6 +3306,8 @@ fn binary_matches_provider(provider: &str, binary: Option<&str>) -> bool {
     match (provider, binary) {
         ("codex", Some("codex")) => true,
         ("claude", Some("claude" | "claude-code" | "claude_code")) => true,
+        // 0.3.27 P1 (E54): copilot binary detection for dangerous-approval scan.
+        ("copilot", Some("copilot" | "github-copilot" | "gh-copilot")) => true,
         _ => false,
     }
 }

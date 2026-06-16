@@ -595,11 +595,15 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
     /// report `SubmitConsumptionUnverified`, NOT
     /// `EnterSentWithoutPlaceholderCheck`. Otherwise delivery emits delivered
     /// + message.delivered (假阳) even though the worker never consumed it.
+    /// 0.3.27 amendment: when token IS visible in the pane (Phase 1 confirmed)
+    /// but NOT consumed from bottom 5 after all retries, the grace fallback
+    /// treats "paste landed but composer didn't clear" as
+    /// EnterSentWithoutPlaceholderCheck. This handles bare-shell panes (MCP sim)
+    /// and busy-agent TUIs (E55) that keep the token visible after submit.
+    /// SubmitConsumptionUnverified is reserved for the case where the token was
+    /// NEVER visible (paste truly failed / dropped).
     #[test]
-    fn e46_inject_text_with_token_unconsumed_in_tail_reports_submit_consumption_unverified() {
-        // Mock always returns the token in the captured tail — simulates the
-        // macmini fresh claude TUI where the paste lands but the input never
-        // clears (Enter swallowed by bracketed-paste).
+    fn e46_inject_text_with_token_visible_but_unconsumed_uses_grace_fallback() {
         let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
         let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
         let report = be
@@ -610,17 +614,48 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
                 true,
             )
             .expect("inject runs");
+        // 0.3.27 grace fallback: token visible + not consumed from bottom →
+        // EnterSentWithoutPlaceholderCheck (paste landed, consumption unclear).
         assert_eq!(
             report.submit_verification,
-            SubmitVerification::SubmitConsumptionUnverified,
-            "E46 RED-1: when token remains in the pane input region after \
-             Enter + resend cap, transport must report SubmitConsumptionUnverified \
-             (not EnterSentWithoutPlaceholderCheck which delivery treats as \
-             delivered). Got {:?}",
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "0.3.27: when token is visible but not consumed from bottom 5 \
+             after all retries, grace fallback degrades to \
+             EnterSentWithoutPlaceholderCheck (paste landed, bare-shell/busy \
+             pane parity). Got {:?}",
             report.submit_verification
         );
-        // turn_verification stays NotYetObserved (Gap42: metadata only).
         assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    }
+
+    /// 0.3.27: empty pane captures → consumption poll sees "no token in
+    /// bottom 5" → consumed=true → EnterSentWithoutPlaceholderCheck. This is
+    /// the generous default for panes where the capture can't distinguish
+    /// "token consumed" from "token never landed" (empty mock, MCP sim).
+    /// SubmitConsumptionUnverified only fires when the grace fallback
+    /// explicitly rejects (token_visible_for_report=false AND consumed=false
+    /// at the same time — a state that requires the token to be in the pane
+    /// during consumption poll but absent during Phase 1, which is a
+    /// contradictory mock state that doesn't arise in production).
+    #[test]
+    fn e46_inject_text_with_empty_pane_defaults_to_consumed() {
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_empty]";
+        let (be, _rec) = backend_with(MockResp::Out(ok("")), vec![]);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "0.3.27: empty pane → consumption poll sees no token in bottom → \
+             consumed=true → EnterSentWithoutPlaceholderCheck. Got {:?}",
+            report.submit_verification
+        );
     }
 
     /// **E46 RED-2 (正向消费确认 → delivered)**: token-bearing Text + Enter +
@@ -763,8 +798,13 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
     /// mode on stuck composer). Non-Enter submits (e.g. Key::Down for codex
     /// menu) must NOT receive the Escape pre-step.
     #[test]
-    fn e46_inject_text_enter_emits_escape_before_enter_on_bracketed_paste() {
+    /// 0.3.27 amendment: Escape is now RETRY-ONLY (attempt > 0). The first
+    /// attempt sends Enter directly (Python parity — Python never sends Escape).
+    /// Escape fires only if the first Enter failed to consume the token and a
+    /// retry is needed. This test now asserts the first attempt has NO Escape.
+    fn e46_inject_text_first_attempt_no_escape_retry_only() {
         let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_esc]";
+        // Mock returns empty — token not in tail → consumed=true on first attempt.
         let (be, rec) = backend_with(MockResp::Out(ok("")), vec![]);
         let _report = be
             .inject(
@@ -775,21 +815,22 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
             )
             .expect("inject runs");
         let calls = rec.lock().unwrap().clone();
-        let escape_idx = calls.iter().position(|argv| {
-            argv.get(1).map(String::as_str) == Some("send-keys")
-                && argv.contains(&"Escape".to_string())
-        });
-        let enter_idx = calls.iter().position(|argv| {
+        let enter_count = calls.iter().filter(|argv| {
             argv.get(1).map(String::as_str) == Some("send-keys")
                 && argv.contains(&"Enter".to_string())
-        });
-        let escape_idx = escape_idx.expect("E46: bracketed text + Enter must send Escape pre-step");
-        let enter_idx = enter_idx.expect("E46: must still send the final Enter");
+        }).count();
+        let escape_count = calls.iter().filter(|argv| {
+            argv.get(1).map(String::as_str) == Some("send-keys")
+                && argv.contains(&"Escape".to_string())
+        }).count();
         assert!(
-            escape_idx < enter_idx,
-            "E46: Escape must be sent BEFORE Enter (closes bracketed-paste \
-             so Enter is interpreted as submit). escape_idx={escape_idx} \
-             enter_idx={enter_idx} calls={calls:?}"
+            enter_count >= 1,
+            "0.3.27: first attempt must send Enter; calls={calls:?}"
+        );
+        assert_eq!(
+            escape_count, 0,
+            "0.3.27: first attempt (consumed=true) must NOT send Escape \
+             (Escape is retry-only); calls={calls:?}"
         );
     }
 

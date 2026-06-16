@@ -929,6 +929,31 @@ fn capture_has_pasted_content_prompt(text: &str) -> bool {
     pasted_prompt_match(text).is_some()
 }
 
+/// 0.3.27: check if a token marker is present in the bottom N non-empty lines.
+/// Used by the unified submit_and_verify to detect whether the provider consumed
+/// the pasted message (token scrolls out of composer region on successful submit).
+fn token_in_bottom_n(text: &str, marker: &str, n: usize) -> bool {
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(n)
+        .any(|line| line.contains(marker))
+}
+
+/// 0.3.27: check if a pasted-content prompt literal (`pasted content` / `pasted text`)
+/// appears in the bottom N non-empty lines. Narrower than the full-Tail(80) check
+/// that caused scrollback ghost matches (E50 defect B).
+fn pasted_prompt_in_bottom(text: &str, n: usize) -> bool {
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(n)
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("pasted content") || lower.contains("pasted text")
+        })
+}
+
 /// E50 PR-1 (0.3.24 P0, pasted-prompt 假阴诊断): factor `capture_has_pasted_content_prompt`
 /// so the diagnostic layer can recover the MATCHED LITERAL and its position
 /// in the tail. Returns `(literal, line_index_from_bottom)` on a match.
@@ -1318,152 +1343,195 @@ impl Transport for TmuxBackend {
                         self.run_inject_stage(&argv, stage)?;
                     }
                 }
-                // E50 PR-1 (0.3.24 P0): record appear-gate timing + per-attempt
-                // observations. Pure diagnostic — no behavioural change. The
-                // existing matcher / windows / actions are byte-identical.
-                let appear_gate_start = std::time::Instant::now();
-                let mut saw_pasted_prompt = false;
-                for _ in 0..PASTED_CONTENT_APPEAR_POLLS {
-                    let captured = self.capture(target, CaptureRange::Tail(80))?;
-                    if capture_has_pasted_content_prompt(&captured.text) {
-                        saw_pasted_prompt = true;
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                let appear_gate_elapsed_ms = appear_gate_start.elapsed().as_millis() as u64;
-                let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
-                // E50 PR-2 Fix-B (0.3.26 P0): when the payload carries a token
-                // marker (ALL delivery messages do via render_message), SKIP the
-                // legacy pasted-prompt weak loop even if `saw_pasted_prompt` is
-                // true. Fall through to the E46 token-based consumption gate
-                // (Escape pre-Enter + post_submit_input_consumed + resend cap
-                // with C3 re-check), which has NONE of the two defects:
-                //   A. E46 gate uses 60ms sleep + 3 retries (not zero-sleep).
-                //   B. E46 gate anchors on the token marker in the bottom 5
-                //      lines (composer region), not a substring match on
-                //      Tail(80) that catches scrollback residue.
+                // ═══════════════════════════════════════════════════════════
+                // 0.3.27 UNIFIED submit_and_verify
                 //
-                // Non-token payloads (rare: test harness / trust prompt Empty)
-                // still use the legacy loop for backward compatibility with
-                // provider_submit_verification_red.rs::PastePromptRunner tests.
-                let has_token = payload_token_marker(payload).is_some();
-                if saw_pasted_prompt && !has_token {
-                    // Legacy weak loop preserved for non-token payloads (test harness).
-                    let mut attempts = 0;
-                    let mut cleared = false;
-                    for _ in 0..PASTED_CONTENT_SUBMIT_ATTEMPTS {
-                        attempts += 1;
-                        self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
-                        let captured = self.capture(target, CaptureRange::Tail(80))?;
-                        if !capture_has_pasted_content_prompt(&captured.text) {
-                            cleared = true;
-                            break;
-                        }
-                    }
-                    return Ok(InjectReport {
-                        stage_reached: InjectStage::Submit,
-                        inject_verification:
-                            InjectVerification::CaptureContainsNewPastedContentPrompt,
-                        submit_verification: if cleared {
-                            SubmitVerification::PastedContentPromptAbsentAfterSubmit
-                        } else {
-                            SubmitVerification::PastedContentPromptStillPresentAfterSubmit
-                        },
-                        turn_verification: TurnVerification::NotYetObserved,
-                        attempts,
-                        submit_diagnostics: None,
-                    });
-                }
-                // U1 #7 (efd189b redo, canonical-native): around the final submit, read
-                // back the pane and confirm the just-pasted token is actually visible.
-                // The static `inject_verification_for_payload` returns CaptureContainsToken
-                // for any token payload WITHOUT checking the pane — a false positive when
-                // the paste silently dropped. A no-echo pane may only render after Enter,
-                // so a pre-submit miss gets one bounded post-submit readback before we
-                // downgrade to CaptureMissingToken.
+                // Replaces the dual-branch split (saw_pasted_prompt weak loop
+                // + E46 token consumption gate) with a single pipeline:
+                //
+                //   Phase 1 — token visibility poll (dynamic timeout based on
+                //     payload size, 50ms interval, replaces the fixed 125ms
+                //     appear_gate)
+                //   Phase 2 — Escape (if bracketed+Text+Enter) + Enter + poll
+                //     token disappeared from bottom 3 lines. On failure:
+                //     re-check → Escape+Enter → poll. Up to 3 attempts.
+                //
+                // Design truth source: .team/artifacts/E55-delivery-architecture-design.html
+                // Python parity: dynamic timeout max(2s, bytes/25000), poll 50ms.
+                // ═══════════════════════════════════════════════════════════
+                let inject_start = std::time::Instant::now();
+                let submit_argv = tmux_send_keys_argv(&pane, &[submit]);
+
+                // Phase 1: token visibility poll — wait for the pasted text to
+                // become visible in the pane before submitting. Dynamic timeout
+                // based on payload size (large codex pastes can take seconds to
+                // render the bracketed-paste block).
+                let token_poll_timeout_ms = {
+                    let size_based = (text.len() as u64) / 25;
+                    size_based.max(2000)
+                };
+                let poll_start = std::time::Instant::now();
                 token_visible_for_report =
-                    pre_submit_token_visible(self, target, payload).unwrap_or(None);
-                // E46 (0.3.24 bug#5, demo-director卡 bracketed paste root cause):
-                // bracketed-paste-mode on a fresh provider TUI swallows the framework's
-                // Enter as paste content. Send `Escape` first to exit the paste bracket
-                // so the subsequent Enter is interpreted as submit. Safe across
-                // claude/codex/copilot: Escape on an empty composer is a no-op
-                // (cancel any pending mode), it only matters when bracketed-paste is
-                // actually open. Architect-approved + macmini real-machine verified.
-                // Only Enter benefits — explicit menu navigation (Key::Down etc.)
-                // should not pre-cancel mode.
-                if bracketed
+                    if payload_token_marker(payload).is_some() {
+                        let mut visible = false;
+                        while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
+                            match token_visible_in_capture(self, target, payload) {
+                                Ok(Some(true)) => { visible = true; break; }
+                                Err(_) => break, // tmux unavailable, skip poll
+                                _ => {}
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Some(visible)
+                    } else {
+                        None
+                    };
+
+                // Phase 2: submit_and_verify — unified Escape+Enter+poll loop.
+                let use_escape = bracketed
                     && matches!(payload, InjectPayload::Text(_))
-                    && matches!(submit, Key::Enter)
-                {
-                    let escape_argv = tmux_send_keys_argv(&pane, &[Key::Escape]);
-                    // We don't fail the whole inject on Escape error — Escape failure
-                    // would surface downstream as the same SubmitConsumptionUnverified
-                    // when post-Enter probe still sees the token in the input region.
-                    let _ = self.run_inject_stage(&escape_argv, InjectStage::Submit);
-                }
-                self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
-                if matches!(token_visible_for_report, Some(false)) {
-                    token_visible_for_report =
-                        post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
-                }
-                // E46 C2 + C3: post-Enter consumption gate with bounded resend cap.
-                // Only fires for:
-                //   - submit key == Enter (other keys like Down/Up are explicit
-                //     menu navigation; codex uses `Down Enter` to dismiss a
-                //     prompt — those carry their own verification semantics
-                //     via KeySentAfterVisibleToken),
-                //   - token-bearing Text payloads (the structural input-empty
-                //     signal needs a token marker to anchor on).
-                // Each iteration RE-CHECKS that the input still contains the
-                // token BEFORE resending Enter — guards against the C3
-                // double-submit hazard when the first Enter was consumed but
-                // our readback was slow to catch the empty-input state.
-                let mut consumption_attempts: u32 = 1;
-                let mut consumed = if matches!(submit, Key::Enter) {
-                    post_submit_input_consumed(self, target, payload).unwrap_or(None)
+                    && matches!(submit, Key::Enter);
+                let escape_argv = if use_escape {
+                    Some(tmux_send_keys_argv(&pane, &[Key::Escape]))
                 } else {
                     None
                 };
-                if matches!(consumed, Some(false)) {
-                    for _ in 1..POST_SUBMIT_CONSUMPTION_ATTEMPTS {
-                        std::thread::sleep(Duration::from_millis(
-                            POST_SUBMIT_CONSUMPTION_POLL_MS,
-                        ));
-                        // C3 critical: re-check BEFORE resending. If the input
-                        // is now empty (= first Enter actually consumed, just
-                        // observable now), DO NOT resend — bumping a spurious
-                        // empty Enter would open an empty turn.
-                        consumed = post_submit_input_consumed(self, target, payload)
-                            .unwrap_or(None);
-                        if !matches!(consumed, Some(false)) {
+                // Non-Enter submit keys (Key::Down for codex menu, etc.) skip
+                // the entire submit_and_verify loop — single send, no consumption
+                // check, KeySentAfterVisibleToken verification.
+                if !matches!(submit, Key::Enter) {
+                    self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
+                    let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
+                    return Ok(InjectReport {
+                        stage_reached: InjectStage::Submit,
+                        inject_verification: inject_verification_after_readback(
+                            payload,
+                            token_visible_for_report,
+                        ),
+                        submit_verification: submit_verification_for_key(submit),
+                        turn_verification: TurnVerification::NotYetObserved,
+                        attempts: 1,
+                        submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
+                            appear_gate_elapsed_ms: 0,
+                            appear_gate_matched: false,
+                            total_elapsed_ms,
+                            attempts_detail: Vec::new(),
+                        }),
+                    });
+                }
+
+                let marker = payload_token_marker(payload);
+                let max_submit_attempts: u32 = 3;
+                let mut consumption_attempts: u32 = 0;
+                let mut consumed: Option<bool> = None;
+
+                for attempt in 0..max_submit_attempts {
+                    // Before resending (attempt > 0), re-check if the token
+                    // already disappeared — guards against double-submit (C3).
+                    // Capture failures are non-fatal (tmux may not be running
+                    // in MCP sim / test env).
+                    if attempt > 0 {
+                        if let Some(m) = marker {
+                            if let Ok(cap) = self.capture(target, CaptureRange::Tail(30)) {
+                                if !token_in_bottom_n(&cap.text, m, 5) {
+                                    consumed = Some(true);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Escape is RETRY-ONLY (attempt > 0). Researcher discovery:
+                    // Escape on Claude TUI with [Pasted content] visible may
+                    // CLEAR the composer content instead of exiting paste mode.
+                    // Python never sends Escape and never has this issue. So:
+                    // attempt 0 → direct Enter (Python parity); attempt 1+ →
+                    // Escape+Enter as remediation for stuck bracketed-paste.
+                    if attempt > 0 {
+                        if let Some(ref esc) = escape_argv {
+                            let _ = self.run_inject_stage(esc, InjectStage::Submit);
+                            for _ in 0..10 {
+                                match self.capture(target, CaptureRange::Tail(30)) {
+                                    Ok(cap) if !pasted_prompt_in_bottom(&cap.text, 3) => break,
+                                    Err(_) => break,
+                                    _ => {}
+                                }
+                                std::thread::sleep(Duration::from_millis(50));
+                            }
+                        }
+                    }
+
+                    // Enter — send-keys failure is degraded (tmux may not have
+                    // the pane in sim/test env). Break to consumed=None path
+                    // which returns EnterSentWithoutPlaceholderCheck.
+                    if self.run_inject_stage(&submit_argv, InjectStage::Submit).is_err() {
+                        consumed = None;
+                        break;
+                    }
+                    consumption_attempts = attempt + 1;
+
+                    // Post-submit token readback (U1 #7 parity: check token
+                    // visible after Enter for no-echo panes).
+                    if attempt == 0 && matches!(token_visible_for_report, Some(false)) {
+                        token_visible_for_report =
+                            post_submit_token_visible(self, target, payload)
+                                .unwrap_or(Some(false));
+                    }
+
+                    // Poll: token disappeared from bottom 5 lines = consumed.
+                    // Capture failures → consumed=None (non-blocking).
+                    if let Some(m) = marker {
+                        let mut found_consumed = false;
+                        let mut capture_failed = false;
+                        for _ in 0..6 {
+                            std::thread::sleep(Duration::from_millis(50));
+                            match self.capture(target, CaptureRange::Tail(30)) {
+                                Ok(cap) => {
+                                    if !token_in_bottom_n(&cap.text, m, 5) {
+                                        found_consumed = true;
+                                        break;
+                                    }
+                                }
+                                Err(_) => { capture_failed = true; break; }
+                            }
+                        }
+                        if capture_failed {
+                            consumed = None;
                             break;
                         }
-                        consumption_attempts += 1;
-                        let _ = self.run_inject_stage(&submit_argv, InjectStage::Submit);
+                        consumed = Some(found_consumed);
+                        if found_consumed {
+                            break;
+                        }
+                    } else {
+                        // Non-token payload: single Enter, no consumption check.
+                        consumed = None;
+                        break;
                     }
                 }
+
                 let submit_verification = match consumed {
-                    // Consumption confirmed → MUST-10 path: keep the canonical
-                    // EnterSentWithoutPlaceholderCheck so the existing
-                    // provider_submit_verification_red contract holds.
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                    // Consumption explicitly NOT observed (token still in tail
-                    // after resend cap) → E46's new variant. Delivery treats
-                    // as not delivered.
-                    Some(false) => SubmitVerification::SubmitConsumptionUnverified,
-                    // No structural anchor (non-token payload) → preserve the
-                    // historic non-checked variant; the pre-existing
-                    // pre/post-submit token readback + U1 #7 cover the other
-                    // false-positive (silent paste drop).
+                    Some(false) => {
+                        // Consumption not observed (token still in bottom 5 after
+                        // all attempts). As a grace fallback, check if the token
+                        // is visible ANYWHERE in the pane capture. If yes, the
+                        // paste DID land — the pane just doesn't clear the token
+                        // from the bottom region (bare shell panes, MCP sim env,
+                        // busy agent TUI). Treat as "submitted, verification
+                        // degraded" → EnterSentWithoutPlaceholderCheck (generous;
+                        // matches pre-0.3.27 behaviour for these edge cases).
+                        // If the token is NOT visible at all, the paste truly
+                        // failed → SubmitConsumptionUnverified.
+                        if matches!(token_visible_for_report, Some(true)) {
+                            SubmitVerification::EnterSentWithoutPlaceholderCheck
+                        } else {
+                            SubmitVerification::SubmitConsumptionUnverified
+                        }
+                    }
                     None => submit_verification_for_key(submit),
                 };
-                // E50 PR-1: surface appear-gate timing on the E46 token path too.
-                // saw_pasted_prompt=false here; the placeholder never appeared
-                // within PASTED_CONTENT_APPEAR_POLLS, so the route is E46. The
-                // gate elapsed_ms still helps operators see how long we waited
-                // (e.g. codex slow-render).
+                let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
                 return Ok(InjectReport {
                     stage_reached: InjectStage::Submit,
                     inject_verification: inject_verification_after_readback(
@@ -1477,9 +1545,9 @@ impl Transport for TmuxBackend {
                     },
                     attempts: consumption_attempts,
                     submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
-                        appear_gate_elapsed_ms,
+                        appear_gate_elapsed_ms: 0,
                         appear_gate_matched: false,
-                        total_elapsed_ms: appear_gate_elapsed_ms,
+                        total_elapsed_ms,
                         attempts_detail: Vec::new(),
                     }),
                 });

@@ -11,7 +11,7 @@ use crate::model::ids::{OwnerEpoch, TaskId};
 use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
 
 use super::helpers::MessageStatusShadow;
-use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
+use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError};
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
 /// caller(send_message(to=leader) / report_result / request_human / idle reminder /
@@ -393,29 +393,66 @@ pub fn deliver_to_leader_fallback_pane(
 
     match inject_result {
         Ok(report) => {
-            store.mark(message_id, "delivered", None)?;
-            event_log.write(
-                "leader_receiver.fallback_pane_submitted",
-                serde_json::json!({
-                    "message_id": message_id,
-                    "result_id": result_id,
-                    "owner_team_id": owner_team_id,
-                    "pane_id": pane_id,
-                    "primary_error": primary_error,
-                    "delivered_via": "fallback_pane",
-                    "verification": format!("{:?}", report.submit_verification),
-                }),
-            )?;
-            Ok(DeliveryOutcome {
-                ok: true,
-                status: DeliveryStatus::Delivered,
-                message_status: MessageStatusShadow("delivered".to_string()),
-                message_id: Some(message_id.to_string()),
-                verification: Some("delivered_via=fallback_pane".to_string()),
-                stage: None,
-                reason: None,
-                channel: Some("fallback_pane".to_string()),
-            })
+            // 0.3.27 P0: leader_receiver verification gate. The pre-fix path
+            // marked every inject Ok as delivered regardless of whether the
+            // submit was actually verified. Apply the same two-gate check that
+            // deliver_pending_message uses (delivery.rs:376-381):
+            //   (a) inject_submit_verified — Enter was accepted by the TUI
+            //   (b) pane_readback_verified — token was visible in the pane
+            // Both must pass to mark delivered; otherwise degrade to
+            // submitted_unverified (loud, not silent).
+            let submit_ok = super::delivery::inject_submit_verified(&report);
+            let readback_ok = super::delivery::pane_readback_verified(&report);
+            if submit_ok && readback_ok {
+                store.mark(message_id, "delivered", None)?;
+                event_log.write(
+                    "leader_receiver.fallback_pane_submitted",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "result_id": result_id,
+                        "owner_team_id": owner_team_id,
+                        "pane_id": pane_id,
+                        "primary_error": primary_error,
+                        "delivered_via": "fallback_pane",
+                        "verification": format!("{:?}", report.submit_verification),
+                    }),
+                )?;
+                Ok(DeliveryOutcome {
+                    ok: true,
+                    status: DeliveryStatus::Delivered,
+                    message_status: MessageStatusShadow("delivered".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some("delivered_via=fallback_pane".to_string()),
+                    stage: None,
+                    reason: None,
+                    channel: Some("fallback_pane".to_string()),
+                })
+            } else {
+                let reason = format!(
+                    "fallback_pane_unverified:submit={submit_ok},readback={readback_ok},sv={:?}",
+                    report.submit_verification
+                );
+                store.mark(message_id, "submitted_unverified", Some(&reason))?;
+                event_log.write(
+                    "leader_receiver.fallback_pane_unverified",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "pane_id": pane_id,
+                        "reason": reason,
+                        "primary_error": primary_error,
+                    }),
+                )?;
+                Ok(DeliveryOutcome {
+                    ok: false,
+                    status: DeliveryStatus::Failed,
+                    message_status: MessageStatusShadow("submitted_unverified".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some(reason),
+                    stage: Some(DeliveryStage::Submit),
+                    reason: None,
+                    channel: Some("fallback_pane".to_string()),
+                })
+            }
         }
         Err(error) => {
             event_log.write(

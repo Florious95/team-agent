@@ -473,7 +473,8 @@ pub fn deliver_pending_message(
     Ok(outcome)
 }
 
-fn inject_submit_verified(report: &InjectReport) -> bool {
+/// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
+pub(crate) fn inject_submit_verified(report: &InjectReport) -> bool {
     match report.submit_verification {
         SubmitVerification::SendKeysFailed => false,
         SubmitVerification::PastedContentPromptStillPresentAfterSubmit => false,
@@ -502,7 +503,8 @@ fn inject_submit_verified(report: &InjectReport) -> bool {
 /// `CaptureMissingToken` → readback failed → not delivered (degraded/unverified). All
 /// other inject_verification variants (incl. token-less payloads, empty sends, new
 /// pasted-content prompt) are not readback-negative and pass this gate.
-fn pane_readback_verified(report: &InjectReport) -> bool {
+/// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
+pub(crate) fn pane_readback_verified(report: &InjectReport) -> bool {
     !matches!(
         report.inject_verification,
         InjectVerification::CaptureMissingToken

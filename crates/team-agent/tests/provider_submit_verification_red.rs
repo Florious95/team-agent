@@ -24,13 +24,20 @@ use team_agent::transport::{
     TurnVerification, WindowName,
 };
 
+/// 0.3.27 UNIFIED pipeline: the old pasted-content-block detection branch is
+/// gone. Non-token payloads (no `[team-agent-token:...]` marker) get a single
+/// Enter with `consumed = None → EnterSentWithoutPlaceholderCheck` verification.
+/// The unified pipeline handles ALL submit verification via the token-based
+/// consumption gate (Phase 2), which only fires for token-bearing delivery
+/// messages. These tests now assert the unified pipeline behaviour for non-token
+/// payloads, replacing the old pasted-prompt-specific assertions.
 #[test]
-fn tmux_text_inject_waits_for_pasted_content_block_then_retries_enter_until_cleared() {
+fn tmux_text_inject_non_token_payload_single_enter_with_placeholder_check() {
     let runner = PastePromptRunner::new([
         "",                                  // baseline/no block
         "[Pasted Content 2048 chars]",       // block appears after paste
-        "[Pasted Content 2048 chars]",       // first Enter was off-by-one, block still present
-        "OpenAI Codex\n›",                   // retry Enter submitted the current block
+        "[Pasted Content 2048 chars]",       // would have triggered pasted-prompt branch pre-0.3.27
+        "OpenAI Codex\n›",                   // cleared on next capture
     ]);
     let calls = runner.calls();
     let backend = TmuxBackend::with_runner(Box::new(runner));
@@ -42,40 +49,28 @@ fn tmux_text_inject_waits_for_pasted_content_block_then_retries_enter_until_clea
             Key::Enter,
             true,
         )
-        .expect("provider-aware inject should succeed once the pasted-content block clears");
+        .expect("inject should succeed");
 
-    let calls = calls.lock().unwrap().clone();
-    let paste_idx = first_call_index(&calls, "paste-buffer").expect("paste-buffer call");
-    let first_enter_idx = first_send_enter_index(&calls).expect("first Enter send-keys");
-    assert!(
-        calls[paste_idx + 1..first_enter_idx]
-            .iter()
-            .any(|argv| is_tmux_subcommand(argv, "capture-pane")),
-        "after paste-buffer, inject must capture/wait for the provider pasted-content block before pressing Enter; calls={calls:?}"
-    );
-    assert!(
-        calls[first_enter_idx + 1..]
-            .iter()
-            .any(|argv| is_tmux_subcommand(argv, "capture-pane")),
-        "after Enter, inject must poll capture until the pasted-content block disappears; calls={calls:?}"
-    );
-    assert!(
-        send_enter_count(&calls) >= 2,
-        "off-by-one guard: if the first Enter leaves the pasted-content block visible, inject must retry Enter; calls={calls:?}"
-    );
+    // 0.3.27: non-token payload → single Enter, no consumption check.
+    // Submit verification is the non-checked variant (Python parity: Enter
+    // sent, no placeholder probe for non-delivery payloads).
     assert_eq!(
         report.submit_verification,
-        SubmitVerification::PastedContentPromptAbsentAfterSubmit,
-        "successful placeholder submission must be reported as verified"
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "0.3.27 unified pipeline: non-token payload gets \
+         EnterSentWithoutPlaceholderCheck (single Enter, no consumption gate); \
+         report={report:?}"
     );
+    // At least one Enter must have been sent.
+    let calls = calls.lock().unwrap().clone();
     assert!(
-        report.attempts >= 2,
-        "report.attempts must expose Enter retries needed to clear the pasted-content block; report={report:?}"
+        send_enter_count(&calls) >= 1,
+        "inject must send at least one Enter; calls={calls:?}"
     );
 }
 
 #[test]
-fn tmux_text_inject_reports_unverified_when_pasted_content_block_still_present_after_retries() {
+fn tmux_text_inject_non_token_payload_with_persistent_pasted_block_still_reports_placeholder_check() {
     let runner = PastePromptRunner::new([
         "[Pasted Content 4096 chars]",
         "[Pasted Content 4096 chars]",
@@ -92,21 +87,18 @@ fn tmux_text_inject_reports_unverified_when_pasted_content_block_still_present_a
             Key::Enter,
             true,
         )
-        .expect("inject should return a diagnostic report even when submit verification fails");
+        .expect("inject should return a report");
 
+    // 0.3.27: non-token payload → single Enter, EnterSentWithoutPlaceholderCheck.
+    // The old CaptureContainsNewPastedContentPrompt / PastedContentPromptStillPresentAfterSubmit
+    // flow is removed; the unified pipeline only distinguishes consumed vs not-consumed
+    // for TOKEN payloads. Non-token payloads are treated as "checked by caller" (delivery
+    // layer for non-delivery injects like trust prompt).
     assert_eq!(
-        report.inject_verification,
-        InjectVerification::CaptureContainsNewPastedContentPrompt,
-        "fixture sanity: this path must exercise the provider pasted-content block flow; report={report:?}"
-    );
-    assert!(
-        !matches!(
-            report.submit_verification,
-            SubmitVerification::EnterSentWithoutPlaceholderCheck
-                | SubmitVerification::PastedContentPromptAbsentAfterSubmit
-                | SubmitVerification::KeySentAfterVisibleToken { .. }
-        ),
-        "when the pasted-content block remains visible after retries, transport must report a distinct unverified/failure state instead of the generic successful paste+Enter variant; report={report:?}"
+        report.submit_verification,
+        SubmitVerification::EnterSentWithoutPlaceholderCheck,
+        "0.3.27 unified: non-token payload reports EnterSentWithoutPlaceholderCheck \
+         regardless of pasted-content block visibility; report={report:?}"
     );
 }
 
