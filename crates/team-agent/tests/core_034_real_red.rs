@@ -323,9 +323,17 @@ fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
             && format!("{default_report:?}").contains("adaptive"),
         "adaptive layout contract: quick-start report/JSON surface must visibly report display_backend=adaptive, not hide the default. report={default_report:?}"
     );
+    // 0.3.28 Step 4b: per-agent adaptive `display` records removed in favour
+    // of 1-window-per-agent layout. The state-root `display_backend=adaptive`
+    // (asserted above) is the contract. Per-agent display dicts were the
+    // pre-0.3.28 adaptive overlay bookkeeping; the architecture moved that to
+    // `layout::overlay` (display overlay only fires for the leader-session
+    // overlay path, not per worker).
+    // Skip state_has_adaptive_display_records — replaced by:
     assert!(
-        state_has_adaptive_display_records(&default_state),
-        "adaptive layout contract: default adaptive must create direct adaptive display records. state={default_state}"
+        default_state.pointer("/agents/worker/window").is_some(),
+        "0.3.28 Step 4b: each worker has its own window in the worker session. \
+         state={default_state}"
     );
 
     let none_ws = tmp_dir("display-none");

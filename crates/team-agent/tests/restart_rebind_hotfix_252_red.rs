@@ -174,9 +174,11 @@ fn coordinator_tick_saves_captured_session_into_nested_active_team() {
 fn launch_persists_agent_pane_id_and_pid() {
     let case = HotfixCase::new("launch-pane-id");
     case.write_team(CURRENT, "greeter", Provider::Fake);
+    // 0.3.28 Step 4b: workers live in their own window named after the
+    // agent_id, not the adaptive `team-w1` anchor.
     let transport = RecordingTransport::new()
-        .with_targets(vec![pane_info("%7", "team-current", "team-w1", Some(4242))])
-        .with_windows(vec![WindowName::new("team-w1")])
+        .with_targets(vec![pane_info("%7", "team-current", "greeter", Some(4242))])
+        .with_windows(vec![WindowName::new("greeter")])
         .with_default_liveness(PaneLiveness::Live);
 
     launch_with_transport_in_workspace(

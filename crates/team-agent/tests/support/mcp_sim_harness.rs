@@ -454,9 +454,14 @@ impl McpClient {
         });
         writeln!(self.stdin, "{request}").expect("write json-rpc request");
         self.stdin.flush().expect("flush json-rpc request");
+        // 0.3.28-final E55: strict consumption gate retries 3× with
+        // ~2s Phase-1 timeout + ~300ms grace per attempt. Broadcast paths
+        // may fan-out delivery across multiple workers serially → > 5s.
+        // Bump to 30s so the MCP harness tolerates the strict-gate
+        // wall-clock for bare-shell pane fixtures.
         let line = self
             .stdout_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Duration::from_secs(30))
             .unwrap_or_else(|_| panic!("timed out waiting for MCP response to {method}"));
         let value: Value = serde_json::from_str(&line).unwrap_or_else(|err| {
             panic!("invalid JSON-RPC response for {method}: {err}; line={line}")

@@ -660,11 +660,12 @@ incident); got {:?}",
             spawn.env.get("COPILOT_DISABLE_TERMINAL_TITLE")
         ));
     }
-    // Default adaptive layout groups workers into team-wN windows; the title-disable
-    // env is what keeps copilot from rewriting that addressing anchor.
-    if spawn.window != "team-w1" {
+    // 0.3.28 Step 4b: 1-window-per-agent; window name = agent_id (`worker_a`),
+    // not team-w1 (the pre-0.3.28 adaptive layout anchor).
+    if spawn.window != "worker_a" {
         failures.push(format!(
-            "RC-12/C-4-1: the worker window must stay on the adaptive layout anchor; got {:?}",
+            "0.3.28 Step 4b / RC-12: the worker window must be the per-agent \
+             window named after agent_id (`worker_a`); got {:?}",
             spawn.window
         ));
     }

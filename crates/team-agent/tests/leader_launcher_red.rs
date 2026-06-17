@@ -52,15 +52,19 @@ fn managed_claude_leader_plan_uses_workspace_socket_tmux_not_default_server() {
         plan.mode,
         team_agent::leader::LeaderStartMode::ManagedTmuxClient
     );
+    // 0.3.28 Step 2: managed leader window is named after `provider_wire`
+    // (e.g. `claude_code`), not the literal `leader`. Architecture parity
+    // with Python `leader/__init__.py:114-131`.
     assert!(
         plan.argv.len() >= 5
             && plan.argv[0] == "tmux"
             && plan.argv[1] == "-L"
             && plan.argv[2].starts_with("ta-")
             && plan.argv.iter().any(|arg| arg == "attach-session")
-            && plan.argv.iter().any(|arg| arg.ends_with(":leader")),
-        "managed leader client argv must be workspace-socketed (`tmux -L ta-* attach-session -t <team>:leader`) \
-         so the provider pane and workers share the same tmux server. default-socket argv={:?}",
+            && plan.argv.iter().any(|arg| arg.ends_with(":claude_code")),
+        "0.3.28 Step 2: managed leader client argv must be workspace-socketed \
+         (`tmux -L ta-* attach-session -t <leader_session>:claude_code`); \
+         argv={:?}",
         plan.argv
     );
 }
