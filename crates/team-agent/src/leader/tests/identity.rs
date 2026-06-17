@@ -66,20 +66,23 @@ use super::*;
         let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
         assert_eq!(plan.provider, Provider::Fake);
         assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
-        assert_eq!(
-            plan.session_name.as_ref().map(SessionName::as_str),
-            Some("team-current")
+        // 0.3.28 Step 2: managed mode now uses the dedicated leader session
+        // (`team-agent-leader-<provider>-<folder>-<sha1[:8]>`), not the worker
+        // session `team-<team_id>`. Python parity.
+        let session_name = plan.session_name.as_ref().map(SessionName::as_str).unwrap_or("");
+        assert!(
+            session_name.starts_with(crate::layout::sessions::LEADER_SESSION_PREFIX),
+            "managed mode must use dedicated leader session prefix; got `{session_name}`"
         );
-        assert_eq!(plan.leader_window.as_ref().map(WindowName::as_str), Some("leader"));
+        // 0.3.28 Step 2: window name = provider wire (`fake`), not `leader`.
+        assert_eq!(
+            plan.leader_window.as_ref().map(WindowName::as_str),
+            Some("fake")
+        );
         assert!(!plan.is_external_leader);
         assert!(
             plan.argv.iter().any(|arg| arg == "attach-session"),
-            "no-tmux managed launch attaches the user client to the team leader window: {:?}",
-            plan.argv
-        );
-        assert!(
-            plan.argv.iter().any(|arg| arg == "team-current:leader"),
-            "managed client target must be the team leader window: {:?}",
+            "no-tmux managed launch attaches the user client to the leader window: {:?}",
             plan.argv
         );
         // plan 边界 detached 恒 false(`-d` 插入在 start_leader 层,非此处)。
@@ -126,7 +129,12 @@ use super::*;
 
     #[test]
     #[serial_test::serial(env)]
-    fn managed_leader_reuses_existing_team_session_name_without_double_prefix() {
+    fn managed_leader_uses_dedicated_leader_session_independent_of_state_session_name() {
+        // 0.3.28 Step 2 amendment: the persisted `session_name` is the WORKER
+        // session, not the leader session. Managed leader now ignores it and
+        // always uses the dedicated `leader_session_name(provider, workspace)`.
+        // This test pins the new behaviour and the regression guard that the
+        // managed argv never gets a `team-team-*` double prefix.
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _e = EnvGuard::apply(&[("TMUX", None), ("TMUX_PANE", None)]);
         let ws = std::env::temp_dir().join(format!("ta_rs_lsp_existing_{}", std::process::id()));
@@ -140,9 +148,11 @@ use super::*;
         let plan = leader_start_plan(Provider::Fake, &[], &ws, false, false, None, false).unwrap();
 
         assert_eq!(plan.mode, LeaderStartMode::ManagedTmuxClient);
-        assert_eq!(
-            plan.session_name.as_ref().map(SessionName::as_str),
-            Some("team-alpha")
+        let session_name = plan.session_name.as_ref().map(SessionName::as_str).unwrap_or("");
+        assert!(
+            session_name.starts_with(crate::layout::sessions::LEADER_SESSION_PREFIX),
+            "managed mode uses dedicated leader session prefix regardless of \
+             persisted worker session_name; got `{session_name}`"
         );
         assert!(
             !plan.argv.iter().any(|arg| arg.contains("team-team-alpha")),
@@ -169,9 +179,14 @@ use super::*;
             "same-server managed launch must switch the existing tmux client: {:?}",
             plan.argv
         );
+        // 0.3.28 Step 2: target is `<dedicated_leader_session>:<provider_wire>`,
+        // not `team-current:leader`.
+        let session_name = plan.session_name.as_ref().map(SessionName::as_str).unwrap_or("");
+        let expected_target = format!("{session_name}:fake");
         assert!(
-            plan.argv.iter().any(|arg| arg == "team-current:leader"),
-            "managed switch target must be the team leader window: {:?}",
+            plan.argv.iter().any(|arg| arg == &expected_target),
+            "managed switch target must be the dedicated leader-session leader \
+             window `{expected_target}`; got argv {:?}",
             plan.argv
         );
     }

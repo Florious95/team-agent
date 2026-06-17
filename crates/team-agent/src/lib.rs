@@ -74,6 +74,9 @@ pub mod diagnose;
 // 富返回类型,fn body unimplemented!(),P2 porter 落实现)。lifecycle=quick-start/restart/display;
 // mcp_server=stdio MCP tool handlers;cli=clap 子命令;packaging=install/migrate/repair。
 pub mod lifecycle;
+// 0.3.28 — unified adaptive layout manager (single source of truth for tmux
+// topology decisions). See `.team/artifacts/adaptive-layout-full-architecture-locate.md`.
+pub mod layout;
 pub mod mcp_server;
 pub mod cli;
 pub mod packaging;

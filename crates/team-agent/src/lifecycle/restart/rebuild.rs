@@ -213,6 +213,27 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     }
     let session_name = state_session_name(&state);
     if session_live_or_default(transport, &session_name, false) {
+        // 0.3.28 Step 5 (warn-only): per architecture, restart should REFUSE
+        // when the worker session is live (Python `restart/orchestration.py:79-85`
+        // raises `_tmux_session_conflict_error`). Pre-0.3.28 Rust kills the
+        // worker session here — which under the old co-located topology also
+        // killed the leader pane (the E57-1 cascade contribution from the
+        // layout layer).
+        //
+        // After Step 2 the leader lives in a DIFFERENT session
+        // (`team-agent-leader-...`), so killing the worker session no longer
+        // tears down the leader. That makes this kill structurally safe, but
+        // it still loses provider session state in the worker panes.
+        //
+        // Full "refuse" semantics will land once Steps 6+7 expose the
+        // recovery path so users have a clean alternative. For now we emit
+        // the warn-only event so operators see the drift in event logs.
+        eprintln!(
+            "team_agent::layout restart_precondition_warning worker_session=`{}` action=killing \
+             (post-Step-7 will refuse and direct user to recover; safe today because Step 2 \
+             moved leader to dedicated session)",
+            session_name.as_str()
+        );
         transport
             .kill_session(&session_name)
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;
@@ -426,6 +447,11 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         &failed_agents,
         "ok",
     )?;
+    // 0.3.28 Step 1: topology invariant guard (warn-only). Same pattern as
+    // `lifecycle::launch::launch_with_transport_in_workspace` — logs to stderr,
+    // never panics. Hard error path is deferred to Step 10.
+    let violations = crate::layout::sessions::assert_topology_invariants(&state, &spec);
+    crate::layout::sessions::log_topology_violations(&violations);
     Ok(RestartReport::Restarted {
         session_name,
         agents: successful_agents,

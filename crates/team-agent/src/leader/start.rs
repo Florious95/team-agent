@@ -53,12 +53,18 @@ pub fn leader_start_plan(
     let state = crate::state::persist::load_runtime_state(workspace).ok();
     let identity = leader_identity_context(workspace, None, state.as_ref())?;
     let external_path = external_leader || attach_existing || attach_session.is_some();
+    // 0.3.28 Step 2: managed mode now uses the SAME dedicated leader session
+    // as the external path (`team-agent-leader-<provider>-<folder>-<sha1[:8]>`)
+    // — Python parity. Pre-0.3.28 the managed branch used
+    // `managed_team_session_name(identity) = team-<team_id>` which is the
+    // worker session — that co-location is the structural root of
+    // E49/E51/E53/E57-3/E60.
     let session_name = if external_path {
         attach_session
             .cloned()
             .or_else(|| Some(leader_session_name(provider, workspace)))
     } else {
-        Some(managed_team_session_name(&identity))
+        Some(leader_session_name(provider, workspace))
     };
     let in_tmux = std::env::var_os("TMUX").is_some();
     if !in_tmux || !external_path {
@@ -107,8 +113,14 @@ pub fn leader_start_plan(
         session_name,
         argv,
         provider_argv,
+        // 0.3.28 Step 2: leader window inside the dedicated leader session is
+        // named after the provider wire (e.g. `claude`, `codex`, `copilot`),
+        // never the literal string `leader`. Python parity (see
+        // `leader/__init__.py:114-131`). This eliminates the `WorkerWindowNamedLeader`
+        // topology violation surface — the worker session never has a window
+        // named `leader` either, because the leader session is disjoint.
         leader_window: (mode == LeaderStartMode::ManagedTmuxClient)
-            .then(|| WindowName::new("leader")),
+            .then(|| WindowName::new(provider_wire(provider))),
         is_external_leader: external_path,
         leader_env: plan_env,
         identity: Some(identity),
@@ -265,7 +277,7 @@ fn start_argv(
             let Some(session) = session_name else {
                 return Err(LeaderError::Start("managed leader session missing".to_string()));
             };
-            managed_client_argv(workspace, session)
+            managed_client_argv(workspace, session, provider)
         }
         LeaderStartMode::AttachExisting => {
             let Some(session) = session_name else {
@@ -327,17 +339,21 @@ fn normalized_provider_args(provider_args: &[String]) -> impl Iterator<Item = St
         .cloned()
 }
 
-fn managed_team_session_name(identity: &LeaderIdentity) -> SessionName {
-    let team = identity.team_id.as_str();
-    if team.starts_with("team-") {
-        SessionName::new(team.to_string())
-    } else {
-        SessionName::new(format!("team-{team}"))
-    }
-}
+// 0.3.28 Step 2: `managed_team_session_name` deleted. Both managed and
+// external paths now compute the dedicated leader session via
+// `leader_session_name(provider, workspace)` directly. The old function
+// returned `team-<team_id>` which is the WORKER session — the structural
+// root of E49/E51/E53/E57-3/E60.
 
-fn managed_client_argv(workspace: &Path, session: &SessionName) -> Result<Vec<String>, LeaderError> {
-    let target = format!("{}:leader", session.as_str());
+fn managed_client_argv(
+    workspace: &Path,
+    session: &SessionName,
+    provider: Provider,
+) -> Result<Vec<String>, LeaderError> {
+    // 0.3.28 Step 2: leader window inside the dedicated leader session is
+    // named after `provider_wire(provider)` (e.g. `claude`, `codex`, `fake`),
+    // never the literal `leader`. Pre-0.3.28 this hardcoded `:leader`.
+    let target = format!("{}:{}", session.as_str(), provider_wire(provider));
     let argv = if std::env::var_os("TMUX").is_some() {
         vec![
             "tmux".to_string(),

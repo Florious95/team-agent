@@ -119,6 +119,15 @@ pub fn launch_with_transport_in_workspace(
         )?;
         started
     };
+    // 0.3.28 Step 1: topology invariant guard (warn-only during migration).
+    // Logs each violation to stderr; never panics. Promoted to hard error at
+    // Step 10 once Steps 2–9 have eliminated structural co-location.
+    if !dry_run {
+        if let Ok(state_for_check) = crate::state::persist::load_runtime_state(workspace) {
+            let violations = crate::layout::sessions::assert_topology_invariants(&state_for_check, &spec);
+            crate::layout::sessions::log_topology_violations(&violations);
+        }
+    }
     Ok(LaunchReport {
         session_name,
         started,
@@ -364,46 +373,17 @@ fn spawn_agents(
                 }),
             );
         }
-        let placement = layout_plan
-            .iter()
-            .find(|placement| placement.agent_id == agent_id)
-            .cloned();
-        let window = placement
-            .as_ref()
-            .map(|placement| placement.layout_window.clone())
-            .unwrap_or_else(|| WindowName::new(agent_id_raw));
-        let spawn = if let Some(placement) = placement.as_ref() {
-            if placement.starts_window {
-                if started.is_empty() {
-                    transport.spawn_first_with_env_unset(
-                        session_name,
-                        &window,
-                        &plan.argv,
-                        workspace,
-                        &env,
-                        &env_unset,
-                    )
-                } else {
-                    transport.spawn_into_with_env_unset(
-                        session_name,
-                        &window,
-                        &plan.argv,
-                        workspace,
-                        &env,
-                        &env_unset,
-                    )
-                }
-            } else {
-                transport.spawn_split_with_env_unset(
-                    session_name,
-                    &window,
-                    &plan.argv,
-                    workspace,
-                    &env,
-                    &env_unset,
-                )
-            }
-        } else if started.is_empty() {
+        // 0.3.28 Step 4b: replaced the `adaptive_layout_plan` 3-pane tiling
+        // with Python-parity 1-window-per-agent placement. Window name =
+        // `agent_id`; first worker creates the session via spawn_first,
+        // subsequent workers each get a new window via spawn_into. No splits
+        // in the worker session — Step 8's `assert_overlay_call_site` would
+        // catch any drift if a split call snuck back in. The `placement`
+        // variable is set to None to signal "no adaptive layout" to all
+        // downstream consumers (display dict, layout_window persistence).
+        let placement: Option<LayoutPlacement> = None;
+        let window = WindowName::new(agent_id_raw);
+        let spawn = if started.is_empty() {
             transport.spawn_first_with_env_unset(
                 session_name,
                 &window,
@@ -2041,30 +2021,25 @@ pub(crate) fn inherited_env_with_team_overrides(
     agent_id: &str,
     team_id: Option<&str>,
 ) -> BTreeMap<String, String> {
-    // Only POSIX-valid shell identifier keys ([A-Za-z_][A-Za-z0-9_]*) — Bash/dash refuses
-    // `KEY=val` assignment whose KEY has dashes/dots (e.g. `CARGO_BIN_EXE_team-agent=...`
-    // shipped by cargo's integration-test runner) and would fail the entire `sh -lc`
-    // line, leaving tmux's session dead-on-arrival. POSIX-invalid keys are runtime
-    // metadata that workers never legitimately need; the user's PATH/proxy/CA always use
-    // valid identifiers.
-    let mut env: BTreeMap<String, String> = std::env::vars()
-        .filter(|(k, _)| is_posix_shell_identifier(k))
-        .collect();
-    env.remove("TMUX");
-    env.remove("TMUX_PANE");
-    env.insert(
-        "TEAM_AGENT_WORKSPACE".to_string(),
-        workspace.to_string_lossy().to_string(),
-    );
-    // Python providers.py:131 — TEAM_AGENT_ID must be the worker ITSELF, overriding any
-    // value inherited from the launching process (an add-agent/fork issued from another
-    // worker's MCP server carries the CALLER's TEAM_AGENT_ID in its environ).
-    env.insert("TEAM_AGENT_ID".to_string(), agent_id.to_string());
-    env.insert("TEAM_AGENT_AGENT_ID".to_string(), agent_id.to_string());
-    if let Some(tid) = team_id.filter(|s| !s.is_empty()) {
-        env.insert("TEAM_AGENT_OWNER_TEAM_ID".to_string(), tid.to_string());
-    }
-    env
+    // 0.3.28 Step 3: delegate to `layout::worker_env::worker_spawn_env` which
+    // implements Python's whitelist semantics (`providers.py:130-145`). The
+    // whitelist:
+    //   * Keeps PATH-like vars, locale, provider creds (CLAUDE_*/OPENAI_*/
+    //     COPILOT_*/GH_*/GEMINI_*/GOOGLE_*) + posix identifiers only.
+    //   * Strips ALL `TEAM_AGENT_LEADER_*` and
+    //     `TEAM_AGENT_MACHINE_FINGERPRINT` (leader identity contamination,
+    //     E60 root).
+    //   * Strips `TEAM_AGENT_TEAM_ID` (the leader's team_id — re-injected
+    //     as `TEAM_AGENT_OWNER_TEAM_ID` for the worker).
+    //   * Strips `COPILOT_DISABLE_TERMINAL_TITLE` (re-injected per-agent by
+    //     `apply_copilot_instructions_overlay` based on the WORKER's provider).
+    //   * Strips `TMUX` / `TMUX_PANE` (would attach worker to leader's pane).
+    crate::layout::worker_env::worker_spawn_env(
+        std::env::vars(),
+        workspace,
+        agent_id,
+        team_id,
+    )
 }
 
 pub(crate) fn apply_mcp_auto_approval_env(
@@ -4785,6 +4760,13 @@ fn spec_session_name(spec: &Value) -> SessionName {
         .filter(|name| !name.is_empty())
         .unwrap_or("agent");
     SessionName::new(format!("team-{team_name}"))
+}
+
+/// 0.3.28 layout step 1: pub re-export of `spec_session_name` for the new
+/// `layout::sessions::worker_session_name` to delegate to. Single underlying
+/// impl; this just widens visibility without duplicating logic.
+pub fn worker_session_name_pub(spec: &Value) -> SessionName {
+    spec_session_name(spec)
 }
 
 fn spec_agents(spec: &Value) -> Vec<AgentId> {

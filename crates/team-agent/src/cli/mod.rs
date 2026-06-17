@@ -443,6 +443,20 @@ pub mod lifecycle_port {
         );
         let mut error = None;
         for session in &to_kill {
+            // 0.3.28 Step 6 (warn-only invariant): the kill list MUST NOT
+            // contain a leader session. `sessions_to_kill` already excludes
+            // leader-prefixed sessions, but the managed-leader cleanup path
+            // (this function) computes its own `to_kill` from `target`. Any
+            // leader-prefixed entry here is a topology violation introduced
+            // somewhere upstream. Log loudly and skip the kill.
+            if session.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX) {
+                eprintln!(
+                    "team_agent::layout shutdown_invariant_violation kind=KillListContainsLeaderSession \
+                     session=`{}` action=skipping_kill (post-Step-9 will hard-fail)",
+                    session.as_str()
+                );
+                continue;
+            }
             if let Err(err) = transport.kill_session(session) {
                 if !tmux_absent_error(&err.to_string()) {
                     error.get_or_insert_with(|| err.to_string());

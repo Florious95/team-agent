@@ -1108,56 +1108,18 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
         }
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
-    assert_eq!(display_backend, "adaptive");
+    // 0.3.28 Step 4b: adaptive 3-pane tiling replaced with 1-window-per-agent
+    // Python-parity layout. 4 workers → spawn_first + 3×spawn_into, each in its
+    // own window named after the agent_id. No team-w<N> windows; no splits.
     assert_eq!(
         transport
             .spawn_records()
             .iter()
             .map(|(kind, _)| kind.as_str())
             .collect::<Vec<_>>(),
-        vec!["spawn_first", "spawn_split", "spawn_split", "spawn_into"],
-        "4 default-adaptive workers should create team-w1 with 3 panes, then team-w2"
-    );
-    assert_eq!(
-        transport
-            .pane_title_records()
-            .iter()
-            .map(|(_, window, pane, title)| (window.as_str(), pane.as_str(), title.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            ("team-w1", "%0", "w1"),
-            ("team-w1", "%1", "w2"),
-            ("team-w1", "%2", "w3"),
-            ("team-w2", "%3", "w4"),
-        ],
-        "adaptive workers must set tmux pane titles to the agent id"
-    );
-    assert_eq!(
-        launch
-            .started
-            .iter()
-            .map(|started| {
-                (
-                    started.agent_id.as_str().to_string(),
-                    started.layout_window.as_ref().map(|w| w.as_str().to_string()),
-                    started.pane_index,
-                )
-            })
-            .collect::<Vec<_>>(),
-        vec![
-            ("w1".to_string(), Some("team-w1".to_string()), Some(0)),
-            ("w2".to_string(), Some("team-w1".to_string()), Some(1)),
-            ("w3".to_string(), Some("team-w1".to_string()), Some(2)),
-            ("w4".to_string(), Some("team-w2".to_string()), Some(0)),
-        ]
-    );
-    assert!(
-        attach_commands.iter().any(|cmd| cmd.contains(":team-w1")),
-        "attach commands must include the first layout window: {attach_commands:?}"
-    );
-    assert!(
-        attach_commands.iter().any(|cmd| cmd.contains(":team-w2")),
-        "attach commands must include the second layout window: {attach_commands:?}"
+        vec!["spawn_first", "spawn_into", "spawn_into", "spawn_into"],
+        "0.3.28 Step 4b: 4 workers → 1 spawn_first + 3 spawn_into; \
+         no splits in worker session"
     );
 
     let (_raw, state) = raw_runtime_state(workspace);
@@ -1169,26 +1131,15 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
                 == state.get("session_name").and_then(serde_json::Value::as_str)),
         "pane titles must be configured inside the team session"
     );
-    assert_eq!(state["display_backend"], json!("adaptive"));
-    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("team-w1")));
-    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
-    assert_eq!(state.pointer("/agents/w1/pane_index"), Some(&json!(0)));
-    assert_eq!(
-        state.pointer("/agents/w1/display/backend"),
-        Some(&json!("adaptive"))
+    // Each worker lives in its OWN window named `agent_id` (Python parity).
+    assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("w1")));
+    assert_eq!(state.pointer("/agents/w4/window"), Some(&json!("w4")));
+    // attach commands point to the per-agent windows.
+    assert!(
+        attach_commands.iter().any(|cmd| cmd.contains(":w1")),
+        "attach commands must include the per-agent windows: {attach_commands:?}"
     );
-    assert_eq!(
-        state.pointer("/agents/w1/display/pane_title"),
-        Some(&json!("w1"))
-    );
-    assert_eq!(
-        state.pointer("/agents/w1/display/linked_session"),
-        Some(&json!(null))
-    );
-    assert_eq!(
-        state.pointer("/agents/w4/layout_window"),
-        Some(&json!("team-w2"))
-    );
+    let _ = display_backend; // display_backend value preserved by upstream
 }
 
 #[test]
@@ -2403,6 +2354,9 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
         .keys()
         .cloned()
         .collect::<Vec<_>>();
+    // 0.3.28 Step 4b: adaptive layout fields (layout_window, layout_index,
+    // pane_index, display) removed from running agent state — 1-window-per-agent
+    // means no layout bookkeeping needed.
     assert_eq!(
         keys,
         vec![
@@ -2421,15 +2375,11 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "captured_at",
             "captured_via",
             "attribution_confidence",
-            "layout_window",
-            "layout_index",
-            "pane_index",
-            "display",
             "spawn_cwd",
             "spawned_at",
             "pane_id",
         ],
-        "running agent state key order must include adaptive layout fields; raw={raw}"
+        "0.3.28 running agent state: no adaptive layout bookkeeping; raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
     assert_eq!(agent["provider"], json!("codex"));
@@ -2437,7 +2387,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert_eq!(agent["model"], json!("gpt-5.5"));
     assert_eq!(agent["auth_mode"], json!("subscription"));
     assert!(agent["profile"].is_null());
-    assert_eq!(agent["window"], json!("team-w1"));
+    assert_eq!(agent["window"], json!("implementer"));
     assert_eq!(
         agent["mcp_config"],
         json!(workspace
@@ -2459,12 +2409,13 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert!(agent["captured_at"].is_null());
     assert!(agent["captured_via"].is_null());
     assert!(agent["attribution_confidence"].is_null());
-    assert_eq!(agent["layout_window"], json!("team-w1"));
-    assert_eq!(agent["layout_index"], json!(0));
-    assert_eq!(agent["pane_index"], json!(0));
-    assert_eq!(agent.pointer("/display/backend"), Some(&json!("adaptive")));
-    assert_eq!(agent.pointer("/display/window"), Some(&json!("team-w1")));
-    assert_eq!(agent.pointer("/display/pane_id"), Some(&json!("%0")));
+    // 0.3.28 Step 4b: layout_window/layout_index/pane_index/display removed.
+    // No adaptive bookkeeping needed — each worker has its own window named
+    // after the agent_id.
+    assert!(agent.get("layout_window").is_none());
+    assert!(agent.get("layout_index").is_none());
+    assert!(agent.get("pane_index").is_none());
+    assert!(agent.get("display").is_none());
     // D5 (#264) / Python launch/core.py:253 — fresh launch persists spawn_cwd=workspace.
     assert_eq!(agent["spawn_cwd"], json!(workspace.to_string_lossy()));
     assert_eq!(agent["spawned_at"], json!(FIXED_SPAWNED_AT));

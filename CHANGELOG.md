@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.28
+
+- **Improved: teammate windows now use one layout manager.** Starting, adding, removing, and restarting teammates now share the same layout rules, so panes are placed more predictably and new layout changes do not need to be reimplemented in several places.
+- **Fixed: pasted messages no longer rely on the old grace fallback path.** Team Agent now waits for the real submit signal instead of treating a briefly visible pasted token as good enough, which makes delivery confirmation stricter and more reliable.
+- **Fixed: Copilot teammates keep the expected launch flags.** Copilot workers now preserve the intended bypass settings through the unified layout and launch path.
+
 ## 0.3.27
 
 - **Improved: message delivery now uses one consistent path.** Team Agent no longer has a separate side path for one kind of pasted message, so delivery checks behave the same way across providers and avoid branch-specific surprises.

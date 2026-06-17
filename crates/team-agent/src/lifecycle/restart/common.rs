@@ -126,15 +126,19 @@ pub(super) fn spawn_agent_window(
     );
     crate::lifecycle::launch::apply_profile_launch_env(&mut env, &profile_launch);
     crate::lifecycle::launch::apply_mcp_auto_approval_env(&mut env, safety);
-    let spawn_cwd = spawn_cwd_override
-        .or_else(|| {
-            agent
-                .get("spawn_cwd")
-                .and_then(|v| v.as_str())
-                .filter(|cwd| !cwd.is_empty())
-                .map(Path::new)
-        })
-        .unwrap_or(workspace);
+    // 0.3.28 Step 3: per Python parity, worker spawn cwd is ALWAYS `workspace`.
+    // The persisted-state `agent.spawn_cwd` override is ignored (it was a
+    // Rust-only extension that drifted to `.team/runtime/<team_key>/` after
+    // rebuild.rs:138 — root cause of E56). The `spawn_cwd_override` parameter
+    // is still honoured for callers that need an explicit cwd (e.g. spec
+    // YAML-resolved cwd at first launch in `lifecycle/launch.rs`), but
+    // restart never passes it (see commit 71864c0 which fixed rebuild.rs:297
+    // to stop pinning `.team/runtime/<team_key>/`).
+    //
+    // NOTE: Step 4 will thread the YAML spec down to here so we can honour
+    // a per-agent YAML `spawn_cwd` field if one is set. Until then, override
+    // > workspace; state-based override is silently dropped.
+    let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
     let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
     let result = if let Some(placement) = layout_placement {
         if placement.starts_window {
@@ -181,6 +185,9 @@ pub(super) fn spawn_agent_window(
                 &env_unset,
             )
         } else {
+            // 0.3.28 Step 8: spawn_split must only fire from the display
+            // overlay path. Warn-only here; Step 9 promotes to hard fail.
+            crate::layout::overlay::assert_overlay_call_site(session_name, &window);
             transport.spawn_split_with_env_unset(
                 session_name,
                 &window,

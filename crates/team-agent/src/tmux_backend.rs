@@ -1441,25 +1441,15 @@ impl Transport for TmuxBackend {
                         }
                     }
 
-                    // Escape is RETRY-ONLY (attempt > 0). Researcher discovery:
-                    // Escape on Claude TUI with [Pasted content] visible may
-                    // CLEAR the composer content instead of exiting paste mode.
-                    // Python never sends Escape and never has this issue. So:
-                    // attempt 0 → direct Enter (Python parity); attempt 1+ →
-                    // Escape+Enter as remediation for stuck bracketed-paste.
-                    if attempt > 0 {
-                        if let Some(ref esc) = escape_argv {
-                            let _ = self.run_inject_stage(esc, InjectStage::Submit);
-                            for _ in 0..10 {
-                                match self.capture(target, CaptureRange::Tail(30)) {
-                                    Ok(cap) if !pasted_prompt_in_bottom(&cap.text, 3) => break,
-                                    Err(_) => break,
-                                    _ => {}
-                                }
-                                std::thread::sleep(Duration::from_millis(50));
-                            }
-                        }
-                    }
+                    // 0.3.28-final (E55 false-positive truth source):
+                    // Escape retry is DELETED. The researcher established
+                    // Escape on Claude TUI with [Pasted content] visible
+                    // may CLEAR the composer content rather than exit paste
+                    // mode — sending Escape+Enter on retry would submit an
+                    // empty message and hide the genuine consumption failure
+                    // under a fake-success path. Python parity: ONLY ever
+                    // send Enter, never Escape.
+                    let _ = escape_argv;
 
                     // Enter — send-keys failure is degraded (tmux may not have
                     // the pane in sim/test env). Break to consumed=None path
@@ -1512,23 +1502,18 @@ impl Transport for TmuxBackend {
 
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                    Some(false) => {
-                        // Consumption not observed (token still in bottom 5 after
-                        // all attempts). As a grace fallback, check if the token
-                        // is visible ANYWHERE in the pane capture. If yes, the
-                        // paste DID land — the pane just doesn't clear the token
-                        // from the bottom region (bare shell panes, MCP sim env,
-                        // busy agent TUI). Treat as "submitted, verification
-                        // degraded" → EnterSentWithoutPlaceholderCheck (generous;
-                        // matches pre-0.3.27 behaviour for these edge cases).
-                        // If the token is NOT visible at all, the paste truly
-                        // failed → SubmitConsumptionUnverified.
-                        if matches!(token_visible_for_report, Some(true)) {
-                            SubmitVerification::EnterSentWithoutPlaceholderCheck
-                        } else {
-                            SubmitVerification::SubmitConsumptionUnverified
-                        }
-                    }
+                    // 0.3.28-final (E55 truth source): consumed=Some(false)
+                    // means we ran ALL retries and the token never left
+                    // bottom 5 lines. That is a genuine consumption failure;
+                    // it MUST NOT be masked. Pre-final used a grace fallback
+                    // that returned EnterSentWithoutPlaceholderCheck whenever
+                    // token_visible_for_report=Some(true) — but Phase-1 token
+                    // visibility only proves the paste landed, NOT that the
+                    // provider consumed it. The fallback caused
+                    // delivered=true under E55 (busy-agent paste-landed-not-
+                    // consumed false positive). Always return Unverified now;
+                    // delivery treats it as not delivered.
+                    Some(false) => SubmitVerification::SubmitConsumptionUnverified,
                     None => submit_verification_for_key(submit),
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;

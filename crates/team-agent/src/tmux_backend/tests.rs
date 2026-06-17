@@ -595,15 +595,15 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
     /// report `SubmitConsumptionUnverified`, NOT
     /// `EnterSentWithoutPlaceholderCheck`. Otherwise delivery emits delivered
     /// + message.delivered (假阳) even though the worker never consumed it.
-    /// 0.3.27 amendment: when token IS visible in the pane (Phase 1 confirmed)
-    /// but NOT consumed from bottom 5 after all retries, the grace fallback
-    /// treats "paste landed but composer didn't clear" as
-    /// EnterSentWithoutPlaceholderCheck. This handles bare-shell panes (MCP sim)
-    /// and busy-agent TUIs (E55) that keep the token visible after submit.
-    /// SubmitConsumptionUnverified is reserved for the case where the token was
-    /// NEVER visible (paste truly failed / dropped).
+    /// 0.3.28-final E55 truth source: grace fallback DELETED.
+    /// `consumed=Some(false)` (token still in bottom 5 after all retries)
+    /// MUST report SubmitConsumptionUnverified unconditionally. Pre-final
+    /// returned EnterSentWithoutPlaceholderCheck when Phase-1 saw the token
+    /// at all (token_visible_for_report=Some(true)) — but Phase-1 visibility
+    /// only proves the paste LANDED, not that the provider CONSUMED it.
+    /// That masked E55 busy-agent false positives as delivered=true.
     #[test]
-    fn e46_inject_text_with_token_visible_but_unconsumed_uses_grace_fallback() {
+    fn e46_inject_text_with_token_visible_but_unconsumed_reports_unverified() {
         let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
         let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
         let report = be
@@ -614,15 +614,16 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
                 true,
             )
             .expect("inject runs");
-        // 0.3.27 grace fallback: token visible + not consumed from bottom →
-        // EnterSentWithoutPlaceholderCheck (paste landed, consumption unclear).
+        // 0.3.28-final: no grace fallback. Token visible + not consumed →
+        // SubmitConsumptionUnverified (delivery treats as not delivered).
         assert_eq!(
             report.submit_verification,
-            SubmitVerification::EnterSentWithoutPlaceholderCheck,
-            "0.3.27: when token is visible but not consumed from bottom 5 \
-             after all retries, grace fallback degrades to \
-             EnterSentWithoutPlaceholderCheck (paste landed, bare-shell/busy \
-             pane parity). Got {:?}",
+            SubmitVerification::SubmitConsumptionUnverified,
+            "0.3.28-final: when token still in bottom 5 after all retries, \
+             MUST be SubmitConsumptionUnverified — grace fallback masking \
+             this as EnterSentWithoutPlaceholderCheck caused E55 false \
+             positives (paste landed but busy agent never consumed). \
+             Got {:?}",
             report.submit_verification
         );
         assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);

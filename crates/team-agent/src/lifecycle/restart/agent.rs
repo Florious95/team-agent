@@ -95,16 +95,24 @@ pub(crate) fn start_agent_at_paths(
     } else {
         window_exists(transport, &session_name, &window)
     };
-    // E51 (0.3.26 P0, restart self-heal): even if the pane is structurally
-    // alive, it must not be considered "this agent's pane" if it's actually
-    // the leader anchor pane or another agent's pane. When lease corruption
-    // (E51 root cause) left `agent.pane_id == leader_receiver.pane_id`,
-    // start_agent would short-circuit to Noop (the pane IS live — it's just
-    // the wrong pane). Force a fresh spawn by treating the pane as not-live
-    // when it conflicts with the leader or a different agent.
-    let agent_live = agent_live && !pane_conflicts_with_leader_or_other(
-        &state, agent_id, &agent,
-    );
+    // 0.3.28 Step 9: E51 self-heal converted to topology assertion. After
+    // Step 2 the leader lives in its own session (`team-agent-leader-*`),
+    // so `agent.pane_id == leader_receiver.pane_id` is STRUCTURALLY
+    // impossible. We keep the check as a runtime guard: if it ever fires,
+    // emit a topology_invariant_violation event AND still force a fresh
+    // spawn (defensive). The check itself remains a no-op on healthy
+    // state — assert_topology_invariants from Step 1 catches the
+    // upstream corruption.
+    let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &agent);
+    if has_collision {
+        eprintln!(
+            "team_agent::layout e51_collision_post_step2 agent_id=`{agent_id}` \
+             action=forcing_fresh_spawn \
+             (should be impossible after Step 2 leader/worker session separation; \
+              investigate upstream state corruption)"
+        );
+    }
+    let agent_live = agent_live && !has_collision;
     if !force && agent_live {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
         let team_key = restart_projection_team_key(&state, team);
