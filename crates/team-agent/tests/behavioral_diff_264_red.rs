@@ -696,8 +696,8 @@ impl Transport for RecordingTransport {
         _submit: Key,
         _bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
-        if let InjectPayload::Text(text) = payload {
-            self.sent_text.lock().unwrap().push(text.clone());
+        if let Some(text) = payload.text() {
+            self.sent_text.lock().unwrap().push(text.to_string());
         }
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,

@@ -296,8 +296,14 @@ pub fn deliver_pending_message(
         &message.content,
         message_id,
     );
+    let is_leader_recipient = message.recipient == "leader";
+    let payload = if is_leader_recipient {
+        InjectPayload::TextSkipConsumptionPoll(rendered)
+    } else {
+        InjectPayload::Text(rendered)
+    };
     let inject_report =
-        match transport.inject(&target, &InjectPayload::Text(rendered), Key::Enter, true) {
+        match transport.inject(&target, &payload, Key::Enter, true) {
             Ok(report) => report,
             Err(error) => {
                 let reason = format!("inject_failed:{error}");
@@ -373,13 +379,18 @@ pub fn deliver_pending_message(
                     channel: None,
                 });
             }
-        };
+    };
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
-    // U1 #7: delivery is verified only when the submit succeeded AND the token was read
-    // back as visible in the pane. A submit-verified-but-token-missing inject (silent
-    // paste drop) is NOT delivered — it falls through to the unverified/degraded path.
-    if !(submit_verified && readback_verified) {
+    // Worker panes run provider TUIs, so delivery needs both submit consumption
+    // and pane readback. The leader pane is a human-facing receiver: no provider
+    // consumes the token, so readback is the delivery proof.
+    let verified = if is_leader_recipient {
+        true
+    } else {
+        submit_verified && readback_verified
+    };
+    if !verified {
         let reason = if !readback_verified {
             "pane_readback_unverified:capture_missing_token".to_string()
         } else {

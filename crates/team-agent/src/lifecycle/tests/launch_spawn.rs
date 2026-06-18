@@ -1193,6 +1193,29 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
 }
 
 #[test]
+fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
+    let workspace = temp_ws();
+    let short = crate::tmux_backend::socket_name_for_workspace(&workspace);
+    let expected = crate::tmux_backend::socket_path_for_workspace(&workspace)
+        .expect("workspace socket should have a physical path");
+    let transport = OfflineTransport::new().with_tmux_endpoint(short);
+    let mut state = json!({});
+
+    annotate_runtime_tmux_endpoint(&mut state, &transport, &workspace);
+
+    assert_eq!(
+        state["tmux_endpoint"],
+        json!(expected.to_string_lossy().to_string()),
+        "runtime endpoint state must persist the full tmux socket path, not the short -L name"
+    );
+    assert_eq!(
+        state["tmux_socket"],
+        state["tmux_endpoint"],
+        "tmux_socket mirrors the canonical persisted endpoint"
+    );
+}
+
+#[test]
 fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let workspace = team.parent().expect("team_workspace(team_dir) = parent");

@@ -55,11 +55,13 @@
                     InjectVerification::EmptyTextSendKeys,
                     TurnVerification::NotRequired,
                 ),
-                InjectPayload::Text(text) if text.contains("[team-agent-token:") => (
+                InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text)
+                    if text.contains("[team-agent-token:") =>
+                (
                     InjectVerification::CaptureContainsToken,
                     TurnVerification::NotYetObserved,
                 ),
-                InjectPayload::Text(_) => (
+                InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => (
                     InjectVerification::NoToken,
                     TurnVerification::NotYetObserved,
                 ),

@@ -335,7 +335,9 @@ impl Transport for ScriptedTransport {
         _bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
         let text = match payload {
-            InjectPayload::Text(text) => text.clone(),
+            InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
+                text.clone()
+            }
             InjectPayload::Empty => String::new(),
         };
         self.injects.lock().unwrap().push((target.clone(), text));

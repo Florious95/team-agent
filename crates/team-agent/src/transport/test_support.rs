@@ -337,7 +337,9 @@ impl Transport for OfflineTransport {
             state.inject_targets.push(target.clone());
             state.inject_payloads.push(match payload {
                 InjectPayload::Empty => String::new(),
-                InjectPayload::Text(text) => text.clone(),
+                InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
+                    text.clone()
+                }
             });
         });
         Ok(Self::inject_report())

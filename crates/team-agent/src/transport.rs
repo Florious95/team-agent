@@ -141,6 +141,21 @@ pub enum InjectPayload {
     /// → 纯 send submit-key。
     Empty,
     Text(String),
+    /// Text payload for human-facing panes that do not consume provider turns.
+    TextSkipConsumptionPoll(String),
+}
+
+impl InjectPayload {
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Text(text) | Self::TextSkipConsumptionPoll(text) => Some(text),
+            Self::Empty => None,
+        }
+    }
+
+    pub fn skip_consumption_poll(&self) -> bool {
+        matches!(self, Self::TextSkipConsumptionPoll(_))
+    }
 }
 
 /// 抽象 Key 枚举(§gap-5):各后端翻译,不透传 tmux 字面量。

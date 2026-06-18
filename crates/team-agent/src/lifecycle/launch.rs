@@ -2985,8 +2985,19 @@ pub(crate) fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, tran
     let Some(endpoint) = transport.tmux_endpoint() else {
         return;
     };
+    let endpoint_for_state = if Path::new(&endpoint).is_absolute() || endpoint == "default" {
+        endpoint.clone()
+    } else if endpoint == crate::tmux_backend::socket_name_for_workspace(workspace) {
+        crate::tmux_backend::socket_path_for_workspace(workspace)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| endpoint.clone())
+    } else {
+        crate::tmux_backend::socket_path_for_name(&endpoint)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| endpoint.clone())
+    };
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("tmux_endpoint".to_string(), serde_json::json!(endpoint));
+        obj.insert("tmux_endpoint".to_string(), serde_json::json!(endpoint_for_state));
         obj.insert(
             "tmux_socket".to_string(),
             obj.get("tmux_endpoint")

@@ -959,6 +959,18 @@ fn format_report_result_notification(
     if let Some(tests) = format_report_result_tests(envelope) {
         lines.push(tests);
     }
+    if let Some(changes) = format_report_result_changes(envelope) {
+        lines.push(changes);
+    }
+    if let Some(risks) = format_report_result_risks(envelope) {
+        lines.push(risks);
+    }
+    if let Some(artifacts) = format_report_result_artifacts(envelope) {
+        lines.push(artifacts);
+    }
+    if let Some(next_actions) = format_report_result_next_actions(envelope) {
+        lines.push(next_actions);
+    }
     lines.push(format!("Result id: {result_id}"));
     lines.push(
         "Team Agent stored this result. The coordinator/collect path will update team_state.md; no manual polling loop is needed."
@@ -986,6 +998,97 @@ fn format_report_result_tests(envelope: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn report_result_array<'a>(
+    envelope: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a Vec<serde_json::Value>> {
+    let values = envelope.get(key).and_then(serde_json::Value::as_array)?;
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn report_field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+fn report_field_any<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| report_field(value, key))
+}
+
+fn format_report_result_changes(envelope: &serde_json::Value) -> Option<String> {
+    let parts = report_result_array(envelope, "changes")?
+        .iter()
+        .filter_map(|change| {
+            let path = report_field_any(change, &["path", "file", "filepath", "filename"])?;
+            let kind = report_field_any(change, &["kind", "type", "action"]).unwrap_or("changed");
+            let description =
+                report_field_any(change, &["description", "summary", "detail", "details", "message"])
+                    .unwrap_or(path);
+            Some(format!("{kind} {path}: {description}"))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Changes: {}", parts.join(", ")))
+    }
+}
+
+fn format_report_result_risks(envelope: &serde_json::Value) -> Option<String> {
+    let parts = report_result_array(envelope, "risks")?
+        .iter()
+        .filter_map(|risk| {
+            let severity = report_field_any(risk, &["severity", "level"]).unwrap_or("low");
+            let description =
+                report_field_any(risk, &["description", "summary", "detail", "message"])?;
+            Some(format!("{severity}: {description}"))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Risks: {}", parts.join(", ")))
+    }
+}
+
+fn format_report_result_artifacts(envelope: &serde_json::Value) -> Option<String> {
+    let parts = report_result_array(envelope, "artifacts")?
+        .iter()
+        .filter_map(|artifact| {
+            let path = report_field_any(artifact, &["path", "file", "filepath", "filename"])?;
+            let description =
+                report_field_any(artifact, &["description", "summary", "detail"]).unwrap_or(path);
+            Some(format!("{path}: {description}"))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Artifacts: {}", parts.join(", ")))
+    }
+}
+
+fn format_report_result_next_actions(envelope: &serde_json::Value) -> Option<String> {
+    let parts = report_result_array(envelope, "next_actions")?
+        .iter()
+        .filter_map(|action| {
+            report_field_any(action, &["description", "summary", "action", "todo", "message"])
+                .map(|text| text.to_string())
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Next actions: {}", parts.join(", ")))
+    }
+}
+
 /// `_collect_results_and_notify_watchers` (`results.py:430`):coordinator tick 调用 —— collect +
 /// notify_result_watchers 编排。daemon-path → Result。
 pub fn collect_results_and_notify_watchers(
@@ -998,4 +1101,44 @@ pub fn collect_results_and_notify_watchers(
         "collected": 0,
         "notified": notified
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_report_result_notification;
+
+    #[test]
+    fn report_result_notification_includes_full_envelope_sections() {
+        let envelope = serde_json::json!({
+            "schema_version": "result_envelope_v1",
+            "task_id": "task-1",
+            "agent_id": "worker",
+            "status": "success",
+            "summary": "done",
+            "changes": [
+                {"path": "src/a.rs", "kind": "modified", "description": "patched delivery"}
+            ],
+            "tests": [
+                {"command": "cargo test", "status": "passed"}
+            ],
+            "risks": [
+                {"severity": "low", "description": "none known"}
+            ],
+            "artifacts": [
+                {"path": ".team/artifacts/evidence.md", "description": "evidence"}
+            ],
+            "next_actions": [
+                {"description": "ship after review"}
+            ]
+        });
+        let notification =
+            format_report_result_notification("res_1", "task-1", "worker", "success", &envelope);
+        assert!(notification.contains("Task task-1 reported success from worker: done"));
+        assert!(notification.contains("Tests: cargo test=passed"));
+        assert!(notification.contains("Changes: modified src/a.rs: patched delivery"));
+        assert!(notification.contains("Risks: low: none known"));
+        assert!(notification.contains("Artifacts: .team/artifacts/evidence.md: evidence"));
+        assert!(notification.contains("Next actions: ship after review"));
+        assert!(notification.contains("Result id: res_1"));
+    }
 }

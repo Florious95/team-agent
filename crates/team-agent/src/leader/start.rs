@@ -493,7 +493,9 @@ fn persist_managed_leader_binding(
         .unwrap_or(0)
         .saturating_add(1);
     let now = chrono::Utc::now().to_rfc3339();
-    let socket = crate::tmux_backend::socket_name_for_workspace(workspace);
+    let socket = crate::tmux_backend::socket_path_for_workspace(workspace)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| crate::tmux_backend::socket_name_for_workspace(workspace));
     let provider = serde_json::to_value(plan.provider)?;
     let session = spawned.session.as_str().to_string();
     let window = spawned.window.as_str().to_string();

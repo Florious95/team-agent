@@ -29,7 +29,8 @@ use crate::transport::{
     tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
     CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
     PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitVerification, Target, Transport, TransportError, TurnVerification, WindowName,
+    SubmitAttemptObservation, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 /// Result of running an external command — the typed output of the OS edge.
@@ -815,10 +816,12 @@ fn buffer_name_for_text(text: &str) -> String {
 fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerification {
     match payload {
         InjectPayload::Empty => InjectVerification::EmptyTextSendKeys,
-        InjectPayload::Text(text) if text.contains("[team-agent-token:") => {
+        InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text)
+            if text.contains("[team-agent-token:") =>
+        {
             InjectVerification::CaptureContainsToken
         }
-        InjectPayload::Text(_) => InjectVerification::NoToken,
+        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => InjectVerification::NoToken,
     }
 }
 
@@ -826,15 +829,11 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
 /// (`[team-agent-token:<id>]`). Use the full marker, not only the prefix, so an old
 /// scrollback token cannot verify a new message.
 fn payload_token_marker(payload: &InjectPayload) -> Option<&str> {
-    match payload {
-        InjectPayload::Text(text) => {
-            let start = text.find("[team-agent-token:")?;
-            let marker = &text[start..];
-            let end = marker.find(']')?;
-            Some(&marker[..=end])
-        }
-        _ => None,
-    }
+    let text = payload.text()?;
+    let start = text.find("[team-agent-token:")?;
+    let marker = &text[start..];
+    let end = marker.find(']')?;
+    Some(&marker[..=end])
 }
 
 fn token_visible_in_capture(
@@ -938,6 +937,74 @@ fn token_in_bottom_n(text: &str, marker: &str, n: usize) -> bool {
         .filter(|line| !line.trim().is_empty())
         .take(n)
         .any(|line| line.contains(marker))
+}
+
+fn marker_position_from_bottom(text: &str, marker: &str) -> Option<u32> {
+    let mut from_bottom = 0u32;
+    for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
+        if line.contains(marker) {
+            return Some(from_bottom);
+        }
+        from_bottom = from_bottom.saturating_add(1);
+    }
+    None
+}
+
+fn provider_busy_signal_in_tail(text: &str) -> bool {
+    text.lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(15)
+        .any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("working")
+                || lower.contains("thinking")
+                || lower.contains("esc to interrupt")
+                || line.contains('●')
+                || line.contains('⏳')
+                || line.contains('⠋')
+                || line.contains('⠙')
+                || line.contains('⠹')
+                || line.contains('⠸')
+                || line.contains('⠼')
+                || line.contains('⠴')
+                || line.contains('⠦')
+                || line.contains('⠧')
+                || line.contains('⠇')
+                || line.contains('⠏')
+                || line.contains('✶')
+                || line.contains('✢')
+        })
+}
+
+fn submit_attempt_observation(
+    attempt_index: u32,
+    captured: &CapturedText,
+    marker: Option<&str>,
+    elapsed_ms: u64,
+) -> SubmitAttemptObservation {
+    let marker_position = marker.and_then(|m| marker_position_from_bottom(&captured.text, m));
+    let (matched, matched_literal, where_in_tail) = if let Some(marker) = marker {
+        (
+            token_in_bottom_n(&captured.text, marker, 15),
+            marker_position.map(|_| marker.to_string()),
+            marker_position,
+        )
+    } else if let Some((literal, where_in_tail)) = pasted_prompt_match(&captured.text) {
+        (true, Some(literal.to_string()), Some(where_in_tail))
+    } else {
+        (false, None, None)
+    };
+    let (pane_tail_excerpt, pane_tail_lines) = scrub_pane_excerpt(&captured.text, 20);
+    SubmitAttemptObservation {
+        attempt_index,
+        matched,
+        matched_literal,
+        where_in_tail,
+        pane_tail_excerpt,
+        pane_tail_lines,
+        elapsed_ms,
+    }
 }
 
 /// 0.3.27: check if a pasted-content prompt literal (`pasted content` / `pasted text`)
@@ -1184,15 +1251,15 @@ fn post_submit_input_consumed(
     let Some(marker) = payload_token_marker(payload) else {
         return Ok(None);
     };
-    let captured = backend.capture(target, CaptureRange::Tail(30))?;
+    let captured = backend.capture(target, CaptureRange::Tail(40))?;
     // The token may legitimately appear in scrollback (a successful submit
     // pushes it into history). We only treat the BOTTOM-of-pane region (last
     // few lines, where the input area lives) as the consumption signal. Tail
     // 30 lines is small enough that the input area still dominates if the
     // submit didn't go through, while a successful submit has pushed the
-    // token marker out of the bottom 5 lines by the time the response
+    // token marker out of the bottom 15 lines by the time the response
     // composer redraws.
-    let tail_lines: Vec<&str> = captured.text.lines().rev().take(5).collect();
+    let tail_lines: Vec<&str> = captured.text.lines().rev().take(15).collect();
     let token_in_tail = tail_lines.iter().any(|line| line.contains(marker));
     Ok(Some(!token_in_tail))
 }
@@ -1333,7 +1400,7 @@ impl Transport for TmuxBackend {
                 let argv = tmux_empty_inject_argv(&pane, submit);
                 self.run_ok(&argv)?;
             }
-            InjectPayload::Text(text) => {
+            InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
                 let buffer = buffer_name_for_text(text);
                 for argv in tmux_inject_text_argv(&pane, &buffer, text, bracketed) {
                     let stage = inject_stage_for_argv(&argv);
@@ -1389,7 +1456,7 @@ impl Transport for TmuxBackend {
 
                 // Phase 2: submit_and_verify — unified Escape+Enter+poll loop.
                 let use_escape = bracketed
-                    && matches!(payload, InjectPayload::Text(_))
+                    && payload.text().is_some()
                     && matches!(submit, Key::Enter);
                 let escape_argv = if use_escape {
                     Some(tmux_send_keys_argv(&pane, &[Key::Escape]))
@@ -1424,16 +1491,33 @@ impl Transport for TmuxBackend {
                 let max_submit_attempts: u32 = 3;
                 let mut consumption_attempts: u32 = 0;
                 let mut consumed: Option<bool> = None;
+                let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
 
-                for attempt in 0..max_submit_attempts {
+                let poll_consumption = !payload.skip_consumption_poll();
+                if !poll_consumption {
+                    if self.run_inject_stage(&submit_argv, InjectStage::Submit).is_ok() {
+                        consumption_attempts = 1;
+                    }
+                }
+                let submit_attempt_limit = if poll_consumption { max_submit_attempts } else { 0 };
+
+                for attempt in 0..submit_attempt_limit {
+                    let attempt_index = attempt + 1;
+                    let attempt_start = std::time::Instant::now();
                     // Before resending (attempt > 0), re-check if the token
                     // already disappeared — guards against double-submit (C3).
                     // Capture failures are non-fatal (tmux may not be running
                     // in MCP sim / test env).
                     if attempt > 0 {
                         if let Some(m) = marker {
-                            if let Ok(cap) = self.capture(target, CaptureRange::Tail(30)) {
-                                if !token_in_bottom_n(&cap.text, m, 5) {
+                            if let Ok(cap) = self.capture(target, CaptureRange::Tail(40)) {
+                                attempts_detail.push(submit_attempt_observation(
+                                    attempt_index,
+                                    &cap,
+                                    marker,
+                                    attempt_start.elapsed().as_millis() as u64,
+                                ));
+                                if !token_in_bottom_n(&cap.text, m, 15) {
                                     consumed = Some(true);
                                     break;
                                 }
@@ -1468,16 +1552,22 @@ impl Transport for TmuxBackend {
                                 .unwrap_or(Some(false));
                     }
 
-                    // Poll: token disappeared from bottom 5 lines = consumed.
+                    // Poll: token disappeared from bottom 15 lines = consumed.
                     // Capture failures → consumed=None (non-blocking).
                     if let Some(m) = marker {
                         let mut found_consumed = false;
                         let mut capture_failed = false;
-                        for _ in 0..6 {
-                            std::thread::sleep(Duration::from_millis(50));
-                            match self.capture(target, CaptureRange::Tail(30)) {
+                        for _ in 0..12 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            match self.capture(target, CaptureRange::Tail(40)) {
                                 Ok(cap) => {
-                                    if !token_in_bottom_n(&cap.text, m, 5) {
+                                    attempts_detail.push(submit_attempt_observation(
+                                        attempt_index,
+                                        &cap,
+                                        marker,
+                                        attempt_start.elapsed().as_millis() as u64,
+                                    ));
+                                    if !token_in_bottom_n(&cap.text, m, 15) {
                                         found_consumed = true;
                                         break;
                                     }
@@ -1504,16 +1594,43 @@ impl Transport for TmuxBackend {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
                     // 0.3.28-final (E55 truth source): consumed=Some(false)
                     // means we ran ALL retries and the token never left
-                    // bottom 5 lines. That is a genuine consumption failure;
+                    // bottom 15 lines. That is a genuine consumption failure
+                    // unless a provider busy marker proves the TUI is already
+                    // processing the turn and simply has not scrolled yet;
                     // it MUST NOT be masked. Pre-final used a grace fallback
                     // that returned EnterSentWithoutPlaceholderCheck whenever
                     // token_visible_for_report=Some(true) — but Phase-1 token
                     // visibility only proves the paste landed, NOT that the
                     // provider consumed it. The fallback caused
                     // delivered=true under E55 (busy-agent paste-landed-not-
-                    // consumed false positive). Always return Unverified now;
-                    // delivery treats it as not delivered.
-                    Some(false) => SubmitVerification::SubmitConsumptionUnverified,
+                    // consumed false positive). Do not restore that grace
+                    // fallback; only a live busy-state signal upgrades this to
+                    // EnterSentWithoutPlaceholderCheck.
+                    Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
+                        Ok(cap) => {
+                            attempts_detail.push(submit_attempt_observation(
+                                consumption_attempts.max(1),
+                                &cap,
+                                marker,
+                                inject_start.elapsed().as_millis() as u64,
+                            ));
+                            let busy = provider_busy_signal_in_tail(&cap.text);
+                            eprintln!(
+                                "team-agent submit consumption fallback: consumed=false busy_state={busy}"
+                            );
+                            if busy {
+                                SubmitVerification::EnterSentWithoutPlaceholderCheck
+                            } else {
+                                SubmitVerification::SubmitConsumptionUnverified
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "team-agent submit consumption fallback: consumed=false busy_capture_error={err}"
+                            );
+                            SubmitVerification::SubmitConsumptionUnverified
+                        }
+                    },
                     None => submit_verification_for_key(submit),
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
@@ -1526,14 +1643,14 @@ impl Transport for TmuxBackend {
                     submit_verification,
                     turn_verification: match payload {
                         InjectPayload::Empty => TurnVerification::NotRequired,
-                        InjectPayload::Text(_) => TurnVerification::NotYetObserved,
+                        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => TurnVerification::NotYetObserved,
                     },
                     attempts: consumption_attempts,
                     submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
                         appear_gate_elapsed_ms: 0,
                         appear_gate_matched: false,
                         total_elapsed_ms,
-                        attempts_detail: Vec::new(),
+                        attempts_detail,
                     }),
                 });
             }
@@ -1547,7 +1664,7 @@ impl Transport for TmuxBackend {
             submit_verification: submit_verification_for_key(submit),
             turn_verification: match payload {
                 InjectPayload::Empty => TurnVerification::NotRequired,
-                InjectPayload::Text(_) => TurnVerification::NotYetObserved,
+                InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => TurnVerification::NotYetObserved,
             },
             attempts: 1,
             // E50 PR-1: Empty payload / non-Text fallthrough path — no submit

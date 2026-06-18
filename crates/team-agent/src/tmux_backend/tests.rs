@@ -573,6 +573,40 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
         );
     }
 
+    #[test]
+    fn inject_skip_consumption_payload_sends_enter_without_phase2_poll() {
+        let text = "hello leader [team-agent-token:skip]";
+        let (be, rec) = backend_with(MockResp::Out(ok(text)), vec![]);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::TextSkipConsumptionPoll(text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject");
+        let calls = rec.lock().unwrap().clone();
+
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck
+        );
+        assert_eq!(report.attempts, 1);
+        assert!(
+            calls.iter().any(|argv| {
+                argv.get(1).map(String::as_str) == Some("send-keys")
+                    && argv.contains(&"Enter".to_string())
+            }),
+            "skip-consumption payload must still submit once; calls={calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|argv| {
+                argv == &tmux_capture_argv(&PaneId::new("%7"), CaptureRange::Tail(40))
+            }),
+            "leader-bound skip payload must not run Phase 2 consumption polls; calls={calls:?}"
+        );
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════
     // E46 0.3.24 task#327 P0 — submit verification false-positive / false-negative.
     //
@@ -627,6 +661,37 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
             report.submit_verification
         );
         assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+    }
+
+    #[test]
+    fn e46_unconsumed_token_with_live_busy_state_is_treated_as_processing() {
+        let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_busy]";
+        let busy_tail = format!("{token_text}\n● Working (1s · esc to interrupt)\n");
+        let (be, _rec) = backend_with(MockResp::Out(ok(&busy_tail)), vec![]);
+        let report = be
+            .inject(
+                &Target::Pane(PaneId::new("%7")),
+                &InjectPayload::Text(token_text.to_string()),
+                Key::Enter,
+                true,
+            )
+            .expect("inject runs");
+        assert_eq!(
+            report.submit_verification,
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "busy provider state means the turn is being processed even if \
+             the token has not yet scrolled out of the bottom capture"
+        );
+        let diagnostics = report.submit_diagnostics.expect("diagnostics");
+        assert!(
+            diagnostics
+                .attempts_detail
+                .last()
+                .map(|obs| obs.pane_tail_excerpt.to_ascii_lowercase().contains("working"))
+                .unwrap_or(false),
+            "busy-state capture should be recorded in attempts_detail: {:?}",
+            diagnostics.attempts_detail
+        );
     }
 
     /// 0.3.27: empty pane captures → consumption poll sees "no token in
@@ -967,6 +1032,19 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
              and was consumed (token not in bottom 5 lines) must report \
              EnterSentWithoutPlaceholderCheck; got {:?}",
             report.submit_verification
+        );
+        let diagnostics = report.submit_diagnostics.expect("diagnostics");
+        assert!(
+            !diagnostics.attempts_detail.is_empty(),
+            "E50: E46 consumption gate must preserve per-capture diagnostics"
+        );
+        assert_eq!(diagnostics.attempts_detail[0].attempt_index, 1);
+        assert!(
+            diagnostics.attempts_detail[0]
+                .pane_tail_excerpt
+                .contains("Pasted content"),
+            "E50: recorded pane tail should contain the post-submit capture; got {:?}",
+            diagnostics.attempts_detail[0]
         );
     }
 
