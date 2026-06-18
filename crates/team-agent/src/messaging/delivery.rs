@@ -382,13 +382,13 @@ pub fn deliver_pending_message(
     };
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
-    // Worker panes run provider TUIs, so delivery needs both submit consumption
-    // and pane readback. The leader pane is a human-facing receiver: no provider
-    // consumes the token, so readback is the delivery proof.
+    // Leader pane: inject success is delivery proof. Worker pane: post-submit
+    // evidence is the delivery proof; stale Phase-1 readback must not veto it
+    // and cannot independently prove the current Enter submitted.
     let verified = if is_leader_recipient {
         true
     } else {
-        submit_verified && readback_verified
+        submit_verified
     };
     if !verified {
         let reason = if !readback_verified {
@@ -507,13 +507,9 @@ pub(crate) fn inject_submit_verified(report: &InjectReport) -> bool {
     }
 }
 
-/// U1 #7 step-2: pane-readback gate. The submit may report verified (a key was sent)
-/// while the pasted token never actually landed in the pane — `inject()` step-1 now
-/// surfaces that as `InjectVerification::CaptureMissingToken`. A delivery is only truly
-/// verified when BOTH the submit succeeded AND the token was read back as visible.
-/// `CaptureMissingToken` → readback failed → not delivered (degraded/unverified). All
-/// other inject_verification variants (incl. token-less payloads, empty sends, new
-/// pasted-content prompt) are not readback-negative and pass this gate.
+/// U1 #7 step-2: pane-readback gate. `CaptureMissingToken` is negative readback
+/// evidence, but 0.3.30 submit evidence can supersede it: consumption or
+/// post-submit token observation proves the message reached the pane.
 /// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
 pub(crate) fn pane_readback_verified(report: &InjectReport) -> bool {
     !matches!(

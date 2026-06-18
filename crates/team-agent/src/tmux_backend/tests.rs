@@ -623,21 +623,11 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
     // no longer in the bottom 5 lines of the pane = composer cleared).
     // ═════════════════════════════════════════════════════════════════════════════
 
-    /// **E46 RED-1 (核心假阳)**: token-bearing Text + Enter + bracketed paste.
-    /// Token is visible in the pane after submit AND remains in the bottom of
-    /// the pane (input region — consumption was NOT observed). Submit must
-    /// report `SubmitConsumptionUnverified`, NOT
-    /// `EnterSentWithoutPlaceholderCheck`. Otherwise delivery emits delivered
-    /// + message.delivered (假阳) even though the worker never consumed it.
-    /// 0.3.28-final E55 truth source: grace fallback DELETED.
-    /// `consumed=Some(false)` (token still in bottom 5 after all retries)
-    /// MUST report SubmitConsumptionUnverified unconditionally. Pre-final
-    /// returned EnterSentWithoutPlaceholderCheck when Phase-1 saw the token
-    /// at all (token_visible_for_report=Some(true)) — but Phase-1 visibility
-    /// only proves the paste LANDED, not that the provider CONSUMED it.
-    /// That masked E55 busy-agent false positives as delivered=true.
+    /// 0.3.30 false-negative fix: token seen during post-submit consumption
+    /// polling proves the paste landed after Enter was sent. If it never
+    /// scrolls away, that is slow provider output, not transport failure.
     #[test]
-    fn e46_inject_text_with_token_visible_but_unconsumed_reports_unverified() {
+    fn e46_post_submit_matched_token_without_scroll_is_verified() {
         let token_text = "Team Agent message from leader:\n\nhi\n\n[team-agent-token:msg_red1]";
         let (be, _rec) = backend_with(MockResp::Out(ok(token_text)), vec![]);
         let report = be
@@ -648,19 +638,19 @@ CaptureMissingToken, not the static CaptureContainsToken false-positive"
                 true,
             )
             .expect("inject runs");
-        // 0.3.28-final: no grace fallback. Token visible + not consumed →
-        // SubmitConsumptionUnverified (delivery treats as not delivered).
         assert_eq!(
             report.submit_verification,
-            SubmitVerification::SubmitConsumptionUnverified,
-            "0.3.28-final: when token still in bottom 5 after all retries, \
-             MUST be SubmitConsumptionUnverified — grace fallback masking \
-             this as EnterSentWithoutPlaceholderCheck caused E55 false \
-             positives (paste landed but busy agent never consumed). \
-             Got {:?}",
+            SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            "0.3.30: post-submit matched=true is delivery proof even when \
+             the token stays in the bottom capture window. Got {:?}",
             report.submit_verification
         );
         assert_eq!(report.turn_verification, TurnVerification::NotYetObserved);
+        let diagnostics = report.submit_diagnostics.expect("diagnostics");
+        assert!(
+            diagnostics.attempts_detail.iter().any(|obs| obs.matched),
+            "the positive verdict must be backed by a post-submit matched observation"
+        );
     }
 
     #[test]

@@ -393,17 +393,12 @@ pub fn deliver_to_leader_fallback_pane(
 
     match inject_result {
         Ok(report) => {
-            // 0.3.27 P0: leader_receiver verification gate. The pre-fix path
-            // marked every inject Ok as delivered regardless of whether the
-            // submit was actually verified. Apply the same two-gate check that
-            // deliver_pending_message uses (delivery.rs:376-381):
-            //   (a) inject_submit_verified — Enter was accepted by the TUI
-            //   (b) pane_readback_verified — token was visible in the pane
-            // Both must pass to mark delivered; otherwise degrade to
-            // submitted_unverified (loud, not silent).
+            // 0.3.30: submit verification is enough for fallback-pane
+            // delivery. Readback is retained for diagnostics when submit
+            // itself is unverified.
             let submit_ok = super::delivery::inject_submit_verified(&report);
             let readback_ok = super::delivery::pane_readback_verified(&report);
-            if submit_ok && readback_ok {
+            if submit_ok {
                 store.mark(message_id, "delivered", None)?;
                 event_log.write(
                     "leader_receiver.fallback_pane_submitted",

@@ -1492,6 +1492,7 @@ impl Transport for TmuxBackend {
                 let mut consumption_attempts: u32 = 0;
                 let mut consumed: Option<bool> = None;
                 let mut attempts_detail: Vec<SubmitAttemptObservation> = Vec::new();
+                let mut any_attempt_matched = false;
 
                 let poll_consumption = !payload.skip_consumption_poll();
                 if !poll_consumption {
@@ -1511,12 +1512,16 @@ impl Transport for TmuxBackend {
                     if attempt > 0 {
                         if let Some(m) = marker {
                             if let Ok(cap) = self.capture(target, CaptureRange::Tail(40)) {
-                                attempts_detail.push(submit_attempt_observation(
+                                let obs = submit_attempt_observation(
                                     attempt_index,
                                     &cap,
                                     marker,
                                     attempt_start.elapsed().as_millis() as u64,
-                                ));
+                                );
+                                if obs.matched {
+                                    any_attempt_matched = true;
+                                }
+                                attempts_detail.push(obs);
                                 if !token_in_bottom_n(&cap.text, m, 15) {
                                     consumed = Some(true);
                                     break;
@@ -1561,12 +1566,16 @@ impl Transport for TmuxBackend {
                             std::thread::sleep(Duration::from_millis(100));
                             match self.capture(target, CaptureRange::Tail(40)) {
                                 Ok(cap) => {
-                                    attempts_detail.push(submit_attempt_observation(
+                                    let obs = submit_attempt_observation(
                                         attempt_index,
                                         &cap,
                                         marker,
                                         attempt_start.elapsed().as_millis() as u64,
-                                    ));
+                                    );
+                                    if obs.matched {
+                                        any_attempt_matched = true;
+                                    }
+                                    attempts_detail.push(obs);
                                     if !token_in_bottom_n(&cap.text, m, 15) {
                                         found_consumed = true;
                                         break;
@@ -1592,45 +1601,40 @@ impl Transport for TmuxBackend {
 
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
-                    // 0.3.28-final (E55 truth source): consumed=Some(false)
-                    // means we ran ALL retries and the token never left
-                    // bottom 15 lines. That is a genuine consumption failure
-                    // unless a provider busy marker proves the TUI is already
-                    // processing the turn and simply has not scrolled yet;
-                    // it MUST NOT be masked. Pre-final used a grace fallback
-                    // that returned EnterSentWithoutPlaceholderCheck whenever
-                    // token_visible_for_report=Some(true) — but Phase-1 token
-                    // visibility only proves the paste landed, NOT that the
-                    // provider consumed it. The fallback caused
-                    // delivered=true under E55 (busy-agent paste-landed-not-
-                    // consumed false positive). Do not restore that grace
-                    // fallback; only a live busy-state signal upgrades this to
-                    // EnterSentWithoutPlaceholderCheck.
-                    Some(false) => match self.capture(target, CaptureRange::Tail(15)) {
-                        Ok(cap) => {
-                            attempts_detail.push(submit_attempt_observation(
-                                consumption_attempts.max(1),
-                                &cap,
-                                marker,
-                                inject_start.elapsed().as_millis() as u64,
-                            ));
-                            let busy = provider_busy_signal_in_tail(&cap.text);
+                    Some(false) => {
+                        if any_attempt_matched {
                             eprintln!(
-                                "team-agent submit consumption fallback: consumed=false busy_state={busy}"
+                                "team-agent submit consumption: consumed=false any_attempt_matched=true -> verified"
                             );
-                            if busy {
-                                SubmitVerification::EnterSentWithoutPlaceholderCheck
-                            } else {
-                                SubmitVerification::SubmitConsumptionUnverified
+                            SubmitVerification::EnterSentWithoutPlaceholderCheck
+                        } else {
+                            match self.capture(target, CaptureRange::Tail(15)) {
+                                Ok(cap) => {
+                                    attempts_detail.push(submit_attempt_observation(
+                                        consumption_attempts.max(1),
+                                        &cap,
+                                        marker,
+                                        inject_start.elapsed().as_millis() as u64,
+                                    ));
+                                    let busy = provider_busy_signal_in_tail(&cap.text);
+                                    eprintln!(
+                                        "team-agent submit consumption fallback: consumed=false any_attempt_matched=false busy_state={busy}"
+                                    );
+                                    if busy {
+                                        SubmitVerification::EnterSentWithoutPlaceholderCheck
+                                    } else {
+                                        SubmitVerification::SubmitConsumptionUnverified
+                                    }
+                                }
+                                Err(err) => {
+                                    eprintln!(
+                                        "team-agent submit consumption fallback: consumed=false busy_capture_error={err}"
+                                    );
+                                    SubmitVerification::SubmitConsumptionUnverified
+                                }
                             }
                         }
-                        Err(err) => {
-                            eprintln!(
-                                "team-agent submit consumption fallback: consumed=false busy_capture_error={err}"
-                            );
-                            SubmitVerification::SubmitConsumptionUnverified
-                        }
-                    },
+                    }
                     None => submit_verification_for_key(submit),
                 };
                 let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;

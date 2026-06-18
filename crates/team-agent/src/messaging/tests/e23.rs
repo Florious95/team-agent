@@ -7,6 +7,11 @@ fn e23_fallback_pane_has_single_shared_noisy_surface() {
     assert!(leader_receiver.contains("leader_receiver.fallback_pane_failed"));
     assert!(leader_receiver.contains("delivered_via=fallback_pane"));
     assert!(
+        leader_receiver.contains("if submit_ok {")
+            && !leader_receiver.contains("submit_ok && readback_ok"),
+        "fallback pane delivery must accept submit_ok alone; stale readback must not veto it"
+    );
+    assert!(
         leader_receiver.find("if primary_ok").unwrap()
             < leader_receiver
                 .find("leader_receiver.fallback_pane_attempt")

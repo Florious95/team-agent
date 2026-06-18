@@ -1269,7 +1269,9 @@ fn fire_due_scheduled_events_fires_each_scheduled_kind() {
     );
 }
 
-struct UnverifiedInjectTransport;
+struct UnverifiedInjectTransport {
+    readback_visible: bool,
+}
 impl Transport for UnverifiedInjectTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
@@ -1303,7 +1305,11 @@ impl Transport for UnverifiedInjectTransport {
     ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
-            inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
+            inject_verification: if self.readback_visible {
+                crate::transport::InjectVerification::CaptureContainsToken
+            } else {
+                crate::transport::InjectVerification::CaptureMissingToken
+            },
             submit_verification:
                 crate::transport::SubmitVerification::PastedContentPromptStillPresentAfterSubmit,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
@@ -1441,12 +1447,8 @@ impl Transport for FailingInjectTransport {
     }
 }
 
-// U1 #7 step-2 (RED→GREEN) — pane-readback gate: a token payload whose token was NOT
-// read back as visible in the pane (`InjectVerification::CaptureMissingToken`, surfaced by
-// the step-1 tmux_backend readback) must NOT be counted delivered, even when the SUBMIT
-// itself verified. Today the delivery gate only consulted submit_verification → a silent
-// paste-drop reported delivered (false green). This transport returns a verified submit
-// (KeySentAfterVisibleToken) but a missing-token readback.
+// 0.3.30: submit evidence supersedes stale readback. This transport returns a
+// verified submit but a missing-token readback.
 struct ReadbackMissingTransport;
 impl Transport for ReadbackMissingTransport {
     fn kind(&self) -> BackendKind {
@@ -1507,7 +1509,7 @@ impl Transport for ReadbackMissingTransport {
 }
 
 #[test]
-fn deliver_pending_readback_missing_token_is_not_delivered() {
+fn deliver_pending_submit_verified_overrides_missing_readback() {
     let ws = tmp_ws("readbackmiss");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
@@ -1532,23 +1534,47 @@ fn deliver_pending_readback_missing_token_is_not_delivered() {
     .unwrap();
 
     assert!(
-        !out.ok,
-        "U1 #7: a submit-verified inject whose token was NOT read back (CaptureMissingToken) \
-must NOT be delivered — readback gate catches the silent paste drop"
+        out.ok,
+        "0.3.30: submit-verified delivery must not be vetoed by stale CaptureMissingToken readback"
     );
-    assert_ne!(
+    assert_eq!(
         out.message_status.0, "delivered",
-        "U1 #7: readback-missing must not mark the message delivered (false green)"
+        "0.3.30: submit evidence is stronger than readback"
     );
-    let events = log.tail(0).unwrap();
+}
+
+#[test]
+fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
+    let ws = tmp_ws("readbacksaves");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-readbacksaves",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+
+    let out = deliver_pending_message(
+        &ws,
+        &store,
+        &UnverifiedInjectTransport {
+            readback_visible: true,
+        },
+        &message_id,
+        &log,
+        &state,
+    )
+    .unwrap();
+
     assert!(
-        events.iter().any(|event| event
-            .get("reason")
-            .and_then(serde_json::Value::as_str)
-            .map(|r| r.contains("pane_readback_unverified"))
-            .unwrap_or(false)),
-        "U1 #7: the failure reason must name pane_readback_unverified (loud, not silent); got {events:?}"
+        !out.ok,
+        "0.3.30: positive readback alone must not mark delivered when submit is unverified"
     );
+    assert_ne!(out.message_status.0, "delivered");
 }
 
 #[test]
@@ -1569,7 +1595,9 @@ fn deliver_pending_exhausted_unverified_send_emits_failed_event() {
     let out = deliver_pending_message(
         &ws,
         &store,
-        &UnverifiedInjectTransport,
+        &UnverifiedInjectTransport {
+            readback_visible: false,
+        },
         &message_id,
         &log,
         &state,
