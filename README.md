@@ -4,7 +4,7 @@
 
 > Talk once. Ship a team.
 
-![demo](assets/demo.gif)
+![demo](assets/demo-en.gif)
 
 A multi-agent runtime for Claude Code and Codex CLI where **the lead does the orchestration** — you describe a goal in plain language and it builds a team across providers, runs the work, and reports back.
 
