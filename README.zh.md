@@ -4,6 +4,8 @@
 
 > 说一次。一个 team 跑起来。
 
+![demo](assets/demo.gif)
+
 为 Claude Code 和 Codex CLI 设计的多 agent 运行时。**编排由 lead 自己完成**——你用自然语言描述目标,它跨厂商组建团队、执行工作、汇报结果。
 
 没有 DAG。没有 YAML。没有 Kanban。只有对话。
