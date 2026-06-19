@@ -141,7 +141,7 @@ pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
 
 pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
     // E47 ROOT-FIX#2 (0.3.24 P0, idle/busy 假阳): limit the scan to the
-    // BOTTOM ACTIVE REGION (last 1-3 non-empty lines = composer / status
+    // BOTTOM ACTIVE REGION (last 1-5 non-empty lines = composer / status
     // line). The pre-fix `rfind` across the whole Tail(40) buffer let a
     // historical spinner/`Working` token out-position the live `❯`/`›`
     // composer (the rfind-recency family bug — same shape as the #320
@@ -155,7 +155,7 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
         .lines()
         .rev()
         .filter(|line| !line.trim().is_empty())
-        .take(3)
+        .take(5)
         .collect();
     if active_region.is_empty() {
         return None;
@@ -168,11 +168,13 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
             has_idle_prompt = true;
         }
         // codex live spinner shapes (provider/adapter.rs:875-876 markers):
-        // braille spinner, `• Working (`, `Thinking`; claude `✶`/`✢` per
-        // adapter; we look for STRUCTURAL composer signals.
+        // braille spinner, `• Working (`, `Thinking`; claude `✶`/`✢`/`✻`
+        // and Claude Code tool-progress verbs. We look for STRUCTURAL
+        // composer/status signals in the active region only.
         if [
             "working (", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦",
-            "⠧", "⠇", "⠏", "✶", "✢",
+            "⠧", "⠇", "⠏", "✶", "✢", "✻", "analyzing", "reading", "writing",
+            "searching", "running", "editing",
         ]
         .iter()
         .any(|needle| lower.contains(needle))

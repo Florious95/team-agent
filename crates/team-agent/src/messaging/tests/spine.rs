@@ -623,6 +623,45 @@ fn e47_claude_live_working_in_bottom_active_region_classifies_working() {
 }
 
 #[test]
+fn worker_state_claude_code_busy_signal_within_bottom_five_classifies_working() {
+    let scrollback = "older output\n\
+                      ✻ Searching files\n\
+                      Reading src/lib.rs\n\
+                      tool progress\n\
+                      status line\n\
+                      › Continue?\n\
+                      ❯ ";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, Some("claude"), None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Working,
+        "Claude Code busy signal inside the bottom five active lines must \
+         classify Working even when an idle prompt glyph is also visible. Got {a:?}"
+    );
+}
+
+#[test]
+fn worker_state_historical_claude_code_busy_above_bottom_five_stays_idle() {
+    let scrollback = "✻ Searching old result\n\
+                      historical tool output\n\
+                      line 1\n\
+                      line 2\n\
+                      line 3\n\
+                      line 4\n\
+                      › Continue?\n\
+                      ❯ ";
+    let st = serde_json::json!({});
+    let a = classify_agent_activity(&st, scrollback, false, Some("claude"), None);
+    assert_eq!(
+        a.status,
+        ActivityStatus::Idle,
+        "Claude Code busy signal above the bottom five active lines is \
+         scrollback history and must not override the live idle prompt. Got {a:?}"
+    );
+}
+
+#[test]
 fn e47_iron_law_no_signal_in_bottom_region_stays_uncertain_not_idle() {
     // Defence: IRON LAW (activity.rs:3 / bug-071/077/085). When the bottom
     // active region has no spinner AND no `❯`/`›` AND no other decisive
