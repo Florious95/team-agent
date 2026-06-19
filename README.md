@@ -2,204 +2,87 @@
 
 # Team Agent
 
-> Talk once. Ship a team.
+> Use Claude Code the way you always do — now lead a whole team.
 
 ![demo](assets/demo-en.gif)
 
-A multi-agent runtime for Claude Code and Codex CLI where **the lead does the orchestration** — you describe a goal in plain language and it builds a team across providers, runs the work, and reports back.
+## What is this
 
-No DAG. No YAML. No Kanban. Just a conversation.
+Right now, when you use Claude Code (or Codex, or Copilot CLI), you have one pair of hands: while it writes the frontend, the backend waits; while it runs tests, you wait.
 
-```bash
-npx @team-agent/installer@latest install
-```
+With Team Agent installed, it's still the same conversation window, but you can say:
 
-**Important:** the lead Claude/Codex conversation must run inside a
-tmux-managed pane. The easiest path is `team-agent claude` or
-`team-agent codex`; existing tmux layouts also work. A plain terminal without a
-tmux pane is not enough, because teammates need a concrete pane target to send
-verified messages back to the lead.
+> "This is too slow for one person. Build a team: one for backend, one for frontend, one for tests."
 
----
+Then:
 
-## Why this exists
+- New windows pop up, one per teammate, **all working in parallel**
+- Teammates message each other directly (frontend asks backend for the API schema — no need to go through you)
+- You only talk to the lead; the lead reports progress and only escalates when there's a real decision
 
-You have a $20 Claude subscription. It's day 18 of the month. You're out of credits but you still have work to ship.
+No config files. No new UI to learn. If you can chat with Claude, you can run a team.
 
-You could pay $200. You could switch to a cheaper model and lose Claude's taste. You could wait until the 1st.
-
-Or you could let Claude stay the lead — designing tasks, coordinating, reviewing — while Codex or a third-party-API-routed Claude handles implementation. Same conversation, ~10x cheaper, no quality loss.
-
-That's one of the things this is for. **The lead stays Claude. The hands can be anyone.**
-
----
-
-## What it actually does
-
-Install once. Then in any Claude Code or Codex CLI conversation, say something like:
-
-> "Build a small SaaS for tracking client feedback — backend, frontend, tests, and acceptance criteria."
-
-The lead figures out:
-
-- What roles you need (and how rich each role's definition should be)
-- Which provider each role should run on (Claude for taste, Codex for logic, third-party for cost)
-- How teammates communicate (peer-to-peer, with shared task lists)
-- When to escalate decisions back to you
-
-It then spawns the team, runs the work, and reports back. You stay in the same conversation the whole time. Teammates show up in separate terminal windows so you can watch what each is doing without leaving the lead.
-
-Close your terminal. Come back tomorrow. The team is still there. Open Claude Code again — pick up where you left off.
-
----
-
-## What makes it different
-
-There are good multi-agent tools today. Each picks a different tradeoff:
-
-|                            | Form               | You configure                  | Lead                                  | Where it runs       |
-| -------------------------- | ------------------ | ------------------------------ | ------------------------------------- | ------------------- |
-| **agent-teams-ai** (871★)  | Electron app       | Roles + provisioning prompt in UI | "CTO" watches Kanban               | Desktop app         |
-| **omo** (54.9k★)           | OpenCode plugin    | `ultrawork` command word       | Sisyphus, fixed roles                 | OpenCode TUI        |
-| **CCB** (2.5k★)            | CLI + TOML         | `.ccb/ccb.config` per team     | None (you compose)                    | tmux                |
-| **ClawTeam** (3.3k★)       | CLI + prompt inject | TOML team templates            | None                                  | tmux + Web UI       |
-| **Team Agent** (this)      | MCP runtime        | Nothing                        | The native Claude/Codex you're already talking to | Your existing terminal |
-
-The lead in this project isn't a special "orchestrator agent" with its own personality. **It's just Claude (or Codex)** — the same one you'd talk to about anything else, now with the ability to spawn and manage teammates.
-
-This matters because:
-
-- **Orchestration scales with model intelligence**, not with framework features. When Claude 5 ships, the lead gets smarter automatically. No update required on our side.
-- **The lead can build any team for any task**, not just predefined coding roles. We've run academic paper revisions, multi-role brainstorming sessions, even adversarial games like Werewolf — none of them programmed, all of them composed by the lead in conversation.
-- **You give up the orchestration UI**, you gain the ability to ship work whose specifics you couldn't have specified up front.
-
----
-
-## How it works (briefly)
-
-Three design choices make this possible:
-
-**1. The orchestration layer is the lead.** No external workflow engine. The lead reasons about role definitions, dispatches via MCP tools, and adjusts the team in real time from your conversation. Add a teammate mid-flow, change someone's role, dissolve a team — all in plain language.
-
-**2. Transport is infrastructure, identity is persistent.** Teammates run as long-lived `claude` or `codex` processes with stable session IDs. When a window dies, the runtime respawns it and restores state — without that event ever entering any agent's context. Identity is injected at the system-prompt level, not via fragile chat-history hacks.
-
-**3. Standards over inventions.** MCP for tool calls, Skill files for role definitions. Anything the broader ecosystem ships, this picks up automatically.
-
----
-
-## Quick start
-
-### Install
+## Install
 
 ```bash
 npx @team-agent/installer@latest install
 ```
 
-This sets up the MCP server, registers the Team Agent skill, and wires it into your Claude Code / Codex CLI config.
-
-Source checkout install:
-
-```bash
-git clone https://github.com/Florious95/team-agent.git team-agent
-cd team-agent
-npm exec --yes --package . -- team-agent-installer install
-```
-
-### Windows + WSL
-
-If you run `npx @team-agent/installer@latest install` from
-`/mnt/c/Users/<user>/` and see npm warn
-`config prefix cannot be changed from project config`, followed by
-`team-agent-installer: not found`, npm did not expose the installer bin shim.
-
-This is usually caused by a project-level `.npmrc` under `/mnt/c/Users/<user>/`
-that contains a `prefix=...` setting. Action: move that setting to `~/.npmrc`,
-or delete the project-level `prefix` line, then retry from your Linux home:
-
-```bash
-cd ~
-npx @team-agent/installer@latest install
-```
-
-Fallback explicit package form:
-
-```bash
-npx --package @team-agent/installer team-agent-installer install
-```
-
-### Use
-
-Start the lead inside tmux. The shortcut commands create or attach a tmux
-leader session when needed:
+Then start like this (instead of typing `claude` / `codex` / `copilot` directly):
 
 ```bash
 team-agent claude
-team-agent codex
 ```
 
-If you already use tmux/Ghostty/Finder layouts, keep using them; the hard
-requirement is that the visible lead conversation has a tmux pane. Then talk to
-the lead:
+Two steps. Everything else happens in the conversation.
+
+## What you can say
+
+Team building and management is all natural language. Some real examples:
 
 ```
-You:   I want to refactor this codebase, split it into a monorepo,
-       and add proper test coverage. Help me plan and run this.
+"Refactor this codebase into a monorepo and add test coverage. Build a team, show me the plan first."
 
-Lead:  [proposes a team — refactor architect (Claude), code mover (Codex),
-        test author (Claude), reviewer (Codex). Surfaces the tradeoffs,
-        waits for your confirmation.]
+"Add another person just for code review — every merge goes through them."
 
-You:   Go.
-```
+"The frontend role isn't working out. Reset it and try a different approach."
 
-That's it. With the default display, teammates appear in separate Ghostty
-windows. If `display_backend: ghostty_workspace` is set, teammates appear in one
-Ghostty window with tmux tabs/windows, up to three side-by-side panes per tab
-(`4` workers => `3 + 1`, `8` workers => `3 + 3 + 2`). The lead reports
-progress, raises decisions when needed, and shuts everything down when you say
-so.
-
-### Stop / resume
-
-```
-You:   Close the team for now.
-Lead:  [Saves state, closes panes. ~2 seconds.]
+"Wrap it up for today."              ← Team closes, state saved
 
 (next day)
-
-You:   Continue yesterday's refactor team.
-Lead:  [Restores teammates from saved sessions. ~2 seconds. Same context.]
+"Continue yesterday's refactor team." ← Same people, same memory, pick up where they left off
 ```
 
----
+Teammates aren't limited to coding roles. People have used it for multi-round paper reviews (reviewers critique each other then reach consensus), multi-role brainstorming, even having 5 agents play four rounds of Werewolf autonomously. If you can describe the division of labor, the lead can build the team.
 
-## What works today
+## Teammates can come from different CLIs
 
-Verified across multiple real workflows:
+The lead and each teammate independently choose which CLI to use:
 
-- **Cross-vendor mixed teams** — Claude leading, Codex implementing, third-party-API Claude on tests
-- **Web development teams** — 5 roles: frontend / backend / contract / requirements / testing
-- **Academic collaboration** — 5-stage paper revision with adversarial reviewers and consensus mechanism
-- **Game / experimental** — 4-round "Who's the Spy" experiments (1 lead + 4 players, fully autonomous, surfaced a real LLM theory-of-mind observation)
-- **Emergent recovery** — leads automatically pressing enter on Codex permission prompts; teams surviving pane closures and resuming the next day
-- **Dialog-driven team mutation** — adding teammates mid-flow, changing roles, dissolving a team, all without leaving the lead's conversation
+|          | Claude Code | Codex CLI | Copilot CLI |
+| -------- | :--: | :--: | :--: |
+| Lead     | ✓ | ✓ | ✓ |
+| Teammate | ✓ | ✓ | ✓ |
 
----
+In other words: let Claude be the lead for planning and review, let Codex teammates handle bulk implementation. Mix and match whatever subscriptions you have.
 
-## Supported leads and teammates
+## FAQ
 
-| Role     | Claude Code (subscription) | Claude Code (third-party API) | Codex CLI |
-| -------- | -------------------------- | ----------------------------- | --------- |
-| Lead     | ✓                          | ✓                             | ✓         |
-| Teammate | ✓                          | ✓                             | ✓         |
+**What do I need?**
+macOS or Linux (including WSL), at least one CLI from the table above, and tmux (`team-agent claude` handles tmux automatically — you don't need to know tmux).
 
-Any teammate can be backed by a different provider/tier than the lead. The runtime handles auth, session lifecycle, and resume per teammate independently.
+**Do I have to watch the teammate windows?**
+No. The windows are there if you want to glance at them. All reports come back to the lead's conversation.
 
----
+**Will the team die if I close the terminal?**
+No. The team keeps running in the background. Reopen your conversation and pick up where you left off.
+
+**How is this different from Claude Code's built-in subagents?**
+Subagents are one-shot, fire-and-forget, and can't talk to each other. Team Agent teammates are persistent roles: they have their own memory, can message each other, and are still there tomorrow.
 
 ## Status
 
-**Beta.** Working in real use, but expect rough edges in less common configurations. Issues and PRs welcome.
+**Beta.** Used daily in real projects. Rough edges possible in uncommon configurations. Issues and PRs welcome.
 
 ## License
 
