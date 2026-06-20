@@ -1476,7 +1476,6 @@ fn claude_base_command(
         };
         argv.push("--mcp-config".to_string());
         argv.push(raw.to_string());
-        argv.push("--strict-mcp-config".to_string());
     }
     for tool in claude_disallowed_tools(tools) {
         argv.push("--disallowedTools".to_string());

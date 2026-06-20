@@ -216,6 +216,31 @@ fn build_command_includes_model_and_system_prompt() {
 }
 
 #[test]
+fn claude_mcp_config_does_not_enable_strict_mode() {
+    let adapter = get_adapter(Provider::ClaudeCode);
+    let config = adapter
+        .mcp_config(AuthMode::Subscription)
+        .expect("mcp config");
+    let argv = adapter
+        .build_command(
+            AuthMode::Subscription,
+            Some(&config),
+            Some("worker"),
+            Some("opus"),
+        )
+        .expect("build command with mcp config");
+
+    assert!(
+        argv_contains_adjacent(&argv, &["--mcp-config"]),
+        "Claude worker argv must still pass Team Agent MCP config: {argv:?}"
+    );
+    assert!(
+        !argv.iter().any(|arg| arg == "--strict-mcp-config"),
+        "--mcp-config must merge with user-level Claude MCP; strict mode hides user MCP: {argv:?}"
+    );
+}
+
+#[test]
 fn unsupported_provider_capability_error_message_shape() {
     // unsupported.py:31 ProviderCapabilityError — placeholder providers reject
     // on call. The skeleton Provider enum has no Copilot/Opencode variant, so
@@ -236,4 +261,3 @@ fn unsupported_provider_capability_error_message_shape() {
 // ═══════════════ P2 FIX-LOOP RED (复绿即对抗 cross-model findings) ═══════════════
 // Lock the CORRECT Python v0.2.11 behavior the strengthened contracts missed.
 // Golden re-probed via /tmp/probe_p2_provider.py vs team-agent-public @ 439bef8.
-

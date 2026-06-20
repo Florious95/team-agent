@@ -172,7 +172,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     if !convergence.converged && convergence.changed {
         save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
-    let mut forced_fresh_missing = if convergence.converged {
+    let forced_fresh_missing = if convergence.converged {
         std::collections::BTreeSet::new()
     } else {
         convergence.missing.iter().cloned().collect()
@@ -183,12 +183,6 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         &state,
         allow_fresh,
     )?;
-    for decision in &plan.decisions {
-        if matches!(decision.decision, ResumeDecision::FreshStart) && decision.session_id.is_some()
-        {
-            forced_fresh_missing.insert(decision.agent_id.as_str().to_string());
-        }
-    }
     write_restart_resume_decision_events(
         &selected.run_workspace,
         &state,

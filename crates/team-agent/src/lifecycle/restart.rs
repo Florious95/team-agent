@@ -43,6 +43,7 @@ pub use rebuild::{
     restart, restart_candidates, restart_with_session_convergence_deadline, restart_with_transport,
     restart_with_transport_with_readiness_deadline, select_restart_state,
 };
+pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
 pub use remove::{remove_agent, remove_agent_with_transport};
 pub use selection::{classify_first_send_at, classify_restart_plan, decide_start_mode, python_type_name};
 pub(crate) use team_state::write_team_state;

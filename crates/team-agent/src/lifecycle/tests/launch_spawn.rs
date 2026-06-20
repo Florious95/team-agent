@@ -1534,6 +1534,107 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
 }
 
 #[test]
+fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_capture_times_out() {
+    let ws = temp_ws().join("restartatomic");
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: restartatomic\nobjective: Restart atomicity probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
+    std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
+
+    let sessions_root = ws.join("codex-sessions");
+    let dated = sessions_root.join("2026").join("06").join("20");
+    std::fs::create_dir_all(&dated).unwrap();
+    let alpha_session = "019ee540-37ed-7a20-a141-1d654224d209";
+    std::fs::write(
+        dated.join(format!(
+            "rollout-2026-06-20T21-37-31-{alpha_session}.jsonl"
+        )),
+        "{}\n",
+    )
+    .unwrap();
+
+    let spec = crate::compiler::compile_team(&ws).expect("compile restart team");
+    std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-restartatomic",
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "provider": "codex",
+                    "session_id": alpha_session,
+                    "rollout_path": ws.join("stale").join("missing-alpha.jsonl").to_string_lossy(),
+                    "codex_sessions_root": sessions_root.to_string_lossy(),
+                    "first_send_at": "2026-05-27T10:00:00+00:00"
+                },
+                "bravo": {
+                    "status": "running",
+                    "provider": "codex",
+                    "session_id": null,
+                    "spawn_cwd": ws.to_string_lossy(),
+                    "first_send_at": "2026-05-27T10:00:00+00:00"
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&ws);
+    let transport = OfflineTransport::new();
+
+    let result = restart_with_transport_with_session_convergence_deadline(
+        &ws,
+        true,
+        None,
+        &transport,
+        Some(0),
+        None,
+    );
+
+    assert!(
+        matches!(result, Ok(RestartReport::Restarted { .. })),
+        "allow-fresh restart should complete with alpha resumed and bravo fresh; got {result:?}"
+    );
+    let events = crate::event_log::EventLog::new(&ws).tail(80).unwrap();
+    let decisions = events
+        .iter()
+        .filter(|event| {
+            event.get("event").and_then(|v| v.as_str()) == Some("restart.resume_decision")
+        })
+        .collect::<Vec<_>>();
+    let alpha = decisions
+        .iter()
+        .find(|event| event.get("worker_id").and_then(|v| v.as_str()) == Some("alpha"))
+        .expect("alpha decision");
+    assert_eq!(
+        alpha.get("decision").and_then(|v| v.as_str()),
+        Some("resume"),
+        "alpha has session_id plus matching codex transcript and must not be forced fresh: {alpha}"
+    );
+    assert!(
+        alpha.get("forced_fresh").is_none(),
+        "alpha must not inherit bravo's convergence timeout: {alpha}"
+    );
+    let bravo = decisions
+        .iter()
+        .find(|event| event.get("worker_id").and_then(|v| v.as_str()) == Some("bravo"))
+        .expect("bravo decision");
+    assert_eq!(
+        bravo.get("decision").and_then(|v| v.as_str()),
+        Some("fresh_start")
+    );
+    assert_eq!(
+        bravo.get("forced_fresh").and_then(|v| v.as_bool()),
+        Some(true),
+        "only the missing-session agent should carry forced_fresh: {bravo}"
+    );
+}
+
+#[test]
 fn restart_spawn_failure_isolated_to_partial_report() {
     let ws = restart_ws_two_resumable_workers();
     let transport = OfflineTransport::new().with_spawn_failure("bravo", "injected bravo failure");
