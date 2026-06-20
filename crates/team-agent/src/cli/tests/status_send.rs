@@ -50,10 +50,15 @@ use super::*;
             "results",
             "latest_results",
             "coordinator",
+            "reminder",
             "last_events",
         ] {
             assert!(obj.contains_key(key), "compact status missing key `{key}`");
         }
+        assert_eq!(
+            obj.get("reminder").and_then(|v| v.as_str()),
+            Some(crate::cli::STATUS_REMINDER)
+        );
         // seeded agent surfaces through the projection.
         assert!(
             obj["agents"].as_object().unwrap().contains_key("a1"),
@@ -62,6 +67,27 @@ use super::*;
         // compact bounds: queued_messages[:8] and latest_results[:5] -> arrays.
         assert!(obj["queued_messages"].is_array());
         assert!(obj["latest_results"].as_array().unwrap().len() <= 5);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn cmd_status_human_appends_harness_reminder() {
+        let ws = seed_status_workspace();
+        let args = StatusArgs {
+            agent: None,
+            workspace: ws.clone(),
+            detail: false,
+            summary: false,
+            json: false,
+        };
+
+        let r = cmd_status_for_team(&args, None).expect("status");
+        let text = match r.output {
+            CmdOutput::Human(text) => text,
+            other => panic!("expected human status output, got {other:?}"),
+        };
+
+        assert!(text.ends_with(crate::cli::STATUS_REMINDER), "{text}");
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -255,6 +281,12 @@ use super::*;
         match r.output {
             CmdOutput::Json(ref v) => {
                 assert!(v.get("ok").is_some(), "send result Json must carry `ok`");
+                if v.get("ok").and_then(|ok| ok.as_bool()) == Some(true) {
+                    assert_eq!(
+                        v.get("reminder").and_then(|reminder| reminder.as_str()),
+                        Some(crate::cli::SEND_REMINDER)
+                    );
+                }
             }
             other => panic!("cmd_send must emit Json DeliveryOutcome, got {other:?}"),
         }

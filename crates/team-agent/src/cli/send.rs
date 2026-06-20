@@ -22,7 +22,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         if content.is_empty() {
             return Err(CliError::Usage("--pane requires a non-empty message".to_string()));
         }
-        let value = send_to_pane_direct(
+        let mut value = send_to_pane_direct(
             &args.workspace,
             pane_id,
             &content,
@@ -31,6 +31,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             args.team.as_deref(),
             args.json,
         )?;
+        add_send_reminder_if_ok(&mut value);
         return Ok(CmdResult::from_json(value, args.json));
     }
     let selected = crate::state::selector::resolve_active_team(
@@ -60,6 +61,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             obj.insert("watch".to_string(), watch_notice_json(&target, &opts));
         }
     }
+    add_send_reminder_if_ok(&mut value);
     Ok(CmdResult::from_json(value, args.json))
 }
 
@@ -469,6 +471,15 @@ fn delivery_outcome_json(
         "reason": outcome.reason.map(delivery_refusal_wire),
         "channel": outcome.channel,
     })
+}
+
+fn add_send_reminder_if_ok(value: &mut Value) {
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("reminder".to_string(), json!(crate::cli::SEND_REMINDER));
+    }
 }
 
 fn target_json(target: &MessageTarget) -> Value {

@@ -48,6 +48,9 @@ use crate::messaging::{self, AlertType, MessageTarget, SendOptions};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";
+pub(crate) const QUICK_START_REMINDER: &str = "Reminder: Do not inspect raw worker terminal output during normal operation. Use team-agent status / inbox / collect instead. Wait for report_result.";
+pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.";
+pub(crate) const STATUS_REMINDER: &str = "To wait for results use --watch-result or team-agent collect. Do not capture-pane worker terminals.";
 
 pub mod adapters;
 pub mod diagnose;
@@ -2528,6 +2531,7 @@ pub mod lifecycle_port {
                     "display_backend": display_backend,
                     "next_actions": next_actions,
                     "attach_commands": attach_commands,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
                     "readiness": readiness_json.clone(),
                     "worker_readiness": readiness_json,
                 })
@@ -2546,6 +2550,7 @@ pub mod lifecycle_port {
                 "state_path": state_path.map(|p| p.to_string_lossy().to_string()),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::QuickStartReport::PreflightBlocked {
                 summary,
@@ -2558,6 +2563,7 @@ pub mod lifecycle_port {
                 "blockers": blockers,
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
         }
     }
@@ -2582,6 +2588,10 @@ pub mod lifecycle_port {
                 Some("tmux -S /tmp/tmux-501/ta-test attach -t team-teamA:worker"),
                 "B-2: ExistingRuntime JSON must preserve attach_commands instead of only next_actions; value={value}"
             );
+            assert_eq!(
+                value.get("reminder").and_then(Value::as_str),
+                Some(crate::cli::QUICK_START_REMINDER)
+            );
         }
 
         #[test]
@@ -2596,6 +2606,20 @@ pub mod lifecycle_port {
                 value.get("attach_commands").and_then(Value::as_array).map(Vec::len),
                 Some(0),
                 "B-2: PreflightBlocked JSON must include attach_commands: [] for schema parity with Ready/Restart; value={value}"
+            );
+        }
+
+        #[test]
+        fn restart_json_includes_harness_reminder() {
+            let value = restart_value(crate::lifecycle::RestartReport::RefusedResumeAtomicity {
+                unresumable: Vec::new(),
+                allow_fresh: false,
+                error: "resume refused".to_string(),
+            });
+
+            assert_eq!(
+                value.get("reminder").and_then(Value::as_str),
+                Some(crate::cli::QUICK_START_REMINDER)
             );
         }
     }
@@ -2616,6 +2640,7 @@ pub mod lifecycle_port {
                 "coordinator_started": coordinator_started,
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::Partial {
                 session_name,
@@ -2650,6 +2675,7 @@ pub mod lifecycle_port {
                 "coordinator_started": coordinator_started,
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::Failed {
                 session_name,
@@ -2681,6 +2707,7 @@ pub mod lifecycle_port {
                 })).collect::<Vec<_>>(),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::RefusedResumeAtomicity {
                 unresumable,
@@ -2692,6 +2719,7 @@ pub mod lifecycle_port {
                 "allow_fresh": allow_fresh,
                 "error": error,
                 "unresumable": unresumable.iter().map(|w| w.agent_id.as_str()).collect::<Vec<_>>(),
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::RefusedResumeNotReady {
                 missing,
@@ -2716,6 +2744,7 @@ pub mod lifecycle_port {
                     "pending_agent_ids": missing.iter().map(|w| w.as_str()).collect::<Vec<_>>(),
                 },
                 "next_action": "rerun restart after session capture completes, or pass --allow-fresh to deliberately discard missing context",
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
             crate::lifecycle::RestartReport::RefusedInvalidFirstSendAt {
                 invalid,
@@ -2727,6 +2756,7 @@ pub mod lifecycle_port {
                 "allow_fresh": allow_fresh,
                 "error": error,
                 "invalid": invalid.iter().map(|w| w.worker_id.as_str()).collect::<Vec<_>>(),
+                "reminder": crate::cli::QUICK_START_REMINDER,
             }),
         }
     }

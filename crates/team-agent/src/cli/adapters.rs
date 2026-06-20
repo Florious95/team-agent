@@ -152,7 +152,7 @@ fn quickstart_human(value: &Value) -> String {
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     if attach.is_empty() {
-        return summary.to_string();
+        return append_reminder(summary.to_string(), crate::cli::QUICK_START_REMINDER);
     }
     let mut out = String::from(summary);
     out.push_str("\n\nattach:");
@@ -160,7 +160,15 @@ fn quickstart_human(value: &Value) -> String {
         out.push_str("\n  ");
         out.push_str(cmd);
     }
-    out
+    append_reminder(out, crate::cli::QUICK_START_REMINDER)
+}
+
+fn append_reminder(text: String, reminder: &str) -> String {
+    if text.is_empty() {
+        reminder.to_string()
+    } else {
+        format!("{text}\n{reminder}")
+    }
 }
 
 /// `cmd_compile`(`commands.py:42`)。
@@ -240,7 +248,10 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
             true,
             false,
         )?;
-        return Ok(CmdResult::human(format_status_summary(&value)));
+        return Ok(CmdResult::human(append_reminder(
+            format_status_summary(&value),
+            crate::cli::STATUS_REMINDER,
+        )));
     }
     if args.json {
         let value = status_port::status_scoped(
@@ -252,12 +263,15 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         )?;
         return Ok(CmdResult::from_json(value, true));
     }
-    Ok(CmdResult::human(status_port::format_status_scoped(
-        &selected.run_workspace,
-        &selected.state,
-        Some(&selected.team_key),
-        args.agent.as_deref(),
-    )?))
+    Ok(CmdResult::human(append_reminder(
+        status_port::format_status_scoped(
+            &selected.run_workspace,
+            &selected.state,
+            Some(&selected.team_key),
+            args.agent.as_deref(),
+        )?,
+        crate::cli::STATUS_REMINDER,
+    )))
 }
 
 fn status_selector_error_payload(error: &str, workspace: &Path) -> Value {
@@ -276,6 +290,7 @@ fn status_selector_error_payload(error: &str, workspace: &Path) -> Value {
         "action": "run `team-agent doctor` or inspect the log path shown here",
         "log": log_path.to_string_lossy().to_string(),
         "workspace": workspace.to_string_lossy().to_string(),
+        "reminder": crate::cli::STATUS_REMINDER,
     })
 }
 
@@ -1583,15 +1598,22 @@ mod tests {
         assert!(out.contains("team started"), "must keep summary; got {out}");
         assert!(out.contains("attach:"), "must render attach block; got {out}");
         assert!(out.contains("team-y:w1") && out.contains("team-y:w2"), "must list each attach cmd; got {out}");
+        assert!(out.ends_with(crate::cli::QUICK_START_REMINDER), "must append harness reminder; got {out}");
     }
 
     #[test]
     fn e13_quickstart_human_summary_only_when_no_attach() {
         let value = json!({"summary": "quick-start complete"});
-        assert_eq!(quickstart_human(&value), "quick-start complete");
+        assert_eq!(
+            quickstart_human(&value),
+            format!("quick-start complete\n{}", crate::cli::QUICK_START_REMINDER)
+        );
         // 空数组也只 summary。
         let value2 = json!({"summary": "s", "attach_commands": []});
-        assert_eq!(quickstart_human(&value2), "s");
+        assert_eq!(
+            quickstart_human(&value2),
+            format!("s\n{}", crate::cli::QUICK_START_REMINDER)
+        );
     }
 
     #[test]

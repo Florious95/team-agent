@@ -99,6 +99,7 @@ use rusqlite::params;
             "readiness": readiness,
             "coordinator": coordinator_health_value(health),
             "runtime": runtime_block,
+            "reminder": crate::cli::STATUS_REMINDER,
             "last_events": Value::Array(
                 crate::event_log::EventLog::new(workspace)
                     .tail(10)
@@ -598,6 +599,7 @@ use rusqlite::params;
             "latest_results": take_array(full.get("latest_results"), 5),
             "readiness": full.get("readiness").cloned().unwrap_or_else(|| json!({})),
             "coordinator": compact_object(full.get("coordinator"), &["status", "pid", "metadata_ok", "schema_ok"]),
+            "reminder": full.get("reminder").cloned().unwrap_or_else(|| json!(crate::cli::STATUS_REMINDER)),
             "last_events": take_array_tail(full.get("last_events"), 10),
         })
     }
