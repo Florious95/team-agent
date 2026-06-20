@@ -67,11 +67,8 @@ pub fn leader_start_plan(
         Some(leader_session_name(provider, workspace))
     };
     let in_tmux = std::env::var_os("TMUX").is_some();
-    if !in_tmux || !external_path {
+    if !in_tmux {
         ensure_tmux_installed()?;
-    }
-    if !external_path {
-        validate_managed_tmux_context(workspace)?;
     }
     let existing_session = if external_path && !in_tmux && !attach_existing && attach_session.is_none() {
         match session_name.as_ref() {
@@ -81,7 +78,9 @@ pub fn leader_start_plan(
     } else {
         false
     };
-    let mode = if !external_path {
+    let mode = if !external_path && in_tmux {
+        LeaderStartMode::ExecProvider
+    } else if !external_path {
         LeaderStartMode::ManagedTmuxClient
     } else if in_tmux {
         LeaderStartMode::ExecProvider
@@ -99,6 +98,11 @@ pub fn leader_start_plan(
         session_name.as_ref(),
         &leader_env,
     )?;
+    let plan_session_name = if mode == LeaderStartMode::ExecProvider && !external_path {
+        None
+    } else {
+        session_name
+    };
     let plan_env = if mode == LeaderStartMode::ExecProvider {
         merged_exec_env(&leader_env)
     } else {
@@ -110,7 +114,7 @@ pub fn leader_start_plan(
         provider,
         workspace: resolve_workspace_for_hash(workspace),
         socket: LeaderLaunchSocket::Workspace,
-        session_name,
+        session_name: plan_session_name,
         argv,
         provider_argv,
         // 0.3.28 Step 2: leader window inside the dedicated leader session is
@@ -208,7 +212,9 @@ pub fn execute_leader_plan(
     let detached = plan.mode == LeaderStartMode::NewTmuxSession
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
-    if plan.is_external_leader {
+    if plan.mode == LeaderStartMode::ExecProvider && !plan.is_external_leader {
+        persist_exec_provider_leader_binding(plan, workspace)?;
+    } else if plan.is_external_leader {
         persist_external_leader_topology_marker(plan, workspace)?;
     }
     let status = run_leader_argv(&argv, &plan.leader_env, plan, workspace)?;
@@ -370,27 +376,6 @@ fn managed_client_argv(
         ]
     };
     Ok(TmuxBackend::argv_for_workspace(workspace, &argv))
-}
-
-fn validate_managed_tmux_context(workspace: &Path) -> Result<(), LeaderError> {
-    let Some(current_endpoint) = crate::tmux_backend::socket_name_from_tmux_env() else {
-        return Ok(());
-    };
-    let expected = crate::tmux_backend::socket_name_for_workspace(workspace);
-    if tmux_endpoint_matches_socket_name(&current_endpoint, &expected) {
-        return Ok(());
-    }
-    Err(LeaderError::Start(format!(
-        "Error: managed leader launch refused inside a different tmux server\nReason: current TMUX socket is {current_endpoint}, but this team uses {expected}\nAction: detach and run from a normal shell, or use --external-leader for the external leader topology"
-    )))
-}
-
-fn tmux_endpoint_matches_socket_name(endpoint: &str, socket_name: &str) -> bool {
-    endpoint == socket_name
-        || Path::new(endpoint)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(socket_name)
 }
 
 fn execute_managed_leader_plan(
@@ -555,6 +540,116 @@ fn persist_managed_leader_binding(
     }
     crate::state::persist::save_runtime_state(workspace, &state)?;
     Ok(())
+}
+
+fn persist_exec_provider_leader_binding(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<(), LeaderError> {
+    let identity = plan
+        .identity
+        .as_ref()
+        .ok_or_else(|| LeaderError::Start("exec provider leader identity missing".to_string()))?;
+    let pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| LeaderError::Start("exec provider leader pane missing".to_string()))?;
+    let pane_id = PaneId::new(pane.clone());
+    let target = current_tmux_pane_info(&pane_id);
+    let mut state = crate::state::persist::load_runtime_state(workspace)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let owner_epoch = state
+        .get("owner_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            state
+                .get("team_owner")
+                .and_then(|owner| owner.get("owner_epoch"))
+                .and_then(serde_json::Value::as_u64)
+        })
+        .unwrap_or(0)
+        .saturating_add(1);
+    let now = chrono::Utc::now().to_rfc3339();
+    let socket = crate::tmux_backend::socket_name_from_tmux_env();
+    let provider = serde_json::to_value(plan.provider)?;
+    let mut receiver = serde_json::json!({
+        "mode": "direct_tmux",
+        "status": "attached",
+        "provider": provider.clone(),
+        "pane_id": pane,
+        "pane": pane,
+        "leader_session_uuid": identity.leader_session_uuid,
+        "owner_epoch": owner_epoch,
+        "attached_at": now,
+        "discovery": "current_pane",
+    });
+    if let Some(target) = target.as_ref() {
+        if let Some(obj) = receiver.as_object_mut() {
+            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+            if let Some(window_name) = target.window_name.as_ref() {
+                obj.insert("window_name".to_string(), serde_json::json!(window_name.as_str()));
+            }
+        }
+    }
+    if let Some(socket) = socket.as_ref() {
+        if let Some(obj) = receiver.as_object_mut() {
+            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
+        }
+    }
+    let owner = serde_json::json!({
+        "pane_id": pane,
+        "provider": provider.clone(),
+        "machine_fingerprint": identity.machine_fingerprint,
+        "leader_session_uuid": identity.leader_session_uuid,
+        "owner_epoch": owner_epoch,
+        "claimed_at": now,
+        "claimed_via": "claim-leader",
+        "os_user": identity.os_user,
+    });
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert(
+            "active_team_key".to_string(),
+            serde_json::json!(identity.team_id.as_str()),
+        );
+        if let Some(target) = target.as_ref() {
+            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+        }
+        if let Some(socket) = socket.as_ref() {
+            obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
+            obj.insert("tmux_socket".to_string(), serde_json::json!(socket));
+        }
+        obj.insert("is_external_leader".to_string(), serde_json::json!(false));
+        obj.insert(
+            "leader_client".to_string(),
+            serde_json::json!({
+                "diagnostic_only": true,
+                "attach_mode": "exec-provider",
+                "tmux": std::env::var("TMUX").ok(),
+            }),
+        );
+        obj.insert("leader_receiver".to_string(), receiver);
+        obj.insert("team_owner".to_string(), owner);
+        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
+    }
+    let entry = crate::state::projection::compact_team_state(&state);
+    if let Some(obj) = state.as_object_mut() {
+        let teams = obj
+            .entry("teams".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(teams) = teams.as_object_mut() {
+            teams.insert(identity.team_id.as_str().to_string(), entry);
+        }
+    }
+    crate::state::persist::save_runtime_state(workspace, &state)?;
+    Ok(())
+}
+
+fn current_tmux_pane_info(pane_id: &PaneId) -> Option<crate::transport::PaneInfo> {
+    tmux_transport_for_current_pane()
+        .list_targets()
+        .ok()?
+        .into_iter()
+        .find(|target| target.pane_id == *pane_id)
 }
 
 fn persist_external_leader_topology_marker(
@@ -968,6 +1063,41 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var(key).ok()))
+                .collect::<Vec<_>>();
+            for (key, value) in vars {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in self.saved.drain(..).rev() {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn external_exec_provider_persists_topology_before_provider_exec() {
         let workspace = std::env::temp_dir().join(format!(
@@ -1016,6 +1146,79 @@ mod tests {
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(state["is_external_leader"], serde_json::json!(true));
         assert_eq!(state["teams"]["current"]["is_external_leader"], serde_json::json!(true));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    #[serial_test::serial(env)]
+    fn default_exec_provider_persists_current_pane_binding_before_provider_exec() {
+        let workspace = std::env::temp_dir().join(format!(
+            "ta-current-pane-pre-exec-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let state_path = crate::state::persist::runtime_state_path(&workspace);
+        let command = format!(
+            "test -f {path} && grep -q leader_receiver {path}",
+            path = shlex_quote(&state_path.to_string_lossy())
+        );
+        let _env = EnvGuard::set(&[
+            ("TMUX", Some("/private/tmp/tmux-501/default,88432,187")),
+            ("TMUX_PANE", Some("%77")),
+        ]);
+        let identity = LeaderIdentity {
+            leader_session_uuid: LeaderSessionUuid::derive(
+                "fp",
+                &workspace.to_string_lossy(),
+                "tester",
+                "current",
+            )
+            .unwrap(),
+            leader_session_uuid_source: LeaderSessionUuidSource::Derived,
+            machine_fingerprint: "fp".to_string(),
+            workspace_abspath: workspace.clone(),
+            os_user: "tester".to_string(),
+            team_id: TeamKey::new("current"),
+        };
+        let plan = LeaderStartPlan {
+            mode: LeaderStartMode::ExecProvider,
+            provider: Provider::Fake,
+            workspace: workspace.clone(),
+            socket: LeaderLaunchSocket::Workspace,
+            session_name: None,
+            argv: vec!["sh".to_string(), "-c".to_string(), command],
+            provider_argv: vec!["fake".to_string()],
+            leader_window: None,
+            is_external_leader: false,
+            leader_env: BTreeMap::new(),
+            identity: Some(identity),
+            detached: false,
+        };
+
+        let outcome = execute_leader_plan(&plan, &workspace)
+            .expect("current pane binding must be present before provider argv runs");
+
+        assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
+        let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+        assert_eq!(state["is_external_leader"], serde_json::json!(false));
+        assert_eq!(state["leader_receiver"]["pane_id"], serde_json::json!("%77"));
+        assert_eq!(
+            state["leader_receiver"]["tmux_socket"],
+            serde_json::json!("/private/tmp/tmux-501/default")
+        );
+        assert_eq!(state["team_owner"]["pane_id"], serde_json::json!("%77"));
+        assert_eq!(
+            state["teams"]["current"]["leader_receiver"]["pane_id"],
+            serde_json::json!("%77")
+        );
+        assert_eq!(
+            state["teams"]["current"]["team_owner"]["pane_id"],
+            serde_json::json!("%77")
+        );
+        assert_eq!(
+            state["leader_client"]["attach_mode"],
+            serde_json::json!("exec-provider")
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
