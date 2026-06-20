@@ -157,7 +157,9 @@ fn prepare_profile_launch(
     let mut claude_projects_root = None;
     let mut managed_mcp_config = false;
 
-    if matches!(agent.provider, Provider::Claude | Provider::ClaudeCode) {
+    if matches!(agent.provider, Provider::Claude | Provider::ClaudeCode)
+        && agent.auth_mode == AuthMode::CompatibleApi
+    {
         let dir = compatible_claude_config_dir(workspace, &agent.id)?;
         if let Some(config) = mcp_config {
             ensure_compatible_claude_mcp_config(&dir, workspace, config)?;

@@ -90,6 +90,46 @@ fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_m
 }
 
 #[test]
+#[serial(env)]
+fn subscription_profile_keeps_default_claude_config_dir_for_logged_in_quota() {
+    let ws = tmp_dir("subscription-config");
+    let team = write_claude_subscription_profile_team(&ws, "subteam", "clauder");
+    let transport = RecordingTransport::default();
+
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team,
+        None,
+        true,
+        true,
+        Some("subteam"),
+        &transport,
+    )
+    .expect("subscription profile should launch without managed config isolation");
+
+    let spawn = transport.single_spawn();
+    assert!(
+        !spawn.env.contains_key("CLAUDE_CONFIG_DIR"),
+        "subscription Claude workers must inherit the user's default ~/.claude login state; env={:?}",
+        spawn.env
+    );
+    assert!(
+        !spawn.env.contains_key("ANTHROPIC_API_KEY")
+            && !spawn.env.contains_key("ANTHROPIC_AUTH_TOKEN"),
+        "subscription launch must not switch into API-token auth via profile env; env={:?}",
+        spawn.env
+    );
+
+    let state = load_runtime_state(&ws).unwrap();
+    let agent = &state["teams"]["subteam"]["agents"]["clauder"];
+    assert_eq!(
+        agent.get("claude_projects_root"),
+        None,
+        "without a supported fine-grained Claude projects-root env, subscription workers must not fake an isolated transcript root; state={state}"
+    );
+}
+
+#[test]
 fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver() {
     let launch = source("src/lifecycle/launch.rs");
     let restart_common = source("src/lifecycle/restart/common.rs");
@@ -189,6 +229,32 @@ fn write_claude_profile_team(ws: &Path, team_key: &str, agent_id: &str) -> PathB
         team.join("agents").join(format!("{agent_id}.md")),
         format!(
             "---\nname: {agent_id}\nrole: Claude Worker\nprovider: claude\nauth_mode: compatible_api\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n"
+        ),
+    )
+    .unwrap();
+    team
+}
+
+fn write_claude_subscription_profile_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
+    let team = ws.join(team_key);
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::create_dir_all(ws.join(".team").join("current").join("profiles")).unwrap();
+    std::fs::write(
+        ws.join(".team").join("current").join("profiles").join("local.env"),
+        "AUTH_MODE=subscription\nMODEL=claude-sonnet-4-6\n",
+    )
+    .unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        format!(
+            "---\nname: {team_key}\nobjective: Claude subscription profile launch contract.\nprovider: claude\nauth_mode: subscription\n---\n\nTeam.\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        team.join("agents").join(format!("{agent_id}.md")),
+        format!(
+            "---\nname: {agent_id}\nrole: Claude Worker\nprovider: claude\nauth_mode: subscription\nprofile: local\nmodel: null\ntools:\n  - mcp_team\n---\n\nWorker.\n"
         ),
     )
     .unwrap();
