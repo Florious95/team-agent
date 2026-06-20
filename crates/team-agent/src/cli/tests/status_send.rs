@@ -87,6 +87,59 @@ use super::*;
     }
 
     #[test]
+    fn status_port_managed_attach_command_uses_receiver_window_name() {
+        let ws = seed_status_workspace();
+        let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("is_external_leader".to_string(), json!(false));
+            obj.insert("session_name".to_string(), json!("team-current"));
+            obj.insert(
+                "leader_receiver".to_string(),
+                json!({"pane_id": "%3", "window_name": "claude_code", "status": "attached"}),
+            );
+        }
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+
+        let attach = v["leader_attach_command"]
+            .as_str()
+            .expect("managed status includes attach command");
+        assert!(attach.contains("attach -t team-current:claude_code"), "{attach}");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn leader_attach_command_for_plan_uses_plan_leader_window() {
+        let ws = tmp_workspace();
+        let plan = crate::leader::LeaderStartPlan {
+            mode: crate::leader::LeaderStartMode::ManagedTmuxClient,
+            provider: crate::provider::Provider::ClaudeCode,
+            workspace: ws.clone(),
+            socket: crate::leader::LeaderLaunchSocket::Workspace,
+            session_name: Some(crate::transport::SessionName::new(
+                "team-agent-leader-claude_code-demo".to_string(),
+            )),
+            argv: Vec::new(),
+            provider_argv: Vec::new(),
+            leader_window: Some(crate::transport::WindowName::new("claude_code")),
+            is_external_leader: false,
+            leader_env: std::collections::BTreeMap::new(),
+            identity: None,
+            detached: false,
+        };
+
+        let attach = lifecycle_port::leader_attach_command_for_plan(&ws, &plan)
+            .expect("managed plan has attach command");
+
+        assert!(
+            attach.contains("attach -t team-agent-leader-claude_code-demo:claude_code"),
+            "{attach}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
     fn status_port_missing_topology_marker_defaults_to_managed() {
         let ws = seed_status_workspace();
         let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();

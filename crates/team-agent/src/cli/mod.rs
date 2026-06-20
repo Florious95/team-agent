@@ -158,13 +158,7 @@ pub mod lifecycle_port {
             crate::leader::LeaderLaunchStatus::Detached => true,
             crate::leader::LeaderLaunchStatus::NotStarted => false,
         };
-        let leader_attach_command = if plan.is_external_leader {
-            None
-        } else {
-            plan.session_name.as_ref().and_then(|session| {
-                crate::tmux_backend::attach_command_for_workspace(cwd, session, "leader")
-            })
-        };
+        let leader_attach_command = leader_attach_command_for_plan(cwd, &plan);
         Ok(json!({
             "ok": ok,
             "provider": provider,
@@ -181,6 +175,18 @@ pub mod lifecycle_port {
             "attach_session": attach.attach_session,
             "session_name": plan.session_name.as_ref().map(|session| session.as_str().to_string()),
         }))
+    }
+
+    pub(crate) fn leader_attach_command_for_plan(
+        cwd: &Path,
+        plan: &crate::leader::LeaderStartPlan,
+    ) -> Option<String> {
+        if plan.is_external_leader {
+            return None;
+        }
+        let session = plan.session_name.as_ref()?;
+        let window = plan.leader_window.as_ref()?;
+        crate::tmux_backend::attach_command_for_workspace(cwd, session, window.as_str())
     }
     /// `runtime.shutdown`(`cmd_shutdown`)。
     pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>) -> Result<Value, CliError> {

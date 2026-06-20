@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 
 use crate::provider::{get_adapter, Provider};
 use crate::tmux_backend::TmuxBackend;
-use crate::transport::{PaneId, SessionName, SpawnResult, Target, Transport, WindowName};
+use crate::transport::{
+    PaneId, PaneLiveness, SessionName, SpawnResult, Target, Transport, WindowName,
+};
 
 use super::helpers::{
     provider_wire, resolve_workspace_for_hash, sanitize_session_folder, sha1_hex_prefix,
@@ -405,6 +407,7 @@ fn execute_managed_leader_plan(
                 .unwrap_or_else(|| "signal".to_string())
         )));
     }
+    ensure_managed_provider_live_after_attach(&transport, &spawned)?;
     Ok(LeaderLaunchOutcome {
         status: LeaderLaunchStatus::Exited,
         exit_code: code,
@@ -414,7 +417,7 @@ fn execute_managed_leader_plan(
 }
 
 fn ensure_managed_leader_pane(
-    transport: &TmuxBackend,
+    transport: &dyn Transport,
     session: &SessionName,
     window: &WindowName,
     plan: &LeaderStartPlan,
@@ -453,6 +456,39 @@ fn ensure_managed_leader_pane(
             .spawn_first(session, window, &plan.provider_argv, workspace, &plan.leader_env)
             .map_err(|error| LeaderError::Start(error.to_string()))
     }
+}
+
+fn ensure_managed_provider_live_after_attach(
+    transport: &dyn Transport,
+    spawned: &SpawnResult,
+) -> Result<(), LeaderError> {
+    let live = match transport.liveness(&spawned.pane_id) {
+        Ok(PaneLiveness::Live) => true,
+        Ok(PaneLiveness::Dead) => false,
+        Ok(PaneLiveness::Unknown) | Err(_) => managed_spawned_pane_in_targets(transport, spawned),
+    };
+    if live {
+        return Ok(());
+    }
+    Err(LeaderError::Start(format!(
+        "managed leader provider pane is not running after tmux client returned: {} {}:{}",
+        spawned.pane_id.as_str(),
+        spawned.session.as_str(),
+        spawned.window.as_str()
+    )))
+}
+
+fn managed_spawned_pane_in_targets(transport: &dyn Transport, spawned: &SpawnResult) -> bool {
+    transport
+        .list_targets()
+        .unwrap_or_default()
+        .iter()
+        .any(|pane| {
+            pane.pane_id.as_str() == spawned.pane_id.as_str()
+                && pane.session.as_str() == spawned.session.as_str()
+                && pane.window_name.as_ref().map(WindowName::as_str)
+                    == Some(spawned.window.as_str())
+        })
 }
 
 fn persist_managed_leader_binding(
@@ -911,11 +947,16 @@ mod tests {
         TurnVerification, WindowName,
     };
 
-    use super::{execute_leader_plan, handle_exec_provider_startup_prompts, shlex_quote};
+    use super::{
+        ensure_managed_provider_live_after_attach, execute_leader_plan,
+        handle_exec_provider_startup_prompts, shlex_quote,
+    };
 
     struct ScriptedTransport {
         screens: Mutex<Vec<String>>,
         sent: Mutex<Vec<(Target, Vec<Key>)>>,
+        liveness: PaneLiveness,
+        targets: Vec<PaneInfo>,
     }
 
     impl ScriptedTransport {
@@ -923,6 +964,26 @@ mod tests {
             Self {
                 screens: Mutex::new(screens),
                 sent: Mutex::new(Vec::new()),
+                liveness: PaneLiveness::Unknown,
+                targets: Vec::new(),
+            }
+        }
+
+        fn with_liveness(liveness: PaneLiveness) -> Self {
+            Self {
+                screens: Mutex::new(Vec::new()),
+                sent: Mutex::new(Vec::new()),
+                liveness,
+                targets: Vec::new(),
+            }
+        }
+
+        fn with_liveness_and_targets(liveness: PaneLiveness, targets: Vec<PaneInfo>) -> Self {
+            Self {
+                screens: Mutex::new(Vec::new()),
+                sent: Mutex::new(Vec::new()),
+                liveness,
+                targets,
             }
         }
 
@@ -1024,11 +1085,11 @@ mod tests {
         }
 
         fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
-            Ok(PaneLiveness::Unknown)
+            Ok(self.liveness)
         }
 
         fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-            Ok(Vec::new())
+            Ok(self.targets.clone())
         }
 
         fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
@@ -1061,6 +1122,69 @@ mod tests {
                 reason: "not used by startup-prompt test".to_string(),
             })
         }
+    }
+
+    fn managed_spawn_result() -> SpawnResult {
+        SpawnResult {
+            pane_id: PaneId::new("%42"),
+            session: SessionName::new("team-agent-leader-claude_code-demo"),
+            window: WindowName::new("claude_code"),
+            child_pid: Some(1234),
+        }
+    }
+
+    fn managed_pane_info(spawned: &SpawnResult) -> PaneInfo {
+        PaneInfo {
+            pane_id: spawned.pane_id.clone(),
+            session: spawned.session.clone(),
+            window_index: Some(0),
+            window_name: Some(spawned.window.clone()),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("claude".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: spawned.child_pid,
+            leader_env: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn managed_attach_success_requires_live_provider_pane() {
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::with_liveness(PaneLiveness::Dead);
+
+        let err = ensure_managed_provider_live_after_attach(&transport, &spawned)
+            .expect_err("dead provider pane must fail managed launch");
+
+        let text = err.to_string();
+        assert!(
+            text.contains("managed leader provider pane is not running"),
+            "{text}"
+        );
+        assert!(text.contains("%42"), "{text}");
+        assert!(text.contains("claude_code"), "{text}");
+    }
+
+    #[test]
+    fn managed_attach_success_accepts_live_provider_pane() {
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::with_liveness(PaneLiveness::Live);
+
+        ensure_managed_provider_live_after_attach(&transport, &spawned)
+            .expect("live provider pane keeps managed launch successful");
+    }
+
+    #[test]
+    fn managed_attach_success_uses_target_scan_when_liveness_unknown() {
+        let spawned = managed_spawn_result();
+        let transport = ScriptedTransport::with_liveness_and_targets(
+            PaneLiveness::Unknown,
+            vec![managed_pane_info(&spawned)],
+        );
+
+        ensure_managed_provider_live_after_attach(&transport, &spawned)
+            .expect("target scan can prove provider pane is still live");
     }
 
     struct EnvGuard {

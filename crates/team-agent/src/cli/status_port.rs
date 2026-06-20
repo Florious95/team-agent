@@ -53,11 +53,15 @@ use rusqlite::params;
         let leader_attach_command = if is_external_leader {
             None
         } else {
+            let window_name = state
+                .pointer("/leader_receiver/window_name")
+                .and_then(Value::as_str)
+                .unwrap_or("leader");
             session_name.as_str().and_then(|session| {
                 crate::tmux_backend::attach_command_for_workspace(
                     workspace,
                     &crate::transport::SessionName::new(session.to_string()),
-                    "leader",
+                    window_name,
                 )
             })
         };
