@@ -308,14 +308,13 @@ fn pane_conflicts_with_leader_or_other(
     else {
         return false;
     };
+    let state_socket = runtime_tmux_socket(state);
+    let agent_socket = tmux_socket_field(agent).or(state_socket);
     // Check leader anchor.
     for key in ["leader_receiver", "team_owner"] {
-        if state
-            .get(key)
-            .and_then(|v| v.get("pane_id"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|lp| lp == pane_id)
-        {
+        if state.get(key).and_then(pane_socket_binding).is_some_and(|leader| {
+            pane_conflicts_on_same_socket(pane_id, agent_socket, leader)
+        }) {
             return true;
         }
     }
@@ -325,16 +324,66 @@ fn pane_conflicts_with_leader_or_other(
             if id == agent_id.as_str() {
                 continue;
             }
+            let other_socket = tmux_socket_field(other).or(state_socket);
             if other
                 .get("pane_id")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|op| op == pane_id)
+                .is_some_and(|op| {
+                    op == pane_id && !tmux_sockets_known_different(agent_socket, other_socket)
+                })
             {
                 return true;
             }
         }
     }
     false
+}
+
+#[derive(Clone, Copy)]
+struct PaneSocketBinding<'a> {
+    pane_id: &'a str,
+    tmux_socket: Option<&'a str>,
+}
+
+fn pane_conflicts_on_same_socket(
+    pane_id: &str,
+    agent_socket: Option<&str>,
+    other: PaneSocketBinding<'_>,
+) -> bool {
+    other.pane_id == pane_id && !tmux_sockets_known_different(agent_socket, other.tmux_socket)
+}
+
+fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+    if left == right {
+        return false;
+    }
+    std::path::Path::new(left).is_absolute() && std::path::Path::new(right).is_absolute()
+}
+
+fn runtime_tmux_socket(state: &serde_json::Value) -> Option<&str> {
+    tmux_socket_field(state)
+}
+
+fn tmux_socket_field(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("tmux_endpoint")
+        .or_else(|| value.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {
+    let pane_id = value
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "__team_agent_unbound__")?;
+    Some(PaneSocketBinding {
+        pane_id,
+        tmux_socket: tmux_socket_field(value),
+    })
 }
 
 fn agent_pane_live(
@@ -949,4 +998,82 @@ fn write_reset_complete_event(
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn e51_restart_allows_leader_same_pane_id_on_different_tmux_sockets() {
+        let state = serde_json::json!({
+            "tmux_endpoint": "/private/tmp/tmux-501/ta-worker",
+            "leader_receiver": {
+                "pane_id": "%0",
+                "tmux_socket": "/private/tmp/tmux-501/default"
+            },
+            "agents": {
+                "architect": {
+                    "pane_id": "%0",
+                    "tmux_socket": "/private/tmp/tmux-501/ta-worker"
+                }
+            }
+        });
+        let agent_id = AgentId::new("architect");
+        let agent = state["agents"]["architect"].clone();
+
+        assert!(
+            !pane_conflicts_with_leader_or_other(&state, &agent_id, &agent),
+            "same pane id on different tmux sockets must not force a fresh restart"
+        );
+    }
+
+    #[test]
+    fn e51_restart_keeps_leader_conflict_on_same_tmux_socket() {
+        let socket = "/private/tmp/tmux-501/default";
+        let state = serde_json::json!({
+            "tmux_endpoint": socket,
+            "leader_receiver": {
+                "pane_id": "%0",
+                "tmux_socket": socket
+            },
+            "agents": {
+                "architect": {
+                    "pane_id": "%0",
+                    "tmux_socket": socket
+                }
+            }
+        });
+        let agent_id = AgentId::new("architect");
+        let agent = state["agents"]["architect"].clone();
+
+        assert!(
+            pane_conflicts_with_leader_or_other(&state, &agent_id, &agent),
+            "same pane id on the same tmux socket must keep the E51 guard"
+        );
+    }
+
+    #[test]
+    fn e51_restart_allows_other_agent_same_pane_id_on_different_tmux_sockets() {
+        let state = serde_json::json!({
+            "tmux_endpoint": "/private/tmp/tmux-501/ta-worker",
+            "agents": {
+                "architect": {
+                    "pane_id": "%0",
+                    "tmux_socket": "/private/tmp/tmux-501/ta-worker"
+                },
+                "reviewer": {
+                    "pane_id": "%0",
+                    "tmux_socket": "/private/tmp/tmux-501/default"
+                }
+            }
+        });
+        let agent_id = AgentId::new("architect");
+        let agent = state["agents"]["architect"].clone();
+
+        assert!(
+            !pane_conflicts_with_leader_or_other(&state, &agent_id, &agent),
+            "other-agent collision checks must also include tmux_socket"
+        );
+    }
 }

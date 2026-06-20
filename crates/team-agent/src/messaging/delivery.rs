@@ -587,8 +587,10 @@ fn resolve_inject_target(
     // is in lease.rs (E51 guard #1) which prevents the conflation; this is the
     // defence-in-depth in the delivery layer.
     if let Some(pane) = cached_pane.as_ref() {
-        let leader_pane = leader_receiver_pane_id(state);
-        if leader_pane.is_some_and(|lp| lp == pane.as_str()) {
+        let worker_socket = worker_tmux_socket(state, agent, transport);
+        if leader_receiver_pane_binding(state).is_some_and(|leader| {
+            pane_conflicts_on_same_socket(pane.as_str(), worker_socket.as_deref(), leader)
+        }) {
             return Target::SessionWindow {
                 session: SessionName::new(session),
                 window: WindowName::new(format!("{recipient}_pane_conflicts_with_leader")),
@@ -639,11 +641,68 @@ fn cached_pane_known_dead(transport: &dyn Transport, pane: &PaneId) -> bool {
     matches!(transport.liveness(pane), Ok(PaneLiveness::Dead))
 }
 
+#[derive(Clone, Copy)]
+struct PaneSocketBinding<'a> {
+    pane_id: &'a str,
+    tmux_socket: Option<&'a str>,
+}
+
+fn pane_conflicts_on_same_socket(
+    pane_id: &str,
+    worker_socket: Option<&str>,
+    leader: PaneSocketBinding<'_>,
+) -> bool {
+    leader.pane_id == pane_id
+        && !tmux_sockets_known_different(worker_socket, leader.tmux_socket)
+}
+
+fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool {
+    let (Some(left), Some(right)) = (left, right) else {
+        return false;
+    };
+    if left == right {
+        return false;
+    }
+    std::path::Path::new(left).is_absolute() && std::path::Path::new(right).is_absolute()
+}
+
+fn worker_tmux_socket(
+    state: &serde_json::Value,
+    agent: Option<&serde_json::Value>,
+    transport: &dyn Transport,
+) -> Option<String> {
+    agent
+        .and_then(tmux_socket_field)
+        .or_else(|| runtime_tmux_socket(state))
+        .map(str::to_string)
+        .or_else(|| transport.tmux_endpoint())
+}
+
+fn runtime_tmux_socket(state: &serde_json::Value) -> Option<&str> {
+    tmux_socket_field(state)
+        .or_else(|| active_team_entry(state).and_then(tmux_socket_field))
+        .or_else(|| only_team_entry(state).and_then(tmux_socket_field))
+}
+
+fn tmux_socket_field(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("tmux_endpoint")
+        .or_else(|| value.get("tmux_socket"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
 /// Read the bound leader pane id off the projected or team-scoped runtime state.
 fn leader_receiver_pane_id(state: &serde_json::Value) -> Option<&str> {
     leader_receiver_pane_id_in_state(state)
         .or_else(|| active_team_entry(state).and_then(leader_receiver_pane_id_in_state))
         .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_id_in_state))
+}
+
+fn leader_receiver_pane_binding(state: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {
+    leader_receiver_pane_binding_in_state(state)
+        .or_else(|| active_team_entry(state).and_then(leader_receiver_pane_binding_in_state))
+        .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_binding_in_state))
 }
 
 /// `state` is "usable" for leader delivery when the bound `leader_receiver.pane_id`
@@ -759,6 +818,25 @@ fn leader_receiver_pane_id_in_state(state: &serde_json::Value) -> Option<&str> {
                 .and_then(serde_json::Value::as_str)
                 .filter(|s| !s.is_empty() && *s != "__team_agent_unbound__")
         })
+}
+
+fn leader_receiver_pane_binding_in_state(
+    state: &serde_json::Value,
+) -> Option<PaneSocketBinding<'_>> {
+    ["leader_receiver", "team_owner"]
+        .into_iter()
+        .find_map(|key| state.get(key).and_then(pane_socket_binding))
+}
+
+fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {
+    let pane_id = value
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "__team_agent_unbound__")?;
+    Some(PaneSocketBinding {
+        pane_id,
+        tmux_socket: tmux_socket_field(value),
+    })
 }
 
 fn leader_receiver_tmux_socket(state: &serde_json::Value) -> Option<&str> {

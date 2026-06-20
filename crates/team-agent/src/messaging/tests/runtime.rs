@@ -1813,6 +1813,88 @@ fn u1_resolve_inject_target_uses_live_pane_when_cached_pane_drifted() {
 }
 
 #[test]
+fn e51_delivery_allows_same_pane_id_on_different_tmux_sockets() {
+    let ws = tmp_ws("e51diffsocket");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-e51",
+        "tmux_endpoint": "/private/tmp/tmux-501/ta-worker",
+        "leader_receiver": {
+            "pane_id": "%0",
+            "tmux_socket": "/private/tmp/tmux-501/default"
+        },
+        "agents": {
+            "architect": {
+                "provider": "fake",
+                "pane_id": "%0",
+                "window": "architect"
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let _ = store
+        .create_message(None, "peer", "architect", "socket-aware", None, false, None)
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint("/private/tmp/tmux-501/ta-worker")
+        .with_targets(vec![pane_info("%0", "team-e51", "architect")]);
+
+    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
+        .expect("same pane id on different sockets must not poison delivery");
+
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        transport.inject_targets(),
+        vec![Target::Pane(PaneId::new("%0"))],
+        "E51 must compare pane_id with tmux_socket; different sockets are not a leader conflict"
+    );
+}
+
+#[test]
+fn e51_delivery_keeps_same_socket_pane_conflict_guard() {
+    let ws = tmp_ws("e51samesocket");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let socket = "/private/tmp/tmux-501/default";
+    let state = serde_json::json!({
+        "session_name": "team-e51",
+        "tmux_endpoint": socket,
+        "leader_receiver": {
+            "pane_id": "%0",
+            "tmux_socket": socket
+        },
+        "agents": {
+            "architect": {
+                "provider": "fake",
+                "pane_id": "%0",
+                "window": "architect"
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let _ = store
+        .create_message(None, "peer", "architect", "same-socket", None, false, None)
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![pane_info("%0", "team-e51", "architect")]);
+
+    let delivered = deliver_pending_messages(&ws, &state, &transport, &log)
+        .expect("same-socket E51 guard should still resolve to a structured target");
+
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(
+        transport.inject_targets(),
+        vec![Target::SessionWindow {
+            session: SessionName::new("team-e51"),
+            window: WindowName::new("architect_pane_conflicts_with_leader"),
+        }],
+        "same pane id on the same socket must keep the E51 loop guard"
+    );
+}
+
+#[test]
 fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
     let ws = tmp_ws("u1backfill");
     crate::state::persist::save_runtime_state(
