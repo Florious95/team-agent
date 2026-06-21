@@ -50,4 +50,22 @@ mod cases {
     mod send_002_send_to_stopped;
     mod send_003_send_json_shape;
     mod send_007_send_broadcast;
+    mod agent_001_start_agent_repair_missing_window;
+    mod agent_002_stop_agent_single_worker;
+    mod agent_003_reset_agent_discard_session;
+    mod agent_004_add_agent_runtime;
+    mod agent_005_remove_agent_runtime;
+    mod agent_006_fork_agent;
+    mod stat_001_status_json_shape;
+    mod stat_002_status_stopped_team;
+    mod stat_003_status_dirty_state_reporting;
+    mod dirty_001_stale_pane_id;
+    mod dirty_002_missing_tmux_socket;
+    mod dirty_003_orphan_coordinator;
+    mod dirty_004_stale_session_id_missing_backing;
+    mod dirty_005_cross_team_binding_pollution;
+    mod dirty_006_message_stuck_in_accepted;
+    mod rec_001_repair_state_basic;
+    mod rec_002_doctor_checks;
+    mod rec_003_diagnose_output;
 }

@@ -144,6 +144,53 @@ impl TestWorkspace {
         let serialized = serde_json::to_string_pretty(&state).expect("serialize seed state");
         std::fs::write(runtime_dir.join("state.json"), serialized).expect("write state.json");
     }
+
+    pub fn write_state_value(&self, state: Value) {
+        let serialized = serde_json::to_string_pretty(&state).expect("serialize state");
+        std::fs::write(self.state_json_path(), serialized).expect("write state.json");
+    }
+
+    pub fn mutate_state<F>(&self, f: F)
+    where
+        F: FnOnce(&mut Value),
+    {
+        let mut state = self.read_state();
+        f(&mut state);
+        self.write_state_value(state);
+    }
+
+    pub fn mutate_agent_everywhere<F>(&self, agent_id: &str, mut f: F)
+    where
+        F: FnMut(&mut serde_json::Map<String, Value>),
+    {
+        let mut state = self.read_state();
+        if let Some(agent) = state
+            .get_mut("agents")
+            .and_then(Value::as_object_mut)
+            .and_then(|agents| agents.get_mut(agent_id))
+            .and_then(Value::as_object_mut)
+        {
+            f(agent);
+        }
+        if let Some(active) = state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            if let Some(agent) = state
+                .get_mut("teams")
+                .and_then(Value::as_object_mut)
+                .and_then(|teams| teams.get_mut(&active))
+                .and_then(|team| team.get_mut("agents"))
+                .and_then(Value::as_object_mut)
+                .and_then(|agents| agents.get_mut(agent_id))
+                .and_then(Value::as_object_mut)
+            {
+                f(agent);
+            }
+        }
+        self.write_state_value(state);
+    }
 }
 
 impl Drop for TestWorkspace {
@@ -338,6 +385,29 @@ pub fn tmux_session_exists_on_socket(socket_arg: &str, name: &str) -> bool {
     match out {
         Ok(o) => o.status.success(),
         Err(_) => false,
+    }
+}
+
+pub fn tmux_windows_on_socket(socket_arg: &str, name: &str) -> Vec<String> {
+    let (flag, value) = if socket_arg.contains('/') {
+        ("-S", socket_arg)
+    } else {
+        ("-L", socket_arg)
+    };
+    let out = Command::new("tmux")
+        .args([flag, value, "list-windows", "-t", name, "-F", "#W"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -536,6 +606,58 @@ pub fn tmux_session_exists_for_workspace(ws: &TestWorkspace, name: &str) -> bool
         return tmux_session_exists(name);
     }
     tmux_session_exists_on_socket(socket, name)
+}
+
+pub fn tmux_windows_for_workspace(ws: &TestWorkspace, name: &str) -> Vec<String> {
+    let state_path = ws.state_json_path();
+    if !state_path.exists() {
+        return Vec::new();
+    }
+    let state = ws.read_state();
+    let socket = state
+        .get("tmux_socket")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if socket.is_empty() {
+        let out = Command::new("tmux")
+            .args(["list-windows", "-t", name, "-F", "#W"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        return match out {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            _ => Vec::new(),
+        };
+    }
+    tmux_windows_on_socket(socket, name)
+}
+
+pub fn tmux_window_exists_for_workspace(ws: &TestWorkspace, session: &str, window: &str) -> bool {
+    tmux_windows_for_workspace(ws, session)
+        .iter()
+        .any(|name| name == window)
+}
+
+#[track_caller]
+pub fn state_agent<'a>(state: &'a Value, agent_id: &str) -> &'a Value {
+    state
+        .get("agents")
+        .and_then(Value::as_object)
+        .and_then(|agents| agents.get(agent_id))
+        .unwrap_or_else(|| panic!("state.agents.{agent_id} missing in {state}"))
+}
+
+pub fn state_has_agent(state: &Value, agent_id: &str) -> bool {
+    state
+        .get("agents")
+        .and_then(Value::as_object)
+        .is_some_and(|agents| agents.contains_key(agent_id))
 }
 
 /// Misc helper: collect a tag → value map of all keys present at the top
