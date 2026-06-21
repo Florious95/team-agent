@@ -95,6 +95,7 @@ pub(super) fn spawn_agent_window(
         model: command_model,
         tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
+        agent_id_hint: Some(agent_id.as_str()),
     };
     let mut plan = match resume_session_id {
         Some(session_id) => adapter

@@ -889,6 +889,7 @@ fn write_start_agent_start_event(
         model: command_model,
         tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
+        agent_id_hint: Some(agent_id.as_str()),
     };
     let mut plan = match session_id {
         Some(session_id) => adapter

@@ -455,6 +455,18 @@ impl ProviderAdapter for BasicProviderAdapter {
                 )?;
                 argv.push("--session-id".to_string());
                 argv.push(expected.clone());
+                // Layer 1 self-healing (architect probe 2026-06-22, claude help
+                // `-n, --name <name>`): pass `--name <agent_id>` so the
+                // resume picker and on-disk `~/.claude/sessions/*.json name`
+                // field carry our role label. This is a secondary diagnostic
+                // hint — primary restart key remains `session_id + backing
+                // store revalidation` (see provider/session/resume.rs).
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
                 Ok(CommandPlan {
                     argv,
                     expected_session_id: Some(SessionId::new(expected)),
@@ -654,6 +666,15 @@ impl ProviderAdapter for BasicProviderAdapter {
                 )?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
+                // Layer 1 self-healing: keep the role name on resume too —
+                // makes resumed sessions findable in the picker by agent_id
+                // when state.json drifts.
+                if let Some(agent_id) = ctx.agent_id_hint {
+                    if !agent_id.is_empty() {
+                        argv.push("--name".to_string());
+                        argv.push(agent_id.to_string());
+                    }
+                }
                 let mut plan = CommandPlan::argv_only(argv);
                 plan.provider_projects_root = ctx
                     .profile_launch

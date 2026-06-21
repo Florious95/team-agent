@@ -251,6 +251,11 @@ fn spawn_agents(
                 model: command_model,
                 tools: &resolved_tool_refs,
                 profile_launch: Some(&profile_launch),
+                // Layer 1 self-healing (architect probe 2026-06-22): expose
+                // agent_id as a display-name hint so Claude / Copilot
+                // adapters can pass `--name <agent_id>`. Codex has no
+                // equivalent flag and ignores the hint.
+                agent_id_hint: Some(agent_id_raw),
             })
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
@@ -4030,6 +4035,7 @@ pub fn fork_agent_with_transport(
                 model: command_model,
                 tools: &resolved_tool_refs,
                 profile_launch: Some(&profile_launch),
+                agent_id_hint: Some(as_agent_id.as_str()),
             },
         )
         .map_err(|e| {

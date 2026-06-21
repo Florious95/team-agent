@@ -342,6 +342,11 @@ pub struct ProviderCommandContext<'a> {
     pub model: Option<&'a str>,
     pub tools: &'a [&'a str],
     pub profile_launch: Option<&'a ProviderProfileLaunch>,
+    /// Optional agent id, used as a launch-time display-name hint for
+    /// providers that accept `--name <name>` (Claude, Copilot). Codex has
+    /// no `--name` CLI flag (probe verdict 2026-06-22) and ignores this
+    /// field. None = legacy callers (the field is purely additive).
+    pub agent_id_hint: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
