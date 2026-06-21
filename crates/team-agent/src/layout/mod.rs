@@ -27,3 +27,9 @@ pub mod worker_env;
 pub mod placement;
 pub mod recovery;
 pub mod overlay;
+pub mod runtime_sessions;
+
+pub use runtime_sessions::{
+    LeaderLauncherSession, LeaderLauncherSessionError, RuntimeSessionAnomaly, RuntimeSessions,
+    WorkerSession, WorkerSessionError,
+};
