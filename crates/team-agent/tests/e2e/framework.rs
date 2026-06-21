@@ -222,6 +222,13 @@ fn ta_binary() -> PathBuf {
 /// framework does NOT auto-inject `--workspace` or `--json` — pass them
 /// explicitly so test intent is visible.
 pub fn run_ta(ws: &TestWorkspace, args: &[&str]) -> TaResult {
+    run_ta_env(ws, args, &[])
+}
+
+/// Like `run_ta` but lets the caller splice extra env entries (key/value
+/// pairs). Per-command env keeps parallel tests safe — never set process
+/// globals via `std::env::set_var`.
+pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)]) -> TaResult {
     let bin = ta_binary();
     let mut cmd = Command::new(&bin);
     cmd.args(args)
@@ -235,6 +242,9 @@ pub fn run_ta(ws: &TestWorkspace, args: &[&str]) -> TaResult {
         // skeleton — future addition).
         .env_remove("TMUX")
         .env_remove("TMUX_PANE");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     let Output { status, stdout, stderr } = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn {:?}: {e}", bin));

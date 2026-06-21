@@ -29,12 +29,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // tests assert with unwrap/expect on purpose
 
 pub mod framework;
+pub mod scripted_provider;
 
 mod cases {
     mod shut_001_clean_shutdown;
     mod shut_002_false_green_guard;
+    mod shut_003_idempotent;
+    mod shut_004_cleans_coordinator;
     mod rest_001_refuses_stale_session;
     mod rest_002_backing_store_missing;
+    mod rest_011_resume_happy_path;
+    mod rest_012_mixed_resume_fresh;
+    mod rest_013_allow_fresh_flag;
+    mod rest_014_multi_team_selector;
     mod lnch_001_quick_start_basic;
+    mod lnch_002_duplicate_session;
+    mod lnch_003_missing_profile;
+    mod lnch_004_display_backend_none;
     mod send_001_fake_worker;
+    mod send_002_send_to_stopped;
+    mod send_003_send_json_shape;
+    mod send_007_send_broadcast;
 }
