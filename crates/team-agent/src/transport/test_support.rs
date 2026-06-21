@@ -18,6 +18,7 @@ pub struct SpawnRecord {
     pub session: SessionName,
     pub window: WindowName,
     pub argv: Vec<String>,
+    pub cwd: std::path::PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +201,10 @@ impl OfflineTransport {
         })
     }
 
+    pub fn spawn_cwd_records(&self) -> Vec<std::path::PathBuf> {
+        self.with_state(|state| state.spawns.iter().map(|record| record.cwd.clone()).collect())
+    }
+
     pub fn pane_title_records(&self) -> Vec<(String, String, String, String)> {
         self.with_state(|state| state.pane_titles.clone())
     }
@@ -238,6 +243,7 @@ impl OfflineTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
+        cwd: &Path,
     ) -> Result<SpawnResult, TransportError> {
         let pane_index = self.with_state(|state| {
             state.calls.push(kind);
@@ -246,6 +252,7 @@ impl OfflineTransport {
                 session: session.clone(),
                 window: window.clone(),
                 argv: argv.to_vec(),
+                cwd: cwd.to_path_buf(),
             });
             if let Some(error) = state.spawn_failures.get(window.as_str()) {
                 return Err(TransportError::Spawn {
@@ -296,10 +303,10 @@ impl Transport for OfflineTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn_result("spawn_first", session, window, argv)
+        self.spawn_result("spawn_first", session, window, argv, cwd)
     }
 
     fn spawn_into(
@@ -307,10 +314,10 @@ impl Transport for OfflineTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn_result("spawn_into", session, window, argv)
+        self.spawn_result("spawn_into", session, window, argv, cwd)
     }
 
     fn spawn_split_with_env_unset(
@@ -318,11 +325,11 @@ impl Transport for OfflineTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
-        _cwd: &Path,
+        cwd: &Path,
         _env: &BTreeMap<String, String>,
         _env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
-        self.spawn_result("spawn_split", session, window, argv)
+        self.spawn_result("spawn_split", session, window, argv, cwd)
     }
 
     fn inject(

@@ -44,6 +44,23 @@ fn run(args: &[&str], cwd: &Path) -> Output {
     Command::new(bin()).args(args).current_dir(cwd).output().unwrap()
 }
 
+#[test]
+fn top_level_version_prints_current_package_version() {
+    let cwd = tmp_cwd("version");
+    let out = run(&["--version"], &cwd);
+
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("team-agent {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "--version must be a zero-noise installer-safe probe; stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 // ── unknown subcommand -> argparse usage error to STDERR, exit 2 ──────────────────────────────
 #[test]
 fn unknown_subcommand_is_argparse_usage_error_exit2() {

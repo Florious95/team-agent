@@ -309,7 +309,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             transport,
             Some(&safety),
             layout_placement.as_ref(),
-            Some(spec_workspace),
+            None,
         ) {
             Ok(spawn) => spawn,
             Err(error) => {
@@ -935,6 +935,10 @@ fn mark_agent_respawned(
         "spawned_at".to_string(),
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
+    agent.insert(
+        "spawn_cwd".to_string(),
+        serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
+    );
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
@@ -1382,6 +1386,7 @@ fn rebuild_runtime_spec_from_roles(
     // 重建:compile_team(角色定义) + 保留运行期 session_name override。
     let mut spec = crate::compiler::compile_team(&team_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    crate::lifecycle::launch::override_spec_workspace(&mut spec, run_workspace);
     if let Some(session_name) = state
         .get("session_name")
         .and_then(serde_json::Value::as_str)
@@ -1589,6 +1594,7 @@ mod tests {
             plan: crate::provider::CommandPlan::argv_only(vec!["codex".to_string()]),
             profile_launch: crate::provider::ProviderProfileLaunch::default(),
             layout_placement: None,
+            spawn_cwd: std::path::PathBuf::from("/tmp/team-epoch"),
         };
         let before = chrono::Utc::now();
 

@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Team Agent 上线前测试清单</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #647084;
+      --line: #d9dee7;
+      --accent: #1967d2;
+      --accent-soft: #e8f0fe;
+      --ok: #147a3f;
+      --warn: #9a5b00;
+      --code: #111827;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    main {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+    }
+
+    header {
+      display: grid;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    .intro {
+      max-width: 780px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .status-bar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+
+    .progress-track {
+      height: 10px;
+      overflow: hidden;
+      background: #e6e9ef;
+      border-radius: 999px;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      background: var(--accent);
+      transition: width 160ms ease;
+    }
+
+    .progress-copy {
+      min-width: 96px;
+      color: var(--muted);
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    button {
+      min-height: 36px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .checklist {
+      display: grid;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .test-item {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .test-heading {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      padding: 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    input[type="checkbox"] {
+      width: 22px;
+      height: 22px;
+      margin: 1px 0 0;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    h2 {
+      margin: 0 0 4px;
+      font-size: 20px;
+      letter-spacing: 0;
+    }
+
+    .description {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .test-body {
+      display: grid;
+      gap: 16px;
+      padding: 18px;
+    }
+
+    .method-title {
+      margin: 0 0 8px;
+      color: var(--text);
+      font-weight: 800;
+    }
+
+    .subchecks {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .subchecks label {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      color: var(--text);
+    }
+
+    code,
+    pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      border-radius: 8px;
+      background: var(--code);
+      color: #f9fafb;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .note {
+      margin: 0;
+      padding: 10px 12px;
+      border-left: 4px solid var(--warn);
+      background: #fff8e7;
+      color: #5b3a00;
+      border-radius: 0 8px 8px 0;
+    }
+
+    .done .test-heading {
+      background: #f1fbf5;
+    }
+
+    .done .badge {
+      background: #e8f5ed;
+      color: var(--ok);
+    }
+
+    footer {
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 720px) {
+      main {
+        width: min(100% - 20px, 1120px);
+        padding-top: 20px;
+      }
+
+      .status-bar,
+      .test-heading {
+        grid-template-columns: 1fr;
+      }
+
+      .progress-copy {
+        text-align: left;
+      }
+
+      .badge {
+        width: fit-content;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>Team Agent 上线前测试清单</h1>
+        <p class="intro">每次发布前逐项执行。勾选状态保存在当前浏览器的 localStorage 中，不会上传，也不依赖外部服务。</p>
+      </div>
+      <section class="status-bar" aria-label="Checklist progress">
+        <div class="progress-track" aria-hidden="true">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-copy" id="progress-copy">0 / 0</div>
+        <div class="actions">
+          <button type="button" id="check-all">全部勾选</button>
+          <button type="button" id="clear-all">清空状态</button>
+        </div>
+      </section>
+    </header>
+
+    <section class="checklist" aria-label="Pre-release tests">
+      <article class="test-item" data-test="npx-install">
+        <div class="test-heading">
+          <input type="checkbox" id="npx-install" data-check="npx-install">
+          <div>
+            <h2><label for="npx-install">1. NPX 端到端安装验证</label></h2>
+            <p class="description">确认从 npm latest 安装出来的 `team-agent` binary、PATH 命中位置、runtime 目录内容完全一致。</p>
+          </div>
+          <span class="badge">installer</span>
+        </div>
+        <div class="test-body">
+          <div>
+            <p class="method-title">验证方法</p>
+            <pre><code>npx @team-agent/installer@latest install
+which team-agent
+team-agent --version
+ls -l "$(which team-agent)" ~/.local/bin/team-agent
+md5 "$(which team-agent)"
+md5 ~/.team-agent/runtime/team-agent</code></pre>
+          </div>
+          <ul class="subchecks">
+            <li><label><input type="checkbox" data-check="npx-install-command">执行 `npx @team-agent/installer@latest install` 成功退出。</label></li>
+            <li><label><input type="checkbox" data-check="npx-install-which">`which team-agent` 指向的 binary 是本次 latest 版本。</label></li>
+            <li><label><input type="checkbox" data-check="npx-install-hash">binary 大小和 md5 与 runtime 目录下的 binary 一致。</label></li>
+            <li><label><input type="checkbox" data-check="npx-install-localbin">特别确认 `~/.local/bin/team-agent` 已更新，避免 PATH 优先级命中旧 binary。</label></li>
+          </ul>
+          <p class="note">若 `which team-agent` 不是 `~/.local/bin/team-agent`，必须记录 PATH 顺序并确认实际被 shell 调用的 binary 仍是最新版本。</p>
+        </div>
+      </article>
+
+      <article class="test-item" data-test="claude-start">
+        <div class="test-heading">
+          <input type="checkbox" id="claude-start" data-check="claude-start">
+          <div>
+            <h2><label for="claude-start">2. `team-agent claude` 启动验证</label></h2>
+            <p class="description">确认普通非 tmux 终端下 Claude Code 能被 Team Agent 正常拉起，并且不会启动即退出。</p>
+          </div>
+          <span class="badge">leader</span>
+        </div>
+        <div class="test-body">
+          <div>
+            <p class="method-title">验证方法</p>
+            <pre><code>env | grep -E '^TMUX=' || true
+team-agent claude
+# 等待 10 秒，确认 Claude Code TUI 保持运行
+# Ctrl+C 退出后检查 exit code 和相关 tmux session/log</code></pre>
+          </div>
+          <ul class="subchecks">
+            <li><label><input type="checkbox" data-check="claude-start-nontmux">在非 tmux 环境执行，`TMUX` 环境变量为空。</label></li>
+            <li><label><input type="checkbox" data-check="claude-start-running">Claude Code 正常启动并保持运行至少 10 秒。</label></li>
+            <li><label><input type="checkbox" data-check="claude-start-exit">退出行为可控，无 `status: exited, exit_code: 0` 的启动即退出回归。</label></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="test-item" data-test="send-message">
+        <div class="test-heading">
+          <input type="checkbox" id="send-message" data-check="send-message">
+          <div>
+            <h2><label for="send-message">3. `send` 消息验证</label></h2>
+            <p class="description">确认 leader 向 worker 发送消息时，真实命中 pane 后不会被错误标记为 failed。</p>
+          </div>
+          <span class="badge">messaging</span>
+        </div>
+        <div class="test-body">
+          <div>
+            <p class="method-title">验证方法</p>
+            <pre><code>team-agent send &lt;worker&gt; "请回复收到，并 report_result。"
+team-agent status --json
+rg -n "send.failed|matched=true|failed" .team/runtime/current</code></pre>
+          </div>
+          <ul class="subchecks">
+            <li><label><input type="checkbox" data-check="send-delivered">worker 收到消息并产生可见回复或 result。</label></li>
+            <li><label><input type="checkbox" data-check="send-no-false-negative">无 `send.failed` 假阴性。</label></li>
+            <li><label><input type="checkbox" data-check="send-matched-not-failed">事件中 `matched=true` 时不再同时报 failed。</label></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="test-item" data-test="restart-recovery">
+        <div class="test-heading">
+          <input type="checkbox" id="restart-recovery" data-check="restart-recovery">
+          <div>
+            <h2><label for="restart-recovery">4. `restart` 恢复验证</label></h2>
+            <p class="description">确认 shutdown 后 restart 能恢复原 worker 角色上下文，不因单个 worker 问题牵连全队 fresh spawn。</p>
+          </div>
+          <span class="badge">lifecycle</span>
+        </div>
+        <div class="test-body">
+          <div>
+            <p class="method-title">验证方法</p>
+            <pre><code>team-agent shutdown --workspace . --keep-logs
+team-agent restart .
+team-agent status --json
+team-agent send &lt;worker&gt; "请说明你恢复后的角色和上一轮任务上下文。"
+rg -n "forced_fresh|fresh_spawn|resume" .team/runtime/current</code></pre>
+          </div>
+          <ul class="subchecks">
+            <li><label><input type="checkbox" data-check="restart-shutdown">`shutdown --keep-logs` 正常完成。</label></li>
+            <li><label><input type="checkbox" data-check="restart-role-context">`restart .` 后 worker 能说明原角色和上一轮上下文。</label></li>
+            <li><label><input type="checkbox" data-check="restart-no-forced-fresh">无 `forced_fresh` 连坐；不可恢复 worker 不应导致其他 worker 丢上下文。</label></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="test-item" data-test="homepage-deploy">
+        <div class="test-heading">
+          <input type="checkbox" id="homepage-deploy" data-check="homepage-deploy">
+          <div>
+            <h2><label for="homepage-deploy">5. 主页部署验证</label></h2>
+            <p class="description">确认线上主页可访问，核心视频素材能自动播放，中英文切换不破坏页面状态。</p>
+          </div>
+          <span class="badge">website</span>
+        </div>
+        <div class="test-body">
+          <div>
+            <p class="method-title">验证方法</p>
+            <pre><code>open https://team-agent.net
+curl -I https://team-agent.net
+# 在桌面和移动宽度各检查一次：
+# 1. 视频自动播放
+# 2. 中文/英文切换
+# 3. 首屏、FAQ、CTA 区域无布局破损</code></pre>
+          </div>
+          <ul class="subchecks">
+            <li><label><input type="checkbox" data-check="homepage-access">`team-agent.net` 可访问，HTTP 状态正常。</label></li>
+            <li><label><input type="checkbox" data-check="homepage-video">主页视频自动播放，无黑屏、暂停或控制台资源错误。</label></li>
+            <li><label><input type="checkbox" data-check="homepage-locale">中英文切换正常，切换后关键文案和布局都正确。</label></li>
+          </ul>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      Last updated: 2026-06-21. Storage key: <code>team-agent.pre-release-checklist.v1</code>
+    </footer>
+  </main>
+
+  <script>
+    (function () {
+      'use strict';
+
+      const storageKey = 'team-agent.pre-release-checklist.v1';
+      const checks = Array.from(document.querySelectorAll('[data-check]'));
+      const progressFill = document.getElementById('progress-fill');
+      const progressCopy = document.getElementById('progress-copy');
+
+      function loadState() {
+        try {
+          return JSON.parse(localStorage.getItem(storageKey) || '{}');
+        } catch (error) {
+          return {};
+        }
+      }
+
+      function saveState(state) {
+        localStorage.setItem(storageKey, JSON.stringify(state));
+      }
+
+      function updateParentState(parent) {
+        const item = parent.closest('.test-item');
+        const childChecks = Array.from(item.querySelectorAll('.test-body [data-check]'));
+        const allDone = childChecks.length > 0 && childChecks.every((check) => check.checked);
+        parent.checked = allDone;
+      }
+
+      function updateItemVisuals() {
+        document.querySelectorAll('.test-item').forEach((item) => {
+          const parent = item.querySelector('.test-heading [data-check]');
+          item.classList.toggle('done', parent.checked);
+        });
+      }
+
+      function updateProgress() {
+        const done = checks.filter((check) => check.checked).length;
+        const total = checks.length;
+        const percent = total === 0 ? 0 : Math.round((done / total) * 100);
+        progressFill.style.width = percent + '%';
+        progressCopy.textContent = done + ' / ' + total;
+      }
+
+      function persistFromDom() {
+        const state = {};
+        checks.forEach((check) => {
+          state[check.dataset.check] = check.checked;
+        });
+        saveState(state);
+      }
+
+      function refresh() {
+        document.querySelectorAll('.test-heading [data-check]').forEach(updateParentState);
+        updateItemVisuals();
+        updateProgress();
+        persistFromDom();
+      }
+
+      function setItemChildren(parent, checked) {
+        const item = parent.closest('.test-item');
+        item.querySelectorAll('.test-body [data-check]').forEach((child) => {
+          child.checked = checked;
+        });
+      }
+
+      const state = loadState();
+      checks.forEach((check) => {
+        check.checked = Boolean(state[check.dataset.check]);
+      });
+      document.querySelectorAll('.test-heading [data-check]').forEach(updateParentState);
+      updateItemVisuals();
+      updateProgress();
+
+      checks.forEach((check) => {
+        check.addEventListener('change', () => {
+          if (check.closest('.test-heading')) {
+            setItemChildren(check, check.checked);
+          }
+          refresh();
+        });
+      });
+
+      document.getElementById('check-all').addEventListener('click', () => {
+        checks.forEach((check) => {
+          check.checked = true;
+        });
+        refresh();
+      });
+
+      document.getElementById('clear-all').addEventListener('click', () => {
+        checks.forEach((check) => {
+          check.checked = false;
+        });
+        refresh();
+      });
+    })();
+  </script>
+</body>
+</html>

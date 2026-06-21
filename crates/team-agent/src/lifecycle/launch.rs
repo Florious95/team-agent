@@ -2805,6 +2805,7 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let workspace = workspace.to_path_buf();
     let mut spec = crate::compiler::compile_team(agents_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    override_spec_workspace(&mut spec, &workspace);
     if !open_display {
         override_spec_display_backend(&mut spec, "none");
     }
@@ -3548,6 +3549,7 @@ fn add_agent_with_transport_at_paths(
     // 就地读外部 role 文档编译,注入 base team spec 的 agents/routing。role 文件留在原处。
     let mut spec = crate::compiler::compile_team(team_dir)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    override_spec_workspace(&mut spec, run_workspace);
     let workspace_s = spec
         .get("team")
         .and_then(|team| team.get("workspace"))
@@ -4722,6 +4724,25 @@ pub(crate) fn write_spec_atomic(spec_path: &Path, spec: &Value) -> Result<(), Li
 
 pub(crate) fn override_spec_session_name(spec: &mut Value, session_name: &str) {
     override_spec_runtime_str(spec, "session_name", session_name);
+}
+
+pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
+    let workspace_s = workspace.to_string_lossy().to_string();
+    let Value::Map(root) = spec else { return };
+    if let Some((_, Value::Map(team))) = root.iter_mut().find(|(k, _)| k == "team") {
+        if let Some((_, value)) = team.iter_mut().find(|(k, _)| k == "workspace") {
+            *value = Value::Str(workspace_s.clone());
+        }
+    }
+    if let Some((_, Value::List(agents))) = root.iter_mut().find(|(k, _)| k == "agents") {
+        for agent in agents {
+            if let Value::Map(fields) = agent {
+                if let Some((_, value)) = fields.iter_mut().find(|(k, _)| k == "working_directory") {
+                    *value = Value::Str(workspace_s.clone());
+                }
+            }
+        }
+    }
 }
 
 fn override_spec_display_backend(spec: &mut Value, display_backend: &str) {

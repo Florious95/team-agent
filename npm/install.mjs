@@ -149,9 +149,15 @@ function install(argv) {
 
   const runtimeBinary = path.join(dest, "bin", "team-agent");
   fs.mkdirSync(binDir, { recursive: true });
-  writeExecWrapper(path.join(binDir, "team-agent"), runtimeBinary, []);
+  writeExecWrapper(path.join(binDir, "team-agent"), runtimeBinary, [], { allowForeign: true });
   writeExecWrapper(path.join(binDir, "team_orchestrator"), runtimeBinary, ["mcp-server"]);
   writeExecWrapper(path.join(binDir, "team-agent-coordinator"), runtimeBinary, ["coordinator"]);
+  const shadowRepairs = repairPathShadowingTeamAgentCommands({
+    env: process.env,
+    home: os.homedir(),
+    binDir,
+    runtimeBinary,
+  });
   installSkills(runtimeBinary);
   writeInstallManifest(runtimeRoot, {
     version,
@@ -160,6 +166,7 @@ function install(argv) {
     runtimeBinary,
     installedAt: new Date().toISOString(),
     installTargetKind: installTarget.kind,
+    pathShadowRepairs: shadowRepairs.map((repair) => repair.file),
   });
 
   const teamAgent = path.join(binDir, "team-agent");
@@ -176,6 +183,9 @@ function install(argv) {
   console.log(`runtime: ${dest}`);
   console.log(`binary: ${platformBinary.packageName}`);
   console.log("skill: installed for Codex, Claude and Copilot");
+  for (const repair of shadowRepairs) {
+    console.log(`path-shadow: updated ${repair.file} to runtime shim`);
+  }
 
   // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
   // 子命令,因为 0.3.x CLI 现阶段没有 --version)。真跑一次 binary 才能抓住
@@ -209,6 +219,11 @@ function install(argv) {
   } finally {
     fs.rmSync(doctorWorkspace, { recursive: true, force: true });
   }
+  const pathCheck = verifyInstalledTeamAgentOnPath({
+    env: process.env,
+    expectedVersion: version,
+  });
+  console.log(`post-install: ${pathCheck.entry} --version = ${pathCheck.version}`);
 }
 
 function runDoctor(argv) {
@@ -307,6 +322,115 @@ export function resolveInstallBinDir(options = {}) {
   fs.mkdirSync(binDir, { recursive: true });
   const rc = ensureBinDirOnShellRc(binDir, { env, home });
   return { binDir, kind: "shell_rc", readyNow: false, rc };
+}
+
+export function repairPathShadowingTeamAgentCommands(options = {}) {
+  const env = options.env || process.env;
+  const home = options.home || os.homedir();
+  const binDir = path.resolve(expandHomeFor(options.binDir || "", home));
+  const runtimeBinary = options.runtimeBinary;
+  if (!runtimeBinary) {
+    throw new Error("runtimeBinary is required");
+  }
+  const installedWrapper = path.join(binDir, "team-agent");
+  const repairs = [];
+  for (const entry of shadowingPathEntries(env.PATH || "", home, binDir)) {
+    if (isVersionManagedPath(entry)) {
+      continue;
+    }
+    const candidate = path.join(entry, "team-agent");
+    if (!isExecutableFile(candidate) || sameFile(candidate, installedWrapper) || sameFile(candidate, runtimeBinary)) {
+      continue;
+    }
+    try {
+      writeExecWrapper(candidate, runtimeBinary, [], { allowForeign: true });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`failed to update PATH-shadowing team-agent at ${candidate}: ${detail}`);
+    }
+    repairs.push({ file: candidate, binDir: entry });
+  }
+  return repairs;
+}
+
+export function verifyInstalledTeamAgentOnPath(options = {}) {
+  const env = options.env || process.env;
+  const expectedVersion = options.expectedVersion;
+  if (!expectedVersion) {
+    throw new Error("expectedVersion is required");
+  }
+  const which = spawnSync("which", ["team-agent"], {
+    text: true,
+    encoding: "utf8",
+    env,
+    timeout: VERSION_SMOKE_TIMEOUT_MS,
+  });
+  const entry = (which.stdout || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  if (which.status !== 0 || !entry) {
+    throw new Error(
+      `post-install version check failed: \`which team-agent\` did not find the installed command. ` +
+        `Expected version ${expectedVersion}. Add the install bin directory to PATH or restart your shell.`,
+    );
+  }
+  const versionProbe = spawnSync(entry, ["--version"], {
+    text: true,
+    encoding: "utf8",
+    env,
+    timeout: VERSION_SMOKE_TIMEOUT_MS,
+  });
+  const versionOutput = `${versionProbe.stdout || ""}\n${versionProbe.stderr || ""}`;
+  if (versionProbe.status !== 0) {
+    const log = versionOutput.trim() || "no stderr/stdout";
+    throw new Error(
+      `post-install version check failed: PATH resolves team-agent to ${entry}, but \`${entry} --version\` failed ` +
+        `(status=${versionProbe.status ?? "signal"}). Expected version ${expectedVersion}. ` +
+        `A stale binary may be shadowing the installed shim. LOG: ${log}`,
+    );
+  }
+  const actualVersion = parseTeamAgentVersion(versionOutput);
+  if (actualVersion !== expectedVersion) {
+    throw new Error(
+      `post-install version check failed: PATH resolves team-agent to ${entry}, version ${actualVersion || "unknown"} ` +
+        `but installer installed ${expectedVersion}. Remove or update the earlier PATH entry that shadows Team Agent.`,
+    );
+  }
+  return { entry, version: actualVersion };
+}
+
+export function parseTeamAgentVersion(output) {
+  const text = String(output || "").trim();
+  const prefixed = text.match(/^team-agent\s+([^\s]+)$/m);
+  if (prefixed) {
+    return prefixed[1];
+  }
+  const bare = text.match(/^([0-9]+\.[0-9]+\.[0-9]+(?:[-+][^\s]+)?)$/m);
+  return bare ? bare[1] : null;
+}
+
+function shadowingPathEntries(searchPath, home, binDir) {
+  const entries = uniquePathEntries(searchPath, home);
+  const installedIndex = entries.findIndex((entry) => path.resolve(entry) === path.resolve(binDir));
+  if (installedIndex === -1) {
+    return entries;
+  }
+  return entries.slice(0, installedIndex);
+}
+
+function isExecutableFile(file) {
+  try {
+    fs.accessSync(file, fs.constants.X_OK);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function sameFile(left, right) {
+  try {
+    return fs.realpathSync(left) === fs.realpathSync(right);
+  } catch {
+    return path.resolve(left) === path.resolve(right);
+  }
 }
 
 function uniquePathEntries(searchPath, home) {
@@ -499,8 +623,8 @@ function copyExecutable(src, dest) {
   fs.chmodSync(dest, 0o755);
 }
 
-function writeExecWrapper(file, binary, fixedArgs) {
-  if (fs.existsSync(file) && !isInstallerManagedWrapper(file)) {
+function writeExecWrapper(file, binary, fixedArgs, options = {}) {
+  if (fs.existsSync(file) && !options.allowForeign && !isInstallerManagedWrapper(file)) {
     throw new Error(`refusing to overwrite non-Team Agent installer wrapper: ${file}`);
   }
   const args = fixedArgs.map(shellQuote).join(" ");

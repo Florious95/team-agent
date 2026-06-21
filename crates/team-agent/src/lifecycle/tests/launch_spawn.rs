@@ -225,6 +225,60 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
     );
 }
 
+#[test]
+fn quick_start_default_workspace_compiled_spec_uses_project_root() {
+    let workspace = temp_ws();
+    std::fs::create_dir_all(workspace.join("agents")).unwrap();
+    std::fs::write(workspace.join("TEAM.md"), QS_TEAM_MD).unwrap();
+    std::fs::write(workspace.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    seed_healthy_coordinator(&workspace);
+    let transport = OfflineTransport::new();
+
+    let report = quick_start_with_transport_in_workspace(
+        &workspace,
+        &workspace,
+        None,
+        true,
+        true,
+        None,
+        &transport,
+    )
+    .expect("quick-start workspace-root team should reach a report");
+    assert!(
+        matches!(report, QuickStartReport::Ready { .. }),
+        "quick-start failed: {report:?}"
+    );
+
+    let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+    let spec_path = state
+        .get("spec_path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .expect("quick-start state should carry spec_path");
+    let spec = crate::model::yaml::loads(&std::fs::read_to_string(spec_path).unwrap()).unwrap();
+    assert_eq!(
+        spec.get("team")
+            .and_then(|team| team.get("workspace"))
+            .and_then(crate::model::yaml::Value::as_str),
+        Some(workspace.to_string_lossy().as_ref()),
+        "compiled team.workspace must be the project root, not its parent"
+    );
+    for agent in spec.get("agents").and_then(crate::model::yaml::Value::as_list).unwrap() {
+        assert_eq!(
+            agent
+                .get("working_directory")
+                .and_then(crate::model::yaml::Value::as_str),
+            Some(workspace.to_string_lossy().as_ref()),
+            "compiled agent working_directory must be the project root"
+        );
+    }
+    assert_eq!(
+        transport.spawn_cwd_records(),
+        vec![workspace],
+        "quick-start must spawn workers from the project root"
+    );
+}
+
 // P0 — quick_start over an INVALID role doc (missing `provider`) must surface the REAL compile
 // error, distinct from the stub's hardcoded "no role docs found". Golden: compile_team raises
 // "missing front matter field provider" (compiler.py:_validate_role_doc), before preflight.
@@ -1531,6 +1585,91 @@ fn restart_with_transport_spawns_resumable_workers_not_stub() {
             .is_some_and(|error| error.contains("session_disappeared_after_spawn")),
         "restart must report the first resumed agent/session disappearance explicitly; event={failed} result={result_debug}"
     );
+}
+
+#[test]
+fn restart_runtime_spec_spawns_from_run_workspace_not_runtime_dir() {
+    let workspace = temp_ws();
+    std::fs::create_dir_all(workspace.join("agents")).unwrap();
+    let rollout = workspace.join("alpha-rollout.jsonl");
+    std::fs::write(&rollout, "{}\n").unwrap();
+    std::fs::write(
+        workspace.join("TEAM.md"),
+        "---\nname: current\nobjective: Restart cwd probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
+    let spec = crate::compiler::compile_team(&workspace).expect("compile project-root team");
+    let spec_path = crate::model::paths::runtime_spec_path(&workspace, "current");
+    std::fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+    std::fs::write(&spec_path, crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": "current",
+            "session_name": "team-current",
+            "spec_path": spec_path.to_string_lossy(),
+            "team_dir": workspace.to_string_lossy(),
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "provider": "codex",
+                    "session_id": "sess-a",
+                    "rollout_path": rollout.to_string_lossy(),
+                    "first_send_at": "2026-05-27T10:00:00+00:00",
+                    "spawn_cwd": null
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&workspace);
+    let transport = OfflineTransport::new();
+
+    let result = restart_with_transport(&workspace, false, Some("current"), &transport);
+
+    assert!(
+        matches!(result, Ok(RestartReport::Restarted { .. })),
+        "restart should succeed for a resumable project-root team: {result:?}"
+    );
+    assert_eq!(
+        transport.spawn_cwd_records(),
+        vec![workspace.clone()],
+        "restart must spawn from run_workspace, not .team/runtime/<team>"
+    );
+    let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+    assert_eq!(
+        state
+            .get("agents")
+            .and_then(|agents| agents.get("alpha"))
+            .and_then(|agent| agent.get("spawn_cwd"))
+            .and_then(serde_json::Value::as_str),
+        Some(workspace.to_string_lossy().as_ref()),
+        "restart must persist the actual spawn cwd for later diagnostics"
+    );
+    let rebuilt_spec =
+        crate::model::yaml::loads(&std::fs::read_to_string(&spec_path).unwrap()).unwrap();
+    assert_eq!(
+        rebuilt_spec
+            .get("team")
+            .and_then(|team| team.get("workspace"))
+            .and_then(crate::model::yaml::Value::as_str),
+        Some(workspace.to_string_lossy().as_ref()),
+        "restart spec rebuild must keep team.workspace at the project root"
+    );
+    for agent in rebuilt_spec
+        .get("agents")
+        .and_then(crate::model::yaml::Value::as_list)
+        .unwrap()
+    {
+        assert_eq!(
+            agent
+                .get("working_directory")
+                .and_then(crate::model::yaml::Value::as_str),
+            Some(workspace.to_string_lossy().as_ref()),
+            "restart spec rebuild must keep agent working_directory at the project root"
+        );
+    }
 }
 
 #[test]

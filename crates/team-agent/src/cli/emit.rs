@@ -41,6 +41,10 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
         println!("{}", command_help(None));
         return ExitCode::Ok;
     }
+    if matches!(command, "-V" | "--version") {
+        println!("team-agent {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::Ok;
+    }
     // CR-063/G4: every registered subcommand's `--help` must short-circuit before dispatch,
     // before argument validation, leader-pane checks, or runtime-state writes.
     //

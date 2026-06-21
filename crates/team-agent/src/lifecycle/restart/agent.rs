@@ -621,6 +621,10 @@ fn mark_agent_started(
         "spawned_at".to_string(),
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
+    agent.insert(
+        "spawn_cwd".to_string(),
+        serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
+    );
     crate::lifecycle::launch::persist_command_plan_state(
         agent,
         &spawn.plan,

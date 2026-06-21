@@ -7,8 +7,11 @@ import path from "node:path";
 import {
   doctorSelfCheckLine,
   doctorSelfCheckVerdict,
+  parseTeamAgentVersion,
   readInstallManifest,
+  repairPathShadowingTeamAgentCommands,
   resolveInstallBinDir,
+  verifyInstalledTeamAgentOnPath,
   writeInstallManifest,
 } from "./install.mjs";
 
@@ -110,6 +113,91 @@ test("install bin resolver skips writable path dir with foreign wrapper", () => 
   assert.equal(resolved.readyNow, true);
 });
 
+test("post-install repair updates higher-priority stale local team-agent binary", () => {
+  const root = tempRoot("path-shadow");
+  const localBin = path.join(root, ".local", "bin");
+  const installBin = path.join(root, ".hermes", "bin");
+  const runtimeBinary = path.join(root, "runtime", "0.3.test", "bin", "team-agent");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.mkdirSync(installBin, { recursive: true });
+  fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
+  fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(localBin, "team-agent"), "#!/bin/sh\necho old team-agent\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+
+  const repairs = repairPathShadowingTeamAgentCommands({
+    env: { PATH: [localBin, installBin].join(path.delimiter) },
+    home: root,
+    binDir: installBin,
+    runtimeBinary,
+  });
+
+  assert.deepEqual(repairs.map((repair) => repair.file), [path.join(localBin, "team-agent")]);
+  const repaired = fs.readFileSync(path.join(localBin, "team-agent"), "utf8");
+  assert.match(repaired, /team-agent installer wrapper/);
+  assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
+});
+
+test("post-install repair leaves lower-priority team-agent binary untouched", () => {
+  const root = tempRoot("path-shadow-after");
+  const installBin = path.join(root, ".hermes", "bin");
+  const laterBin = path.join(root, ".local", "bin");
+  const runtimeBinary = path.join(root, "runtime", "0.3.test", "bin", "team-agent");
+  fs.mkdirSync(installBin, { recursive: true });
+  fs.mkdirSync(laterBin, { recursive: true });
+  fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
+  fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(laterBin, "team-agent"), "#!/bin/sh\necho later old\n", { mode: 0o755 });
+
+  const repairs = repairPathShadowingTeamAgentCommands({
+    env: { PATH: [installBin, laterBin].join(path.delimiter) },
+    home: root,
+    binDir: installBin,
+    runtimeBinary,
+  });
+
+  assert.deepEqual(repairs, []);
+  assert.equal(fs.readFileSync(path.join(laterBin, "team-agent"), "utf8"), "#!/bin/sh\necho later old\n");
+});
+
+test("post-install version check verifies the actual team-agent resolved on PATH", () => {
+  const root = tempRoot("version-check");
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeVersionScript(path.join(binDir, "team-agent"), "1.2.3");
+
+  const check = verifyInstalledTeamAgentOnPath({
+    env: { PATH: [binDir, process.env.PATH || ""].join(path.delimiter) },
+    expectedVersion: "1.2.3",
+  });
+
+  assert.equal(check.entry, path.join(binDir, "team-agent"));
+  assert.equal(check.version, "1.2.3");
+});
+
+test("post-install version check fails when PATH still resolves an old team-agent", () => {
+  const root = tempRoot("version-mismatch");
+  const binDir = path.join(root, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  writeVersionScript(path.join(binDir, "team-agent"), "0.3.36");
+
+  assert.throws(
+    () =>
+      verifyInstalledTeamAgentOnPath({
+        env: { PATH: [binDir, process.env.PATH || ""].join(path.delimiter) },
+        expectedVersion: "0.3.37",
+      }),
+    /PATH resolves team-agent.*0\.3\.36.*installed 0\.3\.37/,
+  );
+});
+
+test("team-agent version parser accepts installer-safe output shapes", () => {
+  assert.equal(parseTeamAgentVersion("team-agent 1.2.3\n"), "1.2.3");
+  assert.equal(parseTeamAgentVersion("1.2.3\n"), "1.2.3");
+  assert.equal(parseTeamAgentVersion("usage: nope\n"), null);
+});
+
 test("install manifest persists selected bin dir for later commands", () => {
   const root = tempRoot("manifest");
   const runtimeRoot = path.join(root, "runtime");
@@ -124,4 +212,22 @@ test("install manifest persists selected bin dir for later commands", () => {
 
 function tempRoot(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `team-agent-install-${label}-`));
+}
+
+function writeVersionScript(file, version) {
+  fs.writeFileSync(
+    file,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "team-agent ${version}"
+  exit 0
+fi
+exit 2
+`,
+    { mode: 0o755 },
+  );
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

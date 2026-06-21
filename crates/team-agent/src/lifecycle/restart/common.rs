@@ -5,6 +5,7 @@ pub(super) struct SpawnedAgentWindow {
     pub plan: crate::provider::CommandPlan,
     pub profile_launch: crate::provider::ProviderProfileLaunch,
     pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
+    pub spawn_cwd: std::path::PathBuf,
 }
 
 pub(super) fn spawn_agent_window(
@@ -238,6 +239,7 @@ pub(super) fn spawn_agent_window(
         plan,
         profile_launch,
         layout_placement: layout_placement.cloned(),
+        spawn_cwd: spawn_cwd.to_path_buf(),
     })
 }
 
