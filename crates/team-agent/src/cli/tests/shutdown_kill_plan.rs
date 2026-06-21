@@ -677,7 +677,7 @@ fn shutdown_outcome_late_or_postcheck_gone_is_ok_with_lsof_diagnostic() {
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone, target_session_spared: false,
         },
     );
 
@@ -697,7 +697,7 @@ fn shutdown_outcome_coordinator_timeout_still_running_is_timeout() {
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running, target_session_spared: false,
         },
     );
 
@@ -717,7 +717,7 @@ fn shutdown_outcome_ps_table_degraded_still_partial_after_coordinator_gone() {
             cleanup_truth_degraded: true,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone, target_session_spared: false,
         },
     );
 
@@ -1097,6 +1097,7 @@ fn unit0_classify_outcome_no_residuals_returns_ok() {
             coordinator_stop_ok: Some(true),
             coordinator_post_stop:
                 crate::cli::lifecycle_port::CoordinatorStopObservation::NotNeeded,
+            target_session_spared: false,
         },
     );
     assert!(out.ok);
@@ -1117,6 +1118,7 @@ fn unit0_classify_outcome_session_residual_returns_failed() {
             coordinator_stop_ok: Some(true),
             coordinator_post_stop:
                 crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            target_session_spared: false,
         },
     );
     assert!(!out.ok);
@@ -1136,6 +1138,7 @@ fn unit0_classify_outcome_coordinator_timeout_returns_timeout_phase() {
             coordinator_stop_ok: Some(false),
             coordinator_post_stop:
                 crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+            target_session_spared: false,
         },
     );
     assert!(!out.ok);
@@ -1156,11 +1159,39 @@ fn unit0_classify_outcome_cleanup_truth_degraded_returns_partial_os_probe() {
             coordinator_stop_ok: Some(true),
             coordinator_post_stop:
                 crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            target_session_spared: false,
         },
     );
     assert!(!out.ok);
     assert_eq!(out.status, "partial");
     assert_eq!(out.phase, Some("os_probe"));
+}
+
+#[test]
+fn unit2_classify_outcome_target_session_spared_is_not_green() {
+    // unit-2 false-green guard: when the target worker session was spared
+    // (still alive) the classifier MUST NOT return ok/status:"ok". This is
+    // the 0.3.39 shutdown false-green shape unit-2 fixes.
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            owned_file_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: false,
+            coordinator_stop_ok: Some(true),
+            coordinator_post_stop:
+                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            target_session_spared: true,
+        },
+    );
+    assert!(
+        !out.ok,
+        "false-green regression: target_session_spared=true must force ok=false"
+    );
+    assert_eq!(out.status, "dirty_state");
+    assert_eq!(out.phase, Some("target_session_spared"));
 }
 
 #[test]

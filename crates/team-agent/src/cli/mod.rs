@@ -859,6 +859,18 @@ pub mod lifecycle_port {
             .as_ref()
             .and_then(|stopped| stopped.pid.map(|p| p.get()));
         let coordinator_pid = coordinator_pid.or(coordinator_pid_for_report);
+        // unit-2 (Stage 1) false-green guard fact:
+        //   target_session_spared = "we had a target worker session name AND
+        //                            that exact name appears in spared_sessions"
+        // Mirrors the "we asked to kill X but X is still alive" check the
+        // 0.3.39 false-green bug missed. session_name is the configured
+        // target; spared_sessions is the cleanup's "kept alive" list.
+        let target_session_spared = match session_name.as_ref() {
+            Some(target) => spared_sessions
+                .iter()
+                .any(|s| s.as_str() == target.as_str()),
+            None => false,
+        };
         let outcome = classify_shutdown_outcome(ShutdownOutcomeInput {
             kill_error: kill_error.is_some(),
             session_residuals: !session_residuals.is_empty(),
@@ -868,6 +880,7 @@ pub mod lifecycle_port {
             coordinator_timeout,
             coordinator_stop_ok: stopped.as_ref().map(|stopped| stopped.ok),
             coordinator_post_stop,
+            target_session_spared,
         });
         let ok = outcome.ok;
         let status = outcome.status;
@@ -956,6 +969,16 @@ pub mod lifecycle_port {
         pub(crate) coordinator_timeout: bool,
         pub(crate) coordinator_stop_ok: Option<bool>,
         pub(crate) coordinator_post_stop: CoordinatorStopObservation,
+        /// unit-2 (Stage 1) false-green guard:
+        /// `true` when the workspace had a target worker session name AND
+        /// the cleanup did NOT confirm kill of that name (i.e. the target
+        /// was spared, leaving the worker alive while ok/status:"ok" would
+        /// otherwise be reported — the 0.3.39 shutdown false-green shape).
+        ///
+        /// Default `false` for callers that have no target (legacy bare
+        /// shutdown on a not-yet-bound workspace) so the existing
+        /// well-defined OK branch keeps working.
+        pub(crate) target_session_spared: bool,
     }
 
     pub(crate) fn classify_shutdown_outcome(input: ShutdownOutcomeInput) -> ShutdownOutcome {
@@ -971,7 +994,12 @@ pub mod lifecycle_port {
             && !input.session_residuals
             && !input.process_residuals
             && !input.owned_file_residuals
-            && !input.cleanup_truth_degraded;
+            && !input.cleanup_truth_degraded
+            // unit-2 false-green guard: refuse OK when the configured worker
+            // session was spared (still alive). The user asked for shutdown,
+            // not "shutdown but maybe keep the session" — make the disagreement
+            // explicit instead of paint-it-green.
+            && !input.target_session_spared;
         if ok {
             return ShutdownOutcome {
                 ok,
@@ -989,6 +1017,12 @@ pub mod lifecycle_port {
             || input.owned_file_residuals
         {
             ("failed", None)
+        } else if input.target_session_spared {
+            // The worker session that was supposed to be killed survived
+            // because the cleanup decision spared it (dirty topology — e.g.
+            // 0.3.39 leader_receiver.session_name == worker session). Surface
+            // a status that names the cause instead of fall-through "partial".
+            ("dirty_state", Some("target_session_spared"))
         } else {
             ("partial", None)
         };
