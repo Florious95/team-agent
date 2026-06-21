@@ -51,14 +51,27 @@ fn rest_011_restart_without_allow_fresh_returns_structured_refusal() {
         "error should steer user to --allow-fresh; got {error:?}"
     );
 
+    // Leader directive 2026-06-22: `unresumable` is now an array of
+    // structured entries `{agent_id, reason, ...}`. The legacy string
+    // array remains available under `unresumable_ids` for tools that
+    // still want the bare list.
     let unresumable = j
         .pointer("/unresumable")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let unresumable_ids: Vec<&str> = unresumable.iter().filter_map(|v| v.as_str()).collect();
+    let unresumable_ids: Vec<&str> = unresumable
+        .iter()
+        .filter_map(|e| e.get("agent_id").and_then(|v| v.as_str()))
+        .collect();
     assert!(
         unresumable_ids.contains(&"a") && unresumable_ids.contains(&"b"),
         "unresumable should list both agents; got {unresumable_ids:?}"
     );
+    for e in &unresumable {
+        assert!(
+            e.get("reason").and_then(|v| v.as_str()).is_some(),
+            "each unresumable entry must carry a reason; got {e}"
+        );
+    }
 }

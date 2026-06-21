@@ -2747,14 +2747,95 @@ pub mod lifecycle_port {
                 unresumable,
                 allow_fresh,
                 error,
-            } => json!({
-                "ok": false,
-                "status": "refused_resume_atomicity",
-                "allow_fresh": allow_fresh,
-                "error": error,
-                "unresumable": unresumable.iter().map(|w| w.agent_id.as_str()).collect::<Vec<_>>(),
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+            } => {
+                // Unit 5 + Layer 2 wire-through (leader directive 2026-06-22):
+                // `unresumable` JSON shape is now `[{agent_id, reason,
+                // session_id?, checked_paths?, recovery_hint?}, ...]` so the
+                // structured refusal class is visible to CLI consumers. The
+                // legacy string-array shape (single agent_id per entry) is
+                // available under `unresumable_ids` for tooling that still
+                // wants the cheap list.
+                let unresumable_detail: Vec<Value> = unresumable
+                    .iter()
+                    .map(|w| {
+                        let mut entry = serde_json::Map::new();
+                        entry.insert(
+                            "agent_id".to_string(),
+                            json!(w.agent_id.as_str()),
+                        );
+                        // Prefer the structured wire string when the
+                        // ResumeRefusalReason enum is populated; fall back
+                        // to the legacy free-form `reason` otherwise.
+                        let reason_wire = w
+                            .refusal_reason
+                            .as_ref()
+                            .map(|r| r.wire().to_string())
+                            .unwrap_or_else(|| w.reason.clone());
+                        entry.insert("reason".to_string(), json!(reason_wire));
+                        if let Some(sid) = &w.session_id {
+                            entry.insert(
+                                "session_id".to_string(),
+                                json!(sid.as_str()),
+                            );
+                        }
+                        if let Some(reason) = &w.refusal_reason {
+                            if let crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+                                checked_paths,
+                                recovery_hint,
+                            } = reason
+                            {
+                                if !checked_paths.is_empty() {
+                                    entry.insert(
+                                        "checked_paths".to_string(),
+                                        json!(checked_paths
+                                            .iter()
+                                            .map(|p| p.to_string_lossy().into_owned())
+                                            .collect::<Vec<_>>()),
+                                    );
+                                }
+                                if let Some(hint) = recovery_hint {
+                                    let mut h = serde_json::Map::new();
+                                    h.insert(
+                                        "provider".to_string(),
+                                        json!(hint.provider),
+                                    );
+                                    if let Some(name) = &hint.provider_session_name_hint {
+                                        h.insert("name".to_string(), json!(name));
+                                    }
+                                    if let Some(cwd) = &hint.spawn_cwd {
+                                        h.insert(
+                                            "spawn_cwd".to_string(),
+                                            json!(cwd.to_string_lossy()),
+                                        );
+                                    }
+                                    h.insert(
+                                        "picker_hint".to_string(),
+                                        json!(hint.picker_hint()),
+                                    );
+                                    entry.insert(
+                                        "recovery_hint".to_string(),
+                                        Value::Object(h),
+                                    );
+                                }
+                            }
+                        }
+                        Value::Object(entry)
+                    })
+                    .collect();
+                let unresumable_ids: Vec<&str> = unresumable
+                    .iter()
+                    .map(|w| w.agent_id.as_str())
+                    .collect();
+                json!({
+                    "ok": false,
+                    "status": "refused_resume_atomicity",
+                    "allow_fresh": allow_fresh,
+                    "error": error,
+                    "unresumable": unresumable_detail,
+                    "unresumable_ids": unresumable_ids,
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                })
+            }
             crate::lifecycle::RestartReport::RefusedResumeNotReady {
                 missing,
                 allow_fresh,

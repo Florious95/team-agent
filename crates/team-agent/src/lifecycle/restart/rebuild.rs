@@ -193,6 +193,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         &plan.decisions,
         &forced_fresh_missing,
         forced_fresh_convergence.as_ref(),
+        &plan.unresumable,
     )?;
     if !plan.corrupt_entries.is_empty() {
         return Ok(RestartReport::RefusedInvalidFirstSendAt {
@@ -1191,7 +1192,13 @@ fn write_restart_resume_decision_events(
     decisions: &[RestartedAgent],
     forced_fresh_missing: &std::collections::BTreeSet<String>,
     forced_fresh_convergence: Option<&crate::session_capture::SessionConvergence>,
+    unresumable: &[crate::lifecycle::types::UnresumableWorker],
 ) -> Result<(), LifecycleError> {
+    // Layer 2 (leader directive 2026-06-22): every restart.resume_decision
+    // event for a Refuse decision must carry the structured refusal_reason
+    // wire string so operators can see WHY without crawling state.json.
+    let refusal_index: std::collections::BTreeMap<&str, &crate::lifecycle::types::UnresumableWorker> =
+        unresumable.iter().map(|u| (u.agent_id.as_str(), u)).collect();
     for decision in decisions {
         let agent = state
             .get("agents")
@@ -1213,6 +1220,7 @@ fn write_restart_resume_decision_events(
             decision_wire,
             forced_fresh_missing.contains(decision.agent_id.as_str()),
             forced_fresh_convergence,
+            refusal_index.get(decision.agent_id.as_str()).copied(),
         )?;
     }
     Ok(())
@@ -1227,6 +1235,7 @@ fn write_restart_resume_decision_event(
     decision: &str,
     forced_fresh: bool,
     forced_fresh_convergence: Option<&crate::session_capture::SessionConvergence>,
+    unresumable: Option<&crate::lifecycle::types::UnresumableWorker>,
 ) -> Result<(), LifecycleError> {
     use std::io::Write as _;
 
@@ -1245,6 +1254,60 @@ fn write_restart_resume_decision_event(
         "first_send_at": first_send_at,
         "session_id": session_id,
     });
+    // Layer 2 (leader directive 2026-06-22): when this is a Refuse decision
+    // and we have a structured ResumeRefusalReason, emit the wire string +
+    // optional recovery hint so the event-log audit is actionable. Falls
+    // back to the legacy free-form `reason` string when no structured
+    // refusal_reason is set.
+    if decision == "refuse" {
+        if let Some(u) = unresumable {
+            if let Some(obj) = event.as_object_mut() {
+                obj.insert("refusal_reason".to_string(), serde_json::json!(u.reason));
+                if let Some(structured) = &u.refusal_reason {
+                    obj.insert(
+                        "refusal_reason_wire".to_string(),
+                        serde_json::json!(structured.wire()),
+                    );
+                    if let crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+                        checked_paths,
+                        recovery_hint,
+                    } = structured
+                    {
+                        if !checked_paths.is_empty() {
+                            obj.insert(
+                                "checked_paths".to_string(),
+                                serde_json::json!(checked_paths
+                                    .iter()
+                                    .map(|p| p.to_string_lossy().into_owned())
+                                    .collect::<Vec<_>>()),
+                            );
+                        }
+                        if let Some(hint) = recovery_hint {
+                            let mut h = serde_json::Map::new();
+                            h.insert("provider".to_string(), serde_json::json!(hint.provider));
+                            if let Some(name) = &hint.provider_session_name_hint {
+                                h.insert("name".to_string(), serde_json::json!(name));
+                            }
+                            if let Some(cwd) = &hint.spawn_cwd {
+                                h.insert(
+                                    "spawn_cwd".to_string(),
+                                    serde_json::json!(cwd.to_string_lossy()),
+                                );
+                            }
+                            h.insert(
+                                "picker_hint".to_string(),
+                                serde_json::json!(hint.picker_hint()),
+                            );
+                            obj.insert(
+                                "recovery_hint".to_string(),
+                                serde_json::Value::Object(h),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     if forced_fresh {
         if let Some(event) = event.as_object_mut() {
             event.insert("forced_fresh".to_string(), serde_json::json!(true));

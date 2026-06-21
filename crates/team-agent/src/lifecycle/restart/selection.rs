@@ -236,10 +236,27 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                     // the catch-all `session_unresumable` — keep that wire,
                     // but record the structured reason so the new shape is
                     // available to callers that want it.
+                    //
+                    // Layer 2 self-healing (architect probe 2026-06-22): attach
+                    // a recovery hint pointing at the agent_id (used as
+                    // launch-time `--name`) and spawn_cwd. Operator-facing
+                    // diagnostic only — no auto-resume off the hint.
+                    let recovery_hint = Some(
+                        crate::provider::session::RecoveryHint {
+                            provider_session_name_hint: Some(agent_id.as_str().to_string()),
+                            spawn_cwd: agent
+                                .get("spawn_cwd")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(std::path::PathBuf::from),
+                            provider: provider_wire.to_string(),
+                        },
+                    );
                     (
                         "session_unresumable".to_string(),
                         crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
                             checked_paths: Vec::new(),
+                            recovery_hint,
                         },
                     )
                 } else {

@@ -8,6 +8,6 @@ pub mod capture;
 pub mod resume;
 
 pub use resume::{
-    ProviderBackingCheck, ResumeDecisionDetail, ResumePreflight, ResumePreflightOutcome,
-    ResumeRefusalReason,
+    ProviderBackingCheck, RecoveryHint, ResumeDecisionDetail, ResumePreflight,
+    ResumePreflightOutcome, ResumeRefusalReason,
 };

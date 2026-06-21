@@ -21,6 +21,48 @@
 
 use std::path::PathBuf;
 
+/// Layer 2 self-healing hint (architect probe 2026-06-22, §Recommended
+/// design): operator-facing diagnostic that names the agent / cwd /
+/// provider for a missing-backing refusal so the operator can manually
+/// find / repair the dropped session. Carried alongside the refusal —
+/// NEVER consumed for automatic resume. Auto-recovery requires multi-key
+/// filtering + backing revalidation (Layer 3 follow-up, see
+/// `session.recovery.candidate_promoted` event design).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryHint {
+    /// Agent role label that was passed at launch as `--name` / `-n`
+    /// (Claude / Copilot). Codex has no launch-time name flag, so this
+    /// is `None` for Codex workers (probe verdict 2026-06-22).
+    pub provider_session_name_hint: Option<String>,
+    /// Spawn cwd recorded for the worker — the second key in the
+    /// "provider+cwd+name+updated_at" filter Layer 3 will require.
+    pub spawn_cwd: Option<PathBuf>,
+    /// Wire provider name (`codex` / `claude` / `claude_code` /
+    /// `copilot`). Used for picker hint string only.
+    pub provider: String,
+}
+
+impl RecoveryHint {
+    /// Build a human-readable picker hint (one line). Layer 2 surfaces
+    /// this in the CLI refusal message and in the
+    /// `session.recovery.candidate_hint` event payload.
+    pub fn picker_hint(&self) -> String {
+        match (&self.provider_session_name_hint, &self.spawn_cwd) {
+            (Some(name), Some(cwd)) => format!(
+                "{} session named '{}' under cwd {}",
+                self.provider,
+                name,
+                cwd.display()
+            ),
+            (Some(name), None) => {
+                format!("{} session named '{}'", self.provider, name)
+            }
+            (None, Some(cwd)) => format!("{} session under cwd {}", self.provider, cwd.display()),
+            (None, None) => format!("{} session", self.provider),
+        }
+    }
+}
+
 /// Structured reason a worker is unresumable. Closed enum — future
 /// reasons require a code change, which is the point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +76,13 @@ pub enum ResumeRefusalReason {
     SessionBackingStoreMissing {
         /// Paths the runtime probed for the backing file.
         checked_paths: Vec<PathBuf>,
+        /// Layer 2 self-healing diagnostic (architect probe 2026-06-22):
+        /// agent / cwd / provider hint the operator can use to find or
+        /// repair the dropped session via the provider's own picker
+        /// (`claude --resume <name>`, `copilot --resume=<name>`).
+        /// **Never auto-consumed for resume** — auto-recovery requires
+        /// the Layer 3 multi-key filter + backing revalidation contract.
+        recovery_hint: Option<RecoveryHint>,
     },
     /// Provider does not support resume at the protocol level (e.g.
     /// some auth modes).
@@ -88,6 +137,7 @@ impl ResumeRefusalReason {
             "session_backing_store_missing" => {
                 ResumeRefusalReason::SessionBackingStoreMissing {
                     checked_paths: Vec::new(),
+                    recovery_hint: None,
                 }
             }
             "provider_resume_unsupported" => ResumeRefusalReason::ProviderResumeUnsupported {
@@ -153,6 +203,30 @@ impl ResumePreflight {
         provider_name: &str,
         allow_fresh: bool,
     ) -> ResumePreflightOutcome {
+        Self::check_with_hint(
+            session_id,
+            provider_can_resume,
+            backing,
+            provider_name,
+            allow_fresh,
+            None,
+        )
+    }
+
+    /// Layer 2 self-healing variant: same decision tree as
+    /// [`Self::check`], but propagates an optional `RecoveryHint` into
+    /// the `SessionBackingStoreMissing` refusal so the CLI / event log
+    /// can surface a "look for session named X under cwd Y" pointer to
+    /// the operator. The hint is for HUMAN consumption only — no
+    /// auto-resume happens off it (Layer 3 follow-up).
+    pub fn check_with_hint(
+        session_id: Option<&str>,
+        provider_can_resume: bool,
+        backing: Option<&ProviderBackingCheck>,
+        provider_name: &str,
+        allow_fresh: bool,
+        recovery_hint: Option<RecoveryHint>,
+    ) -> ResumePreflightOutcome {
         match session_id {
             Some(sid) if provider_can_resume => {
                 let backing_present = backing.map(|b| b.exists).unwrap_or(true);
@@ -168,6 +242,7 @@ impl ResumePreflight {
                             checked_paths: backing
                                 .map(|b| b.paths.clone())
                                 .unwrap_or_default(),
+                            recovery_hint,
                         },
                     }
                 }
@@ -259,5 +334,84 @@ mod tests {
             ResumePreflight::check(Some("sess-x"), true, Some(&backing), "codex", true),
             ResumePreflightOutcome::FreshStart
         );
+    }
+
+    // Layer 2 self-healing tests ────────────────────────────────────────────
+
+    #[test]
+    fn recovery_hint_picker_string_with_all_fields() {
+        let hint = RecoveryHint {
+            provider_session_name_hint: Some("coder".to_string()),
+            spawn_cwd: Some(PathBuf::from("/repo/team-a")),
+            provider: "claude".to_string(),
+        };
+        assert_eq!(
+            hint.picker_hint(),
+            "claude session named 'coder' under cwd /repo/team-a"
+        );
+    }
+
+    #[test]
+    fn recovery_hint_picker_string_no_name_no_cwd() {
+        // Codex worker — no launch-time name, spawn_cwd missing.
+        let hint = RecoveryHint {
+            provider_session_name_hint: None,
+            spawn_cwd: None,
+            provider: "codex".to_string(),
+        };
+        assert_eq!(hint.picker_hint(), "codex session");
+    }
+
+    #[test]
+    fn preflight_with_hint_attaches_to_backing_missing_refusal() {
+        let backing = ProviderBackingCheck {
+            paths: vec![PathBuf::from("/missing.jsonl")],
+            exists: false,
+        };
+        let hint = RecoveryHint {
+            provider_session_name_hint: Some("coder".to_string()),
+            spawn_cwd: Some(PathBuf::from("/repo")),
+            provider: "claude".to_string(),
+        };
+        let out = ResumePreflight::check_with_hint(
+            Some("sess-1"),
+            true,
+            Some(&backing),
+            "claude",
+            false,
+            Some(hint.clone()),
+        );
+        match out {
+            ResumePreflightOutcome::Refuse {
+                reason: ResumeRefusalReason::SessionBackingStoreMissing {
+                    recovery_hint: Some(h),
+                    ..
+                },
+            } => {
+                assert_eq!(h, hint);
+            }
+            other => panic!("expected SessionBackingStoreMissing with hint; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_no_hint_legacy_behavior_unchanged() {
+        // Default check() (no hint) still produces None recovery_hint —
+        // wire-string-compatible with pre-Layer-2 callers.
+        let backing = ProviderBackingCheck {
+            paths: vec![PathBuf::from("/missing.jsonl")],
+            exists: false,
+        };
+        let out = ResumePreflight::check(Some("sess-x"), true, Some(&backing), "codex", false);
+        match out {
+            ResumePreflightOutcome::Refuse {
+                reason: ResumeRefusalReason::SessionBackingStoreMissing {
+                    recovery_hint, ..
+                },
+            } => {
+                assert!(recovery_hint.is_none());
+            }
+            other => panic!("expected backing-missing refusal; got {other:?}"),
+        }
     }
 }
