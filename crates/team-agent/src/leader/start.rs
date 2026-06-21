@@ -546,7 +546,33 @@ fn persist_managed_leader_binding(
         "os_user": identity.os_user,
     });
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("session_name".to_string(), serde_json::json!(session));
+        // unit-4 (Stage 1) ROOT CAUSE FIX of 0.3.39 leader mis-kill:
+        //
+        // BEFORE: `obj.insert("session_name", json!(session));` wrote the
+        //   leader launcher session (always `team-agent-leader-*`) into the
+        //   top-level worker-session-name field, hijacking the identity used
+        //   by restart/shutdown when they decided what tmux session to kill.
+        //
+        // AFTER: the launcher session is recorded ONLY in
+        //   `leader_receiver.session_name` (the `receiver` block above) and
+        //   `team_owner.pane_id`. The top-level `state.session_name` keeps
+        //   whatever value the worker quick-start put there (the real worker
+        //   session). If the workspace has never been quick-started yet
+        //   (no `session_name` field at all), we leave the field absent —
+        //   restart and shutdown have safe default branches for that case.
+        //
+        // unit-3's preflight is the belt-and-suspenders backstop: even if a
+        // future regression reintroduces this overwrite, restart now refuses
+        // before killing a leader-prefixed session_name.
+        if !crate::layout::sessions::LEADER_SESSION_PREFIX.is_empty()
+            && session.starts_with(crate::layout::sessions::LEADER_SESSION_PREFIX)
+        {
+            // Explicit: skip the overwrite for leader-prefixed launcher
+            // sessions. The receiver block records the launcher session in
+            // its proper home (`leader_receiver.session_name`).
+        } else {
+            obj.insert("session_name".to_string(), serde_json::json!(session));
+        }
         obj.insert(
             "active_team_key".to_string(),
             serde_json::json!(identity.team_id.as_str()),
