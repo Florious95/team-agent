@@ -2758,6 +2758,18 @@ pub mod lifecycle_port {
                 "invalid": invalid.iter().map(|w| w.worker_id.as_str()).collect::<Vec<_>>(),
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
+            crate::lifecycle::RestartReport::RefusedDirtyTopology {
+                session_name,
+                reason,
+                error,
+            } => json!({
+                "ok": false,
+                "status": "refused_dirty_topology",
+                "reason": reason,
+                "session_name": session_name,
+                "error": error,
+                "reminder": crate::cli::QUICK_START_REMINDER,
+            }),
         }
     }
 

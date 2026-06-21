@@ -26,6 +26,7 @@ struct LifecyclePathRefs<'a> {
 mod agent;
 mod common;
 mod orchestrator;
+pub mod preflight;
 mod rebuild;
 mod remove;
 mod selection;

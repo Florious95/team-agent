@@ -205,6 +205,29 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             error: "restart requires resumable workers before live spawn; rerun with --allow-fresh to start fresh".to_string(),
         });
     }
+    // unit-3 (Stage 1) session-identity preflight: before any kill, reject
+    // the case where `state.session_name` actually holds a leader launcher
+    // session name (`team-agent-leader-*`). Proceeding would tear down the
+    // leader pane (E49 / 0.3.39 leader mis-kill). Nothing is created or
+    // killed — the caller gets a structured refusal that distinguishes this
+    // dirty-state from a normal resume/atomicity refusal.
+    match crate::lifecycle::restart::preflight::check_session_preflight(&state) {
+        crate::lifecycle::restart::preflight::SessionPreflight::Ok => {}
+        crate::lifecycle::restart::preflight::SessionPreflight::WorkerSessionIsLeaderSession {
+            session_name,
+            reason,
+        } => {
+            return Ok(RestartReport::RefusedDirtyTopology {
+                session_name: session_name.clone(),
+                reason: reason.clone(),
+                error: format!(
+                    "restart refused: state.session_name `{session_name}` is a leader \
+                     launcher session ({reason}); aborting before any tmux kill. Repair \
+                     state.session_name to the worker session and re-run."
+                ),
+            });
+        }
+    }
     let session_name = state_session_name(&state);
     if session_live_or_default(transport, &session_name, false) {
         // 0.3.28 Step 5 (warn-only): per architecture, restart should REFUSE

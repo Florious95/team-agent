@@ -667,6 +667,18 @@ pub enum RestartReport {
         allow_fresh: bool,
         error: String,
     },
+    /// unit-3 (Stage 1): session-identity preflight refused — `state.session_name`
+    /// is a leader launcher session (`team-agent-leader-*`). Proceeding would
+    /// tear down the leader pane (E49 / 0.3.39). **nothing created or killed**.
+    RefusedDirtyTopology {
+        /// The session name that failed the preflight, verbatim from state.
+        session_name: String,
+        /// Stable machine-readable reason (currently
+        /// `"worker_session_is_leader_session"`).
+        reason: String,
+        /// Human-readable error directing the user to a recovery action.
+        error: String,
+    },
 }
 
 /// 单个重建后的 worker(carry restart_mode)。
