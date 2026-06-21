@@ -4927,3 +4927,11 @@ fn team_workspace(team_dir: &Path) -> PathBuf {
 
 mod plan;
 pub use plan::{handle_report_result, start_plan};
+
+// unit-8 (Stage 3) phase boundary modules. Established here as named
+// homes for upcoming relocations from the launch.rs monolith. Each
+// child carries a `*Phase` enum naming the canonical phase labels used
+// in event logs and (future) the orchestrator's step dispatcher.
+pub mod readiness;
+pub mod spawn;
+pub mod spec_state;
