@@ -157,6 +157,7 @@ function install(argv) {
     home: os.homedir(),
     binDir,
     runtimeBinary,
+    log: (line) => console.log(line),
   });
   installSkills(runtimeBinary);
   writeInstallManifest(runtimeRoot, {
@@ -183,9 +184,6 @@ function install(argv) {
   console.log(`runtime: ${dest}`);
   console.log(`binary: ${platformBinary.packageName}`);
   console.log("skill: installed for Codex, Claude and Copilot");
-  for (const repair of shadowRepairs) {
-    console.log(`path-shadow: updated ${repair.file} to runtime shim`);
-  }
 
   // 0.3.6 hotfix · C-5 cr verdict — post-install binary smoke 门(走 `--help`
   // 子命令,因为 0.3.x CLI 现阶段没有 --version)。真跑一次 binary 才能抓住
@@ -329,17 +327,38 @@ export function repairPathShadowingTeamAgentCommands(options = {}) {
   const home = options.home || os.homedir();
   const binDir = path.resolve(expandHomeFor(options.binDir || "", home));
   const runtimeBinary = options.runtimeBinary;
+  const log = typeof options.log === "function" ? options.log : null;
   if (!runtimeBinary) {
     throw new Error("runtimeBinary is required");
   }
   const installedWrapper = path.join(binDir, "team-agent");
   const repairs = [];
-  for (const entry of shadowingPathEntries(env.PATH || "", home, binDir)) {
+  const candidates = pathShadowRepairCandidates(env.PATH || "", home, binDir);
+  log?.(`path-shadow: scanning ${candidates.length} candidate bin dirs before ${binDir}`);
+  for (const candidateDir of candidates) {
+    const entry = candidateDir.dir;
+    const candidate = path.join(entry, "team-agent");
     if (isVersionManagedPath(entry)) {
+      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=version-managed-path`);
       continue;
     }
-    const candidate = path.join(entry, "team-agent");
-    if (!isExecutableFile(candidate) || sameFile(candidate, installedWrapper) || sameFile(candidate, runtimeBinary)) {
+    if (!fs.existsSync(candidate)) {
+      if (candidateDir.source === "home-local-bin") {
+        log?.(`path-shadow: checked ${candidate} source=${candidateDir.source} reason=not-found`);
+      }
+      continue;
+    }
+    log?.(`path-shadow: found ${candidate} source=${candidateDir.source}`);
+    if (!isExecutableFile(candidate)) {
+      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=not-executable-file`);
+      continue;
+    }
+    if (sameFile(candidate, installedWrapper)) {
+      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=installed-wrapper`);
+      continue;
+    }
+    if (sameFile(candidate, runtimeBinary)) {
+      log?.(`path-shadow: skip ${candidate} source=${candidateDir.source} reason=runtime-binary`);
       continue;
     }
     try {
@@ -348,7 +367,11 @@ export function repairPathShadowingTeamAgentCommands(options = {}) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`failed to update PATH-shadowing team-agent at ${candidate}: ${detail}`);
     }
-    repairs.push({ file: candidate, binDir: entry });
+    log?.(`path-shadow: updated ${candidate} source=${candidateDir.source} to runtime shim`);
+    repairs.push({ file: candidate, binDir: entry, source: candidateDir.source });
+  }
+  if (repairs.length === 0) {
+    log?.("path-shadow: no stale team-agent command repaired");
   }
   return repairs;
 }
@@ -414,6 +437,28 @@ function shadowingPathEntries(searchPath, home, binDir) {
     return entries;
   }
   return entries.slice(0, installedIndex);
+}
+
+function pathShadowRepairCandidates(searchPath, home, binDir) {
+  const candidates = [];
+  const seen = new Set();
+  const add = (dir, source) => {
+    const resolved = path.resolve(expandHomeFor(dir, home));
+    if (seen.has(resolved)) {
+      return;
+    }
+    seen.add(resolved);
+    candidates.push({ dir: resolved, source });
+  };
+  for (const entry of shadowingPathEntries(searchPath, home, binDir)) {
+    add(entry, "path-before-install");
+  }
+
+  const homeLocalBin = path.join(home, ".local", "bin");
+  if (!sameFile(homeLocalBin, binDir)) {
+    add(homeLocalBin, "home-local-bin");
+  }
+  return candidates;
 }
 
 function isExecutableFile(file) {

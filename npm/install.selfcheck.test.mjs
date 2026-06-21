@@ -124,15 +124,48 @@ test("post-install repair updates higher-priority stale local team-agent binary"
   fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(path.join(localBin, "team-agent"), "#!/bin/sh\necho old team-agent\n", { mode: 0o755 });
   fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+  const logs = [];
 
   const repairs = repairPathShadowingTeamAgentCommands({
     env: { PATH: [localBin, installBin].join(path.delimiter) },
     home: root,
     binDir: installBin,
     runtimeBinary,
+    log: (line) => logs.push(line),
   });
 
   assert.deepEqual(repairs.map((repair) => repair.file), [path.join(localBin, "team-agent")]);
+  assert.ok(logs.some((line) => line.includes("path-shadow: scanning")));
+  assert.ok(logs.some((line) => line.includes(`found ${path.join(localBin, "team-agent")}`)));
+  assert.ok(logs.some((line) => line.includes(`updated ${path.join(localBin, "team-agent")}`)));
+  const repaired = fs.readFileSync(path.join(localBin, "team-agent"), "utf8");
+  assert.match(repaired, /team-agent installer wrapper/);
+  assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
+});
+
+test("post-install repair probes home local bin even when npm PATH misses it", () => {
+  const root = tempRoot("path-shadow-home-local");
+  const localBin = path.join(root, ".local", "bin");
+  const installBin = path.join(root, ".hermes", "bin");
+  const runtimeBinary = path.join(root, "runtime", "0.3.test", "bin", "team-agent");
+  fs.mkdirSync(localBin, { recursive: true });
+  fs.mkdirSync(installBin, { recursive: true });
+  fs.mkdirSync(path.dirname(runtimeBinary), { recursive: true });
+  fs.writeFileSync(runtimeBinary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(localBin, "team-agent"), "#!/bin/sh\necho old team-agent\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(installBin, "team-agent"), "#!/bin/sh\necho installed\n", { mode: 0o755 });
+  const logs = [];
+
+  const repairs = repairPathShadowingTeamAgentCommands({
+    env: { PATH: installBin },
+    home: root,
+    binDir: installBin,
+    runtimeBinary,
+    log: (line) => logs.push(line),
+  });
+
+  assert.deepEqual(repairs.map((repair) => repair.file), [path.join(localBin, "team-agent")]);
+  assert.ok(logs.some((line) => line.includes(`found ${path.join(localBin, "team-agent")} source=home-local-bin`)));
   const repaired = fs.readFileSync(path.join(localBin, "team-agent"), "utf8");
   assert.match(repaired, /team-agent installer wrapper/);
   assert.match(repaired, new RegExp(escapeRegExp(runtimeBinary)));
@@ -141,7 +174,7 @@ test("post-install repair updates higher-priority stale local team-agent binary"
 test("post-install repair leaves lower-priority team-agent binary untouched", () => {
   const root = tempRoot("path-shadow-after");
   const installBin = path.join(root, ".hermes", "bin");
-  const laterBin = path.join(root, ".local", "bin");
+  const laterBin = path.join(root, "later", "bin");
   const runtimeBinary = path.join(root, "runtime", "0.3.test", "bin", "team-agent");
   fs.mkdirSync(installBin, { recursive: true });
   fs.mkdirSync(laterBin, { recursive: true });
