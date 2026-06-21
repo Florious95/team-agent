@@ -1065,3 +1065,128 @@ fn shutdown_missing_topology_marker_defaults_to_managed_cleanup() {
         "missing topology marker must default to managed cleanup, not external kill-server"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// unit-0 (Stage 0) characterization tests
+//
+// These pin the CURRENT classify_shutdown_outcome behavior so that the
+// Stage 1 refactor (unit-2: move shutdown into lifecycle and feed real
+// session-kill facts into the classifier) is detectable as a behavior
+// change rather than an accidental regression.
+//
+// The classifier today does NOT consume `session_killed` / `spared_sessions`
+// facts — it only looks at residuals. That is the 0.3.39 false-green bug
+// surface. The tests below LOCK the current OK/failed/partial/timeout
+// branches against opaque residual booleans so that:
+//   - unit-2 can wire in the missing topology facts and we observe the
+//     intended new behavior on the false-green scenario,
+//   - any unintended status change in OTHER branches breaks the suite.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn unit0_classify_outcome_no_residuals_returns_ok() {
+    // Baseline: nothing residual, coordinator clean -> ok/status:"ok".
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            owned_file_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: false,
+            coordinator_stop_ok: Some(true),
+            coordinator_post_stop:
+                crate::cli::lifecycle_port::CoordinatorStopObservation::NotNeeded,
+        },
+    );
+    assert!(out.ok);
+    assert_eq!(out.status, "ok");
+    assert_eq!(out.phase, None);
+}
+
+#[test]
+fn unit0_classify_outcome_session_residual_returns_failed() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: true,
+            process_residuals: false,
+            owned_file_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: false,
+            coordinator_stop_ok: Some(true),
+            coordinator_post_stop:
+                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+        },
+    );
+    assert!(!out.ok);
+    assert_eq!(out.status, "failed");
+}
+
+#[test]
+fn unit0_classify_outcome_coordinator_timeout_returns_timeout_phase() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            owned_file_residuals: false,
+            cleanup_truth_degraded: false,
+            coordinator_timeout: true,
+            coordinator_stop_ok: Some(false),
+            coordinator_post_stop:
+                crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+        },
+    );
+    assert!(!out.ok);
+    assert_eq!(out.status, "timeout");
+    assert_eq!(out.phase, Some("stop_coordinator"));
+}
+
+#[test]
+fn unit0_classify_outcome_cleanup_truth_degraded_returns_partial_os_probe() {
+    let out = crate::cli::lifecycle_port::classify_shutdown_outcome(
+        crate::cli::lifecycle_port::ShutdownOutcomeInput {
+            kill_error: false,
+            session_residuals: false,
+            process_residuals: false,
+            owned_file_residuals: false,
+            cleanup_truth_degraded: true,
+            coordinator_timeout: false,
+            coordinator_stop_ok: Some(true),
+            coordinator_post_stop:
+                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+        },
+    );
+    assert!(!out.ok);
+    assert_eq!(out.status, "partial");
+    assert_eq!(out.phase, Some("os_probe"));
+}
+
+#[test]
+fn unit0_sessions_to_kill_leader_prefixed_session_is_always_spared() {
+    // Pinned invariant: a session named `team-agent-leader-*` is NEVER in
+    // the kill list, even without an anchor. unit-1/3 wraps this in typed
+    // identity; the behavior must remain identical.
+    use crate::transport::SessionName;
+    let session_names = vec![
+        SessionName::new("team-real-worker"),
+        SessionName::new("team-agent-leader-claude-x"),
+    ];
+    let decision = sessions_to_kill(&session_names, &BTreeSet::new());
+    match decision {
+        KillDecision::KillIndividually { to_kill, spared } => {
+            assert!(to_kill.iter().any(|s| s.as_str() == "team-real-worker"));
+            assert!(!to_kill
+                .iter()
+                .any(|s| s.as_str().starts_with("team-agent-leader-")));
+            assert!(spared
+                .iter()
+                .any(|s| s.as_str() == "team-agent-leader-claude-x"));
+        }
+        other => panic!(
+            "expected KillIndividually with leader spared; got {:?}",
+            other
+        ),
+    }
+}
