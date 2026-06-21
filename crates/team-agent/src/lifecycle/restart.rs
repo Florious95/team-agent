@@ -47,6 +47,11 @@ pub use rebuild::{
 pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
 pub use remove::{remove_agent, remove_agent_with_transport};
 pub use selection::{classify_first_send_at, classify_restart_plan, decide_start_mode, python_type_name};
+// Layer 2 (leader follow-up 2026-06-22): test-visible workspace-aware
+// classification so lifecycle/tests/restart.rs can exercise the
+// SessionBackingStoreMissing + checked_paths + RecoveryHint path
+// end-to-end without spinning up a full restart.
+pub(crate) use selection::classify_restart_plan_with_resume_validation;
 pub(crate) use team_state::write_team_state;
 
 pub(crate) fn lifecycle_run_workspace(workspace: &Path) -> Result<std::path::PathBuf, LifecycleError> {

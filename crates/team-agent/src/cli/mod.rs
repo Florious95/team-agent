@@ -2826,11 +2826,125 @@ pub mod lifecycle_port {
                     .iter()
                     .map(|w| w.agent_id.as_str())
                     .collect();
+                // Layer 2 self-healing (leader follow-up 2026-06-22): when
+                // EVERY unresumable worker shares the same structured
+                // refusal_reason wire string, refine the top-level `status`
+                // from the coarse `refused_resume_atomicity` to a class-
+                // specific label and overlay an `error` that names the
+                // specific cause + concrete recovery moves. The original
+                // `refused_resume_atomicity` status is kept as
+                // `status_class` so anything matching on the coarse label
+                // still works.
+                let distinct_wires: std::collections::BTreeSet<&'static str> = unresumable
+                    .iter()
+                    .filter_map(|w| w.refusal_reason.as_ref().map(|r| r.wire()))
+                    .collect();
+                let (status_str, error_str): (String, String) = if distinct_wires.len() == 1
+                    && distinct_wires.len() == unresumable.len()
+                {
+                    // Every entry had a structured reason and they all
+                    // agreed. Refine.
+                    let wire = *distinct_wires.iter().next().unwrap_or(&"");
+                    match wire {
+                        "session_backing_store_missing" => {
+                            // Collect a flat list of every checked path so
+                            // operators can copy/paste-grep for files that
+                            // moved. picker_hint per worker gives the
+                            // alternate-recovery one-liner.
+                            let mut probed: Vec<String> = Vec::new();
+                            let mut picker_lines: Vec<String> = Vec::new();
+                            for w in unresumable.iter() {
+                                if let Some(
+                                    crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+                                        checked_paths,
+                                        recovery_hint,
+                                    },
+                                ) = w.refusal_reason.as_ref()
+                                {
+                                    for p in checked_paths {
+                                        probed.push(p.to_string_lossy().into_owned());
+                                    }
+                                    if let Some(h) = recovery_hint {
+                                        picker_lines.push(format!(
+                                            "  {}: try `{}`",
+                                            w.agent_id.as_str(),
+                                            h.picker_hint(),
+                                        ));
+                                    }
+                                }
+                            }
+                            probed.sort();
+                            probed.dedup();
+                            let mut msg = format!(
+                                "restart refused: provider session backing store missing for {} worker(s) ({}). \
+                                 Pass --allow-fresh to start a new session, or restore the backing files listed below.",
+                                unresumable.len(),
+                                unresumable_ids.join(", "),
+                            );
+                            if !probed.is_empty() {
+                                msg.push_str("\nProbed paths (none contained the expected session):");
+                                for p in &probed {
+                                    msg.push_str("\n  ");
+                                    msg.push_str(p);
+                                }
+                            }
+                            if !picker_lines.is_empty() {
+                                msg.push_str("\nProvider picker recovery hints:");
+                                for line in &picker_lines {
+                                    msg.push_str("\n");
+                                    msg.push_str(line);
+                                }
+                            }
+                            (
+                                "refused_session_backing_missing".to_string(),
+                                msg,
+                            )
+                        }
+                        "no_persisted_session_id" => (
+                            "refused_no_session_id".to_string(),
+                            format!(
+                                "restart refused: no persisted session_id for {} worker(s) ({}). Pass --allow-fresh to start fresh.",
+                                unresumable.len(),
+                                unresumable_ids.join(", "),
+                            ),
+                        ),
+                        "provider_resume_unsupported" => (
+                            "refused_provider_resume_unsupported".to_string(),
+                            format!(
+                                "restart refused: provider does not support resume for {} worker(s) ({}). Pass --allow-fresh to start fresh.",
+                                unresumable.len(),
+                                unresumable_ids.join(", "),
+                            ),
+                        ),
+                        _ => ("refused_resume_atomicity".to_string(), error.clone()),
+                    }
+                } else {
+                    // Mixed or unstructured reasons — keep the coarse
+                    // label, but augment the error so it lists each
+                    // worker's specific reason.
+                    let per_worker = unresumable
+                        .iter()
+                        .map(|w| {
+                            let reason = w
+                                .refusal_reason
+                                .as_ref()
+                                .map(|r| r.wire().to_string())
+                                .unwrap_or_else(|| w.reason.clone());
+                            format!("{} ({})", w.agent_id.as_str(), reason)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    (
+                        "refused_resume_atomicity".to_string(),
+                        format!("{error} Per-worker: {per_worker}."),
+                    )
+                };
                 json!({
                     "ok": false,
-                    "status": "refused_resume_atomicity",
+                    "status": status_str,
+                    "status_class": "refused_resume_atomicity",
                     "allow_fresh": allow_fresh,
-                    "error": error,
+                    "error": error_str,
                     "unresumable": unresumable_detail,
                     "unresumable_ids": unresumable_ids,
                     "reminder": crate::cli::QUICK_START_REMINDER,

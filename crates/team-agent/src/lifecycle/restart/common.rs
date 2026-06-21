@@ -469,22 +469,95 @@ pub(super) fn resume_backing_exists_for_agent(
     session_id: &SessionId,
     rollout_path: Option<&RolloutPath>,
 ) -> bool {
-    match provider {
+    resume_backing_probe_for_agent(
+        workspace,
+        agent_id,
+        agent,
+        provider,
+        session_id,
+        rollout_path,
+    )
+    .exists
+}
+
+/// Layer 2 self-healing (leader follow-up 2026-06-22): result of probing
+/// the provider backing store for a resumable session. `checked_paths`
+/// reports every path the runtime probed so the operator can see WHICH
+/// places we looked — surfaced into the
+/// `ResumeRefusalReason::SessionBackingStoreMissing.checked_paths`
+/// field, the CLI JSON `unresumable[].checked_paths` array, and the
+/// `restart.resume_decision` event payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BackingProbeResult {
+    pub exists: bool,
+    pub checked_paths: Vec<PathBuf>,
+}
+
+pub(super) fn resume_backing_probe_for_agent(
+    workspace: &Path,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+    provider: Provider,
+    session_id: &SessionId,
+    rollout_path: Option<&RolloutPath>,
+) -> BackingProbeResult {
+    let mut checked_paths: Vec<PathBuf> = Vec::new();
+
+    // Always record the persisted rollout_path even when it does not
+    // exist — that "we looked here" tells the operator that state has a
+    // pointer but the file is gone.
+    if let Some(path) = rollout_path.map(RolloutPath::as_path) {
+        checked_paths.push(path.to_path_buf());
+    }
+
+    let exists = match provider {
         provider if !provider_supports_resume(provider) => {
             let _ = (workspace, agent_id, agent, session_id, rollout_path);
             false
         }
         Provider::Codex => {
-            rollout_path_exists(rollout_path)
-                || codex_session_transcript_exists(agent, session_id.as_str(), rollout_path)
+            let rollout_ok = rollout_path_exists(rollout_path);
+            let scan_roots = codex_session_transcript_scan_roots(agent, rollout_path);
+            for root in &scan_roots {
+                checked_paths.push(root.clone());
+            }
+            rollout_ok
+                || codex_session_transcript_exists_with_roots(
+                    session_id.as_str(),
+                    &scan_roots,
+                )
         }
         Provider::Claude | Provider::ClaudeCode => {
-            rollout_path_exists(rollout_path)
+            let rollout_ok = rollout_path_exists(rollout_path);
+            let projects_root = claude_projects_root_for_agent(agent);
+            if let Some(root) = projects_root.as_ref() {
+                checked_paths.push(root.clone());
+            }
+            let event_log_path = workspace.join(".team/logs/events.jsonl");
+            checked_paths.push(event_log_path);
+            rollout_ok
                 || event_log_transcript_exists(workspace, agent_id.as_str(), session_id.as_str())
-                || claude_project_transcript_exists(agent, session_id.as_str())
+                || projects_root.is_some_and(|root| {
+                    claude_project_transcript_exists_under(&root, session_id.as_str())
+                })
         }
-        Provider::Copilot => copilot_session_store_has_session(session_id.as_str()),
+        Provider::Copilot => {
+            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                checked_paths.push(home.join(".copilot/session-store.db"));
+            }
+            copilot_session_store_has_session(session_id.as_str())
+        }
         Provider::GeminiCli | Provider::Fake => false,
+    };
+
+    // Deduplicate while preserving order (HashSet would lose deterministic
+    // ordering needed for stable JSON/event output).
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    checked_paths.retain(|p| seen.insert(p.clone()));
+
+    BackingProbeResult {
+        exists,
+        checked_paths,
     }
 }
 
@@ -536,25 +609,32 @@ fn event_transcript_path(event: &serde_json::Value) -> Option<PathBuf> {
 /// so we avoid recomputing the project-dir slug, which is brittle for non-ASCII
 /// workspace paths).
 fn claude_project_transcript_exists(agent: &serde_json::Value, session_id: &str) -> bool {
-    if session_id.is_empty() {
+    let Some(root) = claude_projects_root_for_agent(agent) else {
         return false;
-    }
-    let projects_root = agent
+    };
+    claude_project_transcript_exists_under(&root, session_id)
+}
+
+fn claude_projects_root_for_agent(agent: &serde_json::Value) -> Option<PathBuf> {
+    agent
         .get("claude_projects_root")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude").join("projects"))
-        });
-    let Some(projects_root) = projects_root else {
+        })
+}
+
+fn claude_project_transcript_exists_under(projects_root: &Path, session_id: &str) -> bool {
+    if session_id.is_empty() {
         return false;
-    };
+    }
     if !projects_root.is_dir() {
         return false;
     }
     let transcript_name = format!("{session_id}.jsonl");
-    let Ok(project_dirs) = std::fs::read_dir(&projects_root) else {
+    let Ok(project_dirs) = std::fs::read_dir(projects_root) else {
         return false;
     };
     project_dirs
@@ -568,10 +648,15 @@ fn codex_session_transcript_exists(
     session_id: &str,
     rollout_path: Option<&RolloutPath>,
 ) -> bool {
-    if session_id.is_empty() {
-        return false;
-    }
-    let mut roots = Vec::new();
+    let roots = codex_session_transcript_scan_roots(agent, rollout_path);
+    codex_session_transcript_exists_with_roots(session_id, &roots)
+}
+
+fn codex_session_transcript_scan_roots(
+    agent: &serde_json::Value,
+    rollout_path: Option<&RolloutPath>,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(parent) = rollout_path
         .map(RolloutPath::as_path)
         .and_then(Path::parent)
@@ -597,6 +682,13 @@ fn codex_session_transcript_exists(
     }
     roots.sort();
     roots.dedup();
+    roots
+}
+
+fn codex_session_transcript_exists_with_roots(session_id: &str, roots: &[PathBuf]) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
     roots
         .iter()
         .any(|root| session_transcript_exists_under(root, session_id, 4))

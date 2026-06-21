@@ -190,23 +190,37 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         let provider = agent_provider(agent);
         let provider_wire = provider_wire(provider);
         let provider_can_resume = provider_supports_resume(provider);
-        let resume_backing_exists = match (workspace, session_id.as_ref(), provider_can_resume) {
-            (_, Some(_), false) => false,
-            (Some(workspace), Some(session), true) => resume_backing_exists_for_agent(
-                workspace,
-                &agent_id,
-                agent,
-                provider,
-                session,
-                agent_rollout_path(agent).as_ref(),
-            ),
-            (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
-                agent_rollout_path(agent)
-                    .as_ref()
-                    .is_some_and(|path| path.as_path().exists())
-            }
-            _ => true,
-        };
+        // Layer 2 self-healing (leader follow-up 2026-06-22): use the
+        // structured probe so we can carry the list of paths the runtime
+        // actually checked into the refusal — operators need to see WHICH
+        // places we looked, not just "missing".
+        let (resume_backing_exists, backing_checked_paths) =
+            match (workspace, session_id.as_ref(), provider_can_resume) {
+                (_, Some(_), false) => (false, Vec::new()),
+                (Some(workspace), Some(session), true) => {
+                    let probe = resume_backing_probe_for_agent(
+                        workspace,
+                        &agent_id,
+                        agent,
+                        provider,
+                        session,
+                        agent_rollout_path(agent).as_ref(),
+                    );
+                    (probe.exists, probe.checked_paths)
+                }
+                (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
+                    let path_opt = agent_rollout_path(agent);
+                    let exists = path_opt
+                        .as_ref()
+                        .is_some_and(|path| path.as_path().exists());
+                    let checked = path_opt
+                        .as_ref()
+                        .map(|p| vec![p.as_path().to_path_buf()])
+                        .unwrap_or_default();
+                    (exists, checked)
+                }
+                _ => (true, Vec::new()),
+            };
         let decision = if session_id.is_some() && provider_can_resume && resume_backing_exists {
             ResumeDecision::Resume
         } else if session_id.is_some() && allow_fresh {
@@ -255,7 +269,7 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                     (
                         "session_unresumable".to_string(),
                         crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
-                            checked_paths: Vec::new(),
+                            checked_paths: backing_checked_paths.clone(),
                             recovery_hint,
                         },
                     )

@@ -91,6 +91,84 @@ fn unit0_restart_allow_fresh_converts_refusals_into_fresh_decisions() {
 }
 
 #[test]
+fn layer2_backing_missing_refusal_carries_checked_paths_and_recovery_hint() {
+    // Leader follow-up 2026-06-22: when classify_restart_plan_with_resume_validation
+    // runs with a real workspace, a codex worker whose session_id is set
+    // but whose rollout_path does not exist on disk should produce a
+    // refusal whose structured ResumeRefusalReason::SessionBackingStoreMissing
+    // carries the actual probed paths (the persisted rollout_path) AND a
+    // RecoveryHint with the agent_id as the picker name.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let ws = std::env::temp_dir().join(format!(
+        "ta_rs_l2_backingmiss_{}_{}",
+        std::process::id(),
+        n
+    ));
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let missing_rollout = ws.join(".missing-rollout.jsonl");
+    // Do NOT create the file. Probe must report it as not-existing AND
+    // include it in checked_paths.
+    let mut agent = serde_json::Map::new();
+    agent.insert("provider".to_string(), json!("codex"));
+    agent.insert("status".to_string(), json!("running"));
+    agent.insert("session_id".to_string(), json!("sess-layer2-missing"));
+    agent.insert(
+        "rollout_path".to_string(),
+        json!(missing_rollout.to_string_lossy()),
+    );
+    agent.insert("first_send_at".to_string(), json!("2026-01-01T00:00:00Z"));
+    agent.insert("spawn_cwd".to_string(), json!(ws.to_string_lossy()));
+    let state = json!({ "agents": { "a": serde_json::Value::Object(agent) } });
+
+    let plan = crate::lifecycle::restart::classify_restart_plan_with_resume_validation(
+        Some(&ws),
+        &state,
+        false,
+    )
+    .unwrap();
+    assert_eq!(plan.unresumable.len(), 1);
+    let entry = &plan.unresumable[0];
+    assert_eq!(entry.agent_id.as_str(), "a");
+    assert_eq!(entry.reason, "session_unresumable");
+    match entry.refusal_reason.as_ref() {
+        Some(crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+            checked_paths,
+            recovery_hint,
+        }) => {
+            assert!(
+                !checked_paths.is_empty(),
+                "checked_paths must be populated; got empty"
+            );
+            assert!(
+                checked_paths.iter().any(|p| p == &missing_rollout),
+                "checked_paths must include the persisted rollout_path; got {checked_paths:?}"
+            );
+            let hint = recovery_hint
+                .as_ref()
+                .expect("recovery_hint should be populated");
+            assert_eq!(
+                hint.provider_session_name_hint.as_deref(),
+                Some("a"),
+                "name hint must equal agent_id"
+            );
+            assert_eq!(
+                hint.spawn_cwd.as_deref(),
+                Some(ws.as_path()),
+                "spawn_cwd should round-trip through the hint"
+            );
+            assert_eq!(hint.provider, "codex");
+        }
+        other => panic!(
+            "expected SessionBackingStoreMissing with structured fields; got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
 fn unit0_restart_corrupt_first_send_at_blocks_before_resume_classification() {
     // The corrupt-first_send_at branch is the hard-refuse gate that fires
     // BEFORE resume classification. This pins that corrupt entries land in
