@@ -50,7 +50,8 @@ pub mod state;
 pub mod compiler;
 
 // step 7 (message_store) — team.db 上的核心消息生命周期(create/claim/mark/通知去重)。
-pub mod message_store;
+// unit-10 (Stage 4) compat shim. Physical home is now `crate::db::message_store`.
+pub use crate::db::message_store;
 
 // step 8 (provider) — ProviderAdapter trait + typed provider/turn-state/liveness 等(ROUND-0 骨架;
 // fn body unimplemented!(),P2 porter 落实现)。MUST-NOT-13:provider 调用全走 trait。

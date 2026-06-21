@@ -1,3 +1,9 @@
+// unit-10 (Stage 4): moved from crate::message_store to crate::db::message_store.
+// The historical body uses unwrap/expect/panic for SQL-row failures; the parent
+// db/ module denies these lints, so re-allow them here so the move is a pure
+// physical relocation (zero behavior change).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 //! step 7 · message_store — core message lifecycle over `team.db`.
 //!
 //! Truth source (READ-ONLY): `team-agent-public` @ v0.2.11,
