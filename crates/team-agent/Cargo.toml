@@ -29,5 +29,12 @@ rusqlite.workspace = true       # step 3 db(bundled SQLite,静态链接)
 [dev-dependencies]
 serial_test = { version = "3", features = ["file_locks"] }
 
+# `tests/e2e/` 黑盒 E2E 框架专用 — 不需要 assert_cmd / predicates,
+# 框架内部直接用 std::process::Command + serde_json + 自写 assert_* helpers,
+# 保持 zero new external test-CLI deps(避开 crates.io 代理限制)。
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
 [lints]
 workspace = true
