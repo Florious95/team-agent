@@ -1,6 +1,6 @@
 {
   "name": "@team-agent/cli-darwin-arm64",
-  "version": "0.3.38",
+  "version": "0.3.39",
   "description": "Team Agent CLI binary for macOS arm64",
   "license": "AGPL-3.0",
   "os": [
