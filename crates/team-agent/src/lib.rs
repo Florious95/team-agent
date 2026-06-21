@@ -55,7 +55,10 @@ pub mod message_store;
 // step 8 (provider) — ProviderAdapter trait + typed provider/turn-state/liveness 等(ROUND-0 骨架;
 // fn body unimplemented!(),P2 porter 落实现)。MUST-NOT-13:provider 调用全走 trait。
 pub mod provider;
-pub mod session_capture;
+/// unit-6 (Stage 2) compat shim. Physical home is now
+/// `crate::provider::session::capture`; this re-export keeps every
+/// `crate::session_capture::*` caller working without modification.
+pub use crate::provider::session::capture as session_capture;
 pub(crate) mod os_probe;
 
 // step 9 (transport) — Transport trait(控制面)+ Target/PaneId/InjectReport 等(ROUND-0 骨架;
