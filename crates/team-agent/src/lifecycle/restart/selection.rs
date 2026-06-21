@@ -219,13 +219,47 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
             ResumeDecision::Refuse
         };
         if matches!(decision, ResumeDecision::Refuse) {
+            // unit-5: surface structured ResumeRefusalReason alongside the
+            // legacy free-form string. The string wire is preserved exactly
+            // (round-tripped through ResumeRefusalReason::wire) so the
+            // CLI/JSON contract does not change.
+            let (reason_str, structured) = if session_id.is_some() {
+                if !provider_can_resume {
+                    (
+                        "session_unresumable".to_string(),
+                        crate::provider::session::ResumeRefusalReason::ProviderResumeUnsupported {
+                            provider: provider_wire.to_string(),
+                        },
+                    )
+                } else if !resume_backing_exists {
+                    // Today the legacy wire collapses backing-missing under
+                    // the catch-all `session_unresumable` — keep that wire,
+                    // but record the structured reason so the new shape is
+                    // available to callers that want it.
+                    (
+                        "session_unresumable".to_string(),
+                        crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {
+                            checked_paths: Vec::new(),
+                        },
+                    )
+                } else {
+                    (
+                        "session_unresumable".to_string(),
+                        crate::provider::session::ResumeRefusalReason::Other {
+                            legacy_reason: "session_unresumable".to_string(),
+                        },
+                    )
+                }
+            } else {
+                (
+                    "no_persisted_session_id".to_string(),
+                    crate::provider::session::ResumeRefusalReason::NoSessionId,
+                )
+            };
             unresumable.push(UnresumableWorker {
                 agent_id: agent_id.clone(),
-                reason: if session_id.is_some() {
-                    "session_unresumable".to_string()
-                } else {
-                    "no_persisted_session_id".to_string()
-                },
+                reason: reason_str,
+                refusal_reason: Some(structured),
                 session_id: session_id.clone(),
                 first_send_at: first_send_at_raw.as_str().map(|s| s.to_string()),
             });

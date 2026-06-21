@@ -72,6 +72,9 @@ pub fn restart_with_transport_with_readiness_deadline(
                 .map(|agent_id| UnresumableWorker {
                     agent_id,
                     reason: "session_capture_incomplete".to_string(),
+                    refusal_reason: Some(
+                        crate::provider::session::ResumeRefusalReason::SessionCaptureIncomplete,
+                    ),
                     session_id: None,
                     first_send_at: None,
                 })

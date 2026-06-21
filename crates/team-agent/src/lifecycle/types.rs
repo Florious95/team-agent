@@ -702,11 +702,18 @@ pub struct RestartFailedAgent {
 }
 
 /// atomic refusal 里的不可重建 worker(`orchestration.py:517`)。
+///
+/// unit-5 (Stage 2): `reason` 是历史 free-form 字符串,JSON/CLI 直接吃它;新增
+/// `refusal_reason` 携带 unit-5 的 closed enum(`provider::session::ResumeRefusalReason`)
+/// 同源 wire 字符串。两者必须 round-trip 一致(see `ResumeRefusalReason::wire`)。
+/// 旧调用方读 `reason` 不变;新调用方走 enum 拿到结构化原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresumableWorker {
     pub agent_id: AgentId,
-    /// `no_persisted_session_id` | `session_unresumable`。
+    /// `no_persisted_session_id` | `session_unresumable` | `session_backing_store_missing` | …
     pub reason: String,
+    /// unit-5 structured refusal (optional during migration; populated alongside `reason`).
+    pub refusal_reason: Option<crate::provider::session::ResumeRefusalReason>,
     pub session_id: Option<SessionId>,
     pub first_send_at: Option<String>,
 }

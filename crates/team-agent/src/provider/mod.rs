@@ -35,6 +35,7 @@ pub mod adapter;
 pub mod approvals;
 pub mod classify;
 pub mod faults;
+pub mod session;
 pub mod startup_prompt;
 pub mod types;
 // helpers 全部原为模块私有(JSONL 解析 / 正则编译),非根可见 → 私有 mod,不参与 re-export。
