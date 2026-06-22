@@ -217,6 +217,15 @@ impl McpSimHarness {
         let worker_a = self.panes["worker_a"].as_str();
         let worker_b = self.panes["worker_b"].as_str();
         let worker_c = self.panes["worker_c"].as_str();
+        // 0.4.0 refactor: lifecycle ops (stop_agent, restart, reset) now
+        // run through `ensure_owner_allowed_for_state`. The MCP sim spawns
+        // `worker_b` as the caller, so seed the team owner pane to worker_b
+        // so the owner-gate's pane-equality bypass (`caller_pane ==
+        // owner_pane → return None`) lets the lifecycle op proceed. Without
+        // this, every stop/restart/reset call refuses with
+        // `team_owner_mismatch`. The test contract is about the LIFECYCLE
+        // side effect, not the owner gate (which has its own dedicated
+        // tests in state/owner_gate.rs).
         team_agent::state::persist::save_runtime_state(
             &self.workspace,
             &json!({
@@ -225,7 +234,7 @@ impl McpSimHarness {
                 "leader": {"id": "leader"},
                 "team_owner": {
                     "owner_epoch": 1,
-                    "pane_id": leader_pane,
+                    "pane_id": worker_b,
                     "leader_session_uuid": "leader-session-team-a"
                 },
                 "leader_receiver": {
@@ -337,6 +346,15 @@ pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) 
             "TEAM_AGENT_OWNER_TEAM_ID".to_string(),
             owner_team_id.to_string(),
         ),
+        // 0.4.0 refactor: lifecycle ops (stop/restart/reset) check owner via
+        // check_team_owner. The MCP child process has no TMUX_PANE so the
+        // pane-equality bypass doesn't fire; provide the matching
+        // leader_session_uuid so the same-uuid bypass allows the call.
+        // Value must equal the harness's seeded team_owner.leader_session_uuid.
+        (
+            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE".to_string(),
+            "leader-session-team-a".to_string(),
+        ),
     ]);
     let trace_path = workspace
         .join(".team")
@@ -348,6 +366,12 @@ pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) 
     for (key, value) in &env {
         command.env(key, value);
     }
+    // 0.4.0 refactor: owner-gate's same-uuid bypass requires caller_pane to
+    // be empty OR equal to owner_pane. The MCP child process must not inherit
+    // a stray TMUX_PANE from the harness parent (which would set caller_pane
+    // to the harness's own pane, breaking the bypass).
+    command.env_remove("TMUX_PANE");
+    command.env_remove("TMUX");
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

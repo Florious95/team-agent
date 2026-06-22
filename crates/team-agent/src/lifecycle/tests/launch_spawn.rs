@@ -2544,12 +2544,17 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "tasks",
             "display_backend",
             "is_external_leader",
+            // 0.4.0 refactor: `team_key` added as top-level topology marker
+            // alongside active_team_key (refactor-modular-architecture). The
+            // owner / leader_receiver / owner_epoch invariants below still
+            // hold — those live only under teams[<active_team_key>].
+            "team_key",
             "active_team_key",
             "teams",
         ],
         "state.json top-level key order must match golden launch/core.py:62-71 \
          plus R1 topology marker and Bug 1/2 team-in-team suffix \
-         (is_external_leader, active_team_key, teams). \
+         (is_external_leader, team_key, active_team_key, teams). \
          Bug 2 owner team-scope (N1/N12/N18/N29) deliberately keeps owner / \
          leader_receiver / owner_epoch OFF the top level — they live ONLY under \
          teams[<active_team_key>] so per-team isolation has a single source of \
