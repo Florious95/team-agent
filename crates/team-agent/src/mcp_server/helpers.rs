@@ -221,9 +221,36 @@ pub(crate) fn delivery_outcome_value(out: &DeliveryOutcome) -> Value {
     value
 }
 
-pub(crate) fn latest_task_for_assignee(workspace: &Path, agent_id: &str) -> Option<String> {
+/// Find the latest nonterminal task assigned to `agent_id`.
+///
+/// Blocker-1 (prerelease 0.4.0): scoped teams own their tasks under
+/// `state.teams.<owner>.tasks`; top-level `state.tasks` is the legacy /
+/// fallback list and is often stale or assigned to a different agent in
+/// scoped-team workspaces. Search the scoped view first (when an owner team
+/// is supplied), then fall back to top-level.
+pub(crate) fn latest_task_for_assignee(
+    workspace: &Path,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
     let state = load_runtime_state(workspace).ok()?;
+    if let Some(owner) = owner_team_id.filter(|s| !s.is_empty()) {
+        if let Some(tasks) = state
+            .get("teams")
+            .and_then(|teams| teams.get(owner))
+            .and_then(|team| team.get("tasks"))
+            .and_then(Value::as_array)
+        {
+            if let Some(id) = find_latest_nonterminal_task_for(tasks, agent_id) {
+                return Some(id);
+            }
+        }
+    }
     let tasks = state.get("tasks").and_then(Value::as_array)?;
+    find_latest_nonterminal_task_for(tasks, agent_id)
+}
+
+fn find_latest_nonterminal_task_for(tasks: &[Value], agent_id: &str) -> Option<String> {
     for task in tasks.iter().rev() {
         let assignee = task.get("assignee").and_then(Value::as_str)?;
         if assignee != agent_id {
@@ -245,4 +272,48 @@ pub(crate) fn latest_task_for_assignee(workspace: &Path, agent_id: &str) -> Opti
         }
     }
     None
+}
+
+/// Find the most recent delivered direct message to `agent_id` whose `task_id`
+/// is empty/null AND for which no result row exists yet. Used by
+/// `report_result` as a message-scoped fallback before defaulting to
+/// `"manual"`, so `collect` can correlate via the existing message-scope path
+/// (`messaging::results::is_message_scoped_result`).
+pub(crate) fn latest_uncorrelated_delivered_message_for(
+    workspace: &Path,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
+    use crate::db::message_store::MessageStore;
+    let store = MessageStore::open(workspace).ok()?;
+    let conn = crate::db::schema::open_db(store.db_path()).ok()?;
+    let sql = match owner_team_id {
+        Some(_) => "select m.message_id from messages m \
+                     where m.recipient = ?1 and m.status = 'delivered' \
+                       and (m.task_id is null or m.task_id = '') \
+                       and m.owner_team_id = ?2 \
+                       and not exists ( \
+                         select 1 from results r \
+                         where r.task_id = m.message_id and r.agent_id = m.recipient \
+                       ) \
+                     order by m.created_at desc limit 1",
+        None => "select m.message_id from messages m \
+                     where m.recipient = ?1 and m.status = 'delivered' \
+                       and (m.task_id is null or m.task_id = '') \
+                       and not exists ( \
+                         select 1 from results r \
+                         where r.task_id = m.message_id and r.agent_id = m.recipient \
+                       ) \
+                     order by m.created_at desc limit 1",
+    };
+    let mut stmt = conn.prepare(sql).ok()?;
+    let id: Option<String> = match owner_team_id {
+        Some(team) => stmt
+            .query_row(rusqlite::params![agent_id, team], |row| row.get::<_, String>(0))
+            .ok(),
+        None => stmt
+            .query_row(rusqlite::params![agent_id], |row| row.get::<_, String>(0))
+            .ok(),
+    };
+    id
 }

@@ -19,7 +19,8 @@ use crate::messaging::{self, MessageTarget, SendOptions};
 
 use super::helpers::{
     delivery_outcome_value, ensure_object, enum_value, insert_array, is_worker_recipient,
-    json_dumps_default, latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
+    json_dumps_default, latest_task_for_assignee, latest_uncorrelated_delivered_message_for,
+    non_empty_string, normalized_envelope_value, object_fields,
     requires_ack_for_target, tool_runtime_error,
 };
 use super::normalize::{
@@ -292,11 +293,35 @@ impl TeamOrchestratorTools {
                 obj.insert("status".to_string(), enum_value(status));
             }
             if !obj.contains_key("task_id") {
+                // Blocker-1 (prerelease 0.4.0): scoped-team task inference +
+                // message-scoped fallback, before defaulting to "manual".
+                //   1. explicit arg
+                //   2. latest nonterminal task assigned to this agent in
+                //      teams.<owner>.tasks (scoped) → top-level tasks
+                //   3. latest delivered direct message to this agent with no
+                //      task id and no result yet (message-scope correlation —
+                //      collect path: is_message_scoped_result)
+                //   4. "manual" — truly uncorrelated; collect still rejects
+                let owner_team_id_str = self
+                    .owner_team_id
+                    .as_ref()
+                    .map(|t| t.as_str().to_string());
                 let resolved = task_id
                     .map(ToString::to_string)
-                    .or_else(|| self.agent_id
-                        .as_ref()
-                        .and_then(|agent| latest_task_for_assignee(&self.workspace, agent.as_str())))
+                    .or_else(|| self.agent_id.as_ref().and_then(|agent| {
+                        latest_task_for_assignee(
+                            &self.workspace,
+                            agent.as_str(),
+                            owner_team_id_str.as_deref(),
+                        )
+                    }))
+                    .or_else(|| self.agent_id.as_ref().and_then(|agent| {
+                        latest_uncorrelated_delivered_message_for(
+                            &self.workspace,
+                            agent.as_str(),
+                            owner_team_id_str.as_deref(),
+                        )
+                    }))
                     .unwrap_or_else(|| "manual".to_string());
                 obj.insert("task_id".to_string(), Value::String(resolved));
             }
