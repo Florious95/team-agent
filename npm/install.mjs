@@ -139,7 +139,11 @@ function install(argv) {
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.rmSync(tmp, { recursive: true, force: true });
   fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
-  copyExecutable(platformBinary.path, path.join(tmp, "bin", "team-agent"));
+  const tmpBinary = path.join(tmp, "bin", "team-agent");
+  copyExecutable(platformBinary.path, tmpBinary);
+  // Sign the staged binary before swap. Failure aborts install before any
+  // rename touches the existing runtime directory.
+  prepareDarwinExecutable(tmpBinary);
 
   fs.rmSync(backup, { recursive: true, force: true });
   if (fs.existsSync(dest)) {
@@ -666,6 +670,28 @@ function printUnsupportedPlatform() {
 function copyExecutable(src, dest) {
   fs.copyFileSync(src, dest);
   fs.chmodSync(dest, 0o755);
+}
+
+// Defence-in-depth: on Darwin, ad-hoc re-sign the staged binary before the
+// atomic rename swaps it into place. Atomic temp+rename already avoids the
+// classic in-place vnode/signature-cache failure, but it does not repair an
+// invalid or stale Mach-O signature that survived the npm extraction. The
+// ad-hoc signature (-) is sufficient for local execution and avoids requiring
+// a Developer ID. Fail closed before runtime swap if codesign exits non-zero.
+function prepareDarwinExecutable(dest) {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  const res = spawnSync("/usr/bin/codesign", ["--force", "--sign", "-", dest], {
+    encoding: "utf8",
+  });
+  if (res.status !== 0) {
+    const stderr = (res.stderr || "").trim();
+    const signal = res.signal ? ` signal=${res.signal}` : "";
+    throw new Error(
+      `codesign failed on ${dest}: status=${res.status}${signal} stderr=${stderr || "(empty)"}`,
+    );
+  }
 }
 
 function writeExecWrapper(file, binary, fixedArgs, options = {}) {

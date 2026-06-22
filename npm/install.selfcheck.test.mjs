@@ -243,6 +243,48 @@ test("install manifest persists selected bin dir for later commands", () => {
   assert.equal(manifest.version, "test-version");
 });
 
+// Regression guard for the codesign/SIGKILL fix: the install flow MUST stage
+// the runtime under `.<version>.<pid>.tmp` and use `fs.renameSync(tmp, dest)`
+// to swap it into place. A direct `fs.copyFileSync` into the destination bin
+// path is the bad path that triggers the macOS code-sign cache failure on
+// in-place overwrite. The Darwin ad-hoc codesign helper must also be wired
+// in between staging and the swap.
+test("installer stages under temp dir and codesigns before atomic rename", () => {
+  const source = fs.readFileSync(
+    path.join(path.dirname(new URL(import.meta.url).pathname), "install.mjs"),
+    "utf8",
+  );
+  // Temp-dir staging pattern: `.${version}.${process.pid}.tmp` under runtimeRoot.
+  assert.match(
+    source,
+    /\.\$\{version\}\.\$\{process\.pid\}\.tmp/,
+    "install must stage under .<version>.<pid>.tmp (not overwrite dest in place)",
+  );
+  // Atomic rename: tmp → dest.
+  assert.match(
+    source,
+    /fs\.renameSync\(\s*tmp\s*,\s*dest\s*\)/,
+    "install must swap runtime via fs.renameSync(tmp, dest)",
+  );
+  // Darwin ad-hoc codesign helper wired into staging path (before rename).
+  assert.match(
+    source,
+    /prepareDarwinExecutable\s*\(\s*tmpBinary\s*\)/,
+    "install must call prepareDarwinExecutable(tmpBinary) before runtime swap",
+  );
+  // Helper itself: gated on darwin, uses /usr/bin/codesign --force --sign -.
+  assert.match(
+    source,
+    /process\.platform\s*!==\s*["']darwin["']/,
+    "prepareDarwinExecutable must early-return when not on Darwin",
+  );
+  assert.match(
+    source,
+    /\/usr\/bin\/codesign["'][^)]*"--force"[^)]*"--sign"[^)]*"-"/,
+    "Darwin signer must invoke /usr/bin/codesign --force --sign - (ad-hoc)",
+  );
+});
+
 function tempRoot(label) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `team-agent-install-${label}-`));
 }
