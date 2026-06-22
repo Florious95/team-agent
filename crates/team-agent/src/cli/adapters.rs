@@ -443,7 +443,7 @@ pub fn cmd_collect_for_team(args: &CollectArgs, team: Option<&str>) -> Result<Cm
 
 /// `cmd_settle`(`commands.py:86`)。
 pub fn cmd_settle(args: &SettleArgs) -> Result<CmdResult, CliError> {
-    match settle_value(&args.workspace) {
+    match settle_value(&args.workspace, args.team.as_deref()) {
         Ok(value) => Ok(CmdResult::from_json(value, args.json)),
         Err(error) => Ok(CmdResult::from_json(
             json!({
@@ -456,10 +456,15 @@ pub fn cmd_settle(args: &SettleArgs) -> Result<CmdResult, CliError> {
     }
 }
 
-fn settle_value(workspace: &Path) -> Result<Value, CliError> {
+fn settle_value(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
+    // Bug #6 (prerelease 0.4.0 gate review §6): pass explicit team through to
+    // resolve_active_team so settle scopes collect/status/team-state to the
+    // requested team. Without this, the selector falls back to top-level
+    // active_team_key and settle operates on the wrong team. resolve_active_team
+    // logic unchanged per 不可改项.
     let selected = crate::state::selector::resolve_active_team(
         workspace,
-        None,
+        team,
         crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;

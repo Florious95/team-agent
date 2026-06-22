@@ -614,6 +614,11 @@ pub struct CollectArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettleArgs {
     pub workspace: PathBuf,
+    /// Bug #6 (prerelease 0.4.0 gate review): explicit team scope. When
+    /// `Some`, settle scopes collect/status/team-state to this team via
+    /// `resolve_active_team(workspace, Some(team), ...)`. When `None`,
+    /// the selector falls back to top-level `active_team_key` (legacy).
+    pub team: Option<String>,
     pub json: bool,
 }
 

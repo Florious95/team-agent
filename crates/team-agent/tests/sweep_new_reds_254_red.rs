@@ -103,6 +103,7 @@ fn settle_runtime_workspace_collects_selected_team() {
 
     let out = json_result(
         cmd_settle(&SettleArgs {
+        team: None,
             workspace: root.clone(),
             json: true,
         })

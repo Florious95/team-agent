@@ -140,6 +140,7 @@ fn settle_success_json_byte_shape_wraps_collect() {
     seed_settle_workspace(&ws);
 
     let result = cmd_settle(&SettleArgs {
+        team: None,
         workspace: ws.clone(),
         json: true,
     })
@@ -204,6 +205,7 @@ fn settle_success_human_output_insertion_order() {
     seed_settle_workspace(&ws);
 
     let result = cmd_settle(&SettleArgs {
+        team: None,
         workspace: ws.clone(),
         json: false,
     })

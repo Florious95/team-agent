@@ -1263,6 +1263,7 @@ fn settle_args(args: &[String], cwd: &Path) -> SettleArgs {
     let parsed = parse_args(args);
     SettleArgs {
         workspace: workspace(&parsed, cwd),
+        team: parsed.team.clone(),
         json: parsed.json,
     }
 }
