@@ -423,6 +423,175 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             attach_commands,
         });
     }
+    // RM-039-SESS-001 step 2 (architect verdict 2026-06-22): post-respawn
+    // resume backing validation.
+    //
+    // Pre-kill preflight already proves backing exists, but killing the
+    // provider process can cause the provider to rotate / clean up its
+    // transient backing file (the Claude case in the evidence: the
+    // sessions/<pid>.json file is the process-tracking record and goes away
+    // when the worker dies). Resumed agents preserve the OLD
+    // capture tuple (mark_agent_respawned only clears it on Fresh/
+    // FreshAfterMissingRollout), so without this re-probe the runtime
+    // reports `restart.completed rc:"ok"` while L2 provider backing truth
+    // is missing — a false-green restart.
+    //
+    // Strategy:
+    //   1. For every Resumed worker in `successful_agents`, re-run the
+    //      same `resume_backing_probe_for_agent` used at preflight.
+    //   2. Emit `restart.resume_postflight` carrying agent_id, session_id,
+    //      exists, checked_paths.
+    //   3. If exists=false: clear stale capture fields (rollout_path,
+    //      captured_at, captured_via, attribution_confidence) but
+    //      preserve session_id; set `_pending_session_id` to the same
+    //      session_id so convergence searches for the resumed session
+    //      explicitly. Then run one bounded convergence pass.
+    //   4. Re-probe. If still missing and !allow_fresh, demote the agent
+    //      from successful to failed with phase `resume_postflight` and
+    //      `session_backing_store_missing_after_restart`. The outer
+    //      branches below will then return Failed/Partial instead of OK.
+    {
+        let mut postflight_failed: Vec<crate::lifecycle::types::RestartFailedAgent> = Vec::new();
+        let mut survivors: Vec<crate::lifecycle::types::RestartedAgent> =
+            Vec::with_capacity(successful_agents.len());
+        let convergence_deadline = session_convergence_deadline(session_converge_deadline_ms);
+        let convergence_poll = session_convergence_poll_interval();
+        for decision in successful_agents.drain(..) {
+            if !matches!(decision.restart_mode, crate::lifecycle::types::StartMode::Resumed) {
+                survivors.push(decision);
+                continue;
+            }
+            let Some(agent) = state
+                .get("agents")
+                .and_then(|v| v.get(decision.agent_id.as_str()))
+                .cloned()
+            else {
+                survivors.push(decision);
+                continue;
+            };
+            let provider = agent_provider(&agent);
+            let session_id = match decision.session_id.as_ref() {
+                Some(sid) => sid.clone(),
+                None => {
+                    // No session id on a Resumed decision shouldn't happen,
+                    // but if it does there is nothing to revalidate.
+                    survivors.push(decision);
+                    continue;
+                }
+            };
+            let probe = resume_backing_probe_for_agent(
+                &selected.run_workspace,
+                &decision.agent_id,
+                &agent,
+                provider,
+                &session_id,
+                agent_rollout_path(&agent).as_ref(),
+            );
+            write_restart_resume_postflight_event(
+                &selected.run_workspace,
+                &decision.agent_id,
+                Some(&session_id),
+                probe.exists,
+                &probe.checked_paths,
+                /* recaptured = */ false,
+            )?;
+            if probe.exists {
+                survivors.push(decision);
+                continue;
+            }
+            // Backing went missing between preflight and post-spawn.
+            // Clear stale capture fields, keep session_id, mark
+            // _pending_session_id, run a bounded convergence pass.
+            if let Some(agents) = state
+                .pointer_mut("/agents")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                if let Some(agent_obj) = agents
+                    .get_mut(decision.agent_id.as_str())
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    agent_obj.remove("rollout_path");
+                    agent_obj.remove("captured_at");
+                    agent_obj.remove("captured_via");
+                    agent_obj.remove("attribution_confidence");
+                    agent_obj.insert(
+                        "_pending_session_id".to_string(),
+                        serde_json::json!(session_id.as_str()),
+                    );
+                }
+            }
+            // Persist state before convergence so the helper sees the
+            // cleared tuple.
+            save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+            let _converge = converge_missing_provider_sessions(
+                &mut state,
+                convergence_deadline,
+                convergence_poll,
+                &selected.run_workspace,
+                allow_fresh,
+            )?;
+            save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+            // Re-probe with the freshest agent state.
+            let agent_after = state
+                .get("agents")
+                .and_then(|v| v.get(decision.agent_id.as_str()))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let probe_after = resume_backing_probe_for_agent(
+                &selected.run_workspace,
+                &decision.agent_id,
+                &agent_after,
+                provider,
+                &session_id,
+                agent_rollout_path(&agent_after).as_ref(),
+            );
+            write_restart_resume_postflight_event(
+                &selected.run_workspace,
+                &decision.agent_id,
+                Some(&session_id),
+                probe_after.exists,
+                &probe_after.checked_paths,
+                /* recaptured = */ true,
+            )?;
+            if probe_after.exists {
+                survivors.push(decision);
+                continue;
+            }
+            // Still missing. Demote the agent.
+            let phase = "resume_postflight";
+            let error = "session_backing_store_missing_after_restart".to_string();
+            mark_agent_restart_failed(&mut state, &decision, &error);
+            let _ = write_restart_agent_failed_event(
+                &selected.run_workspace,
+                &decision,
+                phase,
+                &error,
+            );
+            postflight_failed.push(restart_failed_agent(&decision, phase, error));
+        }
+        successful_agents = survivors;
+        failed_agents.extend(postflight_failed);
+        if !failed_agents.is_empty() {
+            save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+        }
+    }
+    if successful_agents.is_empty() && !failed_agents.is_empty() {
+        // Postflight demoted every survivor — emit Failed before coordinator start.
+        let attach_commands = Vec::new();
+        let next_actions = restart_failure_next_actions(&failed_agents);
+        write_restart_completed_event(
+            &selected.run_workspace,
+            &successful_agents,
+            &failed_agents,
+            "fail",
+        )?;
+        return Ok(RestartReport::Failed {
+            session_name,
+            failed_agents,
+            next_actions,
+            attach_commands,
+        });
+    }
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
@@ -1120,6 +1289,39 @@ fn write_restart_agent_failed_event(
                     ".team/logs/coordinator.log and .team/runtime/state.json agent={}",
                     decision.agent_id
                 ),
+            }),
+        )
+        .map(|_| ())
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+/// RM-039-SESS-001 step 2 (architect verdict 2026-06-22): emit
+/// `restart.resume_postflight` for each Resumed worker we re-probed after
+/// spawn. `recaptured=true` means this event is the second probe after
+/// one bounded `converge_missing_provider_sessions` pass; `false` means
+/// it's the first probe right after spawn. `exists` reflects whether the
+/// provider backing file actually exists on disk; `checked_paths` lists
+/// every path the runtime probed.
+fn write_restart_resume_postflight_event(
+    workspace: &Path,
+    agent_id: &AgentId,
+    session_id: Option<&SessionId>,
+    exists: bool,
+    checked_paths: &[std::path::PathBuf],
+    recaptured: bool,
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "restart.resume_postflight",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "session_id": session_id.map(SessionId::as_str),
+                "exists": exists,
+                "checked_paths": checked_paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                "recaptured": recaptured,
             }),
         )
         .map(|_| ())

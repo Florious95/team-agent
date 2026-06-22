@@ -409,14 +409,37 @@ where
 }
 
 fn agent_session_complete(agent: &Value) -> bool {
-    agent
+    // RM-039-SESS-001 step 1 (architect verdict 2026-06-22): historically
+    // this returned true the moment `rollout_path` was non-empty — even when
+    // the file no longer existed on disk. That created a "stale-positive"
+    // capture tuple: the worker had a session_id + a stored rollout_path,
+    // but the provider had rotated/garbage-collected the actual transcript
+    // file. `pending_session_capture` skipped agents whose
+    // `agent_session_complete()` was true, so the runtime never recaptured
+    // the now-broken backing, and downstream consumers saw the stale tuple
+    // as authoritative.
+    //
+    // Fix: a non-empty `rollout_path` only counts as complete when the path
+    // actually exists. session_id remains a required non-empty check
+    // (architect directive: "Keep session_id non-empty as required; do not
+    // infer context from event log alone unless the referenced transcript
+    // path exists.").
+    let session_id_ok = agent
         .get("session_id")
         .and_then(Value::as_str)
-        .is_some_and(|session| !session.is_empty())
-        && agent
-            .get("rollout_path")
-            .and_then(Value::as_str)
-            .is_some_and(|path| !path.is_empty())
+        .is_some_and(|session| !session.is_empty());
+    if !session_id_ok {
+        return false;
+    }
+    let rollout_path = match agent
+        .get("rollout_path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => path,
+        None => return false,
+    };
+    std::path::Path::new(rollout_path).exists()
 }
 
 fn allocate_session_candidates(
@@ -873,5 +896,65 @@ mod u1_tests {
                 error: "provider io error: capture exploded".to_string(),
             }]
         );
+    }
+
+    /// RM-039-SESS-001 step 1 (architect verdict 2026-06-22): the
+    /// `agent_session_complete` predicate must NOT treat a non-empty
+    /// `rollout_path` as complete when the file does not exist. The
+    /// historical bug was that a stale-positive capture tuple
+    /// (`session_id` + `rollout_path` both present, but the path had
+    /// been rotated away by the provider) was reported as complete and
+    /// blocked `pending_session_capture` from recapturing. Now the
+    /// predicate returns false if the path does not exist, so the
+    /// session is re-evaluated on the next convergence tick.
+    #[test]
+    fn rm039_sess001_agent_session_complete_requires_existing_rollout_path() {
+        // Case 1: session_id + rollout_path both non-empty, path absent.
+        let missing = "/tmp/ta-rm039-sess001-nonexistent-rollout.jsonl";
+        // Guard against a previous test run leaving the file behind.
+        let _ = std::fs::remove_file(missing);
+        let agent_stale = serde_json::json!({
+            "session_id": "sess-stale-positive",
+            "rollout_path": missing,
+        });
+        assert!(
+            !agent_session_complete(&agent_stale),
+            "RM-039-SESS-001: stale-positive tuple (session_id + missing rollout_path) \
+             must NOT be reported complete"
+        );
+
+        // Case 2: session_id + rollout_path both non-empty, path exists.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let existing = std::env::temp_dir().join(format!(
+            "ta-rm039-sess001-existing-{}-{}.jsonl",
+            std::process::id(),
+            n
+        ));
+        std::fs::write(&existing, b"{}\n").expect("write fixture rollout file");
+        let agent_complete = serde_json::json!({
+            "session_id": "sess-real",
+            "rollout_path": existing.to_string_lossy(),
+        });
+        assert!(
+            agent_session_complete(&agent_complete),
+            "an agent with session_id + an existing rollout file remains complete"
+        );
+        let _ = std::fs::remove_file(&existing);
+
+        // Case 3: empty session_id must still fail completeness regardless.
+        let agent_no_session = serde_json::json!({
+            "session_id": "",
+            "rollout_path": "/tmp/whatever",
+        });
+        assert!(!agent_session_complete(&agent_no_session));
+
+        // Case 4: empty rollout_path remains incomplete (legacy contract).
+        let agent_no_path = serde_json::json!({
+            "session_id": "sess-x",
+            "rollout_path": "",
+        });
+        assert!(!agent_session_complete(&agent_no_path));
     }
 }
