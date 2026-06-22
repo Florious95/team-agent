@@ -456,13 +456,19 @@ fn delivery_outcome_json(
     content: &str,
     opts: &SendOptions,
 ) -> Value {
+    // Pre-release 0.4.0 user directive: send result MUST NOT carry the
+    // message body — neither in human form (cli/emit.rs) NOR in --json.
+    // External consumers who need the message content read it via `inbox`,
+    // not from the send response. We surface `content_length_bytes` as a
+    // size sanity field so callers can verify the body size they intended
+    // to send arrived intact without exposing the body itself.
     let target_wire = target_json(target);
     json!({
         "ok": outcome.ok,
         "status": delivery_status_wire(outcome.status),
         "target": target_wire,
         "agent_id": first_target(target),
-        "content": content,
+        "content_length_bytes": content.len(),
         "sender": opts.sender,
         "message_id": outcome.message_id,
         "message_status": outcome.message_status.0,

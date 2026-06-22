@@ -13,28 +13,9 @@ pub fn emit(output: &CmdOutput, as_json: bool) -> Option<String> {
         CmdOutput::Human(text) => Some(text.clone()),
         CmdOutput::Json(value) if as_json => serde_json::to_string_pretty(&sort_json(value)).ok(),
         CmdOutput::Json(Value::Object(obj)) => {
-            // Pre-release 0.4.0 fix: the `send` CLI's response JSON contains
-            // a `content` field (kept for the E2E-SEND-003 contract) which,
-            // when rendered in human form, dumped the FULL message body to
-            // the leader's terminal — effectively echoing every sent message
-            // back into the pane the operator was reading. In human-form
-            // emit, replace the `content` value with a short marker
-            // (`<len=N bytes>`) so operators see size sanity without the
-            // body. JSON callers (`--json`) still get the full field for
-            // skill/scribe/external orchestrators.
             let lines: Vec<String> = obj
                 .iter()
-                .map(|(key, value)| {
-                    let rendered = if key == "content" {
-                        match value.as_str() {
-                            Some(s) => format!("<len={} bytes>", s.len()),
-                            None => human_value(value),
-                        }
-                    } else {
-                        human_value(value)
-                    };
-                    format!("{key}: {rendered}")
-                })
+                .map(|(key, value)| format!("{key}: {}", human_value(value)))
                 .collect();
             Some(lines.join("\n"))
         }
