@@ -110,6 +110,108 @@ use super::*;
         let _ = std::fs::remove_dir_all(&ws);
     }
 
+    // =========================================================================
+    // RM-039-STAT-001 second-round regression (architect verdict 2026-06-22).
+    //
+    // Real failure shape: tick wrote `activity` to root .agents.coder and
+    // .teams.current.agents.coder because `team_state_key` cascaded to the
+    // `team_dir = "./.team/current"` basename. But status's selector reads
+    // the `active_team_key = "rm039-status-working-891"` projection, which
+    // was stale. The compact whitelist alone cannot fix this — by the time
+    // compact_agent_state runs, the selected team slot already lacks activity.
+    //
+    // Fix expected at the projection/state-key layer: when load_runtime_state
+    // sees `active_team_key` naming an existing teams entry and no root
+    // `team_key`, it must promote `team_key = active_team_key` so subsequent
+    // tick writes and status reads agree on which teams entry to use. The
+    // assertion here drives the real CLI path through `status_port::status`.
+    // =========================================================================
+    #[test]
+    fn rm039_stat001_status_resolves_active_team_when_root_team_key_missing() {
+        let ws = seed_status_workspace();
+        // Seed the exact dirty shape from the evidence: active_team_key
+        // disagrees with team_dir basename; root team_key absent; the
+        // teams.<active> entry is stale (no activity); root + teams.current
+        // carry activity that the tick had already written there.
+        let active = "rm039-status-working-891";
+        let activity = json!({
+            "status": "working",
+            "confidence": 0.95,
+            "rationale": "provider_jsonl:open_turn",
+        });
+        let state = json!({
+            "session_name": "team-rm039-status-working",
+            "team_dir": "./.team/current",
+            "active_team_key": active,
+            // intentionally no top-level "team_key" — that is the bug shape.
+            "leader": {"id": "leader"},
+            "leader_receiver": {"pane_id": "%3", "status": "running"},
+            "agents": {
+                "coder": {
+                    "status": "running",
+                    "first_send_at": "2026-01-01T00:00:00Z",
+                    "activity": activity.clone(),
+                    "last_output_at": "2026-06-22T02:52:30+00:00",
+                }
+            },
+            "teams": {
+                "current": {
+                    "active_team_key": active,
+                    "session_name": "team-rm039-status-working",
+                    "agents": {
+                        "coder": {
+                            "status": "running",
+                            "first_send_at": "2026-01-01T00:00:00Z",
+                            "activity": activity.clone(),
+                        }
+                    }
+                },
+                active: {
+                    "active_team_key": active,
+                    "session_name": "team-rm039-status-working",
+                    "agents": {
+                        "coder": {
+                            "status": "running",
+                            "first_send_at": "2026-01-01T00:00:00Z",
+                            // NO `activity` here — this is the stale entry
+                            // that the selector landed on pre-fix.
+                        }
+                    }
+                }
+            }
+        });
+        std::fs::write(
+            ws.join(".team").join("runtime").join("state.json"),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+            .expect("compact status should project a value");
+        let agent = v
+            .pointer("/agents/coder")
+            .and_then(serde_json::Value::as_object)
+            .expect("coder agent must appear in compact projection");
+        let got_activity = agent
+            .get("activity")
+            .expect("RM-039-STAT-001 second-round: activity must reach the compact projection \
+                     even when active_team_key disagrees with team_dir basename");
+        assert_eq!(
+            got_activity.pointer("/status").and_then(serde_json::Value::as_str),
+            Some("working"),
+            "RM-039-STAT-001 second-round: compact status.agents.coder.activity.status must \
+             be `working` when state.active_team_key names an existing teams entry, \
+             regardless of team_dir basename"
+        );
+        // Lifecycle status unchanged — T1 split invariant.
+        assert_eq!(
+            agent.get("status").and_then(serde_json::Value::as_str),
+            Some("running"),
+            "lifecycle status must NOT collapse into activity.status"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn status_port_status_compact_json_shape_against_seeded_fixture() {
         // cmd_status json branch (detail=false) delegates status_port::status(compact=true).

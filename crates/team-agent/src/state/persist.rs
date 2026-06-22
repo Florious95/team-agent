@@ -642,6 +642,72 @@ pub fn migrate_active_team_key(state: &mut Value) -> bool {
     true
 }
 
+/// RM-039-STAT-001 second-round compat normalizer (architect verdict
+/// 2026-06-22). When `active_team_key` names an existing `teams` entry
+/// but root `team_key` is missing, set root `team_key = active_team_key`
+/// (and mirror it into `teams[active_team_key].team_key` for callers
+/// that read the team-scoped slot). This keeps the cascade in
+/// `state::projection::team_state_key` honest: the first branch
+/// (`state.team_key`) now matches what `active_team_key` says, so
+/// coordinator tick's `save_team_scoped_state` writes activity to the
+/// SAME teams entry the status selector later reads.
+///
+/// Narrow on purpose:
+///   * Returns `false` (no-op) when root `team_key` already exists,
+///     even if it disagrees with `active_team_key`. Conflict cases
+///     stay observable; we don't silently rewrite.
+///   * Returns `false` when `active_team_key` is null/empty.
+///   * Returns `false` when `teams[active_team_key]` does not exist.
+///   * Does NOT touch any other field (no generic deep merge).
+///
+/// Returns `true` if state was mutated and the caller should persist.
+pub fn migrate_team_key_to_match_active_team(state: &mut Value) -> bool {
+    let Some(obj) = state.as_object() else {
+        return false;
+    };
+    let already_has_root = obj
+        .get("team_key")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if already_has_root {
+        return false;
+    }
+    let active = match obj.get("active_team_key").and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return false,
+    };
+    let teams_has_active = obj
+        .get("teams")
+        .and_then(Value::as_object)
+        .is_some_and(|teams| teams.contains_key(&active));
+    if !teams_has_active {
+        return false;
+    }
+    let Some(obj_mut) = state.as_object_mut() else {
+        return false;
+    };
+    obj_mut.insert("team_key".to_string(), Value::String(active.clone()));
+    // Mirror inside teams[active] so any code reading the team-scoped
+    // slot sees the same canonical key. Skip if the entry isn't an
+    // object (defensive — should always be).
+    if let Some(team_entry) = obj_mut
+        .get_mut("teams")
+        .and_then(Value::as_object_mut)
+        .and_then(|teams| teams.get_mut(&active))
+        .and_then(Value::as_object_mut)
+    {
+        let needs_team_key = team_entry
+            .get("team_key")
+            .and_then(Value::as_str)
+            .map(|s| s != active)
+            .unwrap_or(true);
+        if needs_team_key {
+            team_entry.insert("team_key".to_string(), Value::String(active));
+        }
+    }
+    true
+}
+
 pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     let path = runtime_state_path(workspace);
     if !path.exists() {
@@ -655,6 +721,13 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     normalize_agent_session_state(&mut state);
     let mut changed = migrate_state_identity(&mut state, &SystemEnv, workspace)?;
     if migrate_active_team_key(&mut state) {
+        changed = true;
+    }
+    // RM-039-STAT-001 second-round compat (architect verdict 2026-06-22):
+    // for states written before the launch-side `team_key` fix landed,
+    // promote `active_team_key` into root `team_key` so coordinator tick
+    // and status selector agree on which `teams` entry to read/write.
+    if migrate_team_key_to_match_active_team(&mut state) {
         changed = true;
     }
     if changed {
@@ -1035,6 +1108,171 @@ mod tests {
         assert!(
             saved.pointer("/agents/gone").is_none(),
             "deleted_agent_ids 豁免:被 remove 的 `gone` 不得被 preserve 复活;saved={saved}"
+        );
+    }
+
+    /// RM-039-STAT-001 second-round regression (architect verdict
+    /// 2026-06-22): `migrate_team_key_to_match_active_team` must
+    /// promote `team_key = active_team_key` when root `team_key` is
+    /// missing AND `teams[active_team_key]` exists, and mirror it into
+    /// the team-scoped slot. Coordinator tick then writes to the same
+    /// teams entry that status selector reads.
+    #[test]
+    fn migrate_team_key_to_match_active_team_promotes_when_missing() {
+        let mut state = json!({
+            "active_team_key": "rm039-status-working-891",
+            "session_name": "team-rm039-status-working",
+            "team_dir": "./.team/current",
+            "teams": {
+                "rm039-status-working-891": {
+                    "active_team_key": "rm039-status-working-891",
+                    "session_name": "team-rm039-status-working",
+                    "agents": {}
+                }
+            }
+        });
+        let changed = migrate_team_key_to_match_active_team(&mut state);
+        assert!(changed, "state must be mutated when team_key is missing");
+        assert_eq!(
+            state.get("team_key").and_then(Value::as_str),
+            Some("rm039-status-working-891"),
+            "root team_key must equal active_team_key after migration"
+        );
+        // mirrored into the team-scoped entry
+        assert_eq!(
+            state
+                .pointer("/teams/rm039-status-working-891/team_key")
+                .and_then(Value::as_str),
+            Some("rm039-status-working-891"),
+            "teams[active].team_key must be set as part of the migration"
+        );
+        // team_state_key cascade now agrees with active_team_key.
+        assert_eq!(
+            crate::state::projection::team_state_key(&state),
+            "rm039-status-working-891",
+            "team_state_key first branch must hit `state.team_key` and \
+             return the canonical key"
+        );
+    }
+
+    /// Conflict cases stay observable: if `team_key` already exists,
+    /// the migrator does NOT silently overwrite it, even when it
+    /// disagrees with `active_team_key`. The user/team can resolve.
+    #[test]
+    fn migrate_team_key_to_match_active_team_is_noop_when_team_key_present() {
+        let mut state = json!({
+            "team_key": "explicit-key",
+            "active_team_key": "different-active",
+            "teams": {
+                "different-active": {"agents": {}},
+                "explicit-key": {"agents": {}}
+            }
+        });
+        let changed = migrate_team_key_to_match_active_team(&mut state);
+        assert!(!changed, "existing team_key must NOT be overwritten");
+        assert_eq!(
+            state.get("team_key").and_then(Value::as_str),
+            Some("explicit-key")
+        );
+    }
+
+    /// Narrow: only promote when teams[active_team_key] actually exists.
+    /// Otherwise we'd be claiming a key for a non-existent team slot.
+    #[test]
+    fn migrate_team_key_to_match_active_team_is_noop_when_active_team_entry_missing() {
+        let mut state = json!({
+            "active_team_key": "missing-team",
+            "teams": {
+                "other": {"agents": {}}
+            }
+        });
+        let changed = migrate_team_key_to_match_active_team(&mut state);
+        assert!(
+            !changed,
+            "no migration when teams[active_team_key] does not exist"
+        );
+        assert!(state.get("team_key").is_none());
+    }
+
+    /// Null / empty active_team_key is not actionable.
+    #[test]
+    fn migrate_team_key_to_match_active_team_is_noop_when_active_team_key_absent() {
+        for active in [json!(null), json!(""), json!(serde_json::Value::Null)] {
+            let mut state = json!({
+                "active_team_key": active,
+                "teams": {}
+            });
+            assert!(
+                !migrate_team_key_to_match_active_team(&mut state),
+                "no migration when active_team_key is null/empty"
+            );
+        }
+    }
+
+    /// RM-039-STAT-001 second-round end-to-end at the persistence layer
+    /// (architect verdict 2026-06-22): loading a state file in the dirty
+    /// shape (active_team_key disagrees with team_dir basename, root
+    /// team_key absent) must persist the canonical `team_key` so the
+    /// next `save_team_scoped_state` writes the team-scoped slot at
+    /// `teams[active_team_key]`, not at `teams[team_dir_basename]`.
+    /// This is the bridging contract that decides whether coordinator
+    /// tick's activity write lands where the status selector later reads.
+    #[test]
+    fn load_runtime_state_pins_team_key_from_active_team_key_on_dirty_shape() {
+        let ws = temp_ws();
+        let active = "rm039-status-working-891";
+        let raw = json!({
+            "session_name": "team-rm039-status-working",
+            "team_dir": "./.team/current",
+            "active_team_key": active,
+            // intentionally NO root "team_key" — the dirty shape.
+            "agents": {
+                "coder": {"status": "running", "first_send_at": "2026-01-01T00:00:00Z"}
+            },
+            "teams": {
+                "current": {
+                    "active_team_key": active,
+                    "agents": {"coder": {"status": "running"}}
+                },
+                active: {
+                    "active_team_key": active,
+                    "agents": {"coder": {"status": "running"}}
+                }
+            }
+        });
+        let runtime_dir = ws.join(".team").join("runtime");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(
+            runtime_dir.join("state.json"),
+            serde_json::to_vec_pretty(&raw).unwrap(),
+        )
+        .unwrap();
+        // temp_ws() returns a unique path per call, so the cache
+        // (keyed by path) does not collide with previous tests.
+
+        let loaded = load_runtime_state(&ws).expect("loaded state");
+        assert_eq!(
+            loaded.get("team_key").and_then(Value::as_str),
+            Some(active),
+            "load_runtime_state must promote team_key=active_team_key on the dirty shape"
+        );
+        // team_state_key now cascades to state.team_key, returning the
+        // canonical key instead of the team_dir basename.
+        assert_eq!(
+            crate::state::projection::team_state_key(&loaded),
+            active,
+            "team_state_key must return the canonical key after migration"
+        );
+
+        // Re-read from disk (not cache) to confirm the migration was persisted.
+        let on_disk: Value = serde_json::from_str(
+            &std::fs::read_to_string(runtime_dir.join("state.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            on_disk.get("team_key").and_then(Value::as_str),
+            Some(active),
+            "migration must be persisted to disk so subsequent processes see it"
         );
     }
 }

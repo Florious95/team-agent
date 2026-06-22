@@ -928,6 +928,26 @@ fn save_launched_team_state_for_key(
         .unwrap_or_else(|| crate::state::projection::team_state_key(launched));
     let mut launched = launched.clone();
     if let Some(obj) = launched.as_object_mut() {
+        // RM-039-STAT-001 second-round fix (architect verdict
+        // 2026-06-22): the canonical runtime team key MUST be written
+        // explicitly to `state.team_key`, not only inferred from
+        // `team_dir` by `team_state_key`'s cascade. The historical
+        // bug: when `team_dir = "./.team/current"` and the runtime team
+        // is `rm039-status-working-891`, `team_state_key` cascades to
+        // the team_dir basename (`current`), but `active_team_key` is
+        // the real team key. Coordinator tick uses `team_state_key`
+        // when saving the team-scoped state, so writes land on
+        // `teams.current` instead of `teams.<active_team_key>`. Status
+        // reads `teams[active_team_key]`, sees stale data.
+        //
+        // Writing `team_key=launched_key` here pins the first branch of
+        // `team_state_key` so the cascade returns the canonical runtime
+        // team key everywhere — coordinator tick, save_team_scoped_state,
+        // and status selector all agree.
+        obj.insert(
+            "team_key".to_string(),
+            serde_json::Value::String(launched_key.clone()),
+        );
         obj.insert(
             "active_team_key".to_string(),
             serde_json::Value::String(launched_key.clone()),
