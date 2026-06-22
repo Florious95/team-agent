@@ -418,12 +418,21 @@ pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64)
 }
 
 fn inject_tmux_session_present(workspace: &std::path::Path, state: &mut Value) {
+    // Bug #7 (prerelease 0.4.0 gate review §6): probe the SAME endpoint the
+    // runtime actually uses (state.tmux_endpoint / tmux_socket), not the
+    // workspace-hash socket. Otherwise readiness reports `process_started=false`
+    // even though the session is alive on the persisted socket.
     let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
         return;
     };
-    let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
-    let present = backend
-        .has_session(&crate::transport::SessionName::new(session_name.to_string()))
+    let session_name_owned = session_name.to_string();
+    let selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+        workspace,
+        Some(state),
+    );
+    let present = selection
+        .backend
+        .has_session(&crate::transport::SessionName::new(session_name_owned))
         .unwrap_or(false);
     if let Value::Object(map) = state {
         map.insert("tmux_session_present".to_string(), Value::Bool(present));

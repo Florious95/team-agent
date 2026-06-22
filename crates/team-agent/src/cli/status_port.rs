@@ -58,14 +58,19 @@ use rusqlite::params;
                 .and_then(Value::as_str)
                 .unwrap_or("leader");
             session_name.as_str().and_then(|session| {
-                crate::tmux_backend::attach_command_for_workspace(
+                // Bug #7 (gate review §6): build the attach command from the
+                // SAME endpoint the readiness probe uses (state's persisted
+                // tmux_endpoint/tmux_socket), so the printed command matches
+                // where the session actually lives.
+                crate::tmux_backend::attach_command_for_runtime_state_or_workspace(
                     workspace,
+                    Some(state),
                     &crate::transport::SessionName::new(session.to_string()),
                     window_name,
                 )
             })
         };
-        let tmux_present = tmux_session_present(workspace, session_name.as_str());
+        let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
         let mut readiness_state = state.clone();
         if let Some(obj) = readiness_state.as_object_mut() {
             obj.insert("tmux_session_present".to_string(), serde_json::json!(tmux_present));
@@ -435,7 +440,16 @@ use rusqlite::params;
         }
     }
 
-    fn tmux_session_present(workspace: &Path, session_name: Option<&str>) -> bool {
+    fn tmux_session_present(
+        workspace: &Path,
+        state: &Value,
+        session_name: Option<&str>,
+    ) -> bool {
+        // Bug #7 (prerelease 0.4.0 gate review §6): probe the SAME endpoint
+        // the runtime actually uses (state.tmux_endpoint / tmux_socket), not
+        // the workspace-hash socket. When state has no persisted endpoint,
+        // fall back to workspace — preserves legacy behavior. wait_readiness
+        // formula unchanged per 不可改项; only the input signal is fixed.
         let Some(name) = session_name else {
             return false;
         };
@@ -444,7 +458,12 @@ use rusqlite::params;
         }
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .unwrap_or_else(|_| workspace.to_path_buf());
-        crate::tmux_backend::TmuxBackend::for_workspace(&run_ws)
+        let selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+            &run_ws,
+            Some(state),
+        );
+        selection
+            .backend
             .has_session(&crate::transport::SessionName::new(name))
             .unwrap_or(false)
     }

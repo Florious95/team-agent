@@ -502,6 +502,31 @@ pub(crate) fn attach_command_for_workspace(
     ))
 }
 
+/// Bug #7 (prerelease 0.4.0 gate review §6): when the runtime state carries a
+/// persisted `tmux_endpoint` / `tmux_socket` (e.g. `/private/tmp/tmux-501/default`),
+/// the attach command MUST point at THAT endpoint, not the workspace-hash
+/// socket — otherwise operators are told to attach to a socket where the
+/// session does not exist. Falls back to workspace-hash when state has no
+/// persisted endpoint.
+pub(crate) fn attach_command_for_runtime_state_or_workspace(
+    workspace: &Path,
+    state: Option<&serde_json::Value>,
+    session_name: &SessionName,
+    window_name: &str,
+) -> Option<String> {
+    if let Some((endpoint, _source)) = runtime_tmux_endpoint_from_state(state) {
+        let display = endpoint.to_string();
+        // Distinguish absolute path (`-S <path>`) from short socket name (`-L <name>`).
+        let flag = if Path::new(endpoint).is_absolute() { "-S" } else { "-L" };
+        return Some(format!(
+            "tmux {flag} {display} attach -t {}:{}",
+            session_name.as_str(),
+            window_name
+        ));
+    }
+    attach_command_for_workspace(workspace, session_name, window_name)
+}
+
 pub(crate) fn attach_commands_for_windows<'a>(
     workspace: &Path,
     session_name: &SessionName,
