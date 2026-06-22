@@ -33,6 +33,28 @@ pub fn classify(
         ));
     }
     let facts = extract_lifecycle_facts(provider, &records);
+    // Blocker-2 Layer-2 (prerelease 0.4.0): Claude background-task lifecycle.
+    // Claude's long-running work (e.g. `Bash run_in_background:true`,
+    // followed by `task-notification status=completed`) can outlive the
+    // assistant turn that started it. The existing lifecycle-fact scan
+    // recognises `assistant.stop_reason=end_turn` as TurnComplete, so the
+    // classifier would otherwise mark the worker idle while a background
+    // shell continues. Synthesize a Working fact when at least one
+    // background task started but has not yet been closed. Architect
+    // verdict: bugs-prerelease-blockers.md §141-§143.
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        if let Some(open_turn_id) = claude_background_task_open(&records) {
+            return Ok(decide_state(
+                &lifecycle(
+                    FactKind::TurnOpen,
+                    open_turn_id,
+                    "background_task",
+                    vec!["background_task".to_string()],
+                ),
+                process,
+            ));
+        }
+    }
     let Some(fact) = facts.last() else {
         return Ok(classify_result(
             TurnState::Unknown,
@@ -43,6 +65,122 @@ pub fn classify(
         ));
     };
     Ok(decide_state(fact, process))
+}
+
+/// Blocker-2 Layer-2: scan Claude transcript records for background task
+/// lifecycle markers. Returns `Some(turn_id)` when at least one background
+/// task is OPEN (started but not closed) — caller treats as `TurnOpen` with
+/// reason `background_task`. Returns `None` when no background task started,
+/// or every started task has a matching close (completed / failed).
+///
+/// Open markers (set):
+///   * Any record nested string containing
+///     "Command running in background with ID: <id>" (Bash tool output).
+///   * `tool_use_result.backgroundTaskId` (the structured form).
+///
+/// Close markers (clear):
+///   * `task-notification` content with `<task-id>` matching open id and
+///     `<status>completed</status>` or `failed`.
+///   * `tool_use_result.bashOutput.status = "completed" | "failed"` for the
+///     matching backgroundTaskId.
+fn claude_background_task_open(records: &[serde_json::Value]) -> Option<Option<TurnId>> {
+    use std::collections::BTreeSet;
+    let mut open: BTreeSet<String> = BTreeSet::new();
+    let mut last_open_request: Option<String> = None;
+    for record in records {
+        let mut found_open_ids: Vec<String> = Vec::new();
+        collect_background_open_ids(record, &mut found_open_ids);
+        for id in &found_open_ids {
+            open.insert(id.clone());
+        }
+        if !found_open_ids.is_empty() {
+            if let Some(req) = record.get("requestId").and_then(serde_json::Value::as_str) {
+                last_open_request = Some(req.to_string());
+            }
+        }
+        let mut closed_ids: Vec<String> = Vec::new();
+        collect_background_close_ids(record, &mut closed_ids);
+        for id in &closed_ids {
+            open.remove(id);
+        }
+    }
+    if open.is_empty() {
+        None
+    } else {
+        Some(last_open_request.map(TurnId::new))
+    }
+}
+
+fn collect_background_open_ids(value: &serde_json::Value, out: &mut Vec<String>) {
+    const MARKER: &str = "Command running in background with ID: ";
+    match value {
+        serde_json::Value::String(s) => {
+            for piece in s.split(MARKER).skip(1) {
+                let id: String = piece.chars().take_while(|c| !c.is_whitespace() && *c != '\n').collect();
+                if !id.is_empty() {
+                    out.push(id);
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(id) = map.get("backgroundTaskId").and_then(serde_json::Value::as_str) {
+                if !id.is_empty() {
+                    out.push(id.to_string());
+                }
+            }
+            for v in map.values() {
+                collect_background_open_ids(v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_background_open_ids(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_background_close_ids(value: &serde_json::Value, out: &mut Vec<String>) {
+    // Form A: tool_use_result.bashOutput { backgroundTaskId, status } where status is
+    //   "completed" or "failed".
+    // Form B: <task-notification> wrapper in a string with a status tag.
+    if let serde_json::Value::Object(map) = value {
+        if let Some(bash) = map.get("bashOutput").and_then(serde_json::Value::as_object) {
+            let status = bash.get("status").and_then(serde_json::Value::as_str).unwrap_or("");
+            if matches!(status, "completed" | "failed" | "killed") {
+                if let Some(id) = bash.get("backgroundTaskId").and_then(serde_json::Value::as_str) {
+                    if !id.is_empty() {
+                        out.push(id.to_string());
+                    }
+                }
+            }
+        }
+        for v in map.values() {
+            collect_background_close_ids(v, out);
+        }
+    } else if let serde_json::Value::Array(arr) = value {
+        for v in arr {
+            collect_background_close_ids(v, out);
+        }
+    } else if let serde_json::Value::String(s) = value {
+        // Form B: <task-notification ...><task-id>X</task-id>...<status>completed</status>...
+        if s.contains("<task-notification") && s.contains("<status>completed</status>") {
+            if let Some(id) = extract_xml_tag(s, "task-id") {
+                if !id.is_empty() {
+                    out.push(id);
+                }
+            }
+        }
+    }
+}
+
+fn extract_xml_tag(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end_rel = text[start..].find(&close)?;
+    Some(text[start..start + end_rel].trim().to_string())
 }
 
 pub fn latest_explicit_error_fact(provider: Provider, session_log_text: &str) -> Option<FaultFact> {
