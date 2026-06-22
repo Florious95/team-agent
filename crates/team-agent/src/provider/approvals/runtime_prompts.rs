@@ -16,6 +16,31 @@ pub fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
         && prompt.tool.as_deref().is_some_and(runtime_mcp_tool_allowlisted)
 }
 
+/// Issue 1 (Round 3b gate review §6): Team-Agent control-plane MCP tools
+/// that are safe to auto-approve INDEPENDENT of `leader_auto_approval_allowed`.
+/// These tools never execute user-supplied commands; they are pure team-coord
+/// state transitions. Without this carve-out, a worker spawned by a leader
+/// that lacks a dangerous-bypass flag would have `report_result` blocked at
+/// the MCP approval gate, breaking the entire result-collection pipeline.
+///
+/// Strict scope:
+///   * server MUST be `team_orchestrator` (RUNTIME_MCP_APPROVAL_SERVER) —
+///     never broaden to arbitrary MCP servers.
+///   * tool MUST be one of the explicit safe-list entries. `report_result`
+///     is the canonical case; `send_message` is added because a worker
+///     reporting status to leader through the message bus is the same
+///     architectural layer as `report_result` and is harmless. New tools
+///     join only after explicit product decision (per architect note).
+pub fn runtime_mcp_tool_is_internal_control_plane(prompt: &ApprovalPrompt) -> bool {
+    if prompt.server.as_deref() != Some(RUNTIME_MCP_APPROVAL_SERVER) {
+        return false;
+    }
+    matches!(
+        prompt.tool.as_deref(),
+        Some("report_result") | Some("send_message")
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeApprovalDecision {
@@ -81,6 +106,15 @@ pub fn awaiting_human_confirm_reason(
         ApprovalKind::McpTool => {
             if !runtime_mcp_prompt_allowlisted(prompt) {
                 Some("tool_not_allowlisted")
+            } else if runtime_mcp_tool_is_internal_control_plane(prompt) {
+                // Issue 1 (Round 3b gate review §6): Team-Agent control-plane
+                // MCP tools (report_result / send_message) auto-approve
+                // independent of leader dangerous-bypass. Without this,
+                // workers spawned under a non-bypass leader can never
+                // collect results — the entire correlation pipeline blocks
+                // at the MCP approval gate. Command approvals still go
+                // through `ApprovalKind::Command` and stay human-gated.
+                None
             } else if !leader_auto_approval_allowed {
                 Some("leader_restricted")
             } else {
