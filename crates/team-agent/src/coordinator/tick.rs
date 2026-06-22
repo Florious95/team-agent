@@ -2629,6 +2629,33 @@ fn agent_rollout_path(agent: &Value) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Memory-growth fix (architect §5): bounded tail cap for JSONL activity reads.
+/// Matches `ABNORMAL_TAIL_BYTES` (131_072 bytes) — the abnormal-exit path
+/// already proved this size is sufficient to capture the latest lifecycle
+/// records across all providers (claude / codex / copilot).
+const JSONL_ACTIVITY_TAIL_BYTES: u64 = 131_072;
+
+/// Memory-growth fix (architect §5): per-process `(path, size, mtime_ns) →
+/// activity` cache. When a rollout file hasn't changed since the previous
+/// tick, we skip the file read AND the classification entirely. This is the
+/// dominant savings: a 538MB Claude transcript that updates every few seconds
+/// is touched only when its size or mtime actually moves. Stored values are
+/// small (Option<AgentActivity> = enum + short rationale string); we never
+/// cache the transcript text or parsed JSON.
+struct JsonlActivityCacheEntry {
+    size: u64,
+    mtime_ns: u64,
+    activity: Option<crate::messaging::AgentActivity>,
+}
+
+fn jsonl_activity_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, JsonlActivityCacheEntry>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, JsonlActivityCacheEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 /// E47 (0.3.24 P0, idle/busy 假阳): consult the authoritative provider JSONL
 /// classifier and map to neutral `AgentActivity`. Returns `None` when the
 /// classifier reports `TurnState::Unknown` (unreadable JSONL / no lifecycle
@@ -2638,29 +2665,72 @@ fn agent_rollout_path(agent: &Value) -> Option<PathBuf> {
 /// so we hand off to the TUI scanner which has its OWN no-signal → Uncertain
 /// path. Copilot/Gemini/Fake providers (which don't have JSONL — classify.rs
 /// returns Unknown for them) thus keep using TUI scanning unchanged.
+///
+/// Memory-growth fix (architect analysis 2026-06-23): bounded tail read +
+/// metadata cache. Pre-fix `std::fs::read_to_string` on a 538MB Claude
+/// transcript every 5s caused 200MB+ coordinator RSS plateaus from allocator
+/// fragmentation. Now bounded to 128KiB tail and skipped entirely when
+/// (size, mtime_ns) is unchanged.
 fn jsonl_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentActivity> {
     let rollout_path = agent_rollout_path(agent)?;
     let provider = agent
         .get("provider")
         .and_then(Value::as_str)
         .and_then(parse_provider)?;
-    let log_text = std::fs::read_to_string(&rollout_path).ok()?;
+
+    // Metadata check + cache lookup. Cache hit when the rollout file has
+    // not changed since the previous tick: return the cached classification
+    // without re-reading the file. Truncation (size shrink with stable mtime)
+    // still forces re-read because size is part of the cache key.
+    let metadata = std::fs::metadata(&rollout_path).ok()?;
+    let size = metadata.len();
+    let mtime_ns = metadata_mtime_ns(&metadata)?;
+    if let Ok(cache) = jsonl_activity_cache().lock() {
+        if let Some(entry) = cache.get(&rollout_path) {
+            if entry.size == size && entry.mtime_ns == mtime_ns {
+                return entry.activity.clone();
+            }
+        }
+    }
+
+    // Cache miss: bounded tail read + classify. The classifier only needs the
+    // latest lifecycle records to determine idle/working state; the
+    // abnormal-exit path uses the same 128KiB tail and is sufficient for
+    // claude / codex / copilot lifecycle markers.
+    let log_text = read_tail_text(&rollout_path, JSONL_ACTIVITY_TAIL_BYTES).ok()?;
     let process = explicit_process_liveness(agent).unwrap_or(ProcessLiveness::Unverifiable);
-    let result = crate::provider::classify(provider, &log_text, process, 0.0).ok()?;
-    use crate::messaging::{ActivityStatus, AgentActivity};
-    use crate::provider::types::TurnState;
-    let status = match result.state {
-        TurnState::Idle => ActivityStatus::Idle,
-        TurnState::IdleInterrupted => ActivityStatus::Idle,
-        TurnState::Working => ActivityStatus::Working,
-        TurnState::BlockedOnHuman | TurnState::Abnormal => ActivityStatus::Uncertain,
-        TurnState::Unknown => return None,
-    };
-    Some(AgentActivity {
-        status,
-        confidence: 0.95,
-        rationale: format!("provider_jsonl:{}", result.reason),
-    })
+    let activity = crate::provider::classify(provider, &log_text, process, 0.0)
+        .ok()
+        .and_then(|result| {
+            use crate::messaging::{ActivityStatus, AgentActivity};
+            use crate::provider::types::TurnState;
+            let status = match result.state {
+                TurnState::Idle => ActivityStatus::Idle,
+                TurnState::IdleInterrupted => ActivityStatus::Idle,
+                TurnState::Working => ActivityStatus::Working,
+                TurnState::BlockedOnHuman | TurnState::Abnormal => ActivityStatus::Uncertain,
+                TurnState::Unknown => return None,
+            };
+            Some(AgentActivity {
+                status,
+                confidence: 0.95,
+                rationale: format!("provider_jsonl:{}", result.reason),
+            })
+        });
+
+    // Store the classification (including None / Unknown) so the next tick
+    // can short-circuit when the file is unchanged.
+    if let Ok(mut cache) = jsonl_activity_cache().lock() {
+        cache.insert(
+            rollout_path,
+            JsonlActivityCacheEntry {
+                size,
+                mtime_ns,
+                activity: activity.clone(),
+            },
+        );
+    }
+    activity
 }
 
 fn runtime_approval_target(
