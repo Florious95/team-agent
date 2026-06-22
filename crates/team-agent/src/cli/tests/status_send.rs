@@ -23,6 +23,93 @@ use super::*;
     // RED: status_port::status is unimplemented!() so the call panics until ported.
     // =========================================================================
 
+    // =========================================================================
+    // RM-039-STAT-001 regression guard (real-machine evidence 2026-06-22).
+    //
+    // Architect verdict (bugs-stat001-sess001-architecture-analysis.md §root-cause):
+    // the coordinator-tick activity classifier writes
+    // `activity {status, confidence, rationale}` to the top-level
+    // `agents.<id>` slot of state.json (T1 invariant 60/61); the compact
+    // `status --json` projection MUST preserve it, last_output_at, and
+    // the enrich_agents-injected `interacted` marker. Lifecycle `status`
+    // and turn `activity.status` are separate fields per T1; the
+    // projection MUST NOT collapse them.
+    // =========================================================================
+    #[test]
+    fn rm039_stat001_compact_status_preserves_activity_last_output_and_interacted() {
+        let ws = seed_status_workspace();
+        let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        if let Some(agents) = state
+            .pointer_mut("/agents")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(agent) = agents
+                .get_mut("a1")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                agent.insert(
+                    "activity".to_string(),
+                    json!({
+                        "status": "working",
+                        "confidence": 0.95,
+                        "rationale": "provider_jsonl:open_turn",
+                    }),
+                );
+                agent.insert(
+                    "last_output_at".to_string(),
+                    json!("2026-06-22T02:52:30+00:00"),
+                );
+                // first_send_at is already set by seed_status_workspace so
+                // enrich_agents will inject `interacted` with the same ISO value.
+            }
+        }
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
+            .expect("compact status should project a value");
+        let agent = v
+            .pointer("/agents/a1")
+            .and_then(serde_json::Value::as_object)
+            .expect("seeded agent a1 must appear in compact projection");
+
+        // T1 split: lifecycle `status` stays unchanged.
+        assert_eq!(
+            agent.get("status").and_then(serde_json::Value::as_str),
+            Some("running"),
+            "RM-039-STAT-001: compact projection must NOT collapse `status` into `activity.status`"
+        );
+        // Turn activity preserved (the field that was historically dropped).
+        let activity = agent
+            .get("activity")
+            .expect("RM-039-STAT-001: compact projection must preserve `activity`");
+        assert_eq!(
+            activity.pointer("/status").and_then(serde_json::Value::as_str),
+            Some("working"),
+            "compact activity.status must survive the projection"
+        );
+        assert_eq!(
+            activity.pointer("/rationale").and_then(serde_json::Value::as_str),
+            Some("provider_jsonl:open_turn"),
+            "compact activity.rationale must survive the projection"
+        );
+        // last_output_at is the timestamp the classifier advances when
+        // scrollback digest changes; operators read it alongside activity.
+        assert_eq!(
+            agent.get("last_output_at").and_then(serde_json::Value::as_str),
+            Some("2026-06-22T02:52:30+00:00"),
+            "compact projection must preserve `last_output_at` for the \"is something moving\" view"
+        );
+        // enrich_agents injects `interacted` from first_send_at; the
+        // compact path must carry it (operators read it as a one-glance
+        // \"has the leader ever sent this worker a message?\" signal).
+        assert_eq!(
+            agent.get("interacted").and_then(serde_json::Value::as_str),
+            Some("2026-01-01T00:00:00Z"),
+            "compact projection must preserve `interacted` from enrich_agents"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn status_port_status_compact_json_shape_against_seeded_fixture() {
         // cmd_status json branch (detail=false) delegates status_port::status(compact=true).

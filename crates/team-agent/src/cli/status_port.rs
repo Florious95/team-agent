@@ -635,6 +635,22 @@ use rusqlite::params;
             "session_id",
             "captured_via",
             "attribution_confidence",
+            // RM-039-STAT-001 fix (real-machine evidence 2026-06-22): the
+            // coordinator-tick activity classifier writes activity (status,
+            // confidence, rationale) to the top-level agent state, but the
+            // status --json compact projection dropped it. Operators saw
+            // "status: running" with no working/idle signal even when the
+            // pane was clearly producing output. Add the classifier output
+            // here so the compact form surfaces it.
+            // last_output_at is the timestamp the classifier advanced when
+            // the scrollback digest changed; keeping it adjacent to activity
+            // gives the operator a one-glance "is something moving" view.
+            // interacted is enriched in enrich_agents (true|false|never)
+            // and is the canonical "leader has ever sent this worker a
+            // message" signal — also needed for status sanity at a glance.
+            "activity",
+            "last_output_at",
+            "interacted",
         ] {
             if let Some(value) = input.get(key) {
                 out.insert(key.to_string(), value.clone());
