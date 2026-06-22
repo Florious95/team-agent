@@ -283,12 +283,15 @@ fn routing_ambiguous_value(
     if in_team {
         return None;
     }
+    // aeab1c7 follow-up: `content` is no longer emitted anywhere from `send`
+    // responses (including this refusal). Replace with `content_length_bytes`
+    // to keep the size-sanity field consistent with the normal-send shape.
     Some(json!({
         "ok": false,
         "status": "refused",
         "target": null,
         "agent_id": null,
-        "content": name,
+        "content_length_bytes": name.len(),
         "sender": opts.sender,
         "message_id": null,
         "message_status": "refused",
