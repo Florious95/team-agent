@@ -1216,7 +1216,16 @@ fn candidate_session_files(
                 collect_optional_candidate_files(&home.join(".codex").join("sessions"), &context.agent_id, &mut out)?;
             }
             Provider::Claude | Provider::ClaudeCode => {
-                collect_optional_candidate_files(&home.join(".claude").join("sessions"), &context.agent_id, &mut out)?;
+                // Blocker-2 Layer-1 (prerelease 0.4.0): the activity rollout_path
+                // MUST be the real transcript under .claude/projects/<encoded cwd>/
+                // <session_id>.jsonl. ~/.claude/sessions/<pid>.json is a small
+                // session-metadata file (~300-400 bytes) that contains a
+                // sessionId but no lifecycle records; if it wins capture, the
+                // activity classifier reads it forever and never sees the real
+                // transcript. Architect verdict (bugs-prerelease-blockers.md §138):
+                // do not let .claude/sessions/<pid>.json become rollout_path.
+                // Skip that directory entirely; resume backing probe still scans
+                // it via its own path checks in restart/common.rs.
                 // E6 层1·B:优先锚到 ~/.claude/projects/<canonical spawn_cwd 编码> 子目录
                 // (claude 把 cwd 的 '/' 编码成 '-';交互式 worker 的真实 transcript 落在此),
                 // 而非全 projects 树盲扫(交互式 claude 自生成 UUID,锚 cwd 子目录 + 时间窗才能唯一选)。

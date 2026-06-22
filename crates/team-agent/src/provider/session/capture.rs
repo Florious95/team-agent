@@ -424,6 +424,15 @@ fn agent_session_complete(agent: &Value) -> bool {
     // (architect directive: "Keep session_id non-empty as required; do not
     // infer context from event log alone unless the referenced transcript
     // path exists.").
+    //
+    // Blocker-2 Layer-1 (prerelease 0.4.0, architect bugs-prerelease-blockers.md §139):
+    // existence alone is not enough — a small Claude session-metadata JSON
+    // (~/.claude/sessions/<pid>.json, ~300-400 bytes, sessionId only, no
+    // assistant/user records) used to satisfy this and prevent recapture of
+    // the real .claude/projects/<cwd>/<sid>.jsonl transcript. For
+    // Claude/ClaudeCode rollout paths, additionally require a recognizable
+    // transcript lifecycle record (an assistant or user record). Other
+    // providers keep existence-only semantics (codex 不可改项).
     let session_id_ok = agent
         .get("session_id")
         .and_then(Value::as_str)
@@ -439,7 +448,48 @@ fn agent_session_complete(agent: &Value) -> bool {
         Some(path) => path,
         None => return false,
     };
-    std::path::Path::new(rollout_path).exists()
+    let path = std::path::Path::new(rollout_path);
+    if !path.exists() {
+        return false;
+    }
+    let provider_wire = agent.get("provider").and_then(Value::as_str).unwrap_or("");
+    if matches!(provider_wire, "claude" | "claude-code" | "claude_code") {
+        return claude_rollout_has_lifecycle_records(path);
+    }
+    true
+}
+
+/// Blocker-2 Layer-1 (prerelease 0.4.0): a Claude rollout file qualifies as
+/// activity backing only when it contains at least one recognizable transcript
+/// lifecycle record (top-level `type:"assistant"` or `type:"user"`). The
+/// ~/.claude/sessions/<pid>.json metadata file has neither, so this returns
+/// false for it and the runtime recaptures via the .claude/projects/<cwd>/
+/// scan in adapter.rs. Bounded read so a large transcript is not slurped.
+fn claude_rollout_has_lifecycle_records(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 65_536;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::new();
+    if file.take(MAX_BYTES).read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if matches!(kind, "assistant" | "user") {
+            return true;
+        }
+    }
+    false
 }
 
 fn allocate_session_candidates(
