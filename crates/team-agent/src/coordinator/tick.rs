@@ -406,6 +406,29 @@ impl Coordinator {
             true,
             0,
         )?;
+        // RM-039-STAT-001 third-round fix (architect verdict 2026-06-22):
+        // when capture_missing_sessions assigns a new rollout_path to an
+        // agent, clear that agent's `coordinator_idle_capture_next_at` so
+        // the JSONL classifier is not gated by stale warm-idle suppression
+        // on the SAME tick that the rollout becomes readable. Without this,
+        // an agent that was IDLE before attribution would carry the old
+        // suppression timestamp into sync_agent_health and only the
+        // expensive pane Tail(40) path would observe its working state.
+        if !report.assigned.is_empty() {
+            if let Some(agents) = state
+                .get_mut("agents")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for assigned_agent_id in &report.assigned {
+                    if let Some(agent_obj) = agents
+                        .get_mut(assigned_agent_id)
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        agent_obj.remove("coordinator_idle_capture_next_at");
+                    }
+                }
+            }
+        }
         for failure in report.capture_failures {
             event_log.write(
                 "coordinator.tick.capture_missing_failed",
@@ -466,6 +489,38 @@ impl Coordinator {
             if !agent_probe_base_eligible(agent) {
                 continue;
             }
+            // RM-039-STAT-001 third-round fix (architect verdict 2026-06-22):
+            // try the provider JSONL classifier FIRST, BEFORE any pane-target
+            // / window checks and BEFORE warm_idle_capture_suppressed. The
+            // historical chain ran JSONL only inside the pane-capture branch,
+            // so a stale pane-fallback `idle_prompt` could land first
+            // (before session attribution completed), then
+            // `warm_idle_capture_suppressed` would gate subsequent ticks for
+            // IDLE_HEALTH_CAPTURE_INTERVAL_SECS even after JSONL gained a
+            // `task_started` record + the worker process was alive. Now: if
+            // the JSONL classifier returns a definite activity (not Unknown),
+            // we write activity + agent_health here and bypass the warm-idle
+            // suppression for the rest of this iteration. Pane capture still
+            // runs so the CapturedRuntimeFact map stays populated for
+            // downstream runtime detectors; only the activity classify
+            // happens once.
+            let jsonl_first = jsonl_activity_for_agent(agent);
+            if let Some(activity) = jsonl_first.as_ref() {
+                remember_idle_capture_schedule(agent, activity);
+                write_activity(agent, activity, false);
+                let last_output_at_now = agent
+                    .get("last_output_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                write_agent_health(
+                    store,
+                    &team,
+                    agent_id,
+                    agent,
+                    activity,
+                    last_output_at_now.as_deref(),
+                )?;
+            }
             let Some((session, window, target)) =
                 capture_window_target(agent, session_name.as_deref())
             else {
@@ -495,7 +550,13 @@ impl Coordinator {
             if !windows.iter().any(|known| known == &window) {
                 continue;
             }
-            if warm_idle_capture_suppressed(agent, has_work_obligation) {
+            // Warm-idle suppression still gates pane fallback ONLY. When
+            // JSONL above produced a definite activity, we already wrote it,
+            // so warm-idle gating no longer matters for the activity path —
+            // but we still want CapturedRuntimeFact populated for downstream
+            // detectors, so fall through into the pane capture block below
+            // (skipping the pane-classify activity write at the bottom).
+            if jsonl_first.is_none() && warm_idle_capture_suppressed(agent, has_work_obligation) {
                 continue;
             }
             let captured = match self
@@ -544,38 +605,35 @@ impl Coordinator {
                 .get("last_output_at")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            // E47 (0.3.24 P0, idle/busy 假阳): consult the AUTHORITATIVE
-            // provider JSONL classifier BEFORE the TUI keyword scan. The
-            // scrollback Tail(40) keeps historical `• Working (...· esc to
-            // interrupt)` + spinners within the 40-line window long after a
-            // turn completed, so `classify_agent_activity`'s rfind-recency
-            // grep flips a truly-idle worker to Working/Stuck. The provider
-            // JSONL (codex task_complete / claude end_turn) is the single
-            // source of truth for "turn closed". Only fall back to TUI
-            // scanning when the JSONL is unreadable or no lifecycle fact has
-            // been written yet (TurnState::Unknown) — never silently fall
-            // through into the leaky grep on a CONFIRMED IDLE.
-            let activity_from_jsonl = jsonl_activity_for_agent(agent);
-            let activity = activity_from_jsonl.unwrap_or_else(|| {
-                crate::messaging::classify_agent_activity(
+            // E47 (0.3.24 P0, idle/busy 假阳): the provider JSONL classifier
+            // already ran at the top of this iteration. If it returned a
+            // definite fact (Some), activity + agent_health were written
+            // there; we MUST NOT classify-and-overwrite here, otherwise the
+            // pane fallback would flip the JSONL truth back to a stale
+            // idle_prompt. Only run the pane fallback when JSONL returned
+            // None (no readable rollout, TurnState::Unknown, or unparseable
+            // log). RM-039-STAT-001 third-round fix (architect verdict
+            // 2026-06-22).
+            let last_output_at = last_output_at_now;
+            if jsonl_first.is_none() {
+                let activity = crate::messaging::classify_agent_activity(
                     &snapshot,
                     &captured.text,
                     pane_in_mode,
                     current_command.as_deref(),
-                    last_output_at_now.as_deref(),
-                )
-            });
-            remember_idle_capture_schedule(agent, &activity);
-            write_activity(agent, &activity, false);
-            let last_output_at = last_output_at_now;
-            write_agent_health(
-                store,
-                &team,
-                agent_id,
-                agent,
-                &activity,
-                last_output_at.as_deref(),
-            )?;
+                    last_output_at.as_deref(),
+                );
+                remember_idle_capture_schedule(agent, &activity);
+                write_activity(agent, &activity, false);
+                write_agent_health(
+                    store,
+                    &team,
+                    agent_id,
+                    agent,
+                    &activity,
+                    last_output_at.as_deref(),
+                )?;
+            }
             let pane_info = matching_capture_pane_info(agent, &session, &window, pane_infos);
             let pane_id = pane_info
                 .as_ref()
