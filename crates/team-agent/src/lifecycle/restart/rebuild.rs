@@ -337,6 +337,10 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             Some(&safety),
             layout_placement.as_ref(),
             None,
+            // Issue 2 (Round 3b gate review §6): thread the resolved
+            // selected.team_key so the worker MCP env carries the right
+            // owner_team_id even when top-level active_team_key is stale.
+            Some(selected.team_key.as_str()),
         ) {
             Ok(spawn) => spawn,
             Err(error) => {
@@ -1135,6 +1139,18 @@ fn mark_agent_respawned(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    // Issue 2 (Round 3b gate review §6): persist the resolved owner_team_id
+    // back into the agent row so future restarts read it directly from the
+    // agent row (cascade priority 2) instead of relying on top-level
+    // active_team_key (priority 3).
+    if let Some(ref team_id) = spawn.owner_team_id {
+        if !team_id.is_empty() {
+            agent.insert(
+                "owner_team_id".to_string(),
+                serde_json::json!(team_id),
+            );
+        }
+    }
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
@@ -1886,6 +1902,7 @@ mod tests {
             profile_launch: crate::provider::ProviderProfileLaunch::default(),
             layout_placement: None,
             spawn_cwd: std::path::PathBuf::from("/tmp/team-epoch"),
+            owner_team_id: None,
         };
         let before = chrono::Utc::now();
 

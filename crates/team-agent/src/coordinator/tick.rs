@@ -99,6 +99,33 @@ pub enum TickError {
     Panic(String),
 }
 
+/// Issue 2 (Round 3b gate review §6): when the runtime state has
+/// `active_team_key` AND `teams.<key>` is a populated object, return the
+/// team-scoped projection so the coordinator's tick reads `session_name` /
+/// `agents` / `leader_receiver` from the team's nested entry rather than
+/// the top-level (often stale) view. When the projection cannot be derived,
+/// returns `None` and the tick falls back to the raw state — preserving
+/// behavior for legacy single-team workspaces and tests that don't seed
+/// `teams.<key>`. Sibling teams under `state.teams.*` are NOT touched.
+fn coordinator_team_scoped_state(
+    workspace: &std::path::Path,
+    raw_state: &Value,
+) -> Option<Value> {
+    let active = raw_state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    let has_team_entry = raw_state
+        .get("teams")
+        .and_then(Value::as_object)
+        .map(|teams| teams.contains_key(active))
+        .unwrap_or(false);
+    if !has_team_entry {
+        return None;
+    }
+    crate::state::projection::select_runtime_state(workspace, Some(active)).ok()
+}
+
 // ===========================================================================
 // Coordinator struct(daemon lifecycle + tick orchestration)
 // ===========================================================================
@@ -190,7 +217,18 @@ impl Coordinator {
     /// 副作用 ORDER 测试断言固定序列)。生产两者均 `None`,零开销。
     pub fn tick(&self) -> Result<TickReport, TickError> {
         self.record_step("load_state");
-        let mut state = crate::state::persist::load_runtime_state(self.workspace.as_path())?;
+        let raw_state = crate::state::persist::load_runtime_state(self.workspace.as_path())?;
+        // Issue 2 (Round 3b gate review §6): when the runtime carries
+        // `active_team_key` AND `teams.<key>` exists, project the team-scoped
+        // view (session_name / agents / leader_receiver come from the team's
+        // nested object) instead of the raw top-level state. Otherwise the
+        // coordinator would probe the wrong tmux session (e.g. stale
+        // `session_name=team-tmp` while the real team session is
+        // `team-prerelease-040-round3b`) and emit `coordinator.session_missing`
+        // even though the right session is alive. Fall back to raw state when
+        // no team scope can be derived (legacy single-team workspaces).
+        let mut state = coordinator_team_scoped_state(self.workspace.as_path(), &raw_state)
+            .unwrap_or(raw_state);
         let store = crate::message_store::MessageStore::open(self.workspace.as_path())?;
         let event_log = EventLog::new(self.workspace.as_path());
         increment_coordinator_tick_iteration_count(&self.workspace);

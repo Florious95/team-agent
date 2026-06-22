@@ -190,6 +190,11 @@ pub(crate) fn start_agent_at_paths(
         .as_ref()
         .map(|placement| placement.layout_window.as_str().to_string())
         .unwrap_or_else(|| window.clone());
+    // Issue 2 (Round 3b gate review §6): pass the explicit team_key so the
+    // worker MCP env carries it through restart-agent path too. The
+    // `restart_projection_team_key` helper consolidates the same resolution
+    // used for save_restart_projected_state below.
+    let resolved_team_key = restart_projection_team_key(&state, team);
     let spawn = spawn_agent_window(
         workspace,
         &session_name,
@@ -201,6 +206,7 @@ pub(crate) fn start_agent_at_paths(
         Some(&safety),
         layout_placement.as_ref(),
         None,
+        Some(resolved_team_key.as_str()),
     )?;
     mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, transport, &safety)?;
     // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
@@ -625,6 +631,16 @@ fn mark_agent_started(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    // Issue 2 (Round 3b gate review §6): persist the resolved owner_team_id
+    // so future restart/start cycles read it directly from the agent row.
+    if let Some(ref team_id) = spawn.owner_team_id {
+        if !team_id.is_empty() {
+            agent.insert(
+                "owner_team_id".to_string(),
+                serde_json::json!(team_id),
+            );
+        }
+    }
     crate::lifecycle::launch::persist_command_plan_state(
         agent,
         &spawn.plan,

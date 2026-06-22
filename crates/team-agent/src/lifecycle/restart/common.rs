@@ -6,8 +6,15 @@ pub(super) struct SpawnedAgentWindow {
     pub profile_launch: crate::provider::ProviderProfileLaunch,
     pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
     pub spawn_cwd: std::path::PathBuf,
+    /// Issue 2 (Round 3b gate review §6): the resolved `owner_team_id` used
+    /// for this spawn's MCP env / command. Callers (`mark_agent_respawned`,
+    /// `mark_agent_started`) must persist this back into the agent row so
+    /// future restarts read it directly (priority #2 in the resolution
+    /// cascade) instead of relying on top-level `active_team_key`.
+    pub owner_team_id: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_agent_window(
     workspace: &Path,
     session_name: &SessionName,
@@ -19,6 +26,14 @@ pub(super) fn spawn_agent_window(
     safety: Option<&DangerousApproval>,
     layout_placement: Option<&crate::lifecycle::launch::LayoutPlacement>,
     spawn_cwd_override: Option<&Path>,
+    // Issue 2 (Round 3b gate review §6): explicit owner_team_id override.
+    // When `Some`, callers (restart/rebuild.rs, restart/agent.rs) thread the
+    // resolved `selected.team_key` through here so the worker's MCP env /
+    // command argv carries `TEAM_AGENT_OWNER_TEAM_ID=<selected team>` —
+    // even when the persisted agent row OR the top-level `active_team_key`
+    // is stale. When `None`, falls back to the legacy resolution
+    // (agent row → active_team_key) for back-compat with non-restart callers.
+    owner_team_id_override: Option<&str>,
 ) -> Result<SpawnedAgentWindow, LifecycleError> {
     let provider = agent_provider(agent);
     let auth_mode = agent_auth_mode(agent);
@@ -52,15 +67,26 @@ pub(super) fn spawn_agent_window(
         safety,
     )?;
     let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-    // owner_team_id resolution: prefer the runtime-state row's `owner_team_id` (set by
-    // launch/restart); fall back to the active team key for paths that don't write the
-    // row first (e.g. add-agent calls spawn before upserting team metadata).
+    // owner_team_id resolution priority (Issue 2 fix):
+    //   1. caller's explicit override (restart paths pass `selected.team_key`)
+    //   2. agent row's persisted `owner_team_id` (set by prior launch/restart)
+    //   3. top-level `active_team_key` (legacy fallback for add-agent etc.)
+    // The override breaks the dependency on top-level state mutation: even if
+    // top-level `active_team_key` is stale (e.g. `ta-probe-ws`), a restart that
+    // resolved `selected.team_key=prerelease-040-round3b` propagates THAT team
+    // into the worker's MCP env.
     let state_for_team =
         crate::state::persist::load_runtime_state(workspace).unwrap_or(serde_json::json!({}));
-    let team_id = agent
-        .get("owner_team_id")
-        .and_then(|v| v.as_str())
+    let team_id = owner_team_id_override
+        .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            agent
+                .get("owner_team_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
         .or_else(|| {
             let key =
                 crate::messaging::leader_receiver::active_team_key(workspace, &state_for_team);
@@ -241,6 +267,7 @@ pub(super) fn spawn_agent_window(
         profile_launch,
         layout_placement: layout_placement.cloned(),
         spawn_cwd: spawn_cwd.to_path_buf(),
+        owner_team_id: team_id,
     })
 }
 
