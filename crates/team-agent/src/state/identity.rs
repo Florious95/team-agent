@@ -568,6 +568,12 @@ mod tests {
 
     #[test]
     fn populate_team_owner_seed_and_skip() {
+        // Stage 3d (identity-boundary unified plan, architect direction
+        // 2026-06-23): after the top-level dual-write was dropped, owner
+        // lives only at `state.teams.<team_key>.team_owner`. The test now
+        // resolves through the ownership repository so the precedence rule
+        // (teams.<key> first, then legacy top-level when team_state_key
+        // matches) is the single source of truth.
         let e_with_pane = env(&[
             ("TEAM_AGENT_LEADER_PANE_ID", "%9"),
             ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
@@ -581,14 +587,21 @@ mod tests {
             &json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fp",
                     "leader_session_uuid": "u1", "claimed_at": "TS", "claimed_via": "autopopulate"}),
         );
-        same_repr(&state["team_owner"], &owner);
+        // The canonical key is whatever team_state_key derives for the
+        // empty state (fallback "current" in legacy single-team flow).
+        let team_key = crate::state::projection::team_state_key(&state);
+        let repo_owner = crate::state::ownership::read_owner_value(&state, &team_key)
+            .expect("Stage 3d: owner readable via ownership repository");
+        same_repr(repo_owner, &owner);
 
         // 无 pane_id → None,不写 owner。
         let mut state2 = json!({});
         assert!(populate_team_owner_from_env(&mut state2, "x", &env(&[]), "TS").unwrap().is_none());
-        assert!(state2.get("team_owner").is_none());
+        let team_key2 = crate::state::projection::team_state_key(&state2);
+        assert!(crate::state::ownership::read_owner_value(&state2, &team_key2).is_none());
 
-        // 已有 team_owner(缺 uuid)→ 迁移补 uuid 后返回。
+        // 已有 team_owner(缺 uuid)→ 迁移补 uuid 后返回。Legacy top-level shape
+        // still recognized (read precedence supports the migration window).
         let mut state3 = json!({"team_owner": {"pane_id": "%1", "machine_fingerprint": "fp"}, "session_name": "s"});
         let o3 = populate_team_owner_from_env(&mut state3, "x", &env(&[("USER", "u")]), "TS").unwrap().unwrap();
         assert_eq!(o3["leader_session_uuid"].as_str().unwrap().len(), 32);
@@ -597,6 +610,10 @@ mod tests {
     #[test]
     #[serial(env)]
     fn apply_first_time_binding_success_writes_state() {
+        // Stage 3d (identity-boundary unified plan, architect direction
+        // 2026-06-23): canonical owner now lives at
+        // `state.teams.<team_key>.{team_owner,leader_receiver}`. Read
+        // through the ownership repository.
         let _env = EnvUnsetGuard::unset(&["TMUX", "TMUX_PANE"]);
         let ws = temp_ws();
         let now = "2026-06-02T09:17:59.994383+00:00";
@@ -606,13 +623,18 @@ mod tests {
         let pane = json!({"pane_current_command": "codex", "pane_current_path": ws.to_string_lossy()});
         let r = apply_first_time_leader_binding(&ws, &mut state, &mut receiver, &pane, &identity, "claim", now, |_c, _p| true);
         same_repr(&r, &json!({"ok": true, "pane": pane, "warning": null, "first_time": true}));
+        let team_key = crate::state::projection::team_state_key(&state);
+        let team_owner = crate::state::ownership::read_owner_value(&state, &team_key)
+            .expect("Stage 3d: team_owner reachable via repository");
         same_repr(
-            &state["team_owner"],
+            team_owner,
             &json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fpX",
                     "leader_session_uuid": "uuidX", "owner_epoch": 0, "claimed_at": now, "claimed_via": "claim"}),
         );
+        // leader_receiver lives at the same canonical location.
+        let leader_receiver = state["teams"][&team_key]["leader_receiver"].clone();
         same_repr(
-            &state["leader_receiver"],
+            &leader_receiver,
             &json!({"pane_id": "%9", "provider": "codex", "leader_session_uuid": "uuidX",
                     "machine_fingerprint": "fpX", "owner_epoch": 0}),
         );

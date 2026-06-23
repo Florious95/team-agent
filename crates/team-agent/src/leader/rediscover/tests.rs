@@ -127,10 +127,14 @@ fn try_readopt_writes_owner_receiver_dual_state_and_events() {
     assert_eq!(got.1["pane"]["pane_id"], json!("%new"));
     assert_eq!(got.1["readopted"], json!(true));
     assert!(got.1.get("warning").is_some_and(Value::is_null));
-    assert_eq!(state["team_owner"]["pane_id"], json!("%new"));
-    assert_eq!(state["team_owner"]["claimed_via"], json!("attach-leader"));
-    assert_eq!(state["team_owner"]["owner_epoch"], json!(4));
-    assert_eq!(state["leader_receiver"]["discovery"], json!("attach_readopt"));
+    // Stage 3d: owner + receiver live at canonical teams.<team_key>.
+    let team_key = crate::state::projection::team_state_key(&state);
+    let owner_view = &state["teams"][&team_key]["team_owner"];
+    let receiver_view = &state["teams"][&team_key]["leader_receiver"];
+    assert_eq!(owner_view["pane_id"], json!("%new"));
+    assert_eq!(owner_view["claimed_via"], json!("attach-leader"));
+    assert_eq!(owner_view["owner_epoch"], json!(4));
+    assert_eq!(receiver_view["discovery"], json!("attach_readopt"));
     assert!(crate::model::paths::runtime_dir(&ws)
         .join("teams")
         .join("sess")
@@ -185,6 +189,10 @@ fn try_readopt_refuses_when_different_live_owner_uuid_mismatches() {
     .unwrap();
 
     assert!(got.is_none());
+    // Stage 3d: no owner anywhere — check both legacy top-level and the
+    // canonical teams.<key> location via the ownership repository.
+    let team_key = crate::state::projection::team_state_key(&state);
+    assert!(crate::state::ownership::read_owner_value(&state, &team_key).is_none());
     assert!(state.get("team_owner").is_none());
 }
 
@@ -227,7 +235,10 @@ fn rediscover_updates_unique_env_triple_match() {
     assert_eq!(out["status"], json!("updated"));
     assert!(out.get("ok").is_none(), "golden rediscover result has no ok wrapper");
     assert_eq!(out["owner_identity"]["pane_id"], json!("%r"));
-    assert_eq!(state["leader_receiver"]["pane_id"], json!("%r"));
+    // Stage 3d: receiver lives at canonical teams.<team_key>.leader_receiver.
+    let team_key = crate::state::projection::team_state_key(&state);
+    let receiver = &state["teams"][&team_key]["leader_receiver"];
+    assert_eq!(receiver["pane_id"], json!("%r"));
     let events = event_log.tail(10).unwrap();
     let rediscovered = event_named(&events, "leader_receiver.rediscovered");
     assert_eq!(rediscovered["provider"], json!("codex"));
@@ -241,7 +252,7 @@ fn rediscover_updates_unique_env_triple_match() {
     assert_eq!(rebound["new_pane_id"], json!("%r"));
     assert_eq!(rebound["owner_identity"]["machine_fingerprint"], json!("fp"));
     assert_eq!(rebound["uuid_prefix"], json!("OWNERUUI"));
-    assert_eq!(state["leader_receiver"]["discovery"], json!("stale_rediscovery_unique_candidate"));
+    assert_eq!(receiver["discovery"], json!("stale_rediscovery_unique_candidate"));
 }
 
 #[test]
@@ -286,7 +297,10 @@ fn rediscover_owner_identity_passthrough_sets_discovery_and_reason() {
 
     assert_eq!(out["status"], json!("updated"));
     assert_eq!(out["owner_identity"], raw_identity);
-    assert_eq!(state["leader_receiver"]["discovery"], json!("stale_rediscovery_owner_identity"));
+    // Stage 3d: receiver lives at canonical teams.<team_key>.leader_receiver.
+    let team_key = crate::state::projection::team_state_key(&state);
+    let receiver = &state["teams"][&team_key]["leader_receiver"];
+    assert_eq!(receiver["discovery"], json!("stale_rediscovery_owner_identity"));
     let rebound = event_named(&event_log.tail(10).unwrap(), "leader_receiver.rebind_applied");
     assert_eq!(rebound["reason"], json!("stale_receiver"));
     assert_eq!(rebound["owner_identity"], raw_identity);

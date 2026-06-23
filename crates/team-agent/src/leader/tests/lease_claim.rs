@@ -35,18 +35,45 @@ use super::*;
         let receiver = r.receiver.as_ref().expect("claimed → receiver");
         assert_eq!(receiver.pane_id, caller);
         assert_eq!(receiver.discovery, Some(Discovery::ClaimLeader));
-        // dual-state: BOTH workspace state.json + team/<session> snapshot carry %5/epoch 1.
+        // Stage 3d (identity-boundary unified plan, architect direction
+        // 2026-06-23): canonical owner now lives at teams.<team_key>; the
+        // top-level dual-write was dropped. Read through the ownership
+        // repository which preserves the legacy precedence for callers
+        // that still consult top-level on migration states.
         let ws_path = crate::state::persist::runtime_state_path(&ws);
         let ws_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&ws_path).unwrap()).unwrap();
-        assert_eq!(ws_state["team_owner"]["pane_id"], serde_json::json!("%5"));
-        assert_eq!(ws_state["team_owner"]["owner_epoch"], serde_json::json!(1));
+        // The canonical team_key is what `team_state_key(state)` derives
+        // (here: state's session_name "team-agent-x" since no explicit
+        // team_key/team_dir/spec_path was seeded). The test's `team_id`
+        // parameter is the LOOKUP key but `claim_lease_no_incident` uses
+        // the state-derived key for canonical writes. Stage 5 will unify
+        // these via TeamRuntimePaths.
+        let canonical_key = crate::state::projection::team_state_key(&ws_state);
+        let ws_owner =
+            crate::state::ownership::read_owner_value(&ws_state, &canonical_key)
+                .expect("Stage 3d: vacant acquire writes canonical owner");
+        assert_eq!(ws_owner["pane_id"], serde_json::json!("%5"));
+        assert_eq!(ws_owner["owner_epoch"], serde_json::json!(1));
+        // team_id parameter is currently unused by the canonical write
+        // (architect Stage 5 will close this gap); silence the warning.
+        let _ = &team_id;
         let snap_path = crate::model::paths::runtime_dir(&ws)
             .join("teams").join("team-agent-x").join("state.json");
         let snap: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&snap_path).unwrap()).unwrap();
-        assert_eq!(snap["team_owner"]["pane_id"], serde_json::json!("%5"), "dual-state snapshot owner");
-        assert_eq!(snap["team_owner"]["owner_epoch"], serde_json::json!(1));
+        // Snapshot is per-session; team_state_key on the snapshot derives
+        // from its session_name. Read top-level first (legacy snapshot
+        // layout), fall back to derived team key.
+        let snap_owner = snap
+            .get("team_owner")
+            .or_else(|| {
+                let key = crate::state::projection::team_state_key(&snap);
+                snap.get("teams").and_then(|t| t.get(key)).and_then(|e| e.get("team_owner"))
+            })
+            .expect("dual-state snapshot owner");
+        assert_eq!(snap_owner["pane_id"], serde_json::json!("%5"), "dual-state snapshot owner");
+        assert_eq!(snap_owner["owner_epoch"], serde_json::json!(1));
     }
 
     // RED — DEAD-OWNER RECOVER: bound pane %1 absent from live set, caller %5
@@ -173,8 +200,11 @@ use super::*;
             &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
         )
         .unwrap();
+        // Stage 3d: canonical receiver at teams.<team_key>.leader_receiver.
+        let team_key = crate::state::projection::team_state_key(&persisted);
+        let receiver = &persisted["teams"][&team_key]["leader_receiver"];
         assert_eq!(
-            persisted["leader_receiver"]["tmux_socket"],
+            receiver["tmux_socket"],
             serde_json::json!(leader_socket),
             "state.json must carry enough endpoint information for later delivery to use tmux -S"
         );
@@ -290,8 +320,11 @@ use super::*;
             &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
         )
         .unwrap();
+        // Stage 3d: canonical receiver at teams.<team_key>.leader_receiver.
+        let team_key = crate::state::projection::team_state_key(&persisted);
+        let receiver = &persisted["teams"][&team_key]["leader_receiver"];
         assert_eq!(
-            persisted["leader_receiver"]["tmux_socket"],
+            receiver["tmux_socket"],
             serde_json::json!(current_socket),
             "state must not preserve a short endpoint after explicit claim; state={persisted}"
         );

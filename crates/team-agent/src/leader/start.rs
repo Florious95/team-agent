@@ -588,13 +588,12 @@ fn persist_managed_leader_binding(
             }),
         );
     }
-    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
-    // managed leader binding write routed through the ownership repository.
-    let record = crate::state::ownership::OwnershipWrite::new()
-        .with_leader_receiver(receiver)
-        .with_team_owner(owner)
-        .with_owner_epoch(owner_epoch);
-    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
+    // Stage 3a/d (identity-boundary unified plan, architect direction
+    // 2026-06-23): build the teams.<key> entry from the non-owner fields
+    // of state (compact_team_state strips the `teams` key), then publish
+    // the canonical owner record AFTER teams.insert so write_owner's
+    // teams.<key>.{team_owner,leader_receiver,owner_epoch} is the final
+    // word and doesn't get overwritten by the compacted entry.
     let entry = crate::state::projection::compact_team_state(&state);
     if let Some(obj) = state.as_object_mut() {
         let teams = obj
@@ -604,6 +603,11 @@ fn persist_managed_leader_binding(
             teams.insert(identity.team_id.as_str().to_string(), entry);
         }
     }
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
     crate::state::persist::save_runtime_state(workspace, &state)?;
     Ok(())
 }
@@ -694,13 +698,10 @@ fn persist_exec_provider_leader_binding(
             }),
         );
     }
-    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
-    // exec-provider leader binding write routed through the ownership repository.
-    let record = crate::state::ownership::OwnershipWrite::new()
-        .with_leader_receiver(receiver)
-        .with_team_owner(owner)
-        .with_owner_epoch(owner_epoch);
-    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
+    // Stage 3a/d (identity-boundary unified plan, architect direction
+    // 2026-06-23): compact-then-write-owner ordering as in
+    // persist_managed_leader_binding above. write_owner must be the final
+    // write so the canonical teams.<key> owner record survives.
     let entry = crate::state::projection::compact_team_state(&state);
     if let Some(obj) = state.as_object_mut() {
         let teams = obj
@@ -710,6 +711,11 @@ fn persist_exec_provider_leader_binding(
             teams.insert(identity.team_id.as_str().to_string(), entry);
         }
     }
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
     crate::state::persist::save_runtime_state(workspace, &state)?;
     Ok(())
 }
@@ -1359,15 +1365,14 @@ mod tests {
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(state["is_external_leader"], serde_json::json!(false));
-        assert_eq!(state["leader_receiver"]["pane_id"], serde_json::json!("%77"));
-        assert_eq!(
-            state["leader_receiver"]["tmux_socket"],
-            serde_json::json!("/private/tmp/tmux-501/default")
-        );
-        assert_eq!(state["team_owner"]["pane_id"], serde_json::json!("%77"));
+        // Stage 3d: canonical owner/receiver at teams.<team_key>.
         assert_eq!(
             state["teams"]["current"]["leader_receiver"]["pane_id"],
             serde_json::json!("%77")
+        );
+        assert_eq!(
+            state["teams"]["current"]["leader_receiver"]["tmux_socket"],
+            serde_json::json!("/private/tmp/tmux-501/default")
         );
         assert_eq!(
             state["teams"]["current"]["team_owner"]["pane_id"],

@@ -167,9 +167,11 @@ use super::*;
         assert_eq!(r.status, crate::leader::LeaseStatus::Claimed);
         assert_eq!(r.owner_epoch, Some(crate::model::ids::OwnerEpoch(3)));
         assert_eq!(r.bound_pane_id, Some(caller.clone()));
-        assert_eq!(state["leader_receiver"]["pane_id"], json!("%5"));
-        assert_eq!(state["team_owner"]["pane_id"], json!("%5"));
-        assert_eq!(state["team_owner"]["owner_epoch"], json!(3));
+        // Stage 3d: canonical owner/receiver at teams.<team_key>.
+        let team_key = crate::state::projection::team_state_key(&state);
+        assert_eq!(state["teams"][&team_key]["leader_receiver"]["pane_id"], json!("%5"));
+        assert_eq!(state["teams"][&team_key]["team_owner"]["pane_id"], json!("%5"));
+        assert_eq!(state["teams"][&team_key]["team_owner"]["owner_epoch"], json!(3));
     }
 
     struct LeaderPortSeededLiveness {

@@ -10,7 +10,12 @@ use super::*;
         let r = claim_lease_no_incident(&ws, &mut state, None, &TeamKey::new("current"),
             &PaneId::new("%5"), false, &crate::event_log::EventLog::new(&ws), &seeded_liveness(&["%5"])).unwrap();
         assert!(r.ok && r.status == LeaseStatus::Claimed, "precondition: vacant acquire");
-        let owner = state["team_owner"].as_object().expect("team_owner object");
+        // Stage 3d (identity-boundary unified plan, architect direction
+        // 2026-06-23): canonical owner now at teams.<team_key>.team_owner.
+        let team_key = crate::state::projection::team_state_key(&state);
+        let owner = state["teams"][&team_key]["team_owner"]
+            .as_object()
+            .expect("Stage 3d: team_owner at canonical teams.<team_key>");
         assert!(owner.contains_key("os_user"),
             "golden claim-path team_owner carries os_user even when empty; keys={:?}", owner.keys().collect::<Vec<_>>());
         let keys: Vec<&str> = owner.keys().map(String::as_str).collect();
@@ -37,7 +42,11 @@ use super::*;
         let r = claim_lease_no_incident(&ws, &mut state, None, &TeamKey::new("current"),
             &PaneId::new("%5"), false, &crate::event_log::EventLog::new(&ws), &seeded_liveness(&["%5"])).unwrap();
         assert!(r.ok && r.status == LeaseStatus::Claimed, "precondition: vacant acquire");
-        let recv = state["leader_receiver"].as_object().expect("leader_receiver object");
+        // Stage 3d: canonical receiver at teams.<team_key>.leader_receiver.
+        let team_key = crate::state::projection::team_state_key(&state);
+        let recv = state["teams"][&team_key]["leader_receiver"]
+            .as_object()
+            .expect("Stage 3d: leader_receiver at canonical teams.<team_key>");
         for extra in ["fingerprint", "requested_provider", "warning"] {
             assert!(!recv.contains_key(extra),
                 "golden leader_receiver has NO '{extra}' key (Rust must add skip_serializing_if); keys={:?}", recv.keys().collect::<Vec<_>>());

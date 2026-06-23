@@ -1547,15 +1547,16 @@ mod e22_unbound_owner_provider_tests {
 
         seed_unbound_launched_owner(&mut launched, "team-e22");
 
+        // Stage 3d: canonical owner/receiver at teams.team-e22.
         assert_eq!(
             launched
-                .pointer("/team_owner/provider")
+                .pointer("/teams/team-e22/team_owner/provider")
                 .and_then(serde_json::Value::as_str),
             Some("copilot")
         );
         assert_eq!(
             launched
-                .pointer("/leader_receiver/provider")
+                .pointer("/teams/team-e22/leader_receiver/provider")
                 .and_then(serde_json::Value::as_str),
             Some("copilot")
         );
@@ -1572,13 +1573,16 @@ mod e22_unbound_owner_provider_tests {
 
         seed_unbound_launched_owner(&mut launched, "team-e22");
 
+        // Stage 3d: no receiver should be seeded at canonical location.
         assert!(
-            launched.get("leader_receiver").is_none(),
+            launched
+                .pointer("/teams/team-e22/leader_receiver")
+                .is_none(),
             "unattributed unbound owner must not seed a codex receiver: {launched}"
         );
         assert!(
             launched
-                .pointer("/team_owner/provider")
+                .pointer("/teams/team-e22/team_owner/provider")
                 .and_then(serde_json::Value::as_str)
                 != Some("codex"),
             "unattributed unbound owner must not silently become codex: {launched}"
@@ -1608,16 +1612,15 @@ mod e22_unbound_owner_provider_tests {
             |pane| (pane.as_str() == "%0").then_some(Provider::Copilot),
         ));
 
+        // Stage 3d: canonical owner/receiver at teams.<team_state_key>.
+        // State has no team_key/team_dir/spec_path → fallback "current".
+        let team_key = crate::state::projection::team_state_key(&state);
         assert_eq!(
-            state
-                .pointer("/team_owner/provider")
-                .and_then(serde_json::Value::as_str),
+            state["teams"][&team_key]["team_owner"]["provider"].as_str(),
             Some("copilot")
         );
         assert_eq!(
-            state
-                .pointer("/leader_receiver/provider")
-                .and_then(serde_json::Value::as_str),
+            state["teams"][&team_key]["leader_receiver"]["provider"].as_str(),
             Some("copilot")
         );
     }
@@ -1634,30 +1637,21 @@ mod e22_unbound_owner_provider_tests {
             caller("", "%0"),
             |_| None,
         ));
+        let team_key = crate::state::projection::team_state_key(&state);
         assert_eq!(
-            state
-                .pointer("/team_owner/pane_id")
-                .and_then(serde_json::Value::as_str),
+            state["teams"][&team_key]["team_owner"]["pane_id"].as_str(),
             Some("%0")
         );
         assert_eq!(
-            state
-                .pointer("/leader_receiver/pane_id")
-                .and_then(serde_json::Value::as_str),
+            state["teams"][&team_key]["leader_receiver"]["pane_id"].as_str(),
             Some("%0")
         );
         assert!(
-            state
-                .pointer("/leader_receiver/provider")
-                .and_then(serde_json::Value::as_str)
-                != Some("codex"),
+            state["teams"][&team_key]["leader_receiver"]["provider"].as_str() != Some("codex"),
             "unknown caller pane must not silently seed a codex receiver: {state}"
         );
         assert!(
-            state
-                .pointer("/team_owner/provider")
-                .and_then(serde_json::Value::as_str)
-                != Some("codex"),
+            state["teams"][&team_key]["team_owner"]["provider"].as_str() != Some("codex"),
             "unknown caller pane must not silently become codex: {state}"
         );
     }
