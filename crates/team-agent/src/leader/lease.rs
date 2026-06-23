@@ -1031,6 +1031,12 @@ fn scan_agents_for_pane(agents: Option<&Value>, caller_pane: &PaneId) -> Option<
     None
 }
 
+/// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+/// route the in-memory binding write through the `state::ownership` API. The
+/// helper signature is unchanged so callers in this file don't need to thread
+/// a team_key — the team is derived from the state via `team_state_key`.
+/// Behaviour is byte-identical to the pre-3a hand-rolled inserts (the
+/// repository writes the same three fields at the same locations).
 fn write_binding_to_state(
     state: &mut Value,
     receiver: &LeaderReceiver,
@@ -1039,12 +1045,15 @@ fn write_binding_to_state(
     if !state.is_object() {
         *state = json!({});
     }
-    let Some(root) = state.as_object_mut() else {
+    if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
-    };
-    root.insert("leader_receiver".to_string(), serde_json::to_value(receiver)?);
-    root.insert("team_owner".to_string(), serde_json::to_value(owner)?);
-    root.insert("owner_epoch".to_string(), json!(owner.owner_epoch.0));
+    }
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(serde_json::to_value(receiver)?)
+        .with_team_owner(serde_json::to_value(owner)?)
+        .with_owner_epoch(owner.owner_epoch.0);
+    crate::state::ownership::write_owner(state, &team_key, record);
     Ok(())
 }
 
@@ -1055,10 +1064,13 @@ fn write_receiver_to_state(
     if !state.is_object() {
         *state = json!({});
     }
-    let Some(root) = state.as_object_mut() else {
+    if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
-    };
-    root.insert("leader_receiver".to_string(), serde_json::to_value(receiver)?);
+    }
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(serde_json::to_value(receiver)?);
+    crate::state::ownership::write_owner(state, &team_key, record);
     Ok(())
 }
 

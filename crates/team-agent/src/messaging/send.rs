@@ -357,16 +357,28 @@ fn backfill_leader_binding_for_delivery_view(
     let Some(obj) = state.as_object_mut() else {
         return;
     };
+    // Stage 3a (identity-boundary unified plan, architect direction
+    // 2026-06-23): route the in-memory backfill through the ownership
+    // repository. This in-memory promote is a delivery-view helper, NOT a
+    // persistent write — but funneling it through the same API as the
+    // canonical writers keeps the writer surface consistent for the
+    // acceptance contract (architect §6 verdict 2: zero `insert("team_owner")`
+    // outside ownership module). The repository call only touches the
+    // top-level (we pass empty team_key) so it matches the pre-3a backfill
+    // semantics exactly: top-level fields populated when missing, no
+    // teams-projection write.
+    let mut record = crate::state::ownership::OwnershipWrite::new();
     if !obj.contains_key("leader_receiver") {
         if let Some(receiver) = raw_state.get("leader_receiver").filter(|v| !v.is_null()) {
-            obj.insert("leader_receiver".to_string(), receiver.clone());
+            record = record.with_leader_receiver(receiver.clone());
         }
     }
     if !obj.contains_key("team_owner") {
         if let Some(owner) = raw_state.get("team_owner").filter(|v| !v.is_null()) {
-            obj.insert("team_owner".to_string(), owner.clone());
+            record = record.with_team_owner(owner.clone());
         }
     }
+    crate::state::ownership::write_owner(state, "", record);
 }
 
 fn can_backfill_top_level_leader_binding(raw_state: &serde_json::Value) -> bool {
@@ -459,8 +471,13 @@ fn owner_pane_is_dead(state: &serde_json::Value) -> bool {
     {
         return true;
     }
-    let Some(pane_id) = state
-        .get("team_owner")
+    // Stage 3a (identity-boundary unified plan, architect direction
+    // 2026-06-23): route owner read through the ownership repository.
+    // `state` here is already team-projected by the upstream
+    // `send_message` flow, so the empty-team-key path returns the same
+    // top-level owner the legacy direct read produced. Stage 5 will swap
+    // the data source under the repository.
+    let Some(pane_id) = crate::state::ownership::read_owner_value(state, "")
         .and_then(|owner| owner.get("pane_id"))
         .and_then(serde_json::Value::as_str)
         .filter(|pane| !pane.is_empty())

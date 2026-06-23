@@ -230,16 +230,23 @@ pub fn claim_leader_receiver(
             "runtime state root is not an object".to_string(),
         ));
     };
-    let owner = root
-        .entry("team_owner")
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(owner) = owner.as_object_mut() {
+    // Build the updated owner + receiver values in-place (field-level
+    // mutation preserves any extra fields the caller carries), then publish
+    // through the ownership repository. This keeps `claim_leader_receiver`'s
+    // legacy field-merge semantics while sourcing all owner mutations from
+    // one API surface (Stage 3a, architect direction 2026-06-23).
+    let mut owner_value = root
+        .get("team_owner")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(owner) = owner_value.as_object_mut() {
         owner.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
     }
-    let receiver = root
-        .entry("leader_receiver")
-        .or_insert_with(|| serde_json::json!({}));
-    if let Some(receiver) = receiver.as_object_mut() {
+    let mut receiver_value = root
+        .get("leader_receiver")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(receiver) = receiver_value.as_object_mut() {
         receiver.insert("mode".to_string(), serde_json::json!("direct_tmux"));
         receiver.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
         copy_candidate_field(receiver, candidate, "pane_id");
@@ -255,6 +262,13 @@ pub fn claim_leader_receiver(
             receiver.insert("tmux_socket".to_string(), serde_json::json!(socket));
         }
     }
+    drop(root);
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_team_owner(owner_value)
+        .with_leader_receiver(receiver_value)
+        .with_owner_epoch(next_epoch);
+    crate::state::ownership::write_owner(state, &team_key, record);
     crate::state::persist::save_runtime_state(workspace, state)?;
     event_log.write(
         "leader_receiver.claimed",

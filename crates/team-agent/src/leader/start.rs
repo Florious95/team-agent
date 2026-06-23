@@ -587,10 +587,14 @@ fn persist_managed_leader_binding(
                 "tmux": std::env::var("TMUX").ok(),
             }),
         );
-        obj.insert("leader_receiver".to_string(), receiver);
-        obj.insert("team_owner".to_string(), owner);
-        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
     }
+    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+    // managed leader binding write routed through the ownership repository.
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
     let entry = crate::state::projection::compact_team_state(&state);
     if let Some(obj) = state.as_object_mut() {
         let teams = obj
@@ -689,10 +693,14 @@ fn persist_exec_provider_leader_binding(
                 "tmux": std::env::var("TMUX").ok(),
             }),
         );
-        obj.insert("leader_receiver".to_string(), receiver);
-        obj.insert("team_owner".to_string(), owner);
-        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
     }
+    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+    // exec-provider leader binding write routed through the ownership repository.
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
     let entry = crate::state::projection::compact_team_state(&state);
     if let Some(obj) = state.as_object_mut() {
         let teams = obj

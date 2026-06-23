@@ -216,8 +216,13 @@ fn detect_leader_api_error(
                 .and_then(Value::as_str)
                 .map(ToString::to_string)
         });
-    let leader_session_uuid = state
-        .get("team_owner")
+    // Stage 3a (identity-boundary unified plan, architect direction
+    // 2026-06-23): route owner read through the ownership repository.
+    // The coordinator state here is the workspace runtime state — Stage 5
+    // will swap to per-team state and this read follows automatically.
+    // capture.leader_receiver fallback is kept as evidence, not owner truth
+    // (architect §4 cross-module risk: capture fallback is evidence-only).
+    let leader_session_uuid = crate::state::ownership::read_owner_value(state, "")
         .and_then(|owner| owner.get("leader_session_uuid"))
         .or_else(|| {
             capture

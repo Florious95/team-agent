@@ -272,9 +272,14 @@ pub fn populate_team_owner_from_env(
         "claimed_at": now_iso,
         "claimed_via": source,
     });
-    if let Some(o) = state.as_object_mut() {
-        o.insert("team_owner".to_string(), owner.clone());
-    }
+    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+    // route the in-memory team_owner write through the ownership repository.
+    // Net behaviour preserved: still writes top-level (legacy dual-write);
+    // 3b/3c/3d will remove the read-side projection promote, persist
+    // copy-back, and finally the top-level write.
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_team_owner(owner.clone());
+    crate::state::ownership::write_owner(state, &key, record);
     Ok(Some(owner))
 }
 
@@ -345,10 +350,13 @@ pub fn apply_first_time_leader_binding(
         "claimed_at": now_iso,
         "claimed_via": source,
     });
-    if let Some(o) = state.as_object_mut() {
-        o.insert("team_owner".to_string(), owner);
-        o.insert("leader_receiver".to_string(), receiver.clone());
-    }
+    // Stage 3a: route through ownership repository.
+    let team_key = team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_team_owner(owner)
+        .with_leader_receiver(receiver.clone())
+        .with_owner_epoch(0);
+    crate::state::ownership::write_owner(state, &team_key, record);
     json!({ "ok": true, "pane": pane_info, "warning": null, "first_time": true })
 }
 

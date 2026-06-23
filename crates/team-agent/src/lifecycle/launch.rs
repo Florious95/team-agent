@@ -1141,12 +1141,21 @@ fn drop_foreign_seeded_owner(
     };
     if owner_pane_belongs_to_other_team(existing, launched_key, pane) {
         let replacement = unbound_launched_owner(launched, launched_key);
-        if let Some(obj) = launched.as_object_mut() {
-            if let Some(owner) = replacement {
-                obj.insert("team_owner".to_string(), owner);
-            } else {
-                obj.remove("team_owner");
+        // Stage 3a (identity-boundary unified plan, architect direction
+        // 2026-06-23): route owner replace through ownership repository.
+        // Both branches (Some owner replacement; None = removal) preserve
+        // pre-3a behaviour: write_owner overwrites the top-level fields
+        // when given; the None branch falls back to direct mutation (the
+        // repository has no remove API yet — removal is uncommon enough
+        // to leave it inline).
+        if let Some(owner) = replacement {
+            let record = crate::state::ownership::OwnershipWrite::new().with_team_owner(owner);
+            crate::state::ownership::write_owner(launched, launched_key, record);
+            if let Some(obj) = launched.as_object_mut() {
+                obj.remove("owner_epoch");
             }
+        } else if let Some(obj) = launched.as_object_mut() {
+            obj.remove("team_owner");
             obj.remove("owner_epoch");
         }
     }
@@ -1423,11 +1432,13 @@ fn seed_unbound_launched_owner(launched: &mut serde_json::Value, launched_key: &
         "owner_epoch": owner_epoch,
         "discovery": "quick_start",
     });
-    if let Some(obj) = launched.as_object_mut() {
-        obj.insert("leader_receiver".to_string(), receiver);
-        obj.insert("team_owner".to_string(), owner);
-        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
-    }
+    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+    // route quick-start unbound seed through ownership repository.
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(launched, launched_key, record);
 }
 
 fn unbound_launched_owner(
@@ -4681,11 +4692,14 @@ fn seed_launched_owner_from_caller_with_provider_lookup(
     ) {
         receiver.insert("tmux_socket".to_string(), serde_json::json!(socket));
     }
-    if let Some(obj) = state.as_object_mut() {
-        obj.insert("leader_receiver".to_string(), receiver);
-        obj.insert("team_owner".to_string(), owner);
-        obj.insert("owner_epoch".to_string(), serde_json::json!(owner_epoch));
-    }
+    // Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+    // route quick-start attached-from-env seed through ownership repository.
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(owner_epoch);
+    crate::state::ownership::write_owner(state, &team_key, record);
     true
 }
 

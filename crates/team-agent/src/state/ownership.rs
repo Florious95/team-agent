@@ -116,6 +116,103 @@ pub fn read_owner_value<'a>(state: &'a Value, team_key: &str) -> Option<&'a Valu
     read_owner_for_team(state, team_key).map(|read| read.value)
 }
 
+/// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+/// single write entry point for owner mutations. Pre-Stage-3, owner writes
+/// were spread across 13 sites (claim/attach/readopt/managed-leader/quick-
+/// start/identity/send), each independently inserting `team_owner` +
+/// `leader_receiver` + `owner_epoch` into the in-memory state. Stage 3a
+/// collapses those writers into this API.
+///
+/// Architect §1.A: the three fields form ONE ownership record. They must
+/// be written together (no half-writes that race in projection/persist).
+///
+/// 3a behaviour (this commit): writes the record to BOTH the top-level
+/// (`state.{team_owner, leader_receiver, owner_epoch}`) AND
+/// `state.teams.<team_key>.{team_owner, leader_receiver, owner_epoch}`.
+/// Zero behavioural change vs the legacy hand-rolled inserts — only the
+/// API is consolidated. Stage 3b/3c will remove the read-side projection
+/// promote and the persist-side copy-back; Stage 3d's tests will assert
+/// canonical-only behaviour and a final small change here will stop the
+/// top-level write.
+///
+/// Each write field is optional so callers can update a subset (e.g.
+/// `write_receiver_only`). The `epoch` value is duplicated in
+/// `state.owner_epoch` to match the legacy shape every reader expects.
+pub fn write_owner(state: &mut Value, team_key: &str, record: OwnershipWrite) {
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    // Top-level write (3a preserves dual-write; 3d removes).
+    if let Some(root) = state.as_object_mut() {
+        if let Some(receiver) = record.leader_receiver.as_ref() {
+            root.insert("leader_receiver".to_string(), receiver.clone());
+        }
+        if let Some(owner) = record.team_owner.as_ref() {
+            root.insert("team_owner".to_string(), owner.clone());
+        }
+        if let Some(epoch) = record.owner_epoch {
+            root.insert("owner_epoch".to_string(), serde_json::json!(epoch));
+        }
+    }
+    // Teams-projection write (Stage 5 will move this to per-team state file).
+    if team_key.is_empty() {
+        return;
+    }
+    let teams = state
+        .as_object_mut()
+        .and_then(|root| {
+            root.entry("teams")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+        });
+    let Some(teams) = teams else { return };
+    let entry = teams
+        .entry(team_key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(entry_obj) = entry.as_object_mut() else {
+        return;
+    };
+    if let Some(receiver) = record.leader_receiver.as_ref() {
+        entry_obj.insert("leader_receiver".to_string(), receiver.clone());
+    }
+    if let Some(owner) = record.team_owner.as_ref() {
+        entry_obj.insert("team_owner".to_string(), owner.clone());
+    }
+    if let Some(epoch) = record.owner_epoch {
+        entry_obj.insert("owner_epoch".to_string(), serde_json::json!(epoch));
+    }
+}
+
+/// The ownership write payload. All fields optional so callers can update a
+/// subset — receiver-only attach paths don't need to re-emit team_owner.
+#[derive(Debug, Clone, Default)]
+pub struct OwnershipWrite {
+    pub team_owner: Option<Value>,
+    pub leader_receiver: Option<Value>,
+    pub owner_epoch: Option<u64>,
+}
+
+impl OwnershipWrite {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_team_owner(mut self, owner: Value) -> Self {
+        self.team_owner = Some(owner);
+        self
+    }
+
+    pub fn with_leader_receiver(mut self, receiver: Value) -> Self {
+        self.leader_receiver = Some(receiver);
+        self
+    }
+
+    pub fn with_owner_epoch(mut self, epoch: u64) -> Self {
+        self.owner_epoch = Some(epoch);
+        self
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -209,5 +306,78 @@ mod tests {
         });
         let value = read_owner_value(&state, "alpha").expect("owner found");
         assert_eq!(value["pane_id"], json!("%top"));
+    }
+
+    // ───────────── Stage 3a: write_owner API tests ─────────────
+
+    #[test]
+    fn write_owner_writes_top_level_and_teams_projection() {
+        // 3a contract: preserve legacy dual-write semantics so readers
+        // that still scan top-level (pre-3b/3c) keep working.
+        let mut state = json!({});
+        let record = OwnershipWrite::new()
+            .with_team_owner(owner_with_pane("%new"))
+            .with_owner_epoch(7)
+            .with_leader_receiver(json!({"pane_id": "%new", "mode": "direct_tmux"}));
+        write_owner(&mut state, "alpha", record);
+        assert_eq!(state["team_owner"]["pane_id"], json!("%new"));
+        assert_eq!(state["owner_epoch"], json!(7));
+        assert_eq!(state["leader_receiver"]["pane_id"], json!("%new"));
+        assert_eq!(state["teams"]["alpha"]["team_owner"]["pane_id"], json!("%new"));
+        assert_eq!(state["teams"]["alpha"]["owner_epoch"], json!(7));
+        assert_eq!(
+            state["teams"]["alpha"]["leader_receiver"]["pane_id"],
+            json!("%new")
+        );
+    }
+
+    #[test]
+    fn write_owner_supports_partial_updates() {
+        // Receiver-only attach path doesn't need to re-emit team_owner.
+        let mut state = json!({
+            "team_owner": owner_with_pane("%existing"),
+            "teams": {"alpha": {"team_owner": owner_with_pane("%existing")}},
+        });
+        let record = OwnershipWrite::new()
+            .with_leader_receiver(json!({"pane_id": "%existing", "mode": "direct_tmux"}));
+        write_owner(&mut state, "alpha", record);
+        // Owner unchanged.
+        assert_eq!(state["team_owner"]["pane_id"], json!("%existing"));
+        // Receiver written to both locations.
+        assert_eq!(state["leader_receiver"]["pane_id"], json!("%existing"));
+        assert_eq!(
+            state["teams"]["alpha"]["leader_receiver"]["pane_id"],
+            json!("%existing")
+        );
+    }
+
+    #[test]
+    fn write_owner_with_empty_team_key_only_writes_top_level() {
+        // The owner-gate-style attach with no team scope: still preserve the
+        // legacy single-source top-level write. Stage 5 will refuse this
+        // path; for now it remains compatible.
+        let mut state = json!({});
+        let record = OwnershipWrite::new().with_team_owner(owner_with_pane("%top"));
+        write_owner(&mut state, "", record);
+        assert_eq!(state["team_owner"]["pane_id"], json!("%top"));
+        assert!(
+            state.get("teams").is_none_or(|teams| teams
+                .as_object()
+                .is_some_and(|map| map.is_empty())),
+            "empty team_key must NOT touch teams.<key>"
+        );
+    }
+
+    #[test]
+    fn write_owner_then_read_round_trip() {
+        // 3a write + Stage 2 read agree: after writing for "alpha", reading
+        // for "alpha" returns the LegacyTeamsProjection branch (teams wins
+        // over top-level per the precedence rule).
+        let mut state = json!({"team_key": "alpha"});
+        let record = OwnershipWrite::new().with_team_owner(owner_with_pane("%w1"));
+        write_owner(&mut state, "alpha", record);
+        let read = read_owner_for_team(&state, "alpha").expect("owner found");
+        assert_eq!(read.source, OwnershipSource::LegacyTeamsProjection);
+        assert_eq!(read.value["pane_id"], json!("%w1"));
     }
 }

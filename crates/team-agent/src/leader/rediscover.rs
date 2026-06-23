@@ -1064,6 +1064,9 @@ fn state_receiver(state: &Value) -> Option<LeaderReceiver> {
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+/// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
+/// route the readopt binding write through the ownership repository.
+/// Behaviour byte-identical to the pre-3a hand-rolled inserts.
 fn write_readopt_state(
     workspace: &Path,
     state: &mut Value,
@@ -1073,11 +1076,14 @@ fn write_readopt_state(
     if !state.is_object() {
         *state = json!({});
     }
-    let Some(root) = state.as_object_mut() else {
+    if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
-    };
-    root.insert("leader_receiver".to_string(), serde_json::to_value(receiver)?);
-    root.insert("team_owner".to_string(), serde_json::to_value(owner)?);
+    }
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(serde_json::to_value(receiver)?)
+        .with_team_owner(serde_json::to_value(owner)?);
+    crate::state::ownership::write_owner(state, &team_key, record);
     crate::leader::write_lease_dual_state(workspace, state)
 }
 
@@ -1089,10 +1095,13 @@ fn write_receiver_state(
     if !state.is_object() {
         *state = json!({});
     }
-    let Some(root) = state.as_object_mut() else {
+    if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
-    };
-    root.insert("leader_receiver".to_string(), serde_json::to_value(receiver)?);
+    }
+    let team_key = crate::state::projection::team_state_key(state);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(serde_json::to_value(receiver)?);
+    crate::state::ownership::write_owner(state, &team_key, record);
     crate::leader::write_lease_dual_state(workspace, state)
 }
 
