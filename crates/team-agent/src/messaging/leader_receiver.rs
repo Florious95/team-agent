@@ -262,7 +262,7 @@ pub fn claim_leader_receiver(
             receiver.insert("tmux_socket".to_string(), serde_json::json!(socket));
         }
     }
-    drop(root);
+    // The `root` borrow above is released by NLL before this call.
     let team_key = crate::state::projection::team_state_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
         .with_team_owner(owner_value)

@@ -317,17 +317,25 @@ pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
         .get("teams")
         .and_then(Value::as_object)
         .is_some_and(|teams| !teams.is_empty());
-    // owner binding is team-scoped: never borrow another team's top-level binding.
+    // Stage 3b (identity-boundary unified plan, architect direction 2026-06-23):
+    // remove the top-level owner promote. Pre-3b, when `teams.<key>` lacked
+    // an owner entry the projection promoted the legacy top-level
+    // `state.team_owner` into the projected view — that's the
+    // "copy-back/promotion" the architect §Stage 3 calls out as the
+    // dual-source bug origin (stale top-level owner could be served to
+    // callers of a different team's projection). Now only the canonical
+    // teams.<key> branch promotes; callers needing the legacy top-level
+    // path must go through `state::ownership::read_owner_for_team` whose
+    // precedence rule applies the migration-precedence semantics
+    // explicitly (architect §3: teams > top-level only when
+    // team_state_key matches).
     if let Some(v) = entry_obj.get("team_owner") {
         p.insert("team_owner".to_string(), v.clone());
-    } else if !has_team_entries && state.get("team_owner").is_some_and(|v| !v.is_null()) {
-        p.insert("team_owner".to_string(), state["team_owner"].clone());
     }
     if let Some(v) = entry_obj.get("leader_receiver") {
         p.insert("leader_receiver".to_string(), v.clone());
-    } else if !has_team_entries && state.get("leader_receiver").is_some_and(|v| !v.is_null()) {
-        p.insert("leader_receiver".to_string(), state["leader_receiver"].clone());
     }
+    let _ = has_team_entries; // silence unused warning; kept for clarity.
     // coordinator:仅顶层有 key 时 setdefault(投影里没有才插)。
     if state.as_object().is_some_and(|o| o.contains_key("coordinator")) && !p.contains_key("coordinator") {
         p.insert("coordinator".to_string(), state["coordinator"].clone());
