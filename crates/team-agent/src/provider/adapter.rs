@@ -1062,6 +1062,24 @@ fn scan_session_candidates_once(
         }) {
             return Ok(vec![hit.clone()]);
         }
+        // Stage 1 (identity-boundary unified plan, architect direction
+        // 2026-06-23): for Claude/ClaudeCode with an expected session id,
+        // an exact-id miss MUST NOT fall back to same-cwd latest. Pre-fix
+        // the scanner returned every same-cwd candidate sorted with
+        // expected-first; with no exact match, that handed `frontend`'s
+        // transcript to `reviewer` in the AI-sync repro. Mirror Copilot's
+        // stricter contract: keep only candidates with a positive worker
+        // identity match (TEAM_AGENT_ID literal in the transcript head, or
+        // path-encoded agent_id). If none, return empty — capture stays
+        // pending/ambiguous, which is safer than misattribution.
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+            let positive_only: Vec<CapturedSessionCandidate> = out
+                .iter()
+                .filter(|candidate| candidate.positive_agent_id_match || candidate.agent_path_match)
+                .cloned()
+                .collect();
+            return Ok(positive_only);
+        }
     }
     // E6 层1·B(主路径,交互式现实):cwd 匹配但盘上有多个 sibling transcript(claude 自生成,
     // 不采用预定 UUID)→ 用 spawn 时间窗唯一选:只留 mtime >= spawned_at 的候选,打破歧义。
@@ -1086,6 +1104,10 @@ fn scan_session_candidates_once(
             }
         }
     }
+    // Non-Claude / non-strict providers with an expected id but no exact
+    // match: order expected-first so the allocator's `unique_available_candidate`
+    // sees the deterministically preferred candidate. Claude/ClaudeCode took
+    // the strict positive-only return above and never reaches here.
     if let Some(expected) = context.expected_session_id.as_ref() {
         out.sort_by_key(|candidate| {
             candidate

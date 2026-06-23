@@ -242,6 +242,125 @@ fn claude_capture_prefers_expected_session_id_under_provider_projects_root() {
     );
 }
 
+/// Stage 1 (identity-boundary unified plan, architect direction 2026-06-23):
+/// when Claude's `expected_session_id` is set but the matching transcript
+/// is NOT on disk, the scanner MUST NOT fall back to a same-cwd sibling
+/// transcript (the AI-sync repro: `reviewer._pending=36dd` got assigned
+/// `frontend`'s `7d5f.jsonl`). It must return either empty OR only candidates
+/// with positive worker identity. Pre-fix the scanner sorted same-cwd
+/// candidates with expected-first and the allocator picked the top one.
+#[test]
+#[serial(env)]
+fn claude_capture_expected_id_missing_does_not_fall_back_to_same_cwd_sibling() {
+    let root = tmp_dir("capture-expected-missing");
+    let spawn_cwd = root.join("ai-sync");
+    let projects_root = root.join("managed-claude").join("projects");
+    let home = root.join("home");
+    std::fs::create_dir_all(&spawn_cwd).unwrap();
+    std::fs::create_dir_all(&projects_root).unwrap();
+    std::fs::create_dir_all(home.join(".claude").join("projects")).unwrap();
+
+    let expected = "36dd1d1a-2766-4636-856c-03f14a4bb803"; // reviewer's expected
+    let sibling = "7d5f430a-00cd-42fa-986e-43296b90b8f4"; // frontend's transcript
+    // Only the sibling's transcript exists on disk — expected is missing.
+    write_claude_transcript(
+        &projects_root.join("sibling.jsonl"),
+        sibling,
+        &spawn_cwd,
+        "frontend-marker", // does NOT mention reviewer
+    );
+
+    let _guard = EnvGuard::set_path_and_home(&home);
+    let context = CaptureSessionContext {
+        agent_id: "reviewer".to_string(),
+        spawn_cwd: spawn_cwd.clone(),
+        pane_id: Some("%9".to_string()),
+        pane_pid: Some(9999),
+        spawned_at: Some("2026-06-23T10:00:00+08:00".to_string()),
+        expected_session_id: Some(SessionId::new(expected)),
+        provider_projects_root: Some(projects_root.clone()),
+    };
+
+    let candidates = get_adapter(Provider::Claude)
+        .capture_session_candidates(&context, 0)
+        .expect("Claude scan should succeed");
+
+    // Stage 1 contract: no candidate's session_id matches the expected → the
+    // scanner must return only candidates with positive worker identity (or
+    // empty). The sibling has no `reviewer` marker → must NOT appear.
+    let returned_sibling = candidates.iter().any(|candidate| {
+        candidate
+            .captured
+            .session_id
+            .as_ref()
+            .is_some_and(|sid| sid.as_str() == sibling)
+    });
+    assert!(
+        !returned_sibling,
+        "Stage 1: expected_session_id miss must not fall back to a same-cwd \
+         sibling without positive worker identity. AI-sync repro: \
+         reviewer._pending={expected} captured sibling={sibling}; candidates={candidates:?}"
+    );
+}
+
+/// Stage 1: when expected id IS on disk, the existing exact-match return
+/// path still wins (this is the architect §5 "Claude exact expected-id
+/// still works" gate; the strict-miss fix must not break the strict-hit
+/// path). Regression guard against the strict mode regressing positive
+/// captures.
+#[test]
+#[serial(env)]
+fn claude_capture_expected_id_exact_match_still_wins() {
+    let root = tmp_dir("capture-expected-exact");
+    let spawn_cwd = root.join("team");
+    let projects_root = root.join("managed-claude").join("projects");
+    let home = root.join("home");
+    std::fs::create_dir_all(&spawn_cwd).unwrap();
+    std::fs::create_dir_all(&projects_root).unwrap();
+    std::fs::create_dir_all(home.join(".claude").join("projects")).unwrap();
+
+    let expected = "36dd1d1a-2766-4636-856c-03f14a4bb803";
+    let sibling = "7d5f430a-00cd-42fa-986e-43296b90b8f4";
+    write_claude_transcript(
+        &projects_root.join("expected.jsonl"),
+        expected,
+        &spawn_cwd,
+        "reviewer-marker",
+    );
+    write_claude_transcript(
+        &projects_root.join("sibling.jsonl"),
+        sibling,
+        &spawn_cwd,
+        "frontend-marker",
+    );
+
+    let _guard = EnvGuard::set_path_and_home(&home);
+    let context = CaptureSessionContext {
+        agent_id: "reviewer".to_string(),
+        spawn_cwd: spawn_cwd.clone(),
+        pane_id: Some("%9".to_string()),
+        pane_pid: Some(9999),
+        spawned_at: Some("2026-06-23T10:00:00+08:00".to_string()),
+        expected_session_id: Some(SessionId::new(expected)),
+        provider_projects_root: Some(projects_root.clone()),
+    };
+
+    let candidates = get_adapter(Provider::Claude)
+        .capture_session_candidates(&context, 0)
+        .expect("Claude scan should succeed");
+
+    let chosen = candidates
+        .first()
+        .and_then(|candidate| candidate.captured.session_id.as_ref())
+        .map(SessionId::as_str);
+    assert_eq!(
+        chosen,
+        Some(expected),
+        "Stage 1: exact-match path must still return the expected transcript \
+         even with same-cwd siblings present; candidates={candidates:?}"
+    );
+}
+
 #[test]
 #[serial(env)]
 fn claude_auth_status_uses_zero_token_cli_status_json() {

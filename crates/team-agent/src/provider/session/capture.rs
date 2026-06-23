@@ -194,6 +194,40 @@ where
             continue;
         };
         if let Some(candidate) = assignments.get(&item.agent_id) {
+            // Stage 1 (identity-boundary unified plan, architect direction
+            // 2026-06-23): defensive expected-id guard. The adapter scanner
+            // is the primary defence (Claude no longer falls back to same-
+            // cwd latest when expected_session_id is set), but the allocator
+            // also goes through a one-to-one global pass that could match a
+            // wrong candidate if the per-agent list still has stale entries.
+            // Refuse to write `session_id`/`rollout_path` when the candidate's
+            // session_id is set AND differs from the pending expected_session_id.
+            // Capture stays pending; the agent is marked ambiguous so the
+            // operator sees it.
+            let mismatch = item
+                .context
+                .expected_session_id
+                .as_ref()
+                .zip(candidate.captured.session_id.as_ref())
+                .is_some_and(|(expected, captured)| expected.as_str() != captured.as_str());
+            if mismatch {
+                report.ambiguous.push(AmbiguousSessionCapture {
+                    agent_id: item.agent_id.clone(),
+                    spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
+                });
+                if finalize_ambiguous {
+                    agent_obj.insert(
+                        "attribution_ambiguous".to_string(),
+                        serde_json::json!(true),
+                    );
+                    agent_obj.insert(
+                        "captured_at".to_string(),
+                        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                    );
+                    report.changed = true;
+                }
+                continue;
+            }
             apply_captured_session(agent_obj, &candidate.captured);
             report.changed = true;
             report.assigned.push(item.agent_id);
