@@ -533,7 +533,54 @@ fn allocate_session_candidates(
 ) -> (BTreeMap<String, CapturedSessionCandidate>, BTreeSet<String>) {
     let mut assignments = BTreeMap::new();
     let mut ambiguous = BTreeSet::new();
+
+    // Stage 1 amendment (architect direction 2026-06-23, S1-CAPTURE-002 fix):
+    // ExpectedSessionId pre-pass. For each pending agent that carries an
+    // `_pending_session_id`, the strongest possible binding is the candidate
+    // whose `session_id` exactly matches that expected id. Run this BEFORE
+    // the existing PositiveAgentId / PathAgentId / global one-to-one passes,
+    // because the global one-to-one pass uses
+    // `remaining_agents.zip(candidates.into_values())` (BTreeMap sorted by
+    // candidate-key, not by agent ownership) and can produce CROSS
+    // assignments (claude-a → claude-b's transcript and vice versa) when two
+    // pending agents both have expected ids but no PositiveAgentId/PathAgentId
+    // hint — those would be rejected by the mismatch guard at apply time,
+    // leaving both agents `attribution_ambiguous` instead of correctly
+    // bound. With this pre-pass the global one-to-one only ever sees agents
+    // that have NO expected id (or whose expected candidate is unavailable
+    // / collides), and the cross-assignment hazard is eliminated.
     for item in pending {
+        let Some(expected) = item.context.expected_session_id.as_ref() else {
+            continue;
+        };
+        let Some(agent_candidates) = candidates_by_agent.get(&item.agent_id) else {
+            continue;
+        };
+        let exact_matches: Vec<&CapturedSessionCandidate> = agent_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .captured
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|sid| sid.as_str() == expected.as_str())
+            })
+            .filter(|candidate| !candidate_keys_collide(candidate, claimed))
+            .collect();
+        // Uniqueness requirement: only assign when the expected id maps to
+        // exactly one available candidate. Multiple matches or a colliding
+        // single match leave the agent for the ambiguity path below.
+        if exact_matches.len() == 1 {
+            let candidate = exact_matches[0].clone();
+            claimed.extend(captured_provider_session_keys(&candidate.captured));
+            assignments.insert(item.agent_id.clone(), candidate);
+        }
+    }
+
+    for item in pending {
+        if assignments.contains_key(&item.agent_id) {
+            continue;
+        }
         if let Some(candidate) = unique_available_candidate(
             candidates_by_agent.get(&item.agent_id),
             claimed,
@@ -745,12 +792,19 @@ fn parse_provider(raw: &str) -> Option<Provider> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use std::sync::Arc;
 
     #[derive(Clone)]
     pub(crate) struct CaptureCandidatesAdapter {
         provider: Provider,
         fail_agent_id: Option<String>,
         error: String,
+        /// Stage 1 amendment test support (architect direction 2026-06-23):
+        /// per-agent candidate map. When set, the adapter returns the mapped
+        /// candidates for `context.agent_id` instead of an empty list. Lets
+        /// the allocator-level test inject expected-id candidates for two
+        /// pending agents and observe cross-assignment regressions.
+        candidates_by_agent: Option<Arc<BTreeMap<String, Vec<CapturedSessionCandidate>>>>,
     }
 
     impl CaptureCandidatesAdapter {
@@ -759,7 +813,16 @@ pub(crate) mod test_support {
                 provider,
                 fail_agent_id: fail_agent_id.map(str::to_string),
                 error: error.to_string(),
+                candidates_by_agent: None,
             }
+        }
+
+        pub(crate) fn with_candidates(
+            mut self,
+            candidates_by_agent: BTreeMap<String, Vec<CapturedSessionCandidate>>,
+        ) -> Self {
+            self.candidates_by_agent = Some(Arc::new(candidates_by_agent));
+            self
         }
     }
 
@@ -835,6 +898,11 @@ pub(crate) mod test_support {
         ) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
             if self.fail_agent_id.as_deref() == Some(context.agent_id.as_str()) {
                 return Err(ProviderError::Io(self.error.clone()));
+            }
+            if let Some(map) = self.candidates_by_agent.as_ref() {
+                if let Some(candidates) = map.get(&context.agent_id) {
+                    return Ok(candidates.clone());
+                }
             }
             Ok(Vec::new())
         }
@@ -1040,5 +1108,131 @@ mod u1_tests {
             "rollout_path": "",
         });
         assert!(!agent_session_complete(&agent_no_path));
+    }
+
+    /// Stage 1 amendment regression (architect direction 2026-06-23,
+    /// S1-CAPTURE-002): two pending agents, each with a distinct
+    /// `_pending_session_id`. Each agent's candidate list contains ONLY its
+    /// own expected transcript (no positive worker identity hint, no path
+    /// agent id hint — the file basename is just a UUID). Pre-fix, the
+    /// allocator's `allocate_global_one_to_one` zipped agents (sorted by
+    /// agent_id) with candidates (sorted by candidate-key), producing CROSS
+    /// assignments that the mismatch guard then rejected — leaving both
+    /// agents `attribution_ambiguous`. Post-fix, the ExpectedSessionId
+    /// pre-pass binds each agent to its own expected candidate before any
+    /// global one-to-one runs.
+    #[test]
+    fn capture_allocator_expected_session_id_binds_each_worker_to_its_own_transcript() {
+        use crate::provider::{CaptureVia, Confidence, RolloutPath};
+        let dir = std::env::temp_dir().join(format!(
+            "ta-stage1-allocator-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rollout_a = dir.join("9a2d1668.jsonl");
+        let rollout_b = dir.join("3e824e89.jsonl");
+        std::fs::write(&rollout_a, b"{}\n").unwrap();
+        std::fs::write(&rollout_b, b"{}\n").unwrap();
+        let candidate_a = CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(
+                    "9a2d1668-8987-4c36-8bde-a5135b10da02",
+                )),
+                rollout_path: Some(RolloutPath::new(rollout_a.clone())),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: dir.clone(),
+            },
+            // Critical: no positive worker identity hint. Pre-fix this is
+            // exactly the shape that fell through to global one-to-one.
+            positive_agent_id_match: false,
+            agent_path_match: false,
+        };
+        let candidate_b = CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(
+                    "3e824e89-25ac-4b3f-b272-b4f733f6403c",
+                )),
+                rollout_path: Some(RolloutPath::new(rollout_b.clone())),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: dir.clone(),
+            },
+            positive_agent_id_match: false,
+            agent_path_match: false,
+        };
+        let mut candidates_by_agent: BTreeMap<String, Vec<CapturedSessionCandidate>> =
+            BTreeMap::new();
+        candidates_by_agent.insert("claude-a".to_string(), vec![candidate_a.clone()]);
+        candidates_by_agent.insert("claude-b".to_string(), vec![candidate_b.clone()]);
+
+        let cwd_str = dir.to_string_lossy().to_string();
+        let mut state = serde_json::json!({
+            "agents": {
+                "claude-a": {
+                    "provider": "claude",
+                    "status": "running",
+                    "spawn_cwd": cwd_str,
+                    "_pending_session_id": "9a2d1668-8987-4c36-8bde-a5135b10da02"
+                },
+                "claude-b": {
+                    "provider": "claude",
+                    "status": "running",
+                    "spawn_cwd": cwd_str,
+                    "_pending_session_id": "3e824e89-25ac-4b3f-b272-b4f733f6403c"
+                }
+            }
+        });
+        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Claude, None, "")
+            .with_candidates(candidates_by_agent);
+        let mut adapter_for = move |_provider| {
+            Box::new(adapter.clone()) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("allocator pass should succeed");
+
+        // ExpectedSessionId pre-pass must bind each agent to its own
+        // expected transcript. No cross-assignment, no ambiguous mark.
+        let agents = state["agents"].as_object().expect("agents object");
+        assert_eq!(
+            agents["claude-a"]["session_id"].as_str(),
+            Some("9a2d1668-8987-4c36-8bde-a5135b10da02"),
+            "Stage 1 fix: claude-a must bind to its own expected transcript; \
+             state.claude-a={}",
+            agents["claude-a"]
+        );
+        assert_eq!(
+            agents["claude-b"]["session_id"].as_str(),
+            Some("3e824e89-25ac-4b3f-b272-b4f733f6403c"),
+            "Stage 1 fix: claude-b must bind to its own expected transcript; \
+             state.claude-b={}",
+            agents["claude-b"]
+        );
+        assert!(
+            agents["claude-a"]
+                .get("attribution_ambiguous")
+                .is_none_or(|v| v.as_bool() != Some(true)),
+            "Stage 1 fix: claude-a must NOT be flagged ambiguous after the \
+             expected-id pre-pass bound it; state.claude-a={}",
+            agents["claude-a"]
+        );
+        assert!(
+            agents["claude-b"]
+                .get("attribution_ambiguous")
+                .is_none_or(|v| v.as_bool() != Some(true)),
+            "Stage 1 fix: claude-b must NOT be flagged ambiguous; \
+             state.claude-b={}",
+            agents["claude-b"]
+        );
+        assert_eq!(
+            report.ambiguous.len(),
+            0,
+            "Stage 1 fix: capture report must record zero ambiguous; report={report:?}"
+        );
+
+        let _ = std::fs::remove_file(&rollout_a);
+        let _ = std::fs::remove_file(&rollout_b);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
