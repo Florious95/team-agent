@@ -15,7 +15,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 pub mod identity;
+// Stage 0 of identity-boundary unified plan (architect direction 2026-06-23):
+// shared identity primitives. Pure additive — Stage 1+ consume these.
+pub mod identity_keys;
 pub mod owner_gate;
+pub mod paths;
 pub mod persist;
 pub mod projection;
 pub mod selector;
