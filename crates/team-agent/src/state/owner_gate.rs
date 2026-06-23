@@ -39,13 +39,23 @@ pub struct CallerIdentity {
 
 /// `check_team_owner`(`state.py:366`)的纯判定版:caller 身份 + 是否有 TEAM_AGENT_ID + liveness 注入。
 /// 返回 `None`=允许(own / 无 owner / 死 owner pane 可接管);`Some(dict)`=拒绝(team_owner_mismatch)。
+///
+/// Stage 2 (identity-boundary unified plan, architect direction 2026-06-23):
+/// the owner is now looked up through `state::ownership::read_owner_value`
+/// instead of `state::projection::read_owner` directly. The two are
+/// equivalent today for the gate's `None` (empty team_key) path — both
+/// resolve to top-level `state.team_owner` — but routing through the
+/// repository means Stage 5 can swap the data source (per-team canonical
+/// `state.json`) without touching this gate. The empty-team-key argument
+/// preserves the pre-Stage-2 shape: gate callers feed an
+/// already-team-projected state and expect top-level reads.
 pub fn check_team_owner(
     state: &Value,
     caller: &CallerIdentity,
     has_team_agent_id: bool,
     liveness: &dyn PaneLivenessProbe,
 ) -> Option<Value> {
-    let owner = crate::state::projection::read_owner(state, None)?;
+    let owner = crate::state::ownership::read_owner_value(state, "")?;
     if !owner.is_object() || owner.as_object().is_none_or(serde_json::Map::is_empty) {
         return None;
     }

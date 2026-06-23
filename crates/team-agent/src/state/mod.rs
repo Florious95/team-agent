@@ -19,6 +19,10 @@ pub mod identity;
 // shared identity primitives. Pure additive — Stage 1+ consume these.
 pub mod identity_keys;
 pub mod owner_gate;
+// Stage 2 of identity-boundary unified plan: single read entry point for
+// `team_owner` lookups. Stage 3 will migrate writers; Stage 5 will swap
+// the data source to per-team canonical state without touching call sites.
+pub mod ownership;
 pub mod paths;
 pub mod persist;
 pub mod projection;

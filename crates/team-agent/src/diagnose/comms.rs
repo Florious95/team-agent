@@ -82,11 +82,19 @@ fn receiver_binding_snapshot(workspace: &Path, team: Option<&TeamKey>) -> Value 
     };
     let state = selected.state;
     let receiver = state.get("leader_receiver").and_then(Value::as_object);
+    // Stage 2 (identity-boundary unified plan, architect direction
+    // 2026-06-23): route owner pane lookup through the ownership repository.
+    // `selected.state` is already team-projected by the selector, so the
+    // empty-team-key path returns the same top-level owner the legacy direct
+    // read produced — but Stage 5 will swap the data source under the
+    // repository and this diagnose surface follows automatically. The
+    // `owner` key fallback is retained for callers that pre-date the
+    // `team_owner` rename.
     let owner_pane_id = state
         .get("owner")
-        .or_else(|| state.get("team_owner"))
-        .and_then(|v| v.get("pane_id"))
         .cloned()
+        .or_else(|| crate::state::ownership::read_owner_value(&state, "").cloned())
+        .and_then(|v| v.get("pane_id").cloned())
         .unwrap_or(Value::Null);
     let caller_pane_id = std::env::var("TMUX_PANE").ok().map(Value::String).unwrap_or(Value::Null);
     let pane_id = receiver

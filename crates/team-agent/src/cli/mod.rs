@@ -3745,18 +3745,13 @@ pub mod leader_port {
     }
 
     fn team_owner_value(state: &Value, team_id: &TeamKey) -> Option<Value> {
-        state
-            .get("teams")
-            .and_then(|teams| teams.get(team_id.as_str()))
-            .and_then(|team| team.get("team_owner"))
-            .cloned()
-            .or_else(|| {
-                if crate::state::projection::team_state_key(state) == team_id.as_str() {
-                    state.get("team_owner").cloned()
-                } else {
-                    None
-                }
-            })
+        // Stage 2 (identity-boundary unified plan, architect direction
+        // 2026-06-23): route through the ownership repository so all owner
+        // reads see the same precedence (teams.<key> > top-level when
+        // team_state_key matches). The repository preserves the pre-Stage-2
+        // semantics of this helper and adds an `OwnershipSource` tag that
+        // diagnose/status surfaces can consume in later stages.
+        crate::state::ownership::read_owner_value(state, team_id.as_str()).cloned()
     }
 
     fn family_a_owner_value(
