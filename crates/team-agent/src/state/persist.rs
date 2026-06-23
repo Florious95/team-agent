@@ -331,7 +331,16 @@ fn preserve_latest_roster_entries(
             skip_top_level_capture_backfill,
             skip_capture_backfill_agent_ids,
         );
-        preserve_latest_ownership_fields(incoming, latest);
+        // Stage 3c (identity-boundary unified plan, architect direction
+        // 2026-06-23): top-level owner copy-back removed. Pre-3c this
+        // copied legacy `state.{team_owner, leader_receiver, owner_epoch}`
+        // from disk's latest back into the incoming save — the persist-side
+        // mirror of the projection promote that 3b removed. With Stage 3a's
+        // write_owner funneling all owner mutations and 3b's projection
+        // cleanup, top-level owner truth is no longer authoritative; the
+        // teams.<key> entry-scoped preservation at :370 remains so legacy
+        // teams.<key>.team_owner entries still survive a save that omits
+        // them.
     }
 
     if projection_matches {
@@ -381,7 +390,14 @@ fn preserve_latest_roster_entries(
                     should_skip_capture_backfill(Some(active_team), skip_capture_backfill_team_key),
                     skip_capture_backfill_agent_ids,
                 );
-                preserve_latest_ownership_fields(incoming_entry, latest);
+                // Stage 3c (identity-boundary unified plan, architect direction
+                // 2026-06-23): top-level → teams.<active> owner cross-promote
+                // removed. This was the persist-side mirror of the projection
+                // copy-back (3b) and a quiet migration path that let stale
+                // top-level owner re-seed teams.<active>. With write_owner
+                // (3a) producing both top-level and teams.<key> directly,
+                // this auto-promotion is redundant and reintroduces the dual
+                // source the unified plan eliminates.
             }
         }
     }
