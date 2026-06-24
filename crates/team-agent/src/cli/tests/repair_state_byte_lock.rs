@@ -130,6 +130,7 @@ fn repair_args(
         status: status.to_string(),
         summary: summary.map(str::to_string),
         json,
+        team: None,
     }
 }
 

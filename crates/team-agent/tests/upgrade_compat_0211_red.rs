@@ -60,6 +60,7 @@ fn upgrade_0211_state_team_key_runtime_key_not_spec_name() {
             detail: true,
             summary: false,
             json: true,
+            team: None,
         },
         Some(TEAM_KEY),
     ));
@@ -185,6 +186,7 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
             detail: true,
             summary: false,
             json: true,
+            team: None,
         },
         Some(TEAM_KEY),
     ));
@@ -204,6 +206,7 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
             workspace: fixture.workspace.clone(),
             result_file: None,
             json: true,
+            team: None,
         },
         Some(TEAM_KEY),
     ));

@@ -268,6 +268,7 @@ use super::*;
             detail: false,
             summary: false,
             json: false,
+            team: None,
         };
 
         let r = cmd_status_for_team(&args, None).expect("status");

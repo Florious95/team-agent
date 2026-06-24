@@ -43,6 +43,7 @@ fn app_call(ws: &std::path::Path, a: &str, b: &str) -> CmdResult {
         b: b.to_string(),
         workspace: ws.to_path_buf(),
         json: false,
+        team: None,
     })
     .expect("allow-peer-talk is a compat-noop and must not error")
 }

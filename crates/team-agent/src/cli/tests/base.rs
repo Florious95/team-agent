@@ -635,6 +635,7 @@ Truncated: more fallback entries available; run team-agent inbox leader";
             detail: false,
             summary: true,
             json: true,
+            team: None,
         };
         let err = cmd_status(&args).unwrap_err();
         assert!(
@@ -652,6 +653,7 @@ Truncated: more fallback entries available; run team-agent inbox leader";
             detail: false,
             summary: true,
             json: false,
+            team: None,
         };
         let err = cmd_status(&args).unwrap_err();
         assert!(

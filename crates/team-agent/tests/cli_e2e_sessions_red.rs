@@ -129,6 +129,7 @@ agents:
     let result = cmd_sessions(&SessionsArgs {
         workspace: ws.clone(),
         json: true,
+        team: None,
     })
     .expect("sessions result");
     assert_eq!(result.exit, ExitCode::Ok);

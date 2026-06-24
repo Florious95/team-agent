@@ -452,6 +452,7 @@ fn contract_a_probe5_quick_start_ready_is_invalid_while_actionable_trust_remains
         workspace: ws.to_path_buf(),
         timeout: 0.0,
         json: true,
+        team: None,
     })
     .expect("wait-ready SUT should return shaped JSON");
     let value = match result.output {

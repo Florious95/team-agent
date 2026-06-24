@@ -430,6 +430,7 @@ fn wait_ready_reports_session_capture_incomplete_for_running_resumable_worker_wi
             workspace: fixture.team.clone(),
             timeout: 0.0,
             json: true,
+            team: None,
         })
         .expect("wait-ready should return structured JSON"),
     );

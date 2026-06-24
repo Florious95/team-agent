@@ -339,7 +339,7 @@ fn current_uid() -> Option<String> {
         crate::coordinator::write_coordinator_metadata(&wp, me, crate::coordinator::MetadataSource::Boot).unwrap();
         std::fs::write(crate::coordinator::coordinator_pid_path(&wp), me.to_string()).unwrap();
 
-        let args = StatusArgs { agent: None, workspace: ws, detail: true, summary: false, json: true };
+        let args = StatusArgs { agent: None, workspace: ws, detail: true, summary: false, json: true, team: None };
         let r = cmd_status(&args).expect("cmd_status");
         let value = match r.output {
             CmdOutput::Json(v) => v,

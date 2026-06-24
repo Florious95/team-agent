@@ -35,6 +35,7 @@ fn diagnose_live_fake_team_uses_active_team_projection() {
         cmd_diagnose(&DiagnoseArgs {
             workspace: root.clone(),
             json: true,
+            team: None,
         })
         .expect("diagnose should return JSON"),
     );
@@ -74,6 +75,7 @@ fn repair_state_runtime_workspace_uses_selected_spec_path() {
         status: "done".to_string(),
         summary: Some("patched by repair".to_string()),
         json: true,
+        team: None,
     });
     assert!(
         result.is_ok(),
@@ -140,6 +142,7 @@ fn wait_ready_fake_live_worker_with_mcp_config_and_window_is_ready() {
             workspace: root.clone(),
             timeout: 0.01,
             json: true,
+            team: None,
         })
         .expect("wait-ready should return JSON"),
     );

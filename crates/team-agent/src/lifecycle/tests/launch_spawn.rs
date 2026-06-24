@@ -208,6 +208,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         detail: false,
         summary: false,
         json: true,
+        team: None,
     });
     assert!(
         status.is_ok(),
@@ -218,6 +219,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
         result_file: None,
         workspace: team.clone(),
         json: true,
+        team: None,
     });
     assert!(
         collect.is_ok(),

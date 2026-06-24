@@ -127,7 +127,7 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         }
         "validate-result" => cmd_validate_result(&validate_result_args(args)?).map(emit_result),
         "collect" => {
-            cmd_collect_for_team(&collect_args(args, cwd), parse_args(args).team.as_deref())
+            cmd_collect_for_team(&collect_args(args, cwd)?, parse_args(args).team.as_deref())
                 .map(emit_result)
         }
         "settle" => cmd_settle(&settle_args(args, cwd)).map(emit_result),
@@ -949,6 +949,31 @@ fn fallback_report_result_args(
     })
 }
 
+/// Stage 4 of identity-boundary unified plan (architect direction
+/// 2026-06-24, .team/artifacts/identity-boundary-unified-plan.md §2 Stage
+/// 4): destructive command ambiguity gate. When the workspace has 2+
+/// alive teams and the caller did not pass `--team`, refuse with a
+/// usage error listing the candidates so the operator picks explicitly.
+/// Single-team workspaces (the 0.4.x baseline) are unaffected — the
+/// `CommandScope::resolve` helper returns `Resolved` and this function
+/// is a no-op.
+fn refuse_if_multi_alive_team_missing_scope(
+    command: &str,
+    workspace: &Path,
+    requested_team: Option<&str>,
+) -> Result<(), CliError> {
+    let scope = crate::state::paths::CommandScope::resolve(workspace, requested_team);
+    if scope.is_ambiguous() {
+        let candidates = scope.candidates().join(", ");
+        return Err(CliError::Usage(format!(
+            "{command}: workspace has multiple alive teams ({candidates}); \
+             pass `--team <key>` to choose one (refusing to default to any \
+             single team — Stage 4 identity-boundary contract)"
+        )));
+    }
+    Ok(())
+}
+
 fn allow_peer_talk_args(args: &[String], cwd: &Path) -> Result<AllowPeerTalkArgs, CliError> {
     let parsed = parse_args(args);
     Ok(AllowPeerTalkArgs {
@@ -956,6 +981,7 @@ fn allow_peer_talk_args(args: &[String], cwd: &Path) -> Result<AllowPeerTalkArgs
         b: required_pos(&parsed, 1, "b")?,
         workspace: workspace(&parsed, cwd),
         json: parsed.json,
+        team: parsed.team,
     })
 }
 
@@ -967,6 +993,7 @@ fn status_args(args: &[String], cwd: &Path) -> StatusArgs {
         detail: parsed.detail,
         summary: parsed.summary,
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
@@ -984,6 +1011,7 @@ fn approvals_args(args: &[String], cwd: &Path) -> ApprovalsArgs {
         agent: parsed.positionals.first().cloned(),
         workspace: workspace(&parsed, cwd),
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
@@ -995,6 +1023,7 @@ fn inbox_args(args: &[String], cwd: &Path) -> Result<InboxArgs, CliError> {
         limit: parsed.limit.unwrap_or(20),
         since: parsed.since,
         json: parsed.json,
+        team: parsed.team,
     })
 }
 
@@ -1149,16 +1178,24 @@ fn stuck_list_args(args: &[String], cwd: &Path) -> StuckListArgs {
     StuckListArgs {
         workspace: workspace(&parsed, cwd),
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
 fn stuck_cancel_args(args: &[String], cwd: &Path) -> Result<StuckCancelArgs, CliError> {
     let parsed = parse_args(args);
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope(
+        "stuck-cancel",
+        &workspace,
+        parsed.team.as_deref(),
+    )?;
     Ok(StuckCancelArgs {
         agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
+        workspace,
         alert_type: alert_type(parsed.alert_type.as_deref())?,
         json: parsed.json,
+        team: parsed.team,
     })
 }
 
@@ -1212,6 +1249,7 @@ fn sessions_args(args: &[String], cwd: &Path) -> SessionsArgs {
     SessionsArgs {
         workspace: workspace(&parsed, cwd),
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
@@ -1250,13 +1288,16 @@ fn validate_result_args(args: &[String]) -> Result<ValidateResultArgs, CliError>
     })
 }
 
-fn collect_args(args: &[String], cwd: &Path) -> CollectArgs {
+fn collect_args(args: &[String], cwd: &Path) -> Result<CollectArgs, CliError> {
     let parsed = parse_args(args);
-    CollectArgs {
-        workspace: workspace(&parsed, cwd),
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope("collect", &workspace, parsed.team.as_deref())?;
+    Ok(CollectArgs {
+        workspace,
         result_file: parsed.result_file,
         json: parsed.json,
-    }
+        team: parsed.team,
+    })
 }
 
 fn settle_args(args: &[String], cwd: &Path) -> SettleArgs {
@@ -1270,8 +1311,10 @@ fn settle_args(args: &[String], cwd: &Path) -> SettleArgs {
 
 fn repair_state_args(args: &[String], cwd: &Path) -> Result<RepairStateArgs, CliError> {
     let parsed = parse_args(args);
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope("repair-state", &workspace, parsed.team.as_deref())?;
     Ok(RepairStateArgs {
-        workspace: workspace(&parsed, cwd),
+        workspace,
         task_id: parsed
             .task
             .ok_or_else(|| CliError::Usage("missing --task".to_string()))?,
@@ -1281,6 +1324,7 @@ fn repair_state_args(args: &[String], cwd: &Path) -> Result<RepairStateArgs, Cli
             .ok_or_else(|| CliError::Usage("missing --status".to_string()))?,
         summary: option_value(args, "--summary").or_else(|| parsed.positionals.first().cloned()),
         json: parsed.json,
+        team: parsed.team,
     })
 }
 
@@ -1308,6 +1352,7 @@ fn diagnose_args(args: &[String], cwd: &Path) -> DiagnoseArgs {
     DiagnoseArgs {
         workspace: workspace(&parsed, cwd),
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
@@ -1331,6 +1376,7 @@ fn wait_ready_args(args: &[String], cwd: &Path) -> WaitReadyArgs {
         workspace: workspace(&parsed, cwd),
         timeout: parsed.timeout.unwrap_or(60.0),
         json: parsed.json,
+        team: parsed.team,
     }
 }
 
@@ -1723,5 +1769,109 @@ mod tests {
         assert_eq!(levenshtein("kitten", "sitting"), 3);
         assert_eq!(levenshtein("status", "status"), 0);
         assert_eq!(levenshtein("statu", "status"), 1);
+    }
+
+    // ─── Stage 4: multi-team ambiguity refusal for destructive commands ───
+
+    fn seed_two_alive_teams_in(ws: &std::path::Path) {
+        crate::state::persist::save_runtime_state(
+            ws,
+            &serde_json::json!({
+                "teams": {
+                    "alpha": {"status": "alive"},
+                    "beta": {"status": "alive"},
+                },
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn refuse_helper_passes_on_single_alive_team() {
+        let ws = tmp_workspace();
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &serde_json::json!({"teams": {"alpha": {"status": "alive"}}}),
+        )
+        .unwrap();
+        assert!(
+            refuse_if_multi_alive_team_missing_scope("stuck-cancel", &ws, None).is_ok(),
+            "single-alive-team workspace must not trigger the ambiguity refusal"
+        );
+    }
+
+    #[test]
+    fn refuse_helper_passes_when_explicit_team_provided_even_in_multi_alive() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        assert!(
+            refuse_if_multi_alive_team_missing_scope("collect", &ws, Some("alpha")).is_ok(),
+            "explicit --team alpha must bypass the ambiguity gate"
+        );
+    }
+
+    #[test]
+    fn refuse_helper_refuses_when_multi_alive_team_and_no_explicit_team() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let err = refuse_if_multi_alive_team_missing_scope("repair-state", &ws, None)
+            .expect_err("multi-alive-team must refuse without --team");
+        let message = err.to_string();
+        assert!(
+            message.contains("multiple alive teams"),
+            "refusal must name the ambiguity; got: {message}"
+        );
+        assert!(
+            message.contains("alpha") && message.contains("beta"),
+            "refusal must list candidate teams; got: {message}"
+        );
+        assert!(
+            message.contains("repair-state"),
+            "refusal must name the command for diagnostic clarity; got: {message}"
+        );
+    }
+
+    #[test]
+    fn stuck_cancel_args_builder_refuses_on_multi_alive_team() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&[
+            "worker_a",
+            "--workspace",
+            &ws.to_string_lossy(),
+        ]);
+        let err = stuck_cancel_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "stuck-cancel args builder must surface the refusal; got: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_args_builder_refuses_on_multi_alive_team() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let err = collect_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "collect args builder must surface the refusal; got: {err}"
+        );
+    }
+
+    #[test]
+    fn repair_state_args_builder_refuses_on_multi_alive_team_before_task_validation() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        // The ambiguity gate must fire BEFORE `--task` / `--status` validation
+        // so the operator sees the multi-team confusion before any other
+        // usage error.
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let err = repair_state_args(&argv, &ws).expect_err("must refuse");
+        let message = err.to_string();
+        assert!(
+            message.contains("multiple alive teams"),
+            "ambiguity gate must precede --task/--status validation; got: {message}"
+        );
     }
 }

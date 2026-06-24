@@ -343,6 +343,7 @@ fn seed_team_spec(ws: &std::path::Path) {
             workspace: ws.clone(),
             timeout: 0.0,
             json: true,
+            team: None,
         }).expect("wait-ready"));
         assert_eq!(value["ok"], json!(false), "wait-ready must not fake success before workers are ready");
         assert_eq!(value.pointer("/readiness/ready"), Some(&json!(false)));
@@ -386,6 +387,7 @@ fn seed_team_spec(ws: &std::path::Path) {
             workspace: ws.clone(),
             timeout: 0.0,
             json: true,
+            team: None,
         }).expect("wait-ready"));
         assert_eq!(
             value.pointer("/readiness/mcp_ready"),
@@ -571,6 +573,7 @@ fn seed_team_spec(ws: &std::path::Path) {
                 workspace: ws.clone(),
                 result_file: None,
                 json: true,
+                team: None,
             })
             .unwrap(),
         );
@@ -611,6 +614,7 @@ fn seed_team_spec(ws: &std::path::Path) {
                 workspace: ws.clone(),
                 alert_type: None,
                 json: true,
+                team: None,
             })
             .unwrap(),
         );
@@ -637,6 +641,7 @@ fn seed_team_spec(ws: &std::path::Path) {
             cmd_stuck_list(&StuckListArgs {
                 workspace: ws.clone(),
                 json: true,
+                team: None,
             })
             .unwrap(),
         );
@@ -717,6 +722,7 @@ fn seed_team_spec(ws: &std::path::Path) {
                 status: "done".to_string(),
                 summary: Some("manual repair accepted".to_string()),
                 json: true,
+                team: None,
             })
             .expect("repair-state should not fail on a valid runtime state"),
         );

@@ -355,6 +355,11 @@ pub struct AllowPeerTalkArgs {
     pub b: String,
     pub workspace: PathBuf,
     pub json: bool,
+    /// Stage 4 (architect direction 2026-06-24): explicit `--team` scope.
+    /// In a multi-alive-team workspace, callers must pass `--team` to
+    /// disambiguate; bare invocation falls back to the legacy single-team
+    /// behaviour for unambiguous workspaces.
+    pub team: Option<String>,
 }
 
 /// `status`(`parser.py:182`)。`--summary`/`--json`/`--detail` 三态(summary xor json,见 `cmd_status`)。
@@ -365,6 +370,9 @@ pub struct StatusArgs {
     pub detail: bool,
     pub summary: bool,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope (read-only command; multi-team
+    /// workspaces use this for filtering, not for refusal).
+    pub team: Option<String>,
 }
 
 /// `watch`(`parser.py:190`)。无 `--json`(纯 stream 到 SystemExit)。
@@ -380,6 +388,8 @@ pub struct ApprovalsArgs {
     pub agent: Option<String>,
     pub workspace: PathBuf,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope.
+    pub team: Option<String>,
 }
 
 /// `inbox`(`parser.py:217`)。`--since` ISO8601(claim-leader inbox_hint 复用)。
@@ -390,6 +400,8 @@ pub struct InboxArgs {
     pub limit: usize,
     pub since: Option<String>,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope.
+    pub team: Option<String>,
 }
 
 /// `takeover`(`parser.py:242`)。`--confirm` 必需(覆写 recorded team_owner)。
@@ -521,6 +533,8 @@ pub struct RemoveAgentArgs {
 pub struct StuckListArgs {
     pub workspace: PathBuf,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope (read-only enumeration).
+    pub team: Option<String>,
 }
 
 /// `stuck-cancel`(`parser.py:429`)。`--alert-type` ∈ {stuck, idle_fallback, all},默认 stuck。
@@ -531,6 +545,10 @@ pub struct StuckCancelArgs {
     /// `None` 表 `all`(展开全集);`Some(AlertType)` 表单类型。
     pub alert_type: Option<AlertType>,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope. Destructive (cancels stuck-alert
+    /// records); CLI dispatch refuses bare invocation in a multi-alive-team
+    /// workspace.
+    pub team: Option<String>,
 }
 
 /// `acknowledge-idle`(`parser.py:436`)。
@@ -573,6 +591,8 @@ pub enum DoctorGate {
 pub struct SessionsArgs {
     pub workspace: PathBuf,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope (read-only enumeration).
+    pub team: Option<String>,
 }
 
 /// `validate [spec=team.spec.yaml] --json`(`parser.py:120`)。
@@ -608,6 +628,10 @@ pub struct CollectArgs {
     pub workspace: PathBuf,
     pub result_file: Option<PathBuf>,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope. Destructive (consumes result
+    /// envelopes); CLI dispatch refuses bare invocation in a
+    /// multi-alive-team workspace.
+    pub team: Option<String>,
 }
 
 /// `settle`(`parser.py:177`)。
@@ -631,6 +655,10 @@ pub struct RepairStateArgs {
     pub status: String,
     pub summary: Option<String>,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope. Destructive (rewrites task state);
+    /// CLI dispatch refuses bare invocation in a multi-alive-team
+    /// workspace.
+    pub team: Option<String>,
 }
 
 /// `diagnose`(`parser.py:298`) runtime health report, distinct from `doctor`.
@@ -638,6 +666,8 @@ pub struct RepairStateArgs {
 pub struct DiagnoseArgs {
     pub workspace: PathBuf,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope (read-only health report).
+    pub team: Option<String>,
 }
 
 /// `preflight`(`parser.py:160`)。
@@ -653,6 +683,8 @@ pub struct WaitReadyArgs {
     pub workspace: PathBuf,
     pub timeout: f64,
     pub json: bool,
+    /// Stage 4: explicit `--team` scope (read-only readiness probe).
+    pub team: Option<String>,
 }
 
 /// `e2e`(`parser.py:449`)。
