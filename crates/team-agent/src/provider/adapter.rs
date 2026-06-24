@@ -1072,6 +1072,12 @@ fn scan_session_candidates_once(
         // identity match (TEAM_AGENT_ID literal in the transcript head, or
         // path-encoded agent_id). If none, return empty — capture stays
         // pending/ambiguous, which is safer than misattribution.
+        //
+        // Bug 2 (0.4.2 P0) reinforcement: even when positive-identity
+        // filtering returns no candidates, do NOT let downstream
+        // time-window narrowing run for Claude when expected_session_id
+        // misses — that's exactly the leader-session-leak symptom the
+        // architect cataloged in .team/artifacts/bug-042-restart-scope-and-session.md.
         if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
             let positive_only: Vec<CapturedSessionCandidate> = out
                 .iter()
@@ -2042,6 +2048,50 @@ mod e6_session_attribution_tests {
         // 用 utimensat 经 std:无直接 set_mtime,借 filetime-free 方式:写后用 File::set_modified。
         let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         f.set_modified(when).unwrap();
+    }
+
+    /// Bug 2 (0.4.2 P0): when expected_session_id is set (restart --allow-fresh
+    /// pre-allocates a UUID via --session-id) but the Claude CLI didn't adopt
+    /// it (no <expected>.jsonl on disk), capture must NOT fall back to
+    /// time-window narrowing over leader transcripts sharing the same cwd.
+    /// Pre-fix: leader transcript with later mtime would be silently picked
+    /// up as the worker session. Post-fix: empty list returned (caller treats
+    /// as session-not-yet-captured and retries on next tick).
+    #[test]
+    fn scan_expected_session_id_miss_refuses_to_pick_leader_sibling() {
+        let base = tmp_root("strict-no-leader-fallback");
+        let cwd = base.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let proj = base.join("projects");
+        // Simulate the leader's transcript and a stale earlier transcript in
+        // the same cwd. NEITHER matches expected_session_id.
+        let leader = write_transcript(&proj, "11111111-1111-4111-8111-111111111111", &cwd);
+        let stale = write_transcript(&proj, "22222222-2222-4222-8222-222222222222", &cwd);
+        let _ = (leader, stale);
+        let ctx = CaptureSessionContext {
+            agent_id: "claude-worker".to_string(),
+            spawn_cwd: cwd.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: Some("2020-01-01T00:00:00+00:00".to_string()),
+            // Worker was spawned with --session-id <expected> but Claude
+            // didn't write <expected>.jsonl.
+            expected_session_id: Some(SessionId::new(
+                "99999999-9999-4999-8999-999999999999",
+            )),
+            provider_projects_root: Some(proj.clone()),
+        };
+        let out = scan_session_candidates_once(Provider::ClaudeCode, &ctx).unwrap();
+        assert!(
+            out.is_empty(),
+            "expected_session_id set + no exact match → must NOT fall back to \
+             time-window narrowing (would grab leader's transcript). \
+             got={:?}",
+            out.iter()
+                .filter_map(|c| c.captured.session_id.as_ref().map(|s| s.as_str().to_string()))
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ── E11 层1:copilot session 归因(expected-id 优先,不抓 leader latest)──
