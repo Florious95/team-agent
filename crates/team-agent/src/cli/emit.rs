@@ -93,9 +93,9 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         }
         "status" => cmd_status_for_team(&status_args(args, cwd), parse_args(args).team.as_deref())
             .map(emit_result),
-        "stop" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
-        "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)).map(emit_result),
-        "restart" => cmd_restart(&restart_args(args, cwd)).map(emit_result),
+        "stop" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
+        "shutdown" => cmd_shutdown(&shutdown_args(args, cwd)?).map(emit_result),
+        "restart" => cmd_restart(&restart_args(args, cwd)?).map(emit_result),
         "restart-agent" => cmd_reset_agent(&reset_agent_args(args, cwd)?).map(emit_result),
         "start-agent" => cmd_start_agent(&start_agent_args(args, cwd)?).map(emit_result),
         "stop-agent" => cmd_stop_agent(&stop_agent_args(args, cwd)?).map(emit_result),
@@ -1075,29 +1075,33 @@ fn identity_args(args: &[String], cwd: &Path) -> IdentityArgs {
     }
 }
 
-fn shutdown_args(args: &[String], cwd: &Path) -> ShutdownArgs {
+fn shutdown_args(args: &[String], cwd: &Path) -> Result<ShutdownArgs, CliError> {
     let parsed = parse_args(args);
-    ShutdownArgs {
-        workspace: workspace(&parsed, cwd),
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope("shutdown", &workspace, parsed.team.as_deref())?;
+    Ok(ShutdownArgs {
+        workspace,
         team: parsed.team,
         keep_logs: parsed.keep_logs,
         json: parsed.json,
-    }
+    })
 }
 
-fn restart_args(args: &[String], cwd: &Path) -> RestartArgs {
+fn restart_args(args: &[String], cwd: &Path) -> Result<RestartArgs, CliError> {
     let parsed = parse_args(args);
-    RestartArgs {
-        workspace: parsed
-            .positionals
-            .first()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| workspace(&parsed, cwd)),
+    let workspace = parsed
+        .positionals
+        .first()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace(&parsed, cwd));
+    refuse_if_multi_alive_team_missing_scope("restart", &workspace, parsed.team.as_deref())?;
+    Ok(RestartArgs {
+        workspace,
         team: parsed.team,
         allow_fresh: parsed.allow_fresh,
         session_converge_deadline_ms: parsed.session_converge_deadline_ms,
         json: parsed.json,
-    }
+    })
 }
 
 fn start_agent_args(args: &[String], cwd: &Path) -> Result<StartAgentArgs, CliError> {
@@ -1125,9 +1129,11 @@ fn stop_agent_args(args: &[String], cwd: &Path) -> Result<StopAgentArgs, CliErro
 
 fn reset_agent_args(args: &[String], cwd: &Path) -> Result<ResetAgentArgs, CliError> {
     let parsed = parse_args(args);
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope("reset-agent", &workspace, parsed.team.as_deref())?;
     Ok(ResetAgentArgs {
         agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
+        workspace,
         team: parsed.team,
         discard_session: parsed.discard_session,
         no_display: parsed.no_display,
@@ -1166,9 +1172,11 @@ fn fork_agent_args(args: &[String], cwd: &Path) -> Result<ForkAgentArgs, CliErro
 
 fn remove_agent_args(args: &[String], cwd: &Path) -> Result<RemoveAgentArgs, CliError> {
     let parsed = parse_args(args);
+    let workspace = workspace(&parsed, cwd);
+    refuse_if_multi_alive_team_missing_scope("remove-agent", &workspace, parsed.team.as_deref())?;
     Ok(RemoveAgentArgs {
         agent: required_pos(&parsed, 0, "agent")?,
-        workspace: workspace(&parsed, cwd),
+        workspace,
         team: parsed.team,
         from_spec: parsed.from_spec,
         confirm: parsed.confirm,
@@ -1888,6 +1896,54 @@ mod tests {
         assert!(
             message.contains("multiple alive teams"),
             "ambiguity gate must precede --task/--status validation; got: {message}"
+        );
+    }
+
+    #[test]
+    fn shutdown_args_builder_refuses_on_multi_alive_team() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let err = shutdown_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "shutdown args builder must surface the refusal; got: {err}"
+        );
+    }
+
+    #[test]
+    fn restart_args_builder_refuses_on_multi_alive_team() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&[&ws.to_string_lossy()]);
+        let err = restart_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "restart args builder must surface the refusal; got: {err}"
+        );
+    }
+
+    #[test]
+    fn reset_agent_args_builder_refuses_on_multi_alive_team_before_agent_validation() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let err = reset_agent_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "reset-agent args builder must surface the refusal; got: {err}"
+        );
+    }
+
+    #[test]
+    fn remove_agent_args_builder_refuses_on_multi_alive_team_before_agent_validation() {
+        let ws = tmp_workspace();
+        seed_two_alive_teams_in(&ws);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
+        let err = remove_agent_args(&argv, &ws).expect_err("must refuse");
+        assert!(
+            err.to_string().contains("multiple alive teams"),
+            "remove-agent args builder must surface the refusal; got: {err}"
         );
     }
 
