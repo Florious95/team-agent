@@ -477,37 +477,22 @@ impl ProviderAdapter for BasicProviderAdapter {
             // codex.py:105-118 — the profile command overrides (codex_profile / codex_config)
             // ride on `agent["_provider_profile"]`, which only the plan path carries.
             //
-            // 0.3.30 Bug 2: synthesize a deterministic capture anchor for Codex
-            // (`_pending_session_id`). Codex CLI does NOT accept `--session-id`,
-            // so we cannot pre-seed Codex's own session id, but the framework's
-            // `_pending_session_id` field is what session capture reads as
-            // `expected_session_id`. By stamping a fresh token here, every
-            // fresh / reset Codex worker gets a unique anchor that survives in
-            // state — combined with spawn_cwd + spawned_at + the time-window
-            // filter (adapter.rs:1048), this lets capture pick the correct
-            // sibling transcript even when Codex assigns its own UUID. The
-            // anchor token itself never appears in Codex transcripts (capture
-            // falls back to the cwd + time-window path) but having it in state
-            // means restart's resume validator and reset-agent's fresh-launch
-            // path both have a non-empty pending id to converge on.
-            Provider::Codex => {
-                let expected = next_session_token();
-                let argv = codex_base_command(
-                    None,
-                    ctx.auth_mode,
-                    ctx.mcp_config,
-                    ctx.system_prompt,
-                    ctx.model,
-                    ctx.tools,
-                    ctx.profile_launch.map(|profile| &profile.command_overrides),
-                );
-                Ok(CommandPlan {
-                    argv,
-                    expected_session_id: Some(SessionId::new(expected)),
-                    provider_projects_root: None,
-                    managed_mcp_config: false,
-                })
-            }
+            // 0.3.31 Codex capture correction (reverts ad518f8): Codex CLI does
+            // NOT accept `--session-id`, so a framework-generated UUID is never
+            // matched against Codex's own session_meta.payload.id. Setting
+            // expected_session_id caused the apply-time Stage 1 guard to
+            // permanently reject the real Codex transcript. Codex capture must
+            // anchor on (cwd, spawned_at) instead — handled in
+            // `scan_session_candidates_once` below.
+            Provider::Codex => Ok(CommandPlan::argv_only(codex_base_command(
+                None,
+                ctx.auth_mode,
+                ctx.mcp_config,
+                ctx.system_prompt,
+                ctx.model,
+                ctx.tools,
+                ctx.profile_launch.map(|profile| &profile.command_overrides),
+            ))),
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
             //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
             //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
@@ -1072,6 +1057,38 @@ fn scan_session_candidates_once(
             agent_path_match,
         });
     }
+    // 0.3.31 Codex capture correction: HARD (cwd, spawned_at) filter.
+    // Codex CLI does NOT honor `--session-id` so we cannot use
+    // expected_session_id semantics. The only safe identity boundary is:
+    //   * session_meta.payload.cwd == spawn_cwd (already filtered above via
+    //     requires_cwd_match), AND
+    //   * session_meta.payload.timestamp >= spawned_at - small_grace, OR file
+    //     mtime >= spawned_at - small_grace (the candidate must be POST-spawn).
+    // Candidates older than the current spawn are pre-reset / pre-restart
+    // remnants and MUST be dropped, not merely de-prioritized — otherwise the
+    // single-candidate allocator path picks them, and the Stage 1 mismatch
+    // guard later rejects them, producing the 0.4.4 attribution_ambiguous loop.
+    if matches!(provider, Provider::Codex) {
+        if let Some(spawned_at) = context.spawned_at.as_deref().and_then(parse_spawned_at) {
+            // 5-second grace: allow for clock skew between Codex's session
+            // timestamp and our spawned_at (Codex records LOCAL time before
+            // RFC3339-encoding, framework records UTC; small skew possible
+            // across midnight or DST boundary).
+            let grace = std::time::Duration::from_secs(5);
+            let cutoff = spawned_at.checked_sub(grace).unwrap_or(spawned_at);
+            out.retain(|candidate| {
+                let path = match candidate.captured.rollout_path.as_ref() {
+                    Some(p) => p.as_path(),
+                    None => return false,
+                };
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .map(|mtime| mtime >= cutoff)
+                    .unwrap_or(false)
+            });
+        }
+    }
+
     // E6 层1·C(机会性兜底):若盘上真有 expected_session_id 命名的 transcript(claude 哪天
     // 真采用 --session-id,或别的 provider 本就采用),直接唯一命中,省去时间窗扫描。
     // 命不中(交互式 claude 现实:不落 <expected>.jsonl)→ 回落 B。

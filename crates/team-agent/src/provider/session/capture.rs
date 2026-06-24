@@ -428,11 +428,22 @@ where
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string),
-            expected_session_id: agent
-                .get("_pending_session_id")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(SessionId::new),
+            // 0.3.31 Codex capture correction: Codex does NOT honor
+            // `--session-id`, so any `_pending_session_id` stored for a Codex
+            // agent (stale 0.3.30 state, or the framework's pre-spawn token)
+            // is a local-only token and must NOT be used as expected_session_id
+            // — that would trigger the Stage 1 mismatch guard against Codex's
+            // real session_meta.payload.id and permanently reject the correct
+            // transcript. Codex capture anchors purely on (cwd, spawned_at).
+            expected_session_id: if matches!(provider, Provider::Codex) {
+                None
+            } else {
+                agent
+                    .get("_pending_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(SessionId::new)
+            },
             provider_projects_root: agent
                 .get("claude_projects_root")
                 .and_then(Value::as_str)

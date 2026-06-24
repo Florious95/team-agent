@@ -2644,12 +2644,11 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
             "captured_at",
             "captured_via",
             "attribution_confidence",
-            "_pending_session_id",
             "spawn_cwd",
             "spawned_at",
             "pane_id",
         ],
-        "0.3.30 Bug 2: Codex fresh spawn now writes _pending_session_id anchor; raw={raw}"
+        "0.3.31 Codex capture correction: no framework _pending_session_id for Codex (CLI doesn't honor --session-id); raw={raw}"
     );
     assert_eq!(agent["status"], json!("running"));
     assert_eq!(agent["provider"], json!("codex"));
