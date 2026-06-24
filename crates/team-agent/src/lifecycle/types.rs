@@ -498,7 +498,7 @@ pub enum QuickStartReport {
         /// failed to spawn) so the CLI surface cannot lie about availability.
         worker_readiness: QuickStartReadiness,
     },
-    /// 已有 runtime state,非 --fresh → 引导用 restart(`quick_start.py:42`)。
+    /// 已有 runtime state → quick-start 拒绝并引导用 restart。
     ExistingRuntime {
         team: Option<String>,
         session_name: Option<SessionName>,

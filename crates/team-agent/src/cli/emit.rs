@@ -215,7 +215,7 @@ fn command_help(command: Option<&str>) -> String {
             )
         }
         Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--fresh] [--no-display] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
@@ -613,7 +613,6 @@ struct ParsedArgs {
     team: Option<String>,
     json: bool,
     yes: bool,
-    fresh: bool,
     name: Option<String>,
     team_id: Option<String>,
     targets: Option<String>,
@@ -685,7 +684,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--team" => parsed.team = next_arg(args, &mut i),
             "--json" => parsed.json = true,
             "--yes" => parsed.yes = true,
-            "--fresh" => parsed.fresh = true,
             "--name" => parsed.name = next_arg(args, &mut i),
             "--team-id" => parsed.team_id = next_arg(args, &mut i),
             "--targets" | "--target" | "--to" => parsed.targets = next_arg(args, &mut i),
@@ -804,6 +802,13 @@ fn required_pos(parsed: &ParsedArgs, index: usize, name: &str) -> Result<String,
 }
 
 fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliError> {
+    if has_arg(args, "--fresh") {
+        return Err(CliError::Usage(
+            "quick-start no longer accepts --fresh. Reset semantics moved to \
+             `team-agent restart --allow-fresh`, which requires explicit user \
+             confirmation.".to_string(),
+        ));
+    }
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
     let agents_dir = parsed
@@ -822,7 +827,6 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         name: parsed.name,
         team_id: parsed.team_id.or(parsed.team),
         yes: parsed.yes,
-        fresh: parsed.fresh,
         no_display: parsed.no_display,
         json: parsed.json,
     })
@@ -1575,7 +1579,7 @@ mod tests {
         for (command, flags) in [
             (
                 "quick-start",
-                &["--workspace", "--team-id", "--yes", "--fresh", "--json"][..],
+                &["--workspace", "--team-id", "--yes", "--json"][..],
             ),
             (
                 "send",
@@ -1713,6 +1717,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            !command_help(Some("quick-start")).contains("--fresh"),
+            "quick-start help must not advertise removed reset semantics"
+        );
     }
 
     #[test]
@@ -1873,5 +1881,46 @@ mod tests {
             message.contains("multiple alive teams"),
             "ambiguity gate must precede --task/--status validation; got: {message}"
         );
+    }
+
+    // ──────────── Stage QR: quick-start/restart separation ────────────
+    // Design doc: .team/artifacts/quickstart-restart-separation-design.md
+
+    #[test]
+    fn quick_start_refuses_fresh_flag_with_restart_guidance() {
+        // QR contract: `--fresh` is gone from quick-start. The flag is
+        // not advertised or carried in QuickStartArgs, but scripts that
+        // still pass it get a clear redirect to restart --allow-fresh.
+        let ws = tmp_workspace();
+        let argv = cli_argv(&[
+            "--workspace",
+            &ws.to_string_lossy(),
+            "--fresh",
+        ]);
+        let err = quick_start_args(&argv, &ws).expect_err("must refuse --fresh");
+        let message = err.to_string();
+        assert!(
+            message.contains("no longer accepts --fresh"),
+            "QR: refusal must say --fresh is gone; got: {message}"
+        );
+        assert!(
+            message.contains("restart --allow-fresh"),
+            "QR: refusal must redirect to `restart --allow-fresh`; got: {message}"
+        );
+    }
+
+    #[test]
+    fn quick_start_without_fresh_flag_still_builds_args() {
+        // Without --fresh, args build normally (the initial-creation path).
+        let ws = tmp_workspace();
+        let argv = cli_argv(&[
+            "--workspace",
+            &ws.to_string_lossy(),
+        ]);
+        let args = quick_start_args(&argv, &ws).expect("must build");
+        assert_eq!(args.workspace, ws);
+        // No `fresh` field anymore — the struct must compile and round-trip
+        // without it.
+        let _ = args.no_display;
     }
 }

@@ -205,7 +205,6 @@ fn current_uid() -> Option<String> {
             name: None,
             team_id: None,
             yes: true,
-            fresh: false,
             no_display: false,
             json: true,
         };
@@ -240,7 +239,6 @@ fn current_uid() -> Option<String> {
             name: None,
             team_id: None,
             yes: false,
-            fresh: false,
             no_display: false,
             json: true,
         };

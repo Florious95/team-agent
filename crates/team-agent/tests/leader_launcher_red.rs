@@ -110,7 +110,7 @@ fn cli_claude_json_does_not_report_success_without_starting_provider_or_tmux() {
 
 #[test]
 #[serial(env)]
-fn cli_leader_launcher_does_not_mutate_leader_receiver_or_team_owner() {
+fn cli_leader_launcher_does_not_mutate_canonical_owner_binding() {
     let workspace = tmp_dir("owner-stable");
     let before = json!({
         "active_team_key": "current",
@@ -171,8 +171,12 @@ fn cli_leader_launcher_does_not_mutate_leader_receiver_or_team_owner() {
         .expect("run team-agent claude");
     let after = load_runtime_state(&workspace).expect("load runtime state");
 
-    assert_owner_binding_unchanged(&before, &after, "/leader_receiver");
-    assert_owner_binding_unchanged(&before, &after, "/team_owner");
+    assert!(
+        after.get("leader_receiver").is_none()
+            && after.get("team_owner").is_none()
+            && after.get("owner_epoch").is_none(),
+        "Stage 3d state saves strip legacy top-level owner copies; after={after}"
+    );
     assert_owner_binding_unchanged(&before, &after, "/teams/current/leader_receiver");
     assert_owner_binding_unchanged(&before, &after, "/teams/current/team_owner");
 }
@@ -445,9 +449,21 @@ fn managed_leader_launcher_writes_client_diagnostics_outside_owner_gate() {
 
     assert_eq!(state["is_external_leader"], json!(false));
     assert_eq!(state["leader_client"]["diagnostic_only"], json!(true));
-    assert_eq!(state["leader_receiver"]["pane_id"], json!("%42"));
-    assert_eq!(state["team_owner"]["pane_id"], json!("%42"));
-    for path in ["/leader_receiver", "/team_owner"] {
+    assert!(
+        state.get("leader_receiver").is_none()
+            && state.get("team_owner").is_none()
+            && state.get("owner_epoch").is_none(),
+        "Stage 3d state saves strip legacy top-level owner copies; state={state}"
+    );
+    assert_eq!(
+        state["teams"]["current"]["leader_receiver"]["pane_id"],
+        json!("%42")
+    );
+    assert_eq!(
+        state["teams"]["current"]["team_owner"]["pane_id"],
+        json!("%42")
+    );
+    for path in ["/teams/current/leader_receiver", "/teams/current/team_owner"] {
         let value = state.pointer(path).expect("owner/receiver");
         assert!(
             value.get("diagnostic_only").is_none()

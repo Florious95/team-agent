@@ -100,13 +100,16 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
+    // Stage QR (quick-start/restart separation, design doc
+    // .team/artifacts/quickstart-restart-separation-design.md): `fresh`
+    // is hardcoded to false. Reset semantics moved to restart.
     let value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
         args.team_id.as_deref(),
         args.yes,
-        args.fresh,
+        false,
         !args.no_display,
     )?;
     let readiness = value.get("readiness").and_then(Value::as_object);

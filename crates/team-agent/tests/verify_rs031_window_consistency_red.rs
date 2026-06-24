@@ -114,16 +114,19 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
 
     let workspace = team.parent().expect("teamdir has parent workspace");
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
-    let receiver_pane = state
+    let top_receiver_pane = state
         .get("leader_receiver")
         .and_then(|receiver| receiver.get("pane_id"))
         .and_then(serde_json::Value::as_str);
-    let team_receiver_pane = state
+    let receiver_pane = state
         .pointer("/teams/teamdir/leader_receiver/pane_id")
         .and_then(serde_json::Value::as_str);
-    let owner_pane = state
+    let top_owner_pane = state
         .get("team_owner")
         .and_then(|owner| owner.get("pane_id"))
+        .and_then(serde_json::Value::as_str);
+    let owner_pane = state
+        .pointer("/teams/teamdir/team_owner/pane_id")
         .and_then(serde_json::Value::as_str);
 
     assert_eq!(
@@ -133,18 +136,18 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
          whose bare id is `%0`, while the first worker in the product per-team -L socket is also `%0`. \
          Different sockets are not a worker/leader collision: the launched leader_receiver must remain bound \
          to the caller pane instead of being cleared to unbound/leader_not_attached. \
-         receiver_pane={receiver_pane:?} team_receiver_pane={team_receiver_pane:?} owner_pane={owner_pane:?} \
+         receiver_pane={receiver_pane:?} top_receiver_pane={top_receiver_pane:?} owner_pane={owner_pane:?} \
+         top_owner_pane={top_owner_pane:?} \
          worker_pane={worker_pane:?} state={state}"
-    );
-    assert_eq!(
-        team_receiver_pane,
-        Some("%0"),
-        "BUG-4 socket contract: the per-team receiver projection must preserve the caller pane too; state={state}"
     );
     assert_eq!(
         owner_pane,
         Some("%0"),
         "BUG-4 socket contract: team_owner must not be replaced with __team_agent_unbound__ for a different-socket bare id collision; state={state}"
+    );
+    assert!(
+        top_receiver_pane.is_none() && top_owner_pane.is_none(),
+        "Stage 3d state saves strip legacy top-level owner copies; state={state}"
     );
 }
 

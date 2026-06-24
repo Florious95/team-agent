@@ -157,7 +157,7 @@ For diagnosis, run `team-agent profile show deepseek --workspace . --json`; neve
 - For real workers, `quick-start` requires a current tmux leader pane. If it says the leader must run inside tmux, restart the leader with `team-agent codex`/`team-agent claude` or use an existing tmux-managed layout, then run quick-start again.
 - Quick-start generated files stay inside the selected team directory, for example `.team/current/` or `.team/alpha/`; do not create or expect root `team.spec.yaml` or `team_state.md`.
 - Use `team-agent quick-start ./roles --team-id alpha` to create a second generated team under `.team/alpha/`, or pass an existing team directory directly such as `team-agent quick-start .team/alpha`.
-- `quick-start` is for fresh startup from role docs. If stored worker context already exists for that runtime session, follow the returned `team-agent restart . --team <session>` action to resume it. Use `--fresh` only when the user explicitly accepts new blank worker contexts.
+- `quick-start` is only for first-time team creation from role docs. If that team already has runtime state, use `team-agent restart . --team <session_name_or_team_name>` to resume it. If restart cannot recover context, explain the loss and wait for explicit user consent before using `team-agent restart . --allow-fresh`; never reset context through quick-start.
 - If the user explicitly asks a worker to create or operate a nested child team, first read `references/team-in-team.md`. Child teams must use an independent child workspace, never the parent `.team/current`.
 - `team-agent send --watch-result coder "Do the bounded task"` sends a direct worker message, returns after delivery, and lets the coordinator collect/report completion asynchronously.
 - After `send --watch-result` succeeds, do not run `sleep`, `status`, `inbox`, or `collect` polling loops unless the user explicitly asks for diagnosis; the coordinator will notify the leader when the result arrives.
@@ -181,7 +181,7 @@ Use `team-agent start-agent <agent_id> --workspace .` only as a narrow repair wh
 
 ## Adding A New Worker At Runtime
 
-To add a new worker to a running team, write the role doc and run **one command** — do not shutdown/restart, do not regenerate the compiled spec, do not `quick-start --fresh`:
+To add a new worker to a running team, write the role doc and run **one command** — do not shutdown/restart, do not regenerate the compiled spec, and do not quick-start an existing team:
 
 ```bash
 cat > .team/current/agents/reviewer.md <<'EOF'
@@ -209,7 +209,7 @@ Semantic distinction:
 - `team-agent add-agent <agent> --role-file <file>` — add a **new** worker not yet in team state.
 - `team-agent start-agent <agent>` — (re)launch a worker that **already exists** in team state but whose window is missing.
 - `team-agent restart .` — resume a fully **stopped** team from stored worker sessions.
-- `team-agent quick-start <dir>` — **fresh** team startup from role docs; `--fresh` is reserved for the user explicitly accepting brand-new blank worker contexts.
+- `team-agent quick-start <dir>` — first-time team creation from role docs; for existing teams use `restart`, and use `restart --allow-fresh` only after explicit user consent to discard context.
 
 Removing a worker at runtime is the symmetric `team-agent remove-agent <agent> --workspace . --confirm`.
 

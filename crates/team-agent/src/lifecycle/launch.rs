@@ -2887,8 +2887,16 @@ pub fn quick_start_with_transport_in_workspace_with_display(
                         )
                     })
                     .unwrap_or_default();
+                // Stage QR (design doc .team/artifacts/quickstart-restart-separation-design.md):
+                // quick-start is initial-creation-only. When the team
+                // already has runtime state, do NOT mention `--fresh`
+                // (it's been removed); steer the operator to the
+                // restart flow which owns resume + reset semantics.
                 let mut next_actions = vec![
-                    "run restart to resume the existing team or pass --fresh to replace it"
+                    "this team already has runtime state — use `team-agent restart` \
+                     to resume it (quick-start is for first-time creation only). \
+                     If recovery is impossible and the operator EXPLICITLY \
+                     accepts losing context, restart accepts `--allow-fresh`."
                         .to_string(),
                 ];
                 if session_name.is_some() {
@@ -2987,6 +2995,16 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let mut next_actions = vec![format!(
         "team compiled; real spawn is behind the transport/provider boundary; {coordinator_action}"
     )];
+    // Stage QR (design doc
+    // .team/artifacts/quickstart-restart-separation-design.md):
+    // quick-start is initial-creation-only. After success, remind the
+    // operator that subsequent starts must go through restart so the
+    // user's context (sessions, ownership, tasks) survives.
+    next_actions.push(
+        "quick-start initialized this team; for all subsequent starts use \
+         `team-agent restart` to resume context (quick-start refuses on \
+         already-initialised teams)".to_string(),
+    );
     if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
         next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(&workspace));
     }

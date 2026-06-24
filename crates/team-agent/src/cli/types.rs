@@ -270,9 +270,13 @@ pub struct QuickStartArgs {
     pub name: Option<String>,
     pub team_id: Option<String>,
     pub yes: bool,
-    pub fresh: bool,
     pub no_display: bool,
     pub json: bool,
+    // Stage QR (quick-start/restart separation, design doc
+    // .team/artifacts/quickstart-restart-separation-design.md): the
+    // `fresh` field is intentionally REMOVED. Reset semantics now live
+    // exclusively on restart (`restart --allow-fresh`) and must be
+    // user-confirmed. quick-start is now an initial-creation-only verb.
 }
 
 /// `init`(`parser.py` bootstrap verb)。
