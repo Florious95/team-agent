@@ -377,13 +377,22 @@ fn quick_start_and_restart_emit_copyable_workspace_socket_attach_commands() {
         "attach-team",
         "fake",
         Some("none"),
-        &[AgentDoc {
-            id: "worker",
-            role: "Fake Worker",
-            provider: "fake",
-            tools: &["mcp_team"],
-            body: "Fake worker.",
-        }],
+        &[
+            AgentDoc {
+                id: "worker_a",
+                role: "Fake Worker A",
+                provider: "fake",
+                tools: &["mcp_team"],
+                body: "Fake worker A.",
+            },
+            AgentDoc {
+                id: "worker_b",
+                role: "Fake Worker B",
+                provider: "fake",
+                tools: &["mcp_team"],
+                body: "Fake worker B.",
+            },
+        ],
     );
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
@@ -398,19 +407,52 @@ fn quick_start_and_restart_emit_copyable_workspace_socket_attach_commands() {
     .expect("quick-start should run with recording transport");
     let quick_text = format!("{quick:?}");
     let mut failures = Vec::new();
-    if !report_has_attach_command(&quick_text, "team-attachcmd", "worker") {
+    if !report_has_attach_command(&quick_text, "team-attachcmd", "worker_a") {
         failures.push(format!(
-            "quick-start missing `tmux -S <full-socket-path> attach -t team-attachcmd:worker`; report={quick:?}"
+            "quick-start missing `tmux -S <full-socket-path> attach -t team-attachcmd:worker_a`; report={quick:?}"
         ));
     }
-    seed_running_resumable_state(&ws, "attachcmd", "worker", "fake");
+    if !report_has_attach_command(&quick_text, "team-attachcmd", "worker_b") {
+        failures.push(format!(
+            "quick-start missing `tmux -S <full-socket-path> attach -t team-attachcmd:worker_b`; report={quick:?}"
+        ));
+    }
+    seed_running_resumable_state(&ws, "attachcmd", "worker_a", "fake");
+    seed_running_resumable_state(&ws, "attachcmd", "worker_b", "fake");
     let restart = restart_with_transport(&ws, true, Some("attachcmd"), &RecordingTransport::new())
         .expect("restart should run with recording transport");
     let restart_text = format!("{restart:?}");
-    if !report_has_attach_command(&restart_text, "team-attachcmd", "worker") {
-        failures.push(format!(
-            "restart missing `tmux -S <full-socket-path> attach -t team-attachcmd:worker`; report={restart:?}"
-        ));
+    match &restart {
+        team_agent::lifecycle::RestartReport::Restarted {
+            attach_commands,
+            next_actions,
+            ..
+        } => {
+            if attach_commands.len() != 1 {
+                failures.push(format!(
+                    "restart must emit exactly one attach command; report={restart:?}"
+                ));
+            }
+            if next_actions.len() != 1 {
+                failures.push(format!(
+                    "restart next_actions must carry the same single attach command; report={restart:?}"
+                ));
+            }
+            if !report_has_session_attach_command(&attach_commands.join("\n"), "team-attachcmd") {
+                failures.push(format!(
+                    "restart missing `tmux -S <full-socket-path> attach -t team-attachcmd`; report={restart:?}"
+                ));
+            }
+            for worker in ["worker_a", "worker_b"] {
+                if report_has_attach_command(&attach_commands.join("\n"), "team-attachcmd", worker)
+                {
+                    failures.push(format!(
+                        "restart must not emit per-worker attach command for {worker}; report={restart:?}"
+                    ));
+                }
+            }
+        }
+        _ => failures.push(format!("restart should succeed; report={restart_text}")),
     }
     assert!(
         failures.is_empty(),
@@ -791,6 +833,12 @@ fn report_has_attach_command(text: &str, expected_session: &str, expected_window
     text.contains("tmux -S")
         && text.contains(" attach -t ")
         && text.contains(&format!("{expected_session}:{expected_window}"))
+}
+
+fn report_has_session_attach_command(text: &str, expected_session: &str) -> bool {
+    text.contains("tmux -S")
+        && text.contains(" attach -t ")
+        && text.contains(&format!("attach -t {expected_session}"))
 }
 
 fn read_to_string(path: &Path) -> String {

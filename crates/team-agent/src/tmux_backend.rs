@@ -502,6 +502,18 @@ pub(crate) fn attach_command_for_workspace(
     ))
 }
 
+pub(crate) fn attach_command_for_session(
+    workspace: &Path,
+    session_name: &SessionName,
+) -> Option<String> {
+    let socket_path = socket_path_for_workspace(workspace)?;
+    Some(format!(
+        "tmux -S {} attach -t {}",
+        socket_path.display(),
+        session_name.as_str()
+    ))
+}
+
 /// Bug #7 (prerelease 0.4.0 gate review §6): when the runtime state carries a
 /// persisted `tmux_endpoint` / `tmux_socket` (e.g. `/private/tmp/tmux-501/default`),
 /// the attach command MUST point at THAT endpoint, not the workspace-hash
