@@ -142,6 +142,41 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         LifecycleError::TeamSelect("active team spec workspace not found".to_string())
     })?;
     let safety = crate::lifecycle::launch::effective_runtime_config(&spec)?;
+    // Bug 1 (0.4.2 P0): the rebuilt spec is the single source of truth for the
+    // active roster. Any agent in state.agents that is NOT in the rebuilt
+    // spec is a stale leftover (role doc was deleted between sessions) and
+    // must NOT be restarted — otherwise a `team-agent restart` would re-spawn
+    // a removed worker from stale state. Prune state.agents in-place before
+    // convergence/plan/spawn so every downstream step (resume validation,
+    // event log, spawn loop) sees the bounded roster.
+    let spec_agent_ids = crate::lifecycle::launch::spec_agent_id_set(&spec);
+    if let Some(agents_obj) = state.get_mut("agents").and_then(|v| v.as_object_mut()) {
+        let stale_ids: Vec<String> = agents_obj
+            .keys()
+            .filter(|id| !spec_agent_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for stale_id in &stale_ids {
+            agents_obj.remove(stale_id);
+            let _ = crate::event_log::EventLog::new(&selected.run_workspace).write(
+                "restart.agent_skipped_not_in_spec",
+                serde_json::json!({
+                    "agent_id": stale_id,
+                    "team_key": selected.team_key.as_str(),
+                    "reason": "agent present in state.agents but absent from rebuilt spec; \
+                               role doc was removed — restart will not respawn removed workers",
+                    "action": format!(
+                        "to permanently remove run `team-agent remove-agent {stale_id}`; \
+                         to re-add restore the role doc under agents/<id>.md and run \
+                         `team-agent restart`"
+                    ),
+                }),
+            );
+        }
+        if !stale_ids.is_empty() {
+            save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+        }
+    }
     let mut convergence = converge_missing_provider_sessions(
         &mut state,
         session_convergence_deadline(session_converge_deadline_ms),

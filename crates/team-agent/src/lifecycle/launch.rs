@@ -4850,6 +4850,16 @@ fn spec_agents(spec: &Value) -> Vec<AgentId> {
         .collect()
 }
 
+/// Bug 1 (0.4.2): expose spec agent id set so the restart path can filter
+/// state.agents to only the agents currently defined in the rebuilt spec.
+/// Returns a `BTreeSet<String>` for O(log n) membership checks.
+pub(crate) fn spec_agent_id_set(spec: &Value) -> std::collections::BTreeSet<String> {
+    spec_agent_values(spec)
+        .into_iter()
+        .filter_map(|agent| agent.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 fn spec_agent_values(spec: &Value) -> Vec<&Value> {
     spec.get("agents")
         .and_then(Value::as_list)
