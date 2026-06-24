@@ -204,14 +204,22 @@ fn save_runtime_state_with_merge_exceptions(
     skip_capture_backfill_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
-    if cache_equals(&path, state) {
-        return Ok(());
-    }
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
     // 我们 `&Value` 不可变 → 克隆后迁移,后续比较/写入/缓存/self-heal 全走 `migrated`。
     // 该步**不**包 try/except → 错误 propagate(对齐 Python)。
     let mut migrated = state.clone();
     migrate_state_identity(&mut migrated, &SystemEnv, workspace)?;
+    // Stage 3 save-output canonical-aware strip (architect direction
+    // 2026-06-24, .team/artifacts/stage3-save-strip-fix.md): when the
+    // state carries a canonical `teams.<active>.team_owner` record, drop
+    // the legacy top-level `team_owner / leader_receiver / owner_epoch`
+    // before any cache comparison. The pre-fix order ran a `cache_equals`
+    // check against the RAW (pre-strip) state at the function entry — if
+    // disk and cache were already in the dual-source (post-restart /
+    // post-shutdown) shape, the early return would skip the cleanup
+    // entirely. Moving migrate+strip ahead of every cache_equals makes
+    // the canonical-only shape the cache invariant for new writes.
+    crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut migrated);
     if cache_equals(&path, &migrated) {
         return Ok(());
     }
@@ -224,6 +232,14 @@ fn save_runtime_state_with_merge_exceptions(
             if let Ok(mut existing) = serde_json::from_str::<Value>(&text) {
                 normalize_agent_session_state(&mut existing);
                 let _ = migrate_state_identity(&mut existing, &SystemEnv, workspace);
+                // Stage 3 save-output strip applied to `existing` too so
+                // the equality comparison is between two canonical-only
+                // shapes. Without this, a pre-fix dual-source disk state
+                // would never match the post-fix canonical-only `migrated`
+                // and would force a spurious rewrite on every save.
+                crate::state::ownership::strip_top_level_ownership_if_canonical_present(
+                    &mut existing,
+                );
                 if existing == migrated {
                     cache_set(&path, &migrated);
                     return Ok(());
@@ -257,6 +273,12 @@ fn save_runtime_state_with_merge_exceptions(
             &skip_capture_backfill,
         );
     }
+    // Stage 3 save-output strip second pass (defence-in-depth): after the
+    // `preserve_latest_roster_entries` lock-held merge, a future addition
+    // to the preserve path could re-introduce root owner fields from the
+    // on-disk latest. Re-strip here so the serialized payload is always
+    // canonical-only when a canonical teams.<key>.team_owner is present.
+    crate::state::ownership::strip_top_level_ownership_if_canonical_present(&mut migrated);
     // 字节对拍 Python json.dumps(indent=2, ensure_ascii=False)(无尾换行)。
     let payload = serde_json::to_string_pretty(&migrated)?;
     let delays = [0.05_f64, 0.2, 0.5];

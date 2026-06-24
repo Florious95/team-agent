@@ -1197,26 +1197,17 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
         value_object(&existing)
     };
     // Stage 3 top-level cleanup (architect direction 2026-06-24,
-    // .team/artifacts/stage3-toplevel-cleanup-fix.md): the legacy
-    // top-level owner copy loop (pre-fix:
-    //   for key in ["leader_receiver","team_owner","owner_epoch"] {
-    //       if let Some(value) = state.get(key) { merged.insert(...) }
-    //   })
-    // is removed. After Stage 3d's canonical-only write, `state.get(key)`
-    // at root returns either nothing (new save) or stale leftovers from
-    // older states / projected views. Keeping the loop would re-promote
-    // those stale values into the persisted root and reintroduce the
-    // dual-source bug (S3-OWNER-002: root team_owner=%2/epoch=1 stale
-    // while teams.<key> advanced to %3/epoch=2). The canonical record at
-    // `teams.target_key` already carries the up-to-date ownership via
-    // `compact_team_state_preserving_ownership`.
-    //
-    // Strip any legacy top-level owner fields from `merged` BEFORE the
-    // `teams` insertion + save. `had_existing_teams` / primary/active
-    // key computations are retained as dead writes only via _ binding —
-    // they no longer gate any owner promote.
+    // .team/artifacts/stage3-toplevel-cleanup-fix.md + stage3-save-strip-fix.md):
+    // the legacy top-level owner copy loop is gone; the canonical-aware
+    // strip is now performed at the persistence boundary
+    // (`state::persist::save_runtime_state_with_merge_exceptions`), which
+    // every save_runtime_state* path funnels through. This per-call-site
+    // strip call has been removed — the save output handles cleanup
+    // uniformly for claim / restart / shutdown / start-agent / stop-agent
+    // / coordinator tick / promote sibling. `had_existing_teams` /
+    // primary/active key computations are retained as dead writes only
+    // via _ binding — they no longer gate any owner promote.
     let _ = (had_existing_teams, existing_primary_key, existing_active_key);
-    crate::state::ownership::strip_top_level_ownership(&mut merged);
     merged.insert("teams".to_string(), Value::Object(teams));
     crate::state::persist::save_runtime_state(workspace, &Value::Object(merged))?;
     Ok(())

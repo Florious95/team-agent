@@ -210,6 +210,55 @@ pub fn strip_top_level_ownership(root: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// Stage 3 save-output canonical-aware strip (architect direction
+/// 2026-06-24, .team/artifacts/stage3-save-strip-fix.md): conditional
+/// version of `strip_top_level_ownership` used by `state::persist`'s
+/// persistence boundary. Only strips when a canonical
+/// `teams.<active_team_key>.team_owner` record exists; legacy single-team
+/// states whose only owner copy still lives at the root are left
+/// untouched so the `read_owner_for_team` legacy fallback can keep
+/// serving them through the migration window.
+///
+/// This is the SINGLE call point for owner cleanup at save time. Every
+/// `save_runtime_state*` path funnels through here, so claim / restart /
+/// shutdown / start-agent / stop-agent / coordinator tick / promote
+/// sibling are all uniformly cleaned without per-call-site patches (the
+/// scatter-patching approach S3-OWNER-002 showed was incomplete).
+pub fn strip_top_level_ownership_if_canonical_present(state: &mut Value) {
+    let canonical_key = active_team_key_for_strip(state);
+    if canonical_key.is_empty() {
+        return;
+    }
+    let teams_entry_has_owner = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(&canonical_key))
+        .and_then(Value::as_object)
+        .is_some_and(|entry| entry.contains_key("team_owner"));
+    if !teams_entry_has_owner {
+        return;
+    }
+    if let Some(root) = state.as_object_mut() {
+        strip_top_level_ownership(root);
+    }
+}
+
+/// Resolve the canonical team_key for the strip predicate. Architect's
+/// §Modification block keys the strip on `active_team_key`, falling back
+/// to `team_state_key(state)` for the legacy unscoped flow — same
+/// precedence as `canonical_owner_write_key` in `leader/lease.rs` so the
+/// write/strip pair stay aligned on the same key.
+fn active_team_key_for_strip(state: &Value) -> String {
+    if let Some(active) = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+    {
+        return active.to_string();
+    }
+    crate::state::projection::team_state_key(state)
+}
+
 /// The ownership write payload. All fields optional so callers can update a
 /// subset — receiver-only attach paths don't need to re-emit team_owner.
 #[derive(Debug, Clone, Default)]
@@ -397,6 +446,71 @@ mod tests {
                 .as_object()
                 .is_some_and(|map| map.is_empty())),
             "empty team_key must NOT touch teams.<key>"
+        );
+    }
+
+    #[test]
+    fn strip_if_canonical_present_strips_when_teams_entry_has_owner() {
+        // Canonical-aware strip: both root AND teams.<active> have owner →
+        // root gets stripped, canonical preserved.
+        let mut state = json!({
+            "active_team_key": "alpha",
+            "team_owner": owner_with_pane("%stale"),
+            "leader_receiver": {"pane_id": "%stale"},
+            "owner_epoch": 1,
+            "teams": {
+                "alpha": {
+                    "team_owner": owner_with_pane("%canonical"),
+                    "owner_epoch": 2,
+                }
+            },
+        });
+        strip_top_level_ownership_if_canonical_present(&mut state);
+        assert!(state.get("team_owner").is_none());
+        assert!(state.get("leader_receiver").is_none());
+        assert!(state.get("owner_epoch").is_none());
+        assert_eq!(
+            state["teams"]["alpha"]["team_owner"]["pane_id"],
+            json!("%canonical")
+        );
+        assert_eq!(state["teams"]["alpha"]["owner_epoch"], json!(2));
+    }
+
+    #[test]
+    fn strip_if_canonical_present_preserves_legacy_only_state() {
+        // Legacy-only state: root owner exists but no canonical
+        // teams.<active> owner. The strip MUST NOT remove root — that
+        // would lose ownership before the migration window completes.
+        // `read_owner_for_team` fallback still serves these readers.
+        let mut state = json!({
+            "active_team_key": "alpha",
+            "team_owner": owner_with_pane("%legacy"),
+            "leader_receiver": {"pane_id": "%legacy"},
+            "owner_epoch": 1,
+        });
+        strip_top_level_ownership_if_canonical_present(&mut state);
+        assert_eq!(state["team_owner"]["pane_id"], json!("%legacy"));
+        assert_eq!(state["leader_receiver"]["pane_id"], json!("%legacy"));
+        assert_eq!(state["owner_epoch"], json!(1));
+    }
+
+    #[test]
+    fn strip_if_canonical_present_falls_back_to_team_state_key() {
+        // No active_team_key → fall back to team_state_key (here:
+        // session_name "team-agent-x"). If that bucket has canonical
+        // owner, strip root.
+        let mut state = json!({
+            "session_name": "team-agent-x",
+            "team_owner": owner_with_pane("%stale"),
+            "teams": {
+                "team-agent-x": {"team_owner": owner_with_pane("%canonical")},
+            },
+        });
+        strip_top_level_ownership_if_canonical_present(&mut state);
+        assert!(state.get("team_owner").is_none());
+        assert_eq!(
+            state["teams"]["team-agent-x"]["team_owner"]["pane_id"],
+            json!("%canonical")
         );
     }
 
