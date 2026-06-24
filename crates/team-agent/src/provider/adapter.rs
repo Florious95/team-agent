@@ -476,15 +476,38 @@ impl ProviderAdapter for BasicProviderAdapter {
             }
             // codex.py:105-118 — the profile command overrides (codex_profile / codex_config)
             // ride on `agent["_provider_profile"]`, which only the plan path carries.
-            Provider::Codex => Ok(CommandPlan::argv_only(codex_base_command(
-                None,
-                ctx.auth_mode,
-                ctx.mcp_config,
-                ctx.system_prompt,
-                ctx.model,
-                ctx.tools,
-                ctx.profile_launch.map(|profile| &profile.command_overrides),
-            ))),
+            //
+            // 0.3.30 Bug 2: synthesize a deterministic capture anchor for Codex
+            // (`_pending_session_id`). Codex CLI does NOT accept `--session-id`,
+            // so we cannot pre-seed Codex's own session id, but the framework's
+            // `_pending_session_id` field is what session capture reads as
+            // `expected_session_id`. By stamping a fresh token here, every
+            // fresh / reset Codex worker gets a unique anchor that survives in
+            // state — combined with spawn_cwd + spawned_at + the time-window
+            // filter (adapter.rs:1048), this lets capture pick the correct
+            // sibling transcript even when Codex assigns its own UUID. The
+            // anchor token itself never appears in Codex transcripts (capture
+            // falls back to the cwd + time-window path) but having it in state
+            // means restart's resume validator and reset-agent's fresh-launch
+            // path both have a non-empty pending id to converge on.
+            Provider::Codex => {
+                let expected = next_session_token();
+                let argv = codex_base_command(
+                    None,
+                    ctx.auth_mode,
+                    ctx.mcp_config,
+                    ctx.system_prompt,
+                    ctx.model,
+                    ctx.tools,
+                    ctx.profile_launch.map(|profile| &profile.command_overrides),
+                );
+                Ok(CommandPlan {
+                    argv,
+                    expected_session_id: Some(SessionId::new(expected)),
+                    provider_projects_root: None,
+                    managed_mcp_config: false,
+                })
+            }
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
             //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
             //   * `-C <workspace>`(双保险,即便 spawn cwd 漂移也能锚定)
