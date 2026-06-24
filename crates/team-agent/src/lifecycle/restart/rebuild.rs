@@ -610,7 +610,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         crate::tmux_backend::attach_command_for_session(&selected.run_workspace, &session_name)
             .into_iter()
             .collect::<Vec<_>>();
-    let mut next_actions = attach_commands.clone();
+    let mut next_actions = Vec::new();
     if !failed_agents.is_empty() {
         next_actions.extend(restart_failure_next_actions(&failed_agents));
         write_restart_completed_event(

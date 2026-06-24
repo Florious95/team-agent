@@ -433,9 +433,9 @@ fn quick_start_and_restart_emit_copyable_workspace_socket_attach_commands() {
                     "restart must emit exactly one attach command; report={restart:?}"
                 ));
             }
-            if next_actions.len() != 1 {
+            if !next_actions.is_empty() {
                 failures.push(format!(
-                    "restart next_actions must carry the same single attach command; report={restart:?}"
+                    "restart next_actions must not duplicate attach_commands; report={restart:?}"
                 ));
             }
             if !report_has_session_attach_command(&attach_commands.join("\n"), "team-attachcmd") {
