@@ -654,6 +654,13 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             &failed_agents,
             "partial",
         )?;
+        // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
+        // come up still need a leader_receiver pane to deliver report_result.
+        try_autobind_leader_after_restart(
+            &selected.run_workspace,
+            Some(selected.team_key.as_str()),
+            &state,
+        );
         return Ok(RestartReport::Partial {
             session_name,
             agents: successful_agents,
@@ -669,6 +676,16 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         &failed_agents,
         "ok",
     )?;
+    // 0.3.30 Bug 1: auto-attach leader from caller's TMUX_PANE if available.
+    // Mirrors quick-start's seed_launched_owner_from_env behaviour: a restart
+    // invoked from a tmux pane should bind that pane as leader_receiver,
+    // restoring the worker→leader delivery path. Failure is non-fatal — the
+    // user can still run `team-agent attach-leader` manually.
+    try_autobind_leader_after_restart(
+        &selected.run_workspace,
+        Some(&selected.team_key),
+        &state,
+    );
     // 0.3.28 Step 1: topology invariant guard (warn-only). Same pattern as
     // `lifecycle::launch::launch_with_transport_in_workspace` — logs to stderr,
     // never panics. Hard error path is deferred to Step 10.
@@ -1061,6 +1078,68 @@ fn verify_spawned_agent_live(
     _transport: &dyn crate::transport::Transport,
 ) -> Result<(), LifecycleError> {
     Ok(())
+}
+
+/// 0.3.30 Bug 1: restart success path auto-attach.
+/// When `TMUX_PANE` is present in the caller's env, treat the restart as if
+/// the user had also run `attach-leader` from that pane. Mirrors quick-start's
+/// `seed_launched_owner_from_env` semantics.
+///
+/// Failure modes are intentionally non-fatal — `attach_leader` returns Err if
+/// the pane validation rejects (e.g. caller pane is a registered worker pane,
+/// E51 guard). In that case the user must still run `attach-leader` manually,
+/// matching pre-fix behaviour. We log to stderr so the operator sees why
+/// auto-attach didn't take.
+fn try_autobind_leader_after_restart(
+    workspace: &std::path::Path,
+    team: Option<&str>,
+    state: &serde_json::Value,
+) {
+    if std::env::var_os("TMUX_PANE").is_none() {
+        return;
+    }
+    // Provider: prefer the existing team_owner.provider (if rebind),
+    // else leader_receiver.provider (stale, but still informative),
+    // else default to ClaudeCode (matches the most common deployment).
+    let provider = state
+        .pointer("/team_owner/provider")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            state
+                .pointer("/leader_receiver/provider")
+                .and_then(serde_json::Value::as_str)
+        })
+        .and_then(|s| match s {
+            "codex" => Some(crate::model::enums::Provider::Codex),
+            "claude" | "claude_code" | "claude-code" => {
+                Some(crate::model::enums::Provider::ClaudeCode)
+            }
+            "copilot" => Some(crate::model::enums::Provider::Copilot),
+            _ => None,
+        })
+        .unwrap_or(crate::model::enums::Provider::ClaudeCode);
+    let team_str = team;
+    match crate::leader::attach_leader(workspace, team_str, None, provider) {
+        Ok(result) if result.ok => {
+            eprintln!(
+                "team_agent::restart auto_attach_leader ok pane={:?} team={:?}",
+                result.bound_pane_id.as_ref().map(|p| p.as_str()),
+                team_str,
+            );
+        }
+        Ok(result) => {
+            eprintln!(
+                "team_agent::restart auto_attach_leader skipped reason={:?} team={:?}",
+                result.reason, team_str,
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "team_agent::restart auto_attach_leader failed error={error} team={team_str:?} \
+                 (run `team-agent attach-leader` from your tmux pane to bind manually)",
+            );
+        }
+    }
 }
 
 fn mark_leader_receiver_rebind_required(state: &mut serde_json::Value, session_name: &SessionName) {
