@@ -441,3 +441,91 @@ use super::*;
     // _lease_epoch:400, _emit_lease_refusal:469, audit :712-729). These REDs lock the EXACT
     // golden shape per divergence; driven via claim_lease_no_incident(+seeded_liveness), OS-safe.
     // ═════════════════════════════════════════════════════════════════════════
+
+    /// **S3-OWNER-001 regression** (architect Stage 3 owner persist fix,
+    /// .team/artifacts/stage3-owner-persist-fix.md). Pre-fix on commit
+    /// `5d980c7`:
+    /// 1. `claim-leader --team alpha` returns `ok=true/status=claimed`.
+    /// 2. In-memory state has `state.teams.alpha.team_owner` set by
+    ///    `write_binding_to_state` → `state::ownership::write_owner`.
+    /// 3. `save_claim_team_scoped_state` calls `compact_team_state(state)` to
+    ///    build the per-team snapshot. `compact_team_state` strips the
+    ///    `teams` key entirely — the just-written nested ownership record
+    ///    is DROPPED on the way to disk.
+    /// 4. After Stage 3d removed the top-level dual-write, no copy survives.
+    /// 5. Reloading the workspace state.json shows `persisted_owner_locations=[]`.
+    ///
+    /// Fix: `save_claim_team_scoped_state` now uses
+    /// `compact_team_state_preserving_ownership(state, target_key)` which
+    /// re-injects `team_owner / leader_receiver / owner_epoch` from
+    /// `state.teams[target_key]` into the compacted entry. Top-level fields
+    /// remain absent (Stage 3d canonical shape preserved).
+    #[test]
+    #[serial_test::serial(env)]
+    fn claim_team_scoped_persists_canonical_owner_under_teams_target_key() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
+        let ws = p2_temp_ws("claim_team_persist");
+        let target = "alpha";
+        let team_id = TeamKey::new(target);
+        let caller = PaneId::new("%5");
+        // Seed runtime state with a teams entry but no owner fields anywhere
+        // (the S3-OWNER-001 starting condition). team_dir is set so
+        // team_state_key resolves to the target team_key, matching the
+        // claim path's projected-state shape.
+        let mut state = serde_json::json!({
+            "session_name": "team-agent-x",
+            "team_dir": format!("/tmp/{}", target),
+            "teams": {target: {}},
+        });
+        let event_log = crate::event_log::EventLog::new(&ws);
+        let live = seeded_liveness(&["%5"]);
+        let r = claim_lease_no_incident(
+            &ws, &mut state, Some(target), &team_id, &caller, false, &event_log, &live,
+        )
+        .unwrap();
+        assert!(r.ok, "S3-OWNER-001: claim must succeed; got {r:?}");
+        assert_eq!(r.status, LeaseStatus::Claimed);
+
+        // Reload state from disk — this is where the pre-fix loss surfaced.
+        let persisted_path = crate::state::persist::runtime_state_path(&ws);
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).unwrap(),
+        )
+        .unwrap();
+
+        // Canonical: teams.<target_key>.{team_owner, leader_receiver, owner_epoch}.
+        let entry = &persisted["teams"][target];
+        assert_eq!(
+            entry["team_owner"]["pane_id"],
+            serde_json::json!("%5"),
+            "S3-OWNER-001 fix: teams.{target}.team_owner.pane_id persisted; \
+             persisted={persisted}"
+        );
+        assert_eq!(
+            entry["leader_receiver"]["pane_id"],
+            serde_json::json!("%5"),
+            "S3-OWNER-001 fix: teams.{target}.leader_receiver.pane_id persisted; \
+             persisted={persisted}"
+        );
+        assert_eq!(
+            entry["owner_epoch"], serde_json::json!(1),
+            "S3-OWNER-001 fix: teams.{target}.owner_epoch=1 persisted; \
+             persisted={persisted}"
+        );
+
+        // Stage 3d invariant: top-level owner fields stay ABSENT (no
+        // recurrence of the legacy dual-write).
+        assert!(
+            persisted.get("team_owner").is_none(),
+            "Stage 3d: top-level team_owner must remain absent; persisted={persisted}"
+        );
+        assert!(
+            persisted.get("leader_receiver").is_none(),
+            "Stage 3d: top-level leader_receiver must remain absent; persisted={persisted}"
+        );
+        assert!(
+            persisted.get("owner_epoch").is_none(),
+            "Stage 3d: top-level owner_epoch must remain absent; persisted={persisted}"
+        );
+    }

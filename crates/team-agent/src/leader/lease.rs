@@ -1031,12 +1031,17 @@ fn scan_agents_for_pane(agents: Option<&Value>, caller_pane: &PaneId) -> Option<
     None
 }
 
-/// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23):
-/// route the in-memory binding write through the `state::ownership` API. The
-/// helper signature is unchanged so callers in this file don't need to thread
-/// a team_key — the team is derived from the state via `team_state_key`.
-/// Behaviour is byte-identical to the pre-3a hand-rolled inserts (the
-/// repository writes the same three fields at the same locations).
+/// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23)
+/// + Stage 3 owner persist fix (architect direction 2026-06-24): route the
+/// in-memory binding write through the `state::ownership` API. The
+/// canonical team_key is derived from `active_team_key` first (the explicit
+/// scope set by `project_top_level_view` when an explicit team was passed
+/// to claim-leader) and only falls back to `team_state_key(state)` for the
+/// legacy unscoped flow. Without the `active_team_key` preference, an
+/// explicit `claim-leader --team alpha` whose projected state was emptied
+/// of team_dir/session_name would derive "current" and write the owner to
+/// `teams.current`, while `save_claim_team_scoped_state` expected
+/// `teams.alpha` — the S3-OWNER-001 persistence loss shape.
 fn write_binding_to_state(
     state: &mut Value,
     receiver: &LeaderReceiver,
@@ -1048,7 +1053,7 @@ fn write_binding_to_state(
     if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
     }
-    let team_key = crate::state::projection::team_state_key(state);
+    let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
         .with_leader_receiver(serde_json::to_value(receiver)?)
         .with_team_owner(serde_json::to_value(owner)?)
@@ -1067,11 +1072,29 @@ fn write_receiver_to_state(
     if !state.is_object() {
         return Err(LeaderError::Validation("state root is not an object".to_string()));
     }
-    let team_key = crate::state::projection::team_state_key(state);
+    let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
         .with_leader_receiver(serde_json::to_value(receiver)?);
     crate::state::ownership::write_owner(state, &team_key, record);
     Ok(())
+}
+
+/// Stage 3 owner persist fix (architect direction 2026-06-24): determine
+/// the canonical team_key for an in-memory ownership write. When the state
+/// carries an `active_team_key` (set by `project_top_level_view` whenever
+/// an explicit team was scoped into the claim path), trust it — that's the
+/// requested team that `save_claim_team_scoped_state` will read back. Only
+/// fall back to `team_state_key(state)` for the legacy unscoped flow where
+/// the writer must derive team identity from session/dir/spec_path fields.
+fn canonical_owner_write_key(state: &Value) -> String {
+    if let Some(active) = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+    {
+        return active.to_string();
+    }
+    crate::state::projection::team_state_key(state)
 }
 
 fn state_receiver(state: &Value) -> Option<LeaderReceiver> {
@@ -1151,9 +1174,16 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
             .entry(existing_key)
             .or_insert_with(|| crate::state::projection::compact_team_state(&existing));
     }
+    // Stage 3 owner persist fix (architect direction 2026-06-24,
+    // .team/artifacts/stage3-owner-persist-fix.md): after Stage 3d removed
+    // top-level dual-write, the canonical ownership record lives ONLY at
+    // `state.teams[target_key].{team_owner, leader_receiver, owner_epoch}`.
+    // `compact_team_state(state)` strips the `teams` key entirely — that
+    // dropped the just-written nested ownership record on disk. Use the
+    // preserving helper so the canonical fields survive the compaction.
     teams.insert(
         target_key.to_string(),
-        crate::state::projection::compact_team_state(state),
+        compact_team_state_preserving_ownership(state, target_key),
     );
     let existing_primary_key = existing
         .get("session_name")
@@ -1183,6 +1213,41 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
 
 fn value_object(value: &Value) -> serde_json::Map<String, Value> {
     value.as_object().cloned().unwrap_or_default()
+}
+
+/// Stage 3 owner persist fix (architect direction 2026-06-24,
+/// .team/artifacts/stage3-owner-persist-fix.md): build the per-team
+/// snapshot used by `save_claim_team_scoped_state` so the canonical
+/// `teams.<target_key>.{team_owner, leader_receiver, owner_epoch}` record
+/// survives the `compact_team_state` strip. Without this helper the
+/// claim-leader save loses the just-written nested ownership record (the
+/// S3-OWNER-001 evidence shape: `persisted_owner_locations=[]`).
+///
+/// Behaviour:
+/// - Start from the existing `compact_team_state(state)` (strips `teams`).
+/// - Look up `state.teams[target_key].{team_owner, leader_receiver, owner_epoch}`
+///   and copy each present field into the compacted entry.
+/// - Top-level owner fields stay UNTOUCHED — Stage 3d's canonical-only
+///   shape is preserved on disk.
+fn compact_team_state_preserving_ownership(state: &Value, target_key: &str) -> Value {
+    let mut entry = crate::state::projection::compact_team_state(state);
+    let Some(entry_obj) = entry.as_object_mut() else {
+        return entry;
+    };
+    let Some(owner_obj) = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(target_key))
+        .and_then(Value::as_object)
+    else {
+        return entry;
+    };
+    for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+        if let Some(value) = owner_obj.get(key) {
+            entry_obj.insert(key.to_string(), value.clone());
+        }
+    }
+    entry
 }
 
 /// `_detect_dual_state_divergence`(card §85 C18;`__init__.py:556`)。workspace-level 与
