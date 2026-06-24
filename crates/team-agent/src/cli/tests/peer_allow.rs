@@ -136,3 +136,21 @@ fn allow_peer_talk_unknown_agents_succeed_no_validation() {
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn allow_peer_talk_explicit_team_is_rejected_until_backend_is_scoped() {
+    let ws = tmp_workspace();
+    let err = cmd_allow_peer_talk(&AllowPeerTalkArgs {
+        a: "alpha".to_string(),
+        b: "bravo".to_string(),
+        workspace: ws.clone(),
+        json: true,
+        team: Some("current".to_string()),
+    })
+    .expect_err("explicit --team must not silently write the global peer allowlist");
+    assert!(
+        err.to_string().contains("not supported yet"),
+        "allow-peer-talk --team must be an explicit refusal until backend supports scoped writes; got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}

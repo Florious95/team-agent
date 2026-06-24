@@ -115,7 +115,7 @@ fn unowned_running_ws() -> PathBuf {
 fn quick_start_compiles_real_spec_to_team_spec_yaml() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let result = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let result = quick_start_with_transport(&team, None, true, None, &transport);
 
     // OBSERVABLE 1 (real compiler ran; spawn-independent): the compiled spec is written.
     // E5: spec lands in .team/runtime/<team_key>/ (NOT the user team dir).
@@ -153,7 +153,7 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
     std::fs::write(team.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
 
     let transport = OfflineTransport::new();
-    let result = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let result = quick_start_with_transport(&team, None, true, None, &transport);
     assert!(
         matches!(result, Ok(QuickStartReport::Ready { .. })),
         "quick-start failed: {result:?}"
@@ -241,7 +241,6 @@ fn quick_start_default_workspace_compiled_spec_uses_project_root() {
         &workspace,
         None,
         true,
-        true,
         None,
         &transport,
     )
@@ -288,7 +287,7 @@ fn quick_start_default_workspace_compiled_spec_uses_project_root() {
 fn quick_start_invalid_role_doc_surfaces_real_compile_error() {
     let team = quick_start_team_dir(QS_ROLE_NO_PROVIDER);
     let transport = OfflineTransport::new();
-    let result = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let result = quick_start_with_transport(&team, None, true, None, &transport);
 
     let text = format!("{result:?}");
     assert!(
@@ -415,7 +414,7 @@ fn fork_agent_proceeds_past_owner_gate_for_unowned_workspace() {
             happens inside launch's real spawn). Acceptance-crate boundary, not a unit RED."]
 fn quick_start_full_ready_real_spawn() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
-    let report = quick_start(&team, None, true, true, None).expect("quick_start launches the team");
+    let report = quick_start(&team, None, true, None).expect("quick_start launches the team");
     assert!(
         matches!(report, QuickStartReport::Ready { .. }),
         "got {report:?}"
@@ -534,7 +533,7 @@ fn unowned_running_ws_all_paused() -> PathBuf {
 fn spine_quick_start_seeds_state_under_team_workspace_not_team_dir() {
     let team = quick_start_team_dir(QS_VALID_ROLE); // <base>/teamdir
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team.parent().unwrap(); // team_workspace(<base>/teamdir) = <base>
     let ws_state = crate::model::paths::runtime_dir(workspace).join("state.json");
     assert!(
@@ -1062,7 +1061,7 @@ fn quick_start_with_transport_spawns_workers_not_dry_run() {
     seed_healthy_coordinator(workspace);
     let transport = OfflineTransport::new();
 
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach a report");
 
     let launch = match report {
@@ -1155,7 +1154,7 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
     seed_healthy_coordinator(workspace);
     let transport = OfflineTransport::new();
 
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
 
     let (launch, attach_commands, display_backend) = match report {
@@ -1224,7 +1223,7 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
     let endpoint = "/tmp/team-agent-layout-selected-socket";
     let transport = OfflineTransport::new().with_tmux_endpoint(endpoint);
 
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
         QuickStartReport::Ready { attach_commands, .. } => attach_commands,
@@ -1299,7 +1298,7 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
     .expect("seed managed leader state");
     let transport = OfflineTransport::new();
 
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
         QuickStartReport::Ready { attach_commands, .. } => attach_commands,
@@ -1377,7 +1376,7 @@ fn quick_start_no_display_keeps_one_window_per_agent() {
     let transport = OfflineTransport::new();
 
     let report = quick_start_with_transport_in_workspace_with_display(
-        workspace, &team, None, true, true, None, &transport, false,
+        workspace, &team, None, true, None, &transport, false,
     )
     .expect("quick_start_with_transport must reach Ready");
 
@@ -1409,7 +1408,7 @@ fn quick_start_no_display_keeps_one_window_per_agent() {
 #[ignore = "real-machine: live tmux session + resident coordinator daemon (framework verifies via ps)"]
 fn quick_start_fresh_ws_spawns_resident_tmux_and_coordinator() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
-    let report = quick_start(&team, None, true, true, None).expect("quick_start");
+    let report = quick_start(&team, None, true, None).expect("quick_start");
     match report {
         QuickStartReport::Ready { launch, .. } => {
             assert!(
@@ -2464,7 +2463,7 @@ fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
 fn quick_start_seeds_tasks_key_from_compiled_spec() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
         .parent()
         .expect("team_workspace(<base>/teamdir) = <base>");
@@ -2521,7 +2520,7 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
     let _tmux = EnvVarGuard::unset("TMUX");
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
         .parent()
         .expect("team_workspace(<base>/teamdir) = <base>");
@@ -2610,7 +2609,7 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     let _clock_guard = EnvVarGuard::set("TEAM_AGENT_TEST_FIXED_SPAWNED_AT", FIXED_SPAWNED_AT);
     let team = quick_start_team_dir(QS_VALID_ROLE);
     let transport = OfflineTransport::new();
-    let _ = quick_start_with_transport(&team, None, true, true, None, &transport);
+    let _ = quick_start_with_transport(&team, None, true, None, &transport);
     let workspace = team
         .parent()
         .expect("team_workspace(<base>/teamdir) = <base>");

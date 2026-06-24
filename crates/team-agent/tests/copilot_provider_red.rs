@@ -60,7 +60,7 @@ fn copilot_argv_golden_restricted_role() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cprestricted"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cprestricted"), &transport)
         .expect("quick-start should reach copilot command construction");
     let spawn = transport.single_spawn();
     let argv = &spawn.argv;
@@ -202,7 +202,7 @@ fn copilot_argv_dangerous_maps_to_allow_all() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpdangerous"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpdangerous"), &transport)
         .expect("quick-start should reach copilot command construction");
     let argv = &transport.single_spawn().argv;
 
@@ -249,7 +249,7 @@ fn copilot_agents_md_is_the_compiled_prompt_and_env_points_at_it() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpinstr"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpinstr"), &transport)
         .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
@@ -339,7 +339,7 @@ fn copilot_permission_note_registers_fs_tools_prompt_only() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpenforce"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpenforce"), &transport)
         .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
     let dir = spawn
@@ -375,7 +375,7 @@ fn copilot_fork_returns_structured_capability_unsupported() {
     let team_dir = write_copilot_team(&ws, "cp-fork", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpfork"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpfork"), &transport)
         .expect("quick-start should seed the team");
     // Give the source a session id so the capability gate (not a missing-session gate)
     // is what fires.
@@ -647,7 +647,7 @@ fn copilot_p0_terminal_title_disabled_and_window_name_stable() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cptitle"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cptitle"), &transport)
         .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
@@ -723,7 +723,7 @@ fn copilot_mcp_residual_named_disabled_and_recorded() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpresidual"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresidual"), &transport)
         .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
@@ -782,7 +782,7 @@ fn copilot_mcp_residual_scan_unavailable_degrades_honestly_no_false_positive() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpresidunavail"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresidunavail"), &transport)
         .expect("quick-start should spawn the copilot worker even without copilot on PATH");
     let spawn = transport.single_spawn();
 
@@ -836,7 +836,7 @@ fn copilot_mcp_config_uses_copilot_field_name() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpschema"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpschema"), &transport)
         .expect("quick-start should spawn the copilot worker");
     let argv = &transport.single_spawn().argv;
 
@@ -868,7 +868,7 @@ fn copilot_resume_argv_has_no_session_id_resume_conflict() {
     let ws = tmp_ws("resume");
     let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpresume"), &RecordingTransport::new())
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresume"), &RecordingTransport::new())
         .expect("quick-start should seed the team");
     seed_running_resumable(&ws, "worker_a");
     seed_copilot_session_store(&home, "99999999-aaaa-4bbb-8ccc-dddddddddddd");
@@ -900,7 +900,7 @@ fn copilot_subscription_model_argv_only_when_configured() {
     let team_dir = write_copilot_team_model(&ws, "cp-model", &["mcp_team"], Some("gpt-5.5"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpmodel"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpmodel"), &transport)
         .expect("quick-start with a role model");
     let with_model = transport.single_spawn().argv;
 
@@ -908,7 +908,7 @@ fn copilot_subscription_model_argv_only_when_configured() {
     let team_dir2 = write_copilot_team_model(&ws2, "cp-nomodel", &["mcp_team"], None);
     seed_healthy_coordinator(&ws2);
     let transport2 = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, true, Some("cpnomodel"), &transport2)
+    quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, Some("cpnomodel"), &transport2)
         .expect("quick-start without a role model");
     let no_model = transport2.single_spawn().argv;
 
@@ -946,7 +946,7 @@ fn copilot_subscription_model_precedence_role_over_profile() {
     std::fs::write(&agent_md, body).unwrap();
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpprec"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpprec"), &transport)
         .expect("quick-start with role+profile model");
     let argv = transport.single_spawn().argv;
     assert_eq!(
@@ -971,7 +971,7 @@ fn copilot_subscription_env_no_provider_or_token_injection() {
     let team_dir = write_copilot_team(&ws, "cp-subenv", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpsubenv"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpsubenv"), &transport)
         .expect("quick-start subscription worker");
     let env = transport.single_spawn().env;
 
@@ -1009,7 +1009,7 @@ fn copilot_byok_profile_exports_provider_env_and_requires_model() {
     let team_dir = write_copilot_byok_team(&ws, "cp-byok", Some("byok-model-z"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    match quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cpbyok"), &transport) {
+    match quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpbyok"), &transport) {
         Err(error) => failures.push(format!("A-4: a complete BYOK profile must launch; got Err({error})")),
         Ok(_) => {
             let env = transport.single_spawn().env;
@@ -1036,7 +1036,7 @@ fn copilot_byok_profile_exports_provider_env_and_requires_model() {
     let ws2 = tmp_ws("byok-nomodel");
     let team_dir2 = write_copilot_byok_team(&ws2, "cp-byok-nm", None);
     seed_healthy_coordinator(&ws2);
-    match quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, true, Some("cpbyoknm"), &RecordingTransport::new()) {
+    match quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, Some("cpbyoknm"), &RecordingTransport::new()) {
         Ok(_) => failures.push(
             "A-4: a BYOK profile without a model must fail (help-providers: 'A model is \
 required for BYOK'); got Ok"
@@ -1088,7 +1088,7 @@ fn copilot_token_passthrough_emits_warning_event() {
     let team_dir = write_copilot_team(&ws, "cp-token", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("cptoken"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cptoken"), &transport)
         .expect("quick-start with a shell token present");
 
     let events = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap_or_default();

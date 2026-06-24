@@ -127,7 +127,6 @@ fn real_tmux_adaptive_display_creates_tiled_overview_and_close_removes_only_tagg
             "adaptive",
             "--name",
             "adaptive",
-            "--fresh",
             "--yes",
             "--json",
         ])

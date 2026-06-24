@@ -186,7 +186,7 @@ fn seed_team_spec(ws: &std::path::Path) {
         let mid = store
             .create_message(None, "leader", "w1", "hello w1", None, true, None)
             .unwrap();
-        let v = status_port::inbox(&ws, "w1", 20, None, true).expect("inbox");
+        let v = status_port::inbox(&ws, "w1", 20, None, true, None).expect("inbox");
         let messages = v["messages"].as_array().expect("messages array");
         assert_eq!(
             messages.len(),
@@ -217,7 +217,7 @@ fn seed_team_spec(ws: &std::path::Path) {
         store.create_message(None, "leader", "w1", "to w1", None, true, None).unwrap();
         store.create_message(None, "w1", "leader", "from w1", None, true, None).unwrap();
         store.create_message(None, "leader", "w2", "unrelated to w2", None, true, None).unwrap();
-        let v = status_port::inbox(&ws, "w1", 20, None, true).expect("inbox");
+        let v = status_port::inbox(&ws, "w1", 20, None, true, None).expect("inbox");
         let messages = v["messages"].as_array().expect("messages array");
         let mut contents: Vec<String> =
             messages.iter().map(|m| m["content"].as_str().unwrap().to_string()).collect();
@@ -651,6 +651,26 @@ fn seed_team_spec(ws: &std::path::Path) {
             "stuck-list must read the persisted state mirror, not return a hard-coded empty list"
         );
     }
+
+    #[test]
+    fn stuck_cancel_explicit_team_is_rejected_until_backend_is_scoped() {
+        let ws = tmp_workspace();
+        seed_collect_state(&ws);
+        let err = cmd_stuck_cancel(&StuckCancelArgs {
+            agent: "fake_impl".to_string(),
+            workspace: ws.clone(),
+            alert_type: None,
+            json: true,
+            team: Some("current".to_string()),
+        })
+        .expect_err("explicit --team must not silently write global stuck suppression");
+        assert!(
+            err.to_string().contains("not supported yet"),
+            "stuck-cancel --team must be an explicit refusal until backend supports scoped writes; got {err}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
     #[test]
     fn stuck_cancel_invalid_alert_type_is_rejected() {
         let ws = tmp_workspace();

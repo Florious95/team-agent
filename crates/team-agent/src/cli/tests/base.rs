@@ -455,11 +455,13 @@ latest result: none";
         let payload = err.to_payload(Path::new("/tmp/cli-error-123.log"), "quick-start");
         assert_eq!(payload.reason.as_deref(), Some("tmux_session_name_conflict"));
         assert_eq!(payload.session_name.as_deref(), Some("my-team"));
-        // E8 (N38): quick-start 撞已有 runtime 引导到 restart(resume),明确 --fresh 会丢上下文。
+        // E8 (N38): quick-start 撞已有 runtime 引导到 restart(resume);
+        // context reset is only through restart --allow-fresh with explicit consent.
         assert_eq!(
             payload.action,
             "tmux session `my-team` already exists. It may be your own existing team. \
-To resume it use `team-agent restart` (NOT --fresh, which discards context). \
+To resume it use `team-agent restart`. \
+If recovery is impossible, use `team-agent restart --allow-fresh` only after explicit context-loss consent. \
 Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. \
 Never terminate existing tmux sessions from quick-start."
         );

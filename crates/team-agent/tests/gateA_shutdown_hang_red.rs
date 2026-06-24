@@ -207,7 +207,6 @@ fn fake_provider_quick_start_shutdown_does_not_resurrect_killed_session_aliases(
             case.workspace.to_str().unwrap(),
             "--team-id",
             "current",
-            "--fresh",
             "--yes",
             "--json",
         ],

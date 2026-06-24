@@ -100,16 +100,12 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_quick_start`(`commands.py:18`)。`--json` 或 `!ok` → 整 dict;否则 `result["summary"]`。
 pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
-    // Stage QR (quick-start/restart separation, design doc
-    // .team/artifacts/quickstart-restart-separation-design.md): `fresh`
-    // is hardcoded to false. Reset semantics moved to restart.
     let value = lifecycle_port::quick_start(
         &args.workspace,
         &args.agents_dir,
         args.name.as_deref(),
         args.team_id.as_deref(),
         args.yes,
-        false,
         !args.no_display,
     )?;
     let readiness = value.get("readiness").and_then(Value::as_object);
@@ -216,7 +212,7 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
 /// `cmd_status`(`commands.py:90`)。三态:`--summary`(xor json,xor agent)→五行文本;
 /// `--json`→`status_port::status(compact=!detail)`;else→`status_port::format_status(agent)`。
 pub fn cmd_status(args: &StatusArgs) -> Result<CmdResult, CliError> {
-    cmd_status_for_team(args, None)
+    cmd_status_for_team(args, args.team.as_deref())
 }
 
 pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdResult, CliError> {
@@ -329,12 +325,20 @@ pub fn cmd_watch(args: &WatchArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_sessions`(`parser.py:230`)。
 pub fn cmd_sessions(args: &SessionsArgs) -> Result<CmdResult, CliError> {
-    let state = crate::state::persist::load_runtime_state(&args.workspace)?;
-    let spec = load_team_spec_optional(&args.workspace, &state)?;
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let spec = match selected.spec_path.as_ref() {
+        Some(path) => load_team_spec_at(path)?,
+        None => load_team_spec_optional(&selected.run_workspace, &selected.state)?,
+    };
     Ok(CmdResult::from_json(
         json!({
             "ok": true,
-            "sessions": sessions_overview(&state, spec.as_ref()),
+            "sessions": sessions_overview(&selected.state, spec.as_ref()),
             "workspace": args.workspace.to_string_lossy().to_string(),
         }),
         args.json,
@@ -370,7 +374,7 @@ pub fn cmd_validate_result(args: &ValidateResultArgs) -> Result<CmdResult, CliEr
 
 /// `cmd_collect`(`parser.py:292`)。
 pub fn cmd_collect(args: &CollectArgs) -> Result<CmdResult, CliError> {
-    cmd_collect_for_team(args, None)
+    cmd_collect_for_team(args, args.team.as_deref())
 }
 
 pub fn cmd_collect_for_team(args: &CollectArgs, team: Option<&str>) -> Result<CmdResult, CliError> {
@@ -602,6 +606,11 @@ fn write_settle_details_log(workspace: &Path, collect: &Value, status: &Value) -
 
 /// `cmd_allow_peer_talk`(`parser.py allow-peer-talk`).
 pub fn cmd_allow_peer_talk(args: &AllowPeerTalkArgs) -> Result<CmdResult, CliError> {
+    if args.team.is_some() {
+        return Err(CliError::Usage(
+            "allow-peer-talk --team is not supported yet because peer allowlist storage is not team-scoped".to_string(),
+        ));
+    }
     let value = messaging::allow_peer_talk(&args.workspace, &args.a, &args.b)?;
     Ok(CmdResult::from_json(value, args.json))
 }
@@ -616,7 +625,7 @@ pub fn cmd_repair_state(args: &RepairStateArgs) -> Result<CmdResult, CliError> {
     }
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
-        None,
+        args.team.as_deref(),
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -669,7 +678,7 @@ pub fn cmd_repair_state(args: &RepairStateArgs) -> Result<CmdResult, CliError> {
 pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
-        None,
+        args.team.as_deref(),
         crate::state::selector::SelectorMode::RuntimeOnly,
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -690,8 +699,8 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
                 "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
                 "leader_receiver": state.get("leader_receiver").cloned().unwrap_or(Value::Null),
                 "agent_count": state.get("agents").and_then(Value::as_object).map_or(0, serde_json::Map::len),
-                "message_count": count_dir_entries(&args.workspace.join(".team").join("messages")),
-                "result_count": count_dir_entries(&args.workspace.join(".team").join("results")),
+                "message_count": count_dir_entries(&selected.run_workspace.join(".team").join("messages")),
+                "result_count": count_dir_entries(&selected.run_workspace.join(".team").join("results")),
             },
             "suggested_repairs": suggested_repairs,
         }),
@@ -710,7 +719,7 @@ pub fn cmd_preflight(args: &PreflightArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_wait_ready`(`parser.py:171`)。
 pub fn cmd_wait_ready(args: &WaitReadyArgs) -> Result<CmdResult, CliError> {
-    let report = build_wait_ready_report(&args.workspace, args.timeout)?;
+    let report = build_wait_ready_report(&args.workspace, args.timeout, args.team.as_deref())?;
     Ok(CmdResult::from_json(
         report,
         args.json,
@@ -1324,7 +1333,18 @@ fn load_team_spec_at(spec_path: &Path) -> Result<Option<crate::model::yaml::Valu
 
 /// `cmd_approvals`(`commands.py:112`)。
 pub fn cmd_approvals(args: &ApprovalsArgs) -> Result<CmdResult, CliError> {
-    let value = status_port::approvals(&args.workspace, args.agent.as_deref(), args.json)?;
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let value = status_port::approvals_scoped(
+        &selected.run_workspace,
+        &selected.state,
+        args.agent.as_deref(),
+        args.json,
+    )?;
     if args.json {
         Ok(CmdResult::from_json(value, true))
     } else {
@@ -1334,21 +1354,29 @@ pub fn cmd_approvals(args: &ApprovalsArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_inbox`(`commands.py:137`)。
 pub fn cmd_inbox(args: &InboxArgs) -> Result<CmdResult, CliError> {
-    let value = status_port::inbox(
+    let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let value = status_port::inbox(
+        &selected.run_workspace,
         &args.agent,
         args.limit,
         args.since.as_deref(),
         args.json,
+        Some(&selected.team_key),
     )?;
     if args.json {
         Ok(CmdResult::from_json(value, true))
     } else {
         Ok(CmdResult::human(format_inbox_human(
-            &args.workspace,
+            &selected.run_workspace,
             &args.agent,
             args.since.as_deref(),
             &value,
+            Some(&selected.team_key),
         )?))
     }
 }
@@ -1358,6 +1386,7 @@ fn format_inbox_human(
     agent: &str,
     since: Option<&str>,
     value: &Value,
+    owner_team_id: Option<&str>,
 ) -> Result<String, CliError> {
     let messages = value
         .get("messages")
@@ -1380,7 +1409,7 @@ fn format_inbox_human(
             lines.push(format!("- {sender}: {content}"));
         }
     }
-    let pending = uncollected_result_count(workspace)?;
+    let pending = uncollected_result_count(workspace, owner_team_id)?;
     let mut note = "final results are not in inbox; use team-agent collect".to_string();
     if pending > 0 {
         note.push_str(&format!(" ({pending} uncollected result(s) pending)"));
@@ -1389,16 +1418,23 @@ fn format_inbox_human(
     Ok(lines.join("\n"))
 }
 
-fn uncollected_result_count(workspace: &Path) -> Result<i64, CliError> {
+fn uncollected_result_count(workspace: &Path, owner_team_id: Option<&str>) -> Result<i64, CliError> {
     let store = crate::message_store::MessageStore::open(workspace)
         .map_err(|e| CliError::Runtime(e.to_string()))?;
     let conn = crate::db::schema::open_db(store.db_path())
         .map_err(|e| CliError::Runtime(e.to_string()))?;
-    conn.query_row(
-        "select count(*) from results where status not in ('collected', 'invalid')",
-        [],
-        |row| row.get::<_, i64>(0),
-    )
+    match owner_team_id {
+        Some(team) => conn.query_row(
+            "select count(*) from results where status not in ('collected', 'invalid') and owner_team_id = ?1",
+            [team],
+            |row| row.get::<_, i64>(0),
+        ),
+        None => conn.query_row(
+            "select count(*) from results where status not in ('collected', 'invalid')",
+            [],
+            |row| row.get::<_, i64>(0),
+        ),
+    }
     .map_err(|e| CliError::Runtime(e.to_string()))
 }
 
@@ -1530,11 +1566,32 @@ pub fn cmd_remove_agent(args: &RemoveAgentArgs) -> Result<CmdResult, CliError> {
 
 /// `cmd_stuck_list`(`commands.py:405`)。REUSE `messaging::stuck_list`。
 pub fn cmd_stuck_list(args: &StuckListArgs) -> Result<CmdResult, CliError> {
-    Ok(CmdResult::from_json(messaging::stuck_list(&args.workspace)?, args.json))
+    let selected = crate::state::selector::resolve_active_team(
+        &args.workspace,
+        args.team.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let suppressed = selected
+        .state
+        .get("coordinator")
+        .and_then(|v| v.get("suppressed_idle_alerts"))
+        .and_then(|v| v.get(&selected.team_key))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok(CmdResult::from_json(
+        json!({"ok": true, "suppressed_idle_alerts": suppressed}),
+        args.json,
+    ))
 }
 
 /// `cmd_stuck_cancel`(`commands.py:409`)。REUSE `messaging::stuck_cancel`(suppressed_by="leader")。
 pub fn cmd_stuck_cancel(args: &StuckCancelArgs) -> Result<CmdResult, CliError> {
+    if args.team.is_some() {
+        return Err(CliError::Usage(
+            "stuck-cancel --team is not supported yet because stuck suppression storage is not team-scoped".to_string(),
+        ));
+    }
     Ok(CmdResult::from_json(
         messaging::stuck_cancel(&args.workspace, &args.agent, args.alert_type, "leader")?,
         args.json,

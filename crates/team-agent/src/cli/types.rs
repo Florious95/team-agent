@@ -86,7 +86,7 @@ impl CliError {
             payload.session_name = Some(session.clone());
             if command == "quick-start" {
                 payload.action = format!(
-                    "tmux session `{session}` already exists. It may be your own existing team. To resume it use `team-agent restart` (NOT --fresh, which discards context). Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. Never terminate existing tmux sessions from quick-start."
+                    "tmux session `{session}` already exists. It may be your own existing team. To resume it use `team-agent restart`. If recovery is impossible, use `team-agent restart --allow-fresh` only after explicit context-loss consent. Only if you want a separate team, change `name:` in TEAM.md and run quick-start again. Never terminate existing tmux sessions from quick-start."
                 );
                 payload.next_actions = Some(vec![
                     "If this is your existing team, resume it with `team-agent restart`.".to_string(),
@@ -359,10 +359,8 @@ pub struct AllowPeerTalkArgs {
     pub b: String,
     pub workspace: PathBuf,
     pub json: bool,
-    /// Stage 4 (architect direction 2026-06-24): explicit `--team` scope.
-    /// In a multi-alive-team workspace, callers must pass `--team` to
-    /// disambiguate; bare invocation falls back to the legacy single-team
-    /// behaviour for unambiguous workspaces.
+    /// Parsed but rejected until peer allowlist storage grows a team-scoped
+    /// backend column.
     pub team: Option<String>,
 }
 
@@ -549,9 +547,8 @@ pub struct StuckCancelArgs {
     /// `None` 表 `all`(展开全集);`Some(AlertType)` 表单类型。
     pub alert_type: Option<AlertType>,
     pub json: bool,
-    /// Stage 4: explicit `--team` scope. Destructive (cancels stuck-alert
-    /// records); CLI dispatch refuses bare invocation in a multi-alive-team
-    /// workspace.
+    /// Parsed but rejected until stuck suppression storage grows a team-scoped
+    /// backend selector.
     pub team: Option<String>,
 }
 

@@ -39,7 +39,6 @@ fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
         &team_dir,
         None,
         true,
-        false,
         Some("lifeteam"),
         &transport,
     )

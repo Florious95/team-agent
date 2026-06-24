@@ -117,7 +117,6 @@ pub mod lifecycle_port {
         name: Option<&str>,
         team_id: Option<&str>,
         yes: bool,
-        fresh: bool,
         open_display: bool,
     ) -> Result<Value, CliError> {
         match crate::lifecycle::quick_start_in_workspace_with_display(
@@ -125,7 +124,6 @@ pub mod lifecycle_port {
             agents_dir,
             name,
             yes,
-            fresh,
             team_id,
             open_display,
         ) {

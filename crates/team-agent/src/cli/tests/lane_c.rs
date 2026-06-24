@@ -196,7 +196,7 @@ use super::*;
     #[test]
     fn inbox_golden_shape_is_agent_id_and_since_not_agent_limit() {
         let ws = tmp_workspace();
-        let v = status_port::inbox(&ws, "alpha", 20, None, true).expect("inbox");
+        let v = status_port::inbox(&ws, "alpha", 20, None, true, None).expect("inbox");
         let obj = v.as_object().expect("inbox dict");
         let order: Vec<&str> = obj.keys().map(String::as_str).collect();
         assert_eq!(

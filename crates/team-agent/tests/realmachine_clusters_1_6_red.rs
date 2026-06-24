@@ -373,14 +373,12 @@ fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
         &teamdir,
         Some("command-harness-parent"),
         true,
-        true,
         Some("parent"),
         &transport,
     );
     let second = quick_start_with_transport(
         &teamdir,
         Some("command-harness-child"),
-        true,
         true,
         Some("child"),
         &transport,

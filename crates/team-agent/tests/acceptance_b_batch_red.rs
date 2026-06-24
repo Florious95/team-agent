@@ -133,7 +133,6 @@ fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
         &team_dir,
         None,
         true,
-        true,
         Some("b2team"),
         &WindowedTransport::new("b2team", &["worker_a"]),
     )
@@ -159,7 +158,6 @@ fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
         &team_dir,
         None,
         true,
-        false,
         Some("b2team"),
         &WindowedTransport::new("b2team", &["worker_a"]),
     )
@@ -273,7 +271,6 @@ fn b7_dead_leader_pane_env_fails_fast_on_quick_start() {
         &team_dir,
         None,
         true,
-        true,
         Some("b7team"),
         &DeadPaneTransport,
     );
@@ -308,7 +305,6 @@ fn b7_unset_leader_pane_env_passes_through() {
         &ws,
         &team_dir,
         None,
-        true,
         true,
         Some("b7uteam"),
         &WindowedTransport::new("b7uteam", &["worker_a"]),

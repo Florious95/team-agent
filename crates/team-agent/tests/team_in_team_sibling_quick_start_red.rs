@@ -52,7 +52,6 @@ fn quick_start_sibling_teamdir_in_same_workspace_starts_new_team_not_existing_ru
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -63,7 +62,6 @@ fn quick_start_sibling_teamdir_in_same_workspace_starts_new_team_not_existing_ru
         &team_b,
         Some("teamB"),
         true,
-        false,
         Some("teamB"),
         &transport,
     )
@@ -114,7 +112,6 @@ fn quick_start_sibling_teamdir_without_team_arg_infers_compiled_spec_name() {
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -125,7 +122,6 @@ fn quick_start_sibling_teamdir_without_team_arg_infers_compiled_spec_name() {
         &team_b,
         None,
         true,
-        false,
         None,
         &transport,
     )
@@ -176,7 +172,6 @@ fn quick_start_sibling_teamdir_without_team_arg_same_spec_name_still_returns_exi
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -187,7 +182,6 @@ fn quick_start_sibling_teamdir_without_team_arg_same_spec_name_still_returns_exi
         &team_b_same_name,
         None,
         true,
-        false,
         None,
         &transport,
     )
@@ -239,7 +233,6 @@ fn quick_start_same_existing_team_still_returns_existing_runtime() {
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -250,7 +243,6 @@ fn quick_start_same_existing_team_still_returns_existing_runtime() {
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -305,7 +297,6 @@ fn quick_start_sibling_after_shutdown_is_allowed_not_nested() {
         &team_a,
         Some("teamA"),
         true,
-        false,
         Some("teamA"),
         &transport,
     )
@@ -328,7 +319,6 @@ fn quick_start_sibling_after_shutdown_is_allowed_not_nested() {
     let second = quick_start_with_transport(
         &team_b,
         None,
-        false,
         false,
         None,
         &transport,
@@ -389,7 +379,6 @@ fn dirty_sibling_quick_start_from_same_leader_pane_binds_receiver_and_delivers_t
             "--team-id",
             "current",
             "--yes",
-            "--fresh",
             "--json",
         ],
         &leader_env,
@@ -677,7 +666,6 @@ fn worker_pane_seeded_as_leader_still_dropped() {
         &root,
         &team,
         Some("workerseed"),
-        true,
         true,
         Some("workerseed"),
         &transport,

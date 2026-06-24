@@ -297,13 +297,17 @@ fn copy_optional_field(from: &Value, to: &mut Value, key: &str) {
     obj.insert(key.to_string(), value);
 }
 
-pub(crate) fn build_wait_ready_report(workspace: &std::path::Path, timeout: f64) -> Result<Value, CliError> {
+pub(crate) fn build_wait_ready_report(
+    workspace: &std::path::Path,
+    timeout: f64,
+    team: Option<&str>,
+) -> Result<Value, CliError> {
     // swallow batch 3 ③: an unreadable runtime state must never read as "ready" — the
     // read error is surfaced verbatim (state_read_error) with ready=false instead of
     // silently degrading to an empty/stale state.
     let selected = match crate::state::selector::resolve_active_team(
         workspace,
-        None,
+        team,
         crate::state::selector::SelectorMode::RuntimeOnly,
     ) {
         Ok(selected) => selected,

@@ -134,6 +134,50 @@ fn repair_args(
     }
 }
 
+fn team_repair_state(ws: &std::path::Path, team: &str) -> serde_json::Value {
+    json!({
+        "active_team_key": team,
+        "status": "alive",
+        "spec_path": ws.join(".team").join("runtime").join(team).join("team.spec.yaml").to_string_lossy(),
+        "session_name": format!("team-agent-{team}"),
+        "leader": {"id": "leader"},
+        "agents": {"fake_impl": {"status": "stopped", "provider": "fake"}},
+        "tasks": [{
+            "id": "task_impl",
+            "title": format!("{team} implementation"),
+            "type": "implementation",
+            "assignee": null,
+            "deps": [],
+            "acceptance": ["fake result collected"],
+            "status": "pending"
+        }]
+    })
+}
+
+fn seed_two_team_repair_workspace(ws: &std::path::Path) {
+    std::fs::create_dir_all(ws.join(".team").join("logs")).unwrap();
+    for team in ["alpha", "beta"] {
+        let spec_dir = ws.join(".team").join("runtime").join(team);
+        std::fs::create_dir_all(&spec_dir).unwrap();
+        std::fs::write(
+            spec_dir.join("team.spec.yaml"),
+            REPAIR_SPEC_TEMPLATE.replace("__WS__", &ws.to_string_lossy()),
+        )
+        .unwrap();
+    }
+    crate::state::persist::save_runtime_state(
+        ws,
+        &json!({
+            "active_team_key": "alpha",
+            "teams": {
+                "alpha": team_repair_state(ws, "alpha"),
+                "beta": team_repair_state(ws, "beta"),
+            }
+        }),
+    )
+    .unwrap();
+}
+
 // Golden source:
 // - cli/parser.py:303-310 registers `repair-state --workspace --task --assignee --status --summary --json`.
 // - cli/commands.py:196-203 delegates all five args to `runtime.repair_state`.
@@ -245,6 +289,33 @@ fn repair_state_rejects_status_outside_task_statuses() {
             ws.join(".team/logs/cli-error-123.log").to_string_lossy()
         ),
         "repair-state --json error envelope must match Python compact key order and text",
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn repair_state_explicit_team_updates_selected_team_not_active_team() {
+    let ws = tmp_workspace();
+    seed_two_team_repair_workspace(&ws);
+    let mut args = repair_args(&ws, "done", Some("patched beta"), true);
+    args.team = Some("beta".to_string());
+
+    let cmd = cmd_repair_state(&args).expect("repair-state --team beta should update beta");
+    assert_eq!(cmd.exit, ExitCode::Ok);
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        state["teams"]["alpha"]["tasks"][0]["status"],
+        json!("pending"),
+        "repair-state --team beta must not mutate active/default alpha"
+    );
+    assert_eq!(
+        state["teams"]["beta"]["tasks"][0]["status"],
+        json!("done"),
+        "repair-state must consume args.team and update beta"
+    );
+    assert_eq!(
+        state["teams"]["beta"]["tasks"][0]["last_result_summary"],
+        json!("patched beta")
     );
     let _ = std::fs::remove_dir_all(&ws);
 }

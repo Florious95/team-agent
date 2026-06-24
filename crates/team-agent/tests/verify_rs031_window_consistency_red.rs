@@ -46,7 +46,7 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
     let team = mixed_provider_team_dir("mcp-owner-scope");
     let transport =
         RecordingTransport::new().with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
-    let launch = ready_launch(quick_start_with_transport(&team, None, true, true, None, &transport)
+    let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick-start should reach worker spawn path"));
     assert_eq!(launch.started.len(), 2, "fixture precondition: both workers spawn");
 
@@ -99,7 +99,7 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
     ]);
     let team = codex_only_team_dir("external-pane-collision");
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
-    let launch = ready_launch(quick_start_with_transport(&team, None, true, true, None, &transport)
+    let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick-start should reach worker spawn path"));
     let worker_pane = launch
         .started

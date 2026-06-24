@@ -4,7 +4,7 @@
 //! - First quick-start launches successfully.
 //! - Second quick-start with the same `--team-id` returns `ok:false` and the
 //!   JSON summary mentions an existing runtime; the user is steered to
-//!   `restart` / `--fresh` (next_actions string).
+//!   `restart --allow-fresh` (next_actions string).
 
 use crate::framework::*;
 
@@ -23,10 +23,10 @@ fn lnch_002_duplicate_quick_start_is_refused() {
     assert!(!ok, "2nd quick-start must refuse duplicate; got {j}");
 
     let dump = serde_json::to_string(&j).unwrap().to_lowercase();
-    let signals = ["existing", "already", "restart", "--fresh", "fresh"];
+    let signals = ["existing", "already", "restart", "--allow-fresh"];
     assert!(
         signals.iter().any(|s| dump.contains(s)),
-        "duplicate refusal should steer user to restart/--fresh; got json={j}"
+        "duplicate refusal should steer user to restart --allow-fresh; got json={j}"
     );
 
     let _ = run_ta(

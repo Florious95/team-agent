@@ -46,7 +46,7 @@ fn bug1_quick_start_child_preserves_runtime_teams_and_status_bindings() {
     let child = team_dir(&root, "child", &[("child_worker", "Child worker")]);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport(&parent, None, true, true, Some("parent"), &transport)
+    quick_start_with_transport(&parent, None, true, Some("parent"), &transport)
         .expect("fixture: parent quick-start should complete with recording transport");
     seed_canonical_state(
         &root,
@@ -60,7 +60,7 @@ fn bug1_quick_start_child_preserves_runtime_teams_and_status_bindings() {
         "parent",
     );
 
-    quick_start_with_transport(&child, None, true, true, Some("child"), &transport)
+    quick_start_with_transport(&child, None, true, Some("child"), &transport)
         .expect("Bug 1 trigger: child quick-start should run without a real provider");
     let after_child = load_runtime_state(&root).expect("state after child quick-start");
     let child_failures = missing_team_binding_failures(&after_child, &["parent", "child"]);
@@ -434,7 +434,7 @@ fn assert_child_quick_start_does_not_inherit_parent_owner() -> Result<(), String
         )],
         "parent",
     );
-    quick_start_with_transport(&child, None, true, true, Some("child"), &RecordingTransport::new())
+    quick_start_with_transport(&child, None, true, Some("child"), &RecordingTransport::new())
         .map_err(|e| e.to_string())?;
     let after = load_runtime_state(&root).map_err(|e| e.to_string())?;
     let mut failures = Vec::new();
@@ -532,7 +532,7 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
         };
         let _leader_pane = EnvGuard::remove("TEAM_AGENT_LEADER_PANE_ID");
         let _uuid = EnvGuard::remove("TEAM_AGENT_LEADER_SESSION_UUID");
-        quick_start_with_transport(&parent, None, true, true, Some("parent"), &quick_start_transport)
+        quick_start_with_transport(&parent, None, true, Some("parent"), &quick_start_transport)
             .map_err(|e| format!("{label}: parent quick-start failed: {e}"))?;
     }
     let after_parent = load_runtime_state(&root).map_err(|e| e.to_string())?;
@@ -588,7 +588,7 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
         let _pane = EnvGuard::set("TMUX_PANE", "%4");
         let _leader_pane = EnvGuard::remove("TEAM_AGENT_LEADER_PANE_ID");
         let _uuid = EnvGuard::remove("TEAM_AGENT_LEADER_SESSION_UUID");
-        quick_start_with_transport(&child, None, true, true, Some("child"), &quick_start_transport)
+        quick_start_with_transport(&child, None, true, Some("child"), &quick_start_transport)
             .map_err(|e| format!("{label}: child quick-start failed: {e}"))?;
     }
     let after_child = load_runtime_state(&root).map_err(|e| e.to_string())?;

@@ -34,7 +34,6 @@ fn compatible_api_profile_writes_claude_settings_and_project_state_with_mcp_serv
         &team,
         None,
         true,
-        true,
         Some("cfgteam"),
         &transport,
     )

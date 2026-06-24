@@ -295,7 +295,6 @@ impl RealCase {
                 team_key,
                 "--name",
                 team_key,
-                "--fresh",
                 "--yes",
                 "--json",
             ],

@@ -53,7 +53,7 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
         WindowName::new("codexer"),
         WindowName::new("clauder"),
     ]);
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should succeed for healthy spawn");
     let QuickStartReport::Ready { worker_readiness, session_name, .. } = &report else {
         panic!("quick-start must return Ready for healthy spawn; got {report:?}");
@@ -93,7 +93,7 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
     // spawn_failed in runtime state; BUG-7 must surface that as a Degraded
     // verdict so quick-start cannot pretend the team is ready.
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
-    let report = quick_start_with_transport(&team, None, true, true, None, &transport)
+    let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should reach the spawn/state path even when an agent fails to spawn");
     let QuickStartReport::Ready { worker_readiness, .. } = &report else {
         panic!("quick-start must still return Ready (with Degraded verdict) so the user sees session details; got {report:?}");

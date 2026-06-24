@@ -890,7 +890,7 @@ fn save_snapshot_writes_atomic_state_json_under_teams_dir() {
 fn quick_start_empty_dir_returns_typed_report_not_error_path_only() {
     let ws = temp_ws();
     // 空目录无可编译 team:应是 typed 阻塞 / 编译错,绝不 Ready。
-    match quick_start(&ws, None, false, false, None) {
+    match quick_start(&ws, None, false, None) {
         Ok(QuickStartReport::Ready { .. }) => {
             panic!("空 agents_dir 不应 Ready —— 无 team 可编译")
         }

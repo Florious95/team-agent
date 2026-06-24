@@ -73,7 +73,7 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("d123team"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d123team"), &transport)
         .expect("quick-start should reach codex command construction");
     let spawn = transport.single_spawn();
     let argv = &spawn.argv;
@@ -169,7 +169,7 @@ fn d4_worker_shell_env_sets_team_agent_id_to_worker_self() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("d4team"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d4team"), &transport)
         .expect("quick-start should spawn the worker");
     let spawn = transport.single_spawn();
     let mut failures = Vec::new();
@@ -206,7 +206,7 @@ fn d5_fresh_launch_spawn_cwd_and_state_use_workspace() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("d5team"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d5team"), &transport)
         .expect("quick-start should spawn the worker");
     let spawn = transport.single_spawn();
     let mut failures = Vec::new();
@@ -264,7 +264,7 @@ fn d6_compiled_system_prompt_first_section_is_identity() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("d6team"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d6team"), &transport)
         .expect("quick-start should spawn the claude worker");
     let spawn = transport.single_spawn();
     let prompt = flag_value(&spawn.argv, "--append-system-prompt")
@@ -301,7 +301,7 @@ fn d7_runtime_fast_sends_codex_fast_mode_toggle() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, true, Some("d7team"), &transport)
+    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d7team"), &transport)
         .expect("quick-start should spawn the codex worker");
     transport.single_spawn();
     let sent = transport.sent_text();

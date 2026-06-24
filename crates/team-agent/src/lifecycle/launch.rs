@@ -2658,18 +2658,17 @@ fn json_team_identity_matches(state: &serde_json::Value, team: &str) -> bool {
             .is_some_and(|value| value == team)
 }
 
-/// `quick_start(agents_dir, name, yes, fresh, team_id)`(`diagnose/quick_start.py:18`)。
+/// `quick_start(agents_dir, name, yes, team_id)`(`diagnose/quick_start.py:18`)。
 /// 面向用户的零配置入口:编译 team_dir → `launch` → autobind leader receiver → 起
 /// coordinator → `wait_ready` 轮询就绪。归入 lifecycle module(不与 diagnose 混)。
 pub fn quick_start(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = team_workspace(agents_dir);
-    quick_start_in_workspace(&workspace, agents_dir, name, yes, fresh, team_id)
+    quick_start_in_workspace(&workspace, agents_dir, name, yes, team_id)
 }
 
 pub fn quick_start_in_workspace(
@@ -2677,7 +2676,6 @@ pub fn quick_start_in_workspace(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = explicit_quick_start_workspace(workspace);
@@ -2687,7 +2685,6 @@ pub fn quick_start_in_workspace(
         agents_dir,
         name,
         yes,
-        fresh,
         team_id,
         &transport,
     )
@@ -2698,7 +2695,6 @@ pub fn quick_start_in_workspace_with_display(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
@@ -2709,7 +2705,6 @@ pub fn quick_start_in_workspace_with_display(
         agents_dir,
         name,
         yes,
-        fresh,
         team_id,
         &transport,
         open_display,
@@ -2784,13 +2779,12 @@ pub fn quick_start_with_transport(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = team_workspace(agents_dir);
     quick_start_with_transport_in_workspace(
-        &workspace, agents_dir, name, yes, fresh, team_id, transport,
+        &workspace, agents_dir, name, yes, team_id, transport,
     )
 }
 
@@ -2799,12 +2793,11 @@ pub fn quick_start_with_transport_in_workspace(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
     quick_start_with_transport_in_workspace_with_display(
-        workspace, agents_dir, name, yes, fresh, team_id, transport, true,
+        workspace, agents_dir, name, yes, team_id, transport, true,
     )
 }
 
@@ -2813,7 +2806,6 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     agents_dir: &Path,
     name: Option<&str>,
     yes: bool,
-    fresh: bool,
     team_id: Option<&str>,
     transport: &dyn Transport,
     open_display: bool,
@@ -2856,65 +2848,63 @@ pub fn quick_start_with_transport_in_workspace_with_display(
             team_depth.team_depth.saturating_sub(1)
         )));
     }
-    if !fresh {
-        let state_path = crate::state::persist::runtime_state_path(&workspace);
-        if state_path.exists() {
-            let state = crate::state::persist::load_runtime_state(&workspace)
-                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-            if requested_team
-                .as_deref()
-                .is_none_or(|team| runtime_state_has_quick_start_team(&state, team))
-            {
-                let session_name = state
-                    .get("session_name")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(SessionName::new);
-                let attach_commands = session_name
-                    .as_ref()
-                    .map(|session| {
-                        let windows = quick_start_attach_window_names(&state);
-                        attach_commands_for_runtime_windows(
-                            state
-                                .get("tmux_endpoint")
-                                .and_then(serde_json::Value::as_str)
-                                .or_else(|| {
-                                    state.get("tmux_socket").and_then(serde_json::Value::as_str)
-                                }),
-                            &workspace,
-                            session,
-                            windows.iter().map(String::as_str),
-                        )
-                    })
-                    .unwrap_or_default();
-                // Stage QR (design doc .team/artifacts/quickstart-restart-separation-design.md):
-                // quick-start is initial-creation-only. When the team
-                // already has runtime state, do NOT mention `--fresh`
-                // (it's been removed); steer the operator to the
-                // restart flow which owns resume + reset semantics.
-                let mut next_actions = vec![
-                    "this team already has runtime state — use `team-agent restart` \
-                     to resume it (quick-start is for first-time creation only). \
-                     If recovery is impossible and the operator EXPLICITLY \
-                     accepts losing context, restart accepts `--allow-fresh`."
-                        .to_string(),
-                ];
-                if session_name.is_some() {
-                    if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
-                        next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
-                            &workspace,
-                        ));
-                    }
-                    next_actions.extend(attach_commands.iter().cloned());
+    let state_path = crate::state::persist::runtime_state_path(&workspace);
+    if state_path.exists() {
+        let state = crate::state::persist::load_runtime_state(&workspace)
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        if requested_team
+            .as_deref()
+            .is_none_or(|team| runtime_state_has_quick_start_team(&state, team))
+        {
+            let session_name = state
+                .get("session_name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(SessionName::new);
+            let attach_commands = session_name
+                .as_ref()
+                .map(|session| {
+                    let windows = quick_start_attach_window_names(&state);
+                    attach_commands_for_runtime_windows(
+                        state
+                            .get("tmux_endpoint")
+                            .and_then(serde_json::Value::as_str)
+                            .or_else(|| {
+                                state.get("tmux_socket").and_then(serde_json::Value::as_str)
+                            }),
+                        &workspace,
+                        session,
+                        windows.iter().map(String::as_str),
+                    )
+                })
+                .unwrap_or_default();
+            // Stage QR (design doc .team/artifacts/quickstart-restart-separation-design.md):
+            // quick-start is initial-creation-only. When the team
+            // already has runtime state, do NOT mention `--fresh`
+            // (it's been removed); steer the operator to the
+            // restart flow which owns resume + reset semantics.
+            let mut next_actions = vec![
+                "this team already has runtime state — use `team-agent restart` \
+                 to resume it (quick-start is for first-time creation only). \
+                 If recovery is impossible and the operator EXPLICITLY \
+                 accepts losing context, restart accepts `--allow-fresh`."
+                    .to_string(),
+            ];
+            if session_name.is_some() {
+                if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
+                    next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
+                        &workspace,
+                    ));
                 }
-                return Ok(QuickStartReport::ExistingRuntime {
-                    team: requested_team.clone(),
-                    session_name,
-                    state_path: Some(state_path),
-                    next_actions,
-                    attach_commands,
-                });
+                next_actions.extend(attach_commands.iter().cloned());
             }
+            return Ok(QuickStartReport::ExistingRuntime {
+                team: requested_team.clone(),
+                session_name,
+                state_path: Some(state_path),
+                next_actions,
+                attach_commands,
+            });
         }
     }
     // CR-040/042: repeated quick-start from one template with distinct --team-id/--name

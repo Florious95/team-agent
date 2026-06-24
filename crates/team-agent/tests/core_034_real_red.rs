@@ -53,7 +53,6 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
         &team_dir,
         None,
         true,
-        true,
         Some("workerargv"),
         &transport,
     )
@@ -133,7 +132,6 @@ fn claude_control_role_without_native_tools_still_disallows_native_tools() {
         &team_dir,
         None,
         true,
-        true,
         Some("controlargv"),
         &transport,
     )
@@ -189,7 +187,6 @@ fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_
         &ws,
         &team_dir,
         None,
-        true,
         true,
         Some("restarttools"),
         &RecordingTransport::new(),
@@ -305,7 +302,6 @@ fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
         &default_team,
         None,
         true,
-        true,
         Some("defaultdisplay"),
         &RecordingTransport::new(),
     )
@@ -356,7 +352,6 @@ fn quick_start_default_display_adaptive_and_none_escape_hatch_are_observable() {
         &none_team,
         None,
         true,
-        true,
         Some("nonedisplay"),
         &RecordingTransport::new(),
     )
@@ -396,7 +391,6 @@ fn quick_start_and_restart_emit_copyable_workspace_socket_attach_commands() {
         &ws,
         &team,
         None,
-        true,
         true,
         Some("attachcmd"),
         &transport,

@@ -265,6 +265,16 @@ use rusqlite::params;
     pub fn approvals(workspace: &Path, agent: Option<&str>, as_json: bool) -> Result<Value, CliError> {
         let _ = as_json;
         let state = read_runtime_state(workspace);
+        approvals_scoped(workspace, &state, agent, as_json)
+    }
+
+    pub fn approvals_scoped(
+        workspace: &Path,
+        state: &Value,
+        agent: Option<&str>,
+        as_json: bool,
+    ) -> Result<Value, CliError> {
+        let _ = as_json;
         let session = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty());
         let mut approvals = Vec::new();
         if let (Some(session), Some(agents)) = (session, state.get("agents").and_then(Value::as_object)) {
@@ -333,12 +343,13 @@ use rusqlite::params;
         limit: usize,
         since: Option<&str>,
         as_json: bool,
+        owner_team_id: Option<&str>,
     ) -> Result<Value, CliError> {
         let _ = as_json;
         let store = crate::message_store::MessageStore::open(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut messages = store
-            .inbox(agent, limit, None)
+            .inbox(agent, limit, owner_team_id)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         if let Some(cutoff) = since.and_then(parse_rfc3339) {
             messages.retain(|message| {
