@@ -529,3 +529,123 @@ use super::*;
             "Stage 3d: top-level owner_epoch must remain absent; persisted={persisted}"
         );
     }
+
+    /// **S3-OWNER-002 regression** (architect Stage 3 top-level cleanup,
+    /// .team/artifacts/stage3-toplevel-cleanup-fix.md). Even with the
+    /// nested-ownership-preserving compact (aae818f), a SECOND claim on a
+    /// state whose root still carries legacy top-level `team_owner` /
+    /// `leader_receiver` / `owner_epoch` would leave the stale root copy
+    /// on disk while the canonical `teams.<key>` advanced. Evidence:
+    /// `state-after-claim.json` showed `team_owner=%2/epoch=1` at root and
+    /// `teams.<key>.team_owner=%3/epoch=2` — exact dual-source recurrence.
+    ///
+    /// Fix: `save_claim_team_scoped_state` strips legacy root ownership
+    /// fields before save via `state::ownership::strip_top_level_ownership`,
+    /// and the legacy "copy top-level owner from incoming state into
+    /// merged" loop is removed. After every successful named-team owner
+    /// mutation, persisted root is canonical-only.
+    #[test]
+    #[serial_test::serial(env)]
+    fn second_claim_strips_legacy_top_level_ownership_from_persisted_root() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
+        let ws = p2_temp_ws("claim_team_second_strip");
+        let target = "alpha";
+        let team_id = TeamKey::new(target);
+        let caller = PaneId::new("%3");
+        // Seed a state whose root carries stale legacy top-level owner
+        // (%2/epoch=1) AND a teams.<target_key> entry that already has
+        // canonical ownership at the previous epoch. This is the
+        // post-S3-OWNER-001-fix shape on disk after one prior claim.
+        let mut state = serde_json::json!({
+            "session_name": "team-agent-x",
+            "team_dir": format!("/tmp/{}", target),
+            "active_team_key": target,
+            "team_owner": {
+                "pane_id": "%2",
+                "provider": "codex",
+                "machine_fingerprint": "fp",
+                "leader_session_uuid": "OLDUUID",
+                "owner_epoch": 1,
+                "claimed_at": "t",
+                "claimed_via": "claim-leader",
+            },
+            "leader_receiver": {
+                "pane_id": "%2",
+                "owner_epoch": 1,
+                "leader_session_uuid": "OLDUUID",
+            },
+            "owner_epoch": 1,
+            "teams": {
+                target: {
+                    "team_owner": {
+                        "pane_id": "%2",
+                        "provider": "codex",
+                        "machine_fingerprint": "fp",
+                        "leader_session_uuid": "OLDUUID",
+                        "owner_epoch": 1,
+                        "claimed_at": "t",
+                        "claimed_via": "claim-leader",
+                    },
+                    "leader_receiver": {
+                        "pane_id": "%2",
+                        "owner_epoch": 1,
+                        "leader_session_uuid": "OLDUUID",
+                    },
+                    "owner_epoch": 1,
+                }
+            },
+        });
+        // Persist the seeded shape so `save_claim_team_scoped_state` loads
+        // it back as `existing` on save.
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+        let event_log = crate::event_log::EventLog::new(&ws);
+        // Both panes live so the dead-owner reclaim branch doesn't apply;
+        // explicit takeover via confirm=true forces the claim past the
+        // live-owner gate.
+        let live = seeded_liveness(&["%2", "%3"]);
+        let r = claim_lease_no_incident(
+            &ws, &mut state, Some(target), &team_id, &caller, true, &event_log, &live,
+        )
+        .unwrap();
+        assert!(r.ok, "S3-OWNER-002: explicit takeover must succeed; got {r:?}");
+        assert_eq!(r.status, LeaseStatus::Claimed);
+
+        let persisted_path = crate::state::persist::runtime_state_path(&ws);
+        let persisted: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&persisted_path).unwrap(),
+        )
+        .unwrap();
+
+        // Canonical advanced.
+        let entry = &persisted["teams"][target];
+        assert_eq!(
+            entry["team_owner"]["pane_id"],
+            serde_json::json!("%3"),
+            "S3-OWNER-002 fix: canonical owner advanced to new pane; persisted={persisted}"
+        );
+        assert_eq!(
+            entry["owner_epoch"],
+            serde_json::json!(2),
+            "S3-OWNER-002 fix: canonical owner_epoch advanced to 2; persisted={persisted}"
+        );
+        assert_eq!(
+            entry["leader_receiver"]["pane_id"],
+            serde_json::json!("%3"),
+            "S3-OWNER-002 fix: canonical receiver advanced; persisted={persisted}"
+        );
+
+        // Top-level stale legacy owner stripped.
+        assert!(
+            persisted.get("team_owner").is_none(),
+            "S3-OWNER-002 fix: stale top-level team_owner must be stripped; persisted={persisted}"
+        );
+        assert!(
+            persisted.get("leader_receiver").is_none(),
+            "S3-OWNER-002 fix: stale top-level leader_receiver must be stripped; persisted={persisted}"
+        );
+        assert!(
+            persisted.get("owner_epoch").is_none(),
+            "S3-OWNER-002 fix: stale top-level owner_epoch must be stripped; persisted={persisted}"
+        );
+    }

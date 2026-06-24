@@ -189,6 +189,27 @@ pub fn write_owner(state: &mut Value, team_key: &str, record: OwnershipWrite) {
     }
 }
 
+/// Stage 3 top-level cleanup (architect direction 2026-06-24,
+/// .team/artifacts/stage3-toplevel-cleanup-fix.md): strip the legacy
+/// top-level `team_owner / leader_receiver / owner_epoch` fields from a
+/// state root after a canonical `teams.<key>` ownership write has been
+/// published. Required because `save_claim_team_scoped_state` builds the
+/// to-be-persisted root from `value_object(state)` which still carries
+/// stale top-level owner copies from older saves (or from a projected
+/// state that promoted legacy values into the top-level view). Without
+/// this strip, every claim-leader save leaves a stale duplicate at the
+/// root and the dual-source bug returns.
+///
+/// Used only at owner-mutation save boundaries; do NOT call from a
+/// load-time path — legacy single-team states may still have only
+/// top-level owner and no canonical `teams.<key>` owner, and a blind load
+/// strip would lose ownership before migration.
+pub fn strip_top_level_ownership(root: &mut serde_json::Map<String, Value>) {
+    for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+        root.remove(key);
+    }
+}
+
 /// The ownership write payload. All fields optional so callers can update a
 /// subset — receiver-only attach paths don't need to re-emit team_owner.
 #[derive(Debug, Clone, Default)]
@@ -377,6 +398,33 @@ mod tests {
                 .is_some_and(|map| map.is_empty())),
             "empty team_key must NOT touch teams.<key>"
         );
+    }
+
+    #[test]
+    fn strip_top_level_ownership_removes_legacy_fields_only() {
+        // Stage 3 top-level cleanup: stripping legacy root owner fields
+        // must not touch unrelated state keys or the canonical teams.<key>
+        // ownership record.
+        let mut state = json!({
+            "session_name": "team-agent-x",
+            "team_owner": owner_with_pane("%stale"),
+            "leader_receiver": {"pane_id": "%stale", "mode": "direct_tmux"},
+            "owner_epoch": 1,
+            "teams": {"alpha": {"team_owner": owner_with_pane("%canonical"), "owner_epoch": 2}},
+        });
+        let root = state.as_object_mut().expect("root object");
+        strip_top_level_ownership(root);
+        assert!(root.get("team_owner").is_none());
+        assert!(root.get("leader_receiver").is_none());
+        assert!(root.get("owner_epoch").is_none());
+        // Unrelated fields preserved.
+        assert_eq!(root.get("session_name"), Some(&json!("team-agent-x")));
+        // Canonical teams.<key> untouched.
+        assert_eq!(
+            root["teams"]["alpha"]["team_owner"]["pane_id"],
+            json!("%canonical")
+        );
+        assert_eq!(root["teams"]["alpha"]["owner_epoch"], json!(2));
     }
 
     #[test]
