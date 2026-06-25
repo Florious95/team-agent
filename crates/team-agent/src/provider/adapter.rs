@@ -1955,6 +1955,33 @@ fn current_team_agent_command() -> String {
 /// `{"type":"custom-title","customTitle":"claude leader",...}` or
 /// `{"type":"agent-name","agentName":"claude leader",...}` written when the
 /// leader pane starts. Workers must never be attributed to such transcripts.
+/// E57 (lane-046-capture-gap postflight): expose the Claude leader-marker
+/// scanner for the event-log repair path. `recover_resume_session_from_events`
+/// must apply the SAME marker filter the capture allocator applies, otherwise
+/// a stale `session.captured` event from a pre-fix run still pulls the leader
+/// transcript onto a worker on the next restart.
+///
+/// Returns `true` ONLY for Claude/ClaudeCode providers when the rollout file's
+/// head records carry `customTitle == "claude leader"` or `agentName ==
+/// "claude leader"` (case-insensitive). Other providers always return `false`
+/// — codex/copilot transcripts don't use those fields the same way.
+pub(crate) fn rollout_path_has_claude_leader_marker(
+    provider: crate::provider::Provider,
+    rollout_path: &Path,
+) -> bool {
+    if !matches!(
+        provider,
+        crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode
+    ) {
+        return false;
+    }
+    let Ok(text) = read_head_text(rollout_path, CAPTURE_HEAD_BYTES) else {
+        return false;
+    };
+    let records = parse_session_records(&text);
+    claude_records_have_leader_marker(&records)
+}
+
 fn claude_records_have_leader_marker(records: &[serde_json::Value]) -> bool {
     records.iter().any(|record| {
         let custom_title = record

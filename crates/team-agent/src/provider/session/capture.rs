@@ -444,6 +444,13 @@ pub fn recover_resume_session_from_events(
     auth_mode: crate::provider::AuthMode,
     exclude_session_ids: &BTreeSet<String>,
 ) -> Result<Option<Value>, ProviderError> {
+    // E57 postflight: read the agent's provider once; needed for the Claude
+    // leader-marker filter below. Falls back to None on non-string / missing,
+    // in which case the marker filter is skipped (only meaningful for Claude).
+    let provider = previous
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider);
     let events = crate::event_log::EventLog::new(workspace)
         .tail(0)
         .map_err(|e| ProviderError::Io(e.to_string()))?;
@@ -473,6 +480,20 @@ pub fn recover_resume_session_from_events(
         let Some(rollout_path) = event_rollout_path(event).filter(|path| path.exists()) else {
             continue;
         };
+        // E57 postflight (lane-046-capture-gap): the capture allocator already
+        // refuses Claude leader transcripts (P0 d39b5104,
+        // claude_records_have_leader_marker in provider/adapter.rs). Event-log
+        // repair must apply the SAME filter — otherwise a stale `session.captured`
+        // event from a pre-fix run (or from a window where the allocator was
+        // bypassed) still pulls the 590MB leader transcript onto a worker on the
+        // next restart (Mac mini repro: session_id=ea059b82 reassigned to
+        // release-engineer via captured_via=event_log_repair). The check is
+        // a no-op for non-Claude providers.
+        if let Some(p) = provider {
+            if crate::provider::adapter::rollout_path_has_claude_leader_marker(p, &rollout_path) {
+                continue;
+            }
+        }
         let session = SessionId::new(session_id.to_string());
         if !adapter.session_is_resumable(Some(&session), auth_mode)? {
             continue;
@@ -1693,5 +1714,80 @@ mod u1_tests {
         let _ = std::fs::remove_file(&rollout_a);
         let _ = std::fs::remove_file(&rollout_b);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// E57 RED postflight (lane-046-capture-gap): `recover_resume_session_from_events`
+    /// must refuse to repair a worker's session from a stale `session.captured`
+    /// event whose rollout file is a Claude LEADER transcript
+    /// (`customTitle == "claude leader"`). Without this filter, a fresh restart
+    /// after a pre-fix run still pulls the leader transcript onto a worker via
+    /// captured_via=event_log_repair (Mac mini evidence:
+    /// resume.session_repaired session_id=ea059b82 → release-engineer).
+    #[test]
+    fn e57_recover_resume_refuses_claude_leader_marker_rollout() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let workspace = std::env::temp_dir().join(format!("ta-e57-recover-{}-{}", std::process::id(), uniq));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        // Write a leader-marker rollout file (claude TUI leader transcript).
+        let rollout = workspace.join("ea059b82-leader.jsonl");
+        let mut f = std::fs::File::create(&rollout).expect("rollout");
+        writeln!(
+            f,
+            "{{\"customTitle\":\"claude leader\",\"sessionId\":\"ea059b82-c53e-4654-9590-9f3e6d46f0ca\",\"cwd\":\"/tmp/e57\"}}"
+        )
+        .unwrap();
+        writeln!(f, "{{\"role\":\"user\",\"content\":\"hi\"}}").unwrap();
+        drop(f);
+
+        // Write a `session.captured` event into events.jsonl pointing
+        // release-engineer at the leader rollout — simulates the stale
+        // pre-fix event that triggered the bug.
+        let event_log = crate::event_log::EventLog::new(&workspace);
+        event_log
+            .write(
+                "session.captured",
+                serde_json::json!({
+                    "agent_id": "release-engineer",
+                    "provider": "claude",
+                    "session_id": "ea059b82-c53e-4654-9590-9f3e6d46f0ca",
+                    "rollout_path": rollout.to_string_lossy().to_string(),
+                    "captured_via": "fs_watch",
+                }),
+            )
+            .expect("event write");
+
+        let previous = serde_json::json!({
+            "provider": "claude",
+            "session_id": null,
+            "rollout_path": null,
+        });
+        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Claude, None, "");
+        let exclude = BTreeSet::new();
+        let result = recover_resume_session_from_events(
+            &workspace,
+            "release-engineer",
+            &previous,
+            &adapter,
+            crate::provider::AuthMode::Subscription,
+            &exclude,
+        )
+        .expect("recover call ok");
+
+        assert!(
+            result.is_none(),
+            "E57 postflight: recover_resume_session_from_events must REFUSE \
+             to repair from a Claude leader-marker rollout (event_log_repair \
+             cannot resurrect a stale leader-to-worker assignment); got {result:?}"
+        );
+
+        let _ = std::fs::remove_file(&rollout);
+        let _ = std::fs::remove_file(workspace.join(".team/logs/events.jsonl"));
+        let _ = std::fs::remove_dir_all(workspace.join(".team"));
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 }
