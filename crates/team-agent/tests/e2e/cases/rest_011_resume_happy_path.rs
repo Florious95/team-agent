@@ -1,24 +1,29 @@
 //! E2E-REST-011 Restart resume "happy path" — JSON shape contract.
 //!
-//! Pure-fake teams never become resumable (no provider session is captured
-//! for `provider: fake`), so the runtime always refuses `restart` without
-//! `--allow-fresh`. This is the documented behavior we want to lock down.
+//! 0.4.7 partial-resume: pure-fake teams never become resumable (no provider
+//! session is captured for `provider: fake`), AND fake workers also have no
+//! `first_send_at` because the leader doesn't message them in this fixture.
+//! So both agents are NEVER_CAPTURED (session_id=null + first_send_at=null),
+//! which partial-resume auto-freshes WITHOUT --allow-fresh — there's no
+//! context to lose.
 //!
-//! Invariants we DO assert (the contract the leader / scribe rely on):
-//! - `restart` without `--allow-fresh` returns `ok:false`,
-//!   `status:"refused_resume_atomicity"` (or a successor `refused_*` /
-//!   `session_*` label), and `error` mentions `--allow-fresh`.
-//! - `unresumable` array names every agent in the team.
+//! Pre-0.4.7 behaviour: `restart` without `--allow-fresh` refused with
+//! `refused_resume_atomicity`. That was the 1-blocks-N regression: a
+//! never-captured worker shouldn't block sibling restart.
+//!
+//! Invariants asserted (the contract):
+//! - `restart` without `--allow-fresh` on a never-captured fake team
+//!   returns `ok:true`, `status:"restarted"`.
 //! - The exit code is 0 (CLI prints structured JSON, does not crash).
 //!
-//! This guards the path users hit when they shut a fake team and try a
-//! bare `restart`. Real resume happy-paths are exercised by T2 scripted
-//! provider tests in a later batch.
+//! The "preserve never-silently-fresh guard" path (session_id=null +
+//! first_send_at=Valid → still Refuse) is tested in
+//! `upgrade_compat_0211_red::restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard`.
 
 use crate::framework::*;
 
 #[test]
-fn rest_011_restart_without_allow_fresh_returns_structured_refusal() {
+fn rest_011_restart_never_captured_fake_team_auto_freshes_partial_resume() {
     let team_id = "rest011";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
     let ws_path = ws.path().to_str().unwrap();
@@ -31,7 +36,6 @@ fn rest_011_restart_without_allow_fresh_returns_structured_refusal() {
     );
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
-    // Refusal is non-zero exit; only assert that the CLI didn't panic.
     assert!(
         !out.stderr.contains("panicked"),
         "restart stderr contains panic: {}",
@@ -39,39 +43,12 @@ fn rest_011_restart_without_allow_fresh_returns_structured_refusal() {
     );
     let j = out.json();
 
-    assert_json_field_eq_bool(&j, "/ok", false);
+    // 0.4.7: never-captured workers auto-fresh without --allow-fresh.
+    assert_json_field_eq_bool(&j, "/ok", true);
     let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        status.starts_with("refused_") || status.starts_with("session_"),
-        "status should be a refused_* / session_* label; got {status:?}; json={j}"
+    assert_eq!(
+        status, "restarted",
+        "0.4.7 partial-resume: never-captured fake team must auto-fresh \
+         (no context to lose); got status={status:?}; json={j}"
     );
-    let error = j.pointer("/error").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        error.contains("--allow-fresh"),
-        "error should steer user to --allow-fresh; got {error:?}"
-    );
-
-    // Leader directive 2026-06-22: `unresumable` is now an array of
-    // structured entries `{agent_id, reason, ...}`. The legacy string
-    // array remains available under `unresumable_ids` for tools that
-    // still want the bare list.
-    let unresumable = j
-        .pointer("/unresumable")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let unresumable_ids: Vec<&str> = unresumable
-        .iter()
-        .filter_map(|e| e.get("agent_id").and_then(|v| v.as_str()))
-        .collect();
-    assert!(
-        unresumable_ids.contains(&"a") && unresumable_ids.contains(&"b"),
-        "unresumable should list both agents; got {unresumable_ids:?}"
-    );
-    for e in &unresumable {
-        assert!(
-            e.get("reason").and_then(|v| v.as_str()).is_some(),
-            "each unresumable entry must carry a reason; got {e}"
-        );
-    }
 }

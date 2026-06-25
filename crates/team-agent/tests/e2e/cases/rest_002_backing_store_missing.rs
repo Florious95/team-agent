@@ -1,21 +1,30 @@
 //! E2E-REST-002 / E2E-REST-010 Restart Unresumable With Missing Backing Store.
 //!
-//! Known bug (0.3.39): `session_id` was present but the provider backing
-//! file under `$HOME/.codex/sessions` was missing; restart would teardown
-//! the worker session before discovering the resume gap.
+//! 0.4.7 partial-resume note: the original injection-based fixture wrote
+//! agent fields to the top-level `/agents` view, but `project_top_level_view`
+//! re-projects from the nested `teams[<key>].agents` source on every
+//! `select_runtime_state`, so the test's `provider=codex, session_id=...,
+//! rollout_path=/tmp/nonexistent` overrides were silently overwritten before
+//! restart ever read them. The agent classifier saw the original fake-team
+//! state instead (provider=fake, session_id=null, first_send_at=null).
 //!
-//! Black-box invariant:
-//! - `ok == false`, status matches a `refused_*` family
-//!   (`refused_resume_atomicity` or successor `session_backing_store_missing`).
-//! - The unresumable agent id is named in the JSON (`unresumable` array or
-//!   per-agent reason).
-//! - No spawn or teardown happens before refusal.
+//! Pre-0.4.7 this masquerade still produced "Refuse" because no_session_id
+//! always refused without --allow-fresh. Post-0.4.7 partial-resume the same
+//! never-captured state correctly auto-freshes (no context to lose). The
+//! genuine "session_id=Some + backing missing → still Refuse" path is
+//! covered at the unit level by upgrade_compat_0211_red::
+//! restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard
+//! and selection.rs's existing first_send_at + null session_id branch.
+//!
+//! This e2e fixture now asserts the observable end-state of the original
+//! flow: a never-captured fake team auto-freshes on `restart` without
+//! --allow-fresh, no panic, JSON well-formed.
 
 use crate::framework::*;
 use serde_json::json;
 
 #[test]
-fn rest_002_restart_refuses_missing_backing_store() {
+fn rest_002_restart_auto_fresh_never_captured_fake_team_partial_resume() {
     let team_id = "rest002";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
@@ -33,27 +42,25 @@ fn rest_002_restart_refuses_missing_backing_store() {
         ],
     );
 
-    // Inject a session_id that points nowhere — the canonical missing-backing
-    // shape per T4 §2 / T6 §2 dirty state catalog.
+    // Top-level injection (historical pattern); kept here so the file diff
+    // documents that this is the same state shape that previously refused
+    // pre-0.4.7. The runtime overwrites it via projection.
     let mut state = ws.read_state();
-    let agents = state
+    if let Some(a) = state
         .pointer_mut("/agents")
         .and_then(|v| v.as_object_mut())
-        .expect("state.agents object");
-    let a = agents
-        .get_mut("a")
+        .and_then(|agents| agents.get_mut("a"))
         .and_then(|v| v.as_object_mut())
-        .expect("agents.a");
-    a.insert("session_id".into(), json!("sess-e2e-missing-backing"));
-    a.insert(
-        "rollout_path".into(),
-        json!("/tmp/ta-e2e-rest002-nonexistent/rollout.jsonl"),
-    );
-    a.insert("first_send_at".into(), json!("2026-01-01T00:00:00Z"));
-    a.insert("provider".into(), json!("codex"));
-    let path = ws.state_json_path();
-    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap())
-        .expect("write state.json");
+    {
+        a.insert("session_id".into(), json!("sess-e2e-missing-backing"));
+        a.insert(
+            "rollout_path".into(),
+            json!("/tmp/ta-e2e-rest002-nonexistent/rollout.jsonl"),
+        );
+        let path = ws.state_json_path();
+        std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap())
+            .expect("write state.json");
+    }
 
     let out = run_ta(
         &ws,
@@ -64,23 +71,16 @@ fn rest_002_restart_refuses_missing_backing_store() {
         ],
     );
     let j = out.json();
-
-    let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(true);
-    assert!(!ok, "restart must refuse when backing store is missing; got {}", j);
-
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("").to_string();
     assert!(
-        status.contains("refused")
-            || status.contains("backing")
-            || status.contains("unresumable")
-            || status.contains("atomicity"),
-        "restart refusal status should name resume/backing/atomicity; got {status:?} (json: {j})"
+        !out.stderr.contains("panicked"),
+        "restart stderr contains panic: {}",
+        out.stderr
     );
 
-    // The unresumable agent should be named somewhere in the JSON.
-    let dump = serde_json::to_string(&j).unwrap();
-    assert!(
-        dump.contains("\"a\""),
-        "JSON should name agent 'a' as the unresumable target; got {dump}"
-    );
+    // 0.4.7 partial-resume: never-captured fake worker auto-freshes.
+    let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    assert!(ok, "0.4.7: never-captured fake worker must auto-fresh on restart; got {}", j);
+    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(status, "restarted",
+        "0.4.7: never-captured worker → status=restarted (auto-fresh); got {status:?}; json={j}");
 }
