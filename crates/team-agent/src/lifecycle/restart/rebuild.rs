@@ -833,7 +833,7 @@ fn claimed_session_ids_except(
     state: &serde_json::Value,
     current_agent_id: &str,
 ) -> std::collections::BTreeSet<String> {
-    state
+    let mut keys: std::collections::BTreeSet<String> = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .map(|agents| {
@@ -849,7 +849,42 @@ fn claimed_session_ids_except(
                 })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // E57 (lane-046-capture-gap): restart's resume_session_repair postflight
+    // path must NOT reassign the leader's own provider session to a worker.
+    // The capture-layer allocator (session_capture::claimed_provider_session_keys)
+    // already excludes leader_receiver/team_owner; mirror that here for the
+    // event-log recovery path, otherwise a fresh restart can pull the leader
+    // session_id out of events.jsonl and write it onto a worker
+    // (release-engineer / any worker with no captured session). Scan
+    // state.leader_receiver, state.team_owner, and the same fields under
+    // state.teams.<key>.
+    push_leader_session_ids(&mut keys, state);
+    if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
+        for team_state in teams.values() {
+            push_leader_session_ids(&mut keys, team_state);
+        }
+    }
+    keys
+}
+
+fn push_leader_session_ids(
+    keys: &mut std::collections::BTreeSet<String>,
+    scope: &serde_json::Value,
+) {
+    for anchor in ["leader_receiver", "team_owner"] {
+        if let Some(node) = scope.get(anchor) {
+            for field in ["session_id", "provider_session_id"] {
+                if let Some(session_id) = node
+                    .get(field)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.is_empty())
+                {
+                    keys.insert(session_id.to_string());
+                }
+            }
+        }
+    }
 }
 
 fn session_convergence_deadline(requested_ms: Option<u64>) -> std::time::Duration {
