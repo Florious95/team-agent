@@ -1051,6 +1051,18 @@ fn scan_session_candidates_once(
         };
         let positive_agent_id_match = candidate_text_has_team_agent_id(&text, context);
         let agent_path_match = candidate_path_matches_agent_id(&path, context);
+        // P0 (lane-046-capture-gap): Claude leader transcripts must NEVER be
+        // returned as a worker capture candidate. The macmini repro showed a
+        // 590MB leader transcript (sessionId=ea059b82, customTitle="claude
+        // leader") being attributed to a fresh release-engineer worker via the
+        // cwd+spawned_at time window. Filter by leader marker in the head
+        // records — limited to Claude/ClaudeCode (codex/copilot transcripts
+        // don't use customTitle/agentName the same way).
+        if matches!(provider, Provider::Claude | Provider::ClaudeCode)
+            && claude_records_have_leader_marker(&records)
+        {
+            continue;
+        }
         out.push(CapturedSessionCandidate {
             captured: CapturedSession {
                 session_id: session_id.map(SessionId::new),
@@ -1938,6 +1950,26 @@ fn current_team_agent_command() -> String {
     "/usr/local/bin/team-agent".to_string()
 }
 
+/// P0 (lane-046-capture-gap): detect Claude leader transcripts by their head
+/// marker records. A leader transcript head contains records of the form
+/// `{"type":"custom-title","customTitle":"claude leader",...}` or
+/// `{"type":"agent-name","agentName":"claude leader",...}` written when the
+/// leader pane starts. Workers must never be attributed to such transcripts.
+fn claude_records_have_leader_marker(records: &[serde_json::Value]) -> bool {
+    records.iter().any(|record| {
+        let custom_title = record
+            .get("customTitle")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase);
+        let agent_name = record
+            .get("agentName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase);
+        matches!(custom_title.as_deref(), Some("claude leader"))
+            || matches!(agent_name.as_deref(), Some("claude leader"))
+    })
+}
+
 fn has_cwd_field(record: &serde_json::Value) -> bool {
     record_cwd(record).is_some()
 }
@@ -1979,6 +2011,70 @@ fn next_session_token() -> String {
         bytes[14],
         bytes[15],
     )
+}
+
+#[cfg(test)]
+mod lane_046_leader_marker_tests {
+    use super::*;
+
+    #[test]
+    fn claude_leader_marker_in_custom_title_is_detected() {
+        let records = vec![serde_json::json!({
+            "type": "custom-title",
+            "customTitle": "claude leader",
+            "sessionId": "ea059b82",
+        })];
+        assert!(
+            claude_records_have_leader_marker(&records),
+            "customTitle=='claude leader' must be detected as leader marker"
+        );
+    }
+
+    #[test]
+    fn claude_leader_marker_in_agent_name_is_detected() {
+        let records = vec![serde_json::json!({
+            "type": "agent-name",
+            "agentName": "claude leader",
+            "sessionId": "ea059b82",
+        })];
+        assert!(
+            claude_records_have_leader_marker(&records),
+            "agentName=='claude leader' must be detected as leader marker"
+        );
+    }
+
+    #[test]
+    fn claude_worker_records_have_no_leader_marker() {
+        let records = vec![
+            serde_json::json!({
+                "type": "custom-title",
+                "customTitle": "claude release-engineer",
+                "sessionId": "abc12345",
+            }),
+            serde_json::json!({
+                "type": "user",
+                "content": "Team Agent message from leader: do X",
+                "sessionId": "abc12345",
+            }),
+        ];
+        assert!(
+            !claude_records_have_leader_marker(&records),
+            "worker transcripts must NOT be flagged as leader marker (the \
+             literal 'claude leader' in user content does not count — only \
+             customTitle/agentName fields)"
+        );
+    }
+
+    #[test]
+    fn claude_leader_marker_is_case_insensitive() {
+        let records = vec![serde_json::json!({
+            "customTitle": "Claude Leader",
+        })];
+        assert!(
+            claude_records_have_leader_marker(&records),
+            "leader marker detection must be case-insensitive"
+        );
+    }
 }
 
 #[cfg(test)]

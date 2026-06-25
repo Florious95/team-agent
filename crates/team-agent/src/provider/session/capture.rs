@@ -191,7 +191,7 @@ where
         .iter()
         .map(|item| item.agent_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut claimed = claimed_provider_session_keys(agent_map, &pending_ids);
+    let mut claimed = claimed_provider_session_keys(state, agent_map, &pending_ids);
     let (assignments, ambiguous_ids) =
         allocate_session_candidates(&pending, &candidates_by_agent, &mut claimed);
 
@@ -818,6 +818,27 @@ fn allocate_session_candidates(
         if assignments.contains_key(&item.agent_id) {
             continue;
         }
+        // P0 (lane-046-capture-gap): Claude/ClaudeCode with no
+        // expected_session_id (natural fresh — Stage 1 expected-id miss
+        // guard cannot fire) must NOT accept the weak `Any` fallback.
+        // Without this guard, a same-cwd leader transcript (no positive
+        // agent-id match, no path match) becomes the sole candidate via
+        // the time window and gets attributed to a worker. Only
+        // positive-agent-id / path-agent-id can authoritatively bind a
+        // Claude no-expected worker session.
+        let claude_no_expected = matches!(
+            item.provider,
+            Provider::Claude | Provider::ClaudeCode
+        ) && item.context.expected_session_id.is_none();
+        if claude_no_expected {
+            if candidates_by_agent
+                .get(&item.agent_id)
+                .is_some_and(|candidates| !candidates.is_empty())
+            {
+                ambiguous.insert(item.agent_id.clone());
+            }
+            continue;
+        }
         match unique_available_candidate(
             candidates_by_agent.get(&item.agent_id),
             claimed,
@@ -846,9 +867,16 @@ fn allocate_global_one_to_one(
     claimed: &mut BTreeSet<String>,
     assignments: &mut BTreeMap<String, CapturedSessionCandidate>,
 ) {
+    // P0 (lane-046-capture-gap): exclude Claude no-expected agents from the
+    // global one-to-one weak allocator. They must use PositiveAgentId or
+    // PathAgentId only — see allocate_session_candidates Any-block.
     let remaining_agents = pending
         .iter()
         .filter(|item| !assignments.contains_key(&item.agent_id))
+        .filter(|item| {
+            !(matches!(item.provider, Provider::Claude | Provider::ClaudeCode)
+                && item.context.expected_session_id.is_none())
+        })
         .map(|item| item.agent_id.clone())
         .collect::<Vec<_>>();
     if remaining_agents.is_empty() {
@@ -963,30 +991,60 @@ fn apply_captured_session(
 }
 
 fn claimed_provider_session_keys(
+    state: &Value,
     agents: &serde_json::Map<String, Value>,
     pending_ids: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
+    // 1. Non-pending worker sessions (existing behaviour).
     for (agent_id, agent) in agents {
         if pending_ids.contains(agent_id) {
             continue;
         }
-        if let Some(session_id) = agent
-            .get("session_id")
+        push_provider_session_keys(&mut keys, agent);
+    }
+    // 2. P0 (lane-046-capture-gap): leader anchor sessions. The leader's
+    //    own provider transcript must never be attributed to a worker. Scan
+    //    state.leader_receiver, state.team_owner, and the same fields under
+    //    state.teams.<key>. Cover all known provider session field names so
+    //    a present transcript path/id excludes that session from worker
+    //    allocation.
+    push_leader_provider_session_keys(&mut keys, state);
+    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+        for team_state in teams.values() {
+            push_leader_provider_session_keys(&mut keys, team_state);
+        }
+    }
+    keys
+}
+
+fn push_provider_session_keys(keys: &mut BTreeSet<String>, value: &Value) {
+    for field in ["session_id", "provider_session_id"] {
+        if let Some(session_id) = value
+            .get(field)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
             keys.insert(format!("session:{session_id}"));
         }
-        if let Some(rollout_path) = agent
-            .get("rollout_path")
+    }
+    for field in ["rollout_path", "transcript_path"] {
+        if let Some(path) = value
+            .get(field)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
-            keys.insert(format!("rollout:{rollout_path}"));
+            keys.insert(format!("rollout:{path}"));
         }
     }
-    keys
+}
+
+fn push_leader_provider_session_keys(keys: &mut BTreeSet<String>, scope: &Value) {
+    for anchor in ["leader_receiver", "team_owner"] {
+        if let Some(node) = scope.get(anchor) {
+            push_provider_session_keys(keys, node);
+        }
+    }
 }
 
 fn captured_provider_session_keys(captured: &CapturedSession) -> BTreeSet<String> {
@@ -1232,6 +1290,171 @@ pub(crate) mod test_support {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod u1_tests {
     use super::*;
+
+    use crate::provider::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
+    use std::path::PathBuf;
+
+    fn leader_like_candidate(session_id: &str, path: &str) -> CapturedSessionCandidate {
+        CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(session_id)),
+                rollout_path: Some(RolloutPath::new(PathBuf::from(path))),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: PathBuf::from("/tmp/u1-cwd"),
+            },
+            positive_agent_id_match: false,
+            agent_path_match: false,
+        }
+    }
+
+    fn worker_owned_candidate(session_id: &str, path: &str) -> CapturedSessionCandidate {
+        CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(session_id)),
+                rollout_path: Some(RolloutPath::new(PathBuf::from(path))),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: PathBuf::from("/tmp/u1-cwd"),
+            },
+            positive_agent_id_match: true,
+            agent_path_match: false,
+        }
+    }
+
+    /// P0 RED-1 (lane-046-capture-gap): a Claude worker with
+    /// expected_session_id=None must NOT capture a candidate that has neither
+    /// positive_agent_id_match nor agent_path_match — even when it is the
+    /// only candidate (the leader-transcript-as-only-candidate failure mode
+    /// from the macmini repro). Must end up ambiguous, not assigned.
+    #[test]
+    fn claude_no_expected_single_leader_candidate_is_not_assigned() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "release_engineer": {
+                    "provider": "claude",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let mut canned = BTreeMap::new();
+        canned.insert(
+            "release_engineer".to_string(),
+            vec![leader_like_candidate(
+                "ea059b82-c53e-4654-9590-9f3e6d46f0ca",
+                "/Users/alauda/.claude/projects/-Users-alauda-team/ea059b82.jsonl",
+            )],
+        );
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+        assert!(
+            report.assigned.is_empty(),
+            "Claude no-expected + weak (no positive/path) candidate must NOT be assigned; got {:?}",
+            report.assigned
+        );
+        let agent = state
+            .get("agents")
+            .and_then(|a| a.get("release_engineer"))
+            .expect("agent present");
+        assert!(
+            agent.get("session_id").is_none(),
+            "agent.session_id must remain empty when capture is refused; got {agent:?}"
+        );
+    }
+
+    /// P0 RED-2: same shape but with a positive_agent_id_match candidate →
+    /// must capture (positive agent id is authoritative for Claude
+    /// no-expected).
+    #[test]
+    fn claude_no_expected_positive_worker_candidate_still_captures() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "release_engineer": {
+                    "provider": "claude",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let mut canned = BTreeMap::new();
+        canned.insert(
+            "release_engineer".to_string(),
+            vec![worker_owned_candidate(
+                "abc12345-worker-owned",
+                "/Users/alauda/.claude/projects/-Users-alauda-team/abc12345.jsonl",
+            )],
+        );
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+        assert_eq!(
+            report.assigned,
+            vec!["release_engineer".to_string()],
+            "Claude no-expected + positive_agent_id candidate MUST capture; got {:?}",
+            report.assigned
+        );
+    }
+
+    /// P0 RED-3: leader_receiver under teams.<key> with provider session
+    /// fields must exclude that session from worker capture even if the
+    /// candidate would otherwise match.
+    #[test]
+    fn claimed_session_keys_include_team_scoped_leader_receiver() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "release_engineer": {
+                    "provider": "claude",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            },
+            "teams": {
+                "teamA": {
+                    "leader_receiver": {
+                        "session_id": "leader-session-id-zzz",
+                        "rollout_path": "/Users/alauda/.claude/projects/-Users-alauda-team/zzz.jsonl"
+                    }
+                }
+            }
+        });
+        let mut canned = BTreeMap::new();
+        canned.insert(
+            "release_engineer".to_string(),
+            vec![worker_owned_candidate(
+                "leader-session-id-zzz",
+                "/Users/alauda/.claude/projects/-Users-alauda-team/zzz.jsonl",
+            )],
+        );
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+        assert!(
+            report.assigned.is_empty(),
+            "worker candidate that collides with team-scoped leader_receiver \
+             session MUST be excluded by claimed_provider_session_keys; got {:?}",
+            report.assigned
+        );
+    }
 
     #[test]
     fn capture_pass_keeps_pending_agent_when_one_adapter_capture_fails() {

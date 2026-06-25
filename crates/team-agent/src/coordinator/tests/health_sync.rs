@@ -174,9 +174,14 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
     static N: AtomicU64 = AtomicU64::new(0);
     let tdir = std::env::temp_dir().join(format!("ta-rs-health-tx-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir_all(&tdir).unwrap();
+    // lane-046-capture-gap: Claude no-expected_session_id capture now requires
+    // positive_agent_id_match (TEAM_AGENT_ID=<id>) OR agent_path_match. Without
+    // a worker-identity signal, weak candidates can be leader transcripts and
+    // must not be attributed to a worker. The seeded transcript includes the
+    // TEAM_AGENT_ID marker for w1.
     std::fs::write(
         tdir.join("session.jsonl"),
-        r#"{"type":"user","sessionId":"sess-found","cwd":"x","message":{"content":"hi"}}"#,
+        r#"{"type":"user","sessionId":"sess-found","cwd":"x","message":{"content":"TEAM_AGENT_ID=w1 hi"}}"#,
     )
     .unwrap();
     let agents = serde_json::json!({
