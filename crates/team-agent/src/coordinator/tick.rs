@@ -476,12 +476,71 @@ impl Coordinator {
                 }),
             )?;
         }
+        // Bug 2 (0.3.32): emit `session.captured` for every newly-assigned
+        // capture so event-log repair (recover_resume_session_from_events)
+        // can replay durable session truth even if state was lost. Architect
+        // §4 fix #5.
+        for agent_id in &report.assigned {
+            let agent = state
+                .get("agents")
+                .and_then(|a| a.get(agent_id.as_str()));
+            if let Some(agent) = agent {
+                event_log.write(
+                    "session.captured",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "provider": agent.get("provider").and_then(Value::as_str),
+                        "session_id": agent.get("session_id").and_then(Value::as_str),
+                        "rollout_path": agent.get("rollout_path").and_then(Value::as_str),
+                        "captured_via": agent.get("captured_via").and_then(Value::as_str),
+                        "attribution_confidence": agent.get("attribution_confidence").and_then(Value::as_str),
+                        "spawn_cwd": agent.get("spawn_cwd").and_then(Value::as_str),
+                        "spawned_at": agent.get("spawned_at").and_then(Value::as_str),
+                    }),
+                )?;
+            }
+        }
+        // Bug 2 (0.3.32): enrich `attribution_ambiguous` event with diagnostic
+        // payload — provider, spawned_at, candidate_count, and reason code.
+        // Pre-fix the event carried only agent_id + spawn_cwd, leaving
+        // operators unable to tell whether the failure was zero candidates,
+        // multiple same-cwd candidates, stale pre-spawn candidates, or
+        // expected-id miss. Architect §4 fix #4.
         for ambiguous in report.ambiguous {
+            let candidate_count = report
+                .candidate_count_by_agent
+                .get(&ambiguous.agent_id)
+                .copied()
+                .unwrap_or(0);
+            let agent = state
+                .get("agents")
+                .and_then(|a| a.get(ambiguous.agent_id.as_str()));
+            let provider = agent
+                .and_then(|a| a.get("provider"))
+                .and_then(Value::as_str);
+            let spawned_at = agent
+                .and_then(|a| a.get("spawned_at"))
+                .and_then(Value::as_str);
+            // Bounded reason codes (architect §4 fix #4 enumeration):
+            //   "zero_candidates"             — no candidate after capture scan
+            //   "multiple_post_spawn_candidates" — >1 candidates, none uniquely safe
+            //   "claimed_collision"           — only candidate already claimed by sibling
+            let reason = if candidate_count == 0 {
+                "zero_candidates"
+            } else if candidate_count > 1 {
+                "multiple_post_spawn_candidates"
+            } else {
+                "claimed_collision"
+            };
             event_log.write(
                 "provider.session.attribution_ambiguous",
                 serde_json::json!({
                     "agent_id": ambiguous.agent_id,
                     "spawn_cwd": ambiguous.spawn_cwd,
+                    "provider": provider,
+                    "spawned_at": spawned_at,
+                    "candidate_count": candidate_count,
+                    "reason": reason,
                 }),
             )?;
         }

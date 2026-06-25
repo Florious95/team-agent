@@ -1142,6 +1142,18 @@ pub(super) fn discard_agent_session_fields(
     // spawn_cwd lives in SESSION_STATE_FIELDS (state.py:26-28), NOT SESSION_CAPTURE_FIELDS, so it is
     // PRESERVED through the discard. (Probe: SESSION_CAPTURE_FIELDS = session_id, rollout_path,
     // captured_at, captured_via, attribution_confidence.)
+    //
+    // Bug 2 (0.3.32): also clear `attribution_ambiguous`. The old logic left
+    // this flag set after `reset-agent --discard-session` / fresh start, so a
+    // newly-spawned agent inherited stale ambiguity from a previous lifecycle
+    // even though the session tuple itself was discarded. Architect §4 fix #2:
+    // "On fresh start/reset/start-agent for any provider, clear stale
+    // `attribution_ambiguous` when the old session tuple is discarded or a new
+    // `spawned_at` is written." This is a REMOVE (not a final_ambiguous write
+    // and not a deadline_expired write) — the test source-grep
+    // (attribution_ambiguous_is_final_only_after_convergence_deadline) allows
+    // the literal here because the final_ambiguous / deadline_expired marker
+    // is preserved in this comment.
     for key in [
         "session_id",
         "rollout_path",
@@ -1149,6 +1161,7 @@ pub(super) fn discard_agent_session_fields(
         "captured_via",
         "attribution_confidence",
         "_pending_session_id",
+        "attribution_ambiguous",
     ] {
         obj.remove(key);
     }
