@@ -221,6 +221,25 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                 }
                 _ => (true, Vec::new()),
             };
+        // 0.4.7 partial-resume: when a worker has NEVER been captured (no
+        // session_id AND first_send_at is Absent), it is structurally
+        // non-resumable — there is no context to lose, so auto-fresh is
+        // safe even without --allow-fresh. This prevents a single
+        // never-captured role (e.g. MCP-only worker that the leader never
+        // messaged) from blocking restart of the other 6 roles that DO
+        // have complete resume tuples.
+        //
+        // The "never_captured" predicate is the conjunction:
+        //   * session_id is None (no provider session bound), AND
+        //   * first_send_at is Absent (leader has never injected a
+        //     message — so we never armed the capture path either).
+        //
+        // If session_id is None but first_send_at is Valid, that's the
+        // "received message but session not captured" bug state — keep
+        // the Refuse so we never silently drop context (architect rule:
+        // "绝不静默 fresh").
+        let never_captured =
+            session_id.is_none() && matches!(first_send_at_state, FirstSendAtState::Absent);
         let decision = if session_id.is_some() && provider_can_resume && resume_backing_exists {
             ResumeDecision::Resume
         } else if session_id.is_some() && allow_fresh {
@@ -228,6 +247,10 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         } else if session_id.is_some() {
             ResumeDecision::Refuse
         } else if allow_fresh {
+            ResumeDecision::FreshStart
+        } else if never_captured {
+            // No session_id + never captured → safe to auto-fresh without
+            // --allow-fresh. No context to lose.
             ResumeDecision::FreshStart
         } else {
             ResumeDecision::Refuse

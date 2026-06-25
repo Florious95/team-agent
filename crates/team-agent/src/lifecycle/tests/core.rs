@@ -606,10 +606,19 @@ fn classify_restart_plan_interacted_unresumable_with_allow_fresh_yields_fresh_st
 }
 
 #[test]
-fn classify_restart_plan_never_interacted_null_session_refuses_not_fresh() {
-    // E6 层2 (C2, 用户裁定"绝不静默 fresh"): first_send_at absent(自启动 worker,leader 从未发消息)
-    // + session_id null → 不能再静默 FreshStart(那会丢真实 provider 会话上下文)。
-    // 默认 !allow_fresh → Refuse + unresumable(诚实出口 resume_not_ready)。
+fn classify_restart_plan_never_captured_null_session_auto_fresh_partial_resume() {
+    // 0.4.7 partial-resume (inverts pre-0.4.7 E6 layer-2 policy for the
+    // never-captured-AND-never-interacted case ONLY): when a worker has BOTH
+    // session_id=null AND first_send_at=null, it has NEVER been bound to a
+    // provider session AND the leader has NEVER sent a message to it — there
+    // is literally no context to lose. Auto-fresh without --allow-fresh is
+    // safe and PREVENTS one never-captured role from blocking restart of
+    // other resumable roles (1-blocks-N regression in 0.4.6).
+    //
+    // The "never silently fresh" guard is preserved for the dangerous case
+    // (session_id=null + first_send_at=Valid = "received message but session
+    // not captured" bug state) — see the OTHER refuse-interacted test below
+    // and upgrade_restart_refuses_interacted_worker_without_session_id.
     let state = json!({
         "agents": { "w1": { "provider": "claude", "session_id": null } }
     });
@@ -617,15 +626,14 @@ fn classify_restart_plan_never_interacted_null_session_refuses_not_fresh() {
     assert_eq!(plan.decisions.len(), 1);
     assert_eq!(
         plan.decisions[0].decision,
-        ResumeDecision::Refuse,
-        "null-session 自启动 worker 默认必须 Refuse,不许静默 fresh"
+        ResumeDecision::FreshStart,
+        "0.4.7: never-captured + never-interacted → auto-fresh without --allow-fresh"
     );
-    assert_eq!(
-        plan.unresumable.len(),
-        1,
-        "Refuse 必入 unresumable(诚实出口)"
+    assert!(
+        plan.unresumable.is_empty(),
+        "0.4.7: never-captured worker is structurally non-resumable (no context); \
+         must NOT enter unresumable (which would block sibling restart)"
     );
-    assert_eq!(plan.unresumable[0].reason, "no_persisted_session_id");
 }
 
 #[test]

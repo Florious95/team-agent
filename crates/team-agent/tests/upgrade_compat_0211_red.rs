@@ -249,6 +249,67 @@ fn upgrade_restart_plan_uses_persisted_session_id() {
     assert_eq!(plan.decisions[0].session_id.as_ref().map(|s| s.as_str()), Some("sess-upgrade"));
 }
 
+/// 0.4.7 partial-resume: a worker that has NEVER been captured
+/// (no session_id AND first_send_at is Absent) is structurally non-resumable.
+/// restart without --allow-fresh must auto-fresh it (no context to lose),
+/// instead of refusing and blocking the other roles. This prevents 1
+/// never-captured role from connecting 6 other resumable roles.
+#[test]
+fn restart_auto_fresh_never_captured_worker_without_allow_fresh() {
+    let state = json!({
+        "agents": {
+            "never_captured": {
+                "status": "running",
+                "provider": "claude",
+                "session_id": null,
+                "first_send_at": null
+            }
+        }
+    });
+
+    let plan = classify_restart_plan(&state, false).expect("restart plan");
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::FreshStart,
+        "0.4.7: never-captured worker (no session_id + no first_send_at) \
+         must auto-fresh without --allow-fresh; no context to lose"
+    );
+    assert_eq!(plan.decisions[0].restart_mode, StartMode::Fresh);
+    assert!(
+        plan.unresumable.is_empty(),
+        "0.4.7: never-captured worker is not unresumable (no context to fail)"
+    );
+}
+
+/// 0.4.7 partial-resume guard: a worker that HAS first_send_at but no
+/// session_id is the "received message but session not captured" bug
+/// state — restart without --allow-fresh must STILL Refuse, never
+/// silently fresh (architect rule: 绝不静默 fresh). This is what the
+/// existing `upgrade_restart_refuses_interacted_worker_without_session_id`
+/// test pins; this test pins the SAME guard for Claude (the partial-resume
+/// change must not weaken it for any provider).
+#[test]
+fn restart_refuses_interacted_claude_worker_without_session_id_partial_resume_preserves_guard() {
+    let state = json!({
+        "agents": {
+            "interacted_no_sid": {
+                "status": "running",
+                "provider": "claude",
+                "session_id": null,
+                "first_send_at": "2026-06-26T01:00:00+00:00"
+            }
+        }
+    });
+
+    let plan = classify_restart_plan(&state, false).expect("restart plan");
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::Refuse,
+        "0.4.7: interacted worker with no session_id must STILL refuse \
+         without --allow-fresh (architect rule: never silently drop context)"
+    );
+}
+
 #[test]
 fn upgrade_restart_refuses_interacted_worker_without_session_id() {
     let state = json!({
