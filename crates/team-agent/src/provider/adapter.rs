@@ -1181,11 +1181,34 @@ fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
 /// `collect_optional_candidate_files` 对不存在目录是 no-op)。
 fn claude_projects_dir_for_cwd(home: &Path, spawn_cwd: &Path) -> Option<PathBuf> {
     let canonical = std::fs::canonicalize(spawn_cwd).unwrap_or_else(|_| spawn_cwd.to_path_buf());
-    let encoded = canonical.to_string_lossy().replace('/', "-");
+    let encoded = encode_claude_projects_dir(&canonical.to_string_lossy());
     if encoded.is_empty() {
         return None;
     }
     Some(home.join(".claude").join("projects").join(encoded))
+}
+
+/// 0.4.6 Stage 4: Claude CLI's project-dir encoding rule. Collapse every
+/// non-ASCII-alphanumeric character (slashes, dots, spaces, punctuation,
+/// non-ASCII codepoints like Chinese) into a single `-`. The pre-fix
+/// implementation only replaced `/` → `-` which silently produced wrong
+/// directory names for any cwd containing Chinese / spaces / dots
+/// (`/Users/alauda/.../agent前沿探索/多agent协作` produced raw UTF-8 while
+/// Claude actually creates `-Users-alauda-...-agent------agent--`).
+///
+/// Note: each non-alnum CHARACTER produces one `-`. A 2-char Chinese word
+/// like "协作" becomes 2 dashes. Adjacent non-alnums each contribute one
+/// dash (Claude does NOT collapse runs).
+fn encode_claude_projects_dir(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else {
+            out.push('-');
+        }
+    }
+    out
 }
 
 /// §C4 cr verdict — copilot session 真相源 sqlite 点查。
@@ -1988,9 +2011,42 @@ mod e6_session_attribution_tests {
         let cwd = tmp_root("encode");
         let got = claude_projects_dir_for_cwd(home, &cwd).unwrap();
         let canon = std::fs::canonicalize(&cwd).unwrap();
-        let expected_leaf = canon.to_string_lossy().replace('/', "-");
+        let expected_leaf = encode_claude_projects_dir(&canon.to_string_lossy());
         assert_eq!(got, home.join(".claude").join("projects").join(expected_leaf));
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// **0.4.6 Stage 4 RED**: encode every non-[A-Za-z0-9] character to `-`,
+    /// matching Claude CLI's actual project-dir naming rule. Pre-fix code
+    /// only replaced `/` → `-` and silently produced wrong directories for
+    /// non-ASCII / dotted / spaced cwds — invisible to the scanner.
+    #[test]
+    fn encode_claude_projects_dir_parity_with_real_claude_naming() {
+        // Pure-ASCII parity (the pre-fix happy path).
+        assert_eq!(
+            encode_claude_projects_dir("/Users/alauda/code"),
+            "-Users-alauda-code"
+        );
+        // The user's actual project root (Chinese):
+        //   /Users/alauda/Documents/code/agent前沿探索/多agent协作
+        // Each Chinese character → one `-`. "前沿探索"=4 chars → 4 dashes,
+        // "多agent协作" = "多"+"agent"+"协作" = 1 + (alphanumeric kept) + 2.
+        assert_eq!(
+            encode_claude_projects_dir(
+                "/Users/alauda/Documents/code/agent前沿探索/多agent协作"
+            ),
+            "-Users-alauda-Documents-code-agent------agent--"
+        );
+        // Dots and spaces also collapse.
+        assert_eq!(
+            encode_claude_projects_dir("/Users/foo bar.baz/v1.2"),
+            "-Users-foo-bar-baz-v1-2"
+        );
+        // Hidden directory ".team" → "-team".
+        assert_eq!(
+            encode_claude_projects_dir("/proj/.team/runtime"),
+            "-proj--team-runtime"
+        );
     }
 
     #[test]
