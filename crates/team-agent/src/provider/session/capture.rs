@@ -220,17 +220,27 @@ where
                         "attribution_ambiguous".to_string(),
                         serde_json::json!(true),
                     );
-                    agent_obj.insert(
-                        "captured_at".to_string(),
-                        serde_json::json!(chrono::Utc::now().to_rfc3339()),
-                    );
+                    // 0.4.6 tuple-atomic contract (audit:93): do NOT write
+                    // `captured_at` for ambiguity diagnostics. `captured_at`
+                    // is part of the authoritative tuple and may only be
+                    // set together with `session_id + rollout_path +
+                    // captured_via`. Overloading it as both capture
+                    // timestamp and ambiguity timestamp created false
+                    // "looks captured" rows. Ambiguity diagnostics live in
+                    // the `attribution_ambiguous` flag + events; persist
+                    // event log for the timestamp.
                     report.changed = true;
                 }
                 continue;
             }
-            apply_captured_session(agent_obj, &candidate.captured);
-            report.changed = true;
-            report.assigned.push(item.agent_id);
+            // 0.4.6 tuple-atomic contract: apply_captured_session refuses
+            // partial candidates (no session_id or no rollout_path). When
+            // it returns false, the row stays unchanged; capture re-runs
+            // on the next coordinator tick.
+            if apply_captured_session(agent_obj, &candidate.captured) {
+                report.changed = true;
+                report.assigned.push(item.agent_id);
+            }
             continue;
         }
         if ambiguous_ids.contains(&item.agent_id) {
@@ -240,10 +250,8 @@ where
             });
             if finalize_ambiguous {
                 agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
-                agent_obj.insert(
-                    "captured_at".to_string(),
-                    serde_json::json!(chrono::Utc::now().to_rfc3339()),
-                );
+                // 0.4.6 tuple-atomic contract: see comment above. Removed
+                // `captured_at` ambiguity write.
                 report.changed = true;
             }
         }
@@ -321,14 +329,22 @@ pub fn recover_resume_session_from_events(
         let Some(obj) = repaired.as_object_mut() else {
             continue;
         };
+        // 0.4.6 tuple-atomic contract (audit §Capture 修改清单, line 113):
+        // repair must yield a COMPLETE tuple. session_id + rollout_path are
+        // already validated above; ensure captured_at + captured_via are
+        // also always written (fall back to now() if the event has no ts).
         obj.insert("session_id".to_string(), serde_json::json!(session_id));
         obj.insert(
             "rollout_path".to_string(),
             serde_json::json!(rollout_path.to_string_lossy().to_string()),
         );
-        if let Some(ts) = event.get("ts").and_then(Value::as_str).filter(|ts| !ts.is_empty()) {
-            obj.insert("captured_at".to_string(), serde_json::json!(ts));
-        }
+        let captured_at = event
+            .get("ts")
+            .and_then(Value::as_str)
+            .filter(|ts| !ts.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        obj.insert("captured_at".to_string(), serde_json::json!(captured_at));
         obj.insert(
             "captured_via".to_string(),
             serde_json::json!("event_log_repair"),
@@ -493,6 +509,21 @@ fn agent_session_complete(agent: &Value) -> bool {
         Some(path) => path,
         None => return false,
     };
+    // 0.4.6 tuple-atomic contract (audit §Capture 修改清单, line 110):
+    // a "complete" agent session requires the FULL authoritative tuple —
+    // session_id + rollout_path + captured_at + captured_via. Without these
+    // last two, a row is a partial tuple and capture must re-run.
+    let captured_at_ok = agent
+        .get("captured_at")
+        .and_then(Value::as_str)
+        .is_some_and(|ts| !ts.is_empty());
+    let captured_via_ok = agent
+        .get("captured_via")
+        .and_then(Value::as_str)
+        .is_some_and(|via| !via.is_empty());
+    if !captured_at_ok || !captured_via_ok {
+        return false;
+    }
     let path = std::path::Path::new(rollout_path);
     if !path.exists() {
         return false;
@@ -722,16 +753,31 @@ fn candidate_key(candidate: &CapturedSessionCandidate) -> String {
         .join("|")
 }
 
-fn apply_captured_session(agent_obj: &mut serde_json::Map<String, Value>, captured: &CapturedSession) {
-    if let Some(session_id) = &captured.session_id {
-        agent_obj.insert("session_id".to_string(), serde_json::json!(session_id.as_str()));
-    }
-    if let Some(rollout_path) = &captured.rollout_path {
-        agent_obj.insert(
-            "rollout_path".to_string(),
-            serde_json::json!(rollout_path.as_path().to_string_lossy()),
-        );
-    }
+/// 0.4.6 tuple-atomic contract (audit §Capture 修改清单, line 111): writes
+/// the authoritative session tuple if and only if the candidate carries
+/// BOTH `session_id` and `rollout_path`. A partial candidate (e.g.
+/// scanner returned ambiguous attribution with no session_id) MUST NOT
+/// stamp `captured_at` / `captured_via` onto the row, because that
+/// produces a partial tuple that downstream readers treat as authority.
+/// Returns true iff the full tuple was written.
+fn apply_captured_session(
+    agent_obj: &mut serde_json::Map<String, Value>,
+    captured: &CapturedSession,
+) -> bool {
+    let Some(session_id) = captured.session_id.as_ref() else {
+        return false;
+    };
+    let Some(rollout_path) = captured.rollout_path.as_ref() else {
+        return false;
+    };
+    agent_obj.insert(
+        "session_id".to_string(),
+        serde_json::json!(session_id.as_str()),
+    );
+    agent_obj.insert(
+        "rollout_path".to_string(),
+        serde_json::json!(rollout_path.as_path().to_string_lossy()),
+    );
     agent_obj.insert(
         "captured_at".to_string(),
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
@@ -745,6 +791,7 @@ fn apply_captured_session(agent_obj: &mut serde_json::Map<String, Value>, captur
         serde_json::to_value(captured.attribution_confidence).unwrap_or(Value::Null),
     );
     agent_obj.remove("attribution_ambiguous");
+    true
 }
 
 fn claimed_provider_session_keys(
@@ -1096,13 +1143,19 @@ mod u1_tests {
             n
         ));
         std::fs::write(&existing, b"{}\n").expect("write fixture rollout file");
+        // 0.4.6 tuple-atomic contract: `agent_session_complete` now requires
+        // the full authoritative tuple (session_id + rollout_path +
+        // captured_at + captured_via), not just session_id + rollout_path.
+        // Pre-0.4.6 partial tuples are no longer treated as complete.
         let agent_complete = serde_json::json!({
             "session_id": "sess-real",
             "rollout_path": existing.to_string_lossy(),
+            "captured_at": "2026-06-25T10:00:00+00:00",
+            "captured_via": "session.captured",
         });
         assert!(
             agent_session_complete(&agent_complete),
-            "an agent with session_id + an existing rollout file remains complete"
+            "0.4.6: agent with full tuple (session_id + rollout_path + captured_at + captured_via) + existing rollout file is complete"
         );
         let _ = std::fs::remove_file(&existing);
 

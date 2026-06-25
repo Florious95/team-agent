@@ -519,28 +519,62 @@ fn preserve_missing_agents(
     }
 }
 
-/// A0/R2: session-capture fields are written by another process (capture/update_state)
-/// between a writer's load and save; a stale incoming row must not regress them to null.
-/// Monotonic backfill ONLY for the capture field family (no generic deep-merge, so a
-/// deliberate field clear elsewhere is not masked).
+/// 0.4.6 tuple-atomic backfill (restart-persist-capture-contract-audit.md):
+/// the authoritative session tuple is `session_id + rollout_path +
+/// captured_at + captured_via`. `attribution_confidence` is metadata on
+/// that tuple. Persist may preserve an already-complete tuple across stale
+/// saves, but it must NEVER:
+///   * synthesise a partial tuple (e.g. copy `session_id` while the other
+///     three are absent — this caused bug-045 by resurrecting an
+///     intentionally cleared session id);
+///   * mix tuple fields across two different session_ids (one writer's
+///     `session_id` glued to another writer's `rollout_path`);
+///   * create non-null session truth where none existed.
+///
+/// Rules:
+///   1. If LATEST has a complete tuple AND INCOMING has the same `session_id`
+///      (or null), backfill the full tuple together — concurrent capture
+///      protection (A0/R2).
+///   2. If LATEST has a complete tuple AND INCOMING has a DIFFERENT non-null
+///      `session_id`, copy nothing (incoming is a different worker session
+///      identity; the latest tuple belongs to the previous identity).
+///   3. If LATEST tuple is INCOMPLETE (any of the 4 fields null), copy
+///      nothing for the tuple. An incomplete latest tuple is not
+///      authoritative truth, so persist cannot use it as backfill source.
+///   4. `attribution_confidence` rides with the tuple (copied iff tuple
+///      backfill fires).
 fn backfill_capture_fields(incoming_agent: &mut Value, latest_agent: &Value) {
-    const CAPTURE_FIELDS: [&str; 5] = [
+    const TUPLE_FIELDS: [&str; 4] = [
         "session_id",
         "rollout_path",
         "captured_at",
         "captured_via",
-        "attribution_confidence",
     ];
     let Some(incoming_row) = incoming_agent.as_object_mut() else {
         return;
     };
+    // Rule 3: latest tuple must be COMPLETE to be a backfill source.
+    let latest_complete = TUPLE_FIELDS
+        .iter()
+        .all(|field| latest_agent.get(field).is_some_and(|v| !v.is_null()));
+    if !latest_complete {
+        return;
+    }
+    // Rule 2: incoming carries a DIFFERENT non-null session_id → do not mix.
     let incoming_session = incoming_row.get("session_id").and_then(Value::as_str);
     let latest_session = latest_agent.get("session_id").and_then(Value::as_str);
-    let session_changed = incoming_session.is_some() && incoming_session != latest_session;
-    for field in CAPTURE_FIELDS {
-        if session_changed && field != "session_id" {
-            continue;
+    if let Some(inc) = incoming_session {
+        if Some(inc) != latest_session {
+            return;
         }
+    }
+    // Rule 1 + 4: copy the full tuple together (only fields incoming has as
+    // null/missing) plus attribution_confidence.
+    for field in TUPLE_FIELDS
+        .iter()
+        .copied()
+        .chain(std::iter::once("attribution_confidence"))
+    {
         if incoming_row.get(field).is_none_or(Value::is_null) {
             if let Some(value) = latest_agent.get(field).filter(|value| !value.is_null()) {
                 incoming_row.insert(field.to_string(), value.clone());
@@ -1311,6 +1345,187 @@ mod tests {
             on_disk.get("team_key").and_then(Value::as_str),
             Some(active),
             "migration must be persisted to disk so subsequent processes see it"
+        );
+    }
+
+    /// 0.4.6 tuple-atomic contract test #1 (audit §Required Tests, line 264):
+    /// latest has `session_id` only (PARTIAL TUPLE), incoming has null
+    /// tuple → no backfill. This is bug-045's core failure mode: persist
+    /// must not resurrect a scalar session_id when the latest row's tuple
+    /// is incomplete.
+    #[test]
+    fn backfill_capture_skips_when_latest_tuple_is_partial() {
+        let mut incoming = json!({
+            "session_id": Value::Null,
+            "rollout_path": Value::Null,
+            "captured_at": Value::Null,
+            "captured_via": Value::Null,
+        });
+        let latest = json!({
+            "session_id": "partial-only-uuid",
+            "rollout_path": Value::Null,
+            "captured_at": Value::Null,
+            "captured_via": Value::Null,
+        });
+        backfill_capture_fields(&mut incoming, &latest);
+        assert_eq!(
+            incoming.get("session_id"),
+            Some(&Value::Null),
+            "0.4.6: partial latest tuple must NOT backfill session_id; got {incoming}"
+        );
+    }
+
+    /// 0.4.6 tuple-atomic contract test #2 (audit, line 265):
+    /// latest has complete tuple, incoming has null tuple → all 4 fields
+    /// backfilled together. This is the concurrent-capture protection
+    /// (A0/R2) that must still work after the tuple-atomic rewrite.
+    #[test]
+    fn backfill_capture_atomically_copies_complete_tuple() {
+        let mut incoming = json!({
+            "session_id": Value::Null,
+            "rollout_path": Value::Null,
+            "captured_at": Value::Null,
+            "captured_via": Value::Null,
+        });
+        let latest = json!({
+            "session_id": "real-uuid",
+            "rollout_path": "/tmp/real.jsonl",
+            "captured_at": "2026-06-25T10:00:00+00:00",
+            "captured_via": "session.captured",
+            "attribution_confidence": "high",
+        });
+        backfill_capture_fields(&mut incoming, &latest);
+        assert_eq!(
+            incoming.get("session_id").and_then(Value::as_str),
+            Some("real-uuid")
+        );
+        assert_eq!(
+            incoming.get("rollout_path").and_then(Value::as_str),
+            Some("/tmp/real.jsonl")
+        );
+        assert_eq!(
+            incoming.get("captured_at").and_then(Value::as_str),
+            Some("2026-06-25T10:00:00+00:00")
+        );
+        assert_eq!(
+            incoming.get("captured_via").and_then(Value::as_str),
+            Some("session.captured")
+        );
+        assert_eq!(
+            incoming.get("attribution_confidence").and_then(Value::as_str),
+            Some("high"),
+            "attribution_confidence rides with the tuple"
+        );
+    }
+
+    /// 0.4.6 tuple-atomic contract test #3 (audit, line 266):
+    /// latest has complete tuple for one session_id, incoming has non-null
+    /// DIFFERENT session_id → no mixed tuple. Prevents one writer's
+    /// session_id getting glued to another writer's rollout_path/captured_at.
+    #[test]
+    fn backfill_capture_refuses_mixing_different_session_ids() {
+        let mut incoming = json!({
+            "session_id": "incoming-different-uuid",
+            "rollout_path": Value::Null,
+            "captured_at": Value::Null,
+            "captured_via": Value::Null,
+        });
+        let latest = json!({
+            "session_id": "latest-uuid",
+            "rollout_path": "/tmp/latest.jsonl",
+            "captured_at": "2026-06-25T10:00:00+00:00",
+            "captured_via": "session.captured",
+        });
+        backfill_capture_fields(&mut incoming, &latest);
+        // session_id stays as incoming (not overwritten).
+        assert_eq!(
+            incoming.get("session_id").and_then(Value::as_str),
+            Some("incoming-different-uuid"),
+            "0.4.6: incoming session_id must not be overwritten by a different latest"
+        );
+        // Sibling fields stay null (no cross-session mixing).
+        assert_eq!(
+            incoming.get("rollout_path"),
+            Some(&Value::Null),
+            "0.4.6: must not copy latest rollout_path onto a different session_id"
+        );
+    }
+
+    /// 0.4.6 tuple-atomic contract test #4 (audit, line 267):
+    /// `normalize_agent_session_state` may only insert null defaults — it
+    /// must never create non-null session truth.
+    #[test]
+    fn normalize_agent_session_state_only_inserts_null_defaults() {
+        let mut state = json!({
+            "agents": {
+                "alpha": {}
+            }
+        });
+        normalize_agent_session_state(&mut state);
+        let alpha = state.pointer("/agents/alpha").expect("alpha");
+        for field in [
+            "session_id",
+            "rollout_path",
+            "captured_at",
+            "captured_via",
+            "attribution_confidence",
+            "spawn_cwd",
+        ] {
+            assert_eq!(
+                alpha.get(field),
+                Some(&Value::Null),
+                "normalize must insert null for {field}; got {alpha}"
+            );
+        }
+    }
+
+    /// Bug 045 end-to-end persist regression: poisoned latest (session_id
+    /// but no captured_at/captured_via) cannot resurrect a cleared incoming
+    /// row through a real save → reload cycle.
+    #[test]
+    fn poisoned_partial_latest_does_not_resurrect_on_save_reload() {
+        let ws = temp_ws();
+        // Seed disk with the exact bug-045 poisoned shape: session_id set,
+        // no captured_at / captured_via / rollout_path.
+        let poisoned = json!({
+            "session_name": "team-bug045-poisoned",
+            "team_key": "teamP",
+            "agents": {
+                "alpha": {
+                    "status": "stopped",
+                    "provider": "claude",
+                    "session_id": "stale-poisoned-uuid",
+                    "rollout_path": Value::Null,
+                    "captured_at": Value::Null,
+                    "captured_via": Value::Null
+                }
+            }
+        });
+        save_runtime_state(&ws, &poisoned).unwrap();
+
+        // Restart-fresh writes a cleared row.
+        let cleared = json!({
+            "session_name": "team-bug045-poisoned",
+            "team_key": "teamP",
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "provider": "claude",
+                    "session_id": Value::Null,
+                    "rollout_path": Value::Null,
+                    "captured_at": Value::Null,
+                    "captured_via": Value::Null
+                }
+            }
+        });
+        save_runtime_state(&ws, &cleared).unwrap();
+
+        let on_disk = read_state(&ws);
+        let alpha = on_disk.pointer("/agents/alpha").expect("alpha");
+        assert_eq!(
+            alpha.get("session_id"),
+            Some(&Value::Null),
+            "0.4.6: partial poisoned latest must not resurrect cleared session_id; got {alpha}"
         );
     }
 }

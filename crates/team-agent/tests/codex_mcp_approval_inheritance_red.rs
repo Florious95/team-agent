@@ -565,6 +565,12 @@ fn team_dir_with_forkable_source(tag: &str) -> PathBuf {
                     "owner_team_id": tag,
                     "session_id": "sess-worker-a",
                     "rollout_path": rollout.to_string_lossy().to_string(),
+                    // 0.4.6 tuple-atomic contract: fork requires complete
+                    // source tuple. Seed captured_at + captured_via so the
+                    // fork-source backing guard passes and the test
+                    // exercises the inheritance behaviour being asserted.
+                    "captured_at": "2026-06-25T10:00:00+00:00",
+                    "captured_via": "session.captured",
                     "tools": ["mcp_team"]
                 }
             }
@@ -597,6 +603,11 @@ fn seed_agent_state(workspace: &Path, agent_id: &str, role: &str, resumable: boo
                     "owner_team_id": "team-a",
                     "session_id": if resumable { "sess-worker-a" } else { "" },
                     "rollout_path": if resumable { rollout.to_string_lossy().to_string() } else { String::new() },
+                    // 0.4.6 tuple-atomic contract: when resumable, seed the
+                    // full authoritative tuple so fork/restart can probe a
+                    // real backing.
+                    "captured_at": if resumable { "2026-06-25T10:00:00+00:00" } else { "" },
+                    "captured_via": if resumable { "session.captured" } else { "" },
                     "first_send_at": "2026-06-05T09:00:00+00:00",
                     "tools": ["mcp_team"]
                 }

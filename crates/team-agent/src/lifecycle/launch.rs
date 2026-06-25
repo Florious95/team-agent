@@ -3956,18 +3956,45 @@ pub fn fork_agent_with_transport(
     let source_agent = find_spec_agent(&spec, source_agent_id).ok_or_else(|| {
         LifecycleError::RequirementUnmet(format!("unknown worker agent id: {source_agent_id}"))
     })?;
-    let session_id = state
+    // 0.4.6 tuple-atomic contract (audit §Fork 修改清单, line 201): fork
+    // must require the COMPLETE source tuple (session_id + rollout_path +
+    // captured_at + captured_via) before treating the scalar session_id
+    // as resumable truth. A row carrying only `session_id` is a partial
+    // tuple (pre-0.4.6 bug source), and the native fork would attach to
+    // a session that has no confirmed backing.
+    let source_agent_state = state
         .get("agents")
         .and_then(|v| v.get(source_agent_id.as_str()))
-        .and_then(|v| v.get("session_id"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(crate::provider::SessionId::new)
         .ok_or_else(|| {
             LifecycleError::Provider(format!(
-                "cannot fork {source_agent_id}: source session_id is missing"
+                "cannot fork {source_agent_id}: source agent row not in state"
             ))
         })?;
+    let tuple_field_ok = |field: &str| -> bool {
+        source_agent_state
+            .get(field)
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+    };
+    let session_id_str = source_agent_state
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let rollout_path_str = source_agent_state
+        .get("rollout_path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    if session_id_str.is_none()
+        || rollout_path_str.is_none()
+        || !tuple_field_ok("captured_at")
+        || !tuple_field_ok("captured_via")
+    {
+        return Err(LifecycleError::Provider(format!(
+            "cannot fork {source_agent_id}: source session backing is missing or incomplete \
+             (session_id+rollout_path+captured_at+captured_via required)"
+        )));
+    }
+    let session_id = crate::provider::SessionId::new(session_id_str.unwrap().to_string());
     let session_name = state
         .get("session_name")
         .and_then(|v| v.as_str())

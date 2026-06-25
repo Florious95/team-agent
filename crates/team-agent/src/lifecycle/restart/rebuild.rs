@@ -538,9 +538,14 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                 survivors.push(decision);
                 continue;
             }
-            // Backing went missing between preflight and post-spawn.
-            // Clear stale capture fields, keep session_id, mark
-            // _pending_session_id, run a bounded convergence pass.
+            // 0.4.6 tuple-atomic contract: backing went missing between
+            // preflight and post-spawn. Clear the FULL authoritative tuple
+            // (including session_id) and persist the old provider id only
+            // in `_pending_session_id` as a capture hint. Pre-0.4.6 kept
+            // session_id alive while removing siblings — that left a
+            // partial tuple that persist-layer backfill could later
+            // resurrect into "looks captured" or that classify_restart
+            // would refuse with `session_backing_store_missing`.
             if let Some(agents) = state
                 .pointer_mut("/agents")
                 .and_then(serde_json::Value::as_object_mut)
@@ -549,10 +554,15 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                     .get_mut(decision.agent_id.as_str())
                     .and_then(serde_json::Value::as_object_mut)
                 {
-                    agent_obj.remove("rollout_path");
-                    agent_obj.remove("captured_at");
-                    agent_obj.remove("captured_via");
-                    agent_obj.remove("attribution_confidence");
+                    for field in [
+                        "session_id",
+                        "rollout_path",
+                        "captured_at",
+                        "captured_via",
+                        "attribution_confidence",
+                    ] {
+                        agent_obj.remove(field);
+                    }
                     agent_obj.insert(
                         "_pending_session_id".to_string(),
                         serde_json::json!(session_id.as_str()),
@@ -764,6 +774,35 @@ fn repair_resume_sessions_from_event_log(
             .and_then(serde_json::Value::as_str)
             .filter(|path| !path.is_empty())
             .map(str::to_string);
+        // 0.4.6 tuple-atomic contract (audit §Restart 修改清单, line 175):
+        // capture-domain repair must yield a COMPLETE authoritative tuple
+        // (session_id + rollout_path + captured_at + captured_via) before
+        // restart writes it back into agent state. A partial repair would
+        // be persist-domain truth synthesis through the restart hook,
+        // exactly what the contract forbids. Reject incomplete repairs;
+        // capture stays Stage-1 pending on next coordinator tick.
+        let captured_at_ok = repaired
+            .get("captured_at")
+            .is_some_and(|v| !v.is_null() && v.as_str().is_some_and(|s| !s.is_empty()));
+        let captured_via_ok = repaired
+            .get("captured_via")
+            .is_some_and(|v| !v.is_null() && v.as_str().is_some_and(|s| !s.is_empty()));
+        if session_id.is_none() || rollout_path.is_none() || !captured_at_ok || !captured_via_ok {
+            crate::event_log::EventLog::new(workspace)
+                .write(
+                    "resume.session_repair_refused_incomplete_tuple",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "provider": provider_wire(provider),
+                        "session_id": session_id,
+                        "rollout_path": rollout_path,
+                        "captured_at_ok": captured_at_ok,
+                        "captured_via_ok": captured_via_ok,
+                    }),
+                )
+                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+            continue;
+        }
         if let Some(agent) = state
             .get_mut("agents")
             .and_then(serde_json::Value::as_object_mut)
@@ -1270,44 +1309,24 @@ fn mark_agent_respawned(
     // restart probes correctly refuse with `session_backing_store_missing`
     // (macmini bug-044 truth source for Claude/ClaudeCode).
     //
-    // Provider policy (per architect §6 residual risk):
-    //   * Claude / ClaudeCode: do NOT promote. Persist pending only via
-    //     `persist_command_plan_state` below (_pending_session_id field).
-    //     Authoritative `session_id` is written ONLY by session capture when
-    //     a real backing transcript is found on disk. Stale `session_id` from
-    //     a previous session is cleared here (fresh restart means old backing
-    //     is gone or never existed).
-    //   * Copilot: KEEP promotion. Copilot has stronger expected-id semantics
-    //     via its SQLite store, and the test
-    //     `restart_allow_fresh_copilot_persists_expected_session_id` pins the
-    //     existing behaviour. (Future: gate behind a provider-policy backing
-    //     assertion when Copilot store probe is implemented.)
-    //   * Codex: never reaches here with `expected_session_id=Some` — Codex
-    //     command planning returns `None` (provider/adapter.rs:477-495,
-    //     0.3.31 correction).
+    // 0.4.6 tuple-atomic contract (restart-persist-capture-contract-audit.md):
+    // ALL providers — restart never promotes a planned id into authoritative
+    // `session_id`. Capture (provider scanner) is the only authoritative
+    // writer. On Fresh / FreshAfterMissingRollout, clear the full tuple;
+    // `persist_command_plan_state` below writes `_pending_session_id` as a
+    // capture hint, and the provider scanner promotes that hint into the
+    // tuple ONLY after it confirms backing (sqlite/transcript/.codex).
+    //
+    // This deletes the Copilot promotion that previously violated the
+    // capture-only-writer rule (audit §Restart 当前违规 #1) and uses the
+    // Claude family clear path uniformly. The Copilot scanner
+    // (provider/adapter.rs:1217-1228) already gates expected-id with a
+    // sqlite point-check, so no truth is lost.
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
     ) {
-        let provider = agent
-            .get("provider")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_ascii_lowercase);
-        let is_claude_family = matches!(
-            provider.as_deref(),
-            Some("claude") | Some("claude_code") | Some("claude-code") | Some("claudecode")
-        );
-        if is_claude_family {
-            // Claude family: do not promote. Clear stale session_id.
-            agent.insert("session_id".to_string(), serde_json::Value::Null);
-        } else if let Some(session_id) = spawn.plan.expected_session_id.as_ref() {
-            // Copilot (and any future provider with provider-store backing
-            // semantics): promote as before.
-            agent.insert(
-                "session_id".to_string(),
-                serde_json::json!(session_id.as_str()),
-            );
-        }
+        agent.insert("session_id".to_string(), serde_json::Value::Null);
     }
     crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
     persist_effective_approval_policy_for_restart(agent, safety);

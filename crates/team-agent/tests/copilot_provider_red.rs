@@ -1214,12 +1214,34 @@ fn seed_copilot_session_store(home: &Path, session_id: &str) {
 }
 
 fn seed_session_id(ws: &Path, agent: &str) {
+    // 0.4.6 tuple-atomic contract: fork now requires a complete source
+    // tuple (session_id + rollout_path + captured_at + captured_via).
+    // Tests that exercise downstream fork behaviour (capability gate,
+    // adapter error path) need the source row to PASS the backing check
+    // so the test reaches the behaviour it actually asserts. Seed the
+    // full tuple with a real rollout file so the guard is satisfied.
+    let rollout = ws.join(format!("{agent}-rollout.jsonl"));
+    if !rollout.exists() {
+        std::fs::write(&rollout, "{}\n").expect("seed rollout");
+    }
     let mut state = load_runtime_state(ws).unwrap();
     for pointer in [format!("/agents/{agent}"), format!("/teams/cpfork/agents/{agent}")] {
         if let Some(obj) = state.pointer_mut(&pointer).and_then(serde_json::Value::as_object_mut) {
             obj.insert(
                 "session_id".to_string(),
                 serde_json::json!("77777777-8888-4999-aaaa-bbbbbbbbbbbb"),
+            );
+            obj.insert(
+                "rollout_path".to_string(),
+                serde_json::json!(rollout.to_string_lossy()),
+            );
+            obj.insert(
+                "captured_at".to_string(),
+                serde_json::json!("2026-06-25T10:00:00+00:00"),
+            );
+            obj.insert(
+                "captured_via".to_string(),
+                serde_json::json!("session.captured"),
             );
         }
     }

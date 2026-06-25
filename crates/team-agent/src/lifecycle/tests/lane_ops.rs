@@ -172,12 +172,34 @@ fn fork_ws(alpha_role: &str) -> PathBuf {
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile fork team");
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    // 0.4.6 tuple-atomic contract: fork now requires the complete source
+    // tuple (session_id + rollout_path + captured_at + captured_via). These
+    // fork-mechanics tests previously only seeded session_id; seed a real
+    // rollout file + the rest of the tuple so the source backing guard
+    // passes and the test exercises the fork mechanics being asserted.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static FORK_ROLLOUT_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = FORK_ROLLOUT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let rollout = std::env::temp_dir().join(format!(
+        "ta-fork-ws-rollout-{}-{}.jsonl",
+        std::process::id(),
+        n
+    ));
+    std::fs::write(&rollout, b"{}\n").expect("seed fork source rollout");
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
             "session_name": "team-laneateam",
             "agents": {
-                "alpha": { "status": "running", "provider": "codex", "window": "alpha", "session_id": "sess-a" },
+                "alpha": {
+                    "status": "running",
+                    "provider": "codex",
+                    "window": "alpha",
+                    "session_id": "sess-a",
+                    "rollout_path": rollout.to_string_lossy(),
+                    "captured_at": "2026-06-25T10:00:00+00:00",
+                    "captured_via": "session.captured"
+                },
                 "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
             }
         }),

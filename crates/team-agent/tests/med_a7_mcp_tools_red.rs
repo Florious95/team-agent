@@ -212,9 +212,20 @@ role feeds the compiled identity prompt — B2 family); state role={role:?} stat
 fn seed_forkable_source(harness: &McpSimHarness) {
     let ws = harness.workspace_path().to_path_buf();
     let mut state = harness.state_value();
+    // 0.4.6 tuple-atomic contract: fork requires the complete source
+    // tuple. Seed a real rollout file + captured_at + captured_via so
+    // the backing guard passes and the test exercises the fork mechanics
+    // it actually asserts.
+    let rollout = ws.join("worker_a-rollout.jsonl");
+    if !rollout.exists() {
+        std::fs::write(&rollout, b"{}\n").unwrap();
+    }
     for pointer in ["/agents/worker_a", "/teams/teamA/agents/worker_a"] {
         if let Some(agent) = state.pointer_mut(pointer).and_then(Value::as_object_mut) {
             agent.insert("session_id".to_string(), json!("11111111-2222-4333-8444-555555555555"));
+            agent.insert("rollout_path".to_string(), json!(rollout.to_string_lossy()));
+            agent.insert("captured_at".to_string(), json!("2026-06-25T10:00:00+00:00"));
+            agent.insert("captured_via".to_string(), json!("session.captured"));
             agent.insert("role".to_string(), json!("Source Worker"));
             agent.insert("provider".to_string(), json!("claude"));
             agent.insert("auth_mode".to_string(), json!("subscription"));

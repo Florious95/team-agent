@@ -153,11 +153,18 @@ impl RollbackFixture {
             "fixture must compile agent ids alpha/bravo before lifecycle calls; spec={yaml}"
         );
         std::fs::write(self.team.join("team.spec.yaml"), yaml).unwrap();
+        // 0.4.6: seed real rollout files so fork tuple guard passes.
+        std::fs::write(self.team.join("alpha-rollout.jsonl"), b"{}\n").unwrap();
+        std::fs::write(self.team.join("bravo-rollout.jsonl"), b"{}\n").unwrap();
         save_runtime_state(
             &self.team,
             &json!({
                 "session_name": "team-rollbackteam",
                 "active_team_key": "rollbackteam",
+                // 0.4.6 tuple-atomic contract: fork now requires complete
+                // source tuple. Seed real rollout files + captured_at/via
+                // so the fork-source backing guard passes and the test
+                // reaches the rollback behaviour it actually asserts.
                 "agents": {
                     "alpha": {
                         "status": "stopped",
@@ -165,6 +172,9 @@ impl RollbackFixture {
                         "auth_mode": "subscription",
                         "window": "alpha",
                         "session_id": "sess-alpha",
+                        "rollout_path": self.team.join("alpha-rollout.jsonl").to_string_lossy(),
+                        "captured_at": "2026-06-25T10:00:00+00:00",
+                        "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
                     },
                     "bravo": {
@@ -173,6 +183,9 @@ impl RollbackFixture {
                         "auth_mode": "subscription",
                         "window": "bravo",
                         "session_id": "sess-bravo",
+                        "rollout_path": self.team.join("bravo-rollout.jsonl").to_string_lossy(),
+                        "captured_at": "2026-06-25T10:00:00+00:00",
+                        "captured_via": "session.captured",
                         "owner_team_id": "rollbackteam"
                     }
                 }
