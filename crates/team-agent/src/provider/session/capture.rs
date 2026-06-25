@@ -21,6 +21,11 @@ pub struct CapturePassReport {
     pub ambiguous: Vec<AmbiguousSessionCapture>,
     pub capture_failures: Vec<SessionCaptureFailure>,
     pub candidate_count_by_agent: BTreeMap<String, usize>,
+    /// 0.4.6 Stage 3: agents that transitioned into the
+    /// `transcript_missing` capture_state during this pass. The caller
+    /// (coordinator tick) emits a throttled
+    /// `provider.session.transcript_missing` event for each entry.
+    pub transcript_missing: Vec<TranscriptMissing>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +38,19 @@ pub struct SessionCaptureFailure {
 pub struct AmbiguousSessionCapture {
     pub agent_id: String,
     pub spawn_cwd: String,
+}
+
+/// 0.4.6 Stage 3: information emitted when a pending agent transitions
+/// into the `transcript_missing` capture_state. Carries the diagnostic
+/// fields the caller uses to write the
+/// `provider.session.transcript_missing` event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptMissing {
+    pub agent_id: String,
+    pub spawn_cwd: String,
+    pub spawn_epoch: u64,
+    pub expected_session_id: Option<String>,
+    pub candidate_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,13 +268,150 @@ where
             });
             if finalize_ambiguous {
                 agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
+                agent_obj.insert(
+                    "capture_state".to_string(),
+                    serde_json::json!("attribution_ambiguous"),
+                );
                 // 0.4.6 tuple-atomic contract: see comment above. Removed
                 // `captured_at` ambiguity write.
                 report.changed = true;
             }
+            continue;
+        }
+        // 0.4.6 Stage 3: transcript-ready handshake. For pending agents that
+        // are NOT ambiguous and were NOT captured this pass, classify into:
+        //   * `captured` — session_id + rollout_path already on row
+        //   * `transcript_missing` — trigger event has fired (report_result /
+        //     first_send_at / pane_output_advanced) AND elapsed > threshold
+        //     AND zero candidates / no backing
+        //   * `waiting_for_transcript` — still in grace period
+        // The state field surfaces in status/diagnose without changing the
+        // authoritative tuple contract (we never write session_id without
+        // backing). Throttled event emission is done by the caller (tick).
+        let has_session = agent_obj
+            .get("session_id")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+            && agent_obj
+                .get("rollout_path")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty());
+        if has_session {
+            // Captured already — fix state field if drifted.
+            if agent_obj
+                .get("capture_state")
+                .and_then(Value::as_str)
+                != Some("captured")
+            {
+                agent_obj.insert("capture_state".to_string(), serde_json::json!("captured"));
+                report.changed = true;
+            }
+            continue;
+        }
+        let candidate_count = report
+            .candidate_count_by_agent
+            .get(&item.agent_id)
+            .copied()
+            .unwrap_or(0);
+        let next_state = classify_pending_capture_state(agent_obj, candidate_count);
+        let prev_state = agent_obj
+            .get("capture_state")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if prev_state.as_deref() != Some(next_state) {
+            agent_obj.insert(
+                "capture_state".to_string(),
+                serde_json::json!(next_state),
+            );
+            report.changed = true;
+            if next_state == "transcript_missing" {
+                report.transcript_missing.push(TranscriptMissing {
+                    agent_id: item.agent_id.clone(),
+                    spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
+                    spawn_epoch: agent_obj
+                        .get("spawn_epoch")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    expected_session_id: item
+                        .context
+                        .expected_session_id
+                        .as_ref()
+                        .map(|s| s.as_str().to_string()),
+                    candidate_count,
+                });
+            }
         }
     }
     Ok(report)
+}
+
+/// 0.4.6 Stage 3: classify a pending agent's capture state into one of:
+///   * `transcript_missing` — has had a strong trigger event AND elapsed
+///     beyond grace threshold AND still no backing
+///   * `waiting_for_transcript` — still in grace period or no trigger yet
+///
+/// Trigger events (CR M2): any of `first_send_at`, `last_result_at`, or a
+/// recent `last_pane_output_at` indicates the worker has been interactively
+/// used / done something. Without ANY trigger, we stay in waiting state
+/// even past the grace window (silent worker is not a failure to capture).
+///
+/// Threshold: 30 seconds from spawned_at OR 15 seconds from the first
+/// trigger event, whichever is later. This avoids spurious
+/// transcript_missing on slow first-paint while catching the
+/// release-engineer scenario (report_result fired but no jsonl).
+fn classify_pending_capture_state(
+    agent_obj: &serde_json::Map<String, Value>,
+    candidate_count: usize,
+) -> &'static str {
+    // Already-captured agents don't reach here (caller skips). We only
+    // classify pending agents.
+    let now = chrono::Utc::now();
+    let spawned_at = agent_obj
+        .get("spawned_at")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let elapsed_since_spawn = spawned_at
+        .map(|t| now.signed_duration_since(t).num_seconds())
+        .unwrap_or(0);
+    // Trigger event detection — any strong signal that the worker has
+    // actually been used. Pre-conditions (CR M2 in architect doc).
+    let has_trigger = ["first_send_at", "last_result_at", "last_pane_output_at"]
+        .iter()
+        .any(|key| {
+            agent_obj
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+        });
+    // Earliest trigger timestamp for the secondary threshold.
+    let earliest_trigger = ["first_send_at", "last_result_at", "last_pane_output_at"]
+        .iter()
+        .filter_map(|key| {
+            agent_obj
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        })
+        .min();
+    let elapsed_since_trigger = earliest_trigger
+        .map(|t| now.signed_duration_since(t).num_seconds())
+        .unwrap_or(0);
+    const SPAWN_GRACE_SECS: i64 = 30;
+    const TRIGGER_GRACE_SECS: i64 = 15;
+    let past_spawn_grace = elapsed_since_spawn >= SPAWN_GRACE_SECS;
+    let past_trigger_grace = has_trigger && elapsed_since_trigger >= TRIGGER_GRACE_SECS;
+    // transcript_missing requires BOTH: a trigger occurred AND we've
+    // waited past the spawn grace (so we're not blamed for slow startup).
+    // candidate_count == 0 is the "no backing" signal; non-zero
+    // candidates that didn't satisfy assignment go through the ambiguous
+    // path above and don't reach here.
+    if has_trigger && past_spawn_grace && past_trigger_grace && candidate_count == 0 {
+        "transcript_missing"
+    } else {
+        "waiting_for_transcript"
+    }
 }
 
 pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {

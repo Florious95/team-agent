@@ -506,6 +506,50 @@ impl Coordinator {
         // operators unable to tell whether the failure was zero candidates,
         // multiple same-cwd candidates, stale pre-spawn candidates, or
         // expected-id miss. Architect §4 fix #4.
+        // 0.4.6 Stage 3: emit throttled `provider.session.transcript_missing`
+        // events for agents that transitioned into the transcript_missing
+        // capture_state on this pass. The capture pass only flags a
+        // transition (prev_state != next_state), so the event fires at
+        // most once per (agent_id, spawn_epoch) per state change.
+        for missing in &report.transcript_missing {
+            let agent = state
+                .get("agents")
+                .and_then(|a| a.get(missing.agent_id.as_str()));
+            let pane_id = agent
+                .and_then(|a| a.get("pane_id"))
+                .and_then(Value::as_str);
+            let pane_pid = agent.and_then(|a| a.get("pane_pid")).and_then(Value::as_u64);
+            let provider = agent.and_then(|a| a.get("provider")).and_then(Value::as_str);
+            let session_id_in_argv = agent
+                .and_then(|a| a.get("session_id_in_argv"))
+                .and_then(Value::as_str);
+            let first_send_at = agent
+                .and_then(|a| a.get("first_send_at"))
+                .and_then(Value::as_str);
+            let last_result_at = agent
+                .and_then(|a| a.get("last_result_at"))
+                .and_then(Value::as_str);
+            let last_pane_output_at = agent
+                .and_then(|a| a.get("last_pane_output_at"))
+                .and_then(Value::as_str);
+            event_log.write(
+                "provider.session.transcript_missing",
+                serde_json::json!({
+                    "agent_id": missing.agent_id,
+                    "provider": provider,
+                    "pane_id": pane_id,
+                    "pane_pid": pane_pid,
+                    "spawn_epoch": missing.spawn_epoch,
+                    "expected_session_id": missing.expected_session_id,
+                    "session_id_in_argv": session_id_in_argv,
+                    "spawn_cwd": missing.spawn_cwd,
+                    "candidate_count": missing.candidate_count,
+                    "first_send_at": first_send_at,
+                    "last_result_at": last_result_at,
+                    "last_pane_output_at": last_pane_output_at,
+                }),
+            )?;
+        }
         for ambiguous in report.ambiguous {
             let candidate_count = report
                 .candidate_count_by_agent
