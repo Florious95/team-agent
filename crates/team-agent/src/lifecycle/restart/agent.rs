@@ -441,6 +441,99 @@ fn tmux_start_mode_for_spawn(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// 0.4.6 Stage 1: reset/start clean-boundary helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Bounded polling: wait for the old pane to become unreachable AND, when
+/// possible, for the old pane_pid to exit. Returns a JSON evidence blob
+/// recording the observed transition for events.
+pub(super) fn drain_old_pane_and_pid(
+    transport: &dyn crate::transport::Transport,
+    old_pane: Option<&crate::transport::PaneId>,
+    old_pid: Option<u32>,
+) -> serde_json::Value {
+    const DRAIN_MAX_MS: u64 = 1500;
+    const DRAIN_POLL_MS: u64 = 50;
+    let start = std::time::Instant::now();
+    let mut pane_dead = old_pane.is_none();
+    let mut pid_dead = old_pid.is_none();
+    while start.elapsed().as_millis() < DRAIN_MAX_MS as u128 {
+        if !pane_dead {
+            if let Some(pane) = old_pane {
+                if !agent_pane_live_by_id(transport, pane) {
+                    pane_dead = true;
+                }
+            }
+        }
+        if !pid_dead {
+            if let Some(pid) = old_pid {
+                if !pid_is_alive(pid) {
+                    pid_dead = true;
+                }
+            }
+        }
+        if pane_dead && pid_dead {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(DRAIN_POLL_MS));
+    }
+    serde_json::json!({
+        "old_pane_id": old_pane.map(|p| p.as_str()),
+        "old_pane_pid": old_pid,
+        "old_pane_dead": pane_dead,
+        "old_pid_dead": pid_dead,
+        "drain_elapsed_ms": start.elapsed().as_millis() as u64,
+    })
+}
+
+/// Best-effort liveness probe for a pid. Returns true if the pid exists
+/// on Unix (signal 0). On other platforms, returns true conservatively.
+pub(super) fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: kill(pid, 0) checks if pid exists without sending a signal.
+        let ret = unsafe { libc::kill(pid as i32, 0) };
+        if ret == 0 {
+            return true;
+        }
+        // EPERM also means the process exists (we just can't signal it).
+        let err = std::io::Error::last_os_error();
+        matches!(err.raw_os_error(), Some(libc::EPERM))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// Read state.agents[agent_id].pane_pid (u32) from the runtime state.
+pub(super) fn state_pane_pid(state: &serde_json::Value, agent_id: &AgentId) -> Option<u32> {
+    state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("pane_pid"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|p| p as u32)
+}
+
+/// Read + increment state.agents[agent_id].spawn_epoch. The epoch is a
+/// monotonic counter persisted with the agent row that uniquely tags each
+/// fresh-start / reset / restart cycle. Subsequent capture / event /
+/// status logic dispatches on `(team_key, agent_id, spawn_epoch,
+/// pane_pid, expected_session_id)` to avoid attributing a stale prior
+/// fresh attempt to the current process.
+pub(super) fn next_spawn_epoch(state: &serde_json::Value, agent_id: &AgentId) -> u64 {
+    let current = state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("spawn_epoch"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    current.saturating_add(1)
+}
+
 /// `stop_agent(workspace, agent_id, team)`(`lifecycle/operations.py:62`)。
 /// owner-gate → kill window → **同时关显示** → 写 state。
 pub fn stop_agent(
@@ -533,6 +626,22 @@ pub(super) fn stop_agent_at_paths(
             let _ = write_stop_window_failed_event(workspace, agent_id, &target_str, &stderr);
             return Err(LifecycleError::Transport(format!("failed to stop agent {agent_id}: {stderr}")));
         }
+        // 0.4.6 Stage 1: drain-and-prove. The pre-fix path trusted `kill_pane`'s
+        // success return without waiting for the pane / pid to actually exit.
+        // This created a window where reset/start spawned a new worker while
+        // the old Claude process + tty + provider state were still alive,
+        // leading to the macmini "running but not capturable" failure mode.
+        //
+        // Poll bounded time for old pane to become unreachable. If it stays
+        // reachable after the budget, emit an event but do NOT block — the
+        // subsequent spawn boundary check (new pane_id != old pane_id) is
+        // the final safety net.
+        let drain_evidence = drain_old_pane_and_pid(
+            transport,
+            pane_id.as_ref(),
+            state_pane_pid(&state, agent_id),
+        );
+        let _ = write_stop_drain_event(workspace, agent_id, &target_str, &drain_evidence);
     }
     close_agent_display(&mut state, agent_id);
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
@@ -763,6 +872,19 @@ fn reset_agent_at_paths(
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
     let spec = load_team_spec(spec_workspace)?;
     discard_agent_session_fields(&mut state, agent_id)?;
+    // 0.4.6 Stage 1: bump spawn_epoch on every reset. The new epoch is
+    // visible to subsequent capture/event/status paths so they can
+    // attribute observations to the current process cohort (not a stale
+    // prior fresh attempt).
+    let new_epoch = next_spawn_epoch(&state, agent_id);
+    if let Some(obj) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        obj.insert("spawn_epoch".to_string(), serde_json::json!(new_epoch));
+    }
     let team_key = restart_projection_team_key(&state, team);
     sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
@@ -961,6 +1083,32 @@ fn write_stop_complete_event(
                 "target": target,
                 "stopped": stopped,
             }),
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    Ok(())
+}
+
+/// 0.4.6 Stage 1: drain evidence for the old pane+pid after stop. Fires
+/// during reset/stop so operators can see whether the prior worker really
+/// went away or stuck around inside the resp budget.
+pub(super) fn write_stop_drain_event(
+    workspace: &Path,
+    agent_id: &AgentId,
+    target: &str,
+    drain: &serde_json::Value,
+) -> Result<(), LifecycleError> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
+    payload.insert("target".to_string(), serde_json::json!(target));
+    if let Some(obj) = drain.as_object() {
+        for (k, v) in obj {
+            payload.insert(k.clone(), v.clone());
+        }
+    }
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "stop_agent.drain",
+            serde_json::Value::Object(payload),
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
