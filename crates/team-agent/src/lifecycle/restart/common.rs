@@ -168,6 +168,46 @@ pub(super) fn spawn_agent_window(
     // > workspace; state-based override is silently dropped.
     let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
     let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
+
+    // 0.4.6 Stage 2: write actual spawn plan event BEFORE invoking the
+    // transport spawn. Mirrors `launch.rs:359-380` (the reference impl)
+    // so reset/start/restart fresh produces the same truth source as
+    // quick-start. Any "argv had --session-id but didn't take effect"
+    // failure can now be diagnosed from events.jsonl — the recorded
+    // expected_session_id == state._pending_session_id (after
+    // mark_agent_started persists the same plan tuple).
+    {
+        let session_id_in_argv = plan
+            .argv
+            .iter()
+            .position(|a| a == "--session-id")
+            .and_then(|i| plan.argv.get(i + 1))
+            .cloned();
+        let env_overlay_keys: Vec<&String> = env.keys().collect();
+        let tmux_start_mode_pre_spawn = predict_tmux_start_mode(
+            layout_placement,
+            into_existing_session,
+        );
+        let spawn_epoch = state_spawn_epoch_for_agent(workspace, agent_id);
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let _ = event_log.write(
+            "provider.worker.spawn_argv",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "provider": provider,
+                "argv": plan.argv,
+                "session_id_in_argv": session_id_in_argv,
+                "expected_session_id": plan.expected_session_id.as_ref().map(|s| s.as_str()),
+                "spawn_cwd": spawn_cwd.to_string_lossy(),
+                "env_overlay_keys": env_overlay_keys,
+                "env_unset": env_unset,
+                "tmux_start_mode": tmux_start_mode_pre_spawn,
+                "spawn_epoch": spawn_epoch,
+                "source": "restart",
+            }),
+        );
+    }
+
     let result = if let Some(placement) = layout_placement {
         if placement.starts_window {
             if into_existing_session {
@@ -1216,6 +1256,47 @@ pub(super) fn is_dynamic_agent(
             .get("forked_from")
             .and_then(YamlValue::as_str)
             .is_some_and(|s| !s.is_empty())
+}
+
+/// 0.4.6 Stage 2: predict the tmux start mode BEFORE the spawn call, so
+/// the `provider.worker.spawn_argv` event can record what the spawn will
+/// actually do. Same logic as `tmux_start_mode_for_spawn` in agent.rs
+/// but driven by `(layout_placement, into_existing_session)` only — no
+/// dependency on SpawnedAgentWindow.
+pub(super) fn predict_tmux_start_mode(
+    layout_placement: Option<&crate::lifecycle::launch::LayoutPlacement>,
+    into_existing_session: bool,
+) -> &'static str {
+    if let Some(placement) = layout_placement {
+        if placement.starts_window {
+            if into_existing_session {
+                "new-window"
+            } else {
+                "new-session"
+            }
+        } else {
+            "split-window"
+        }
+    } else if into_existing_session {
+        "new-window"
+    } else {
+        "new-session"
+    }
+}
+
+/// 0.4.6 Stage 2: read state.agents[agent_id].spawn_epoch from disk to
+/// stamp the spawn_argv event with the current cohort identifier. Returns
+/// 0 if the agent row / field is missing.
+pub(super) fn state_spawn_epoch_for_agent(workspace: &Path, agent_id: &AgentId) -> u64 {
+    let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
+        return 0;
+    };
+    state
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("spawn_epoch"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -740,6 +740,18 @@ fn mark_agent_started(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    // 0.4.6 Stage 1+2: ensure spawn_epoch is present after every start.
+    // reset_agent_at_paths bumps it before start; non-reset starts
+    // initialise to 1 (or preserve existing) so capture/event paths can
+    // always dispatch on (team_key, agent_id, spawn_epoch, ...).
+    let preserved_epoch = agent
+        .get("spawn_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0);
+    agent.insert(
+        "spawn_epoch".to_string(),
+        serde_json::json!(preserved_epoch.unwrap_or(1)),
+    );
     // Issue 2 (Round 3b gate review §6): persist the resolved owner_team_id
     // so future restart/start cycles read it directly from the agent row.
     if let Some(ref team_id) = spawn.owner_team_id {
