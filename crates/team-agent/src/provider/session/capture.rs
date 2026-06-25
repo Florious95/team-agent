@@ -606,7 +606,20 @@ where
             // — that would trigger the Stage 1 mismatch guard against Codex's
             // real session_meta.payload.id and permanently reject the correct
             // transcript. Codex capture anchors purely on (cwd, spawned_at).
-            expected_session_id: if matches!(provider, Provider::Codex) {
+            //
+            // 0.4.6 P0 (Claude fresh-no-session-id): Claude Code does not
+            // create a transcript for a framework-supplied --session-id with
+            // no prior history. We no longer inject `--session-id` on fresh
+            // spawn (adapter.rs Provider::Claude build_command_plan), so no
+            // _pending_session_id is stored. Stale state from earlier versions
+            // may still carry one — treat it the same as Codex: ignore it,
+            // capture purely via (cwd + spawned_at + identity) attribution.
+            // Resume path is unchanged — it goes through restart_resume which
+            // sets session_id directly from the rebuilt resume tuple.
+            expected_session_id: if matches!(
+                provider,
+                Provider::Codex | Provider::Claude | Provider::ClaudeCode
+            ) {
                 None
             } else {
                 agent
@@ -1342,6 +1355,12 @@ mod u1_tests {
     /// global one-to-one runs.
     #[test]
     fn capture_allocator_expected_session_id_binds_each_worker_to_its_own_transcript() {
+        // 0.4.6 P0 amendment: Claude no longer carries _pending_session_id
+        // (fresh spawn doesn't inject --session-id; capture anchors on
+        // cwd+spawned_at+identity). The ExpectedSessionId pre-pass remains
+        // valid for providers that DO use expected_session_id (Copilot is the
+        // only one left that honors framework-supplied --session-id). Switch
+        // this test to Copilot to preserve the pre-pass invariant coverage.
         use crate::provider::{CaptureVia, Confidence, RolloutPath};
         let dir = std::env::temp_dir().join(format!(
             "ta-stage1-allocator-{}",
@@ -1362,8 +1381,6 @@ mod u1_tests {
                 attribution_confidence: Confidence::High,
                 spawn_cwd: dir.clone(),
             },
-            // Critical: no positive worker identity hint. Pre-fix this is
-            // exactly the shape that fell through to global one-to-one.
             positive_agent_id_match: false,
             agent_path_match: false,
         };
@@ -1382,27 +1399,27 @@ mod u1_tests {
         };
         let mut candidates_by_agent: BTreeMap<String, Vec<CapturedSessionCandidate>> =
             BTreeMap::new();
-        candidates_by_agent.insert("claude-a".to_string(), vec![candidate_a.clone()]);
-        candidates_by_agent.insert("claude-b".to_string(), vec![candidate_b.clone()]);
+        candidates_by_agent.insert("copilot-a".to_string(), vec![candidate_a.clone()]);
+        candidates_by_agent.insert("copilot-b".to_string(), vec![candidate_b.clone()]);
 
         let cwd_str = dir.to_string_lossy().to_string();
         let mut state = serde_json::json!({
             "agents": {
-                "claude-a": {
-                    "provider": "claude",
+                "copilot-a": {
+                    "provider": "copilot",
                     "status": "running",
                     "spawn_cwd": cwd_str,
                     "_pending_session_id": "9a2d1668-8987-4c36-8bde-a5135b10da02"
                 },
-                "claude-b": {
-                    "provider": "claude",
+                "copilot-b": {
+                    "provider": "copilot",
                     "status": "running",
                     "spawn_cwd": cwd_str,
                     "_pending_session_id": "3e824e89-25ac-4b3f-b272-b4f733f6403c"
                 }
             }
         });
-        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Claude, None, "")
+        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Copilot, None, "")
             .with_candidates(candidates_by_agent);
         let mut adapter_for = move |_provider| {
             Box::new(adapter.clone()) as Box<dyn ProviderAdapter>
@@ -1415,34 +1432,34 @@ mod u1_tests {
         // expected transcript. No cross-assignment, no ambiguous mark.
         let agents = state["agents"].as_object().expect("agents object");
         assert_eq!(
-            agents["claude-a"]["session_id"].as_str(),
+            agents["copilot-a"]["session_id"].as_str(),
             Some("9a2d1668-8987-4c36-8bde-a5135b10da02"),
-            "Stage 1 fix: claude-a must bind to its own expected transcript; \
-             state.claude-a={}",
-            agents["claude-a"]
+            "Stage 1 fix: copilot-a must bind to its own expected transcript; \
+             state.copilot-a={}",
+            agents["copilot-a"]
         );
         assert_eq!(
-            agents["claude-b"]["session_id"].as_str(),
+            agents["copilot-b"]["session_id"].as_str(),
             Some("3e824e89-25ac-4b3f-b272-b4f733f6403c"),
-            "Stage 1 fix: claude-b must bind to its own expected transcript; \
-             state.claude-b={}",
-            agents["claude-b"]
+            "Stage 1 fix: copilot-b must bind to its own expected transcript; \
+             state.copilot-b={}",
+            agents["copilot-b"]
         );
         assert!(
-            agents["claude-a"]
+            agents["copilot-a"]
                 .get("attribution_ambiguous")
                 .is_none_or(|v| v.as_bool() != Some(true)),
-            "Stage 1 fix: claude-a must NOT be flagged ambiguous after the \
-             expected-id pre-pass bound it; state.claude-a={}",
-            agents["claude-a"]
+            "Stage 1 fix: copilot-a must NOT be flagged ambiguous after the \
+             expected-id pre-pass bound it; state.copilot-a={}",
+            agents["copilot-a"]
         );
         assert!(
-            agents["claude-b"]
+            agents["copilot-b"]
                 .get("attribution_ambiguous")
                 .is_none_or(|v| v.as_bool() != Some(true)),
-            "Stage 1 fix: claude-b must NOT be flagged ambiguous; \
-             state.claude-b={}",
-            agents["claude-b"]
+            "Stage 1 fix: copilot-b must NOT be flagged ambiguous; \
+             state.copilot-b={}",
+            agents["copilot-b"]
         );
         assert_eq!(
             report.ambiguous.len(),

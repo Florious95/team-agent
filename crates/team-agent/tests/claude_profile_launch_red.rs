@@ -78,9 +78,14 @@ fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_m
 
     let state = load_runtime_state(&ws).unwrap();
     let agent = &state["teams"]["claudeprof"]["agents"]["clauder"];
+    // 0.4.6 P0: Claude fresh spawn no longer carries _pending_session_id.
+    // The build_command_plan no longer injects --session-id (Claude doesn't
+    // create a transcript for a framework-supplied unknown id); capture
+    // anchors on cwd+spawned_at+identity, parity with Codex.
     assert!(
-        agent["_pending_session_id"].as_str().is_some_and(|value| !value.is_empty()),
-        "lifecycle must persist CommandPlan.expected_session_id as agents[*]._pending_session_id; state={state}"
+        agent.get("_pending_session_id").and_then(|v| v.as_str()).map(str::is_empty).unwrap_or(true),
+        "0.4.6: Claude fresh must NOT persist _pending_session_id (build_command_plan \
+         no longer injects --session-id); state={state}"
     );
     assert!(
         agent["claude_projects_root"].as_str().is_some_and(|value| !value.is_empty()),

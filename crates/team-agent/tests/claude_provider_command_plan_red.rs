@@ -40,14 +40,20 @@ fn claude_fresh_command_plan_returns_expected_uuid_and_suppresses_managed_mcp_co
         })
         .expect("Claude compatible_api managed fresh command plan should build");
 
-    let session_id = plan
-        .expected_session_id
-        .as_ref()
-        .map(SessionId::as_str)
-        .unwrap_or("");
+    // 0.4.6 P0 amendment: Claude fresh CommandPlan does NOT carry an
+    // expected_session_id and the argv does NOT inject --session-id. Claude
+    // Code does not create a transcript for a framework-supplied unknown id;
+    // capture anchors on cwd+spawned_at+identity, parity with Codex.
     assert!(
-        is_rfc4122_uuid(session_id),
-        "Claude fresh CommandPlan.expected_session_id must be a non-empty RFC4122 UUID; plan={plan:?}"
+        plan.expected_session_id.is_none(),
+        "0.4.6 Claude fresh CommandPlan.expected_session_id must be None \
+         (Claude doesn't create transcript for unknown framework id); \
+         plan={plan:?}"
+    );
+    assert!(
+        !plan.argv.iter().any(|a| a == "--session-id"),
+        "0.4.6 Claude fresh argv must NOT inject --session-id; argv={:?}",
+        plan.argv
     );
     assert_eq!(
         plan.provider_projects_root.as_deref(),
