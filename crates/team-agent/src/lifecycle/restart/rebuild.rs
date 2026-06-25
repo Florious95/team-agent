@@ -1258,11 +1258,51 @@ fn mark_agent_respawned(
             );
         }
     }
+    // Bug 2 (0.3.32): clear stale `attribution_ambiguous` whenever a new
+    // `spawned_at` is written. Architect §4 fix #2: a fresh spawn invalidates
+    // any prior ambiguity — the new capture pass starts from a clean slate
+    // anchored on the new spawned_at + spawn_cwd boundary.
+    agent.remove("attribution_ambiguous");
+    // Bug 1 (capture promotion, 0.3.32): on Fresh / FreshAfterMissingRollout,
+    // `spawn.plan.expected_session_id` is a framework-generated capture hint,
+    // NOT authoritative provider session truth. Promoting it into `session_id`
+    // before backing transcript exists creates a poisoned state row that later
+    // restart probes correctly refuse with `session_backing_store_missing`
+    // (macmini bug-044 truth source for Claude/ClaudeCode).
+    //
+    // Provider policy (per architect §6 residual risk):
+    //   * Claude / ClaudeCode: do NOT promote. Persist pending only via
+    //     `persist_command_plan_state` below (_pending_session_id field).
+    //     Authoritative `session_id` is written ONLY by session capture when
+    //     a real backing transcript is found on disk. Stale `session_id` from
+    //     a previous session is cleared here (fresh restart means old backing
+    //     is gone or never existed).
+    //   * Copilot: KEEP promotion. Copilot has stronger expected-id semantics
+    //     via its SQLite store, and the test
+    //     `restart_allow_fresh_copilot_persists_expected_session_id` pins the
+    //     existing behaviour. (Future: gate behind a provider-policy backing
+    //     assertion when Copilot store probe is implemented.)
+    //   * Codex: never reaches here with `expected_session_id=Some` — Codex
+    //     command planning returns `None` (provider/adapter.rs:477-495,
+    //     0.3.31 correction).
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
     ) {
-        if let Some(session_id) = spawn.plan.expected_session_id.as_ref() {
+        let provider = agent
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase);
+        let is_claude_family = matches!(
+            provider.as_deref(),
+            Some("claude") | Some("claude_code") | Some("claude-code") | Some("claudecode")
+        );
+        if is_claude_family {
+            // Claude family: do not promote. Clear stale session_id.
+            agent.insert("session_id".to_string(), serde_json::Value::Null);
+        } else if let Some(session_id) = spawn.plan.expected_session_id.as_ref() {
+            // Copilot (and any future provider with provider-store backing
+            // semantics): promote as before.
             agent.insert(
                 "session_id".to_string(),
                 serde_json::json!(session_id.as_str()),
