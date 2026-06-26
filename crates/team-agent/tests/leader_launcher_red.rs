@@ -222,8 +222,10 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
             !tmux_log.contains(":leader"),
             "{command} --external-leader must not create or attach the managed :leader window; tmux_log={tmux_log:?}"
         );
+        // 0.4.x compact slim: is_external_leader / leader_topology moved to
+        // --detail; default `--json` doesn't carry them anymore.
         let status = Command::new(bin())
-            .args(["status", "--workspace", workspace.to_str().unwrap(), "--json"])
+            .args(["status", "--workspace", workspace.to_str().unwrap(), "--json", "--detail"])
             .output()
             .expect("status after external leader launch");
         let status_stdout = String::from_utf8_lossy(&status.stdout);
