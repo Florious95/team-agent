@@ -6,7 +6,7 @@ use std::process::Command;
 use super::helpers::{find_session_id, parse_jsonl_records, patterns};
 use super::types::{
     AuthHintStatus, CaptureVia, CapturedSession, CommandPlan, Confidence, McpConfig,
-    ProviderCaps, ProviderCommandContext, ProviderCommandOverrides, ProviderError, RolloutPath,
+    ProviderCaps, ProviderCommandContext, ProviderError, RolloutPath,
     SessionId, StatusPatterns,
 };
 use super::{AuthMode, Provider};
@@ -296,7 +296,7 @@ pub fn get_adapter(p: Provider) -> Box<dyn ProviderAdapter> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BasicProviderAdapter {
+pub(crate) struct BasicProviderAdapter {
     provider: Provider,
 }
 
@@ -1540,364 +1540,29 @@ fn path_is_under_team_runtime(path: &Path) -> bool {
         .any(|c| c.as_os_str() == std::ffi::OsStr::new(".team"))
 }
 
-fn fake_worker_command() -> Vec<String> {
-    let exe = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.into_os_string().into_string().ok())
-        .unwrap_or_else(|| "team-agent".to_string());
-    vec![
-        exe,
-        "fake-worker".to_string(),
-        "--workspace".to_string(),
-        "{workspace}".to_string(),
-        "--agent-id".to_string(),
-        "{agent_id}".to_string(),
-    ]
-}
-
-fn claude_launch_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    tools: &[&str],
-) -> Result<Vec<String>, ProviderError> {
-    let mut argv = claude_base_command(adapter, auth_mode, mcp_config, system_prompt, model, tools, false)?;
-    argv.push("--session-id".to_string());
-    argv.push(next_session_token());
-    Ok(argv)
-}
-
-fn claude_base_command(
-    adapter: &BasicProviderAdapter,
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    tools: &[&str],
-    managed_mcp_config: bool,
-) -> Result<Vec<String>, ProviderError> {
-    let mut argv = vec!["claude".to_string()];
-    if claude_dangerous_auto_approve(tools) {
-        argv.push("--dangerously-skip-permissions".to_string());
-    } else {
-        argv.push("--permission-mode".to_string());
-        argv.push("default".to_string());
-    }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
-    if let Some(prompt) = system_prompt {
-        argv.push("--append-system-prompt".to_string());
-        argv.push(prompt.to_string());
-    }
-    if !managed_mcp_config
-        && (mcp_config.is_some()
-            || auth_mode == AuthMode::CompatibleApi
-            || system_prompt.is_some_and(prompt_needs_native_mcp))
-    {
-        let raw = if let Some(config) = mcp_config {
-            serde_json::json!({"mcpServers": config.raw.clone()})
-        } else {
-            serde_json::json!({"mcpServers": adapter.mcp_config(auth_mode)?.raw})
-        };
-        argv.push("--mcp-config".to_string());
-        argv.push(raw.to_string());
-    }
-    for tool in claude_disallowed_tools(tools) {
-        argv.push("--disallowedTools".to_string());
-        argv.push(tool.to_string());
-    }
-    Ok(argv)
-}
-
-fn prompt_needs_native_mcp(prompt: &str) -> bool {
+pub(crate) fn prompt_needs_native_mcp(prompt: &str) -> bool {
     prompt.contains('\n') || prompt.contains('"')
 }
 
-fn codex_base_command(
-    subcommand: Option<&str>,
-    _auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    tools: &[&str],
-    overrides: Option<&ProviderCommandOverrides>,
-) -> Vec<String> {
-    let mut argv = vec![
-        "codex".to_string(),
-    ];
-    if let Some(subcommand) = subcommand {
-        argv.push(subcommand.to_string());
-    }
-    argv.extend([
-        "--no-alt-screen".to_string(),
-        "--disable".to_string(),
-        "shell_snapshot".to_string(),
-        "--disable".to_string(),
-        "apps".to_string(),
-    ]);
-    // codex.py:105-107 — profile CODEX_PROFILE before the sandbox/approval flags.
-    if let Some(profile) = overrides.and_then(|o| o.codex_profile.as_deref()) {
-        argv.push("--profile".to_string());
-        argv.push(profile.to_string());
-    }
-    if codex_dangerous_auto_approve(tools) {
-        argv.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    } else {
-        argv.push("--sandbox".to_string());
-        argv.push(codex_sandbox_mode(tools).to_string());
-        argv.push("--ask-for-approval".to_string());
-        argv.push("on-request".to_string());
-    }
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
-    // codex.py:117-118 — profile codex_config `-c` items before developer_instructions.
-    if let Some(overrides) = overrides {
-        for config in &overrides.codex_config {
-            argv.push("-c".to_string());
-            argv.push(config.clone());
-        }
-    }
-    if let Some(prompt) = system_prompt {
-        // codex.py:120 — escape order matters: backslash first, then quote, then newline.
-        let escaped = prompt
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n");
-        argv.push("-c".to_string());
-        argv.push(format!("developer_instructions=\"{escaped}\""));
-    }
-    // Contract C / MUST-8: Codex CLI (2026-06) does NOT take Claude's `--mcp-config <json>` flag;
-    // instead it uses `-c mcp_servers.<name>.<field>=...` overrides, the same pattern used by
-    // the live Team Agent workers in this very session (attach-leader codex panes spawn with
-    // `-c mcp_servers.team_orchestrator.command="..."`, ` ...args=[...]`, `...env.TEAM_AGENT_ID=...`).
-    // Inject the resolved MCP config that way so the Codex worker has a real callable
-    // `team_orchestrator` server (not prompt-only metadata).
-    if let Some(config) = mcp_config {
-        append_codex_mcp_overrides(&mut argv, &config.raw);
-    }
-    argv
-}
-
-/// Render an `McpConfig::raw` ({ name: { type, command, args, env: {...} } }) into Codex
-/// `-c mcp_servers.<name>.<field>=...` overrides. JSON values are stringified with serde
-/// so arrays/objects survive (Codex parses the right-hand side as JSON; this is what the
-/// Python golden + the live attached Codex panes do).
-fn append_codex_mcp_overrides(argv: &mut Vec<String>, raw: &serde_json::Value) {
-    let Some(servers) = raw.as_object() else {
-        return;
-    };
-    for (name, server) in servers {
-        let Some(obj) = server.as_object() else {
-            continue;
-        };
-        for (key, value) in obj {
-            if key == "env" {
-                if let Some(env) = value.as_object() {
-                    for (env_key, env_value) in env {
-                        argv.push("-c".to_string());
-                        argv.push(format!(
-                            "mcp_servers.{name}.env.{env_key}={}",
-                            json_inline(env_value)
-                        ));
-                    }
-                }
-                continue;
-            }
-            argv.push("-c".to_string());
-            argv.push(format!("mcp_servers.{name}.{key}={}", json_inline(value)));
-        }
-        // codex.py:129 — every MCP server gets a 600s tool timeout so long-running
-        // team_orchestrator calls (report_result etc.) survive the codex default.
-        argv.push("-c".to_string());
-        argv.push(format!("mcp_servers.{name}.tool_timeout_sec=600.0"));
-    }
-}
-
-fn json_inline(value: &serde_json::Value) -> String {
+/// Shared JSON renderer used by the codex `-c mcp_servers.*=...` overrides
+/// and any other adapter that wants inline JSON. String values are quoted
+/// (with quote escape); other values use serde's default Display.
+pub(crate) fn json_inline(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
         other => other.to_string(),
     }
 }
 
-fn codex_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-// ---------------------------------------------------------------------------
-// COPILOT base command(v2 实证 + cr verdict v2 30 约束)
-// ---------------------------------------------------------------------------
-//
-// 设计 v2 §B argv 形态(每条带 help 出处,逐字落地):
-//   copilot --no-color --no-auto-update --no-remote     # C-1-2 噪音 + 禁远控
-//          --disable-builtin-mcps                       # C-3-1 P0 禁内建 github-mcp-server
-//          --additional-mcp-config @<file>              # C-3-4 用 @file 形,避 wrapper 语义
-//          --allow-tool 'team_orchestrator'             # C-3-5 mcp_team 免审批 (server 级)
-//          --session-id <uuid> -n <agent_id>            # C-7-1 plan/launch 加
-//          -C <workspace>                               # 双保险,launch 加
-//          [--allow-all | <granular deny>]              # C-5-1/C-5-2
-//          [--model <m>]
-//          [--log-dir <dir> --log-level info]           # C-6-2 launch 加
-// env: COPILOT_CUSTOM_INSTRUCTIONS_DIRS=<ws>/.../<agent_id>/  # C-2-1 launch 注入
-//      COPILOT_DISABLE_TERMINAL_TITLE=1                       # C-4 P0 N39 红线,launch 注入
-// banner 不入 argv(v1 错的 --banner=never 删除;banner 走 config 文件,非 CLI flag)。
-// `-i`/`-p`/`--share*`/`--no-ask-user` **绝不**入 argv(RC-1/RC-14/RC-16)。
-//
-// system_prompt(B2 灵魂件)**不进 argv**:走 spawn env COPILOT_CUSTOM_INSTRUCTIONS_DIRS
-// + per-worker AGENTS.md(B2 单源,不另拼);本函数 system_prompt 参数静默忽略。
-fn copilot_base_command(
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    tools: &[&str],
-) -> Vec<String> {
-    let _ = (auth_mode, system_prompt);
-    let mut argv = vec![
-        "copilot".to_string(),
-        // C-1-2 v2:噪音控制三件 + 禁远控(防 GitHub web 远控 worker)
-        "--no-color".to_string(),
-        "--no-auto-update".to_string(),
-        "--no-remote".to_string(),
-        // C-3-1 v2 (P0):禁内建 github-mcp-server(main-help:70-71);残留风险
-        // 通过 spawn 前 `copilot mcp list` 扫描 + 按名 `--disable-mcp-server <n>` 补
-        // (那一段在 launch 路径加,因为需要 spawn-time 探测)。
-        "--disable-builtin-mcps".to_string(),
-    ];
-    if copilot_dangerous_auto_approve(tools) {
-        // C-5-1 v2 实证:--allow-all == --yolo == 三件套(tools+paths+urls 等价),
-        // help-permissions Enabling All Permissions 节原文。**禁** --allow-all-tools
-        // (仅 tools 一档,语义不全,RC-13)。
-        argv.push("--allow-all".to_string());
-    } else {
-        // C-5-2 v2:角色缺某 canonical 能力 → 精细 deny(deny 恒优先,即便
-        // --allow-all-tools,help-permissions 原文);**禁** --allow-all/--yolo(RC-14)。
-        for flag in copilot_permission_flags(tools) {
-            argv.push(flag);
-        }
-    }
-    // C-3-5 v2:mcp_team ∈ canonical(team_orchestrator 是我们的 server)→ 免审批
-    // (模式 `<mcp-server-name>(tool-name?)` 省略 tool = 该 server 全工具集)。
-    argv.push("--allow-tool".to_string());
-    argv.push("team_orchestrator".to_string());
-    if let Some(model) = model {
-        argv.push("--model".to_string());
-        argv.push(model.to_string());
-    }
-    if let Some(config) = mcp_config {
-        // §C1 v2 + C-3-4 cr verdict v2(te 真机实证 cmd-mcp-add schema):
-        // copilot 的 mcp 配置 schema 字段名是 `transport`(取值 stdio|http|sse),
-        // 不是 codex/claude 的 `type`。McpConfig.raw 是 canonical(type),写
-        // --additional-mcp-config 时必须翻译 type→transport(仅 copilot 走此分支)。
-        argv.push("--additional-mcp-config".to_string());
-        argv.push(copilot_translate_mcp_config(&config.raw).to_string());
-    }
-    argv
-}
-
-/// C-3-4 cr verdict v2 — 把 McpConfig.raw 的 canonical schema(`type`)翻译成
-/// copilot mcp add/--additional-mcp-config 期望的 `transport` 字段(stdio|http|sse)。
-/// 仅 Copilot 适配走此翻译,claude/codex 路径不动。
-fn copilot_translate_mcp_config(raw: &serde_json::Value) -> serde_json::Value {
-    let Some(servers) = raw.as_object() else {
-        return raw.clone();
-    };
-    let mut translated = serde_json::Map::new();
-    for (name, server) in servers {
-        let Some(obj) = server.as_object() else {
-            translated.insert(name.clone(), server.clone());
-            continue;
-        };
-        let mut out = serde_json::Map::new();
-        for (key, value) in obj {
-            if key == "type" {
-                out.insert("transport".to_string(), value.clone());
-            } else {
-                out.insert(key.clone(), value.clone());
-            }
-        }
-        translated.insert(name.clone(), serde_json::Value::Object(out));
-    }
-    serde_json::Value::Object(translated)
-}
-
-/// resume 路径同 base + `--resume <sid>`(去 --session-id);单列出
-/// 避免 plan 端误 push --session-id 与 --resume 同帧。
-fn copilot_base_command_resume(
-    auth_mode: AuthMode,
-    mcp_config: Option<&McpConfig>,
-    system_prompt: Option<&str>,
-    model: Option<&str>,
-    tools: &[&str],
-) -> Vec<String> {
-    copilot_base_command(auth_mode, mcp_config, system_prompt, model, tools)
-}
-
-fn copilot_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-/// C-5-2 v2 verdict — copilot 细粒度 deny 映射(canonical tool → copilot flag,
-/// 全部走 `--deny-tool <kind>`,help-permissions Tool Permissions 节四 kind:
-/// shell/write/mcp/url):
-///   execute_bash ∉ allowed → `--deny-tool 'shell'`
-///   fs_write     ∉ allowed → `--deny-tool 'write'`
-///   network      ∉ allowed → `--deny-tool 'url'`(help-permissions: "url(domain-or-url?)
-///                                                … If omitted, matches all URLs")
-/// fs_read/fs_list 在 copilot 上无对应 deny kind(C-5-3 prompt_only 诚实)。
-fn copilot_permission_flags(tools: &[&str]) -> Vec<String> {
-    let mut flags = Vec::new();
-    if !tools.contains(&"execute_bash") {
-        flags.push("--deny-tool".to_string());
-        flags.push("shell".to_string());
-    }
-    if !tools.contains(&"fs_write") {
-        flags.push("--deny-tool".to_string());
-        flags.push("write".to_string());
-    }
-    if !tools.contains(&"network") {
-        // v2 修正:`--deny-tool 'url'`(省略 domain 匹配全 URL),不是 `--deny-url '*'`
-        // (RC-19 反向 case 守 — 全 URL 拒绝走 deny-tool kind,不走 deny-url path)。
-        flags.push("--deny-tool".to_string());
-        flags.push("url".to_string());
-    }
-    flags
-}
-
-fn claude_dangerous_auto_approve(tools: &[&str]) -> bool {
-    tools.contains(&"dangerous_auto_approve")
-}
-
-fn claude_disallowed_tools(tools: &[&str]) -> Vec<&'static str> {
-    let mut disallowed = Vec::new();
-    if !tools.contains(&"execute_bash") {
-        disallowed.push("Bash");
-    }
-    if !tools.contains(&"fs_read") {
-        disallowed.push("Read");
-    }
-    if !tools.contains(&"fs_write") {
-        disallowed.extend(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
-    }
-    if !tools.contains(&"fs_list") {
-        disallowed.extend(["Glob", "Grep"]);
-    }
-    disallowed
-}
-
-fn codex_sandbox_mode(tools: &[&str]) -> &'static str {
-    if tools.iter().any(|tool| matches!(*tool, "fs_write" | "execute_bash")) {
-        "workspace-write"
-    } else {
-        "read-only"
-    }
-}
+// 0.4.x decoupling step 2: provider-local command builders moved to provider/adapters/.
+// Only the entry points the trait impl actually calls are re-imported here;
+// the per-provider helper fns (dangerous_auto_approve, permission flags,
+// disallowed_tools, sandbox_mode, mcp_overrides) are called from within the
+// extracted base_command fns, not directly by this file.
+use super::adapters::claude::{claude_base_command, claude_launch_command};
+use super::adapters::codex::codex_base_command;
+use super::adapters::copilot::{copilot_base_command, copilot_base_command_resume};
+use super::adapters::fake::fake_worker_command;
 
 /// Contract C / MUST-8: the per-worker Team Agent MCP server config used by Claude
 /// (`--mcp-config`) and Codex (`-c mcp_servers.*` injection). Placeholders
@@ -1991,7 +1656,7 @@ fn has_cwd_field(record: &serde_json::Value) -> bool {
     record_cwd(record).is_some()
 }
 
-fn next_session_token() -> String {
+pub(crate) fn next_session_token() -> String {
     use sha2::Digest;
 
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

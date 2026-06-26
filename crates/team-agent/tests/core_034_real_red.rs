@@ -232,7 +232,26 @@ fn worker_command_context_uses_single_prompt_and_permission_sources() {
     let launch = read_to_string(&src_root.join("lifecycle/launch.rs"));
     let restart_common = read_to_string(&src_root.join("lifecycle/restart/common.rs"));
     let restart_agent = read_to_string(&src_root.join("lifecycle/restart/agent.rs"));
-    let adapter = read_to_string(&src_root.join("provider/adapter.rs"));
+    // 0.4.x decoupling step 2: claude argv builder moved to
+    // provider/adapters/claude.rs. The adapter B1 grep guard now reads the
+    // composite source (adapter.rs + every provider-local adapter file).
+    let adapter = {
+        let mut s = read_to_string(&src_root.join("provider/adapter.rs"));
+        let adapters_dir = src_root.join("provider/adapters");
+        if adapters_dir.is_dir() {
+            for entry in std::fs::read_dir(&adapters_dir)
+                .expect("read adapters dir")
+                .flatten()
+            {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    s.push('\n');
+                    s.push_str(&read_to_string(&p));
+                }
+            }
+        }
+        s
+    };
     let all_src = read_rust_sources(&src_root);
     let command_sources = format!("{launch}\n{restart_common}\n{restart_agent}");
 

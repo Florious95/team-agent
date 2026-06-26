@@ -32,6 +32,9 @@
 pub use crate::model::enums::{AuthMode, Provider};
 
 pub mod adapter;
+/// 0.4.x decoupling step 2: per-provider command builders + permission/auth
+/// helpers split out of `adapter.rs`. Pure extraction — behavior unchanged.
+pub(crate) mod adapters;
 pub mod approvals;
 pub mod classify;
 pub mod command;
