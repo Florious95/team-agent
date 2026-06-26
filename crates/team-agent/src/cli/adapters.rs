@@ -240,11 +240,16 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         }
     };
     if args.summary {
+        // 0.4.x compact slimming: `--summary` renders the five-line triage
+        // text via `format_status_summary`, which needs the full payload
+        // fields (coordinator, leader_receiver, agent_health, queued_messages,
+        // latest_results). The slim compact projection drops those, so the
+        // summary path must request the full payload (compact=false).
         let value = status_port::status_scoped(
             &selected.run_workspace,
             &selected.state,
             Some(&selected.team_key),
-            true,
+            false,
             false,
         )?;
         return Ok(CmdResult::human(append_reminder(

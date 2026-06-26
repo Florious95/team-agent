@@ -601,37 +601,125 @@ use rusqlite::params;
         Ok(Value::Array(values))
     }
 
+    /// 0.4.x: slim default compact payload — exactly 7 top-level fields.
+    /// Diagnostic detail moves to `--detail`. Plan:
+    /// /Users/alauda/Documents/code/team-agent-public/.team/artifacts/status-compact-plan.md
     fn compact_status(full: Value) -> Value {
+        let not_ready = compact_not_ready(&full);
+        let ready = compact_ready(&full, &not_ready);
         json!({
+            "ok": true,
             "team": full.get("team").cloned().unwrap_or(Value::Null),
             "session_name": full.get("session_name").cloned().unwrap_or(Value::Null),
-            "leader_topology": full.get("leader_topology").cloned().unwrap_or_else(|| json!("managed")),
-            "is_external_leader": full.get("is_external_leader").cloned().unwrap_or(Value::Bool(false)),
             "leader_attach_command": full.get("leader_attach_command").cloned().unwrap_or(Value::Null),
-            "leader_client": full.get("leader_client").cloned().unwrap_or(Value::Null),
-            "tmux_session_present": full.get("tmux_session_present").cloned().unwrap_or(Value::Bool(false)),
-            "all_spawned": full.get("all_spawned").cloned().unwrap_or(Value::Bool(false)),
-            "all_attached_receiver": full.get("all_attached_receiver").cloned().unwrap_or(Value::Bool(true)),
-            "all_resumable_have_session": full.get("all_resumable_have_session").cloned().unwrap_or(Value::Bool(true)),
-            "session_capture_complete": full.get("session_capture_complete").cloned().unwrap_or(Value::Bool(true)),
-            "session_capture_incomplete": full.get("session_capture_incomplete").cloned().unwrap_or(Value::Bool(false)),
-            "incomplete_session_capture_agents": full.get("incomplete_session_capture_agents").cloned().unwrap_or_else(|| json!([])),
-            "pending_session_agent_ids": full.get("pending_session_agent_ids").cloned().unwrap_or_else(|| json!([])),
-            "leader_receiver": compact_object(full.get("leader_receiver"), &[
-                "status", "provider", "mode", "session_name", "window_name", "pane_id", "pane_current_command",
-            ]),
+            "ready": ready,
+            "not_ready": not_ready,
             "agents": compact_agents(full.get("agents")),
-            "agent_health": full.get("agent_health").cloned().unwrap_or_else(|| json!({})),
-            "tasks": compact_tasks(full.get("tasks")),
-            "messages": full.get("messages").cloned().unwrap_or_else(|| json!({})),
-            "queued_messages": take_array(full.get("queued_messages"), 8),
-            "results": full.get("results").cloned().unwrap_or_else(|| json!({})),
-            "latest_results": take_array(full.get("latest_results"), 5),
-            "readiness": full.get("readiness").cloned().unwrap_or_else(|| json!({})),
-            "coordinator": compact_object(full.get("coordinator"), &["status", "pid", "metadata_ok", "schema_ok"]),
-            "reminder": full.get("reminder").cloned().unwrap_or_else(|| json!(crate::cli::STATUS_REMINDER)),
-            "last_events": take_array_tail(full.get("last_events"), 10),
         })
+    }
+
+    /// Synthesized readiness boolean for the slim payload. Stricter than the
+    /// raw `readiness.ready` because it also folds in coordinator + schema +
+    /// tmux session presence so operators don't need to read separate booleans.
+    fn compact_ready(full: &Value, not_ready: &Value) -> bool {
+        not_ready.is_null()
+            && full
+                .get("readiness")
+                .and_then(|r| r.get("ready"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            && full
+                .get("coordinator")
+                .and_then(|c| c.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|s| s == "running" || s == "ok")
+            && full
+                .get("coordinator")
+                .and_then(|c| c.get("schema_ok"))
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+    }
+
+    /// Returns `Value::Null` when fully ready, otherwise an object:
+    /// `{"reasons": [...], "agents": [...]}` listing every gating issue.
+    fn compact_not_ready(full: &Value) -> Value {
+        let reasons = not_ready_reasons(full);
+        if reasons.is_empty() {
+            return Value::Null;
+        }
+        let agents = full
+            .get("incomplete_session_capture_agents")
+            .and_then(Value::as_array)
+            .cloned()
+            .or_else(|| {
+                full.get("pending_session_agent_ids")
+                    .and_then(Value::as_array)
+                    .cloned()
+            })
+            .unwrap_or_default();
+        let mut obj = Map::new();
+        obj.insert(
+            "reasons".to_string(),
+            Value::Array(reasons.into_iter().map(Value::String).collect()),
+        );
+        obj.insert("agents".to_string(), Value::Array(agents));
+        Value::Object(obj)
+    }
+
+    fn not_ready_reasons(full: &Value) -> Vec<String> {
+        let mut reasons = Vec::new();
+        let coord = full.get("coordinator");
+        let coord_status = coord
+            .and_then(|c| c.get("status"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if coord_status != "running" && coord_status != "ok" {
+            reasons.push("coordinator_not_running".to_string());
+        }
+        if coord
+            .and_then(|c| c.get("schema_ok"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            reasons.push("coordinator_schema_not_ok".to_string());
+        }
+        if full
+            .get("tmux_session_present")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            reasons.push("tmux_session_missing".to_string());
+        }
+        let readiness = full.get("readiness");
+        if readiness
+            .and_then(|r| r.get("all_spawned"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            reasons.push("workers_not_spawned".to_string());
+        }
+        if readiness
+            .and_then(|r| r.get("all_attached_receiver"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            reasons.push("leader_receiver_unbound".to_string());
+        }
+        if readiness
+            .and_then(|r| r.get("session_capture_complete"))
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            reasons.push("session_capture_incomplete".to_string());
+        }
+        if readiness
+            .and_then(|r| r.get("awaiting_trust_prompt"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            reasons.push("awaiting_trust_prompt".to_string());
+        }
+        reasons
     }
 
     fn compact_agents(value: Option<&Value>) -> Value {
@@ -645,54 +733,19 @@ use rusqlite::params;
         Value::Object(out)
     }
 
-    fn compact_agent_state(agent_id: &str, agent: &Value) -> Value {
+    /// 0.4.x: agent rows in the slim payload have exactly 4 fields. agent_id
+    /// is no longer copied in — the map key already carries it. Diagnostic
+    /// fields (model, tmux_window_present, session_id, captured_via,
+    /// attribution_confidence, display, interacted) move to `--detail`.
+    /// `activity` + `last_output_at` are preserved (RM-039-STAT-001).
+    fn compact_agent_state(_agent_id: &str, agent: &Value) -> Value {
         let Some(input) = agent.as_object() else {
             return json!({});
         };
         let mut out = Map::new();
-        out.insert(
-            "agent_id".to_string(),
-            input
-                .get("agent_id")
-                .cloned()
-                .unwrap_or_else(|| Value::String(agent_id.to_string())),
-        );
-        for key in [
-            "status",
-            "provider",
-            "model",
-            "tmux_window_present",
-            "session_id",
-            "captured_via",
-            "attribution_confidence",
-            // RM-039-STAT-001 fix (real-machine evidence 2026-06-22): the
-            // coordinator-tick activity classifier writes activity (status,
-            // confidence, rationale) to the top-level agent state, but the
-            // status --json compact projection dropped it. Operators saw
-            // "status: running" with no working/idle signal even when the
-            // pane was clearly producing output. Add the classifier output
-            // here so the compact form surfaces it.
-            // last_output_at is the timestamp the classifier advanced when
-            // the scrollback digest changed; keeping it adjacent to activity
-            // gives the operator a one-glance "is something moving" view.
-            // interacted is enriched in enrich_agents (true|false|never)
-            // and is the canonical "leader has ever sent this worker a
-            // message" signal — also needed for status sanity at a glance.
-            "activity",
-            "last_output_at",
-            "interacted",
-        ] {
+        for key in ["status", "provider", "activity", "last_output_at"] {
             if let Some(value) = input.get(key) {
                 out.insert(key.to_string(), value.clone());
-            }
-        }
-        if let Some(display) = input.get("display") {
-            let compact_display = compact_object(
-                Some(display),
-                &["backend", "status", "workspace_window", "pane_id", "pid", "pids", "reason"],
-            );
-            if compact_display.as_object().is_some_and(|obj| !obj.is_empty()) {
-                out.insert("display".to_string(), compact_display);
             }
         }
         Value::Object(out)

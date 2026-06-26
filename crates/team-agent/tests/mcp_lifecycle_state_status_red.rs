@@ -24,10 +24,22 @@ fn mcp_get_team_status_returns_scoped_rich_status_without_sibling_leak() {
         call.body,
         call.raw
     );
-    for key in ["agents", "teams", "messages", "results", "coordinator", "readiness"] {
+    // 0.4.x compact slim: MCP get_team_status follows the same 7-field slim
+    // shape as `status --json` (architect-decided MCP/CLI parity). Rich
+    // diagnostics (messages, results, coordinator, readiness) moved to
+    // CLI `--detail`; MCP does not have a detail mode yet.
+    // The MCP wrapper additionally injects `teams` for sibling-leak safety.
+    for key in ["agents", "ready", "not_ready", "session_name", "teams"] {
         assert!(
             call.body.get(key).is_some(),
-            "get_team_status must include rich status field `{key}`, not only a canned status ok; body={}",
+            "0.4.x: get_team_status must include slim field `{key}`; body={}",
+            call.body
+        );
+    }
+    for forbidden in ["messages", "results", "coordinator", "readiness", "queued_messages", "latest_results"] {
+        assert!(
+            call.body.get(forbidden).is_none(),
+            "0.4.x: get_team_status slim payload must NOT include diagnostic `{forbidden}` (CLI --detail only); body={}",
             call.body
         );
     }

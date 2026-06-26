@@ -36,7 +36,7 @@ use super::*;
     // projection MUST NOT collapse them.
     // =========================================================================
     #[test]
-    fn rm039_stat001_compact_status_preserves_activity_last_output_and_interacted() {
+    fn rm039_stat001_compact_status_preserves_activity_and_last_output() {
         let ws = seed_status_workspace();
         let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
         if let Some(agents) = state
@@ -99,13 +99,11 @@ use super::*;
             Some("2026-06-22T02:52:30+00:00"),
             "compact projection must preserve `last_output_at` for the \"is something moving\" view"
         );
-        // enrich_agents injects `interacted` from first_send_at; the
-        // compact path must carry it (operators read it as a one-glance
-        // \"has the leader ever sent this worker a message?\" signal).
-        assert_eq!(
-            agent.get("interacted").and_then(serde_json::Value::as_str),
-            Some("2026-01-01T00:00:00Z"),
-            "compact projection must preserve `interacted` from enrich_agents"
+        // 0.4.x compact slim: `interacted` moves to --detail; the 4-field
+        // compact agent row keeps only status/provider/activity/last_output_at.
+        assert!(
+            agent.get("interacted").is_none(),
+            "0.4.x: compact projection drops `interacted` (moved to --detail)"
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -215,23 +213,37 @@ use super::*;
     #[test]
     fn status_port_status_compact_json_shape_against_seeded_fixture() {
         // cmd_status json branch (detail=false) delegates status_port::status(compact=true).
-        // compact_status (status/compact.py:8-37) projects to a STABLE key set; assert the
-        // load-bearing keys survive and `last_events` is bounded (compact truncates events).
+        // 0.4.x compact slim: exactly 7 top-level fields; diagnostics moved
+        // to --detail. Plan: .team/artifacts/status-compact-plan.md.
         let ws = seed_status_workspace();
         let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
             .expect("seeded fixture status should project a value");
         let obj = v.as_object().expect("--json status is a dict");
-        // compact_status's exact top-level key set (compact.py:9-37):
-        for key in [
+        // Exactly these 7 keys, no more.
+        let expected: std::collections::BTreeSet<&str> = [
+            "ok",
             "team",
             "session_name",
+            "leader_attach_command",
+            "ready",
+            "not_ready",
+            "agents",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            actual, expected,
+            "0.4.x compact must expose exactly 7 keys; got {actual:?}"
+        );
+        // Diagnostic keys must NOT leak into the default compact payload.
+        for forbidden in [
             "leader_topology",
             "is_external_leader",
-            "leader_attach_command",
             "leader_client",
             "tmux_session_present",
             "leader_receiver",
-            "agents",
             "agent_health",
             "tasks",
             "messages",
@@ -239,23 +251,20 @@ use super::*;
             "results",
             "latest_results",
             "coordinator",
+            "readiness",
             "reminder",
             "last_events",
         ] {
-            assert!(obj.contains_key(key), "compact status missing key `{key}`");
+            assert!(
+                !obj.contains_key(forbidden),
+                "0.4.x: compact must NOT contain diagnostic key `{forbidden}` (--detail only)"
+            );
         }
-        assert_eq!(
-            obj.get("reminder").and_then(|v| v.as_str()),
-            Some(crate::cli::STATUS_REMINDER)
-        );
         // seeded agent surfaces through the projection.
         assert!(
             obj["agents"].as_object().unwrap().contains_key("a1"),
             "seeded agent a1 must appear in compact agents projection"
         );
-        // compact bounds: queued_messages[:8] and latest_results[:5] -> arrays.
-        assert!(obj["queued_messages"].is_array());
-        assert!(obj["latest_results"].as_array().unwrap().len() <= 5);
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -291,14 +300,17 @@ use super::*;
         }
         crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
-        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
-
-        assert_eq!(v["leader_topology"], json!("managed"));
-        assert_eq!(v["is_external_leader"], json!(false));
-        let attach = v["leader_attach_command"]
+        // 0.4.x: leader_topology / is_external_leader moved to --detail.
+        // leader_attach_command stays in the slim compact payload.
+        let slim = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+        let attach = slim["leader_attach_command"]
             .as_str()
-            .expect("managed status includes attach command");
+            .expect("compact still includes leader_attach_command");
         assert!(attach.contains("attach -t team-current:leader"), "{attach}");
+
+        let detail = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status detail");
+        assert_eq!(detail["leader_topology"], json!("managed"));
+        assert_eq!(detail["is_external_leader"], json!(false));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
@@ -365,33 +377,48 @@ use super::*;
         }
         crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
-        let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
-
-        assert_eq!(v["leader_topology"], json!("managed"));
-        assert_eq!(v["is_external_leader"], json!(false));
-        let attach = v["leader_attach_command"]
+        // 0.4.x: topology/external markers moved to --detail; compact keeps attach.
+        let slim = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
+        let attach = slim["leader_attach_command"]
             .as_str()
             .expect("missing marker defaults to managed attach command");
         assert!(attach.contains("attach -t team-current:leader"), "{attach}");
+
+        let detail = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true).expect("status detail");
+        assert_eq!(detail["leader_topology"], json!("managed"));
+        assert_eq!(detail["is_external_leader"], json!(false));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
     fn status_port_status_detail_full_keeps_uncompacted_events() {
-        // cmd_status --json --detail -> status_port::status(compact=false): the FULL dict
-        // (queries.py:65-79) is returned WITHOUT compact_status truncation. Distinguishing
-        // invariant: full result preserves `tasks` rows verbatim (not compact_task-projected),
-        // so the seeded task's full row (incl. fields compact would drop) survives.
+        // 0.4.x: --detail (compact=false) preserves ALL diagnostic fields the
+        // compact slim payload drops. Pin the must-keep set so future
+        // refactors can't accidentally strip detail diagnostics.
         let ws = seed_status_workspace();
         let full = status_port::status(&ws, /*compact=*/ false, /*detail=*/ true)
             .expect("seeded fixture full status should project a value");
         let compact = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false)
             .expect("seeded fixture compact status should project a value");
-        // The CLI-owned invariant: detail=true => compact=false; the two projections MUST
-        // differ in shape (full carries `messages`/`results` count maps + verbatim tasks).
         assert_ne!(full, compact, "detail (full) and default (compact) projections must differ");
         let full_obj = full.as_object().expect("full status is a dict");
-        assert!(full_obj.contains_key("last_events"), "full status keeps last_events");
+        for key in [
+            "coordinator",
+            "readiness",
+            "leader_receiver",
+            "agent_health",
+            "tasks",
+            "messages",
+            "queued_messages",
+            "results",
+            "latest_results",
+            "last_events",
+        ] {
+            assert!(
+                full_obj.contains_key(key),
+                "0.4.x: --detail must preserve `{key}` (compact slimming escape hatch)"
+            );
+        }
         assert_eq!(full_obj["agents"].as_object().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -565,16 +592,15 @@ fn status_noncompact_coordinator_includes_ok() {
 }
 
 #[test]
-fn status_compact_coordinator_omits_ok() {
+fn status_compact_omits_coordinator_entirely() {
+    // 0.4.x compact slim: the entire `coordinator` block moved to --detail.
+    // Compact folds coordinator health into the top-level `ready`/`not_ready`
+    // synthesis (`coordinator_not_running` / `coordinator_schema_not_ok`).
     let ws = seed_status_workspace();
     let v = status_port::status(&ws, /*compact=*/ true, /*detail=*/ false).expect("status");
-    let coord = v.get("coordinator").and_then(|c| c.as_object()).expect("coordinator object");
-    let keys: std::collections::BTreeSet<&str> = coord.keys().map(String::as_str).collect();
-    let expected: std::collections::BTreeSet<&str> =
-        ["metadata_ok", "pid", "schema_ok", "status"].into_iter().collect();
-    assert_eq!(
-        keys, expected,
-        "compact coordinator key set must be EXACTLY {{metadata_ok,pid,schema_ok,status}} (no ok/metadata)"
+    assert!(
+        v.as_object().unwrap().get("coordinator").is_none(),
+        "0.4.x: compact must NOT include `coordinator`; reasons fold into not_ready"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
