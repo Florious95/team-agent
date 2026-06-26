@@ -157,7 +157,14 @@ fn non_allowlist_mcp_tool_is_not_auto_approved_and_is_reported() {
 #[test]
 fn leader_bypass_worker_runtime_approvals_mirror_auto_approve_scope() {
     let launch = source("src/lifecycle/launch.rs");
-    let adapter = source("src/provider/adapter.rs");
+    // 0.4.x decoupling step 2: provider-local command builders moved to
+    // src/provider/adapters/<provider>.rs. This grep guard now reads the
+    // composite source (adapter.rs + every adapters/*.rs).
+    let adapter = format!(
+        "{}\n{}",
+        source("src/provider/adapter.rs"),
+        source_tree("src/provider/adapters"),
+    );
     let all_sources = source_tree("src");
     let mut failures = Vec::new();
 
