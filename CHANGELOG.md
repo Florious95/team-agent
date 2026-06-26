@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7
+
+- **Improved: message delivery and provider wiring are now more reliable.** Provider-specific logic is unified in one place, so fixes and improvements apply consistently across Claude, Codex, Copilot, and Gemini. A bug where GeminiCli and Fake providers missed some delivery updates is now fixed.
+- **Improved: `status --json` output is now compact by default.** The default output shows 7 top-level fields and 4 per-agent fields — just what you need at a glance. Use `status --detail` to get the full diagnostic view with all coordinator and message fields.
+- **Added: `status` now reports a `ready` / `not_ready` summary.** A single field tells you whether the team is ready to work and, if not, lists the reasons why (for example, workers not yet spawned).
+- **Improved: provider adapters are now split into per-provider files.** Claude, Codex, Copilot, and Fake adapters each live in their own file, making the codebase easier to navigate and extend.
+
 ## 0.3.28
 
 - **Improved: teammate windows now use one layout manager.** Starting, adding, removing, and restarting teammates now share the same layout rules, so panes are placed more predictably and new layout changes do not need to be reimplemented in several places.
