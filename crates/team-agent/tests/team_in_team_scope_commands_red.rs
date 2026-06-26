@@ -48,6 +48,10 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("status-scope");
 
+    // 0.4.x compact slim: default `--json` keeps the agents map (which the
+    // slim payload uses to enforce team scoping). Diagnostic fields
+    // (tasks/messages/results/agent_health) moved to --detail; team
+    // scoping for them is asserted against `--json --detail`.
     let output = run_cli([
         "status",
         "--workspace",
@@ -67,28 +71,41 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
         status.pointer("/agents/worker_b").is_none(),
         "status --team teamA must not leak teamB's worker; status={status}"
     );
+
+    let detail_output = run_cli([
+        "status",
+        "--workspace",
+        fixture.root_str(),
+        "--team",
+        "teamA",
+        "--json",
+        "--detail",
+    ]);
+    assert_success(&detail_output, "status --team teamA --json --detail");
+    let detail = stdout_json(&detail_output);
+
     assert!(
-        task_ids(&status).contains(&"task_a".to_string()),
-        "status --team teamA must show teamA tasks; status={status}"
+        task_ids(&detail).contains(&"task_a".to_string()),
+        "status --team teamA --detail must show teamA tasks; detail={detail}"
     );
     assert!(
-        !task_ids(&status).contains(&"task_b".to_string()),
-        "status --team teamA must not collapse to active teamB tasks; status={status}"
+        !task_ids(&detail).contains(&"task_b".to_string()),
+        "status --team teamA --detail must not collapse to active teamB tasks; detail={detail}"
     );
     assert_eq!(
-        status.pointer("/messages/accepted").and_then(Value::as_i64),
+        detail.pointer("/messages/accepted").and_then(Value::as_i64),
         Some(1),
-        "status --team teamA message counts must filter owner_team_id=teamA, not count sibling rows; status={status}"
+        "status --team teamA --detail message counts must filter owner_team_id=teamA; detail={detail}"
     );
     assert_eq!(
-        status.pointer("/results/total").and_then(Value::as_i64),
+        detail.pointer("/results/total").and_then(Value::as_i64),
         Some(1),
-        "status --team teamA result counts must filter owner_team_id=teamA, not count sibling rows; status={status}"
+        "status --team teamA --detail result counts must filter owner_team_id=teamA; detail={detail}"
     );
     assert!(
-        status.pointer("/agent_health/worker_a").is_some()
-            && status.pointer("/agent_health/worker_b").is_none(),
-        "status --team teamA agent_health must be owner_team_id scoped; status={status}"
+        detail.pointer("/agent_health/worker_a").is_some()
+            && detail.pointer("/agent_health/worker_b").is_none(),
+        "status --team teamA --detail agent_health must be owner_team_id scoped; detail={detail}"
     );
 }
 
