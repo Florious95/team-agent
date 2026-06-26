@@ -18,6 +18,12 @@ team-agent claude
 
 Pass provider flags after the provider name, for example `team-agent codex --dangerously-bypass-approvals-and-sandbox`. Existing tmux layouts are valid too, including Finder/Ghostty launchers, as long as `team-agent quick-start` is invoked from the leader's current tmux pane. Do not start a real team from a naked terminal that Team Agent cannot address through tmux.
 
+## Leader Role
+
+Invoking this skill turns the current agent into the team leader. The leader **orchestrates**: read reports, set direction, decompose work, dispatch tasks to teammates, review results, and decide. The leader does **not** execute hands-on work — no `cargo test`, no product-code edits, no `git push`, no build/verify cycles. Those belong to teammates. If the leader catches themselves running tests, editing source files, or pushing commits, they have stepped out of role; stop and re-dispatch.
+
+When the user has been communicating in Chinese throughout the conversation, all leader↔teammate messaging (`send`, `report_result`, MCP messages, task descriptions) must also be in Chinese. The leader dispatches in Chinese, the worker reports back in Chinese. Switch back to the user's language only at the user-facing boundary.
+
 ## Minimal Copy-Paste Team
 
 ```bash
