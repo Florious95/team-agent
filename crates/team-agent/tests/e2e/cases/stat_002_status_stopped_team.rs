@@ -21,6 +21,8 @@ fn stat_002_status_stopped_team() {
     );
     assert!(shut.is_success(), "shutdown stderr={}", shut.stderr);
 
+    // 0.4.x compact slim: default `--json` keeps agent status; diagnostic
+    // top-level fields (tmux_session_present, coordinator) moved to --detail.
     let out = run_ta(
         &ws,
         &[
@@ -32,7 +34,21 @@ fn stat_002_status_stopped_team() {
     );
     assert!(out.is_success(), "status stderr={}", out.stderr);
     let j = out.json();
-    assert_json_field_eq_bool(&j, "/tmux_session_present", false);
-    assert_json_field_eq_str(&j, "/coordinator/status", "missing");
     assert_json_field_eq_str(&j, "/agents/a/status", "stopped");
+
+    let detail = run_ta(
+        &ws,
+        &[
+            "status",
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--json",
+            "--detail",
+        ],
+    );
+    assert!(detail.is_success(), "status --detail stderr={}", detail.stderr);
+    let d = detail.json();
+    assert_json_field_eq_bool(&d, "/tmux_session_present", false);
+    assert_json_field_eq_str(&d, "/coordinator/status", "missing");
+    assert_json_field_eq_str(&d, "/agents/a/status", "stopped");
 }
