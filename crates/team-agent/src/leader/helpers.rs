@@ -9,28 +9,7 @@ use crate::provider::{Provider, RolloutPath, TurnState};
 
 use super::LeaderError;
 
-pub(crate) fn provider_wire(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Fake => "fake",
-    }
-}
-
-pub(crate) fn parse_provider(s: &str) -> Option<Provider> {
-    match s {
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "codex" => Some(Provider::Codex),
-        "copilot" => Some(Provider::Copilot),
-        "gemini_cli" => Some(Provider::GeminiCli),
-        "fake" => Some(Provider::Fake),
-        _ => None,
-    }
-}
+pub(crate) use crate::provider::wire::{parse_provider, provider_wire};
 
 pub(crate) fn turn_state_wire(state: TurnState) -> &'static str {
     match state {

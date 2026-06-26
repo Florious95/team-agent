@@ -913,28 +913,7 @@ pub(super) fn agent_window(agent: &serde_json::Value, agent_id: &AgentId) -> Str
         .to_string()
 }
 
-pub(super) fn parse_provider(raw: &str) -> Option<Provider> {
-    match raw {
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "codex" => Some(Provider::Codex),
-        "copilot" => Some(Provider::Copilot),
-        "gemini_cli" => Some(Provider::GeminiCli),
-        "fake" => Some(Provider::Fake),
-        _ => None,
-    }
-}
-
-pub(super) fn provider_wire(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Fake => "fake",
-    }
-}
+pub(super) use crate::provider::wire::{parse_provider, provider_wire};
 
 pub(super) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     match raw {

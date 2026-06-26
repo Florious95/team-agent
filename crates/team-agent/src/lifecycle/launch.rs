@@ -2455,17 +2455,7 @@ fn spec_display_backend(spec: &Value) -> DisplayBackend {
     crate::lifecycle::display::resolve_display_backend(requested, None).backend
 }
 
-fn parse_provider(raw: &str) -> Option<Provider> {
-    match raw {
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "codex" => Some(Provider::Codex),
-        "copilot" => Some(Provider::Copilot),
-        "gemini_cli" => Some(Provider::GeminiCli),
-        "fake" => Some(Provider::Fake),
-        _ => None,
-    }
-}
+use crate::provider::wire::parse_provider;
 
 fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     match raw {

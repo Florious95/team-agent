@@ -894,17 +894,7 @@ fn effective_profile_or_agent_model<'a>(
     agent.model.as_deref().or_else(|| profile_model(values))
 }
 
-pub(crate) fn parse_provider(raw: &str) -> Option<Provider> {
-    match raw {
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "codex" => Some(Provider::Codex),
-        "copilot" => Some(Provider::Copilot),
-        "gemini_cli" => Some(Provider::GeminiCli),
-        "fake" => Some(Provider::Fake),
-        _ => None,
-    }
-}
+pub(crate) use crate::provider::wire::parse_provider;
 
 pub(crate) fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
     match raw {

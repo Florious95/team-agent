@@ -1656,16 +1656,7 @@ fn turn_state_wire(state: TurnState) -> &'static str {
     }
 }
 
-fn provider_wire(provider: crate::model::enums::Provider) -> &'static str {
-    match provider {
-        crate::model::enums::Provider::Claude => "claude",
-        crate::model::enums::Provider::ClaudeCode => "claude_code",
-        crate::model::enums::Provider::Codex => "codex",
-        crate::model::enums::Provider::Copilot => "copilot",
-        crate::model::enums::Provider::GeminiCli => "gemini_cli",
-        crate::model::enums::Provider::Fake => "fake",
-    }
-}
+use crate::provider::wire::provider_wire;
 
 #[derive(Debug, Clone)]
 struct AbnormalWatchAgent {
@@ -2409,17 +2400,7 @@ fn monotonic_seconds() -> f64 {
     }
 }
 
-fn parse_provider(raw: &str) -> Option<crate::model::enums::Provider> {
-    match raw {
-        "claude" => Some(crate::model::enums::Provider::Claude),
-        "claude_code" => Some(crate::model::enums::Provider::ClaudeCode),
-        "codex" => Some(crate::model::enums::Provider::Codex),
-        "copilot" => Some(crate::model::enums::Provider::Copilot),
-        "gemini_cli" => Some(crate::model::enums::Provider::GeminiCli),
-        "fake" => Some(crate::model::enums::Provider::Fake),
-        _ => None,
-    }
-}
+use crate::provider::wire::parse_provider;
 
 fn capture_window_target(
     agent: &Value,

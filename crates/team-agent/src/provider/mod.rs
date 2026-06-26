@@ -40,6 +40,9 @@ pub mod session;
 pub mod session_scan;
 pub mod startup_prompt;
 pub mod types;
+/// 0.4.x: provider wire-format helpers — single source of truth for
+/// `Provider` ↔ string conversions (replaces 7 hand-rolled match copies).
+pub(crate) mod wire;
 // helpers 全部原为模块私有(JSONL 解析 / 正则编译),非根可见 → 私有 mod,不参与 re-export。
 mod helpers;
 

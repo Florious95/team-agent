@@ -928,26 +928,7 @@ impl ProviderAdapter for BasicProviderAdapter {
     }
 }
 
-fn command_name(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude | Provider::ClaudeCode => "claude",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini",
-        Provider::Fake => "team-agent",
-    }
-}
-
-fn provider_wire(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Fake => "fake",
-    }
-}
+use crate::provider::wire::{command_name, provider_wire};
 
 fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {
     match auth_mode {

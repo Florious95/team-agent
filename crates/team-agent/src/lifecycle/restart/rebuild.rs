@@ -1183,13 +1183,17 @@ fn try_autobind_leader_after_restart(
                 .pointer("/leader_receiver/provider")
                 .and_then(serde_json::Value::as_str)
         })
-        .and_then(|s| match s {
-            "codex" => Some(crate::model::enums::Provider::Codex),
-            "claude" | "claude_code" | "claude-code" => {
-                Some(crate::model::enums::Provider::ClaudeCode)
-            }
-            "copilot" => Some(crate::model::enums::Provider::Copilot),
-            _ => None,
+        .and_then(|s| {
+            // Legacy auto-attach: collapse any claude variant to ClaudeCode
+            // (this site historically treated `Claude` and `ClaudeCode` as
+            // the same attach target). Wire-format `parse_provider` keeps
+            // them distinct everywhere else.
+            crate::provider::wire::parse_provider(s).map(|p| match p {
+                crate::model::enums::Provider::Claude => {
+                    crate::model::enums::Provider::ClaudeCode
+                }
+                other => other,
+            })
         })
         .unwrap_or(crate::model::enums::Provider::ClaudeCode);
     let team_str = team;
