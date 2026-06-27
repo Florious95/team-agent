@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8
+
+- **Fixed: Claude workers now start with a clean session, never inheriting the leader's session ID.** Previously, spawning a Claude worker could accidentally reuse the leader's Claude Code session environment, causing the worker to capture the leader's transcript instead of its own. Claude workers now launch in a fully isolated environment with all session-related variables cleared.
+- **Fixed: `restart` now reliably resumes workers that had existing conversations.** A worker that had chatted before a shutdown is now brought back with its full context. A never-used worker (no transcript, no interaction) is correctly started fresh — no `--allow-fresh` flag required.
+- **Fixed: session capture state is now set atomically with the session tuple.** The capture state and session ID are now written together, preventing a window where one was set but the other was not, which could cause misrouted messages.
+- **Fixed: `reset` now clears the worker's spawn epoch**, so a restarted worker cannot accidentally be matched against stale spawn records from a previous lifecycle.
+- **Fixed: the `transcript-ready` state machine is now consistent.** Workers only transition to the ready state once their transcript file is actually present and writable, preventing premature delivery attempts.
+- **Fixed: status now rejects ambiguous multi-team targets.** If `--workspace` matches more than one team, `status` now returns `ok: false` with `reason: team_target_ambiguous` instead of silently picking one.
+- **Fixed: `start-agent` now clears the fresh tuple and guards against pending mismatches** when launching a worker that previously existed, preventing stale state from leaking into the new lifecycle.
+- **Fixed: Claude child/team environment is fully cleaned on worker spawn.** All `CLAUDE_CODE_*` and team-scoped environment variables are unset before launching a Claude worker, closing the root cause of session bleed-through.
+
 ## 0.4.7
 
 - **Improved: message delivery and provider wiring are now more reliable.** Provider-specific logic is unified in one place, so fixes and improvements apply consistently across Claude, Codex, Copilot, and Gemini. A bug where GeminiCli and Fake providers missed some delivery updates is now fixed.
