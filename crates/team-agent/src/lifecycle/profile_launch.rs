@@ -415,7 +415,14 @@ fn provider_env_exports(
     exports
 }
 
-fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BTreeSet<String> {
+/// 0.4.x (CR C-1): exposed as `pub(crate)` so the leader launcher
+/// (leader/start.rs) can reuse the SAME Claude/Codex/Copilot env-unset set
+/// used by worker spawn. Single source of truth — adding a new provider env
+/// var to clean up means changing this one function. Audit grep guard in
+/// `crates/team-agent/src/leader/start.rs::leader_env_unset_for_provider`
+/// confirms the leader path imports from here and does not maintain its own
+/// duplicate list.
+pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BTreeSet<String> {
     let mut unsets = BTreeSet::new();
     match provider {
         Provider::Claude | Provider::ClaudeCode => {

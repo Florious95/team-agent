@@ -636,7 +636,21 @@ impl TmuxBackend {
         first: bool,
     ) -> Result<SpawnResult, TransportError> {
         let command = shell_command(argv, cwd, env, env_unset);
-        let spawn_argv = tmux_spawn_argv(session, window, &command, first);
+        self.spawn_with_command(session, window, &command, first)
+    }
+
+    /// 0.4.x (CR C-2): spawn variant that takes a pre-built shell command
+    /// (used by `spawn_first_with_leader_shell_wrapper` /
+    /// `spawn_into_with_leader_shell_wrapper` to inject the leader wrapper
+    /// shape without going through `shell_command`'s `exec`-only template).
+    fn spawn_with_command(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        command: &str,
+        first: bool,
+    ) -> Result<SpawnResult, TransportError> {
+        let spawn_argv = tmux_spawn_argv(session, window, command, first);
         self.run_spawn(&spawn_argv)?;
         let pane_argv = vec![
             "tmux".to_string(),
@@ -1327,6 +1341,75 @@ fn shell_command(
     parts.join(" ")
 }
 
+/// 0.4.x (CR R6): single-source marker prefix. The exit marker emitted by
+/// `leader_shell_wrapper_command` and the substring detected by
+/// `leader_provider_health` MUST share this prefix exactly. Format:
+/// `"[team-agent] {provider_label} exited with {rc}"`.
+pub const LEADER_PROVIDER_EXIT_MARKER_PREFIX: &str = "[team-agent]";
+pub const LEADER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
+
+/// 0.4.x (CR R6): build the leader exit marker text for `provider_label`.
+/// Used by both the shell wrapper (printf source) and the health check
+/// (capture substring) so they cannot drift.
+pub fn leader_provider_exit_marker(provider_label: &str) -> String {
+    format!(
+        "{LEADER_PROVIDER_EXIT_MARKER_PREFIX} {provider_label} {LEADER_PROVIDER_EXIT_MARKER_SUFFIX}"
+    )
+}
+
+/// 0.4.x (CR C-2): leader shell wrapper — provider runs as a CHILD of a
+/// long-lived shell, not as the pane's primary process. When the provider
+/// exits, the pane returns to an interactive shell with an explicit exit
+/// marker, matching manual `tmux new-session` then `claude` behaviour.
+///
+/// Four required envelope sections (CR C-2):
+///   1. cd <cwd>                    — same as `shell_command`
+///   2. unset <KEY> ...             — provider env_unset block
+///   3. KEY=val ... <provider>      — env exports + provider invocation
+///                                    (NO `exec` — runs as child)
+///   4. printf exit marker; exec shell -l
+///
+/// `provider_label` is a human-readable provider name (e.g. "claude",
+/// "codex") embedded in the exit marker for diagnostics.
+pub fn leader_shell_wrapper_command(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    env_unset: &[String],
+    provider_label: &str,
+) -> String {
+    let mut parts = Vec::new();
+    // 1. cd
+    parts.push("cd".to_string());
+    parts.push(shell_quote(&cwd.to_string_lossy()));
+    parts.push("&&".to_string());
+    // 2. unset
+    for key in env_unset {
+        parts.push("unset".to_string());
+        parts.push(key.clone());
+        parts.push("&&".to_string());
+    }
+    // 3. env exports + provider (NO `exec` so the provider is a child)
+    for (key, value) in env {
+        parts.push(format!("{key}={}", shell_quote(value)));
+    }
+    parts.extend(argv.iter().map(|arg| shell_quote(arg)));
+    parts.push(";".to_string());
+    // 4. exit marker + fall back to interactive shell
+    parts.push("rc=$?;".to_string());
+    parts.push("printf".to_string());
+    // CR R6: marker text comes from single-source `leader_provider_exit_marker`.
+    parts.push(shell_quote(&format!(
+        "\n{} %s\n",
+        leader_provider_exit_marker(provider_label)
+    )));
+    parts.push("\"$rc\";".to_string());
+    parts.push("exec".to_string());
+    parts.push("\"${SHELL:-/bin/zsh}\"".to_string());
+    parts.push("-l".to_string());
+    parts.join(" ")
+}
+
 fn shell_quote(raw: &str) -> String {
     if raw.is_empty() {
         return "''".to_string();
@@ -1420,6 +1503,38 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
         self.spawn_split(session, window, argv, cwd, env, env_unset)
+    }
+
+    /// 0.4.x (CR C-2): TmuxBackend override of the leader-shell-wrapper
+    /// variant. Builds the wrapper shell line via
+    /// `leader_shell_wrapper_command` and runs it through
+    /// `spawn_with_command` (bypassing the default `exec <cmd>` shape).
+    fn spawn_first_with_leader_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let command = leader_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
+        self.spawn_with_command(session, window, &command, true)
+    }
+
+    fn spawn_into_with_leader_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let command = leader_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
+        self.spawn_with_command(session, window, &command, false)
     }
 
     fn inject(

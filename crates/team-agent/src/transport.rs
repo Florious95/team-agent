@@ -584,6 +584,44 @@ pub trait Transport: Send + Sync {
         self.spawn_into(session, window, argv, cwd, env)
     }
 
+    /// 0.4.x (CR C-2): leader-specific spawn variant. Instead of `exec <cmd>`
+    /// (which makes the provider the pane's primary process and turns the
+    /// pane into `[exited]` when the provider exits), build a shell line
+    /// that runs the provider as a CHILD of a long-lived shell:
+    /// `cd ... && unset ... && KEY=val ... <cmd>; rc=$?; printf '\n[team-agent] <provider> exited with %s\n' "$rc"; exec "${SHELL:-/bin/zsh}" -l`.
+    /// When the provider exits, the pane returns to an interactive shell with
+    /// an explicit exit marker — matching manual `tmux new-session` then
+    /// `claude` behaviour. Default falls back to plain `spawn_first_with_env_unset`
+    /// for backends that have no shell layer (test-only `OfflineTransport`).
+    fn spawn_first_with_leader_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = provider_label;
+        self.spawn_first_with_env_unset(session, window, argv, cwd, env, env_unset)
+    }
+
+    /// 同 [`Transport::spawn_first_with_leader_shell_wrapper`],对应 `spawn_into`。
+    fn spawn_into_with_leader_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = provider_label;
+        self.spawn_into_with_env_unset(session, window, argv, cwd, env, env_unset)
+    }
+
     // —— INJECT / CAPTURE / QUERY(RIE):按稳定 Target 寻址 ——
 
     /// 归并 set/load-buffer + paste-buffer + send submit;空文本走纯 send-keys

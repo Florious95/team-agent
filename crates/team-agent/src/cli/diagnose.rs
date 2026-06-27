@@ -33,6 +33,39 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
             "issue": "leader_not_attached",
             "action": "attach or claim a leader receiver before sending work",
         }));
+    } else {
+        // 0.4.x (CR R2 P0): leader provider health reconciliation. The
+        // leader_receiver may be marked `attached` (pane addressable) but the
+        // provider process has exited — pane fell back to shell with the exit
+        // marker. Distinguish `leader_provider_exited` from `attached` so
+        // status/diagnose surfaces the real state.
+        if let Some((pane_id, provider_label)) = leader_pane_and_provider(state) {
+            let health = crate::leader::leader_provider_health(
+                backend,
+                &crate::transport::PaneId::new(pane_id),
+                &provider_label,
+            );
+            match health {
+                crate::leader::LeaderProviderHealth::ProviderExited => {
+                    issues.push(json!("leader_provider_exited"));
+                    repairs.push(json!({
+                        "issue": "leader_provider_exited",
+                        "action": format!(
+                            "leader pane fell back to shell — provider `{provider_label}` exited; \
+                             relaunch with `team-agent {provider_label}` to restart the provider"
+                        ),
+                    }));
+                }
+                crate::leader::LeaderProviderHealth::Unreachable => {
+                    issues.push(json!("leader_provider_unreachable"));
+                    repairs.push(json!({
+                        "issue": "leader_provider_unreachable",
+                        "action": "leader pane is dead — relaunch the leader",
+                    }));
+                }
+                crate::leader::LeaderProviderHealth::Alive => {}
+            }
+        }
     }
 
     if let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
@@ -60,6 +93,25 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
     }
 
     (Value::Array(issues), Value::Array(repairs))
+}
+
+/// 0.4.x (CR R2): pull (pane_id, provider_label) from leader_receiver. Used
+/// by `leader_provider_health` reconcile in diagnose. Returns None when the
+/// leader is not attached or any field is missing.
+fn leader_pane_and_provider(state: &Value) -> Option<(String, String)> {
+    let receiver = state.get("leader_receiver")?;
+    let pane_id = receiver
+        .get("pane_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let provider = receiver
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("claude")
+        .to_string();
+    Some((pane_id, provider))
 }
 
 fn leader_receiver_attached(state: &Value) -> bool {

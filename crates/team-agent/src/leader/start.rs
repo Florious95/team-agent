@@ -448,14 +448,55 @@ fn ensure_managed_leader_pane(
                 });
             }
         }
+        // 0.4.x (CR C-1 + C-2): leader env_unset reuses the worker
+        // provider_env_unsets (single source of truth) + spawn through the
+        // leader shell wrapper so provider exit returns to a shell, not
+        // `[exited]`.
+        let env_unset = leader_env_unset_for_provider(plan.provider);
+        let provider_label = provider_command_name(plan.provider);
         transport
-            .spawn_into(session, window, &plan.provider_argv, workspace, &plan.leader_env)
+            .spawn_into_with_leader_shell_wrapper(
+                session,
+                window,
+                &plan.provider_argv,
+                workspace,
+                &plan.leader_env,
+                &env_unset,
+                provider_label,
+            )
             .map_err(|error| LeaderError::Start(error.to_string()))
     } else {
+        let env_unset = leader_env_unset_for_provider(plan.provider);
+        let provider_label = provider_command_name(plan.provider);
         transport
-            .spawn_first(session, window, &plan.provider_argv, workspace, &plan.leader_env)
+            .spawn_first_with_leader_shell_wrapper(
+                session,
+                window,
+                &plan.provider_argv,
+                workspace,
+                &plan.leader_env,
+                &env_unset,
+                provider_label,
+            )
             .map_err(|error| LeaderError::Start(error.to_string()))
     }
+}
+
+/// 0.4.x (CR C-1): leader provider env-unset list — SINGLE SOURCE OF TRUTH
+/// reused from worker spawn (`profile_launch::provider_env_unsets`).
+/// Audit grep guard: this function MUST be the only place in
+/// `crates/team-agent/src/leader/` that constructs a Claude/Codex/Copilot
+/// env-unset list. Any new code path that needs it must call this function
+/// or the underlying `provider_env_unsets`. Use `AuthMode::Subscription` —
+/// the leader is the user's interactive provider, never CompatibleApi/
+/// OfficialApi which are worker-only auth modes today.
+fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
+    crate::lifecycle::profile_launch::provider_env_unsets(
+        provider,
+        crate::model::enums::AuthMode::Subscription,
+    )
+    .into_iter()
+    .collect()
 }
 
 fn ensure_managed_provider_live_after_attach(
@@ -476,6 +517,117 @@ fn ensure_managed_provider_live_after_attach(
         spawned.session.as_str(),
         spawned.window.as_str()
     )))
+}
+
+/// 0.4.x (CR C-3 P0): leader provider health reconciliation. The default
+/// `liveness()` check only proves the pane is ADDRESSABLE via tmux — it
+/// returns `Live` even when the provider has exited and the wrapper shell
+/// fell back to an interactive shell. This function distinguishes
+/// `provider_alive` from `provider_exited` by:
+///   1. Reading `pane_current_command` (tmux `#{pane_current_command}`).
+///   2. If the current command matches the expected provider binary (or
+///      one of its known aliases), report `Alive`.
+///   3. If the current command is an interactive shell AND the pane
+///      content contains the exit marker `[team-agent] <provider> exited`
+///      (emitted by `leader_shell_wrapper_command`), report
+///      `ProviderExited`.
+///   4. Otherwise (Unknown shell, no marker), report `Alive` as the
+///      conservative default — avoid false-positive exit alarms.
+///
+/// Note: when the leader shell wrapper is used (CR C-2), a provider exit
+/// leaves the pane as `<SHELL:-/bin/zsh>` with the exit marker in
+/// scrollback. Pre-wrapper code that hit `exec claude` would have left the
+/// pane as `[exited]` and `liveness()` would have returned `Dead`. The new
+/// failure mode requires this richer health check to surface
+/// `leader_provider_exited` as a distinct status.
+pub fn leader_provider_health(
+    transport: &dyn Transport,
+    pane_id: &PaneId,
+    expected_provider_label: &str,
+) -> LeaderProviderHealth {
+    use crate::transport::{CaptureRange, PaneField, Target};
+    let liveness = transport.liveness(pane_id).ok();
+    if matches!(liveness, Some(PaneLiveness::Dead)) {
+        return LeaderProviderHealth::Unreachable;
+    }
+    let target = Target::Pane(pane_id.clone());
+    let current_command = transport
+        .query(&target, PaneField::PaneCurrentCommand)
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
+    if !current_command.is_empty()
+        && (current_command == expected_provider_label
+            || current_command.contains(expected_provider_label))
+    {
+        return LeaderProviderHealth::Alive;
+    }
+    // Current command is NOT the provider — likely fell back to shell.
+    let is_shell = is_interactive_shell_basename(&current_command);
+    if is_shell {
+        // CR R6: marker text from single-source `leader_provider_exit_marker`
+        // so the wrapper printf and the health-check substring cannot drift.
+        let exit_marker_substr =
+            crate::tmux_backend::leader_provider_exit_marker(expected_provider_label);
+        if let Ok(cap) = transport.capture(&target, CaptureRange::Tail(200)) {
+            if cap.text.contains(&exit_marker_substr) {
+                return LeaderProviderHealth::ProviderExited;
+            }
+        }
+    }
+    // Conservative default — pane addressable, but couldn't positively
+    // confirm provider exit. Treat as Alive.
+    LeaderProviderHealth::Alive
+}
+
+/// Health status reported by [`leader_provider_health`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderProviderHealth {
+    /// Provider process appears to be the pane's current command.
+    Alive,
+    /// Pane has fallen back to a shell with the exit marker present —
+    /// provider has exited.
+    ProviderExited,
+    /// Pane is dead / unaddressable.
+    Unreachable,
+}
+
+/// 0.4.x (CR R6 + R3): single-source interactive-shell detection.
+/// Used by:
+///   - `leader_provider_health` to decide "pane fell back to shell"
+///   - shutdown logic to recognise a leader pane in fallback-shell mode
+///     as still owned by the leader (not stray).
+///
+/// Matches by basename (case-insensitive) — `pane_current_command` returns
+/// the basename of the running binary. Conservative whitelist of POSIX +
+/// common interactive shells; missing entries here are false negatives
+/// (shell looks like provider absent → health says Alive) which is the
+/// safe default per the CR R6 conservative-Alive rule.
+pub fn is_interactive_shell_basename(name: &str) -> bool {
+    let trimmed = name.trim().to_ascii_lowercase();
+    let basename = std::path::Path::new(&trimmed)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&trimmed);
+    matches!(
+        basename,
+        "zsh"
+            | "bash"
+            | "sh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "tcsh"
+            | "csh"
+            | "ash"
+            | "mksh"
+            | "yash"
+            | "elvish"
+            | "nu"
+            | "nushell"
+            | "xonsh"
+    )
 }
 
 fn managed_spawned_pane_in_targets(transport: &dyn Transport, spawned: &SpawnResult) -> bool {

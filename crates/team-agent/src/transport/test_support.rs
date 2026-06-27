@@ -50,6 +50,9 @@ struct OfflineState {
     /// U1-C Tail-peek contract: every `capture()` call records its `CaptureRange`,
     /// in order, so a test can prove the delivery peek site narrowed Full → Tail(80).
     capture_ranges: Vec<CaptureRange>,
+    /// 0.4.x (CR C-3 / CR C-5): pre-staged `query(PaneField::PaneCurrentCommand)`
+    /// answer keyed by pane id. Used by leader provider health tests.
+    pane_current_commands: BTreeMap<String, String>,
 }
 
 impl Default for OfflineState {
@@ -73,6 +76,7 @@ impl Default for OfflineState {
             list_targets_error: None,
             capture_text: BTreeMap::new(),
             capture_ranges: Vec::new(),
+            pane_current_commands: BTreeMap::new(),
         }
     }
 }
@@ -161,6 +165,52 @@ impl OfflineTransport {
             state.capture_text.insert(pane_id.into(), text.into());
         });
         self
+    }
+
+    /// 0.4.x (CR C-3 / CR C-5): pre-stage a `pane_current_command` answer
+    /// for `query(PaneField::PaneCurrentCommand)`. Used by leader provider
+    /// health tests to simulate "pane is now in a shell" vs
+    /// "pane is running the provider".
+    pub fn with_pane_current_command(
+        self,
+        pane_id: impl Into<String>,
+        command: impl Into<String>,
+    ) -> Self {
+        self.with_state(|state| {
+            state.pane_current_commands.insert(pane_id.into(), command.into());
+        });
+        self
+    }
+
+    /// 0.4.x (CR C-3 / CR C-5): mutable setters for fluent test seeding
+    /// (alternative to builder chain when the transport already exists).
+    pub fn set_pane_addressable(&self, pane: &PaneId, addressable: bool) {
+        self.with_state(|state| {
+            state.liveness.insert(
+                pane.as_str().to_string(),
+                if addressable {
+                    PaneLiveness::Live
+                } else {
+                    PaneLiveness::Dead
+                },
+            );
+        });
+    }
+
+    pub fn set_pane_current_command(&self, pane: &PaneId, command: &str) {
+        self.with_state(|state| {
+            state
+                .pane_current_commands
+                .insert(pane.as_str().to_string(), command.to_string());
+        });
+    }
+
+    pub fn set_pane_capture(&self, pane: &PaneId, text: &str) {
+        self.with_state(|state| {
+            state
+                .capture_text
+                .insert(pane.as_str().to_string(), text.to_string());
+        });
     }
 
     /// Pre-stage `capture()` output for a `Target::SessionWindow{session,window}` key.
@@ -378,11 +428,20 @@ impl Transport for OfflineTransport {
 
     fn query(
         &self,
-        _target: &Target,
-        _field: PaneField,
+        target: &Target,
+        field: PaneField,
     ) -> Result<Option<String>, TransportError> {
         self.record("query");
-        Ok(None)
+        if !matches!(field, PaneField::PaneCurrentCommand) {
+            return Ok(None);
+        }
+        let pane_id = match target {
+            Target::Pane(p) => p.as_str().to_string(),
+            Target::SessionWindow { .. } => return Ok(None),
+        };
+        Ok(self.with_state(|state| {
+            state.pane_current_commands.get(&pane_id).cloned()
+        }))
     }
 
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
