@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -27,6 +28,7 @@ static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// removed on `Drop` unless `TEAM_AGENT_KEEP_TEST_TMP=1` is set.
 pub struct TestWorkspace {
     path: PathBuf,
+    ta_binary: Mutex<Option<PathBuf>>,
 }
 
 impl TestWorkspace {
@@ -47,11 +49,21 @@ impl TestWorkspace {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create workspace dir");
         let path = std::fs::canonicalize(&path).expect("canonicalize workspace dir");
-        Self { path }
+        Self {
+            path,
+            ta_binary: Mutex::new(None),
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn record_ta_binary(&self, path: &Path) {
+        let normalized = normalize_existing_path(path);
+        if let Ok(mut slot) = self.ta_binary.lock() {
+            *slot = Some(normalized);
+        }
     }
 
     /// Write a minimal TEAM.md + agents/<id>.md tree that uses
@@ -195,9 +207,354 @@ impl TestWorkspace {
 
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
+        self.cleanup_owned_coordinator();
         if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
-            let _ = std::fs::remove_dir_all(&self.path);
+            remove_workspace_dir(&self.path);
         }
+    }
+}
+
+impl TestWorkspace {
+    fn cleanup_owned_coordinator(&self) {
+        if std::env::var("TEAM_AGENT_KEEP_TEST_PROCESSES").as_deref() == Ok("1") {
+            return;
+        }
+        let mut stopped_any = false;
+        for pid in self.discover_owned_coordinator_pids() {
+            if self.terminate_owned_pid(pid) {
+                stopped_any = true;
+            } else {
+                eprintln!(
+                    "TestWorkspace cleanup: failed to stop owned coordinator pid={pid} workspace={}",
+                    self.path.display()
+                );
+            }
+        }
+        if stopped_any || !self.pid_is_owned_coordinator_from_file() {
+            let _ = std::fs::remove_file(self.coordinator_pid_file());
+            let _ = std::fs::remove_file(self.coordinator_meta_file());
+        }
+    }
+
+    fn coordinator_pid_file(&self) -> PathBuf {
+        self.path.join(".team/runtime/coordinator.pid")
+    }
+
+    fn coordinator_meta_file(&self) -> PathBuf {
+        self.path.join(".team/runtime/coordinator.json")
+    }
+
+    fn discover_owned_coordinator_pids(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        if let Some(pid) = read_pid(&self.coordinator_pid_file()) {
+            if self.pid_is_owned_coordinator(pid) {
+                out.push(pid);
+            }
+        }
+        for (pid, command) in ps_table() {
+            if self.command_is_owned_coordinator(&command) {
+                out.push(pid);
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    fn pid_is_owned_coordinator_from_file(&self) -> bool {
+        read_pid(&self.coordinator_pid_file()).is_some_and(|pid| self.pid_is_owned_coordinator(pid))
+    }
+
+    fn pid_is_owned_coordinator(&self, pid: u32) -> bool {
+        pid != std::process::id()
+            && ps_command(pid)
+                .as_deref()
+                .is_some_and(|command| self.command_is_owned_coordinator(command))
+    }
+
+    fn command_is_owned_coordinator(&self, command: &str) -> bool {
+        let tokens = command.split_whitespace().collect::<Vec<_>>();
+        if tokens.len() < 3 || !self.path_is_e2e_private_tmp() {
+            return false;
+        }
+        let Some(binary) = tokens.first() else {
+            return false;
+        };
+        if is_installed_team_agent_binary(binary) || !self.binary_matches_test_binary(binary) {
+            return false;
+        }
+        tokens.iter().any(|token| *token == "coordinator")
+            && workspace_arg_matches(&tokens, &workspace_match_candidates(&self.path))
+    }
+
+    fn path_is_e2e_private_tmp(&self) -> bool {
+        self.path
+            .to_str()
+            .is_some_and(|path| path.starts_with("/private/tmp/ta-e2e-"))
+    }
+
+    fn binary_matches_test_binary(&self, command_binary: &str) -> bool {
+        let command_binary = normalize_existing_path(Path::new(command_binary));
+        self.ta_binary_candidates()
+            .iter()
+            .any(|candidate| *candidate == command_binary)
+    }
+
+    fn ta_binary_candidates(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Ok(slot) = self.ta_binary.lock() {
+            if let Some(path) = slot.as_ref() {
+                out.push(path.clone());
+            }
+        }
+        if let Some(path) = std::env::var_os("CARGO_BIN_EXE_team-agent").map(PathBuf::from) {
+            out.push(normalize_existing_path(&path));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(debug_dir) = exe.parent().and_then(Path::parent) {
+                out.push(normalize_existing_path(&debug_dir.join("team-agent")));
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn terminate_owned_pid(&self, pid: u32) -> bool {
+        if !self.pid_is_owned_coordinator(pid) {
+            return false;
+        }
+        let _ = send_signal(pid, libc::SIGTERM);
+        if wait_until_pid_exits(pid, Duration::from_millis(1500)) {
+            return true;
+        }
+        if !self.pid_is_owned_coordinator(pid) {
+            return !pid_is_running(pid);
+        }
+        let _ = send_signal(pid, libc::SIGKILL);
+        wait_until_pid_exits(pid, Duration::from_millis(1500))
+    }
+}
+
+fn remove_workspace_dir(path: &Path) {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(first) if first.kind() == std::io::ErrorKind::NotFound => {}
+        Err(first) => {
+            std::thread::sleep(Duration::from_millis(100));
+            if let Err(second) = std::fs::remove_dir_all(path) {
+                if second.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "TestWorkspace cleanup: remove_dir_all {} failed: first={first}; retry={second}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+}
+
+fn ps_command(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let command = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!command.is_empty()).then_some(command)
+}
+
+fn ps_table() -> Vec<(u32, String)> {
+    let output = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_ps_line)
+        .collect()
+}
+
+fn parse_ps_line(line: &str) -> Option<(u32, String)> {
+    let line = line.trim_start();
+    let split = line.find(char::is_whitespace).unwrap_or(line.len());
+    let pid = line.get(..split)?.parse::<u32>().ok()?;
+    let command = line.get(split..)?.trim();
+    (!command.is_empty()).then(|| (pid, command.to_string()))
+}
+
+fn workspace_match_candidates(path: &Path) -> Vec<String> {
+    let mut out = vec![path.to_string_lossy().to_string()];
+    if let Ok(canonical) = path.canonicalize() {
+        let text = canonical.to_string_lossy().to_string();
+        if !out.iter().any(|candidate| candidate == &text) {
+            out.push(text);
+        }
+    }
+    out
+}
+
+fn workspace_arg_matches(tokens: &[&str], candidates: &[String]) -> bool {
+    for (index, token) in tokens.iter().enumerate() {
+        if *token == "--workspace"
+            && tokens
+                .get(index + 1)
+                .is_some_and(|workspace| candidates.iter().any(|candidate| candidate == workspace))
+        {
+            return true;
+        }
+        if let Some(workspace) = token.strip_prefix("--workspace=") {
+            if candidates.iter().any(|candidate| candidate == workspace) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn normalize_existing_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_installed_team_agent_binary(binary: &str) -> bool {
+    binary == "/Users/alauda/.local/bin/team-agent" || binary.contains("/.team-agent/runtime/")
+}
+
+fn pid_is_running(pid: u32) -> bool {
+    (unsafe { libc::kill(pid as libc::pid_t, 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn send_signal(pid: u32, signal: libc::c_int) -> bool {
+    (unsafe { libc::kill(pid as libc::pid_t, signal) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn wait_until_pid_exits(pid: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !pid_is_running(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    !pid_is_running(pid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_coordinator_predicate_requires_debug_binary_and_e2e_workspace() {
+        let ws = TestWorkspace::new("cleanup-predicate");
+        let bin =
+            PathBuf::from("/Users/alauda/Documents/code/team-agent-public/target/debug/team-agent");
+        ws.record_ta_binary(&bin);
+        let workspace = ws.path().to_string_lossy();
+
+        let owned = format!("{} coordinator --workspace {workspace}", bin.display());
+        assert!(
+            ws.command_is_owned_coordinator(&owned),
+            "debug binary plus exact private e2e workspace should be owned"
+        );
+
+        let local =
+            format!("/Users/alauda/.local/bin/team-agent coordinator --workspace {workspace}");
+        assert!(
+            !ws.command_is_owned_coordinator(&local),
+            "installed local binary must never be owned by the E2E cleanup"
+        );
+
+        let runtime = format!(
+            "/Users/alauda/.team-agent/runtime/0.4.8/bin/team-agent coordinator --workspace {workspace}"
+        );
+        assert!(
+            !ws.command_is_owned_coordinator(&runtime),
+            "runtime-installed binary must never be owned by the E2E cleanup"
+        );
+
+        let real_workspace = format!(
+            "{} coordinator --workspace /Users/alauda/Documents/code/team-agent-public",
+            bin.display()
+        );
+        assert!(
+            !ws.command_is_owned_coordinator(&real_workspace),
+            "debug binary alone is not enough without the exact private e2e workspace"
+        );
+    }
+
+    #[test]
+    fn drop_stops_owned_coordinator_after_worker_is_stopped() {
+        let team_id = format!("cleanup{}", std::process::id());
+        let (workspace, coordinator_pid) = {
+            let ws = TestWorkspace::new("cleanup-drop").with_fake_spec(&["a"]);
+            let qs = quick_start_fake(&ws, &team_id);
+            assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+
+            let stop = run_ta(
+                &ws,
+                &[
+                    "stop-agent",
+                    "a",
+                    "--workspace",
+                    ws.path().to_str().unwrap(),
+                    "--json",
+                ],
+            );
+            assert!(
+                stop.is_success(),
+                "stop-agent exit {}; stdout={} stderr={}",
+                stop.exit_code,
+                stop.stdout,
+                stop.stderr
+            );
+
+            wait_for_or_panic(
+                "coordinator pid file",
+                || read_pid(&ws.coordinator_pid_file()).is_some(),
+                Duration::from_secs(3),
+            );
+            let pid = read_pid(&ws.coordinator_pid_file()).expect("coordinator pid");
+            assert!(
+                ws.pid_is_owned_coordinator(pid),
+                "pid {pid} should be the workspace-owned debug coordinator"
+            );
+            assert!(
+                pid_is_running(pid),
+                "coordinator pid {pid} should be live before Drop"
+            );
+            (ws.path().to_path_buf(), pid)
+        };
+
+        assert!(
+            wait_until_pid_exits(coordinator_pid, Duration::from_secs(3)),
+            "coordinator pid {coordinator_pid} should be stopped by TestWorkspace::Drop"
+        );
+        assert!(
+            !workspace.exists(),
+            "workspace {} should be removed by TestWorkspace::Drop",
+            workspace.display()
+        );
     }
 }
 
@@ -277,6 +634,7 @@ pub fn run_ta(ws: &TestWorkspace, args: &[&str]) -> TaResult {
 /// globals via `std::env::set_var`.
 pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)]) -> TaResult {
     let bin = ta_binary();
+    ws.record_ta_binary(&bin);
     let mut cmd = Command::new(&bin);
     cmd.args(args)
         .current_dir(ws.path())
@@ -292,7 +650,11 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let Output { status, stdout, stderr } = cmd
+    let Output {
+        status,
+        stdout,
+        stderr,
+    } = cmd
         .output()
         .unwrap_or_else(|e| panic!("spawn {:?}: {e}", bin));
     TaResult {
@@ -460,8 +822,8 @@ pub fn assert_file_absent(path: &Path) {
 /// Assert that a UTF-8 file contains a substring.
 #[track_caller]
 pub fn assert_file_contains(path: &Path, needle: &str) {
-    let body = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let body =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert!(
         body.contains(needle),
         "expected file {} to contain {needle:?}; full content:\n{body}",
@@ -494,11 +856,7 @@ pub fn wait_for<F: FnMut() -> bool>(
 }
 
 #[track_caller]
-pub fn wait_for_or_panic<F: FnMut() -> bool>(
-    description: &str,
-    predicate: F,
-    timeout: Duration,
-) {
+pub fn wait_for_or_panic<F: FnMut() -> bool>(description: &str, predicate: F, timeout: Duration) {
     let ok = wait_for(predicate, timeout, Duration::from_millis(100));
     assert!(
         ok,
