@@ -426,7 +426,23 @@ fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BTreeSet<Stri
             // file (~/.claude/projects/<hash>/<leader-session-uuid>.jsonl),
             // corrupting attribution and transcripts. Always unset so Claude
             // Code generates a fresh session id per worker.
+            //
+            // S1-CAPTURE (0.4.x P0): also unset the rest of the Claude Code
+            // child/team env block. These variables make the spawned process
+            // believe it is a CHILD of the parent Claude (CLAUDE_CODE_CHILD_SESSION),
+            // a TEAM member (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS), or otherwise
+            // inherit the parent's invocation identity (ENTRYPOINT / EXECPATH /
+            // CLAUDECODE marker). Without unsetting these, a Claude worker
+            // spawned from a Claude leader is not an INDEPENDENT process — it
+            // joins the leader's session tree and its transcript / state /
+            // billing are attributed to the leader. CLAUDE_EFFORT is preserved
+            // (effort preference does not affect session attribution).
             unsets.insert("CLAUDE_CODE_SESSION_ID".to_string());
+            unsets.insert("CLAUDE_CODE_CHILD_SESSION".to_string());
+            unsets.insert("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS".to_string());
+            unsets.insert("CLAUDE_CODE_ENTRYPOINT".to_string());
+            unsets.insert("CLAUDE_CODE_EXECPATH".to_string());
+            unsets.insert("CLAUDECODE".to_string());
             if auth_mode == AuthMode::CompatibleApi {
                 unsets.insert("ANTHROPIC_API_KEY".to_string());
             }
