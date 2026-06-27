@@ -9,7 +9,7 @@ members = ["crates/team-agent"]
 
 [workspace.package]
 edition = "2021"
-version = "0.4.7"
+version = "0.4.8"
 license = "AGPL-3.0"
 rust-version = "1.95"
 
