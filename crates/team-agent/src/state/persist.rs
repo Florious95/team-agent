@@ -560,6 +560,23 @@ fn backfill_capture_fields(incoming_agent: &mut Value, latest_agent: &Value) {
     if !latest_complete {
         return;
     }
+    // S1-CAPTURE-001 (0.4.8) Rule 5: a fresh restart marker (`_pending_session_id`
+    // present on incoming) signals the worker just respawned and the prior
+    // tuple was intentionally cleared. The capture scanner is the only path
+    // permitted to promote `_pending_session_id` into the authoritative tuple
+    // after it confirms backing. Persist-side backfill MUST NOT revive the
+    // latest tuple in this state — doing so resurrects the previous worker's
+    // session/rollout pair and delivered tokens land in the OLD transcript
+    // (the leader/unassigned mis-attribution surfaced in S1-CAPTURE-001 gate
+    // evidence). Refuse backfill regardless of whether incoming session_id
+    // is null vs latest's value: the pending marker is authoritative intent.
+    let incoming_pending = incoming_row
+        .get("_pending_session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if incoming_pending.is_some() {
+        return;
+    }
     // Rule 2: incoming carries a DIFFERENT non-null session_id → do not mix.
     let incoming_session = incoming_row.get("session_id").and_then(Value::as_str);
     let latest_session = latest_agent.get("session_id").and_then(Value::as_str);

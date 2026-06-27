@@ -296,7 +296,24 @@ where
                 .get("rollout_path")
                 .and_then(Value::as_str)
                 .is_some_and(|s| !s.is_empty());
-        if has_session {
+        // S1-CAPTURE-001 (0.4.8): a pending_session_id that differs from the
+        // on-row session_id means a fresh respawn is in flight — the prior
+        // worker's session_id may still be on the row (concurrent capture race,
+        // delayed persist, or persist-backfill replay) but the NEW worker has
+        // not yet been bound. Stamping capture_state=captured here would
+        // falsely declare the OLD session authoritative for the NEW worker
+        // pane — the leader/unassigned mis-attribution surfaced in S1-CAPTURE-001
+        // gate evidence. Only stamp `captured` when session_id agrees with
+        // _pending_session_id (or _pending is absent, meaning no rebind in
+        // flight).
+        let pending_mismatch = match (
+            agent_obj.get("_pending_session_id").and_then(Value::as_str).filter(|s| !s.is_empty()),
+            agent_obj.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()),
+        ) {
+            (Some(pending), Some(current)) => pending != current,
+            _ => false,
+        };
+        if has_session && !pending_mismatch {
             // Captured already — fix state field if drifted.
             if agent_obj
                 .get("capture_state")

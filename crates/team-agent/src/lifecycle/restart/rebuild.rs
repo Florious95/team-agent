@@ -1361,11 +1361,29 @@ fn mark_agent_respawned(
     // Claude family clear path uniformly. The Copilot scanner
     // (provider/adapter.rs:1217-1228) already gates expected-id with a
     // sqlite point-check, so no truth is lost.
+    // S1-CAPTURE-001 (0.4.8): on Fresh / FreshAfterMissingRollout, clear the
+    // FULL prior-session authoritative capture tuple — not just session_id.
+    // Mirrors mark_agent_started (restart/agent.rs:728-740) so the rebuild path
+    // (multi-agent restart) and the single-agent start path enforce the same
+    // fresh-tuple invariant. Without this, save_restart_state's persist
+    // backfill can revive the stale rollout_path/captured_at/capture_state
+    // tuple from latest, defeating the fresh-tuple guarantee and leaving
+    // delivered tokens in the old transcript (leader/unassigned mis-attrib).
     if matches!(
         restart_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
     ) {
-        agent.insert("session_id".to_string(), serde_json::Value::Null);
+        for field in [
+            "session_id",
+            "rollout_path",
+            "captured_at",
+            "captured_via",
+            "attribution_confidence",
+            "capture_state",
+            "attribution_ambiguous",
+        ] {
+            agent.remove(field);
+        }
     }
     crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
     persist_effective_approval_policy_for_restart(agent, safety);
