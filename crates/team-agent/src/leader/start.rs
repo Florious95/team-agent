@@ -954,10 +954,17 @@ fn run_leader_argv(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // 0.4.x order fix: env_remove MUST run AFTER envs(). The `env` map comes
+    // from `merged_exec_env` which seeds with `std::env::vars().collect()` —
+    // calling `.envs(env)` re-adds every inherited CLAUDE_CODE_* the launching
+    // shell carried, overwriting any prior env_remove. By removing AFTER the
+    // bulk envs() call, the final Command env table has the leak keys
+    // structurally absent. Verified by the regression grep guard that the
+    // env_remove call appears AFTER `command.envs(env)`.
+    command.envs(env);
     for key in &env_unset {
         command.env_remove(key);
     }
-    command.envs(env);
     let mut child = command.spawn()?;
     if plan.mode == LeaderStartMode::ExecProvider {
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());

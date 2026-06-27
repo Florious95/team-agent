@@ -312,6 +312,20 @@ fn in_tmux_execprovider_path_uses_env_remove_grep_guard() {
          (in-tmux ExecProvider path env-leak regression guard). \
          Body excerpt: {body}"
     );
+    // 0.4.x order regression: env_remove MUST appear AFTER command.envs(env).
+    // merged_exec_env seeds from std::env::vars() so envs() re-adds every
+    // inherited CLAUDE_CODE_* the launching shell carries — env_remove must
+    // run last to win.
+    let envs_pos = body.find("command.envs(env)").or_else(|| body.find(".envs(env)"))
+        .expect("run_leader_argv must call envs(env) on the Command");
+    let remove_pos = body.find("env_remove(key)")
+        .expect("run_leader_argv must call env_remove(key)");
+    assert!(
+        remove_pos > envs_pos,
+        "env_remove MUST appear AFTER envs(env) — envs() would otherwise \
+         re-add the inherited CLAUDE_CODE_* keys and overwrite the removal. \
+         envs_pos={envs_pos} remove_pos={remove_pos}"
+    );
 }
 
 // CR C-1 grep guard.
