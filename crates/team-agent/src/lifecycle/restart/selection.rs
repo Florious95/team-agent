@@ -53,6 +53,57 @@ pub fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtState {
     }
 }
 
+/// RESTART-RESUME-001 (0.4.8): true if the agent has any signal of prior
+/// interaction whose context would be lost by silent fresh-start. Checks
+/// `first_send_at` (leader→worker delivery), `last_result_at` (worker
+/// report_result), and `task_prompt_delivered` (MCP-only worker first task).
+/// Used by both the selection-stage never-captured decision and the
+/// pre-selection convergence missing-set predicate so the two layers share
+/// a single "needs context preservation" semantic.
+///
+/// CR M2 callers (must stay in sync):
+///   * lifecycle/restart/selection.rs (never_captured branch, classify_resume_decision)
+///   * lifecycle/restart/common.rs::restart_required_missing_session_agent_ids
+pub(crate) fn restart_agent_has_context_to_preserve(agent: &serde_json::Value) -> bool {
+    let has_valid_first_send_at = matches!(
+        classify_first_send_at(agent.get("first_send_at").unwrap_or(&serde_json::Value::Null)),
+        FirstSendAtState::Valid
+    );
+    if has_valid_first_send_at {
+        return true;
+    }
+    let has_last_result_at = agent
+        .get("last_result_at")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if has_last_result_at {
+        return true;
+    }
+    agent
+        .get("task_prompt_delivered")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// RESTART-RESUME-001: an agent is "never-captured" when its session_id is
+/// absent AND there is no context to preserve. Such an agent is safe to
+/// auto-fresh without `--allow-fresh` and should NOT be required to capture
+/// a transcript before restart proceeds.
+pub(crate) fn restart_agent_never_captured(
+    agent: &serde_json::Value,
+    session_id: Option<&str>,
+) -> bool {
+    let session_present = session_id.is_some_and(|s| !s.is_empty())
+        || agent
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+    if session_present {
+        return false;
+    }
+    !restart_agent_has_context_to_preserve(agent)
+}
+
 fn is_python_fromisoformat_like(raw: &str) -> bool {
     if raw.is_empty() {
         return false;
@@ -221,25 +272,25 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                 }
                 _ => (true, Vec::new()),
             };
-        // 0.4.7 partial-resume: when a worker has NEVER been captured (no
-        // session_id AND first_send_at is Absent), it is structurally
-        // non-resumable — there is no context to lose, so auto-fresh is
-        // safe even without --allow-fresh. This prevents a single
-        // never-captured role (e.g. MCP-only worker that the leader never
-        // messaged) from blocking restart of the other 6 roles that DO
-        // have complete resume tuples.
+        // 0.4.7 partial-resume + RESTART-RESUME-001 (0.4.8): when a worker
+        // has NEVER been captured (no session_id AND no context-bearing
+        // signal at all), it is structurally non-resumable — there is no
+        // context to lose, so auto-fresh is safe even without --allow-fresh.
         //
-        // The "never_captured" predicate is the conjunction:
-        //   * session_id is None (no provider session bound), AND
-        //   * first_send_at is Absent (leader has never injected a
-        //     message — so we never armed the capture path either).
+        // The "never_captured" predicate is now the shared
+        // restart_agent_never_captured(): session_id absent AND none of
+        // first_send_at(Valid) / last_result_at / task_prompt_delivered.
+        // This matches the pre-selection convergence semantic in
+        // common.rs::restart_required_missing_session_agent_ids so both
+        // layers refuse / auto-fresh in unison.
         //
-        // If session_id is None but first_send_at is Valid, that's the
-        // "received message but session not captured" bug state — keep
-        // the Refuse so we never silently drop context (architect rule:
-        // "绝不静默 fresh").
+        // If session_id is None but ANY context signal exists, that's the
+        // "received message/result but session not captured" bug state —
+        // keep the Refuse so we never silently drop context (architect
+        // rule: "绝不静默 fresh").
+        let _ = first_send_at_state; // retained for the Corrupt branch above
         let never_captured =
-            session_id.is_none() && matches!(first_send_at_state, FirstSendAtState::Absent);
+            restart_agent_never_captured(agent, session_id.as_ref().map(|s| s.as_str()));
         let decision = if session_id.is_some() && provider_can_resume && resume_backing_exists {
             ResumeDecision::Resume
         } else if session_id.is_some() && allow_fresh {

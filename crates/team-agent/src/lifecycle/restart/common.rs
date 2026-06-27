@@ -895,10 +895,25 @@ pub(crate) fn restart_required_missing_session_agent_ids(state: &serde_json::Val
                 .get("status")
                 .and_then(|value| value.as_str())
                 .is_some_and(|status| status == "running");
-            // E6 层2 (C2): required-missing 谓词只看 session_id 有无 + 是否在跑。
-            // pane 绑定 / first_send_at 在 gate 时刻天然可空(自启动 worker leader 从未发消息),
-            // 不能作判据 —— 否则真丢上下文的 null-session worker 被漏判,走静默 fresh。
-            missing_session_id && is_running
+            // E6 层2 (C2) + RESTART-RESUME-001 (0.4.8): required-missing
+            // predicate gates on session_id absence + running, but ALSO
+            // skips never-captured workers (no session_id AND no context
+            // signals at all). A never-captured worker has nothing to
+            // lose by fresh-start, so it must not block convergence and
+            // burn the capture deadline. This matches the selection-stage
+            // partial-resume semantic in
+            // selection.rs::classify_resume_decision (never_captured →
+            // FreshStart without --allow-fresh).
+            //
+            // The "has context to preserve" signal is the shared
+            // restart_agent_has_context_to_preserve helper: first_send_at
+            // (leader→worker delivery), last_result_at (MCP report path
+            // that may skip first_send_at), or task_prompt_delivered.
+            // Only context-bearing null-session workers continue to
+            // require convergence (so we never silently drop context).
+            missing_session_id
+                && is_running
+                && !super::selection::restart_agent_never_captured(agent, None)
         })
         .collect::<Vec<_>>();
     missing.sort();

@@ -637,6 +637,105 @@ fn classify_restart_plan_never_captured_null_session_auto_fresh_partial_resume()
 }
 
 #[test]
+fn restart_required_missing_skips_never_captured_workers() {
+    // RESTART-RESUME-001 (0.4.8): the pre-selection convergence missing-set
+    // predicate must skip never-captured workers (null session_id, no
+    // first_send_at/last_result_at/task_prompt_delivered) so a single
+    // never-captured role doesn't burn the capture deadline and trigger
+    // resume_not_ready when the selection stage would auto-fresh it anyway.
+    use crate::lifecycle::restart::restart_required_missing_session_agent_ids;
+    let state = json!({
+        "agents": {
+            "w1": { "provider": "claude", "session_id": null, "status": "running" }
+        }
+    });
+    let missing = restart_required_missing_session_agent_ids(&state);
+    assert!(
+        missing.is_empty(),
+        "never-captured null-session worker must NOT appear in required-missing; \
+         got {missing:?}"
+    );
+}
+
+#[test]
+fn restart_required_missing_keeps_null_session_with_first_send_at() {
+    // RESTART-RESUME-001: null session_id + valid first_send_at means the
+    // leader DID send a message; that context must be preserved → still
+    // missing → restart refuses without --allow-fresh.
+    use crate::lifecycle::restart::restart_required_missing_session_agent_ids;
+    let state = json!({
+        "agents": {
+            "w1": {
+                "provider": "claude",
+                "session_id": null,
+                "status": "running",
+                "spawn_cwd": "/tmp/ws",
+                "first_send_at": "2026-01-01T00:00:00+00:00",
+            }
+        }
+    });
+    let missing = restart_required_missing_session_agent_ids(&state);
+    assert_eq!(
+        missing,
+        vec!["w1".to_string()],
+        "null-session + valid first_send_at (context bearing) must remain in \
+         required-missing; got {missing:?}"
+    );
+}
+
+#[test]
+fn restart_required_missing_keeps_null_session_with_last_result_at() {
+    // RESTART-RESUME-001: MCP / report_result paths may not have
+    // first_send_at, but a non-empty last_result_at means the worker DID
+    // produce a result; that context must be preserved.
+    use crate::lifecycle::restart::restart_required_missing_session_agent_ids;
+    let state = json!({
+        "agents": {
+            "w1": {
+                "provider": "claude",
+                "session_id": null,
+                "status": "running",
+                "spawn_cwd": "/tmp/ws",
+                "last_result_at": "2026-01-01T00:00:00+00:00",
+            }
+        }
+    });
+    let missing = restart_required_missing_session_agent_ids(&state);
+    assert_eq!(
+        missing,
+        vec!["w1".to_string()],
+        "null-session + last_result_at must remain in required-missing; \
+         got {missing:?}"
+    );
+}
+
+#[test]
+fn classify_restart_plan_null_session_with_last_result_at_refuses_without_allow_fresh() {
+    // RESTART-RESUME-001: selection stage must also refuse null-session +
+    // last_result_at (no first_send_at) without --allow-fresh. Otherwise the
+    // pre-selection convergence and selection-stage refuse semantics drift
+    // and the gate fails for MCP-only report paths.
+    let state = json!({
+        "agents": {
+            "w1": {
+                "provider": "claude",
+                "session_id": null,
+                "last_result_at": "2026-01-01T00:00:00+00:00",
+            }
+        }
+    });
+    let plan = classify_restart_plan(&state, false).expect("纯验证不应 Err");
+    assert_eq!(plan.decisions.len(), 1);
+    assert_eq!(
+        plan.decisions[0].decision,
+        ResumeDecision::Refuse,
+        "null-session + last_result_at must Refuse without --allow-fresh \
+         (context to preserve); got {:?}",
+        plan.decisions[0].decision
+    );
+}
+
+#[test]
 fn classify_restart_plan_never_interacted_null_session_with_allow_fresh_marks_forced_fresh() {
     // E6 层2: 同上自启动 null-session worker,但显式 --allow-fresh → 用户主动认账丢上下文 → FreshStart。
     let state = json!({
