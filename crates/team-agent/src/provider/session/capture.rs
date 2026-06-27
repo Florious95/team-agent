@@ -644,14 +644,20 @@ where
             // — that would trigger the Stage 1 mismatch guard against Codex's
             // real session_meta.payload.id and permanently reject the correct
             // transcript. Codex capture anchors purely on (cwd, spawned_at).
-            // 0.4.7 (B1 verified, partial-resume revert of 9feafc31):
-            // Claude --session-id was restored in adapter.rs build_command_plan
-            // because Claude ≥ 2.1.185 DOES honour framework-supplied session
-            // id and DOES create a transcript at that id. So `_pending_session_id`
-            // is once again valid for Claude — re-enable the Stage 1 pre-pass
-            // for Claude/ClaudeCode. Codex remains excluded (Codex CLI ignores
-            // --session-id, capture must anchor purely on cwd+spawned_at).
-            expected_session_id: if matches!(provider, Provider::Codex) {
+            //
+            // 0.4.6 P0 (Claude fresh-no-session-id): Claude Code does not
+            // create a transcript for a framework-supplied --session-id with
+            // no prior history. We no longer inject `--session-id` on fresh
+            // spawn (adapter.rs Provider::Claude build_command_plan), so no
+            // _pending_session_id is stored. Stale state from earlier versions
+            // may still carry one — treat it the same as Codex: ignore it,
+            // capture purely via (cwd + spawned_at + identity) attribution.
+            // Resume path is unchanged — it goes through restart_resume which
+            // sets session_id directly from the rebuilt resume tuple.
+            expected_session_id: if matches!(
+                provider,
+                Provider::Codex | Provider::Claude | Provider::ClaudeCode
+            ) {
                 None
             } else {
                 agent

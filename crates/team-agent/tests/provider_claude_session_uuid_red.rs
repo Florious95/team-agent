@@ -1,30 +1,49 @@
 //! Claude session-id argv contracts.
 //!
-//! Claude CLI rejects `--session-id session-<hex>` with "Invalid session ID. Must be a valid UUID".
-//! Fresh launch and fork must therefore generate RFC4122-shaped UUID values, not Team Agent's
-//! old synthetic `session-` token.
+//! 0.4.6 P0: Claude Code does NOT create a transcript for a framework-supplied
+//! `--session-id` that has no prior history — the apply-time backing-store
+//! check then rejects it forever, breaking restart capture. Fresh spawn must
+//! therefore NOT inject `--session-id` (Claude generates its own; capture
+//! anchors on cwd + spawned_at + identity, parity with Codex).
+//!
+//! Fork still uses --session-id <new-uuid> + --resume <source> (Claude fork
+//! requires the new id be a valid UUID). Fork path is untouched by 0.4.6.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use team_agent::model::enums::{AuthMode, Provider};
-use team_agent::provider::{get_adapter, SessionId};
+use team_agent::provider::{get_adapter, ProviderCommandContext, SessionId};
 
 #[test]
-fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
+fn claude_fresh_plan_omits_session_id_and_expected_session_id() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
-        let argv = adapter
-            .build_command(AuthMode::Subscription, None, None, Some("claude-sonnet-4-6"))
-            .expect("Claude fresh launch command should build");
-        let session_id = session_id_after_flag(&argv);
+        let ctx = ProviderCommandContext {
+            auth_mode: AuthMode::Subscription,
+            mcp_config: None,
+            system_prompt: None,
+            model: Some("claude-sonnet-4-6"),
+            tools: &[],
+            profile_launch: None,
+            agent_id_hint: Some("dev"),
+        };
+        let plan = adapter
+            .build_command_plan(ctx)
+            .expect("Claude fresh plan should build");
 
         assert!(
-            is_rfc4122_uuid(session_id),
-            "Claude fresh launch --session-id must be a valid RFC4122 UUID accepted by Claude CLI; provider={provider:?} session_id={session_id:?} argv={argv:?}"
+            !plan.argv.iter().any(|a| a == "--session-id"),
+            "0.4.6 Claude fresh plan must NOT inject --session-id (Claude doesn't \
+             create a transcript for an unknown framework-supplied id); \
+             provider={provider:?} argv={:?}",
+            plan.argv
         );
         assert!(
-            !session_id.starts_with("session-"),
-            "Claude fresh launch --session-id must not use Team Agent's invalid session-<hex> prefix; provider={provider:?} session_id={session_id:?} argv={argv:?}"
+            plan.expected_session_id.is_none(),
+            "0.4.6 Claude fresh plan must have expected_session_id=None — \
+             capture anchors on cwd+spawned_at+identity (parity with Codex). \
+             Got {:?}",
+            plan.expected_session_id
         );
     }
 }

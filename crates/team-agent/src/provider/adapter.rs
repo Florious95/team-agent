@@ -438,24 +438,16 @@ impl ProviderAdapter for BasicProviderAdapter {
     ) -> Result<CommandPlan, ProviderError> {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => {
-                // 0.4.7 (B1 verified, restart partial resume): RESTORE
-                // `--session-id <uuid>` on Claude fresh spawn. B1 confirmed
-                // Claude ≥ 2.1.185 honours the framework-supplied --session-id
-                // and creates a transcript at that id. The earlier 0.4.6
-                // P0 removal (commit 9feafc31) is reverted; the actual issue
-                // it tried to fix (leader-marker pollution) is addressed
-                // separately in commit d39b5104 (leader session exclusion
-                // in capture/repair).
-                //
-                // Fresh path: --session-id <expected> → Claude writes
-                // transcript at that id → capture/restart restore use the
-                // SAME id we predicted, so apply-time backing-store check
-                // passes immediately (no cwd+spawned_at attribution race).
-                //
-                // Resume path unchanged — `build_resume_command_plan` uses
-                // `--resume <existing_id>` on a session id that already has
-                // a real transcript.
-                let expected = next_session_token();
+                // 0.4.6 P0 (Claude fresh-no-session-id): do NOT inject
+                // `--session-id <uuid>` on fresh spawn. Claude Code does not
+                // create a transcript file for a framework-supplied session-id
+                // that has no prior history — the apply-time backing-store
+                // check then rejects it forever, breaking restart capture.
+                // Fresh path: let Claude generate its own session-id, capture
+                // it post-spawn via (cwd + spawned_at + identity) attribution
+                // (parity with Codex). Resume path is unchanged — it goes
+                // through `build_resume_command_plan` with `--resume <sid>`
+                // on a session id that already has a real transcript.
                 let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
                 let projects_root = ctx
                     .profile_launch
@@ -470,12 +462,11 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.tools,
                     managed,
                 )?;
-                argv.push("--session-id".to_string());
-                argv.push(expected.clone());
                 // Layer 1 self-healing (architect probe 2026-06-22, claude help
                 // `-n, --name <name>`): pass `--name <agent_id>` so the
                 // resume picker and on-disk `~/.claude/sessions/*.json name`
-                // field carry our role label.
+                // field carry our role label. This is a secondary diagnostic
+                // hint that survives even without expected_session_id.
                 if let Some(agent_id) = ctx.agent_id_hint {
                     if !agent_id.is_empty() {
                         argv.push("--name".to_string());
@@ -484,7 +475,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 }
                 Ok(CommandPlan {
                     argv,
-                    expected_session_id: Some(SessionId::new(expected)),
+                    expected_session_id: None,
                     provider_projects_root: projects_root,
                     managed_mcp_config: managed,
                 })
