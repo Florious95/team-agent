@@ -274,7 +274,7 @@ impl TestWorkspace {
 
     fn command_is_owned_coordinator(&self, command: &str) -> bool {
         let tokens = command.split_whitespace().collect::<Vec<_>>();
-        if tokens.len() < 3 || !self.path_is_e2e_private_tmp() {
+        if tokens.len() < 3 || !self.path_is_e2e_temp_workspace() {
             return false;
         }
         let Some(binary) = tokens.first() else {
@@ -287,10 +287,14 @@ impl TestWorkspace {
             && workspace_arg_matches(&tokens, &workspace_match_candidates(&self.path))
     }
 
-    fn path_is_e2e_private_tmp(&self) -> bool {
+    fn path_is_e2e_temp_workspace(&self) -> bool {
         self.path
-            .to_str()
-            .is_some_and(|path| path.starts_with("/private/tmp/ta-e2e-"))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("ta-e2e-"))
+            && test_tmp_roots()
+                .iter()
+                .any(|root| self.path.starts_with(root))
     }
 
     fn binary_matches_test_binary(&self, command_binary: &str) -> bool {
@@ -435,6 +439,16 @@ fn normalize_existing_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn test_tmp_roots() -> Vec<PathBuf> {
+    let mut out = vec![normalize_existing_path(&std::env::temp_dir())];
+    if Path::new("/private/tmp").is_dir() {
+        out.push(normalize_existing_path(Path::new("/private/tmp")));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn is_installed_team_agent_binary(binary: &str) -> bool {
     binary == "/Users/alauda/.local/bin/team-agent" || binary.contains("/.team-agent/runtime/")
 }
@@ -467,15 +481,29 @@ mod tests {
     #[test]
     fn owned_coordinator_predicate_requires_debug_binary_and_e2e_workspace() {
         let ws = TestWorkspace::new("cleanup-predicate");
-        let bin =
-            PathBuf::from("/Users/alauda/Documents/code/team-agent-public/target/debug/team-agent");
+        let bin = ta_binary();
         ws.record_ta_binary(&bin);
         let workspace = ws.path().to_string_lossy();
 
         let owned = format!("{} coordinator --workspace {workspace}", bin.display());
         assert!(
             ws.command_is_owned_coordinator(&owned),
-            "debug binary plus exact private e2e workspace should be owned"
+            "debug binary plus exact e2e temp workspace should be owned"
+        );
+
+        let platform_tmp_ws = TestWorkspace {
+            path: normalize_existing_path(&std::env::temp_dir())
+                .join(format!("ta-e2e-platform-{}-0", std::process::id())),
+            ta_binary: Mutex::new(Some(normalize_existing_path(&bin))),
+        };
+        let platform_tmp_owned = format!(
+            "{} coordinator --workspace {}",
+            bin.display(),
+            platform_tmp_ws.path().display()
+        );
+        assert!(
+            platform_tmp_ws.command_is_owned_coordinator(&platform_tmp_owned),
+            "debug binary plus exact platform temp e2e workspace should be owned"
         );
 
         let local =
