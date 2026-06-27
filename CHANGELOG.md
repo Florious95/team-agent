@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.9
+
+- **Fixed: Claude environment variables no longer leak into spawned subprocesses.** The leader launcher now unsets all `CLAUDE_CODE_*` variables before starting workers, covering both the managed tmux path and the shell wrapper path. The ExecProvider in-tmux path also clears the Claude environment block, and the removal order is corrected to run after `envs()` is called — closing the leak that caused Claude workers to inherit the leader's session environment.
+- **Fixed: E2E tests no longer leave coordinator processes running after a test completes.** `TestWorkspace::Drop` now precisely cleans up coordinator processes, preventing port/socket conflicts between test runs.
+
 ## 0.4.8
 
 - **Fixed: Claude workers now start with a clean session, never inheriting the leader's session ID.** Previously, spawning a Claude worker could accidentally reuse the leader's Claude Code session environment, causing the worker to capture the leader's transcript instead of its own. Claude workers now launch in a fully isolated environment with all session-related variables cleared.
