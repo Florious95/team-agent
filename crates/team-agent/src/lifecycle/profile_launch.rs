@@ -419,6 +419,14 @@ fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BTreeSet<Stri
     let mut unsets = BTreeSet::new();
     match provider {
         Provider::Claude | Provider::ClaudeCode => {
+            // E57 (0.3.27 P0): unset CLAUDE_CODE_SESSION_ID inherited from the
+            // leader's environment. When a Claude leader spawns a Claude worker,
+            // the worker inherits the leader's CLAUDE_CODE_SESSION_ID; Claude
+            // Code then routes the worker's transcript to the leader's session
+            // file (~/.claude/projects/<hash>/<leader-session-uuid>.jsonl),
+            // corrupting attribution and transcripts. Always unset so Claude
+            // Code generates a fresh session id per worker.
+            unsets.insert("CLAUDE_CODE_SESSION_ID".to_string());
             if auth_mode == AuthMode::CompatibleApi {
                 unsets.insert("ANTHROPIC_API_KEY".to_string());
             }
