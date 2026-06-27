@@ -490,7 +490,7 @@ fn ensure_managed_leader_pane(
 /// or the underlying `provider_env_unsets`. Use `AuthMode::Subscription` —
 /// the leader is the user's interactive provider, never CompatibleApi/
 /// OfficialApi which are worker-only auth modes today.
-fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
+pub fn leader_env_unset_for_provider(provider: Provider) -> Vec<String> {
     crate::lifecycle::profile_launch::provider_env_unsets(
         provider,
         crate::model::enums::AuthMode::Subscription,
@@ -937,13 +937,28 @@ fn run_leader_argv(
             "leader launch argv is empty".to_string(),
         ));
     };
-    let mut child = Command::new(program)
+    // 0.4.x regression fix (env-leak scenario 1, in-tmux ExecProvider path):
+    // the managed-tmux path got the provider env-unset block via the shell
+    // wrapper (cb9c217), but the ExecProvider in-tmux path here is a direct
+    // Command::spawn().wait() — it inherits the parent process's full env
+    // including any CLAUDE_CODE_SESSION_ID / CLAUDE_CODE_CHILD_SESSION /
+    // CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS / CLAUDE_CODE_ENTRYPOINT /
+    // CLAUDE_CODE_EXECPATH / CLAUDECODE that the launching shell carries.
+    // Apply the SAME env-unset list used by the managed path (CR R6 single
+    // source: profile_launch::provider_env_unsets via
+    // leader_env_unset_for_provider).
+    let env_unset = leader_env_unset_for_provider(plan.provider);
+    let mut command = Command::new(program);
+    command
         .args(argv.iter().skip(1))
-        .envs(env)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stderr(Stdio::inherit());
+    for key in &env_unset {
+        command.env_remove(key);
+    }
+    command.envs(env);
+    let mut child = command.spawn()?;
     if plan.mode == LeaderStartMode::ExecProvider {
         spawn_exec_provider_startup_prompt_handler(plan.provider, workspace.to_path_buf());
     }

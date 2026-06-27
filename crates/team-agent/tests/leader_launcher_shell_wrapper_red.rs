@@ -243,6 +243,77 @@ fn leader_provider_health_recognizes_diverse_shells_as_fallback() {
     }
 }
 
+// 0.4.x env-leak regression (scenario 1, in-tmux ExecProvider path):
+// leader_env_unset_for_provider(Claude) must contain the full Claude
+// CLAUDE_CODE_* child/team env block. The in-tmux ExecProvider path
+// (`run_leader_argv`) calls Command::env_remove for each of these so a
+// Claude leader launched from a Claude-owned shell does not inherit the
+// parent's session-inheritance variables.
+#[test]
+fn leader_env_unset_for_claude_contains_full_claude_block() {
+    use team_agent::leader::leader_env_unset_for_provider;
+    use team_agent::provider::Provider;
+    let unsets = leader_env_unset_for_provider(Provider::Claude);
+    let required = [
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDECODE",
+    ];
+    for key in required {
+        assert!(
+            unsets.iter().any(|u| u == key),
+            "leader_env_unset_for_provider(Claude) must contain `{key}`; \
+             got {unsets:?}"
+        );
+    }
+    // ClaudeCode (Claude Code distinct provider variant) must have the same
+    // env-unset list — same Anthropic CLI under the hood.
+    let cc_unsets = leader_env_unset_for_provider(Provider::ClaudeCode);
+    for key in required {
+        assert!(
+            cc_unsets.iter().any(|u| u == key),
+            "leader_env_unset_for_provider(ClaudeCode) must contain `{key}`; \
+             got {cc_unsets:?}"
+        );
+    }
+}
+
+// 0.4.x env-leak regression grep guard: run_leader_argv in
+// leader/start.rs MUST call `command.env_remove(key)` for each entry in
+// `leader_env_unset_for_provider`. This pins the in-tmux ExecProvider
+// path so a future refactor cannot silently re-introduce the env leak.
+#[test]
+fn in_tmux_execprovider_path_uses_env_remove_grep_guard() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let start_rs = manifest.join("src").join("leader").join("start.rs");
+    let contents = std::fs::read_to_string(&start_rs)
+        .expect("must read leader/start.rs");
+    // The run_leader_argv function must call env_remove inside a loop
+    // over leader_env_unset_for_provider.
+    let run_leader_argv_pos = contents
+        .find("fn run_leader_argv(")
+        .expect("run_leader_argv must exist in leader/start.rs");
+    let next_fn_pos = contents[run_leader_argv_pos + 1..]
+        .find("\nfn ")
+        .map(|p| run_leader_argv_pos + 1 + p)
+        .unwrap_or(contents.len());
+    let body = &contents[run_leader_argv_pos..next_fn_pos];
+    assert!(
+        body.contains("leader_env_unset_for_provider(plan.provider)"),
+        "run_leader_argv must call leader_env_unset_for_provider \
+         (CR R6 single source). Body excerpt: {body}"
+    );
+    assert!(
+        body.contains("command.env_remove(key)") || body.contains(".env_remove(key)"),
+        "run_leader_argv must call env_remove on each unset key \
+         (in-tmux ExecProvider path env-leak regression guard). \
+         Body excerpt: {body}"
+    );
+}
+
 // CR C-1 grep guard.
 #[test]
 fn leader_env_unset_single_source_grep_guard() {
