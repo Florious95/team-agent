@@ -208,7 +208,7 @@ pub(crate) fn start_agent_at_paths(
         None,
         Some(resolved_team_key.as_str()),
     )?;
-    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, transport, &safety)?;
+    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, transport, &safety, start_mode)?;
     // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
     // `state.tmux_socket` synchronized with the transport actually used for the
     // spawn. Without this, add-agent / fork-agent could spawn to a socket that
@@ -700,6 +700,7 @@ fn mark_agent_started(
     spawn: &SpawnedAgentWindow,
     transport: &dyn crate::transport::Transport,
     safety: &DangerousApproval,
+    start_mode: StartMode,
 ) -> Result<(), LifecycleError> {
     let Some(agent) = state
         .get_mut("agents")
@@ -712,6 +713,31 @@ fn mark_agent_started(
             agent_id
         )));
     };
+    // S1-CAPTURE-001 (0.4.8, CR M3 provider-agnostic): on a Fresh /
+    // FreshAfterMissingRollout start, the prior session's authoritative
+    // capture tuple MUST be cleared before persist_command_plan_state
+    // writes the new _pending_session_id. Otherwise old session_id +
+    // rollout_path coexist with new _pending_session_id and
+    // agent_session_complete returns true on the stale tuple — capture
+    // never re-binds to the new process, and any delivered token lands
+    // in the old transcript (the leader/unassigned mis-attribution seen
+    // in the gate evidence). This applies to all providers that resume:
+    // codex, claude, copilot. Reset_agent --discard-session already does
+    // this at common.rs:1144-1188; here we mirror it for start-agent /
+    // restart-agent fresh paths so the fresh-tuple invariant is global.
+    if matches!(start_mode, StartMode::Fresh | StartMode::FreshAfterMissingRollout) {
+        for field in [
+            "session_id",
+            "rollout_path",
+            "captured_at",
+            "captured_via",
+            "attribution_confidence",
+            "capture_state",
+            "attribution_ambiguous",
+        ] {
+            agent.remove(field);
+        }
+    }
     agent.insert("status".to_string(), serde_json::json!("running"));
     agent.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
     agent.insert("window".to_string(), serde_json::json!(window));

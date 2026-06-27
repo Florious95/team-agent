@@ -684,6 +684,29 @@ fn agent_session_complete(agent: &Value) -> bool {
     if !session_id_ok {
         return false;
     }
+    // S1-CAPTURE-001 (0.4.8, CR M3 provider-agnostic): pending mismatch guard.
+    // When fresh-start has written a new `_pending_session_id` but the old
+    // authoritative `session_id` is still present and differs, the tuple is
+    // STALE — the new process has a different session that has not been
+    // captured yet. Returning true here would let capture skip this agent
+    // and keep treating the old transcript as authoritative (the gate's
+    // observed mis-attribution). Force re-capture by reporting incomplete.
+    // The fresh-tuple clear in mark_agent_started (lifecycle/restart/agent.rs)
+    // is the primary fix; this guard handles historical poison state where
+    // both fields already coexist from a prior version.
+    let pending = agent
+        .get("_pending_session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let current = agent
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let (Some(pending), Some(current)) = (pending, current) {
+        if pending != current {
+            return false;
+        }
+    }
     let rollout_path = match agent
         .get("rollout_path")
         .and_then(Value::as_str)
@@ -1002,6 +1025,16 @@ fn apply_captured_session(
         serde_json::to_value(captured.attribution_confidence).unwrap_or(Value::Null),
     );
     agent_obj.remove("attribution_ambiguous");
+    // S1-CAPTURE-001 (0.4.8): after writing the authoritative tuple, the
+    // `_pending_session_id` placeholder is no longer needed — remove it so
+    // future reads don't trip the pending-mismatch guard in
+    // agent_session_complete. Also stamp capture_state="captured" for
+    // diagnose/status observability.
+    agent_obj.remove("_pending_session_id");
+    agent_obj.insert(
+        "capture_state".to_string(),
+        serde_json::json!("captured"),
+    );
     true
 }
 
@@ -1783,5 +1816,85 @@ mod u1_tests {
         let _ = std::fs::remove_file(workspace.join(".team/logs/events.jsonl"));
         let _ = std::fs::remove_dir_all(workspace.join(".team"));
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// S1-CAPTURE-001 (0.4.8): pending mismatch guard. When fresh-start has
+    /// written a new `_pending_session_id` but the old authoritative
+    /// `session_id` is still present and differs, `agent_session_complete`
+    /// must return false so capture re-runs and re-binds to the new process.
+    /// Without this, the historical poison state (old + new coexist) lets
+    /// the stale rollout look authoritative.
+    #[test]
+    fn agent_session_complete_returns_false_on_pending_mismatch() {
+        let dir = std::env::temp_dir().join(format!(
+            "ta-pending-mismatch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let rollout = dir.join("old.jsonl");
+        std::fs::write(&rollout, "{\"type\":\"assistant\"}\n").unwrap();
+
+        let agent = serde_json::json!({
+            "provider": "claude",
+            "session_id": "old",
+            "rollout_path": rollout.to_string_lossy(),
+            "captured_at": "2026-01-01T00:00:00+00:00",
+            "captured_via": "fs_watch",
+            "_pending_session_id": "new",
+        });
+
+        assert!(
+            !super::agent_session_complete(&agent),
+            "S1-CAPTURE-001: pending != session_id must force incomplete \
+             (capture must re-attribute to new session)"
+        );
+
+        // Sanity: when they match, complete is true.
+        let agent_match = serde_json::json!({
+            "provider": "claude",
+            "session_id": "new",
+            "rollout_path": rollout.to_string_lossy(),
+            "captured_at": "2026-01-01T00:00:00+00:00",
+            "captured_via": "fs_watch",
+            "_pending_session_id": "new",
+        });
+        assert!(
+            super::agent_session_complete(&agent_match),
+            "pending == session_id (in-progress capture confirmed): must be complete"
+        );
+
+        let _ = std::fs::remove_file(&rollout);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// S1-CAPTURE-001 (0.4.8): apply_captured_session clears
+    /// `_pending_session_id` and stamps `capture_state="captured"` so the
+    /// pending-mismatch guard doesn't fire on subsequent reads.
+    #[test]
+    fn apply_captured_session_clears_pending_and_stamps_capture_state() {
+        let mut agent = serde_json::Map::new();
+        agent.insert(
+            "_pending_session_id".to_string(),
+            serde_json::json!("new-sess"),
+        );
+        let captured = CapturedSession {
+            session_id: Some(SessionId::new("new-sess")),
+            rollout_path: Some(RolloutPath::new(PathBuf::from("/tmp/new.jsonl"))),
+            captured_via: CaptureVia::FsWatch,
+            attribution_confidence: Confidence::High,
+            spawn_cwd: PathBuf::from("/tmp/cwd"),
+        };
+        let written = super::apply_captured_session(&mut agent, &captured);
+        assert!(written, "apply must return true for valid captured");
+        assert!(
+            agent.get("_pending_session_id").is_none(),
+            "S1-CAPTURE-001: _pending_session_id must be removed after capture \
+             (agent={agent:?})"
+        );
+        assert_eq!(
+            agent.get("capture_state").and_then(serde_json::Value::as_str),
+            Some("captured"),
+            "S1-CAPTURE-001: capture_state must be stamped 'captured'"
+        );
     }
 }

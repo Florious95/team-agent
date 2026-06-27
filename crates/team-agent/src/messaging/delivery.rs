@@ -452,6 +452,71 @@ pub fn deliver_pending_message(
             channel: None,
         });
     }
+    // S1-CAPTURE-001 (0.4.8, CR M4 Claude phase-1): for Claude/ClaudeCode
+    // recipients with a known authoritative rollout_path, verify the message
+    // token actually reached the worker's transcript before marking
+    // delivered. This catches the gate's mis-attribution: pane inject
+    // succeeded but the token landed in the leader/unassigned transcript,
+    // not the worker's. Budget per architect plan: 64KB tail / single
+    // per-delivery check / short grace window. Phase-1 Claude only —
+    // codex/copilot keep the pre-fix behaviour (will be addressed in
+    // phase-2 once Claude phase-1 is field-validated).
+    if let Some((rollout_path, provider_wire_str)) = claude_recipient_rollout(state, &message.recipient) {
+        let token_marker = format!("[team-agent-token:{message_id}]");
+        let grace = std::time::Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut transcript_has_token = false;
+        loop {
+            transcript_has_token =
+                rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
+            if transcript_has_token || std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(grace);
+        }
+        if !transcript_has_token {
+            // Loud but non-fatal: emit a mismatch event for diagnose/status
+            // observability. Do NOT mark delivered — degrade to
+            // submitted_unverified so capture is forced to re-attribute.
+            let reason = format!(
+                "transcript_missing:provider={provider_wire_str},rollout={}",
+                rollout_path.display()
+            );
+            event_log.write(
+                "provider.session.transcript_mismatch",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": message.recipient,
+                    "provider": provider_wire_str,
+                    "rollout_path": rollout_path.to_string_lossy(),
+                    "pane_id": state
+                        .get("agents")
+                        .and_then(|a| a.get(&message.recipient))
+                        .and_then(|a| a.get("pane_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(""),
+                    "spawn_epoch": state
+                        .get("agents")
+                        .and_then(|a| a.get(&message.recipient))
+                        .and_then(|a| a.get("spawn_epoch"))
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                    "reason": "transcript_missing",
+                }),
+            )?;
+            store.mark(message_id, "submitted_unverified", Some(&reason))?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Failed,
+                message_status: MessageStatusShadow("submitted_unverified".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(reason),
+                stage: Some(DeliveryStage::Submit),
+                reason: None,
+                channel: None,
+            });
+        }
+    }
     store.mark(message_id, "delivered", None)?;
     event_log.write(
         "message.delivered",
@@ -1689,4 +1754,52 @@ pub fn retry_injection_after_trust_auto_answer(
         reason: None,
         channel: None,
     })
+}
+
+/// S1-CAPTURE-001 (0.4.8 phase-1): returns (rollout_path, provider_wire) when
+/// the recipient agent is Claude/ClaudeCode with a known authoritative
+/// rollout_path; otherwise None (skip transcript verify). Phase-1 Claude only —
+/// codex/copilot return None and keep pre-fix delivery semantics.
+fn claude_recipient_rollout(
+    state: &serde_json::Value,
+    recipient: &str,
+) -> Option<(std::path::PathBuf, &'static str)> {
+    let agent = state.get("agents")?.get(recipient)?;
+    let provider = agent.get("provider").and_then(serde_json::Value::as_str)?;
+    let provider_wire_str = match provider {
+        "claude" => "claude",
+        "claude_code" | "claude-code" => "claude_code",
+        _ => return None,
+    };
+    let rollout = agent
+        .get("rollout_path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    Some((std::path::PathBuf::from(rollout), provider_wire_str))
+}
+
+/// S1-CAPTURE-001 (0.4.8 phase-1): bounded tail read of the rollout file
+/// searching for `needle`. Reads up to `tail_bytes` from the end of the file
+/// (default 64KB budget). Returns true iff the needle appears in the tail.
+/// Silent on read errors — callers treat missing/unreadable as "token not
+/// present" which forces the unverified path.
+fn rollout_tail_contains(path: &std::path::Path, needle: &str, tail_bytes: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    let len = metadata.len();
+    let start = len.saturating_sub(tail_bytes);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity(tail_bytes.min(len) as usize);
+    if file.take(tail_bytes).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let haystack = String::from_utf8_lossy(&buf);
+    haystack.contains(needle)
 }
