@@ -157,9 +157,14 @@ fn prepare_profile_launch(
     let mut claude_projects_root = None;
     let mut managed_mcp_config = false;
 
-    if matches!(agent.provider, Provider::Claude | Provider::ClaudeCode)
-        && agent.auth_mode == AuthMode::CompatibleApi
-    {
+    // S1-CAPTURE-001 (0.4.9): give EVERY Claude worker its own CLAUDE_CONFIG_DIR
+    // so projects/sessions/transcripts are isolated per-agent. Subscription auth
+    // (macOS keychain on Mac, ~/.config/Claude/credentials.json on Linux) is
+    // system-wide and continues to work without any auth-file copy. Without this
+    // isolation, multiple Claude subscription workers (and the leader) all share
+    // ~/.claude/projects/<cwd>/sessions/* → MCP transcript attribution can be
+    // overwritten by whichever Claude process is currently active in that cwd.
+    if matches!(agent.provider, Provider::Claude | Provider::ClaudeCode) {
         let dir = compatible_claude_config_dir(workspace, &agent.id)?;
         if let Some(config) = mcp_config {
             ensure_compatible_claude_mcp_config(&dir, workspace, config)?;
@@ -565,7 +570,41 @@ fn compatible_claude_config_dir(
     std::fs::create_dir_all(&dir)
         .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", dir.display())))?;
     ensure_compatible_claude_config(&dir, workspace)?;
+    // S1-CAPTURE-001 (0.4.9): link Claude subscription auth files from the
+    // user's ~/.claude/ into the per-agent CLAUDE_CONFIG_DIR so subscription
+    // auth survives the isolation. On macOS subscription auth lives in the
+    // system keychain (no file copy needed); on Linux it lives in
+    // ~/.claude/.credentials.json. The symlink approach is non-destructive
+    // and keeps a single auth source-of-truth.
+    link_claude_subscription_auth(&dir);
     Ok(dir)
+}
+
+/// S1-CAPTURE-001 (0.4.9): best-effort symlink of subscription auth files
+/// from `~/.claude/` into the per-agent isolation dir. Failures are silent
+/// (compatible-api workers don't need these; macOS keychain auth doesn't
+/// need these; only Linux subscription needs them).
+fn link_claude_subscription_auth(target_dir: &Path) {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let source_root = home.join(".claude");
+    if !source_root.exists() {
+        return;
+    }
+    // Auth-related entries Claude Code may consult. projects/ and sessions/
+    // are deliberately EXCLUDED to keep transcript isolation per-agent.
+    for name in [".credentials.json", ".credentials", "auth.json", "oauth.json"] {
+        let src = source_root.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = target_dir.join(name);
+        if dst.exists() {
+            continue;
+        }
+        let _ = std::os::unix::fs::symlink(&src, &dst);
+    }
 }
 
 fn ensure_compatible_claude_config(dir: &Path, workspace: &Path) -> Result<(), LifecycleError> {

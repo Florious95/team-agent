@@ -88,9 +88,21 @@ fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_m
     );
 }
 
+/// **S1-CAPTURE-001 (0.4.9) inversion**: pre-0.4.9 invariant said subscription
+/// Claude workers must inherit `~/.claude/` (no CLAUDE_CONFIG_DIR). That caused
+/// MCP transcript attribution to be overwritten by whichever Claude process was
+/// currently active in the shared cwd (multiple subscription workers + leader
+/// all writing to the same `~/.claude/projects/<cwd>/sessions/`). The new
+/// invariant: EVERY Claude worker (subscription OR compatible_api) gets an
+/// isolated CLAUDE_CONFIG_DIR under `.team/runtime/provider-config/<id>/claude/`.
+/// Subscription auth still works because (a) macOS keychain is system-wide and
+/// needs no file, and (b) Linux subscription credential files are symlinked
+/// into the per-agent dir by `link_claude_subscription_auth`. The auth-token
+/// negative assertion (no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN switch) is
+/// preserved — isolation is config-root only, not auth-mode change.
 #[test]
 #[serial(env)]
-fn subscription_profile_keeps_default_claude_config_dir_for_logged_in_quota() {
+fn subscription_profile_isolates_claude_config_dir_per_agent() {
     let ws = tmp_dir("subscription-config");
     let team = write_claude_subscription_profile_team(&ws, "subteam", "clauder");
     let transport = RecordingTransport::default();
@@ -103,13 +115,22 @@ fn subscription_profile_keeps_default_claude_config_dir_for_logged_in_quota() {
         Some("subteam"),
         &transport,
     )
-    .expect("subscription profile should launch without managed config isolation");
+    .expect("subscription profile should launch with per-agent config isolation");
 
     let spawn = transport.single_spawn();
+    let config_dir = spawn.env.get("CLAUDE_CONFIG_DIR").cloned().unwrap_or_default();
     assert!(
-        !spawn.env.contains_key("CLAUDE_CONFIG_DIR"),
-        "subscription Claude workers must inherit the user's default ~/.claude login state; env={:?}",
+        !config_dir.is_empty(),
+        "0.4.9: subscription Claude workers must get an isolated CLAUDE_CONFIG_DIR \
+         under .team/runtime/provider-config/<id>/claude/ so transcripts don't \
+         collide with the leader's ~/.claude/projects/<cwd>/sessions/; env={:?}",
         spawn.env
+    );
+    assert!(
+        config_dir.contains(".team/runtime/provider-config/clauder/claude")
+            || config_dir.contains(".team\\runtime\\provider-config\\clauder\\claude"),
+        "isolated CLAUDE_CONFIG_DIR must point under the per-agent provider-config root; \
+         got {config_dir}"
     );
     assert!(
         !spawn.env.contains_key("ANTHROPIC_API_KEY")
@@ -120,10 +141,10 @@ fn subscription_profile_keeps_default_claude_config_dir_for_logged_in_quota() {
 
     let state = load_runtime_state(&ws).unwrap();
     let agent = &state["teams"]["subteam"]["agents"]["clauder"];
-    assert_eq!(
-        agent.get("claude_projects_root"),
-        None,
-        "without a supported fine-grained Claude projects-root env, subscription workers must not fake an isolated transcript root; state={state}"
+    assert!(
+        agent["claude_projects_root"].as_str().is_some_and(|value| !value.is_empty()),
+        "0.4.9: subscription workers must persist claude_projects_root so the \
+         capture scanner reads per-agent transcripts; state={state}"
     );
 }
 
