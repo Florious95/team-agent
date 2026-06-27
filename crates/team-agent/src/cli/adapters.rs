@@ -226,6 +226,33 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
             "status --summary does not accept an agent argument".to_string(),
         ));
     }
+    // S4QR-001 (0.4.8): selected-team ambiguity gate. status is a selected-team
+    // command: when the workspace has 2+ alive teams and no --team was passed,
+    // refuse instead of silently defaulting to the active team. Uses the same
+    // CommandScope::resolve helper as refuse_if_multi_alive_team_missing_scope
+    // (cli/emit.rs:964-979) so the destructive-command ambiguity gate and the
+    // selected-team-read ambiguity gate share a single source of truth.
+    if team.is_none() {
+        let scope = crate::state::paths::CommandScope::resolve(&args.workspace, None);
+        if scope.is_ambiguous() {
+            let candidates: Vec<String> = scope.candidates().to_vec();
+            let message = format!(
+                "status: workspace has multiple alive teams ({}); pass `--team <key>` to choose one",
+                candidates.join(", ")
+            );
+            if args.json {
+                let payload = serde_json::json!({
+                    "ok": false,
+                    "status": "refused",
+                    "reason": "team_target_ambiguous",
+                    "candidates": candidates,
+                    "message": message,
+                });
+                return Ok(CmdResult::from_json(payload, args.json));
+            }
+            return Err(CliError::Usage(message));
+        }
+    }
     let selected = match crate::state::selector::resolve_active_team(
         &args.workspace,
         team,

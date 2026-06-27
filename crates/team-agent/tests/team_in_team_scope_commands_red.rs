@@ -111,6 +111,70 @@ fn status_team_selector_filters_agents_tasks_messages_and_results_to_that_team()
 
 #[test]
 #[serial(env)]
+fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguous() {
+    // S4QR-001 (0.4.8): status is a selected-team command. When the workspace
+    // has 2+ alive teams and no --team is passed, status must refuse instead
+    // of silently defaulting to the active team. Mirrors the
+    // refuse_if_multi_alive_team_missing_scope gate used by destructive
+    // commands (shutdown/restart/...).
+    let _env = EnvGuard::unset();
+    let fixture = MultiTeamFixture::new("status-ambiguous");
+
+    let output = run_cli([
+        "status",
+        "--workspace",
+        fixture.root_str(),
+        "--json",
+    ]);
+    let body = stdout_json(&output);
+    assert_eq!(
+        body.pointer("/ok").and_then(Value::as_bool),
+        Some(false),
+        "S4QR-001: status --json without --team in multi-alive workspace must be ok=false; body={body}"
+    );
+    assert_eq!(
+        body.pointer("/status").and_then(Value::as_str),
+        Some("refused"),
+        "S4QR-001: status must be refused with status=refused; body={body}"
+    );
+    assert_eq!(
+        body.pointer("/reason").and_then(Value::as_str),
+        Some("team_target_ambiguous"),
+        "S4QR-001: reason must be team_target_ambiguous; body={body}"
+    );
+    let candidates = body
+        .pointer("/candidates")
+        .and_then(Value::as_array)
+        .expect("candidates array present");
+    let names: Vec<&str> = candidates.iter().filter_map(Value::as_str).collect();
+    assert!(
+        names.contains(&"teamA") && names.contains(&"teamB"),
+        "S4QR-001: candidates must list both alive teams; got {names:?}"
+    );
+
+    // Sanity: explicit --team teamA still works and returns teamA scope.
+    let scoped = run_cli([
+        "status",
+        "--workspace",
+        fixture.root_str(),
+        "--team",
+        "teamA",
+        "--json",
+    ]);
+    assert_success(&scoped, "status --team teamA --json");
+    let scoped_body = stdout_json(&scoped);
+    assert!(
+        scoped_body.pointer("/agents/worker_a").is_some(),
+        "explicit --team teamA must succeed; body={scoped_body}"
+    );
+    assert!(
+        scoped_body.pointer("/agents/worker_b").is_none(),
+        "explicit --team teamA must not leak teamB; body={scoped_body}"
+    );
+}
+
+#[test]
+#[serial(env)]
 fn collect_team_selector_collects_only_that_team_and_writes_back_that_team_state() {
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("collect-scope");

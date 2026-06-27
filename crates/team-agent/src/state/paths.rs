@@ -160,10 +160,14 @@ pub enum CommandScope {
     /// Caller passed `--team X` explicitly (or there's only one alive team
     /// and we resolved it). Carries the canonical team_key.
     Resolved(String),
-    /// No `--team` and multiple alive teams. Destructive commands MUST
-    /// refuse with this list of candidates so the operator chooses
-    /// explicitly. Read-only commands may still proceed (their scope is
-    /// "all teams" by default).
+    /// No `--team` and multiple alive teams. Destructive commands AND
+    /// selected-team commands (status, etc.) MUST refuse with this list
+    /// of candidates so the operator chooses explicitly. Only true
+    /// all-team aggregation commands may proceed without --team.
+    /// (S4QR-001 0.4.8: status was previously documented as a read-only
+    /// command that could proceed; in fact it projects a single team's
+    /// view and silently defaulting to the active team caused gate
+    /// failures when multiple alive teams existed.)
     Ambiguous(Vec<String>),
     /// No `--team` and no teams alive yet (fresh workspace) — bare
     /// commands fall through to legacy single-team behaviour.
