@@ -26,6 +26,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
 
@@ -182,17 +183,35 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
         })
         .collect::<Vec<_>>();
 
+    // 0.4.x provider effort MVP step 2: validate TEAM.md provider_effort early
+    // (unknown literal rejects compile). Empty/absent → no team-level effort.
+    let team_provider_effort = match string_field(&team_meta, "provider_effort") {
+        Some(raw) if !raw.trim().is_empty() => {
+            let value = raw.trim();
+            let parsed = ProviderEffort::parse(value).ok_or_else(|| {
+                ModelError::Validation(format!(
+                    "{}: unknown provider_effort '{value}' (allowed: low|medium|high|xhigh|max)",
+                    team_md.display()
+                ))
+            })?;
+            Some(parsed)
+        }
+        _ => None,
+    };
+
+    let mut team_fields: Vec<(&str, Value)> = vec![
+        ("name", Value::Str(team_name.clone())),
+        ("mode", Value::Str("supervisor_worker".to_string())),
+        ("objective", Value::Str(objective)),
+        ("workspace", Value::Str(workspace_s)),
+    ];
+    if let Some(effort) = team_provider_effort {
+        team_fields.push(("provider_effort", Value::Str(effort.as_str().to_string())));
+    }
+
     let spec = map(vec![
         ("version", Value::Int(1)),
-        (
-            "team",
-            map(vec![
-                ("name", Value::Str(team_name.clone())),
-                ("mode", Value::Str("supervisor_worker".to_string())),
-                ("objective", Value::Str(objective)),
-                ("workspace", Value::Str(workspace_s)),
-            ]),
-        ),
+        ("team", map(team_fields)),
         (
             "leader",
             map(vec![
@@ -365,6 +384,56 @@ pub fn compile_role_agent(
     ];
     if let Some(profile) = string_field(&meta, "profile") {
         agent_items.push(("profile", Value::Str(profile)));
+    }
+    // 0.4.x provider effort MVP step 3: resolve effort with role > team > none.
+    // Validate (unknown literal) AND check provider/effort compatibility
+    // (max is Claude-only; emit hard error for max + non-Claude here so
+    // unsupported combinations fail at compile, not at runtime).
+    let role_effort = match string_field(&meta, "effort") {
+        Some(raw) if !raw.trim().is_empty() => {
+            let value = raw.trim();
+            let parsed = ProviderEffort::parse(value).ok_or_else(|| {
+                ModelError::Validation(format!(
+                    "{}: unknown effort '{value}' (allowed: low|medium|high|xhigh|max)",
+                    role_path.display()
+                ))
+            })?;
+            Some(parsed)
+        }
+        _ => None,
+    };
+    let team_effort = match string_field(team_meta, "provider_effort") {
+        Some(raw) if !raw.trim().is_empty() => ProviderEffort::parse(raw.trim()),
+        _ => None,
+    };
+    let resolved_effort = role_effort.or(team_effort);
+    if let Some(effort) = resolved_effort {
+        // Reject max + non-Claude at compile time.
+        let provider_str = agent_items
+            .iter()
+            .find(|(k, _)| *k == "provider")
+            .and_then(|(_, v)| match v {
+                Value::Str(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        let provider_enum = match provider_str {
+            "claude" => Provider::Claude,
+            "claude_code" => Provider::ClaudeCode,
+            "codex" => Provider::Codex,
+            "copilot" => Provider::Copilot,
+            "gemini_cli" => Provider::GeminiCli,
+            "fake" => Provider::Fake,
+            _ => Provider::Codex, // unknown providers caught elsewhere
+        };
+        if effort.is_claude_only() && !matches!(provider_enum, Provider::Claude | Provider::ClaudeCode) {
+            return Err(ModelError::Validation(format!(
+                "{}: effort '{}' is only supported by claude/claude_code (provider: {provider_str})",
+                role_path.display(),
+                effort.as_str()
+            )));
+        }
+        agent_items.push(("effort", Value::Str(effort.as_str().to_string())));
     }
     Ok(CompiledRole {
         id,

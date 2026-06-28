@@ -23,6 +23,71 @@ pub enum Provider {
     Fake,
 }
 
+/// 0.4.x Provider effort MVP: reasoning effort level passed to the provider.
+/// Configuration sources (resolution order):
+///   1. role doc front matter `effort: low|medium|high|xhigh|max`
+///   2. TEAM.md front matter `provider_effort: low|medium|high|xhigh|max`
+///   3. provider default (framework passes no flag)
+///
+/// Provider support:
+///   - claude / claude_code: low|medium|high|xhigh|max → `--effort <level>`
+///   - codex: low|medium|high|xhigh (NOT max) → `-c model_reasoning_effort=<level>`
+///   - copilot / gemini_cli / fake: unsupported — warning event, no flag
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProviderEffort {
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    #[serde(rename = "max")]
+    Max,
+}
+
+impl ProviderEffort {
+    /// Parse from a wire string. Returns None on unknown literal.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+
+    /// Wire string used by both CLI argv and state serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Effort levels Claude-only (Codex / others must reject `max`).
+    pub fn is_claude_only(self) -> bool {
+        matches!(self, Self::Max)
+    }
+
+    /// True when the given provider supports this effort level. `max` is
+    /// Claude-only; other levels are supported by Claude and Codex, ignored
+    /// by Copilot/Gemini/Fake (warning emitted at runtime).
+    pub fn is_supported_by(self, provider: Provider) -> bool {
+        match provider {
+            Provider::Claude | Provider::ClaudeCode => true,
+            Provider::Codex => !self.is_claude_only(),
+            Provider::Copilot | Provider::GeminiCli | Provider::Fake => false,
+        }
+    }
+}
+
 /// auth 模式(`AUTH_MODES` `profiles/constants.py:6`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

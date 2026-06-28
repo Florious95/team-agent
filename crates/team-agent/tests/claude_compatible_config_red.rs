@@ -105,6 +105,7 @@ fn managed_profile_command_plan_omits_mcp_config_even_when_mcp_config_is_availab
             tools: &tools,
             profile_launch: Some(&profile),
             agent_id_hint: None,
+                effort: None,
         })
         .expect("managed compatible_api command plan should build");
 

@@ -17,6 +17,12 @@ pub(crate) fn codex_base_command(
     model: Option<&str>,
     tools: &[&str],
     overrides: Option<&ProviderCommandOverrides>,
+    // 0.4.x provider effort MVP step 6: when Some, inject
+    // `-c model_reasoning_effort=<level>` AFTER existing profile
+    // codex_config overrides — explicit launch effort wins over profile.
+    // Codex does not support `max`; the caller filters that case via
+    // `ProviderEffort::is_supported_by` before reaching this point.
+    effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Vec<String> {
     let mut argv = vec!["codex".to_string()];
     if let Some(subcommand) = subcommand {
@@ -50,6 +56,10 @@ pub(crate) fn codex_base_command(
             argv.push("-c".to_string());
             argv.push(config.clone());
         }
+    }
+    if let Some(effort) = effort {
+        argv.push("-c".to_string());
+        argv.push(format!("model_reasoning_effort={}", effort.as_str()));
     }
     if let Some(prompt) = system_prompt {
         // codex.py:120 — escape order matters: backslash first, then quote, then newline.

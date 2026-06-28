@@ -410,7 +410,7 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Claude | Provider::ClaudeCode => {
                 Ok(claude_launch_command(self, auth_mode, mcp_config, system_prompt, model, tools)?)
             }
-            Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools, None)),
+            Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools, None, None)),
             // §C1 worker argv 形态 + C-1/C-5/C-6 cr verdict:
             //   copilot --no-color --no-auto-update [<dangerous|granular>] [--model]
             //          --additional-mcp-config <inline json> --session-id <expected_uuid> -C <cwd>
@@ -469,6 +469,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     model,
                     ctx.tools,
                     managed,
+                    ctx.effort,
                 )?;
                 argv.push("--session-id".to_string());
                 argv.push(expected.clone());
@@ -507,6 +508,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                 ctx.model,
                 ctx.tools,
                 ctx.profile_launch.map(|profile| &profile.command_overrides),
+                ctx.effort,
             ))),
             // §C1 + §C4 cr verdict — copilot plan 端预定 UUID + workspace `-C` 双保险:
             //   * `--session-id <uuid>`(claude 同法,捕获免目录扫描,sqlite 仅校验)
@@ -638,13 +640,14 @@ impl ProviderAdapter for BasicProviderAdapter {
                     model,
                     tools,
                     None,
+                    None,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
                 let mut argv =
-                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false)?;
+                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false, None)?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -686,6 +689,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     model,
                     ctx.tools,
                     managed,
+                    ctx.effort,
                 )?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
@@ -725,6 +729,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.model,
                     ctx.tools,
                     ctx.profile_launch.map(|profile| &profile.command_overrides),
+                    ctx.effort,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(CommandPlan::argv_only(argv))
@@ -779,13 +784,14 @@ impl ProviderAdapter for BasicProviderAdapter {
                     model,
                     tools,
                     None,
+                    None,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
                 let mut argv =
-                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false)?;
+                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false, None)?;
                 argv.push("--session-id".to_string());
                 argv.push(next_session_token());
                 argv.push("--resume".to_string());
@@ -837,6 +843,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     model,
                     ctx.tools,
                     managed,
+                    ctx.effort,
                 )?;
                 argv.push("--session-id".to_string());
                 argv.push(expected.clone());
@@ -870,6 +877,7 @@ impl ProviderAdapter for BasicProviderAdapter {
                     ctx.model,
                     ctx.tools,
                     ctx.profile_launch.map(|profile| &profile.command_overrides),
+                    ctx.effort,
                 );
                 argv.push(session_id.as_str().to_string());
                 Ok(CommandPlan::argv_only(argv))

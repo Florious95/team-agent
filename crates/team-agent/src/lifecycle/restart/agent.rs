@@ -1058,6 +1058,15 @@ fn write_start_agent_start_event(
         .model
         .as_deref()
         .or(model);
+    // 0.4.x provider effort MVP: start_agent path preserves effort from the
+    // persisted agent JSON.
+    let start_agent_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(&agent, provider);
+    if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
+        &agent, provider, agent_id.as_str(),
+    ) {
+        let _ = crate::event_log::EventLog::new(workspace)
+            .write("provider.effort_unsupported", event_value);
+    }
     let context = crate::provider::ProviderCommandContext {
         auth_mode,
         mcp_config: Some(&mcp_config),
@@ -1066,6 +1075,7 @@ fn write_start_agent_start_event(
         tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
         agent_id_hint: Some(agent_id.as_str()),
+        effort: start_agent_effort,
     };
     let mut plan = match session_id {
         Some(session_id) => adapter

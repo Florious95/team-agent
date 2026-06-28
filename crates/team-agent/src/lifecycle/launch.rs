@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider};
+use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
@@ -243,6 +243,16 @@ fn spawn_agents(
                 Some(&mcp_config),
             )?;
         let command_model = profile_launch.command_overrides.model.as_deref().or(model);
+        // 0.4.x provider effort MVP step 4 + 7: resolve effort and emit
+        // unsupported warning event when the spec asked for an effort the
+        // provider can't satisfy.
+        let agent_effort = provider_effort_for_spawn(agent, provider);
+        if let Some(event_value) =
+            provider_effort_event_if_dropped(agent, provider, agent_id_raw)
+        {
+            let _ = crate::event_log::EventLog::new(workspace)
+                .write("provider.effort_unsupported", event_value);
+        }
         let mut plan = adapter
             .build_command_plan(crate::provider::ProviderCommandContext {
                 auth_mode,
@@ -256,6 +266,7 @@ fn spawn_agents(
                 // adapters can pass `--name <agent_id>`. Codex has no
                 // equivalent flag and ignores the hint.
                 agent_id_hint: Some(agent_id_raw),
+                effort: agent_effort,
             })
             .map_err(|e| LifecycleError::Provider(e.to_string()))?;
         if !plan.managed_mcp_config && !profile_launch.managed_mcp_config {
@@ -320,7 +331,10 @@ fn spawn_agents(
         apply_mcp_auto_approval_env(&mut env, &safety);
         // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker
         // with cwd=workspace, same as the RS fork/add and restart paths.
-        let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
+        let env_unset: Vec<String> = extend_worker_env_unset_for_effort(
+            profile_launch.env_unset.iter().cloned().collect(),
+            provider,
+        );
         // BUG / C-1-2 / C-6-1 cr verdict — Copilot system_prompt 走 spawn env overlay +
         // per-worker AGENTS.md(B2 灵魂件降级):写
         //   <workspace>/.team/runtime/copilot-instructions/<agent_id>/AGENTS.md
@@ -1721,6 +1735,13 @@ fn running_agent_state(
         model.map_or(serde_json::Value::Null, |m| serde_json::json!(m)),
     );
     state.insert("auth_mode".to_string(), serde_json::json!(auth_mode));
+    // 0.4.x provider effort MVP step 8: persist resolved effort so restart
+    // / resume reads the same value (no re-resolution from role/team).
+    if let Some(effort_str) = agent.get("effort").and_then(Value::as_str) {
+        if !effort_str.is_empty() {
+            state.insert("effort".to_string(), serde_json::json!(effort_str));
+        }
+    }
     state.insert("profile".to_string(), profile);
     if agent.get("profile").is_some() {
         if let Some(profile_dir) = profile_dir {
@@ -2464,6 +2485,109 @@ fn parse_auth_mode(raw: &str) -> Option<AuthMode> {
         "compatible_api" => Some(AuthMode::CompatibleApi),
         _ => None,
     }
+}
+
+/// 0.4.x provider effort MVP step 4: low-level from a raw string. Returns
+/// `Some(effort)` when the level parses AND the provider supports it.
+pub(crate) fn provider_effort_from_raw(
+    raw: Option<&str>,
+    provider: Provider,
+) -> Option<ProviderEffort> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let effort = ProviderEffort::parse(raw)?;
+    if effort.is_supported_by(provider) {
+        Some(effort)
+    } else {
+        None
+    }
+}
+
+/// 0.4.x provider effort MVP step 7: warning event payload when the spec
+/// requested an effort level the provider does not support.
+pub(crate) fn provider_effort_event_payload(
+    raw: Option<&str>,
+    provider: Provider,
+    agent_id: &str,
+) -> Option<serde_json::Value> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let effort = ProviderEffort::parse(raw)?;
+    if effort.is_supported_by(provider) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "agent_id": agent_id,
+        "provider": format!("{provider:?}").to_lowercase(),
+        "effort": effort.as_str(),
+        "action": "ignored",
+        "reason": "provider does not support effort",
+    }))
+}
+
+/// 0.4.x provider effort MVP step 9: worker spawn must scrub `CLAUDE_EFFORT`
+/// for Claude/ClaudeCode workers — a parent shell carrying `CLAUDE_EFFORT`
+/// would silently override the framework's effort decision (or, when no
+/// spec effort is configured, override the documented "provider default").
+/// Returns the env_unset vec extended with `CLAUDE_EFFORT` when the provider
+/// is Claude/ClaudeCode; pass-through otherwise.
+pub(crate) fn extend_worker_env_unset_for_effort(
+    base: Vec<String>,
+    provider: Provider,
+) -> Vec<String> {
+    if !matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        return base;
+    }
+    let mut out = base;
+    if !out.iter().any(|k| k == "CLAUDE_EFFORT") {
+        out.push("CLAUDE_EFFORT".to_string());
+    }
+    out
+}
+
+/// Convenience: resolve effort for a yaml::Value agent (spec / compiled).
+pub(crate) fn provider_effort_for_spawn(
+    agent: &crate::model::yaml::Value,
+    provider: Provider,
+) -> Option<ProviderEffort> {
+    provider_effort_from_raw(agent.get("effort").and_then(|v| v.as_str()), provider)
+}
+
+pub(crate) fn provider_effort_event_if_dropped(
+    agent: &crate::model::yaml::Value,
+    provider: Provider,
+    agent_id: &str,
+) -> Option<serde_json::Value> {
+    provider_effort_event_payload(
+        agent.get("effort").and_then(|v| v.as_str()),
+        provider,
+        agent_id,
+    )
+}
+
+/// Same as [`provider_effort_for_spawn`] but for serde_json state values
+/// (used by restart paths reading from `state.agents[id]`).
+pub(crate) fn provider_effort_for_spawn_json(
+    agent: &serde_json::Value,
+    provider: Provider,
+) -> Option<ProviderEffort> {
+    provider_effort_from_raw(agent.get("effort").and_then(serde_json::Value::as_str), provider)
+}
+
+pub(crate) fn provider_effort_event_if_dropped_json(
+    agent: &serde_json::Value,
+    provider: Provider,
+    agent_id: &str,
+) -> Option<serde_json::Value> {
+    provider_effort_event_payload(
+        agent.get("effort").and_then(serde_json::Value::as_str),
+        provider,
+        agent_id,
+    )
 }
 
 fn quick_start_requested_team_key<'a>(
@@ -3786,6 +3910,16 @@ fn upsert_agent_state_from_role(
             }
         }
     }
+    // 0.4.x provider effort MVP step 8 (dynamic add-agent): persist effort
+    // from the role doc front matter (compiler.rs validates syntax/semantics
+    // at compile; add-agent path validates here too in case of direct YAML).
+    if let Some(effort_str) = meta.get("effort").and_then(Value::as_str) {
+        if !effort_str.is_empty() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("effort".to_string(), serde_json::json!(effort_str));
+            }
+        }
+    }
     if let Some(obj) = entry.as_object_mut() {
         persist_effective_approval_policy(obj, safety);
     }
@@ -4075,6 +4209,15 @@ pub fn fork_agent_with_transport(
             Some(&mcp_config),
         )?;
     let command_model = profile_launch.command_overrides.model.as_deref().or(model);
+    // 0.4.x provider effort MVP: fork inherits effort from the new agent JSON
+    // (compiler.rs propagated the role/team effort into the agent at fork-spawn).
+    let fork_effort = provider_effort_for_spawn(new_agent, provider);
+    if let Some(event_value) =
+        provider_effort_event_if_dropped(new_agent, provider, as_agent_id.as_str())
+    {
+        let _ = crate::event_log::EventLog::new(&workspace)
+            .write("provider.effort_unsupported", event_value);
+    }
     let mut plan = adapter
         .fork_plan(
             Some(&session_id),
@@ -4086,6 +4229,7 @@ pub fn fork_agent_with_transport(
                 tools: &resolved_tool_refs,
                 profile_launch: Some(&profile_launch),
                 agent_id_hint: Some(as_agent_id.as_str()),
+                effort: fork_effort,
             },
         )
         .map_err(|e| {
@@ -4111,7 +4255,10 @@ pub fn fork_agent_with_transport(
     // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
     // (spawn_into). The Rust restart seam (restart.rs spawn_agent_window) uses the same branch.
     let session_live = transport.has_session(&session_name).unwrap_or(false);
-    let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
+    let env_unset: Vec<String> = extend_worker_env_unset_for_effort(
+        profile_launch.env_unset.iter().cloned().collect(),
+        provider,
+    );
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(
             &session_name,
@@ -4495,6 +4642,8 @@ fn upsert_forked_agent_state(
         "profile",
         "_profile_dir",
         "role",
+        // 0.4.x provider effort MVP step 8: fork inherits compiled effort.
+        "effort",
     ] {
         if let Some(value) = spec_agent.get(key) {
             entry.insert(key.to_string(), yaml_value_to_json(value));

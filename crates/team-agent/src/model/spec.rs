@@ -250,8 +250,19 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
     if !matches!(spec.get("version"), Some(Yaml::Int(1))) {
         e.push("/version: must equal 1".to_string());
     }
-    let team_keys = &["name", "mode", "objective", "workspace"];
-    check_keys_y(spec.get("team"), "/team", team_keys, team_keys, &mut e);
+    // 0.4.x provider effort MVP step 3: provider_effort is allowed but not required.
+    let team_required = &["name", "mode", "objective", "workspace"];
+    let team_allowed = &["name", "mode", "objective", "workspace", "provider_effort"];
+    check_keys_y(spec.get("team"), "/team", team_required, team_allowed, &mut e);
+    if let Some(team) = spec.get("team") {
+        if let Some(raw) = team.get("provider_effort").and_then(Yaml::as_str) {
+            if crate::model::enums::ProviderEffort::parse(raw).is_none() {
+                e.push(format!(
+                    "/team/provider_effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max)"
+                ));
+            }
+        }
+    }
     let mode = spec.get("team").and_then(|t| t.get("mode")).and_then(Yaml::as_str);
     if !matches!(mode, Some("supervisor_worker" | "swarm_limited")) {
         e.push("/team/mode: invalid mode".to_string());
@@ -298,10 +309,31 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
         "id", "role", "provider", "model", "working_directory", "system_prompt", "tools",
         "permission_mode", "preferred_for", "avoid_for", "output_contract", "paused", "auth_mode",
         "profile", "credential_ref", "forked_from",
+        // 0.4.x provider effort MVP step 3: per-agent effort override (resolved at compile).
+        "effort",
     ];
     check_keys_y(Some(agent), path, req, allowed, errors);
     if !agent.is_map() {
         return;
+    }
+    // 0.4.x provider effort MVP step 3: effort syntactic + semantic validation.
+    if let Some(raw) = agent.get("effort").and_then(Yaml::as_str) {
+        match crate::model::enums::ProviderEffort::parse(raw) {
+            None => {
+                errors.push(format!(
+                    "{path}/effort: unknown effort '{raw}' (allowed: low|medium|high|xhigh|max)"
+                ));
+            }
+            Some(effort) if effort.is_claude_only() => {
+                let provider = agent.get("provider").and_then(Yaml::as_str).unwrap_or("");
+                if !matches!(provider, "claude" | "claude_code") {
+                    errors.push(format!(
+                        "{path}/effort: effort '{raw}' is only supported by claude/claude_code (provider: {provider})"
+                    ));
+                }
+            }
+            Some(_) => {}
+        }
     }
     check_keys_y(agent.get("system_prompt"), &format!("{path}/system_prompt"), &["inline", "file"], &["inline", "file"], errors);
     check_list_y(agent.get("tools"), &format!("{path}/tools"), errors);

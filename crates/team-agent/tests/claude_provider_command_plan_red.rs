@@ -37,6 +37,7 @@ fn claude_fresh_command_plan_returns_expected_uuid_and_suppresses_managed_mcp_co
             tools: &tools,
             profile_launch: Some(&profile),
             agent_id_hint: None,
+                effort: None,
         })
         .expect("Claude compatible_api managed fresh command plan should build");
 
@@ -90,6 +91,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
                 tools: &default_tools,
                 profile_launch: None,
                 agent_id_hint: None,
+                effort: None,
             },
         )
         .expect("Claude resume plan should build");
@@ -116,6 +118,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
                 tools: &default_tools,
                 profile_launch: None,
                 agent_id_hint: None,
+                effort: None,
             },
         )
         .expect("Claude fork plan should build");
@@ -144,6 +147,7 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
             tools: &dangerous_tools,
             profile_launch: None,
                 agent_id_hint: None,
+                effort: None,
         })
         .expect("Claude dangerous plan should build");
     assert!(
@@ -169,6 +173,7 @@ fn claude_disallowed_tools_mapping_covers_the_complete_python_tool_set() {
             tools: &no_filesystem_tools,
             profile_launch: None,
                 agent_id_hint: None,
+                effort: None,
         })
         .expect("Claude plan should build with explicit tools");
     let disallowed = flag_values(&plan.argv, "--disallowedTools");

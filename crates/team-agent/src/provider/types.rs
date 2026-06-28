@@ -347,6 +347,14 @@ pub struct ProviderCommandContext<'a> {
     /// no `--name` CLI flag (probe verdict 2026-06-22) and ignores this
     /// field. None = legacy callers (the field is purely additive).
     pub agent_id_hint: Option<&'a str>,
+    /// 0.4.x provider effort MVP step 4: reasoning effort level resolved
+    /// from role doc / TEAM.md / provider default. `None` means the
+    /// framework passes no effort flag (provider default).
+    ///   - Claude / ClaudeCode: low|medium|high|xhigh|max → `--effort <level>`
+    ///   - Codex: low|medium|high|xhigh → `-c model_reasoning_effort=<level>`
+    ///   - Copilot / Gemini / Fake: ignored, warning event emitted at the
+    ///     caller (lifecycle/launch.rs / lifecycle/restart) before construct.
+    pub effort: Option<crate::model::enums::ProviderEffort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

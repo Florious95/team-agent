@@ -34,6 +34,7 @@ pub(crate) fn claude_launch_command(
         model,
         tools,
         false,
+        None,
     )?;
     argv.push("--session-id".to_string());
     argv.push(next_session_token());
@@ -48,6 +49,9 @@ pub(crate) fn claude_base_command(
     model: Option<&str>,
     tools: &[&str],
     managed_mcp_config: bool,
+    // 0.4.x provider effort MVP step 5: when Some, inject `--effort <level>`
+    // immediately after the model (before prompt/MCP).
+    effort: Option<crate::model::enums::ProviderEffort>,
 ) -> Result<Vec<String>, ProviderError> {
     let mut argv = vec!["claude".to_string()];
     if claude_dangerous_auto_approve(tools) {
@@ -59,6 +63,10 @@ pub(crate) fn claude_base_command(
     if let Some(model) = model {
         argv.push("--model".to_string());
         argv.push(model.to_string());
+    }
+    if let Some(effort) = effort {
+        argv.push("--effort".to_string());
+        argv.push(effort.as_str().to_string());
     }
     if let Some(prompt) = system_prompt {
         argv.push("--append-system-prompt".to_string());

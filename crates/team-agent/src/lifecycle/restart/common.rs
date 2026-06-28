@@ -114,6 +114,15 @@ pub(super) fn spawn_agent_window(
             Some(&mcp_config),
         )?;
     let command_model = profile_launch.command_overrides.model.as_deref().or(model);
+    // 0.4.x provider effort MVP: restart/resume preserves effort from the
+    // persisted agent JSON (state's agent["effort"] field, set by launch).
+    let restart_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(agent, provider);
+    if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
+        agent, provider, agent_id.as_str(),
+    ) {
+        let _ = crate::event_log::EventLog::new(workspace)
+            .write("provider.effort_unsupported", event_value);
+    }
     let context = crate::provider::ProviderCommandContext {
         auth_mode,
         mcp_config: Some(&mcp_config),
@@ -122,6 +131,7 @@ pub(super) fn spawn_agent_window(
         tools: &resolved_tool_refs,
         profile_launch: Some(&profile_launch),
         agent_id_hint: Some(agent_id.as_str()),
+        effort: restart_effort,
     };
     let mut plan = match resume_session_id {
         Some(session_id) => adapter
@@ -167,7 +177,13 @@ pub(super) fn spawn_agent_window(
     // a per-agent YAML `spawn_cwd` field if one is set. Until then, override
     // > workspace; state-based override is silently dropped.
     let spawn_cwd = spawn_cwd_override.unwrap_or(workspace);
-    let env_unset: Vec<String> = profile_launch.env_unset.iter().cloned().collect();
+    // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
+    // worker spawn so a parent shell env cannot silently override the
+    // framework's effort decision.
+    let env_unset: Vec<String> = crate::lifecycle::launch::extend_worker_env_unset_for_effort(
+        profile_launch.env_unset.iter().cloned().collect(),
+        provider,
+    );
 
     // 0.4.6 Stage 2: write actual spawn plan event BEFORE invoking the
     // transport spawn. Mirrors `launch.rs:359-380` (the reference impl)
