@@ -293,6 +293,56 @@ tasks: []
     }
 
     #[test]
+    fn claude_env_unset_includes_claude_effort_in_provider_env_unsets() {
+        // Use the public leader_env_unset_for_provider helper which is a
+        // pub-facing wrapper around provider_env_unsets — single source of
+        // truth for the Claude/ClaudeCode env-unset block.
+        use team_agent::leader::leader_env_unset_for_provider;
+        use team_agent::provider::Provider;
+        let unsets = leader_env_unset_for_provider(Provider::Claude);
+        assert!(
+            unsets.iter().any(|k| k == "CLAUDE_EFFORT"),
+            "CLAUDE_EFFORT must be in Claude provider_env_unsets (single source); got {unsets:?}"
+        );
+        let cc_unsets = leader_env_unset_for_provider(Provider::ClaudeCode);
+        assert!(
+            cc_unsets.iter().any(|k| k == "CLAUDE_EFFORT"),
+            "CLAUDE_EFFORT must be in ClaudeCode provider_env_unsets; got {cc_unsets:?}"
+        );
+    }
+
+    #[test]
+    fn leader_shell_wrapper_drops_env_keys_present_in_env_unset() {
+        // Regression: the shell wrapper must SKIP env exports whose key is
+        // in env_unset, otherwise inherited env carrying that key (e.g.
+        // CLAUDE_EFFORT from launching shell, preserved by worker_spawn_env
+        // whitelist) would be re-introduced after the `unset KEY &&` line.
+        use std::collections::BTreeMap;
+        use std::path::Path;
+        use team_agent::tmux_backend::leader_shell_wrapper_command;
+        let mut env = BTreeMap::new();
+        env.insert("CLAUDE_EFFORT".to_string(), "high".to_string());
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        let line = leader_shell_wrapper_command(
+            &["claude".to_string()],
+            Path::new("/tmp"),
+            &env,
+            &["CLAUDE_EFFORT".to_string()],
+            "claude",
+        );
+        assert!(
+            line.contains("unset CLAUDE_EFFORT &&"),
+            "wrapper must emit `unset CLAUDE_EFFORT &&`; got {line}"
+        );
+        assert!(
+            !line.contains("CLAUDE_EFFORT=high"),
+            "wrapper MUST NOT re-export CLAUDE_EFFORT after unsetting it; got {line}"
+        );
+        // Other env keys still exported.
+        assert!(line.contains("PATH=/usr/bin"), "PATH still exported; got {line}");
+    }
+
+    #[test]
     fn team_provider_effort_high_does_not_produce_effort_error() {
         let yaml = base_team("\n  provider_effort: high");
         match validate_spec_yaml_str(&yaml) {

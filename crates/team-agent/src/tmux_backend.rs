@@ -1321,6 +1321,8 @@ fn shell_command(
     env: &BTreeMap<String, String>,
     env_unset: &[String],
 ) -> String {
+    let unset_set: std::collections::BTreeSet<&str> =
+        env_unset.iter().map(String::as_str).collect();
     let mut parts = Vec::new();
     parts.push("cd".to_string());
     parts.push(shell_quote(&cwd.to_string_lossy()));
@@ -1333,7 +1335,16 @@ fn shell_command(
         parts.push(key.clone());
         parts.push("&&".to_string());
     }
+    // 0.4.x ordering fix (env-leak symptom #3): KEY=val exports must NOT
+    // re-introduce any key that was just unset. Filter env entries whose key
+    // appears in env_unset so the unset wins on the final shell line. This
+    // matters when inherited env (worker_spawn_env / apply_profile_launch_env)
+    // contains the very keys we want to scrub (e.g. CLAUDE_EFFORT carried
+    // forward from the launching shell into the env map).
     for (key, value) in env {
+        if unset_set.contains(key.as_str()) {
+            continue;
+        }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
     parts.push("exec".to_string());
@@ -1378,6 +1389,8 @@ pub fn leader_shell_wrapper_command(
     env_unset: &[String],
     provider_label: &str,
 ) -> String {
+    let unset_set: std::collections::BTreeSet<&str> =
+        env_unset.iter().map(String::as_str).collect();
     let mut parts = Vec::new();
     // 1. cd
     parts.push("cd".to_string());
@@ -1389,8 +1402,13 @@ pub fn leader_shell_wrapper_command(
         parts.push(key.clone());
         parts.push("&&".to_string());
     }
-    // 3. env exports + provider (NO `exec` so the provider is a child)
+    // 3. env exports + provider (NO `exec` so the provider is a child).
+    // 0.4.x ordering fix: skip keys present in env_unset so KEY=val does not
+    // re-introduce a just-unset variable from the inherited env map.
     for (key, value) in env {
+        if unset_set.contains(key.as_str()) {
+            continue;
+        }
         parts.push(format!("{key}={}", shell_quote(value)));
     }
     parts.extend(argv.iter().map(|arg| shell_quote(arg)));

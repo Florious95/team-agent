@@ -450,6 +450,18 @@ pub(crate) fn provider_env_unsets(provider: Provider, auth_mode: AuthMode) -> BT
             unsets.insert("CLAUDE_CODE_ENTRYPOINT".to_string());
             unsets.insert("CLAUDE_CODE_EXECPATH".to_string());
             unsets.insert("CLAUDECODE".to_string());
+            // 0.4.x provider effort MVP step 9: CLAUDE_EFFORT carried from the
+            // launching shell would silently override the framework's effort
+            // decision (or, when no spec effort is configured, override the
+            // documented "provider default"). Scrubbing here is the single
+            // source — `extend_worker_env_unset_for_effort` is a thin alias
+            // that calls into this list. Applies to BOTH worker spawn AND
+            // leader spawn (leader_env_unset_for_provider also reads this).
+            // MVP scope: leader-effort is not configured yet, but if a
+            // launching shell already carries CLAUDE_EFFORT, the leader
+            // inheriting it would conflict with future leader-effort
+            // semantics. Scrub uniformly for predictability.
+            unsets.insert("CLAUDE_EFFORT".to_string());
             if auth_mode == AuthMode::CompatibleApi {
                 unsets.insert("ANTHROPIC_API_KEY".to_string());
             }

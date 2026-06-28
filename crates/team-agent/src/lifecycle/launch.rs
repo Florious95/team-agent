@@ -2529,12 +2529,15 @@ pub(crate) fn provider_effort_event_payload(
     }))
 }
 
-/// 0.4.x provider effort MVP step 9: worker spawn must scrub `CLAUDE_EFFORT`
-/// for Claude/ClaudeCode workers — a parent shell carrying `CLAUDE_EFFORT`
-/// would silently override the framework's effort decision (or, when no
-/// spec effort is configured, override the documented "provider default").
-/// Returns the env_unset vec extended with `CLAUDE_EFFORT` when the provider
-/// is Claude/ClaudeCode; pass-through otherwise.
+/// 0.4.x provider effort MVP step 9: defensive guarantee that `CLAUDE_EFFORT`
+/// is unset in the Claude/ClaudeCode worker spawn env. As of the
+/// `profile_launch::provider_env_unsets` update, the base list already
+/// includes `CLAUDE_EFFORT` for Claude — so this function is idempotent
+/// (returns input unchanged). Kept as a belt-and-braces guard so a future
+/// refactor that bypasses provider_env_unsets cannot silently drop the
+/// scrub. The structural win is in `tmux_backend::shell_command` which now
+/// filters env exports by env_unset (preventing inherited values from
+/// re-introducing keys we just unset).
 pub(crate) fn extend_worker_env_unset_for_effort(
     base: Vec<String>,
     provider: Provider,
