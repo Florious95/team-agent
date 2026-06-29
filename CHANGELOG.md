@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.10
+
+- **Added: workers can now run at a configurable effort level.** Set `effort:` in a role's section of `TEAM.md` or the role document, and Team Agent passes the right flag to the provider. Supported values follow the provider's own effort scale.
+- **Improved: worker lifecycle now tracks five distinct runtime states.** The new `WorkerRuntimeState` enum — `Pending`, `Starting`, `Running`, `Stopping`, `Stopped` — gives the coordinator and status commands a precise view of where each worker is in its lifecycle, replacing the previous boolean running/stopped split.
+- **Improved: foreground workers now run in their own process group.** Phase 1 of the foreground process-group work launches each worker in a dedicated pgrp, so signals and cleanup target the right processes and do not accidentally affect the leader.
+- **Fixed: `CLAUDE_EFFORT` is now scrubbed from the worker environment.** The env-export path previously could re-introduce variables that had already been unset; the scrub now runs after the full environment is assembled, so effort and other control variables do not leak into worker subprocesses.
+
 ## 0.4.9
 
 - **Fixed: Claude environment variables no longer leak into spawned subprocesses.** The leader launcher now unsets all `CLAUDE_CODE_*` variables before starting workers, covering both the managed tmux path and the shell wrapper path. The ExecProvider in-tmux path also clears the Claude environment block, and the removal order is corrected to run after `envs()` is called — closing the leak that caused Claude workers to inherit the leader's session environment.
