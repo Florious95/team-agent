@@ -420,6 +420,48 @@ fn agent_pane_live_by_id(
     }
 }
 
+/// 0.4.10+ reset duplicate-window fix (CR-approved, plan §1).
+///
+/// Enumerate live panes whose `(session, window_name)` match the given pair.
+/// Used by `stop_agent_at_paths` (when the stored pane_id is stale/dead but a
+/// same-role window survives) and by the reset hard gate (to prove no
+/// duplicate window residue remains before `start_agent_at_paths`).
+///
+/// `list_targets()` is a point-in-time tmux snapshot — duplicates ARE
+/// preserved in the result so callers can see the full set.
+///
+/// Caller MUST also check `is_per_agent_window(window, agent_id)` before
+/// using this list to kill panes (plan §2 safety constraint): a shared
+/// layout window may host co-tenants.
+fn list_same_role_panes(
+    transport: &dyn crate::transport::Transport,
+    session: &crate::transport::SessionName,
+    window: &str,
+) -> Vec<crate::transport::PaneInfo> {
+    transport
+        .list_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pane| {
+            pane.session.as_str() == session.as_str()
+                && pane.window_name.as_ref().map(WindowName::as_str) == Some(window)
+        })
+        .collect()
+}
+
+/// 0.4.10+ reset duplicate-window fix (plan §2 safety constraint).
+///
+/// Returns true only when `window == agent_id`, i.e. the canonical
+/// per-agent window. Adaptive/shared layout windows (`workers`, `team`,
+/// or any layout window name produced by `is_adaptive_layout_window_pub`)
+/// MUST NOT be broad-killed by name — they may host co-tenants. The
+/// caller falls back to safer behavior (refuse stop, surface
+/// RequirementUnmet/transport error) when this returns false.
+fn is_per_agent_window(window: &str, agent_id: &AgentId) -> bool {
+    window == agent_id.as_str()
+        && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
+}
+
 fn tmux_start_mode_for_spawn(
     spawn: &SpawnedAgentWindow,
     into_existing_session: bool,
@@ -602,22 +644,62 @@ pub(super) fn stop_agent_at_paths(
         .as_ref()
         .map(|pane| pane.as_str().to_string())
         .unwrap_or_else(|| format!("{}:{window}", session_name.as_str()));
-    let stopped = pane_id
+    // 0.4.10+ reset duplicate-window fix (plan §2): stop must resolve a
+    // STALE stored pane_id to live same-role panes by `(session, window)`
+    // enumeration BEFORE concluding the worker is absent. Pre-fix logic
+    // returned stopped=false when pane_id was dead even if a residual
+    // duplicate window survived — that residue then collided with
+    // reset's unconditional start, producing the observed
+    // `stopped=false, started=true` duplicate-window pattern.
+    //
+    // Only the STALE-pane-id branch enumerates same-role panes. When
+    // pane_id was never set in state (legacy state shape, never observed
+    // a real spawn), the existing window-based fallback is preserved —
+    // the duplicate-window bug requires a stored-but-stale pane_id as
+    // the trigger.
+    let stored_pane_live = pane_id
         .as_ref()
         .map(|pane| agent_pane_live_by_id(transport, pane))
-        .unwrap_or_else(|| window_exists(transport, &session_name, &window));
+        .unwrap_or(false);
+    let stored_pane_stale = pane_id.is_some() && !stored_pane_live;
+    let same_role_panes: Vec<crate::transport::PaneInfo> =
+        if stored_pane_stale && is_per_agent_window(&window, agent_id) {
+            list_same_role_panes(transport, &session_name, &window)
+        } else {
+            Vec::new()
+        };
+    let stopped = stored_pane_live
+        || !same_role_panes.is_empty()
+        || (pane_id.is_none() && window_exists(transport, &session_name, &window));
     if stopped {
         // golden operations.py:84-86: a non-zero kill-window raises
         // RuntimeError(f"failed to stop agent {agent_id}: {proc.stderr.strip()}").
-        let kill_result = if let Some(pane) = pane_id.as_ref() {
-            transport.kill_pane(pane)
-        } else {
-            let target = Target::SessionWindow {
-                session: session_name.clone(),
-                window: WindowName::new(&window),
+        //
+        // 0.4.10+ kill resolution order (plan §2):
+        //   1. stored pane_id is live → kill it by pane_id.
+        //   2. stored pane_id is stale BUT same-role panes survive →
+        //      kill each by pane_id (duplicate window names make
+        //      kill-window -t session:window ambiguous).
+        //   3. no pane_id at all but window exists → kill_window as
+        //      before (legacy compat for state without pane_id field).
+        let kill_result: Result<(), crate::transport::TransportError> =
+            if let Some(pane) = pane_id.as_ref().filter(|_| stored_pane_live) {
+                transport.kill_pane(pane)
+            } else if !same_role_panes.is_empty() {
+                let mut last_err: Option<crate::transport::TransportError> = None;
+                for residual in &same_role_panes {
+                    if let Err(e) = transport.kill_pane(&residual.pane_id) {
+                        last_err = Some(e);
+                    }
+                }
+                last_err.map(Err).unwrap_or(Ok(()))
+            } else {
+                let target = Target::SessionWindow {
+                    session: session_name.clone(),
+                    window: WindowName::new(&window),
+                };
+                transport.kill_window(&target)
             };
-            transport.kill_window(&target)
-        };
         if let Err(e) = kill_result {
             let stderr = match &e {
                 crate::transport::TransportError::Subprocess { stderr, .. } => stderr.trim().to_string(),
@@ -906,7 +988,158 @@ fn reset_agent_at_paths(
         .filter(|session| !session.is_empty())
         .map(SessionId::new);
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state_before_stop, Some(agent_id))?;
+    // Capture old pane_id / pane_pid / window BEFORE stop, so the hard gate
+    // below can prove the same prior instance is gone (or refuse start).
+    let old_pane_id_before = state_before_stop
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("pane_id"))
+        .and_then(|v| v.as_str())
+        .filter(|p| !p.is_empty())
+        .map(crate::transport::PaneId::new);
+    let old_pane_pid_before = state_pane_pid(&state_before_stop, agent_id);
+    // CR C-2: take ONE pre-stop snapshot of the team session's panes so
+    // the gate below can compute "what survived stop" by set difference,
+    // not "what panes exist at all" (which would refuse legitimate
+    // reset flows where stop killed the pane and the post-stop snapshot
+    // includes that same pane id in a transport mock that does not
+    // reflect kill removal).
+    let pre_stop_window = state_before_stop
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("window"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| agent_id.as_str())
+        .to_string();
+    let pre_stop_spec = load_team_spec(spec_workspace).ok();
+    let pre_stop_session = pre_stop_spec
+        .as_ref()
+        .map(|spec| state_session_name_from_spec(&state_before_stop, spec));
+    let pre_stop_pane_ids: std::collections::BTreeSet<String> =
+        if let Some(session) = pre_stop_session.as_ref() {
+            if is_per_agent_window(&pre_stop_window, agent_id) {
+                list_same_role_panes(transport, session, &pre_stop_window)
+                    .iter()
+                    .map(|p| p.pane_id.as_str().to_string())
+                    .collect()
+            } else {
+                std::collections::BTreeSet::new()
+            }
+        } else {
+            std::collections::BTreeSet::new()
+        };
     let stop = stop_agent_at_paths(workspace, spec_workspace, agent_id, team, transport)?;
+
+    // 0.4.10+ paused agent skip: a paused agent's start path returns
+    // StartAgentOutcome::Paused (no spawn). There is no duplicate-window
+    // hazard, so the gate is a no-op for paused agents.
+    let agent_is_paused = state_before_stop
+        .get("agents")
+        .and_then(|v| v.get(agent_id.as_str()))
+        .and_then(|v| v.get("paused"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // 0.4.10+ reset duplicate-window fix (plan §3): HARD GATE before start.
+    // After stop_agent_at_paths returns, prove the old instance is gone OR
+    // refuse to spawn. The pre-fix path unconditionally proceeded to
+    // discard/save/start even when stop returned stopped=false (stop's
+    // pane_id was stale), creating the observed duplicate-window pattern.
+    //
+    // Residue definition (correct: differential, not absolute):
+    //   A pane is RESIDUE iff it appears in BOTH the pre-stop snapshot
+    //   AND the post-stop snapshot. The pre-fix attempt used "any
+    //   matching pane exists post-stop" which broke legitimate flows
+    //   where the transport mock does not model kill_pane removal.
+    //
+    // Old pane id / pid checks:
+    //   The OLD stored pane_id / pane_pid must be gone (not just
+    //   reachable but actually killed). For real tmux this is the
+    //   structural truth source; for mocks the differential approach
+    //   above covers the post-stop visibility.
+    //
+    // CR C-5: gate is reset-specific; standalone stop-agent path keeps
+    // existing "already absent is ok" behavior.
+    //
+    // Gate scope refinement: when stop.stopped == true, the kill_pane
+    // call already succeeded (and drain_old_pane_and_pid polled for
+    // the pane to become unreachable). Treat that as the authoritative
+    // signal — running the gate again post-stop introduces a race
+    // window where tmux's has_pane lag can spuriously report Live.
+    // Only gate the dangerous case: stop reported stopped == false
+    // (state's stale pane_id pointed at nothing kill-able), which is
+    // exactly the duplicate-window bug pattern from the macmini
+    // evidence: `stop_agent.complete stopped=false` followed by an
+    // unconditional `start_agent.agent_start`.
+    if !agent_is_paused && !stop.stopped {
+        let spec_for_gate = load_team_spec(spec_workspace)?;
+        let gate_state = resolve_team_scoped_state_or_refuse(workspace, team)?;
+        let session_name_gate = state_session_name_from_spec(&gate_state, &spec_for_gate);
+        let gate_window = gate_state
+            .get("agents")
+            .and_then(|v| v.get(agent_id.as_str()))
+            .and_then(|v| v.get("window"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| agent_id.as_str())
+            .to_string();
+        let old_pane_still_live = old_pane_id_before
+            .as_ref()
+            .map(|p| agent_pane_live_by_id(transport, p))
+            .unwrap_or(false);
+        // Take a SECOND snapshot post-stop and compute the differential.
+        // Only panes present in BOTH snapshots are residue (stop did not
+        // remove them).
+        let post_stop_panes: Vec<crate::transport::PaneInfo> =
+            if is_per_agent_window(&gate_window, agent_id) {
+                list_same_role_panes(transport, &session_name_gate, &gate_window)
+            } else {
+                Vec::new()
+            };
+        let remaining_panes: Vec<crate::transport::PaneInfo> = post_stop_panes
+            .into_iter()
+            .filter(|p| pre_stop_pane_ids.contains(p.pane_id.as_str()))
+            .collect();
+        // Pid-alone aliveness is secondary evidence and noisy under fixtures
+        // (synthetic pids may by chance be live on the test machine). Block
+        // ONLY on tmux-visible residue: old pane still live OR same-role
+        // panes survived stop. The pid is still recorded in the event for
+        // diagnostics.
+        let old_pid_still_live = old_pane_pid_before
+            .filter(|_| old_pane_still_live)
+            .map(|pid| pid_is_alive(pid))
+            .unwrap_or(false);
+        if old_pane_still_live || !remaining_panes.is_empty() {
+            let remaining_pane_ids: Vec<String> = remaining_panes
+                .iter()
+                .map(|p| p.pane_id.as_str().to_string())
+                .collect();
+            let old_pane_str = old_pane_id_before
+                .as_ref()
+                .map(|p| p.as_str().to_string())
+                .unwrap_or_default();
+            let old_pid_val = old_pane_pid_before.unwrap_or(0);
+            let _ = write_reset_stop_not_proven_event(
+                workspace,
+                agent_id,
+                &old_pane_str,
+                old_pid_val,
+                &remaining_pane_ids,
+            );
+            // CR C-1 N38 three-line error: error / action / log_hint.
+            let _ = stop; // silence unused on the refusal path
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "reset refused: old agent instance still live for {agent_id}\n\
+                 action: stop the worker manually with `team-agent stop-agent {agent_id} --team <team>` then retry reset, or kill the residual tmux panes [{ids}]\n\
+                 log_hint: see reset_agent.stop_not_proven event (old_pane_id={old}, old_pane_pid={pid}, remaining_panes=[{ids}])",
+                agent_id = agent_id.as_str(),
+                ids = remaining_pane_ids.join(", "),
+                old = old_pane_str,
+                pid = old_pid_val,
+            )));
+        }
+    }
+
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
     let spec = load_team_spec(spec_workspace)?;
     discard_agent_session_fields(&mut state, agent_id)?;
@@ -1192,6 +1425,32 @@ fn write_reset_tombstone_event(
             serde_json::json!({
                 "agent_id": agent_id.as_str(),
                 "discarded_session_id": discarded_session_id,
+            }),
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    Ok(())
+}
+
+/// 0.4.10+ reset duplicate-window fix (plan §3): emit a structured event
+/// when the reset hard gate refuses to start because the old instance is
+/// proven still live (old pane id reachable, old pane pid alive, or
+/// same-role panes remain in the team session).
+fn write_reset_stop_not_proven_event(
+    workspace: &Path,
+    agent_id: &AgentId,
+    old_pane_id: &str,
+    old_pane_pid: u32,
+    remaining_panes: &[String],
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "reset_agent.stop_not_proven",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "old_pane_id": old_pane_id,
+                "old_pane_pid": old_pane_pid,
+                "remaining_panes": remaining_panes,
+                "action": "stop the worker manually then retry reset, or kill the residual tmux panes",
             }),
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;

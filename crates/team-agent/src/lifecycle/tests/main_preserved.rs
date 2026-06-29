@@ -34,6 +34,12 @@ type RecordedSpawns = LaneSpawns;
 struct SessionProbeRecordingTransport {
     spawns: RecordedSpawns,
     session_exists: bool,
+    // 0.4.10+ reset hard-gate: record killed panes so liveness/has_pane
+    // reflect the kill (the gate checks "did stop actually remove the
+    // old pane"). Default mock behavior reported Live unconditionally —
+    // safe pre-fix because no gate ran, but the gate now needs the kill
+    // to be observable.
+    killed_panes: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 impl crate::transport::Transport for SessionProbeRecordingTransport {
     fn kind(&self) -> crate::transport::BackendKind {
@@ -62,8 +68,20 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
     fn query(&self, _t: &crate::transport::Target, _f: crate::transport::PaneField) -> Result<Option<String>, crate::transport::TransportError> {
         unimplemented!("not reached")
     }
-    fn liveness(&self, _p: &crate::transport::PaneId) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
+    fn liveness(&self, p: &crate::transport::PaneId) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
+        let killed = self.killed_panes.lock().unwrap();
+        if killed.contains(p.as_str()) {
+            return Ok(crate::model::enums::PaneLiveness::Dead);
+        }
         Ok(crate::model::enums::PaneLiveness::Live)
+    }
+    fn has_pane(&self, p: &crate::transport::PaneId) -> Result<Option<bool>, crate::transport::TransportError> {
+        let killed = self.killed_panes.lock().unwrap();
+        Ok(Some(!killed.contains(p.as_str())))
+    }
+    fn kill_pane(&self, p: &crate::transport::PaneId) -> Result<(), crate::transport::TransportError> {
+        self.killed_panes.lock().unwrap().insert(p.as_str().to_string());
+        Ok(())
     }
     fn list_targets(&self) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
         Ok(Vec::new())
@@ -115,10 +133,7 @@ fn start_agent_respawn_into_dead_session_uses_new_session_not_new_window() {
     let ws = respawn_ws_one_resumable_worker();
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // session_exists=false models the dead CP-1 `-L` server after --discard-session.
-    let transport = SessionProbeRecordingTransport {
-        spawns: std::sync::Arc::clone(&spawns),
-        session_exists: false,
-    };
+    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), session_exists: false, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
     let _ = start_agent_with_transport(&ws, &AgentId::new("alpha"), false, false, false, None, &transport);
     let recorded = spawns.lock().unwrap().clone();
     assert_eq!(recorded.len(), 1, "exactly one respawn for alpha; got {recorded:?}");
@@ -150,10 +165,7 @@ fn reset_agent_discard_session_rebuilds_window_via_start_respawn() {
     let ws = restart_ws_two_resumable_workers(); // compiled spec + state(alpha,bravo running) + seeded coordinator
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // live session present (other workers keep it alive) but alpha's window was discarded.
-    let transport = SessionProbeRecordingTransport {
-        spawns: std::sync::Arc::clone(&spawns),
-        session_exists: true,
-    };
+    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), session_exists: true, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
     let _ = reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport);
     let recorded = spawns.lock().unwrap().clone();
     assert!(
@@ -191,10 +203,7 @@ fn reset_agent_discard_session_syncs_projection_epoch_inputs_for_restart_agent_c
 
     let before = chrono::Utc::now();
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let transport = SessionProbeRecordingTransport {
-        spawns: std::sync::Arc::clone(&spawns),
-        session_exists: true,
-    };
+    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), session_exists: true, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
     let outcome = reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport)
         .expect("reset-agent alpha --discard-session --no-display");
     assert!(
