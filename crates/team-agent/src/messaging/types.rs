@@ -126,6 +126,92 @@ impl ActivityStatus {
     }
 }
 
+/// 0.4.x Phase 1 worker runtime-state (fg-pgrp + 5-state plan, CR APPROVED).
+///
+/// Canonical runtime-state enum surfaced by `team-agent status` and consumed
+/// by automatic-dispatch / idle-gate predicates. Distinct from
+/// [`ActivityStatus`] (which remains the internal classifier output for
+/// backwards compatibility) and from lifecycle `agents.<id>.status` (which
+/// remains launch/stop-owned: `running`/`paused`/`stopped`/etc.).
+///
+/// Rules:
+///   * `Busy` when `foreground_pgrp != agent_root_pgrp` (a child process
+///     occupies the terminal — provider is not at idle prompt).
+///   * `Unknown` is NEVER idle-eligible and must be treated as busy by
+///     automatic-dispatch / idle-gate predicates.
+///   * `ProbablyIdle` is a weak conclusion, not proof of idleness.
+///   * `Dead` when the pane is missing or the root process is gone.
+///   * `Blocked` when the worker is awaiting human confirmation (trust
+///     prompt, startup approval).
+///
+/// CR R4: deserialise with `#[serde(other)]` so a future variant added by
+/// a newer build does not crash an older reader (rolling upgrade safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WorkerRuntimeState {
+    Dead,
+    Busy,
+    Blocked,
+    ProbablyIdle,
+    /// Default fallback. CR R4: also catches unknown wire strings via
+    /// `#[serde(other)]`.
+    #[serde(other)]
+    Unknown,
+}
+
+impl WorkerRuntimeState {
+    /// Wire string used by status/diagnose JSON.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Dead => "DEAD",
+            Self::Busy => "BUSY",
+            Self::Blocked => "BLOCKED",
+            Self::ProbablyIdle => "PROBABLY_IDLE",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+
+    /// Parse from wire string. Returns `Self::Unknown` for unknown literals
+    /// (defence-in-depth alongside `#[serde(other)]`).
+    pub fn parse_wire(value: &str) -> Self {
+        match value.trim() {
+            "DEAD" => Self::Dead,
+            "BUSY" => Self::Busy,
+            "BLOCKED" => Self::Blocked,
+            "PROBABLY_IDLE" => Self::ProbablyIdle,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// True for states that MUST NOT receive automatic dispatch:
+    /// `Dead | Busy | Blocked | Unknown`. Only `ProbablyIdle` is safe.
+    /// CR R3 + Phase 1 §8 dispatch boundary.
+    pub fn blocks_automatic_dispatch(self) -> bool {
+        !matches!(self, Self::ProbablyIdle)
+    }
+
+    /// True only for `ProbablyIdle` — the sole idle candidate. `Unknown` is
+    /// NEVER idle (Iron Law: bug-071/077/085).
+    pub fn is_idle_candidate(self) -> bool {
+        matches!(self, Self::ProbablyIdle)
+    }
+
+    /// Map from the legacy [`ActivityStatus`] for backward-compat. Used by
+    /// status/diagnose code paths that have an old AgentActivity in hand
+    /// and need a runtime-state surface for the product enum.
+    ///   Working   → Busy
+    ///   Idle      → ProbablyIdle
+    ///   Stuck     → Unknown (CR rule: stale signals are never idle)
+    ///   Uncertain → Unknown
+    pub fn from_activity(activity: ActivityStatus) -> Self {
+        match activity {
+            ActivityStatus::Working => Self::Busy,
+            ActivityStatus::Idle => Self::ProbablyIdle,
+            ActivityStatus::Stuck | ActivityStatus::Uncertain => Self::Unknown,
+        }
+    }
+}
+
 /// 告警类型 (card §49;`scheduler.py:38` `_ALERT_TYPES`)。`stuck_cancel` 还接 `all` (展开全集)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

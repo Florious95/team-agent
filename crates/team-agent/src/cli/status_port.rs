@@ -743,7 +743,10 @@ use rusqlite::params;
             return json!({});
         };
         let mut out = Map::new();
-        for key in ["status", "provider", "activity", "last_output_at"] {
+        // 0.4.x Phase 1: add `worker_state` (canonical 5-state product
+        // surface). `activity` is preserved alongside as the deprecated
+        // legacy classifier output (CR R3 same-source contract).
+        for key in ["status", "provider", "worker_state", "activity", "last_output_at"] {
             if let Some(value) = input.get(key) {
                 out.insert(key.to_string(), value.clone());
             }

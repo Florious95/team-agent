@@ -128,3 +128,82 @@ fn read_and_remove(path: &std::path::Path) -> Vec<u8> {
     let _ = std::fs::remove_file(path);
     stdout
 }
+
+/// 0.4.x Phase 1 (fg-pgrp): terminal foreground process-group probe.
+///
+/// macOS probe confirmed (2026-06-29, .team/artifacts/fg-pgrp-probe.md):
+/// `TIOCGPGRP` ioctl returns Errno 25 on tmux slave PTYs opened from a
+/// non-controlling process. We use `ps -o tpgid,pgid -p <pid>` instead —
+/// reliable on macOS AND Linux, no platform-specific cfg needed.
+///
+/// Returns `Ok(Some((tpgid, pgid)))` on success, `Ok(None)` when the PID
+/// is gone / ps returned no row / values unparseable. The caller maps
+/// `None` to `WorkerRuntimeState::Unknown` (never to idle — Iron Law).
+///
+/// `tpgid` = terminal foreground process group ID.
+/// `pgid`  = the agent root's own process group ID.
+/// `tpgid != pgid` means a child process owns the foreground (BUSY signal).
+///
+/// Bounded via [`run_bounded_command`] so a wedged ps cannot stall the
+/// coordinator tick.
+pub(crate) fn pane_foreground_and_root_pgrp(pane_pid: u32) -> io::Result<Option<(u32, u32)>> {
+    let mut command = Command::new("ps");
+    command.args(["-o", "tpgid=,pgid=", "-p", &pane_pid.to_string()]);
+    let output = bounded_command_output_with_probe(
+        &mut command,
+        "pane_foreground_and_root_pgrp",
+        Some(pane_pid),
+    )?;
+    if probe_timed_out() {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let first_line = text.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Ok(None);
+    }
+    let tpgid = parts[0].parse::<i64>().ok();
+    let pgid = parts[1].parse::<i64>().ok();
+    match (tpgid, pgid) {
+        // ps prints `-1` for tpgid when there is no controlling terminal —
+        // treat as unknown rather than fabricating a u32.
+        (Some(t), Some(p)) if t > 0 && p > 0 => Ok(Some((t as u32, p as u32))),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod fg_pgrp_tests {
+    use super::*;
+
+    #[test]
+    fn pane_foreground_and_root_pgrp_self_returns_some_or_none() {
+        // The current test process is not necessarily attached to a
+        // controlling terminal (CI runs detached), so we accept Some OR
+        // None. The contract is: never panic, return io::Result.
+        let pid = std::process::id();
+        match pane_foreground_and_root_pgrp(pid) {
+            Ok(Some((tpgid, pgid))) => {
+                assert!(tpgid > 0 && pgid > 0, "positive pgid/tpgid");
+            }
+            Ok(None) => {} // headless / no tty — acceptable
+            Err(e) => panic!("probe must not error in normal env: {e}"),
+        }
+    }
+
+    #[test]
+    fn pane_foreground_and_root_pgrp_missing_pid_returns_none() {
+        // PID 1 is init/launchd — exists but we read fields; non-existent
+        // PIDs return Ok(None) (ps exits non-zero).
+        let result =
+            pane_foreground_and_root_pgrp(0xFFFF_FFFE).expect("must not error on missing pid");
+        assert!(result.is_none(), "missing pid → None");
+    }
+}

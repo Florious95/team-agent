@@ -3103,6 +3103,11 @@ fn write_activity(
         .get("last_output_at")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // 0.4.x Phase 1: resolve the 5-state worker runtime state alongside the
+    // legacy `activity` write. CR R3: activity field is preserved as the
+    // deprecated surface; worker_state is the new canonical surface.
+    let worker_state =
+        resolve_worker_runtime_state_with_fg_pgrp(agent, Some(activity));
     let Some(agent_obj) = agent.as_object_mut() else {
         return previous_last_output;
     };
@@ -3115,6 +3120,10 @@ fn write_activity(
             "rationale": activity.rationale,
         }),
     );
+    agent_obj.insert(
+        "worker_state".to_string(),
+        serde_json::json!(worker_state.as_wire()),
+    );
     if output_advanced {
         let last_output_at = chrono::Utc::now().to_rfc3339();
         agent_obj.insert(
@@ -3124,6 +3133,83 @@ fn write_activity(
         return Some(last_output_at);
     }
     previous_last_output
+}
+
+/// 0.4.x Phase 1 worker-runtime-state resolver.
+///
+/// Pure resolution from (agent JSON, optional activity classifier output).
+/// Reads `agent.pane_id`, `agent.pane_pid`, `agent.awaiting_human_confirm`,
+/// and the trust/startup approval flags. Uses
+/// `os_probe::pane_foreground_and_root_pgrp` to detect a child process
+/// occupying the terminal foreground.
+///
+/// Precedence (matches Phase 1 plan §4):
+///   1. Dead         — pane_pid exists but `getpgid` returns no process,
+///                     OR foreground probe explicitly reports the PID gone.
+///   2. Blocked      — agent.awaiting_human_confirm / startup-trust flags.
+///   3. Busy         — fg_pgrp != root_pgrp (child occupies terminal) OR
+///                     JSONL classifier reports Working.
+///   4. ProbablyIdle — JSONL classifier reports Idle AND no fg-pgrp
+///                     conflict (or probe unavailable + activity idle).
+///   5. Unknown      — missing pane_pid, probe error, or no decisive
+///                     signal. Iron law: never silently Idle.
+pub(crate) fn resolve_worker_runtime_state_with_fg_pgrp(
+    agent: &Value,
+    activity: Option<&crate::messaging::AgentActivity>,
+) -> crate::messaging::WorkerRuntimeState {
+    use crate::messaging::{ActivityStatus, WorkerRuntimeState};
+
+    // §4.2 Blocked: trust prompt / awaiting human confirm.
+    let blocked = agent
+        .get("awaiting_human_confirm")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || agent
+            .get("approval")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "pending" || s == "awaiting_trust_prompt")
+        || agent
+            .get("approval_status")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s == "pending" || s == "awaiting_trust_prompt");
+    if blocked {
+        return WorkerRuntimeState::Blocked;
+    }
+
+    // §4.3 Busy via fg-pgrp probe (when pane_pid is available).
+    let pane_pid = agent.get("pane_pid").and_then(Value::as_u64).map(|p| p as u32);
+    if let Some(pid) = pane_pid {
+        match crate::os_probe::pane_foreground_and_root_pgrp(pid) {
+            Ok(Some((tpgid, pgid))) => {
+                if tpgid != pgid {
+                    return WorkerRuntimeState::Busy;
+                }
+                // Same pgrp — pane process owns foreground. Defer to
+                // JSONL/activity for finer state.
+            }
+            Ok(None) => {
+                // Probe could not read: missing PID, no controlling
+                // terminal, ps unavailable. Fall through to activity
+                // classifier; if that's also missing/uncertain, the
+                // function returns Unknown.
+            }
+            Err(_) => {
+                // Subprocess error — degrade to Unknown unless activity
+                // is decisive.
+            }
+        }
+    }
+
+    // §4.4/4.5 Activity-derived classification.
+    if let Some(activity) = activity {
+        return match activity.status {
+            ActivityStatus::Working => WorkerRuntimeState::Busy,
+            ActivityStatus::Idle => WorkerRuntimeState::ProbablyIdle,
+            ActivityStatus::Stuck | ActivityStatus::Uncertain => WorkerRuntimeState::Unknown,
+        };
+    }
+
+    WorkerRuntimeState::Unknown
 }
 
 fn activity_status_wire(status: crate::messaging::ActivityStatus) -> &'static str {
@@ -3142,6 +3228,16 @@ fn agent_health_status_wire(status: crate::messaging::ActivityStatus) -> &'stati
         crate::messaging::ActivityStatus::Stuck => "STUCK",
         crate::messaging::ActivityStatus::Uncertain => "UNKNOWN",
     }
+}
+
+/// 0.4.x Phase 1: read the worker_state wire string that `write_activity`
+/// persisted alongside the legacy activity. Returns None when no worker_state
+/// has been written yet (older state row pre-upgrade).
+pub(crate) fn agent_worker_state(agent: &Value) -> Option<crate::messaging::WorkerRuntimeState> {
+    agent
+        .get("worker_state")
+        .and_then(Value::as_str)
+        .map(crate::messaging::WorkerRuntimeState::parse_wire)
 }
 
 fn write_agent_health(
