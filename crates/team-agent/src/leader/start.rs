@@ -430,7 +430,21 @@ fn ensure_managed_leader_pane(
             .iter()
             .any(|existing| existing.as_str() == window.as_str())
         {
-            if let Some(existing) = transport
+            // 0.4.10+ mirror-session fix (CR APPROVED): the pre-fix
+            // path silently returned the existing pane here, so the
+            // caller (`execute_managed_leader_plan`) then ran
+            // `tmux attach-session -t <session>:<provider-window>` —
+            // turning the second `team-agent <provider>` entry into a
+            // second tmux client attached to the SAME pane, producing
+            // a UI mirror with synchronized I/O. Default behavior must
+            // refuse instead. Explicit `--attach --confirm` /
+            // `--attach-session ... --confirm` still go through the
+            // `AttachExisting` mode (untouched).
+            //
+            // CR C-3 cross-vendor: same refusal applies to Claude /
+            // ClaudeCode / Codex / Copilot / Gemini / Fake — the
+            // managed launcher contract is provider-agnostic.
+            let existing_pane = transport
                 .list_targets()
                 .unwrap_or_default()
                 .into_iter()
@@ -438,15 +452,23 @@ fn ensure_managed_leader_pane(
                     pane.session.as_str() == session.as_str()
                         && pane.window_name.as_ref().map(WindowName::as_str)
                             == Some(window.as_str())
-                })
-            {
-                return Ok(SpawnResult {
-                    pane_id: existing.pane_id,
-                    session: session.clone(),
-                    window: window.clone(),
-                    child_pid: existing.pane_pid,
                 });
-            }
+            let pane_str = existing_pane
+                .as_ref()
+                .map(|p| format!(" pane={}", p.pane_id.as_str()))
+                .unwrap_or_default();
+            let cmd = provider_command_name(plan.provider);
+            // CR C-1: full N38-style message — provider name +
+            // attach path + workspace suggestion.
+            return Err(LeaderError::Start(format!(
+                "managed leader already running for this workspace: \
+                 session={} window={}{pane_str}. \
+                 Use `team-agent {cmd} --attach --confirm` to attach to \
+                 it, stop the existing leader first, or run `team-agent \
+                 {cmd}` from a different workspace.",
+                session.as_str(),
+                window.as_str(),
+            )));
         }
         // 0.4.x (CR C-1 + C-2): leader env_unset reuses the worker
         // provider_env_unsets (single source of truth) + spawn through the
@@ -1585,5 +1607,459 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, Target::Pane(PaneId::new("%0")));
         assert_eq!(sent[0].1, vec![Key::Enter]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 0.4.10+ mirror-session fix — ensure_managed_leader_pane refusal.
+    //
+    // Bug: second `team-agent <provider>` entry in the same workspace
+    // silently returned the existing pane and the caller then ran
+    // `tmux attach-session`, producing a UI mirror (two clients on one
+    // pane). Fix: refuse with N38 error text + provider command +
+    // attach path + workspace suggestion.
+    //
+    // CR contract:
+    //   C-1 full N38 message (provider name + attach path + workspace).
+    //   C-2 literal grep guard on the message text.
+    //   C-3 cross-vendor: Claude / ClaudeCode / Codex / Copilot.
+    //   C-5 explicit --attach --confirm path UNTOUCHED.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Mock transport that reports an existing managed session/window/pane,
+    /// the trigger condition for the mirror-session refusal.
+    struct ManagedExistsTransport {
+        session: String,
+        window: String,
+        pane_id: String,
+    }
+
+    impl Transport for ManagedExistsTransport {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Tmux
+        }
+        fn spawn_first(
+            &self,
+            session: &SessionName,
+            window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            // The refusal path must NEVER reach spawn_first. Panic so a
+            // regression surfaces immediately.
+            panic!(
+                "ManagedExistsTransport::spawn_first must not be called \
+                 when an existing managed pane is detected; session={} \
+                 window={}",
+                session.as_str(),
+                window.as_str()
+            );
+        }
+        fn spawn_into(
+            &self,
+            session: &SessionName,
+            window: &WindowName,
+            _argv: &[String],
+            _cwd: &Path,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            panic!(
+                "ManagedExistsTransport::spawn_into must not be called \
+                 when an existing managed pane is detected; session={} \
+                 window={}",
+                session.as_str(),
+                window.as_str()
+            );
+        }
+        fn inject(
+            &self,
+            _t: &Target,
+            _p: &InjectPayload,
+            _s: Key,
+            _b: bool,
+        ) -> Result<InjectReport, TransportError> {
+            unimplemented!()
+        }
+        fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn capture(
+            &self,
+            _t: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
+            Ok(CapturedText {
+                text: String::new(),
+                range,
+            })
+        }
+        fn query(
+            &self,
+            _t: &Target,
+            _f: PaneField,
+        ) -> Result<Option<String>, TransportError> {
+            Ok(None)
+        }
+        fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
+            Ok(PaneLiveness::Live)
+        }
+        fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+            Ok(vec![PaneInfo {
+                pane_id: PaneId::new(&self.pane_id),
+                session: SessionName::new(&self.session),
+                window_index: Some(0),
+                window_name: Some(WindowName::new(&self.window)),
+                pane_index: Some(0),
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: true,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            }])
+        }
+        fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
+            Ok(session.as_str() == self.session)
+        }
+        fn list_windows(
+            &self,
+            session: &SessionName,
+        ) -> Result<Vec<WindowName>, TransportError> {
+            if session.as_str() == self.session {
+                Ok(vec![WindowName::new(&self.window)])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+        fn set_session_env(
+            &self,
+            _s: &SessionName,
+            _k: &str,
+            _v: &str,
+        ) -> Result<SetEnvOutcome, TransportError> {
+            Ok(SetEnvOutcome::Applied)
+        }
+        fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn attach_session(
+            &self,
+            _s: &SessionName,
+        ) -> Result<AttachOutcome, TransportError> {
+            Ok(AttachOutcome::Attached)
+        }
+    }
+
+    fn refusal_plan(provider: Provider) -> LeaderStartPlan {
+        LeaderStartPlan {
+            mode: LeaderStartMode::ManagedTmuxClient,
+            provider,
+            workspace: std::path::PathBuf::from("/tmp/ws-refuse"),
+            socket: LeaderLaunchSocket::Workspace,
+            session_name: None,
+            argv: Vec::new(),
+            provider_argv: vec![super::provider_command_name(provider).to_string()],
+            leader_window: Some(WindowName::new(super::provider_wire(provider))),
+            is_external_leader: false,
+            leader_env: BTreeMap::new(),
+            identity: None,
+            detached: false,
+        }
+    }
+
+    fn assert_refusal_message_shape(text: &str, provider: Provider) {
+        let cmd = super::provider_command_name(provider);
+        // CR C-1 + C-2: full N38 message literal grep guard.
+        assert!(
+            text.contains("managed leader already running for this workspace"),
+            "refusal must carry the canonical prefix; got: {text}"
+        );
+        assert!(
+            text.contains("session="),
+            "refusal must include session= name; got: {text}"
+        );
+        assert!(
+            text.contains("window="),
+            "refusal must include window= name; got: {text}"
+        );
+        assert!(
+            text.contains(&format!("team-agent {cmd} --attach --confirm")),
+            "refusal must suggest the explicit attach command for the \
+             provider's passthrough name (`{cmd}`); got: {text}"
+        );
+        assert!(
+            text.contains("stop the existing leader first"),
+            "refusal must include the stop alternative; got: {text}"
+        );
+        assert!(
+            text.contains("different workspace"),
+            "refusal must include the workspace-change alternative; got: {text}"
+        );
+    }
+
+    #[test]
+    fn managed_leader_refuses_when_existing_session_window_pane_present() {
+        let session = SessionName::new("team-agent-leader-claude_code-demo");
+        let window = WindowName::new("claude_code");
+        let transport = ManagedExistsTransport {
+            session: session.as_str().to_string(),
+            window: window.as_str().to_string(),
+            pane_id: "%0".to_string(),
+        };
+        let plan = refusal_plan(Provider::ClaudeCode);
+        let err = super::ensure_managed_leader_pane(
+            &transport,
+            &session,
+            &window,
+            &plan,
+            std::path::Path::new("/tmp/ws-refuse"),
+        )
+        .expect_err("must refuse when managed session+window+pane exist");
+        let text = err.to_string();
+        assert_refusal_message_shape(&text, Provider::ClaudeCode);
+        // Pane id surfaced for diagnostics.
+        assert!(text.contains("%0"), "refusal must include pane id; got: {text}");
+    }
+
+    #[test]
+    fn managed_leader_refuses_cross_vendor_claude_codex_copilot() {
+        // CR C-3: same refusal for every passthrough provider.
+        for provider in [
+            Provider::Claude,
+            Provider::ClaudeCode,
+            Provider::Codex,
+            Provider::Copilot,
+        ] {
+            let wire = super::provider_wire(provider);
+            let session_name = format!("team-agent-leader-{wire}-cross");
+            let window_name = wire.to_string();
+            let session = SessionName::new(&session_name);
+            let window = WindowName::new(&window_name);
+            let transport = ManagedExistsTransport {
+                session: session_name.clone(),
+                window: window_name.clone(),
+                pane_id: format!("%{wire}"),
+            };
+            let plan = refusal_plan(provider);
+            let err = super::ensure_managed_leader_pane(
+                &transport,
+                &session,
+                &window,
+                &plan,
+                std::path::Path::new("/tmp/ws-refuse-cross"),
+            )
+            .expect_err(&format!(
+                "must refuse cross-vendor: provider={provider:?}"
+            ));
+            let text = err.to_string();
+            assert_refusal_message_shape(&text, provider);
+        }
+    }
+
+    /// Mock transport that reports a managed session without the provider
+    /// window (so spawn_into is the correct path — NOT refusal).
+    struct ManagedSessionNoWindowTransport {
+        session: String,
+        spawn_into_called: Mutex<bool>,
+    }
+    impl Transport for ManagedSessionNoWindowTransport {
+        fn kind(&self) -> BackendKind {
+            BackendKind::Tmux
+        }
+        fn spawn_first(
+            &self,
+            _s: &SessionName,
+            _w: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            panic!("session present → must use spawn_into, not spawn_first")
+        }
+        fn spawn_first_with_leader_shell_wrapper(
+            &self,
+            _s: &SessionName,
+            _w: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+            _u: &[String],
+            _p: &str,
+        ) -> Result<SpawnResult, TransportError> {
+            panic!("session present → must use spawn_into, not spawn_first")
+        }
+        fn spawn_into(
+            &self,
+            session: &SessionName,
+            window: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
+            *self.spawn_into_called.lock().unwrap() = true;
+            Ok(SpawnResult {
+                pane_id: PaneId::new("%new"),
+                session: session.clone(),
+                window: window.clone(),
+                child_pid: None,
+            })
+        }
+        fn spawn_into_with_leader_shell_wrapper(
+            &self,
+            session: &SessionName,
+            window: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+            _u: &[String],
+            _p: &str,
+        ) -> Result<SpawnResult, TransportError> {
+            *self.spawn_into_called.lock().unwrap() = true;
+            Ok(SpawnResult {
+                pane_id: PaneId::new("%new"),
+                session: session.clone(),
+                window: window.clone(),
+                child_pid: None,
+            })
+        }
+        fn inject(
+            &self,
+            _t: &Target,
+            _p: &InjectPayload,
+            _s: Key,
+            _b: bool,
+        ) -> Result<InjectReport, TransportError> {
+            unimplemented!()
+        }
+        fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn capture(
+            &self,
+            _t: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
+            Ok(CapturedText {
+                text: String::new(),
+                range,
+            })
+        }
+        fn query(
+            &self,
+            _t: &Target,
+            _f: PaneField,
+        ) -> Result<Option<String>, TransportError> {
+            Ok(None)
+        }
+        fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
+            Ok(PaneLiveness::Live)
+        }
+        fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+            Ok(Vec::new())
+        }
+        fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
+            Ok(session.as_str() == self.session)
+        }
+        fn list_windows(
+            &self,
+            _session: &SessionName,
+        ) -> Result<Vec<WindowName>, TransportError> {
+            // Some OTHER window in the session, NOT the provider window.
+            Ok(vec![WindowName::new("scratch")])
+        }
+        fn set_session_env(
+            &self,
+            _s: &SessionName,
+            _k: &str,
+            _v: &str,
+        ) -> Result<SetEnvOutcome, TransportError> {
+            Ok(SetEnvOutcome::Applied)
+        }
+        fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn attach_session(
+            &self,
+            _s: &SessionName,
+        ) -> Result<AttachOutcome, TransportError> {
+            Ok(AttachOutcome::Attached)
+        }
+    }
+
+    #[test]
+    fn managed_leader_existing_session_without_provider_window_spawns_into() {
+        // CR contract preservation: when the managed session exists but
+        // the provider window does NOT, the legitimate path is to
+        // spawn_into the session (not refuse). Refusal only fires when
+        // the provider WINDOW is already present.
+        let session_name = "team-agent-leader-claude_code-spawn-into";
+        let session = SessionName::new(session_name);
+        let window = WindowName::new("claude_code");
+        let transport = ManagedSessionNoWindowTransport {
+            session: session_name.to_string(),
+            spawn_into_called: Mutex::new(false),
+        };
+        let plan = refusal_plan(Provider::ClaudeCode);
+        let result = super::ensure_managed_leader_pane(
+            &transport,
+            &session,
+            &window,
+            &plan,
+            std::path::Path::new("/tmp/ws-spawn-into"),
+        );
+        result.expect("must spawn_into when provider window not present");
+        assert!(
+            *transport.spawn_into_called.lock().unwrap(),
+            "spawn_into / spawn_into_with_leader_shell_wrapper must have \
+             been called"
+        );
+    }
+
+    /// CR C-2 source grep guard: lock the literal phrases in the
+    /// refusal message into the source file so a future refactor
+    /// cannot silently drop them.
+    #[test]
+    fn ensure_managed_leader_pane_refusal_literals_grep_guard() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let start_rs = manifest.join("src").join("leader").join("start.rs");
+        let contents =
+            std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
+        // Locate the body of ensure_managed_leader_pane.
+        let start = contents
+            .find("fn ensure_managed_leader_pane(")
+            .expect("ensure_managed_leader_pane must exist");
+        let end = contents[start + 1..]
+            .find("\nfn ")
+            .map(|p| start + 1 + p)
+            .unwrap_or(contents.len());
+        let body = &contents[start..end];
+        // CR C-2: literal phrases from the N38 message.
+        for literal in &[
+            "managed leader already running for this workspace",
+            "--attach --confirm",
+            "stop the existing leader first",
+            "different workspace",
+        ] {
+            assert!(
+                body.contains(literal),
+                "ensure_managed_leader_pane body must contain literal \
+                 `{literal}` (CR C-2 source grep guard); body excerpt: \
+                 {body}"
+            );
+        }
+        // CR C-3 wiring: the refusal uses provider_command_name to vary
+        // the suggested command per vendor.
+        assert!(
+            body.contains("provider_command_name(plan.provider)"),
+            "ensure_managed_leader_pane must dispatch the suggested \
+             command via provider_command_name(plan.provider) so the \
+             refusal covers Claude/Codex/Copilot/etc."
+        );
     }
 }
