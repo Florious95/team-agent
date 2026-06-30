@@ -61,12 +61,20 @@ pub fn leader_start_plan(
     // `managed_team_session_name(identity) = team-<team_id>` which is the
     // worker session — that co-location is the structural root of
     // E49/E51/E53/E57-3/E60.
+    // 0.4.10+ mirror-session fix v2 (option B): managed-mode session name
+    // gets a per-launch nonce so each `team-agent <provider>` entry in the
+    // same workspace creates its OWN tmux session — matching the user
+    // expectation that `tmux new-session + claude` is independent every
+    // time. Pre-fix the managed path used the workspace-keyed name (same
+    // session for every entry) and silently attached the second client →
+    // UI mirror. The external/attach paths keep the stable workspace-keyed
+    // name (per-launch nonce would break `--attach-session` reattach).
     let session_name = if external_path {
         attach_session
             .cloned()
             .or_else(|| Some(leader_session_name(provider, workspace)))
     } else {
-        Some(leader_session_name(provider, workspace))
+        Some(managed_leader_session_name(provider, workspace))
     };
     let in_tmux = std::env::var_os("TMUX").is_some();
     if !in_tmux {
@@ -266,6 +274,42 @@ pub fn leader_session_name(provider: Provider, workspace: &Path) -> SessionName 
     ))
 }
 
+/// 0.4.10+ mirror-session fix v2: managed-mode session name with a
+/// per-launch nonce.
+///
+/// Format: `team-agent-leader-<provider>-<folder>-<hash>-<nonce>`.
+/// `nonce` = `<pid_hex>-<epoch_nanos_hex>`. The pid distinguishes
+/// concurrent launches; the epoch_nanos distinguishes sequential ones.
+///
+/// Each `team-agent <provider>` entry in the managed (non-tmux) path gets
+/// its OWN session, matching the user expectation that `tmux new-session
+/// + claude` is independent every time. The workspace-keyed prefix is
+/// preserved so existing leader-session-anchored protections
+/// (`LEADER_SESSION_PREFIX` matchers in shutdown/cli/mod.rs) still
+/// classify these sessions as leader sessions.
+///
+/// External / attach paths keep the stable `leader_session_name` —
+/// per-launch nonce would break `--attach-session <name>` reattach
+/// semantics.
+pub fn managed_leader_session_name(provider: Provider, workspace: &Path) -> SessionName {
+    let resolved = resolve_workspace_for_hash(workspace);
+    let folder_raw = resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("workspace");
+    let folder = sanitize_session_folder(folder_raw);
+    let hash = sha1_hex_prefix(resolved.to_string_lossy().as_bytes(), 8);
+    let pid = std::process::id();
+    let epoch_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    SessionName::new(format!(
+        "{LEADER_SESSION_PREFIX}{}-{folder}-{hash}-{pid:x}-{epoch_nanos:x}",
+        provider_wire(provider)
+    ))
+}
+
 fn start_argv(
     mode: LeaderStartMode,
     provider: Provider,
@@ -423,31 +467,14 @@ fn ensure_managed_leader_pane(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<SpawnResult, LeaderError> {
+    // 0.4.10+ mirror-session fix v2 (option B): each managed launch gets
+    // its OWN session name (via `managed_leader_session_name`'s nonce).
+    // The historical "session already exists → reuse pane" branch is
+    // structurally unreachable now (the per-launch session never
+    // preexists). If a caller bypasses the nonce path and reuses a name,
+    // tmux's own duplicate-session error will surface — better than
+    // silently attaching a second client.
     if transport.has_session(session).unwrap_or(false) {
-        if transport
-            .list_windows(session)
-            .unwrap_or_default()
-            .iter()
-            .any(|existing| existing.as_str() == window.as_str())
-        {
-            if let Some(existing) = transport
-                .list_targets()
-                .unwrap_or_default()
-                .into_iter()
-                .find(|pane| {
-                    pane.session.as_str() == session.as_str()
-                        && pane.window_name.as_ref().map(WindowName::as_str)
-                            == Some(window.as_str())
-                })
-            {
-                return Ok(SpawnResult {
-                    pane_id: existing.pane_id,
-                    session: session.clone(),
-                    window: window.clone(),
-                    child_pid: existing.pane_pid,
-                });
-            }
-        }
         // 0.4.x (CR C-1 + C-2): leader env_unset reuses the worker
         // provider_env_unsets (single source of truth) + spawn through the
         // leader shell wrapper so provider exit returns to a shell, not
@@ -1585,5 +1612,122 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, Target::Pane(PaneId::new("%0")));
         assert_eq!(sent[0].1, vec![Key::Enter]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 0.4.10+ mirror-session fix v2 (option B: independent session per launch).
+    //
+    // managed_leader_session_name appends a per-launch nonce so each
+    // `team-agent <provider>` entry in the same workspace creates its own
+    // tmux session, matching `tmux new-session + claude` semantics.
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn managed_leader_session_name_carries_leader_prefix() {
+        // Protection invariant: every session name returned by the
+        // managed path must still match LEADER_SESSION_PREFIX so the
+        // shutdown / cli/mod.rs prefix matchers still classify it as a
+        // leader session.
+        let workspace = std::env::temp_dir().join(format!(
+            "ta_rs_mgr_prefix_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&workspace);
+        let name = super::managed_leader_session_name(Provider::ClaudeCode, &workspace);
+        assert!(
+            name.as_str().starts_with(super::super::LEADER_SESSION_PREFIX),
+            "managed session name must carry LEADER_SESSION_PREFIX (`{}`); \
+             got `{}`",
+            super::super::LEADER_SESSION_PREFIX,
+            name.as_str()
+        );
+        assert!(
+            name.as_str().contains("claude_code"),
+            "managed session name must include provider wire; got `{}`",
+            name.as_str()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn managed_leader_session_name_is_unique_per_call() {
+        // Two consecutive calls must return DIFFERENT names — the
+        // per-launch nonce defeats the mirror-session bug.
+        let workspace = std::env::temp_dir().join(format!(
+            "ta_rs_mgr_unique_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&workspace);
+        let a = super::managed_leader_session_name(Provider::ClaudeCode, &workspace);
+        // Sleep > 1ns to ensure epoch_nanos advances even on coarse clocks.
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let b = super::managed_leader_session_name(Provider::ClaudeCode, &workspace);
+        assert_ne!(
+            a.as_str(),
+            b.as_str(),
+            "two managed launches in the same workspace must get \
+             DIFFERENT session names (mirror-session fix v2); got \
+             `{}` vs `{}`",
+            a.as_str(),
+            b.as_str()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn leader_session_name_is_stable_across_calls() {
+        // External / attach paths must keep the stable workspace-keyed
+        // name — `--attach-session <name>` reattach would break if the
+        // name varied per call.
+        let workspace = std::env::temp_dir().join(format!(
+            "ta_rs_lsn_stable_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&workspace);
+        let a = super::leader_session_name(Provider::ClaudeCode, &workspace);
+        let b = super::leader_session_name(Provider::ClaudeCode, &workspace);
+        assert_eq!(
+            a.as_str(),
+            b.as_str(),
+            "leader_session_name must be deterministic per workspace \
+             (external/attach paths depend on stability); got `{}` vs `{}`",
+            a.as_str(),
+            b.as_str()
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    /// CR C-5 source grep guard: managed mode passes the nonce session
+    /// name through `leader_start_plan` so the per-launch independence
+    /// reaches `ensure_managed_leader_pane`. External/attach paths must
+    /// keep `leader_session_name`.
+    #[test]
+    fn managed_path_uses_nonce_session_name_grep_guard() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let start_rs = manifest.join("src").join("leader").join("start.rs");
+        let contents =
+            std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
+        // leader_start_plan must dispatch to managed_leader_session_name
+        // on the managed path.
+        let start = contents
+            .find("pub fn leader_start_plan(")
+            .expect("leader_start_plan must exist");
+        let end = contents[start + 1..]
+            .find("\npub fn ")
+            .or_else(|| contents[start + 1..].find("\nfn "))
+            .map(|p| start + 1 + p)
+            .unwrap_or(contents.len());
+        let body = &contents[start..end];
+        assert!(
+            body.contains("managed_leader_session_name(provider, workspace)"),
+            "leader_start_plan must call managed_leader_session_name on \
+             the managed path (mirror-session fix v2); body excerpt: {body}"
+        );
+        // The external_path branch must still use the stable name.
+        assert!(
+            body.contains("leader_session_name(provider, workspace)"),
+            "leader_start_plan must keep leader_session_name on the \
+             external/attach paths; body excerpt: {body}"
+        );
     }
 }
