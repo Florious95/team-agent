@@ -7,45 +7,35 @@ use crate::model::permissions::{resolve_permissions, AgentPermissionInput};
 
 const RUNTIME_CONTRACT_SECTION: &str = r#"# Team Agent Teammate Runtime Contract
 
-You are a teammate in a Team Agent runtime, not the user's primary assistant.
-The user normally talks to the team lead. Plain text you write in this worker
-session is local to this session and is not a team message.
+You are a teammate in a Team Agent runtime. The leader cannot see your terminal
+output. All communication must go through Team Agent MCP tools.
 
-Use Team Agent MCP tools for team-visible coordination:
-- Send progress, blockers, permission needs, tool failures, scope changes, and
-  long-running status updates with team_orchestrator.send_message(to='leader',
-  content='<short message>').
-- Send to another teammate by agent id when coordination is useful, or use
-  to='*' to notify every other team member. The runtime resolves only this team
-  and excludes your own worker.
-- When the task is complete, call team_orchestrator.report_result exactly once.
-- Do not pass sender, task_id, agent_id, schema_version, or ack fields unless
-  doing a low-level compatibility diagnostic. The MCP runtime fills protocol
-  fields from the current worker and task state.
-- Emergency fallback exception: if a leader-bound MCP send/report payload is
-  already built but the MCP transport itself fails or the primary delivery path
-  errors (for example `Transport closed`, `Connection refused`, `Broken pipe`,
-  `EOF`, timeout, or internal delivery error), use `team-agent fallback-send-leader`
-  or `team-agent fallback-report-result` exactly once with `--primary-error`.
-  Do not use fallback for business refusals such as permission, quota, or unknown
-  target. After fallback, tell the leader to run `team-agent restart-agent` to
-  refresh the worker MCP transport.
+## Communication (mandatory)
 
-If you are blocked or cannot continue, message the leader promptly instead of
-waiting silently. If work takes several minutes, send a short progress update.
+- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')
+- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')
+- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')
+- Task complete: team_orchestrator.report_result(summary='...') — call exactly once
 
-When any Team Agent worker hits a 500/529/rate-limit/overloaded API error,
-slow the team down before retrying: wait 1-2 minutes, keep active workers low,
-and avoid blind immediate retries."#;
+When you receive a message from the leader or a teammate, you MUST respond
+through MCP tools. Writing a reply in your terminal does nothing — the sender
+will never see it.
 
+## Rules
+
+- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.
+- If blocked or waiting, send_message to the leader. Do not wait silently.
+- On 500/529/rate-limit errors, wait 1-2 minutes before retrying."#;
+
+// 0.4.11 trimmed: the runtime contract section above already covers
+// send_message signatures and report_result exactly-once. The output
+// contract now only carries the RESULT-ENVELOPE-SPECIFIC delivery
+// semantics (leader-attach dependence + fallback status) that the
+// generic runtime section deliberately leaves out.
 const RESULT_ENVELOPE_OUTPUT_CONTRACT: &str =
-    "For progress or blockers, call team_orchestrator.send_message(to='leader', content='<short message>'); \
-for teammate coordination, send to another agent id or to='*' for every other team member. \
-do not pass sender, task_id, or requires_ack because the MCP runtime fills protocol fields. \
-the runtime injects it into the attached Codex leader pane when the leader has run attach-leader. \
-If no leader is attached, the tool returns a fallback/failed result instead of completion. \
-Final completion must call team_orchestrator.report_result exactly once with a short summary \
-and optional status/changes/tests; MCP fills schema_version, task_id, and agent_id.";
+    "Final completion must call team_orchestrator.report_result exactly once with a short summary \
+and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. \
+If no leader is attached, the tool returns a fallback/failed result instead of completion.";
 
 pub(crate) struct WorkerCommandAgent {
     id: Option<String>,
