@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.11
+
+- **Fixed: starting a worker after a failed stop no longer opens a duplicate window.** If `stop` fails, Team Agent now refuses to `start` the same worker until the stop completes, preventing a second window from opening alongside the stale one.
+- **Fixed: each `team-agent claude` launch now gets its own independent session.** Previously, a second launch could attach to an existing session instead of starting fresh; each invocation now creates a distinct session.
+- **Improved: the generic teammate system prompt is leaner.** The runtime contract section was trimmed from 30 lines to 16, keeping only the essential MCP communication rules and making it easier for teammates to reach the key requirement: all replies must go through MCP tools.
+
 ## 0.4.10
 
 - **Added: workers can now run at a configurable effort level.** Set `effort:` in a role's section of `TEAM.md` or the role document, and Team Agent passes the right flag to the provider. Supported values follow the provider's own effort scale.
