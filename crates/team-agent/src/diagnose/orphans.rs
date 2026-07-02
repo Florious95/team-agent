@@ -503,18 +503,41 @@ fn is_provider_or_mcp_workspace_command(command: &str) -> bool {
 }
 
 fn parse_workspace_arg(command: &str) -> Option<PathBuf> {
-    let mut parts = command.split_whitespace().peekable();
-    while let Some(part) = parts.next() {
-        if let Some(value) = part.strip_prefix("--workspace=") {
-            if !value.is_empty() {
-                return Some(PathBuf::from(value));
-            }
+    for (start, _) in command.match_indices("--workspace") {
+        let boundary_before = start == 0
+            || command
+                .get(..start)
+                .and_then(|prefix| prefix.chars().next_back())
+                .is_some_and(char::is_whitespace);
+        if !boundary_before {
+            continue;
         }
-        if part == "--workspace" {
-            return parts.peek().map(PathBuf::from);
+        let after = &command[start + "--workspace".len()..];
+        if let Some(value) = after.strip_prefix('=') {
+            return parse_workspace_value(value);
+        }
+        if after.chars().next().is_some_and(char::is_whitespace) {
+            return parse_workspace_value(after);
         }
     }
     None
+}
+
+fn parse_workspace_value(value: &str) -> Option<PathBuf> {
+    let value = value.trim_start();
+    if value.is_empty() {
+        return None;
+    }
+    let value = value
+        .split_once(" --")
+        .map(|(workspace, _)| workspace)
+        .unwrap_or(value)
+        .trim_end();
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
 }
 
 fn classify_workspace_orphan(workspace: &Path, pid: Pid) -> Option<OrphanReason> {
@@ -654,5 +677,40 @@ fn reason_key(reason: &OrphanReason) -> &'static str {
         OrphanReason::CmdlineUnparsed => "cmdline_unparsed",
         OrphanReason::MetadataMismatch => "metadata_mismatch",
         OrphanReason::PidNotRunning => "pid_not_running",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_workspace_arg_keeps_trailing_path_with_spaces() {
+        let command = "/tmp/team-agent coordinator --workspace /Volumes/projects/My Agent";
+
+        assert_eq!(
+            parse_workspace_arg(command),
+            Some(PathBuf::from("/Volumes/projects/My Agent"))
+        );
+    }
+
+    #[test]
+    fn parse_workspace_arg_stops_at_next_flag() {
+        let command = "/tmp/team-agent coordinator --workspace /tmp/My Agent --once";
+
+        assert_eq!(
+            parse_workspace_arg(command),
+            Some(PathBuf::from("/tmp/My Agent"))
+        );
+    }
+
+    #[test]
+    fn parse_workspace_arg_supports_equals_form_with_spaces() {
+        let command = "/tmp/team-agent coordinator --workspace=/tmp/My Agent --once";
+
+        assert_eq!(
+            parse_workspace_arg(command),
+            Some(PathBuf::from("/tmp/My Agent"))
+        );
     }
 }
