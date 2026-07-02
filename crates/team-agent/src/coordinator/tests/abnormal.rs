@@ -150,6 +150,65 @@ fn abnormal_preseeded_seen_suppresses_duplicate_across_calls() {
     assert_eq!(out.notifications.len(), 0, "pre-seeded seen suppresses (probe: 0)");
 }
 
+#[test]
+fn abnormal_explicit_error_classifier_boundaries_stay_stable() {
+    let claude_api = line(serde_json::json!({
+        "type": "system",
+        "subtype": "api_error",
+        "level": "error",
+        "sessionId": "sess-1"
+    }));
+    let claude_api_fact =
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_api)
+            .expect("Claude system api_error level=error counts as explicit");
+    assert_eq!(claude_api_fact.signature.as_str(), "api_error");
+    assert_eq!(
+        claude_api_fact.turn_id.as_ref().map(|id| id.as_str()),
+        Some("sess-1")
+    );
+
+    let claude_tool_result = line(serde_json::json!({
+        "type": "user",
+        "message": {
+            "content": [
+                {"type": "tool_result", "is_error": true, "content": "permission denied"}
+            ]
+        }
+    }));
+    assert!(
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_tool_result)
+            .is_none(),
+        "Claude tool_result is_error is an abnormal fact, but not an explicit provider-exit error"
+    );
+
+    let codex_failed = line(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": {"turn": {"id": "turn-1", "status": "failed"}}
+    }));
+    let codex_fact = crate::provider::latest_explicit_error_fact(Provider::Codex, &codex_failed)
+        .expect("Codex failed turn/completed counts as explicit");
+    assert_eq!(codex_fact.signature.as_str(), "turn_failed");
+    assert_eq!(
+        codex_fact.turn_id.as_ref().map(|id| id.as_str()),
+        Some("turn-1")
+    );
+
+    let non_error = line(serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": {"turn": {"id": "turn-2", "status": "completed"}}
+    }));
+    assert!(
+        crate::provider::latest_explicit_error_fact(Provider::Codex, &non_error).is_none(),
+        "non-error tail must not count as latest explicit error"
+    );
+}
+
+fn line(value: serde_json::Value) -> String {
+    format!("{value}\n")
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // GROUP F — detect_whole_team_gone (abnormal_track.py:91) — clean vs unexpected — RED
 // ═════════════════════════════════════════════════════════════════════════

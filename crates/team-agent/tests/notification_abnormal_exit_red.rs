@@ -1,25 +1,26 @@
 //! #236 abnormal-exit notification contracts.
 //!
 //! User-facing invariant: a worker abnormal-exit notification is deterministic and zero-false-positive:
-//! provider process is dead AND the latest transcript/rollout fact is an explicit error. Either signal
-//! alone must stay silent. The notification goes through the N32 leader funnel.
+//! the latest transcript/rollout fact must be an explicit provider error that is fresh for the
+//! current worker cohort. Process liveness is an audit field; dead-without-error remains silent.
+//! The notification goes through the N32 leader funnel.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
 
-use team_agent::provider::{read_fault_facts, FactKind, Provider};
+use team_agent::provider::{latest_explicit_error_fact, FactKind, Provider};
 
 #[test]
-fn abnormal_exit_requires_dead_process_and_latest_explicit_error_before_notifying_leader() {
+fn notification_abnormal_exit_requires_fresh_latest_explicit_error_before_notifying_leader() {
     let codex_failed = serde_json::json!({
         "jsonrpc": "2.0",
         "method": "turn/completed",
         "params": {"turn": {"id": "turn-failed", "status": "failed"}}
     });
-    let facts = read_fault_facts(&[codex_failed], Provider::Codex);
-    assert_eq!(facts.len(), 1, "fixture precondition: latest explicit Codex failure is a fault fact");
-    assert_eq!(facts[0].kind, FactKind::Failed);
+    let fact = latest_explicit_error_fact(Provider::Codex, &format!("{codex_failed}\n"))
+        .expect("fixture precondition: latest explicit Codex failure is a fault fact");
+    assert_eq!(fact.kind, FactKind::Failed);
 
     let src = production_sources();
     let mut failures = Vec::new();
@@ -30,30 +31,31 @@ fn abnormal_exit_requires_dead_process_and_latest_explicit_error_before_notifyin
                 .to_string(),
         );
     }
-    if !src.contains("ProcessLiveness::Dead")
-        && !src.contains("process_dead")
-        && !src.contains("provider_process_dead")
+    if !src.contains("ErrorRecency")
+        || !src.contains("error_recency")
+        || !src.contains("fresh_error")
     {
-        failures.push(
-            "worker.abnormal_exit must require provider process liveness == dead".to_string(),
-        );
+        failures
+            .push("worker.abnormal_exit must persist/report explicit-error recency".to_string());
     }
-    if !src.contains("read_fault_facts")
-        && !src.contains("turn_failed")
-        && !src.contains("tool_result_is_error")
-        && !src.contains("api_error")
+    if !src.contains("latest_explicit_error_fact")
+        || !src.contains("turn_failed")
+        || !src.contains("api_error")
     {
         failures.push(
             "worker.abnormal_exit must require the latest transcript/rollout fact to be an explicit error"
                 .to_string(),
         );
     }
-    if !src.contains("abnormal_exit.single_signal_suppressed")
-        && !src.contains("single_signal_suppressed")
-        && !src.contains("requires_dead_and_error")
-    {
+    if src.contains("error_only") {
         failures.push(
-            "single-signal cases must be explicitly suppressed/auditable: dead-only and error-only are not notifications"
+            "error_only suppression must be removed; stale/fresh error recency owns that path"
+                .to_string(),
+        );
+    }
+    if !src.contains("dead_only") || !src.contains("abnormal_exit.single_signal_suppressed") {
+        failures.push(
+            "dead-without-explicit-error must remain auditable as dead_only suppression"
                 .to_string(),
         );
     }
@@ -66,13 +68,13 @@ fn abnormal_exit_requires_dead_process_and_latest_explicit_error_before_notifyin
 
     assert!(
         failures.is_empty(),
-        "abnormal_exit deterministic notification contract failed:\n{}",
+        "abnormal_exit fresh explicit-error notification contract failed:\n{}",
         failures.join("\n")
     );
 }
 
 #[test]
-fn abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_notifications() {
+fn notification_abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_notifications() {
     let orphan = source("src/coordinator/orphan.rs");
     let mut failures = Vec::new();
 
@@ -81,7 +83,7 @@ fn abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_notifications
         && !orphan.contains("worker.abnormal_exit")
     {
         failures.push(
-            "generic process_abnormal_records notifications are transcript-only; #236 worker.abnormal_exit needs the dead-process AND latest-error gate"
+            "generic process_abnormal_records notifications are transcript-only; #236 worker.abnormal_exit needs the fresh latest-error gate"
                 .to_string(),
         );
     }

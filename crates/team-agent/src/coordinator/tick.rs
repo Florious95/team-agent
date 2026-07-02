@@ -847,11 +847,10 @@ impl Coordinator {
 
     /// #236 `worker.abnormal_exit` watcher.
     ///
-    /// Notify only when both signals are true: the provider process is dead AND the
-    /// latest transcript/rollout JSONL record is an explicit provider error. Dead-only
-    /// and error-only observations are written as check/suppressed audit events with
-    /// `notification=false`; they never call the N32 leader funnel. This path is
-    /// intentionally separate from the generic transcript-only abnormal fact track.
+    /// Notify only when the latest transcript/rollout JSONL record is an explicit
+    /// provider error that is fresh for the current worker cohort. A dead process
+    /// without an explicit error remains a suppressed `dead_only` audit event; process
+    /// liveness is otherwise diagnostic data for this path.
     fn detect_abnormal_exits(
         &self,
         state: &mut Value,
@@ -874,7 +873,9 @@ impl Coordinator {
                             &agent,
                             None,
                             None,
-                            "unverifiable",
+                            ProcessLiveness::Unverifiable,
+                            None,
+                            ErrorRecency::None,
                             None,
                             Some(error.to_string()),
                         ),
@@ -909,7 +910,9 @@ impl Coordinator {
                             &agent,
                             Some(size),
                             mtime_ns,
-                            "unverifiable",
+                            ProcessLiveness::Unverifiable,
+                            None,
+                            ErrorRecency::None,
                             None,
                             Some(error.to_string()),
                         ),
@@ -920,8 +923,25 @@ impl Coordinator {
             let liveness =
                 agent_process_liveness(&agent, session_name, targets, self.transport.as_ref());
             let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
-            let decision = abnormal_exit_decision(liveness.state, fact.as_ref());
-            let check_key = abnormal_check_key(&agent, &liveness, fact.as_ref(), size);
+            let error_observation_key = fact
+                .as_ref()
+                .map(|fact| abnormal_error_observation_key(&agent, fact, size));
+            let error_observation_cohort = fact.as_ref().map(|_| abnormal_error_cohort_key(&agent));
+            let error_recency = abnormal_error_recency(
+                &snapshot,
+                &agent,
+                error_observation_key.as_deref(),
+                error_observation_cohort.as_deref(),
+            );
+            let decision = abnormal_exit_decision(liveness.state, fact.as_ref(), error_recency);
+            let check_key = abnormal_check_key(
+                &agent,
+                &liveness,
+                fact.as_ref(),
+                error_recency,
+                error_observation_key.as_deref(),
+                size,
+            );
             upsert_abnormal_watch(
                 state,
                 &agent.agent_id,
@@ -929,11 +949,19 @@ impl Coordinator {
                     &agent,
                     Some(size),
                     mtime_ns,
-                    process_liveness_wire(liveness.state),
+                    liveness.state,
                     fact.as_ref().map(|f| f.signature.as_str()),
+                    error_recency,
+                    error_observation_key.as_deref(),
                     None,
                 ),
             );
+            if let (Some(observation_key), Some(cohort_key)) = (
+                error_observation_key.as_deref(),
+                error_observation_cohort.as_deref(),
+            ) {
+                mark_abnormal_error_observed(state, &agent.agent_id, observation_key, cohort_key);
+            }
             if abnormal_last_check_key(state, &agent.agent_id).as_deref()
                 != Some(check_key.as_str())
             {
@@ -944,6 +972,7 @@ impl Coordinator {
                     &liveness,
                     fact.as_ref(),
                     decision,
+                    error_recency,
                     size,
                     mtime_ns,
                 )?;
@@ -996,15 +1025,17 @@ impl Coordinator {
                     "agent_id": agent.agent_id.as_str(),
                     "provider": provider_wire(agent.provider),
                     "path": agent.rollout_path_display.as_str(),
-                    "dead_process": true,
-                    "process_dead": true,
-                    "provider_process_dead": true,
+                    "dead_process": liveness.state == ProcessLiveness::Dead,
+                    "process_dead": liveness.state == ProcessLiveness::Dead,
+                    "provider_process_dead": liveness.state == ProcessLiveness::Dead,
                     "latest_error": true,
                     "latest_explicit_error": true,
-                    "dead_process_and_latest_error": true,
-                    "dead_process_and_latest_explicit_error": true,
-                    "process_dead_and_latest_explicit_error": true,
-                    "provider_process_dead_and_latest_explicit_error": true,
+                    "error_recency": error_recency.as_str(),
+                    "fresh_error": error_recency.is_fresh(),
+                    "dead_process_and_latest_error": liveness.state == ProcessLiveness::Dead,
+                    "dead_process_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                    "process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                    "provider_process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
                     "signature": fact.signature.as_str(),
                     "turn_id": fact.turn_id.as_ref().map(|id| id.as_str()),
                     "size": size,
@@ -1664,6 +1695,8 @@ struct AbnormalWatchAgent {
     provider: crate::model::enums::Provider,
     rollout_path: PathBuf,
     rollout_path_display: String,
+    spawn_epoch: Option<u64>,
+    spawned_at: Option<String>,
     status: Option<String>,
     process_liveness: Option<ProcessLiveness>,
     window: Option<String>,
@@ -1686,27 +1719,53 @@ enum AbnormalExitDecision {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorRecency {
+    None,
+    Stale,
+    Fresh,
+}
+
+impl ErrorRecency {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Stale => "stale",
+            Self::Fresh => "fresh",
+        }
+    }
+
+    fn is_fresh(self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AbnormalExitGate {
     provider_process_dead: bool,
     latest_explicit_error: bool,
+    error_recency: ErrorRecency,
 }
 
 impl AbnormalExitGate {
-    fn new(process_liveness: ProcessLiveness, latest_explicit_error: bool) -> Self {
+    fn new(
+        process_liveness: ProcessLiveness,
+        latest_explicit_error: bool,
+        error_recency: ErrorRecency,
+    ) -> Self {
         Self {
             provider_process_dead: process_liveness == ProcessLiveness::Dead,
             latest_explicit_error,
+            error_recency,
         }
     }
 
     fn should_notify_worker_abnormal_exit(self) -> bool {
-        should_notify_worker_abnormal_exit(self.provider_process_dead, self.latest_explicit_error)
+        should_notify_worker_abnormal_exit(self.latest_explicit_error, self.error_recency)
     }
 
     fn suppressed_reason(self) -> Option<&'static str> {
         match (self.provider_process_dead, self.latest_explicit_error) {
             (true, false) => Some("dead_only"),
-            (false, true) => Some("error_only"),
             _ => None,
         }
     }
@@ -1715,8 +1774,13 @@ impl AbnormalExitGate {
 fn abnormal_exit_decision(
     process_liveness: ProcessLiveness,
     latest_explicit_error: Option<&crate::provider::FaultFact>,
+    error_recency: ErrorRecency,
 ) -> AbnormalExitDecision {
-    let gate = AbnormalExitGate::new(process_liveness, latest_explicit_error.is_some());
+    let gate = AbnormalExitGate::new(
+        process_liveness,
+        latest_explicit_error.is_some(),
+        error_recency,
+    );
     if gate.should_notify_worker_abnormal_exit() {
         return AbnormalExitDecision::Notify;
     }
@@ -1727,10 +1791,10 @@ fn abnormal_exit_decision(
 }
 
 fn should_notify_worker_abnormal_exit(
-    provider_process_dead: bool,
     latest_explicit_error: bool,
+    error_recency: ErrorRecency,
 ) -> bool {
-    provider_process_dead && latest_explicit_error
+    latest_explicit_error && error_recency.is_fresh()
 }
 
 fn resolve_agent_rollout_path(workspace: &Path, path: &Path) -> PathBuf {
@@ -1765,6 +1829,11 @@ fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
                 provider,
                 rollout_path: PathBuf::from(&rollout_path_display),
                 rollout_path_display,
+                spawn_epoch: agent.get("spawn_epoch").and_then(Value::as_u64),
+                spawned_at: agent
+                    .get("spawned_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 status: agent
                     .get("status")
                     .and_then(Value::as_str)
@@ -2041,18 +2110,18 @@ fn abnormal_watch_payload(
     agent: &AbnormalWatchAgent,
     size: Option<u64>,
     mtime_ns: Option<u64>,
-    liveness: &str,
+    liveness: ProcessLiveness,
     signature: Option<&str>,
+    error_recency: ErrorRecency,
+    error_observation_key: Option<&str>,
     error: Option<String>,
 ) -> Value {
-    let dead_process = liveness == "dead";
+    let liveness_wire = process_liveness_wire(liveness);
+    let dead_process = liveness == ProcessLiveness::Dead;
     let latest_explicit_error = signature.is_some();
-    let notify = dead_process && latest_explicit_error;
-    let suppressed_reason = match (dead_process, latest_explicit_error) {
-        (true, false) => Some("dead_only"),
-        (false, true) => Some("error_only"),
-        _ => None,
-    };
+    let gate = AbnormalExitGate::new(liveness, latest_explicit_error, error_recency);
+    let notify = gate.should_notify_worker_abnormal_exit();
+    let suppressed_reason = gate.suppressed_reason();
     serde_json::json!({
         "path": agent.rollout_path_display.as_str(),
         "provider": provider_wire(agent.provider),
@@ -2060,16 +2129,19 @@ fn abnormal_watch_payload(
         "size": size,
         "last_offset": size,
         "last_signature": signature,
-        "last_liveness": liveness,
+        "last_liveness": liveness_wire,
         "dead_process": dead_process,
         "process_dead": dead_process,
         "provider_process_dead": dead_process,
         "latest_error": latest_explicit_error,
         "latest_explicit_error": latest_explicit_error,
-        "dead_process_and_latest_error": notify,
-        "dead_process_and_latest_explicit_error": notify,
-        "process_dead_and_latest_explicit_error": notify,
-        "provider_process_dead_and_latest_explicit_error": notify,
+        "error_recency": error_recency.as_str(),
+        "fresh_error": error_recency.is_fresh(),
+        "error_observation_key": error_observation_key,
+        "dead_process_and_latest_error": dead_process && latest_explicit_error,
+        "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "provider_process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
         "suppressed_reason": suppressed_reason,
         "notification": notify,
         "last_error": error,
@@ -2085,6 +2157,9 @@ fn upsert_abnormal_watch(state: &mut Value, agent_id: &str, mut payload: Value) 
         "last_suppressed_at",
         "last_check_key",
         "last_check_at",
+        "last_error_observation_key",
+        "last_error_observation_cohort",
+        "last_error_observed_at",
     ]
     .into_iter()
     .filter_map(|key| abnormal_watch_field(state, agent_id, key).map(|value| (key, value)))
@@ -2133,6 +2208,14 @@ fn abnormal_last_suppressed_key(state: &Value, agent_id: &str) -> Option<String>
 
 fn abnormal_last_check_key(state: &Value, agent_id: &str) -> Option<String> {
     abnormal_watch_str(state, agent_id, "last_check_key")
+}
+
+fn abnormal_last_error_observation_key(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_error_observation_key")
+}
+
+fn abnormal_last_error_observation_cohort(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_error_observation_cohort")
 }
 
 /// P1: Python `_TAIL_BYTES` parity (idle_takeover_wiring.py:13) — RS must not read less.
@@ -2237,6 +2320,36 @@ fn mark_abnormal_checked(state: &mut Value, agent_id: &str, key: &str) {
     }
 }
 
+fn mark_abnormal_error_observed(
+    state: &mut Value,
+    agent_id: &str,
+    observation_key: &str,
+    cohort_key: &str,
+) {
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        let entry = watch
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "last_error_observation_key".to_string(),
+                serde_json::json!(observation_key),
+            );
+            obj.insert(
+                "last_error_observation_cohort".to_string(),
+                serde_json::json!(cohort_key),
+            );
+            obj.insert(
+                "last_error_observed_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+    }
+}
+
 fn write_abnormal_check(
     event_log: &EventLog,
     team: &str,
@@ -2244,6 +2357,7 @@ fn write_abnormal_check(
     liveness: &ProcessCheck,
     fact: Option<&crate::provider::FaultFact>,
     decision: AbnormalExitDecision,
+    error_recency: ErrorRecency,
     size: u64,
     mtime_ns: Option<u64>,
 ) -> Result<(), TickError> {
@@ -2264,6 +2378,8 @@ fn write_abnormal_check(
             "provider_process_dead": dead_process,
             "latest_error": latest_explicit_error,
             "latest_explicit_error": latest_explicit_error,
+            "error_recency": error_recency.as_str(),
+            "fresh_error": error_recency.is_fresh(),
             "dead_process_and_latest_error": dead_process && latest_explicit_error,
             "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
             "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
@@ -2301,8 +2417,10 @@ fn write_abnormal_suppressed(
             "dead_process": liveness.state == ProcessLiveness::Dead,
             "process_dead": liveness.state == ProcessLiveness::Dead,
             "provider_process_dead": liveness.state == ProcessLiveness::Dead,
-            "latest_error": reason == "error_only",
-            "latest_explicit_error": reason == "error_only",
+            "latest_error": false,
+            "latest_explicit_error": false,
+            "error_recency": ErrorRecency::None.as_str(),
+            "fresh_error": false,
             "dead_process_and_latest_error": false,
             "dead_process_and_latest_explicit_error": false,
             "process_dead_and_latest_explicit_error": false,
@@ -2333,6 +2451,62 @@ fn abnormal_dedupe_key(
     )
 }
 
+fn abnormal_error_cohort_key(agent: &AbnormalWatchAgent) -> String {
+    let cohort = agent
+        .spawn_epoch
+        .map(|epoch| format!("spawn_epoch:{epoch}"))
+        .or_else(|| {
+            agent
+                .spawned_at
+                .as_deref()
+                .map(|spawned_at| format!("spawned_at:{spawned_at}"))
+        })
+        .unwrap_or_else(|| "legacy".to_string());
+    format!(
+        "worker.abnormal_exit.cohort:{}:{}:{}",
+        agent.agent_id, agent.rollout_path_display, cohort
+    )
+}
+
+fn abnormal_error_observation_key(
+    agent: &AbnormalWatchAgent,
+    fact: &crate::provider::FaultFact,
+    size: u64,
+) -> String {
+    let bucket = fact
+        .turn_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| size.to_string());
+    format!(
+        "worker.abnormal_exit.error:{}:{}:{}:{}:{}",
+        agent.agent_id,
+        agent.rollout_path_display,
+        fact.signature.as_str(),
+        bucket,
+        size
+    )
+}
+
+fn abnormal_error_recency(
+    state: &Value,
+    agent: &AbnormalWatchAgent,
+    observation_key: Option<&str>,
+    cohort_key: Option<&str>,
+) -> ErrorRecency {
+    let (Some(observation_key), Some(cohort_key)) = (observation_key, cohort_key) else {
+        return ErrorRecency::None;
+    };
+    let previous_key = abnormal_last_error_observation_key(state, &agent.agent_id);
+    let previous_cohort = abnormal_last_error_observation_cohort(state, &agent.agent_id);
+    match (previous_key.as_deref(), previous_cohort.as_deref()) {
+        (Some(key), Some(cohort)) if cohort == cohort_key && key != observation_key => {
+            ErrorRecency::Fresh
+        }
+        _ => ErrorRecency::Stale,
+    }
+}
+
 fn abnormal_suppression_key(
     agent: &AbnormalWatchAgent,
     liveness: &ProcessCheck,
@@ -2353,14 +2527,18 @@ fn abnormal_check_key(
     agent: &AbnormalWatchAgent,
     liveness: &ProcessCheck,
     fact: Option<&crate::provider::FaultFact>,
+    error_recency: ErrorRecency,
+    error_observation_key: Option<&str>,
     size: u64,
 ) -> String {
     format!(
-        "worker.abnormal_exit.check:{}:{}:{}:{}:{}",
+        "worker.abnormal_exit.check:{}:{}:{}:{}:{}:{}:{}",
         agent.agent_id,
         agent.rollout_path_display,
         process_liveness_wire(liveness.state),
         fact.map(|fact| fact.signature.as_str()).unwrap_or("-"),
+        error_recency.as_str(),
+        error_observation_key.unwrap_or("-"),
         size
     )
 }
@@ -3345,6 +3523,7 @@ fn notify_session_missing(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod u1_tests {
     use super::*;
+    use std::io::Write as _;
 
     struct CaptureFailureRegistry;
 
@@ -3360,6 +3539,24 @@ mod u1_tests {
                     "capture exploded",
                 ),
             )
+        }
+
+        fn error_lists(
+            &self,
+            _provider: crate::provider::Provider,
+        ) -> super::super::types::ErrorLists {
+            super::super::types::ErrorLists::default()
+        }
+    }
+
+    struct NormalRegistry;
+
+    impl ProviderRegistry for NormalRegistry {
+        fn adapter_for(
+            &self,
+            provider: crate::provider::Provider,
+        ) -> Box<dyn crate::provider::ProviderAdapter> {
+            crate::provider::get_adapter(provider)
         }
 
         fn error_lists(
@@ -3425,5 +3622,263 @@ mod u1_tests {
             has_capture_failure,
             "capture_missing failure must be visible in events.jsonl; got {events}"
         );
+    }
+
+    #[test]
+    fn abnormal_stale_error_baselines_then_fresh_alive_error_notifies() {
+        let dir = temp_abnormal_dir("alive-fresh");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first observed explicit error is stale baseline and must not notify; events={first_events:?}"
+        );
+        let stale_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(stale_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(stale_check["fresh_error"], serde_json::json!(false));
+        assert_eq!(stale_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&first_events, "abnormal_exit.single_signal_suppressed").is_none(),
+            "stale/error-only observations must not emit single-signal suppression"
+        );
+        let watch = abnormal_test_watch(&dir);
+        assert_eq!(watch["error_recency"], serde_json::json!("stale"));
+        assert_eq!(watch["fresh_error"], serde_json::json!(false));
+        assert!(
+            watch["last_error_observation_key"].as_str().is_some(),
+            "first explicit error must persist the stale baseline; watch={watch}"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh alive error notification");
+        assert_eq!(abnormal["provider_process_dead"], serde_json::json!(false));
+        assert_eq!(abnormal["latest_explicit_error"], serde_json::json!(true));
+        assert_eq!(abnormal["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(abnormal["fresh_error"], serde_json::json!(true));
+        assert_eq!(
+            abnormal["provider_process_dead_and_latest_explicit_error"],
+            serde_json::json!(false)
+        );
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn abnormal_dead_process_without_explicit_error_stays_dead_only() {
+        let dir = temp_abnormal_dir("dead-only");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"completed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "dead", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        assert!(
+            find_event(&events, "worker.abnormal_exit").is_none(),
+            "dead process without explicit error must not notify; events={events:?}"
+        );
+        let suppressed =
+            find_event(&events, "abnormal_exit.single_signal_suppressed").expect("dead_only");
+        assert_eq!(suppressed["reason"], serde_json::json!("dead_only"));
+        assert_eq!(
+            suppressed["latest_explicit_error"],
+            serde_json::json!(false)
+        );
+        assert_eq!(suppressed["error_recency"], serde_json::json!("none"));
+        assert_eq!(suppressed["fresh_error"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn abnormal_recency_treats_cohort_change_as_stale() {
+        let agent = test_abnormal_agent("/tmp/rollout.jsonl", Some(2), None);
+        let fact = crate::provider::latest_explicit_error_fact(
+            crate::provider::Provider::Codex,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        let observation_key = abnormal_error_observation_key(&agent, &fact, 99);
+        let state = serde_json::json!({
+            "coordinator": {
+                "abnormal_exit_watch": {
+                    "w1": {
+                        "last_error_observation_key": observation_key,
+                        "last_error_observation_cohort": "worker.abnormal_exit.cohort:w1:/tmp/rollout.jsonl:spawn_epoch:1"
+                    }
+                }
+            }
+        });
+        let cohort_key = abnormal_error_cohort_key(&agent);
+
+        let recency = abnormal_error_recency(
+            &state,
+            &agent,
+            Some(observation_key.as_str()),
+            Some(cohort_key.as_str()),
+        );
+
+        assert_eq!(
+            recency,
+            ErrorRecency::Stale,
+            "cohort change baselines the observed error instead of treating it as fresh"
+        );
+    }
+
+    #[test]
+    fn abnormal_dead_fresh_error_event_reports_actual_dead_booleans() {
+        let dir = temp_abnormal_dir("dead-fresh");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "dead", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+        coordinator.tick().unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh dead error notification");
+        assert_eq!(abnormal["provider_process_dead"], serde_json::json!(true));
+        assert_eq!(abnormal["latest_explicit_error"], serde_json::json!(true));
+        assert_eq!(abnormal["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(
+            abnormal["provider_process_dead_and_latest_explicit_error"],
+            serde_json::json!(true)
+        );
+    }
+
+    fn abnormal_test_coordinator(dir: &std::path::Path) -> Coordinator {
+        Coordinator::for_test(
+            WorkspacePath::new(dir.to_path_buf()),
+            Box::new(NormalRegistry),
+            Box::new(
+                crate::transport::test_support::OfflineTransport::new().with_session_present(true),
+            ),
+            None,
+            None,
+        )
+    }
+
+    fn seed_abnormal_state(
+        dir: &std::path::Path,
+        rollout: &std::path::Path,
+        liveness: &str,
+        spawn_epoch: u64,
+    ) {
+        crate::state::persist::save_runtime_state(
+            dir,
+            &serde_json::json!({
+                "active_team_key": "team",
+                "agents": {
+                    "w1": {
+                        "provider": "codex",
+                        "status": "running",
+                        "agent_id": "w1",
+                        "session_id": "session-w1",
+                        "rollout_path": rollout.to_string_lossy(),
+                        "spawn_cwd": dir.to_string_lossy(),
+                        "spawn_epoch": spawn_epoch,
+                        "process_liveness": liveness
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    }
+
+    fn abnormal_test_watch(dir: &std::path::Path) -> Value {
+        crate::state::persist::load_runtime_state(dir)
+            .unwrap()
+            .pointer("/coordinator/abnormal_exit_watch/w1")
+            .cloned()
+            .unwrap()
+    }
+
+    fn read_test_events(dir: &std::path::Path) -> Vec<Value> {
+        let events_path = crate::model::paths::logs_dir(dir).join("events.jsonl");
+        std::fs::read_to_string(events_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    fn find_event(events: &[Value], name: &str) -> Option<Value> {
+        events
+            .iter()
+            .rev()
+            .find(|event| event.get("event").and_then(Value::as_str) == Some(name))
+            .cloned()
+    }
+
+    fn temp_abnormal_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "team-agent-abnormal-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_abnormal_agent(
+        rollout_path: &str,
+        spawn_epoch: Option<u64>,
+        spawned_at: Option<&str>,
+    ) -> AbnormalWatchAgent {
+        AbnormalWatchAgent {
+            agent_id: "w1".to_string(),
+            provider: crate::provider::Provider::Codex,
+            rollout_path: PathBuf::from(rollout_path),
+            rollout_path_display: rollout_path.to_string(),
+            spawn_epoch,
+            spawned_at: spawned_at.map(str::to_string),
+            status: Some("running".to_string()),
+            process_liveness: Some(ProcessLiveness::Alive),
+            window: None,
+            pane_id: None,
+            pid: None,
+            current_command: None,
+        }
     }
 }

@@ -31,8 +31,8 @@ pub fn should_orphan_self_terminate(
 /// #236 dedicated `worker.abnormal_exit` surface.
 ///
 /// This is intentionally separate from `process_abnormal_records`: the generic
-/// abnormal path is transcript-only, while `worker.abnormal_exit` requires the
-/// provider-process-dead AND latest-explicit-error gate before leader notification.
+/// abnormal path is transcript-only, while `worker.abnormal_exit` requires a fresh
+/// latest explicit provider error before leader notification.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "event")]
 pub enum WorkerAbnormalExitSurface {
