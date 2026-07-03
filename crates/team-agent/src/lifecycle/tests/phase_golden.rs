@@ -10,7 +10,10 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
+
 #[test]
+#[serial_test::serial(env)]
 fn phase_b_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_b").join("golden.json");
     let actual = run_phase_golden(PhaseGolden {
@@ -34,6 +37,7 @@ fn phase_b_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn phase_c_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_c").join("golden.json");
     let actual = run_phase_golden(PhaseGolden {
@@ -57,6 +61,7 @@ fn phase_c_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn phase_d_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_d").join("golden.json");
     let actual = run_phase_golden(PhaseGolden {
@@ -80,6 +85,7 @@ fn phase_d_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn phase_e_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_e").join("golden.json");
     let actual = run_phase_golden(PhaseGolden {
@@ -103,6 +109,7 @@ fn phase_e_golden_events_state_status_zero_drift() {
 }
 
 #[test]
+#[serial_test::serial(env)]
 fn phase_f_golden_events_state_status_zero_drift() {
     let baseline = phase_fixture_path("phase_f").join("golden.json");
     let actual = run_phase_golden(PhaseGolden {
@@ -133,6 +140,7 @@ struct PhaseGolden {
 }
 
 fn run_phase_golden(spec: PhaseGolden) -> Value {
+    let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
     let team = two_worker_team_dir();
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
@@ -371,6 +379,33 @@ fn phase_fixture_path(phase: &str) -> PathBuf {
         .join("fixtures")
         .join("0_5_0_phase_golden")
         .join(phase)
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 }
 
 struct NormalizeCtx {
