@@ -11,6 +11,8 @@ use crate::model::yaml::{self, Value};
 use crate::state::persist::{load_runtime_state, save_runtime_state};
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
+
 use super::*;
 
 // ── lifecycle::launch —— 冷启 / quick-start / 危险审批探测 ──────────────────
@@ -3622,6 +3624,12 @@ pub fn add_agent(
         }
         Err(error) => return Err(LifecycleError::TeamSelect(error.to_string())),
     };
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &selected.run_workspace,
+        operation: "add-agent",
+        team: Some(selected.team_key.as_str()),
+        agent_id: Some(agent_id),
+    })?;
     // E5 §3:compile_team 要角色定义目录(team_dir),不是 spec 落点(spec_workspace=runtime)。
     let team_dir = selected.team_dir;
     // **0.3.24 add-agent socket drift fix**: route to the live team's persisted
@@ -3658,6 +3666,12 @@ pub fn add_agent_with_transport(
 ) -> Result<AddAgentReport, LifecycleError> {
     let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &run_workspace,
+        operation: "add-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     add_agent_with_transport_at_paths(
         &run_workspace,
         workspace,
@@ -4062,6 +4076,12 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &selected.run_workspace,
+        operation: "fork-agent",
+        team: Some(selected.team_key.as_str()),
+        agent_id: Some(as_agent_id),
+    })?;
     // E5 §3:team_dir(角色定义+profiles)恒用户目录。spec 读用 selector 解析的 spec_path
     // (读序 B:runtime 优先、legacy 回落),写恒走 runtime_spec_path(canonical 落点)。
     let fork_team_dir = selected.team_dir.clone();

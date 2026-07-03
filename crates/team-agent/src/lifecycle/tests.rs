@@ -22,6 +22,7 @@ fn sess(s: &str) -> SessionName {
 
 mod core;
 mod launch_spawn;
+mod lifecycle_lock;
 mod agent_ops;
 mod lane_ops;
 mod main_preserved;

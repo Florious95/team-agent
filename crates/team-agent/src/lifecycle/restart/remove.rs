@@ -1,7 +1,8 @@
 use super::*;
-use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_with_transport, stop_agent_at_paths};
+use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_at_paths, stop_agent_at_paths};
 use super::common::*;
 use super::team_state::write_team_state;
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `remove_agent(workspace, agent_id, from_spec, force, team)`(`lifecycle/agents.py:22`)。
 /// 从 spec/state/team_state/role-file/agent_health 原子摘除;`_RemoveRollback` 字节级快照
@@ -14,6 +15,12 @@ pub fn remove_agent(
     team: Option<&str>,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "remove-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let transport =
         lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     remove_agent_at_paths(
@@ -36,6 +43,12 @@ pub fn remove_agent_with_transport(
     transport: &dyn crate::transport::Transport,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "remove-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     remove_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -787,8 +800,9 @@ impl RemoveRollback {
         }
 
         if self.restore_running && errors.is_empty() {
-            if let Err(e) = start_agent_with_transport(
+            if let Err(e) = start_agent_at_paths(
                 workspace,
+                spec_workspace,
                 &self.agent_id,
                 true,
                 false,

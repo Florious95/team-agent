@@ -1,6 +1,7 @@
 use super::common::*;
 use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 // ── lifecycle::restart —— 整队 Route B resume-or-fresh 重建 ──────────────────
 
@@ -128,6 +129,12 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             expected.display()
         )));
     }
+    let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &selected.run_workspace,
+        operation: "restart",
+        team: Some(selected.team_key.as_str()),
+        agent_id: None,
+    })?;
     let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
     // E5 task#3 / RC-A6a + E4(leader 裁定:每次 restart 都从角色定义重建 runtime spec,覆盖):
@@ -641,6 +648,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             attach_commands,
         });
     }
+    drop(lifecycle_lock);
     let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
@@ -651,10 +659,12 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         restart_readiness_deadline(readiness_deadline_ms),
         restart_readiness_poll_interval(),
     )?;
-    let attach_commands =
-        crate::tmux_backend::attach_command_for_session(&selected.run_workspace, &session_name)
-            .into_iter()
-            .collect::<Vec<_>>();
+    let attach_commands = crate::tmux_backend::attach_command_for_session(
+        &selected.run_workspace,
+        &session_name,
+    )
+    .into_iter()
+    .collect::<Vec<_>>();
     let mut next_actions = Vec::new();
     if !failed_agents.is_empty() {
         next_actions.extend(restart_failure_next_actions(&failed_agents));

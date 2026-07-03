@@ -2,6 +2,7 @@ use super::*;
 use super::common::*;
 use super::selection::decide_start_mode;
 use super::team_state::write_team_state;
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `start_agent(workspace, agent_id, force, open_display, allow_fresh, team)`
 /// (`lifecycle/start.py:72`)。`_runtime_lock("start-agent")` 下串行:resume-or-fresh
@@ -17,6 +18,12 @@ pub fn start_agent(
     team: Option<&str>,
 ) -> Result<StartAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "start-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let transport =
         lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     start_agent_at_paths(
@@ -43,9 +50,23 @@ pub fn start_agent_with_transport(
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<StartAgentOutcome, LifecycleError> {
+    let paths = match lifecycle_paths(workspace, team) {
+        Ok(paths) => paths,
+        Err(_) if team.is_none() => LifecyclePaths {
+            run_workspace: workspace.to_path_buf(),
+            spec_workspace: workspace.to_path_buf(),
+        },
+        Err(error) => return Err(error),
+    };
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "start-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     start_agent_at_paths(
-        workspace,
-        workspace,
+        &paths.run_workspace,
+        &paths.spec_workspace,
         agent_id,
         force,
         open_display,
@@ -584,6 +605,12 @@ pub fn stop_agent(
     team: Option<&str>,
 ) -> Result<StopAgentReport, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "stop-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let transport =
         lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     stop_agent_at_paths(
@@ -602,6 +629,12 @@ pub fn stop_agent_with_transport(
     transport: &dyn crate::transport::Transport,
 ) -> Result<StopAgentReport, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "stop-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     stop_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -926,6 +959,12 @@ pub fn reset_agent(
         });
     }
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "reset-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     let transport =
         lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     reset_agent_at_paths(
@@ -953,6 +992,12 @@ pub fn reset_agent_with_transport(
         });
     }
     let paths = lifecycle_paths(workspace, team)?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &paths.run_workspace,
+        operation: "reset-agent",
+        team,
+        agent_id: Some(agent_id),
+    })?;
     reset_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,

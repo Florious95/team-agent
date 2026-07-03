@@ -377,6 +377,14 @@ pub enum LifecycleError {
     /// state 持久化失败(bug-084:`os.replace` EACCES/EPERM/EBUSY 退避后仍败)。
     #[error("state persistence failed: {0}")]
     StatePersist(String),
+    /// workspace lifecycle transaction lock acquisition timed out.
+    #[error("error: lifecycle lock timeout after 30s\naction: retry or check for hung reset/start\nlog: {log_path}")]
+    LifecycleLockTimeout {
+        lock_path: PathBuf,
+        log_path: PathBuf,
+        operation: String,
+        waited_ms: u128,
+    },
     /// 编译 spec / role doc 失败(`compile_team`/`compile_role_doc_agent`)。
     #[error("spec compile failed: {0}")]
     Compile(String),
