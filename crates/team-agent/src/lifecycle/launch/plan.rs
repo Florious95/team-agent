@@ -15,9 +15,8 @@ pub fn start_plan(
             plan_path.display()
         )));
     }
-    let text = std::fs::read_to_string(plan_path).map_err(|e| {
-        LifecycleError::InvalidPlan(format!("{}: {e}", plan_path.display()))
-    })?;
+    let text = std::fs::read_to_string(plan_path)
+        .map_err(|e| LifecycleError::InvalidPlan(format!("{}: {e}", plan_path.display())))?;
     let plan = yaml::loads(&text).map_err(|e| LifecycleError::InvalidPlan(e.to_string()))?;
     let plan_id = plan_id_from_plan(plan_path, &plan)?;
     let state_path = plan_state_path(workspace, &plan_id);
@@ -66,7 +65,8 @@ pub fn handle_report_result(
         return Ok(PlanProgress::NoMatch);
     };
     for entry in entries {
-        let entry = entry.map_err(|e| LifecycleError::InvalidPlan(format!("read plan dir: {e}")))?;
+        let entry =
+            entry.map_err(|e| LifecycleError::InvalidPlan(format!("read plan dir: {e}")))?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
@@ -112,10 +112,19 @@ fn plan_stages(plan: &Value) -> Result<Vec<PlanStage>, LifecycleError> {
             .transpose()?;
         stages.push(PlanStage {
             id,
-            assignee: raw.get("assignee").and_then(Value::as_str).map(AgentId::new),
-            prompt: raw.get("prompt").and_then(Value::as_str).map(str::to_string),
+            assignee: raw
+                .get("assignee")
+                .and_then(Value::as_str)
+                .map(AgentId::new),
+            prompt: raw
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             on_result: condition,
-            status: raw.get("status").and_then(Value::as_str).map(str::to_string),
+            status: raw
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         });
     }
     Ok(stages)
@@ -222,6 +231,8 @@ fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            None
+        }
     }
 }

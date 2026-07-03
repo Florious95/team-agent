@@ -302,76 +302,63 @@ pub fn deliver_pending_message(
     } else {
         InjectPayload::Text(rendered)
     };
-    let inject_report =
-        match transport.inject(&target, &payload, Key::Enter, true) {
-            Ok(report) => report,
-            Err(error) => {
-                let reason = format!("inject_failed:{error}");
-                if message.recipient == "leader" {
-                    store.mark(message_id, "failed", Some("leader_not_attached"))?;
-                    event_log.write(
-                        "leader_receiver.delivery_blocked",
-                        serde_json::json!({
-                            "message_id": message_id,
-                            "sender": message.sender,
-                            "reason": "leader_not_attached",
-                            "channel": "rebind_required",
-                            "action": "run team-agent claim-leader or team-agent takeover",
-                            "error": error.to_string(),
-                        }),
-                    )?;
-                    return Ok(DeliveryOutcome {
-                        ok: false,
-                        status: DeliveryStatus::Refused,
-                        message_status: MessageStatusShadow("failed".to_string()),
-                        message_id: Some(message_id.to_string()),
-                        verification: Some(
-                            "run team-agent claim-leader or team-agent takeover".to_string(),
-                        ),
-                        stage: None,
-                        reason: Some(DeliveryRefusal::LeaderNotAttached),
-                        channel: Some("rebind_required".to_string()),
-                    });
-                }
+    let inject_report = match transport.inject(&target, &payload, Key::Enter, true) {
+        Ok(report) => report,
+        Err(error) => {
+            let reason = format!("inject_failed:{error}");
+            if message.recipient == "leader" {
+                store.mark(message_id, "failed", Some("leader_not_attached"))?;
                 event_log.write(
-                    "send.inject_failed",
+                    "leader_receiver.delivery_blocked",
                     serde_json::json!({
                         "message_id": message_id,
-                        "recipient": message.recipient,
-                        "attempts": attempt,
-                        "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
+                        "sender": message.sender,
+                        "reason": "leader_not_attached",
+                        "channel": "rebind_required",
+                        "action": "run team-agent claim-leader or team-agent takeover",
                         "error": error.to_string(),
                     }),
                 )?;
-                if attempt >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
-                    store.mark(message_id, "failed", Some("send_inject_exhausted"))?;
-                    emit_send_failed_exhausted(
-                        workspace,
-                        state,
-                        event_log,
-                        message_id,
-                        &message.recipient,
-                        attempt,
-                        "send_inject_exhausted",
-                        &reason,
-                        None,
-                    )?;
-                    return Ok(DeliveryOutcome {
-                        ok: false,
-                        status: DeliveryStatus::Failed,
-                        message_status: MessageStatusShadow("failed".to_string()),
-                        message_id: Some(message_id.to_string()),
-                        verification: Some(reason),
-                        stage: Some(DeliveryStage::Inject),
-                        reason: None,
-                        channel: None,
-                    });
-                }
-                store.mark(message_id, "target_resolved", Some(&reason))?;
                 return Ok(DeliveryOutcome {
                     ok: false,
-                    status: DeliveryStatus::Degraded,
-                    message_status: MessageStatusShadow("target_resolved".to_string()),
+                    status: DeliveryStatus::Refused,
+                    message_status: MessageStatusShadow("failed".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some(
+                        "run team-agent claim-leader or team-agent takeover".to_string(),
+                    ),
+                    stage: None,
+                    reason: Some(DeliveryRefusal::LeaderNotAttached),
+                    channel: Some("rebind_required".to_string()),
+                });
+            }
+            event_log.write(
+                "send.inject_failed",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "recipient": message.recipient,
+                    "attempts": attempt,
+                    "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
+                    "error": error.to_string(),
+                }),
+            )?;
+            if attempt >= u32::from(SEND_RETRY_MAX_ATTEMPTS) {
+                store.mark(message_id, "failed", Some("send_inject_exhausted"))?;
+                emit_send_failed_exhausted(
+                    workspace,
+                    state,
+                    event_log,
+                    message_id,
+                    &message.recipient,
+                    attempt,
+                    "send_inject_exhausted",
+                    &reason,
+                    None,
+                )?;
+                return Ok(DeliveryOutcome {
+                    ok: false,
+                    status: DeliveryStatus::Failed,
+                    message_status: MessageStatusShadow("failed".to_string()),
                     message_id: Some(message_id.to_string()),
                     verification: Some(reason),
                     stage: Some(DeliveryStage::Inject),
@@ -379,6 +366,18 @@ pub fn deliver_pending_message(
                     channel: None,
                 });
             }
+            store.mark(message_id, "target_resolved", Some(&reason))?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Degraded,
+                message_status: MessageStatusShadow("target_resolved".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(reason),
+                stage: Some(DeliveryStage::Inject),
+                reason: None,
+                channel: None,
+            });
+        }
     };
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
@@ -404,8 +403,7 @@ pub fn deliver_pending_message(
         // legacy keys (`message_id` / `recipient` / `reason` / `attempts`)
         // are preserved byte-for-byte for grep compatibility; new keys are
         // ADDITIONAL.
-        let submit_attempts_detail =
-            render_submit_diagnostics(&inject_report);
+        let submit_attempts_detail = render_submit_diagnostics(&inject_report);
         event_log.write(
             "send.unverified",
             serde_json::json!({
@@ -461,14 +459,15 @@ pub fn deliver_pending_message(
     // per-delivery check / short grace window. Phase-1 Claude only —
     // codex/copilot keep the pre-fix behaviour (will be addressed in
     // phase-2 once Claude phase-1 is field-validated).
-    if let Some((rollout_path, provider_wire_str)) = claude_recipient_rollout(state, &message.recipient) {
+    if let Some((rollout_path, provider_wire_str)) =
+        claude_recipient_rollout(state, &message.recipient)
+    {
         let token_marker = format!("[team-agent-token:{message_id}]");
         let grace = std::time::Duration::from_millis(200);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         let mut transcript_has_token = false;
         loop {
-            transcript_has_token =
-                rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
+            transcript_has_token = rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
             if transcript_has_token || std::time::Instant::now() >= deadline {
                 break;
             }
@@ -589,7 +588,12 @@ pub(crate) fn pane_readback_verified(report: &InjectReport) -> bool {
 /// when it sees this block + extracts the token — the bare content gives WORKING but never a report
 /// (rt-host-a loop #4). token == message_id (exactly-once correlation).
 /// F1 (0.3.26): promoted to `pub` for direct pane send in cli/send.rs.
-pub fn render_message(sender: &str, task_id: Option<&str>, content: &str, message_id: &str) -> String {
+pub fn render_message(
+    sender: &str,
+    task_id: Option<&str>,
+    content: &str,
+    message_id: &str,
+) -> String {
     let mut header = format!("Team Agent message from {sender}");
     if let Some(task_id) = task_id.filter(|t| !t.is_empty()) {
         header.push_str(&format!(" for {task_id}"));
@@ -717,8 +721,7 @@ fn pane_conflicts_on_same_socket(
     worker_socket: Option<&str>,
     leader: PaneSocketBinding<'_>,
 ) -> bool {
-    leader.pane_id == pane_id
-        && !tmux_sockets_known_different(worker_socket, leader.tmux_socket)
+    leader.pane_id == pane_id && !tmux_sockets_known_different(worker_socket, leader.tmux_socket)
 }
 
 fn tmux_sockets_known_different(left: Option<&str>, right: Option<&str>) -> bool {
@@ -784,7 +787,10 @@ fn leader_receiver_pane_is_usable(
     let Some(pane_id) = leader_receiver_pane_id(state) else {
         return false;
     };
-    if live_targets.iter().any(|target| target.pane_id.as_str() == pane_id) {
+    if live_targets
+        .iter()
+        .any(|target| target.pane_id.as_str() == pane_id)
+    {
         return true;
     }
     !matches!(
@@ -1410,8 +1416,20 @@ fn record_turn_open_if_leader_to_worker_scoped(
         return Ok(());
     }
     let mut state = scoped_state_for_write(workspace, owner_team_id)?;
+    arm_turn_open(&mut state, recipient, &delivered.message_id);
+    save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
+        arm_turn_open(latest, recipient, &delivered.message_id);
+    })?;
+    event_log.write(
+        "turn_open.armed_after_delivery",
+        serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id}),
+    )?;
+    Ok(())
+}
+
+fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Option<String>) {
     let Some(root) = state.as_object_mut() else {
-        return Ok(());
+        return;
     };
     let coordinator = root
         .entry("coordinator")
@@ -1419,15 +1437,9 @@ fn record_turn_open_if_leader_to_worker_scoped(
     if let Some(obj) = coordinator.as_object_mut() {
         obj.insert(
             "turn_open".to_string(),
-            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": delivered.message_id}),
+            serde_json::json!({"armed": true, "node_id": recipient, "turn_id": message_id}),
         );
     }
-    save_scoped_state(workspace, &state, owner_team_id)?;
-    event_log.write(
-        "turn_open.armed_after_delivery",
-        serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id}),
-    )?;
-    Ok(())
 }
 
 /// `_stamp_first_send_at_if_leader_to_worker` (`delivery.py:380`):首次 leader→worker 投递戳
@@ -1453,6 +1465,15 @@ fn stamp_first_send_at_if_leader_to_worker_scoped(
     }
     let mut state = scoped_state_for_write(workspace, owner_team_id)?;
     let now = chrono::Utc::now().to_rfc3339();
+    if stamp_first_send_at(&mut state, recipient, &now) {
+        save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
+            let _ = stamp_first_send_at(latest, recipient, &now);
+        })?;
+    }
+    Ok(())
+}
+
+fn stamp_first_send_at(state: &mut serde_json::Value, recipient: &str, now: &str) -> bool {
     if let Some(agent) = state
         .get_mut("agents")
         .and_then(serde_json::Value::as_object_mut)
@@ -1464,11 +1485,14 @@ fn stamp_first_send_at_if_leader_to_worker_scoped(
                 .get("first_send_at")
                 .is_some_and(serde_json::Value::is_null)
         {
-            agent.insert("first_send_at".to_string(), serde_json::Value::String(now));
-            save_scoped_state(workspace, &state, owner_team_id)?;
+            agent.insert(
+                "first_send_at".to_string(),
+                serde_json::Value::String(now.to_string()),
+            );
+            return true;
         }
     }
-    Ok(())
+    false
 }
 
 fn scoped_state_for_write(
@@ -1512,6 +1536,40 @@ fn save_scoped_state(
         }
     } else {
         crate::state::persist::save_runtime_state(workspace, state)?;
+    }
+    Ok(())
+}
+
+fn save_scoped_state_reapplying_after_conflict<F>(
+    workspace: &Path,
+    state: &serde_json::Value,
+    owner_team_id: Option<&str>,
+    reapply: F,
+) -> Result<(), MessagingError>
+where
+    F: FnOnce(&mut serde_json::Value),
+{
+    if owner_team_id.filter(|team| !team.is_empty()).is_some()
+        && state
+            .get("teams")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|teams| {
+                owner_team_id
+                    .and_then(|team| {
+                        crate::state::projection::resolve_owner_team_id(state, team)
+                            .canonical_key()
+                            .map(str::to_string)
+                    })
+                    .is_some_and(|team| teams.contains_key(&team))
+            })
+    {
+        crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
+            workspace, state, reapply,
+        )?;
+    } else {
+        crate::state::persist::save_runtime_state_reapplying_after_conflict(
+            workspace, state, reapply,
+        )?;
     }
     Ok(())
 }

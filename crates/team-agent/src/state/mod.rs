@@ -49,11 +49,15 @@ pub enum StateError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("{0} is locked by another team-agent process; serialize team-agent {0} calls and retry")]
+    #[error(
+        "{0} is locked by another team-agent process; serialize team-agent {0} calls and retry"
+    )]
     Locked(String),
     /// self-heal 也失败(原 state 仍可见);携带最终错误。
     #[error("state save failed after self-heal: {0}")]
     SaveFailed(String),
+    #[error("state save conflict: {0}")]
+    SaveConflict(String),
     /// `select_runtime_state` team 选择失败(`team_agent.errors.RuntimeError` 等价):
     /// 歧义 / 未找到。携带的 `String` == Python `str(exc)`(供 `resolve_team_scoped_state`
     /// 透传为 `team_target_unresolved` 的 `error` 字段)。

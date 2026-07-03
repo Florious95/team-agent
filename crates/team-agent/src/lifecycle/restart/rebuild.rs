@@ -194,8 +194,15 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     if convergence.converged && convergence.changed {
         save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
     }
-    if repair_resume_sessions_from_event_log(&selected.run_workspace, &mut state)? {
-        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+    let repaired_agent_ids =
+        repair_resume_sessions_from_event_log(&selected.run_workspace, &mut state)?;
+    if !repaired_agent_ids.is_empty() {
+        save_restart_session_repairs(
+            &selected.run_workspace,
+            &mut state,
+            &selected.team_key,
+            &repaired_agent_ids,
+        )?;
         let missing_after_repair = restart_required_missing_session_agent_ids(&state);
         convergence.changed = true;
         convergence.converged = missing_after_repair.is_empty();
@@ -302,7 +309,17 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             .map_err(|e| LifecycleError::Transport(e.to_string()))?;
         mark_leader_receiver_rebind_required(&mut state, &session_name);
         mark_restart_targets_stopped_after_teardown(&mut state, &plan.decisions);
-        save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+        let topology_authority_agent_ids = plan
+            .decisions
+            .iter()
+            .map(|decision| decision.agent_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        save_restart_state_with_lifecycle_topology_authority(
+            &selected.run_workspace,
+            &mut state,
+            &selected.team_key,
+            &topology_authority_agent_ids,
+        )?;
     }
     let mut successful_agents: Vec<RestartedAgent> = Vec::new();
     let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
@@ -436,7 +453,21 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         }
     }
     // END_B5_RESTART_ISOLATION_LOOP
-    save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+    let mut topology_authority_agent_ids = successful_agents
+        .iter()
+        .map(|agent| agent.agent_id.as_str().to_string())
+        .collect::<Vec<_>>();
+    topology_authority_agent_ids.extend(
+        failed_agents
+            .iter()
+            .map(|agent| agent.agent_id.as_str().to_string()),
+    );
+    save_restart_state_with_lifecycle_topology_authority(
+        &selected.run_workspace,
+        &mut state,
+        &selected.team_key,
+        &topology_authority_agent_ids,
+    )?;
     if fatal_resume_failure {
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
@@ -503,7 +534,10 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         let convergence_deadline = session_convergence_deadline(session_converge_deadline_ms);
         let convergence_poll = session_convergence_poll_interval();
         for decision in successful_agents.drain(..) {
-            if !matches!(decision.restart_mode, crate::lifecycle::types::StartMode::Resumed) {
+            if !matches!(
+                decision.restart_mode,
+                crate::lifecycle::types::StartMode::Resumed
+            ) {
                 survivors.push(decision);
                 continue;
             }
@@ -617,18 +651,23 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             let phase = "resume_postflight";
             let error = "session_backing_store_missing_after_restart".to_string();
             mark_agent_restart_failed(&mut state, &decision, &error);
-            let _ = write_restart_agent_failed_event(
-                &selected.run_workspace,
-                &decision,
-                phase,
-                &error,
-            );
+            let _ =
+                write_restart_agent_failed_event(&selected.run_workspace, &decision, phase, &error);
             postflight_failed.push(restart_failed_agent(&decision, phase, error));
         }
         successful_agents = survivors;
         failed_agents.extend(postflight_failed);
         if !failed_agents.is_empty() {
-            save_restart_state(&selected.run_workspace, &mut state, &selected.team_key)?;
+            let topology_authority_agent_ids = failed_agents
+                .iter()
+                .map(|agent| agent.agent_id.as_str().to_string())
+                .collect::<Vec<_>>();
+            save_restart_state_with_lifecycle_topology_authority(
+                &selected.run_workspace,
+                &mut state,
+                &selected.team_key,
+                &topology_authority_agent_ids,
+            )?;
         }
     }
     if successful_agents.is_empty() && !failed_agents.is_empty() {
@@ -659,12 +698,10 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         restart_readiness_deadline(readiness_deadline_ms),
         restart_readiness_poll_interval(),
     )?;
-    let attach_commands = crate::tmux_backend::attach_command_for_session(
-        &selected.run_workspace,
-        &session_name,
-    )
-    .into_iter()
-    .collect::<Vec<_>>();
+    let attach_commands =
+        crate::tmux_backend::attach_command_for_session(&selected.run_workspace, &session_name)
+            .into_iter()
+            .collect::<Vec<_>>();
     let mut next_actions = Vec::new();
     if !failed_agents.is_empty() {
         next_actions.extend(restart_failure_next_actions(&failed_agents));
@@ -701,11 +738,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     // invoked from a tmux pane should bind that pane as leader_receiver,
     // restoring the worker→leader delivery path. Failure is non-fatal — the
     // user can still run `team-agent attach-leader` manually.
-    try_autobind_leader_after_restart(
-        &selected.run_workspace,
-        Some(&selected.team_key),
-        &state,
-    );
+    try_autobind_leader_after_restart(&selected.run_workspace, Some(&selected.team_key), &state);
     // 0.3.28 Step 1: topology invariant guard (warn-only). Same pattern as
     // `lifecycle::launch::launch_with_transport_in_workspace` — logs to stderr,
     // never panics. Hard error path is deferred to Step 10.
@@ -723,13 +756,13 @@ pub fn restart_with_transport_with_session_convergence_deadline(
 fn repair_resume_sessions_from_event_log(
     workspace: &Path,
     state: &mut serde_json::Value,
-) -> Result<bool, LifecycleError> {
+) -> Result<Vec<String>, LifecycleError> {
     let agent_ids = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
         .map(|agents| agents.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    let mut changed = false;
+    let mut repaired_agent_ids = Vec::new();
     for agent_id in agent_ids {
         let previous = state
             .get("agents")
@@ -834,9 +867,9 @@ fn repair_resume_sessions_from_event_log(
                 }),
             )
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-        changed = true;
+        repaired_agent_ids.push(agent_id);
     }
-    Ok(changed)
+    Ok(repaired_agent_ids)
 }
 
 fn claimed_session_ids_except(
@@ -1199,9 +1232,7 @@ fn try_autobind_leader_after_restart(
             // the same attach target). Wire-format `parse_provider` keeps
             // them distinct everywhere else.
             crate::provider::wire::parse_provider(s).map(|p| match p {
-                crate::model::enums::Provider::Claude => {
-                    crate::model::enums::Provider::ClaudeCode
-                }
+                crate::model::enums::Provider::Claude => crate::model::enums::Provider::ClaudeCode,
                 other => other,
             })
         })
@@ -1282,7 +1313,92 @@ fn save_restart_state(
     state: &mut serde_json::Value,
     team_key: &str,
 ) -> Result<(), LifecycleError> {
-    save_restart_projected_state(workspace, state, team_key)
+    save_restart_projected_state(workspace, state, team_key, &[])
+}
+
+fn save_restart_state_with_lifecycle_topology_authority(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+    agent_ids: &[String],
+) -> Result<(), LifecycleError> {
+    let agent_ids = agent_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    save_restart_projected_state(workspace, state, team_key, &agent_ids)
+}
+
+fn save_restart_session_repairs(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+    agent_ids: &[String],
+) -> Result<(), LifecycleError> {
+    let repairs = collect_session_repair_fields(state, agent_ids);
+    sync_restart_team_projections(state, team_key);
+    match crate::state::projection::save_team_scoped_state(workspace, state) {
+        Ok(()) => Ok(()),
+        Err(crate::state::StateError::SaveConflict(_)) => {
+            let mut latest =
+                crate::state::projection::select_runtime_state(workspace, Some(team_key))
+                    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+            for (agent_id, repair) in &repairs {
+                apply_session_repair_fields(&mut latest, agent_id, repair);
+            }
+            sync_restart_team_projections(&mut latest, team_key);
+            crate::state::projection::save_team_scoped_state(workspace, &latest)
+                .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+            *state = latest;
+            Ok(())
+        }
+        Err(error) => Err(LifecycleError::StatePersist(error.to_string())),
+    }
+}
+
+fn collect_session_repair_fields(
+    state: &serde_json::Value,
+    agent_ids: &[String],
+) -> Vec<(String, serde_json::Value)> {
+    agent_ids
+        .iter()
+        .filter_map(|agent_id| {
+            state
+                .get("agents")
+                .and_then(|agents| agents.get(agent_id))
+                .cloned()
+                .map(|agent| (agent_id.clone(), agent))
+        })
+        .collect()
+}
+
+fn apply_session_repair_fields(
+    state: &mut serde_json::Value,
+    agent_id: &str,
+    repair: &serde_json::Value,
+) {
+    let Some(target) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(repair) = repair.as_object() else {
+        return;
+    };
+    for field in [
+        "session_id",
+        "rollout_path",
+        "captured_at",
+        "captured_via",
+        "attribution_confidence",
+    ] {
+        if let Some(value) = repair.get(field) {
+            target.insert(field.to_string(), value.clone());
+        } else {
+            target.remove(field);
+        }
+    }
+    target.remove("attribution_ambiguous");
 }
 
 fn mark_agent_respawned(
@@ -1340,10 +1456,7 @@ fn mark_agent_respawned(
     // active_team_key (priority 3).
     if let Some(ref team_id) = spawn.owner_team_id {
         if !team_id.is_empty() {
-            agent.insert(
-                "owner_team_id".to_string(),
-                serde_json::json!(team_id),
-            );
+            agent.insert("owner_team_id".to_string(), serde_json::json!(team_id));
         }
     }
     // Bug 2 (0.3.32): clear stale `attribution_ambiguous` whenever a new
@@ -1648,8 +1761,13 @@ fn write_restart_resume_decision_events(
     // Layer 2 (leader directive 2026-06-22): every restart.resume_decision
     // event for a Refuse decision must carry the structured refusal_reason
     // wire string so operators can see WHY without crawling state.json.
-    let refusal_index: std::collections::BTreeMap<&str, &crate::lifecycle::types::UnresumableWorker> =
-        unresumable.iter().map(|u| (u.agent_id.as_str(), u)).collect();
+    let refusal_index: std::collections::BTreeMap<
+        &str,
+        &crate::lifecycle::types::UnresumableWorker,
+    > = unresumable
+        .iter()
+        .map(|u| (u.agent_id.as_str(), u))
+        .collect();
     for decision in decisions {
         let agent = state
             .get("agents")

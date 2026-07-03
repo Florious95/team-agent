@@ -269,7 +269,28 @@ pub fn claim_leader_receiver(
         .with_leader_receiver(receiver_value)
         .with_owner_epoch(next_epoch);
     crate::state::ownership::write_owner(state, &team_key, record);
-    crate::state::persist::save_runtime_state(workspace, state)?;
+    crate::state::persist::save_runtime_state_reapplying_after_conflict(
+        workspace,
+        state,
+        |latest| {
+            let team_key = crate::state::projection::team_state_key(latest);
+            let record = crate::state::ownership::OwnershipWrite::new()
+                .with_team_owner(
+                    state
+                        .get("team_owner")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                )
+                .with_leader_receiver(
+                    state
+                        .get("leader_receiver")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({})),
+                )
+                .with_owner_epoch(next_epoch);
+            crate::state::ownership::write_owner(latest, &team_key, record);
+        },
+    )?;
     event_log.write(
         "leader_receiver.claimed",
         serde_json::json!({"owner_epoch": next_epoch, "candidate": candidate}),

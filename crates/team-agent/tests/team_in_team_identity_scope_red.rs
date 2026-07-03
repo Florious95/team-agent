@@ -19,11 +19,12 @@ use team_agent::lifecycle::{
 };
 use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
+use team_agent::state::StateError;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 #[test]
@@ -35,14 +36,8 @@ fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
     let team_dir = write_team_dir(&root, "teamdir", "w1");
     let transport = RecordingTransport::default();
 
-    let report = quick_start_with_transport(
-        &team_dir,
-        None,
-        true,
-        Some("lifeteam"),
-        &transport,
-    )
-    .expect("quick-start --team-id lifeteam should launch via fake transport");
+    let report = quick_start_with_transport(&team_dir, None, true, Some("lifeteam"), &transport)
+        .expect("quick-start --team-id lifeteam should launch via fake transport");
     assert_ready("quick-start --team-id lifeteam", &report, "team-lifeteam");
 
     let state = load_runtime_state(&root).expect("runtime state after quick-start");
@@ -72,33 +67,28 @@ fn quick_start_team_id_persists_requested_team_key_for_lifecycle_selection() {
 
 #[test]
 fn quick_start_workspace_override_is_not_dropped_before_runtime_state_write() {
-    let cli_types = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/types.rs"
-    ))
-    .unwrap();
-    let quick_start_args = source_section(&cli_types, "pub struct QuickStartArgs", "pub struct InitArgs");
+    let cli_types =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/types.rs")).unwrap();
+    let quick_start_args = source_section(
+        &cli_types,
+        "pub struct QuickStartArgs",
+        "pub struct InitArgs",
+    );
     assert!(
         quick_start_args.contains("pub workspace: PathBuf"),
         "quick-start TEAMDIR --workspace WS must preserve WS in QuickStartArgs; otherwise runtime state is written to TEAMDIR's parent before lifecycle can honor --workspace. QuickStartArgs={quick_start_args}"
     );
 
-    let cli_mod = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/mod.rs"
-    ))
-    .unwrap();
+    let cli_mod =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/mod.rs")).unwrap();
     let lifecycle_port = source_section(&cli_mod, "pub fn quick_start(", "pub fn start_leader");
     assert!(
         !lifecycle_port.contains("let _ = workspace;"),
         "lifecycle_port::quick_start must not discard --workspace; runtime state must be written to the explicit WS. source={lifecycle_port}"
     );
 
-    let emit = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/emit.rs"
-    ))
-    .unwrap();
+    let emit =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs")).unwrap();
     let quick_start_args_fn = source_section(&emit, "fn quick_start_args", "fn init_args");
     assert!(
         quick_start_args_fn.contains("workspace: workspace.clone()")
@@ -169,18 +159,32 @@ fn add_agent_committed_roster_survives_live_coordinator_stale_snapshot_save() {
     insert_agent_in_state(&mut after_add, "worker_b");
     save_runtime_state(&root, &after_add).expect("simulate add-agent committed worker_b");
 
-    save_runtime_state(&root, &stale_coordinator_snapshot)
-        .expect("simulate live coordinator saving an older tick snapshot after add-agent");
+    // Phase C design §Behavior Preservation / Caller Audit: the old contract
+    // expected merge to resurrect rows from disk. The new contract rejects stale
+    // live-topology saves with SaveConflict; coordinator tick degrades and
+    // retries from a fresh snapshot on its next pass.
+    let stale_save = save_runtime_state(&root, &stale_coordinator_snapshot);
+    assert!(
+        matches!(stale_save, Err(StateError::SaveConflict(_))),
+        "stale coordinator tick snapshot must be rejected instead of merging over add-agent topology; result={stale_save:?}"
+    );
 
     let final_state = load_runtime_state(&root).expect("state after stale coordinator save");
-    assert!(
-        final_state.pointer("/agents/worker_b").is_some(),
-        "live coordinator stale snapshot save must not clobber an add-agent committed top-level worker; final_state={final_state}"
+    assert_eq!(
+        final_state
+            .pointer("/agents/worker_b/window")
+            .and_then(Value::as_str),
+        Some("worker_b"),
+        "SaveConflict must leave add-agent's committed top-level topology intact; final_state={final_state}"
     );
-    assert!(
-        final_state.pointer("/teams/lifeteam/agents/worker_b").is_some(),
-        "live coordinator stale snapshot save must not clobber add-agent's team-scoped roster entry; save_runtime_state must merge lock-held disk state with stale snapshots. final_state={final_state}"
+    assert_eq!(
+        final_state
+            .pointer("/teams/lifeteam/agents/worker_b/window")
+            .and_then(Value::as_str),
+        Some("worker_b"),
+        "SaveConflict must leave add-agent's committed team-scoped topology intact; final_state={final_state}"
     );
+    save_runtime_state(&root, &final_state).expect("fresh tick snapshot should save cleanly");
 }
 
 fn assert_ready(label: &str, report: &QuickStartReport, expected_session: &str) {
@@ -225,7 +229,11 @@ fn write_team_dir(root: &Path, dir_name: &str, agent: &str) -> PathBuf {
         ),
     )
     .unwrap();
-    std::fs::write(team.join("agents").join(format!("{agent}.md")), role_doc(agent)).unwrap();
+    std::fs::write(
+        team.join("agents").join(format!("{agent}.md")),
+        role_doc(agent),
+    )
+    .unwrap();
     team
 }
 
@@ -262,7 +270,11 @@ fn seed_lifeteam_state(root: &Path, team_dir: &Path) {
     });
     save_runtime_state(root, &state).unwrap();
     let spec = team_agent::compiler::compile_team(team_dir).unwrap();
-    std::fs::write(team_dir.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team_dir.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
 }
 
 fn agent_state(team: &str, agent: &str) -> Value {
@@ -384,7 +396,10 @@ impl RecordingTransport {
     }
 
     fn spawn_result(&self, session: &SessionName, window: &WindowName) -> SpawnResult {
-        self.sessions.lock().unwrap().insert(session.as_str().to_string());
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session.as_str().to_string());
         let mut spawned = self.spawned.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawned.len() + 1));
         spawned.push(SpawnedPane {
@@ -449,8 +464,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {

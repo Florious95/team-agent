@@ -46,8 +46,8 @@ pub fn resolve_active_team(
         let state = select_runtime_state(&run, team).or_else(|_| load_runtime_state(&run))?;
         (run, state)
     } else {
-        let run = canonical_run_workspace(input)
-            .map_err(|e| StateError::TeamSelect(e.to_string()))?;
+        let run =
+            canonical_run_workspace(input).map_err(|e| StateError::TeamSelect(e.to_string()))?;
         if !input.exists()
             && !runtime_state_path(&run).exists()
             && !run.join(".team").exists()
@@ -78,13 +78,19 @@ pub fn resolve_active_team(
         let legacy_ws = if explicit_spec.exists() {
             Some(input.to_path_buf())
         } else {
-            spec_workspace_from_state(&state)
-                .or_else(|| run_workspace.join("team.spec.yaml").exists().then(|| run_workspace.clone()))
+            spec_workspace_from_state(&state).or_else(|| {
+                run_workspace
+                    .join("team.spec.yaml")
+                    .exists()
+                    .then(|| run_workspace.clone())
+            })
         };
         let legacy_spec = legacy_ws.as_ref().map(|ws| ws.join("team.spec.yaml"));
         (legacy_ws, legacy_spec)
     };
-    if matches!(mode, SelectorMode::RequireSpec) && !spec_path.as_ref().is_some_and(|path| path.exists()) {
+    if matches!(mode, SelectorMode::RequireSpec)
+        && !spec_path.as_ref().is_some_and(|path| path.exists())
+    {
         // 期望路径报 canonical runtime spec(重建落点),非用户目录。
         let expected = spec_path.as_ref().cloned().unwrap_or(runtime_spec);
         // E5 Bug2 N38:spec=中间产物,运行期由 restart 以角色定义重建;首装走 quick-start;

@@ -126,7 +126,8 @@ pub fn launch_with_transport_in_workspace(
     // Step 10 once Steps 2–9 have eliminated structural co-location.
     if !dry_run {
         if let Ok(state_for_check) = crate::state::persist::load_runtime_state(workspace) {
-            let violations = crate::layout::sessions::assert_topology_invariants(&state_for_check, &spec);
+            let violations =
+                crate::layout::sessions::assert_topology_invariants(&state_for_check, &spec);
             crate::layout::sessions::log_topology_violations(&violations);
         }
     }
@@ -249,9 +250,7 @@ fn spawn_agents(
         // unsupported warning event when the spec asked for an effort the
         // provider can't satisfy.
         let agent_effort = provider_effort_for_spawn(agent, provider);
-        if let Some(event_value) =
-            provider_effort_event_if_dropped(agent, provider, agent_id_raw)
-        {
+        if let Some(event_value) = provider_effort_event_if_dropped(agent, provider, agent_id_raw) {
             let _ = crate::event_log::EventLog::new(workspace)
                 .write("provider.effort_unsupported", event_value);
         }
@@ -281,7 +280,11 @@ fn spawn_agents(
         // 含 "model" 字面,失败信息透传给 leader。
         if matches!(provider, Provider::Copilot) && auth_mode == AuthMode::CompatibleApi {
             let has_model = model.is_some_and(|s| !s.is_empty())
-                || profile_launch.command_overrides.model.as_deref().is_some_and(|s| !s.is_empty())
+                || profile_launch
+                    .command_overrides
+                    .model
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty())
                 || profile_launch
                     .env_overlay
                     .get("COPILOT_MODEL")
@@ -309,9 +312,8 @@ fn spawn_agents(
                 .join("logs")
                 .join("copilot")
                 .join(agent_id_raw);
-            std::fs::create_dir_all(&log_dir).map_err(|e| {
-                LifecycleError::StatePersist(format!("{}: {e}", log_dir.display()))
-            })?;
+            std::fs::create_dir_all(&log_dir)
+                .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", log_dir.display())))?;
             plan.argv.push("--log-dir".to_string());
             plan.argv.push(log_dir.to_string_lossy().to_string());
             plan.argv.push("--log-level".to_string());
@@ -608,9 +610,7 @@ pub(crate) fn adaptive_placement_for_agent(
             if !is_adaptive_layout_window(window) {
                 continue;
             }
-            let pane_id = agent
-                .get("pane_id")
-                .and_then(serde_json::Value::as_str);
+            let pane_id = agent.get("pane_id").and_then(serde_json::Value::as_str);
             let pane_live = pane_id.is_some_and(|pane| live_panes.contains(pane));
             // E43 Fix A: window_name match — when the agent's pane is live,
             // its live window_name MUST equal the claimed `window`; otherwise
@@ -730,7 +730,9 @@ pub(crate) fn adaptive_existing_placement_for_agent(
         .unwrap_or_default()
         .into_iter()
         .filter(|pane| {
-            pane.window_name.as_ref().is_some_and(|name| name.as_str() == window)
+            pane.window_name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == window)
                 && agent
                     .get("pane_id")
                     .and_then(serde_json::Value::as_str)
@@ -1330,7 +1332,10 @@ fn warn_ignored_owner_team_id(workspace: &Path, team_dir: &Path, runtime_team_ke
     let Ok(Some(ignored)) = crate::compiler::ignored_owner_team_id_from_team_md(team_dir) else {
         return;
     };
-    eprintln!("Warning: ignored TEAM.md {}={}", ignored.field, ignored.value);
+    eprintln!(
+        "Warning: ignored TEAM.md {}={}",
+        ignored.field, ignored.value
+    );
     eprintln!("Reason: owner identity is the canonical runtime team key ({runtime_team_key}), not TEAM.md front matter");
     eprintln!("Action: remove {} from TEAM.md", ignored.field);
     if let Err(err) = crate::event_log::EventLog::new(workspace).write(
@@ -1384,7 +1389,9 @@ fn active_leader_pane_state_across_tmux_sockets(
         .map(|endpoint| crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint))
         .collect::<Vec<_>>();
     active_leader_pane_state_across_transports(
-        transports.iter().map(|transport| transport as &dyn Transport),
+        transports
+            .iter()
+            .map(|transport| transport as &dyn Transport),
         pane,
     )
 }
@@ -2087,12 +2094,7 @@ pub(crate) fn inherited_env_with_team_overrides(
     //   * Strips `COPILOT_DISABLE_TERMINAL_TITLE` (re-injected per-agent by
     //     `apply_copilot_instructions_overlay` based on the WORKER's provider).
     //   * Strips `TMUX` / `TMUX_PANE` (would attach worker to leader's pane).
-    crate::layout::worker_env::worker_spawn_env(
-        std::env::vars(),
-        workspace,
-        agent_id,
-        team_id,
-    )
+    crate::layout::worker_env::worker_spawn_env(std::env::vars(), workspace, agent_id, team_id)
 }
 
 pub(crate) fn apply_mcp_auto_approval_env(
@@ -2114,15 +2116,30 @@ pub(crate) fn apply_mcp_auto_approval_env(
         && safety.inherited
     {
         env.insert("TEAM_AGENT_LEADER_BYPASS".to_string(), "1".to_string());
-        env.insert("TEAM_AGENT_LEADER_BYPASS_SOURCE".to_string(), "leader_process".to_string());
+        env.insert(
+            "TEAM_AGENT_LEADER_BYPASS_SOURCE".to_string(),
+            "leader_process".to_string(),
+        );
         if let Some(provider) = safety.provider.as_deref() {
-            env.insert("TEAM_AGENT_LEADER_BYPASS_PROVIDER".to_string(), provider.to_string());
+            env.insert(
+                "TEAM_AGENT_LEADER_BYPASS_PROVIDER".to_string(),
+                provider.to_string(),
+            );
         }
         if let Some(flag) = safety.flag.as_deref() {
-            env.insert("TEAM_AGENT_LEADER_BYPASS_FLAG".to_string(), flag.to_string());
+            env.insert(
+                "TEAM_AGENT_LEADER_BYPASS_FLAG".to_string(),
+                flag.to_string(),
+            );
         }
-        env.insert("TEAM_AGENT_MCP_AUTO_APPROVE".to_string(), "team_orchestrator".to_string());
-        env.insert("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(), "leader_bypass".to_string());
+        env.insert(
+            "TEAM_AGENT_MCP_AUTO_APPROVE".to_string(),
+            "team_orchestrator".to_string(),
+        );
+        env.insert(
+            "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE".to_string(),
+            "leader_bypass".to_string(),
+        );
     } else {
         env.insert("TEAM_AGENT_LEADER_BYPASS".to_string(), "0".to_string());
     }
@@ -2165,7 +2182,10 @@ pub(crate) fn apply_copilot_instructions_overlay(
     // 漏关后果定级为【B5 leader 误杀同级 incident】,绝不允许 silent 跳过。
     // 主案:env `COPILOT_DISABLE_TERMINAL_TITLE=1`(help-config 原文 "Can also be
     // disabled via the COPILOT_DISABLE_TERMINAL_TITLE environment variable")。
-    env.insert("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string());
+    env.insert(
+        "COPILOT_DISABLE_TERMINAL_TITLE".to_string(),
+        "1".to_string(),
+    );
     Ok(())
 }
 
@@ -2221,7 +2241,10 @@ fn apply_copilot_mcp_residual_disables(
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             std::fs::write(
                 &residual_path,
-                format!("copilot mcp list exit={:?} stderr={stderr}\n", out.status.code()),
+                format!(
+                    "copilot mcp list exit={:?} stderr={stderr}\n",
+                    out.status.code()
+                ),
             )
             .map_err(|e| {
                 LifecycleError::StatePersist(format!("{}: {e}", residual_path.display()))
@@ -2580,7 +2603,10 @@ pub(crate) fn provider_effort_for_spawn_json(
     agent: &serde_json::Value,
     provider: Provider,
 ) -> Option<ProviderEffort> {
-    provider_effort_from_raw(agent.get("effort").and_then(serde_json::Value::as_str), provider)
+    provider_effort_from_raw(
+        agent.get("effort").and_then(serde_json::Value::as_str),
+        provider,
+    )
 }
 
 pub(crate) fn provider_effort_event_if_dropped_json(
@@ -2799,14 +2825,7 @@ pub fn quick_start_in_workspace(
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = explicit_quick_start_workspace(workspace);
     let transport = quick_start_tmux_backend(&workspace);
-    quick_start_with_transport_in_workspace(
-        &workspace,
-        agents_dir,
-        name,
-        yes,
-        team_id,
-        &transport,
-    )
+    quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, &transport)
 }
 
 pub fn quick_start_in_workspace_with_display(
@@ -2875,7 +2894,9 @@ pub(crate) fn configure_adaptive_pane_title(
                 "warning": message,
             }),
         ) {
-            eprintln!("Warning: adaptive_layout.pane_title_failed event write failed: {event_error}");
+            eprintln!(
+                "Warning: adaptive_layout.pane_title_failed event write failed: {event_error}"
+            );
         }
     }
 }
@@ -2902,9 +2923,7 @@ pub fn quick_start_with_transport(
     transport: &dyn Transport,
 ) -> Result<QuickStartReport, LifecycleError> {
     let workspace = team_workspace(agents_dir);
-    quick_start_with_transport_in_workspace(
-        &workspace, agents_dir, name, yes, team_id, transport,
-    )
+    quick_start_with_transport_in_workspace(&workspace, agents_dir, name, yes, team_id, transport)
 }
 
 pub fn quick_start_with_transport_in_workspace(
@@ -3092,7 +3111,10 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let attach_windows = load_runtime_state(&workspace)
         .ok()
         .map(|state| {
-            attach_window_names_with_managed_leader(&state, started_attach_window_names(&launch.started))
+            attach_window_names_with_managed_leader(
+                &state,
+                started_attach_window_names(&launch.started),
+            )
         })
         .unwrap_or_else(|| started_attach_window_names(&launch.started));
     let attach_commands = attach_commands_for_runtime_windows(
@@ -3112,10 +3134,13 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     next_actions.push(
         "quick-start initialized this team; for all subsequent starts use \
          `team-agent restart` to resume context (quick-start refuses on \
-         already-initialised teams)".to_string(),
+         already-initialised teams)"
+            .to_string(),
     );
     if crate::tmux_backend::socket_probe_missing_for_workspace(&workspace) {
-        next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(&workspace));
+        next_actions.push(crate::tmux_backend::socket_missing_hint_for_workspace(
+            &workspace,
+        ));
     }
     next_actions.extend(attach_commands.iter().cloned());
     let display_backend = state
@@ -3139,7 +3164,11 @@ pub fn quick_start_with_transport_in_workspace_with_display(
 /// the persisted endpoint synchronized with the transport they actually used,
 /// closing the silent socket-drift gap** (single state-save path; no parallel
 /// "annotate after spawn" race with coordinator).
-pub(crate) fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, transport: &dyn Transport, workspace: &Path) {
+pub(crate) fn annotate_runtime_tmux_endpoint(
+    state: &mut serde_json::Value,
+    transport: &dyn Transport,
+    workspace: &Path,
+) {
     let Some(endpoint) = transport.tmux_endpoint() else {
         return;
     };
@@ -3155,7 +3184,10 @@ pub(crate) fn annotate_runtime_tmux_endpoint(state: &mut serde_json::Value, tran
             .unwrap_or_else(|| endpoint.clone())
     };
     if let Some(obj) = state.as_object_mut() {
-        obj.insert("tmux_endpoint".to_string(), serde_json::json!(endpoint_for_state));
+        obj.insert(
+            "tmux_endpoint".to_string(),
+            serde_json::json!(endpoint_for_state),
+        );
         obj.insert(
             "tmux_socket".to_string(),
             obj.get("tmux_endpoint")
@@ -3609,10 +3641,11 @@ pub fn add_agent(
             // team uses. Cold workspaces / first-agent paths safely fall back to
             // `TmuxBackend::for_workspace(team_workspace)` inside the resolver.
             let team_ws = team_workspace(workspace);
-            let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-                &team_ws, team,
-            )
-            .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&team_ws));
+            let transport =
+                crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+                    &team_ws, team,
+                )
+                .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&team_ws));
             return add_agent_with_transport(
                 workspace,
                 agent_id,
@@ -3964,7 +3997,11 @@ fn inject_agent_into_spec(
                 agents.push(agent);
             }
         }
-        _ => return Err(LifecycleError::Compile("spec.agents missing or not a list".to_string())),
+        _ => {
+            return Err(LifecycleError::Compile(
+                "spec.agents missing or not a list".to_string(),
+            ))
+        }
     }
     // routing.rules 追加 route-<id>(与 compile_team 同形)。
     if let Some((_, Value::Map(routing))) = pairs.iter_mut().find(|(k, _)| k == "routing") {
@@ -4076,18 +4113,27 @@ pub fn fork_agent_with_transport(
         crate::state::selector::SelectorMode::RequireSpec,
     )
     .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let lock_workspace = selected.run_workspace.clone();
+    let lock_team_key = selected.team_key.clone();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
-        workspace: &selected.run_workspace,
+        workspace: &lock_workspace,
         operation: "fork-agent",
-        team: Some(selected.team_key.as_str()),
+        team: Some(lock_team_key.as_str()),
         agent_id: Some(as_agent_id),
     })?;
+    let selected = crate::state::selector::resolve_active_team(
+        &lock_workspace,
+        Some(lock_team_key.as_str()),
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // E5 §3:team_dir(角色定义+profiles)恒用户目录。spec 读用 selector 解析的 spec_path
     // (读序 B:runtime 优先、legacy 回落),写恒走 runtime_spec_path(canonical 落点)。
     let fork_team_dir = selected.team_dir.clone();
-    let read_spec_path = selected.spec_path.clone().ok_or_else(|| {
-        LifecycleError::TeamSelect("active team spec not found".to_string())
-    })?;
+    let read_spec_path = selected
+        .spec_path
+        .clone()
+        .ok_or_else(|| LifecycleError::TeamSelect("active team spec not found".to_string()))?;
     let workspace = selected.run_workspace;
     let state = selected.state;
     ensure_owner_allowed_for_state(&state, Some(source_agent_id))?;
@@ -4161,8 +4207,8 @@ pub fn fork_agent_with_transport(
     }
     let new_spec = append_forked_agent(&spec, source_agent, source_agent_id, as_agent_id, label)?;
     // validate 用角色定义目录的 team_workspace(校验 working_directory),非 spec 落点。
-    let validate_ws = crate::model::paths::team_workspace(&fork_team_dir)
-        .unwrap_or_else(|_| workspace.clone());
+    let validate_ws =
+        crate::model::paths::team_workspace(&fork_team_dir).unwrap_or_else(|_| workspace.clone());
     crate::model::spec::validate_spec(&new_spec, &validate_ws)
         .map_err(|e| LifecycleError::Compile(e.to_string()))?;
     write_spec_atomic(&spec_path, &new_spec)?;
@@ -4342,7 +4388,11 @@ pub fn fork_agent_with_transport(
         );
         return Err(e);
     }
-    if let Err(e) = save_runtime_state(&workspace, &next_state) {
+    if let Err(e) = crate::state::persist::save_runtime_state_with_lifecycle_topology_authority(
+        &workspace,
+        &next_state,
+        &[as_agent_id.as_str()],
+    ) {
         rollback_fork_after_spawn(
             &workspace,
             &spec_path,
@@ -4420,7 +4470,11 @@ fn rollback_fork_after_spawn(
         window: window.clone(),
     });
     let _ = std::fs::write(spec_path, spec_text.as_bytes());
-    let _ = save_runtime_state(workspace, old_state);
+    let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
+        workspace,
+        old_state,
+        &[agent_id.as_str()],
+    );
     cleanup_fork_mcp_artifacts(workspace, agent_id, mcp_config_path, profile_launch);
 }
 
@@ -4968,7 +5022,8 @@ pub(crate) fn override_spec_workspace(spec: &mut Value, workspace: &Path) {
     if let Some((_, Value::List(agents))) = root.iter_mut().find(|(k, _)| k == "agents") {
         for agent in agents {
             if let Value::Map(fields) = agent {
-                if let Some((_, value)) = fields.iter_mut().find(|(k, _)| k == "working_directory") {
+                if let Some((_, value)) = fields.iter_mut().find(|(k, _)| k == "working_directory")
+                {
                     *value = Value::Str(workspace_s.clone());
                 }
             }

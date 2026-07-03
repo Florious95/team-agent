@@ -132,7 +132,26 @@ fn lifecycle_lock_long_held_event_records_holder_and_waiter() {
 
 #[test]
 fn lifecycle_lock_phase_b_golden_source_guard() {
+    r2_lifecycle_lock_exists_precondition();
+}
+
+#[test]
+fn r2_lifecycle_lock_exists_precondition() {
     let src = manifest_src();
+    let lock = read_src("lifecycle/lock.rs");
+    assert!(
+        lock.contains("AGENT_LIFECYCLE_LOCK_NAME: &str = \"agent-lifecycle\""),
+        "lifecycle lock name constant must remain explicit"
+    );
+    assert!(
+        lock.contains("LIFECYCLE_LOCK_TIMEOUT: Duration = Duration::from_secs(30)"),
+        "lifecycle lock timeout constant must remain 30s"
+    );
+    assert!(
+        lock.contains("write_lock_held_long_event") && lock.contains("lifecycle.lock_held_long"),
+        "long-held lifecycle lock event must remain wired"
+    );
+
     let state_hits = source_files(&src.join("state"))
         .into_iter()
         .filter(|path| {
@@ -162,6 +181,38 @@ fn lifecycle_lock_phase_b_golden_source_guard() {
         assert!(
             !text.contains("acquire_agent_lifecycle_lock") && !text.contains("agent-lifecycle"),
             "coordinator tick path must not block on lifecycle lock: {}",
+            path.display()
+        );
+    }
+
+    for path in source_files(&src) {
+        if path == src.join("state").join("persist.rs") || is_test_source(&path) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("RuntimeLock::acquire"),
+            "production source outside state/persist.rs must not acquire runtime locks directly: {}",
+            path.display()
+        );
+    }
+
+    for path in source_files(&src) {
+        if path.starts_with(src.join("state")) || path.starts_with(src.join("lifecycle")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lifecycle_topology_authority_entries = [
+            "save_runtime_state_with_lifecycle_topology_authority",
+            "save_team_scoped_state_with_lifecycle_topology_authority",
+            "save_runtime_state_with_team_tombstone_lifecycle_topology_authority",
+            "save_team_scoped_state_with_tombstone_lifecycle_topology_authority",
+        ];
+        assert!(
+            !lifecycle_topology_authority_entries
+                .iter()
+                .any(|entry| text.contains(entry)),
+            "lifecycle topology authority save entry must not be referenced outside lifecycle/state modules: {}",
             path.display()
         );
     }
@@ -200,6 +251,15 @@ fn lifecycle_lock_phase_b_golden_source_guard() {
             && coordinator_idx < readiness_idx,
         "restart must release lifecycle lock before coordinator readiness wait"
     );
+}
+
+fn is_test_source(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "tests")
+        || path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "tests.rs" || name.ends_with("_tests.rs"))
 }
 
 fn read_events(workspace: &Path) -> Vec<serde_json::Value> {

@@ -108,6 +108,7 @@ fn collect_scoped(
     let mut invalid_results = Vec::new();
     let mut fatal_invalid_results = 0usize;
     let mut state_dirty = false;
+    let mut task_updates = Vec::new();
     for row in rows {
         let envelope: serde_json::Value = match serde_json::from_str(&row.envelope) {
             Ok(envelope) => envelope,
@@ -167,6 +168,7 @@ fn collect_scoped(
         }
         if scope == "task" {
             mark_task_done(&mut state, &row.task_id, &row.result_id);
+            task_updates.push((row.task_id.clone(), row.result_id.clone()));
             state_dirty = true;
         }
         log.write(
@@ -196,9 +198,25 @@ fn collect_scoped(
     }
     if state_dirty {
         if owner_team_id.is_some() {
-            crate::state::projection::save_team_scoped_state(&paths.run_workspace, &state)?;
+            crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
+                &paths.run_workspace,
+                &state,
+                |latest| {
+                    for (task_id, result_id) in &task_updates {
+                        mark_task_done(latest, task_id, result_id);
+                    }
+                },
+            )?;
         } else {
-            crate::state::persist::save_runtime_state(&paths.run_workspace, &state)?;
+            crate::state::persist::save_runtime_state_reapplying_after_conflict(
+                &paths.run_workspace,
+                &state,
+                |latest| {
+                    for (task_id, result_id) in &task_updates {
+                        mark_task_done(latest, task_id, result_id);
+                    }
+                },
+            )?;
         }
     }
     let counts = result_counts(&conn, owner_team_id)?;
@@ -708,8 +726,10 @@ fn report_result_for_owner_team_inner(
         Ok(outcome) => outcome,
         Err(error) => {
             let message_id = format!("fallback:{result_id}");
-            let fallback_error =
-                fallback_primary_error_text(fallback_primary_error, format!("leader_funnel_error:{error}"));
+            let fallback_error = fallback_primary_error_text(
+                fallback_primary_error,
+                format!("leader_funnel_error:{error}"),
+            );
             super::leader_receiver::deliver_to_leader_fallback_pane(
                 workspace,
                 &state,
@@ -1027,9 +1047,11 @@ fn format_report_result_changes(envelope: &serde_json::Value) -> Option<String> 
         .filter_map(|change| {
             let path = report_field_any(change, &["path", "file", "filepath", "filename"])?;
             let kind = report_field_any(change, &["kind", "type", "action"]).unwrap_or("changed");
-            let description =
-                report_field_any(change, &["description", "summary", "detail", "details", "message"])
-                    .unwrap_or(path);
+            let description = report_field_any(
+                change,
+                &["description", "summary", "detail", "details", "message"],
+            )
+            .unwrap_or(path);
             Some(format!("{kind} {path}: {description}"))
         })
         .collect::<Vec<_>>();
@@ -1078,8 +1100,11 @@ fn format_report_result_next_actions(envelope: &serde_json::Value) -> Option<Str
     let parts = report_result_array(envelope, "next_actions")?
         .iter()
         .filter_map(|action| {
-            report_field_any(action, &["description", "summary", "action", "todo", "message"])
-                .map(|text| text.to_string())
+            report_field_any(
+                action,
+                &["description", "summary", "action", "todo", "message"],
+            )
+            .map(|text| text.to_string())
         })
         .collect::<Vec<_>>();
     if parts.is_empty() {

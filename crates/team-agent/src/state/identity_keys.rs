@@ -79,23 +79,17 @@ mod tests {
 
     #[test]
     fn refuses_empty_team_key() {
-        assert!(
-            SessionAttributionKey::new(Provider::Claude, "", "agent_a", "sess_1").is_none()
-        );
+        assert!(SessionAttributionKey::new(Provider::Claude, "", "agent_a", "sess_1").is_none());
     }
 
     #[test]
     fn refuses_empty_agent_id() {
-        assert!(
-            SessionAttributionKey::new(Provider::Claude, "alpha", "", "sess_1").is_none()
-        );
+        assert!(SessionAttributionKey::new(Provider::Claude, "alpha", "", "sess_1").is_none());
     }
 
     #[test]
     fn refuses_empty_session_id() {
-        assert!(
-            SessionAttributionKey::new(Provider::Claude, "alpha", "agent_a", "").is_none()
-        );
+        assert!(SessionAttributionKey::new(Provider::Claude, "alpha", "agent_a", "").is_none());
     }
 
     #[test]
@@ -119,7 +113,8 @@ mod tests {
     /// (provider, team_key, agent_id, session_id) tuple).
     #[test]
     fn different_team_keys_produce_different_keys() {
-        let alpha = SessionAttributionKey::new(Provider::Claude, "alpha", "reviewer", "s1").unwrap();
+        let alpha =
+            SessionAttributionKey::new(Provider::Claude, "alpha", "reviewer", "s1").unwrap();
         let beta = SessionAttributionKey::new(Provider::Claude, "beta", "reviewer", "s1").unwrap();
         assert_ne!(alpha, beta);
     }
@@ -127,8 +122,10 @@ mod tests {
     /// Same team but different agent_id → distinct (per-worker isolation).
     #[test]
     fn different_agent_ids_produce_different_keys() {
-        let reviewer = SessionAttributionKey::new(Provider::Claude, "alpha", "reviewer", "s1").unwrap();
-        let frontend = SessionAttributionKey::new(Provider::Claude, "alpha", "frontend", "s1").unwrap();
+        let reviewer =
+            SessionAttributionKey::new(Provider::Claude, "alpha", "reviewer", "s1").unwrap();
+        let frontend =
+            SessionAttributionKey::new(Provider::Claude, "alpha", "frontend", "s1").unwrap();
         assert_ne!(reviewer, frontend);
     }
 }

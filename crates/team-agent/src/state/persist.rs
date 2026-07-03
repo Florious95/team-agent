@@ -23,8 +23,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -45,6 +45,25 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
     "attribution_confidence",
     "spawn_cwd",
 ];
+const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
+    ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
+const ROSTER_STUB_ALLOWLIST: [&str; 15] = [
+    "agent_id",
+    "provider",
+    "auth_mode",
+    "role",
+    "model",
+    "model_source",
+    "profile",
+    "_profile_dir",
+    "dynamic_role_file",
+    "effort",
+    "forked_from",
+    "managed_mcp_config",
+    "claude_config_dir",
+    "claude_projects_root",
+    "profile_launch",
+];
 
 /// `state.py:_RUNTIME_STATE_CACHE`:进程级 path→state 缓存(deep-equal 早返回)。
 static RUNTIME_STATE_CACHE: LazyLock<Mutex<HashMap<PathBuf, Value>>> =
@@ -57,7 +76,9 @@ pub fn runtime_state_path(workspace: &Path) -> PathBuf {
 }
 
 fn cache_equals(path: &Path, state: &Value) -> bool {
-    RUNTIME_STATE_CACHE.lock().is_ok_and(|c| c.get(path) == Some(state))
+    RUNTIME_STATE_CACHE
+        .lock()
+        .is_ok_and(|c| c.get(path) == Some(state))
 }
 fn cache_set(path: &Path, state: &Value) {
     if let Ok(mut c) = RUNTIME_STATE_CACHE.lock() {
@@ -66,11 +87,16 @@ fn cache_set(path: &Path, state: &Value) {
 }
 /// `_RUNTIME_STATE_CACHE.get(...)` → `copy.deepcopy(cached)`(clone = deepcopy)。
 fn cache_get(path: &Path) -> Option<Value> {
-    RUNTIME_STATE_CACHE.lock().ok().and_then(|c| c.get(path).cloned())
+    RUNTIME_STATE_CACHE
+        .lock()
+        .ok()
+        .and_then(|c| c.get(path).cloned())
 }
 
 fn unique_tmp(path: &Path, suffix: &str) -> PathBuf {
-    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     path.with_file_name(format!("{name}.{}.{seq}.{suffix}", std::process::id()))
 }
@@ -132,7 +158,11 @@ impl RuntimeLock {
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(&lock_path)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)?;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -153,7 +183,9 @@ impl RuntimeLock {
         #[cfg(not(unix))]
         {
             let _ = timeout;
-            Err(StateError::Locked(format!("{name} (runtime lock not yet implemented on non-unix)")))
+            Err(StateError::Locked(format!(
+                "{name} (runtime lock not yet implemented on non-unix)"
+            )))
         }
     }
 }
@@ -170,7 +202,34 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
-    save_runtime_state_with_merge_exceptions(workspace, state, &[], None, &[])
+    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], &[])
+}
+
+pub(crate) fn save_runtime_state_reapplying_after_conflict<F>(
+    workspace: &Path,
+    state: &Value,
+    reapply: F,
+) -> Result<(), StateError>
+where
+    F: FnOnce(&mut Value),
+{
+    match save_runtime_state(workspace, state) {
+        Ok(()) => Ok(()),
+        Err(StateError::SaveConflict(_)) => {
+            let mut latest = load_runtime_state(workspace)?;
+            reapply(&mut latest);
+            save_runtime_state(workspace, &latest)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
+    workspace: &Path,
+    state: &Value,
+    agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], agent_ids)
 }
 
 pub(crate) fn save_runtime_state_with_deleted_agents(
@@ -178,7 +237,7 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
     state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_exceptions(workspace, state, deleted_agent_ids, None, &[])
+    save_runtime_state_with_merge_options(workspace, state, deleted_agent_ids, None, &[], &[])
 }
 
 pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
@@ -187,21 +246,39 @@ pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
     tombstoned_team_key: &str,
     tombstoned_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_exceptions(
+    save_runtime_state_with_merge_options(
         workspace,
         state,
         &[],
         Some(tombstoned_team_key),
         tombstoned_agent_ids,
+        &[],
     )
 }
 
-fn save_runtime_state_with_merge_exceptions(
+pub(crate) fn save_runtime_state_with_team_tombstone_lifecycle_topology_authority(
+    workspace: &Path,
+    state: &Value,
+    tombstoned_team_key: &str,
+    agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        &[],
+        Some(tombstoned_team_key),
+        agent_ids,
+        agent_ids,
+    )
+}
+
+fn save_runtime_state_with_merge_options(
     workspace: &Path,
     state: &Value,
     deleted_agent_ids: &[&str],
     skip_capture_backfill_team_key: Option<&str>,
     skip_capture_backfill_agent_ids: &[&str],
+    topology_update_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
@@ -265,13 +342,20 @@ fn save_runtime_state_with_merge_exceptions(
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        preserve_latest_roster_entries(
+        let topology_updates = topology_update_agent_ids
+            .iter()
+            .copied()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        apply_persist_merge_contract(
             &mut migrated,
             &latest,
             &deleted,
             skip_capture_backfill_team_key,
             &skip_capture_backfill,
-        );
+            &topology_updates,
+        )?;
     }
     // Stage 3 save-output strip second pass (defence-in-depth): after the
     // `preserve_latest_roster_entries` lock-held merge, a future addition
@@ -316,7 +400,9 @@ fn save_runtime_state_with_merge_exceptions(
             }
         }
     }
-    Err(StateError::SaveFailed("retry loop exhausted without return".to_string()))
+    Err(StateError::SaveFailed(
+        "retry loop exhausted without return".to_string(),
+    ))
 }
 
 fn read_latest_state_under_lock(workspace: &Path, path: &Path) -> Option<Value> {
@@ -328,31 +414,33 @@ fn read_latest_state_under_lock(workspace: &Path, path: &Path) -> Option<Value> 
     Some(latest)
 }
 
-fn preserve_latest_roster_entries(
+fn apply_persist_merge_contract(
     incoming: &mut Value,
     latest: &Value,
     deleted_agent_ids: &BTreeSet<String>,
     skip_capture_backfill_team_key: Option<&str>,
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
-) {
+    topology_update_agent_ids: &BTreeSet<String>,
+) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
     // per-team `teams.<k>.agents` merge below is team-key self-identifying and must run
     // even when another process flipped session_name/active_team_key between this
     // writer's load and save.
     let projection_matches = same_runtime_projection(incoming, latest);
-    let active_team = active_team_key(incoming).or_else(|| active_team_key(latest));
     let top_level_team = Some(team_state_key(incoming)).or_else(|| Some(team_state_key(latest)));
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
-        preserve_missing_agents(
+        merge_agent_projection(
+            "agents",
             incoming.get_mut("agents"),
             latest.get("agents"),
             deleted_agent_ids,
             skip_top_level_capture_backfill,
             skip_capture_backfill_agent_ids,
-        );
+            topology_update_agent_ids,
+        )?;
         // Stage 3c (identity-boundary unified plan, architect direction
         // 2026-06-23): top-level owner copy-back removed. Pre-3c this
         // copied legacy `state.{team_owner, leader_receiver, owner_epoch}`
@@ -365,67 +453,35 @@ fn preserve_latest_roster_entries(
         // them.
     }
 
-    if projection_matches {
-        if let Some(active_team) = active_team.as_deref() {
-            let latest_active_agents = latest
-                .get("teams")
-                .and_then(Value::as_object)
-                .and_then(|teams| teams.get(active_team))
-                .and_then(|entry| entry.get("agents"));
-            preserve_missing_agents(
-                incoming.get_mut("agents"),
-                latest_active_agents,
-                deleted_agent_ids,
-                skip_top_level_capture_backfill,
-                skip_capture_backfill_agent_ids,
-            );
-        }
-    }
-
     let latest_teams = latest.get("teams").and_then(Value::as_object);
     let Some(incoming_teams) = incoming.get_mut("teams").and_then(Value::as_object_mut) else {
-        return;
+        return Ok(());
     };
     if let Some(latest_teams) = latest_teams {
         for (team, latest_entry) in latest_teams {
             let Some(incoming_entry) = incoming_teams.get_mut(team) else {
                 continue;
             };
-            preserve_missing_agents(
+            let projection = format!("teams.{team}.agents");
+            merge_agent_projection(
+                &projection,
                 incoming_entry.get_mut("agents"),
                 latest_entry.get("agents"),
                 deleted_agent_ids,
                 should_skip_capture_backfill(Some(team), skip_capture_backfill_team_key),
                 skip_capture_backfill_agent_ids,
-            );
+                topology_update_agent_ids,
+            )?;
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
         }
     }
-    if projection_matches {
-        if let Some(active_team) = active_team.as_deref() {
-            let latest_top_agents = latest.get("agents");
-            if let Some(incoming_entry) = incoming_teams.get_mut(active_team) {
-                preserve_missing_agents(
-                    incoming_entry.get_mut("agents"),
-                    latest_top_agents,
-                    deleted_agent_ids,
-                    should_skip_capture_backfill(Some(active_team), skip_capture_backfill_team_key),
-                    skip_capture_backfill_agent_ids,
-                );
-                // Stage 3c (identity-boundary unified plan, architect direction
-                // 2026-06-23): top-level → teams.<active> owner cross-promote
-                // removed. This was the persist-side mirror of the projection
-                // copy-back (3b) and a quiet migration path that let stale
-                // top-level owner re-seed teams.<active>. With write_owner
-                // (3a) producing both top-level and teams.<key> directly,
-                // this auto-promotion is redundant and reintroduces the dual
-                // source the unified plan eliminates.
-            }
-        }
-    }
+    Ok(())
 }
 
-fn should_skip_capture_backfill(current_team_key: Option<&str>, skip_team_key: Option<&str>) -> bool {
+fn should_skip_capture_backfill(
+    current_team_key: Option<&str>,
+    skip_team_key: Option<&str>,
+) -> bool {
     match skip_team_key {
         Some(skip_team_key) => current_team_key == Some(skip_team_key),
         None => true,
@@ -452,9 +508,7 @@ fn latest_has_preferable_ownership(incoming: &Value, latest: &Value) -> bool {
     if latest_epoch > incoming_epoch {
         return true;
     }
-    latest_epoch == incoming_epoch
-        && !ownership_attached(incoming)
-        && ownership_attached(latest)
+    latest_epoch == incoming_epoch && !ownership_attached(incoming) && ownership_attached(latest)
 }
 
 fn ownership_epoch(state: &Value) -> u64 {
@@ -486,37 +540,103 @@ fn ownership_attached(state: &Value) -> bool {
     })
 }
 
-fn preserve_missing_agents(
+fn merge_agent_projection(
+    projection: &str,
     incoming_agents: Option<&mut Value>,
     latest_agents: Option<&Value>,
     deleted_agent_ids: &BTreeSet<String>,
     skip_capture_backfill: bool,
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
-) {
+    topology_update_agent_ids: &BTreeSet<String>,
+) -> Result<(), StateError> {
     let Some(incoming_agents) = incoming_agents else {
-        return;
+        return Ok(());
     };
     let Some(incoming_map) = incoming_agents.as_object_mut() else {
-        return;
+        return Ok(());
     };
     let Some(latest_map) = latest_agents.and_then(Value::as_object) else {
-        return;
+        return Ok(());
     };
     for (agent_id, latest_agent) in latest_map {
         if deleted_agent_ids.contains(agent_id) {
             continue;
         }
+        let tombstoned_for_projection =
+            skip_capture_backfill && skip_capture_backfill_agent_ids.contains(agent_id);
         match incoming_map.entry(agent_id.clone()) {
             serde_json::map::Entry::Vacant(slot) => {
-                slot.insert(latest_agent.clone());
+                if topology_update_agent_ids.contains(agent_id) {
+                    continue;
+                }
+                if !tombstoned_for_projection && latest_has_live_topology(latest_agent) {
+                    return Err(save_conflict(
+                        projection,
+                        agent_id,
+                        live_topology_fields(latest_agent),
+                    ));
+                }
+                if let Some(stub) = roster_stub(latest_agent) {
+                    slot.insert(stub);
+                }
             }
             serde_json::map::Entry::Occupied(mut existing) => {
+                if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
+                    let fields = topology_conflict_fields(existing.get(), latest_agent);
+                    if !fields.is_empty() {
+                        return Err(save_conflict(projection, agent_id, fields));
+                    }
+                }
                 if !skip_capture_backfill || !skip_capture_backfill_agent_ids.contains(agent_id) {
                     backfill_capture_fields(existing.get_mut(), latest_agent);
                 }
             }
         }
     }
+    Ok(())
+}
+
+fn save_conflict(projection: &str, agent_id: &str, fields: Vec<&'static str>) -> StateError {
+    StateError::SaveConflict(format!(
+        "agent_id={agent_id} projection={projection} conflicting_fields={}",
+        fields.join(",")
+    ))
+}
+
+fn latest_has_live_topology(agent: &Value) -> bool {
+    LIVE_TOPOLOGY_FIELDS
+        .iter()
+        .any(|field| agent.get(field).is_some_and(json_truthy))
+}
+
+fn live_topology_fields(agent: &Value) -> Vec<&'static str> {
+    LIVE_TOPOLOGY_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| agent.get(*field).is_some_and(json_truthy))
+        .collect()
+}
+
+fn topology_conflict_fields(incoming_agent: &Value, latest_agent: &Value) -> Vec<&'static str> {
+    let latest_live = live_topology_fields(latest_agent);
+    if latest_live.is_empty() {
+        return Vec::new();
+    }
+    latest_live
+        .into_iter()
+        .filter(|field| incoming_agent.get(*field) != latest_agent.get(*field))
+        .collect()
+}
+
+fn roster_stub(latest_agent: &Value) -> Option<Value> {
+    let latest = latest_agent.as_object()?;
+    let mut stub = serde_json::Map::new();
+    for field in ROSTER_STUB_ALLOWLIST {
+        if let Some(value) = latest.get(field).filter(|value| !value.is_null()) {
+            stub.insert(field.to_string(), value.clone());
+        }
+    }
+    (!stub.is_empty()).then(|| Value::Object(stub))
 }
 
 /// 0.4.6 tuple-atomic backfill (restart-persist-capture-contract-audit.md):
@@ -544,12 +664,7 @@ fn preserve_missing_agents(
 ///   4. `attribution_confidence` rides with the tuple (copied iff tuple
 ///      backfill fires).
 fn backfill_capture_fields(incoming_agent: &mut Value, latest_agent: &Value) {
-    const TUPLE_FIELDS: [&str; 4] = [
-        "session_id",
-        "rollout_path",
-        "captured_at",
-        "captured_via",
-    ];
+    const TUPLE_FIELDS: [&str; 4] = ["session_id", "rollout_path", "captured_at", "captured_via"];
     let Some(incoming_row) = incoming_agent.as_object_mut() else {
         return;
     };
@@ -633,7 +748,9 @@ fn self_heal(
 ) -> Result<(), StateError> {
     let event_log = EventLog::new(workspace);
     let heal_tmp = unique_tmp(path, "heal.tmp");
-    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let backup = path.with_file_name(format!("{name}.bak.{}", std::process::id()));
     let mut backup_created = false;
 
@@ -706,11 +823,17 @@ pub fn normalize_agent_session_state(state: &mut Value) {
 /// 注:Python `seed if seed in teams or not teams else seed` 两支均为 `seed`(死三元),
 /// 此处直接 `= seed`,与可观测行为一致。
 pub fn migrate_active_team_key(state: &mut Value) -> bool {
-    if state.as_object().is_some_and(|o| o.contains_key("active_team_key")) {
+    if state
+        .as_object()
+        .is_some_and(|o| o.contains_key("active_team_key"))
+    {
         return false;
     }
     let teams_is_dict = state.get("teams").is_some_and(Value::is_object);
-    let teams_len = state.get("teams").and_then(Value::as_object).map_or(0, serde_json::Map::len);
+    let teams_len = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .map_or(0, serde_json::Map::len);
     if state.get("session_name").is_some_and(json_truthy) {
         let seed = team_state_key(state);
         if let Some(o) = state.as_object_mut() {
@@ -719,7 +842,10 @@ pub fn migrate_active_team_key(state: &mut Value) -> bool {
         return true;
     }
     if teams_is_dict && teams_len == 1 {
-        let first = state.get("teams").and_then(Value::as_object).and_then(|t| t.keys().next().cloned());
+        let first = state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|t| t.keys().next().cloned());
         if let (Some(k), Some(o)) = (first, state.as_object_mut()) {
             o.insert("active_team_key".to_string(), Value::String(k));
         }
@@ -803,7 +929,9 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
         if let Some(cached) = cache_get(&path) {
             return Ok(cached);
         }
-        return Ok(json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}));
+        return Ok(
+            json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
+        );
     }
     let text = std::fs::read_to_string(&path)?;
     let mut state: Value = serde_json::from_str(&text)?;
@@ -843,7 +971,10 @@ mod tests {
         EventLog::new(ws).tail(50).unwrap()
     }
     fn count_event(ws: &Path, name: &str) -> usize {
-        read_events(ws).iter().filter(|e| e["event"] == json!(name)).count()
+        read_events(ws)
+            .iter()
+            .filter(|e| e["event"] == json!(name))
+            .count()
     }
     // per-call-index 故障计划:plan[i] = 第 i 次 atomic_replace 的 errno(0=成功)。
     fn set_fault_plan(plan: &[i32]) {
@@ -854,10 +985,21 @@ mod tests {
         set_fault_plan(&[]);
     }
     fn get_event(ws: &Path, name: &str) -> Value {
-        read_events(ws).into_iter().find(|e| e["event"] == json!(name)).unwrap_or(Value::Null)
+        read_events(ws)
+            .into_iter()
+            .find(|e| e["event"] == json!(name))
+            .unwrap_or(Value::Null)
     }
     fn read_state(ws: &Path) -> Value {
         serde_json::from_str(&std::fs::read_to_string(runtime_state_path(ws)).unwrap()).unwrap()
+    }
+    fn write_state(ws: &Path, state: &Value) {
+        std::fs::create_dir_all(runtime_dir(ws)).unwrap();
+        std::fs::write(
+            runtime_state_path(ws),
+            serde_json::to_string_pretty(state).unwrap(),
+        )
+        .unwrap();
     }
     fn bak_files(ws: &Path) -> Vec<PathBuf> {
         let dir = runtime_dir(ws);
@@ -865,7 +1007,10 @@ mod tests {
             .map(|rd| {
                 rd.filter_map(std::result::Result::ok)
                     .map(|e| e.path())
-                    .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().contains(".bak.")))
+                    .filter(|p| {
+                        p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().contains(".bak."))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -880,13 +1025,18 @@ mod tests {
         ));
         let canonical = include_str!("testdata/state-rich.canonical.json");
         let v: Value = serde_json::from_str(fixture).unwrap();
-        assert_eq!(serde_json::to_string_pretty(&v).unwrap(), canonical, "state.json 序列化未字节对齐 Python indent=2");
+        assert_eq!(
+            serde_json::to_string_pretty(&v).unwrap(),
+            canonical,
+            "state.json 序列化未字节对齐 Python indent=2"
+        );
     }
 
     #[test]
     fn save_writes_atomically_and_caches() {
         let ws = temp_ws();
-        let state = json!({"session_name":"t","agents":{"a":{"agent_id":"a"}},"active_team_key":"t"});
+        let state =
+            json!({"session_name":"t","agents":{"a":{"agent_id":"a"}},"active_team_key":"t"});
         save_runtime_state(&ws, &state).unwrap();
         let on_disk = std::fs::read_to_string(runtime_state_path(&ws)).unwrap();
         assert_eq!(on_disk, serde_json::to_string_pretty(&state).unwrap());
@@ -903,7 +1053,10 @@ mod tests {
         // 删掉文件;若缓存早返回生效,save 相同 state 不会重建文件。
         std::fs::remove_file(runtime_state_path(&ws)).unwrap();
         save_runtime_state(&ws, &state).unwrap();
-        assert!(!runtime_state_path(&ws).exists(), "deep-equal 命中缓存 → 未重写(文件仍不存在)");
+        assert!(
+            !runtime_state_path(&ws).exists(),
+            "deep-equal 命中缓存 → 未重写(文件仍不存在)"
+        );
     }
 
     // bug-084 核心:EACCES 重试 3 次(有界退避)→ self-heal 成功 + 事件**字段精确**。
@@ -917,7 +1070,10 @@ mod tests {
         clear_fault();
         assert_eq!(read_state(&ws), s2, "inode 重建,文件为 s2");
         // 事件序列 + 字段精确。
-        let retries: Vec<_> = read_events(&ws).into_iter().filter(|e| e["event"] == json!("runtime.state.save_retry")).collect();
+        let retries: Vec<_> = read_events(&ws)
+            .into_iter()
+            .filter(|e| e["event"] == json!("runtime.state.save_retry"))
+            .collect();
         assert_eq!(retries.len(), 3, "3 次重试");
         assert_eq!(retries[0]["attempt"], json!(1));
         assert_eq!(retries[0]["errno_name"], json!("EACCES"));
@@ -939,7 +1095,10 @@ mod tests {
             clear_fault();
             assert_eq!(read_state(&ws), json!({"v":2}));
             assert_eq!(count_event(&ws, "runtime.state.self_healed"), 1);
-            assert_eq!(get_event(&ws, "runtime.state.save_retry")["errno_name"], json!(name));
+            assert_eq!(
+                get_event(&ws, "runtime.state.save_retry")["errno_name"],
+                json!(name)
+            );
         }
     }
 
@@ -964,7 +1123,11 @@ mod tests {
         clear_fault();
         assert_eq!(read_state(&ws), json!({"v":7}));
         assert_eq!(count_event(&ws, "runtime.state.save_retry"), 3);
-        assert_eq!(count_event(&ws, "runtime.state.self_healed"), 0, "未触发 self-heal");
+        assert_eq!(
+            count_event(&ws, "runtime.state.self_healed"),
+            0,
+            "未触发 self-heal"
+        );
     }
 
     // 崩溃安全不变量①:self-heal 中途失败但 restore 成功 → 原 state 复位 + 0 restore_failed + 1 save_failed。
@@ -979,8 +1142,15 @@ mod tests {
         let r = save_runtime_state(&ws, &json!({"keep":"new"}));
         clear_fault();
         assert!(matches!(r, Err(StateError::SaveFailed(_))));
-        assert_eq!(read_state(&ws), original, "restore 成功:原 state 复位到 state.json");
-        assert_eq!(count_event(&ws, "runtime.state.self_heal_restore_failed"), 0);
+        assert_eq!(
+            read_state(&ws),
+            original,
+            "restore 成功:原 state 复位到 state.json"
+        );
+        assert_eq!(
+            count_event(&ws, "runtime.state.self_heal_restore_failed"),
+            0
+        );
         let failed = get_event(&ws, "runtime.state.save_failed");
         assert_eq!(failed["phase"], json!("save_runtime_state"));
         assert_eq!(failed["retries_used"], json!(3));
@@ -997,7 +1167,10 @@ mod tests {
         let r = save_runtime_state(&ws, &json!({"keep":"new"}));
         clear_fault();
         assert!(matches!(r, Err(StateError::SaveFailed(_))));
-        assert_eq!(count_event(&ws, "runtime.state.self_heal_restore_failed"), 1);
+        assert_eq!(
+            count_event(&ws, "runtime.state.self_heal_restore_failed"),
+            1
+        );
         assert_eq!(count_event(&ws, "runtime.state.save_failed"), 1);
         // state.json 已被 rename 到 backup(restore 失败),原 state 在 .bak 里完好(绝不丢失)。
         let baks = bak_files(&ws);
@@ -1036,8 +1209,11 @@ mod tests {
         let state = json!({"v":1});
         save_runtime_state(&ws, &state).unwrap(); // 填充缓存
         let _held = RuntimeLock::acquire(&ws, "state-save", 2.0).unwrap(); // 占锁
-        // 若 deep-equal 不早返回,会去抢已被占的锁 → 2s timeout → Locked。Ok 即证早返回。
-        assert!(save_runtime_state(&ws, &state).is_ok(), "deep-equal 应在取锁前返回");
+                                                                           // 若 deep-equal 不早返回,会去抢已被占的锁 → 2s timeout → Locked。Ok 即证早返回。
+        assert!(
+            save_runtime_state(&ws, &state).is_ok(),
+            "deep-equal 应在取锁前返回"
+        );
     }
 
     // 并发全流程 save(非仅 lock acquire):多线程存不同 state → 全 Ok + 最终文件合法 JSON + 无 tmp 残留。
@@ -1075,8 +1251,13 @@ mod tests {
         let held = RuntimeLock::acquire(&ws, "state-save", 2.0).unwrap();
         // 另一线程在短 timeout 内尝试 → 应 Locked(flock 进程内/跨 fd 互斥)。
         let ws2 = ws.clone();
-        let r = std::thread::spawn(move || RuntimeLock::acquire(&ws2, "state-save", 0.2)).join().unwrap();
-        assert!(matches!(r, Err(StateError::Locked(_))), "持锁时第二者应 Locked");
+        let r = std::thread::spawn(move || RuntimeLock::acquire(&ws2, "state-save", 0.2))
+            .join()
+            .unwrap();
+        assert!(
+            matches!(r, Err(StateError::Locked(_))),
+            "持锁时第二者应 Locked"
+        );
         drop(held);
     }
 
@@ -1090,7 +1271,10 @@ mod tests {
             "session_id": "keep", "rollout_path": null, "captured_at": null,
             "captured_via": null, "attribution_confidence": null, "spawn_cwd": null,
         }}});
-        assert_eq!(serde_json::to_string(&state).unwrap(), serde_json::to_string(&expected).unwrap());
+        assert_eq!(
+            serde_json::to_string(&state).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
     }
 
     #[test]
@@ -1116,7 +1300,10 @@ mod tests {
     fn load_runtime_state_missing_returns_default() {
         let ws = temp_ws();
         let s = load_runtime_state(&ws).unwrap();
-        assert_eq!(s, json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}));
+        assert_eq!(
+            s,
+            json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null})
+        );
     }
 
     #[test]
@@ -1130,18 +1317,31 @@ mod tests {
             "agents": {"w1": {"agent_id": "w1"}},
             "team_owner": {"pane_id": "%1", "machine_fingerprint": "fp"},
         });
-        std::fs::write(runtime_state_path(&ws), serde_json::to_string(&legacy).unwrap()).unwrap();
+        std::fs::write(
+            runtime_state_path(&ws),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
         let s = load_runtime_state(&ws).unwrap();
         // active_team_key seed = team_state_key = "tk"。
         assert_eq!(s["active_team_key"], json!("tk"));
         // agent session 字段补 None。
         assert_eq!(s["agents"]["w1"]["spawn_cwd"], json!(null));
         // team_owner 补 leader_session_uuid。
-        assert_eq!(s["team_owner"]["leader_session_uuid"].as_str().unwrap().len(), 32);
+        assert_eq!(
+            s["team_owner"]["leader_session_uuid"]
+                .as_str()
+                .unwrap()
+                .len(),
+            32
+        );
         // 迁移已回写磁盘(再 load 不再变;active_team_key 已在)。
         let on_disk = read_state(&ws);
         assert_eq!(on_disk["active_team_key"], json!("tk"));
-        assert_eq!(on_disk["team_owner"]["leader_session_uuid"], s["team_owner"]["leader_session_uuid"]);
+        assert_eq!(
+            on_disk["team_owner"]["leader_session_uuid"],
+            s["team_owner"]["leader_session_uuid"]
+        );
     }
 
     // 对抗 P1:legacy 文件**已有 active_team_key** 但缺 leader_session_uuid。load 内存补 uuid,
@@ -1156,47 +1356,389 @@ mod tests {
         let before = std::fs::read_to_string(runtime_state_path(&ws)).unwrap();
         let loaded = load_runtime_state(&ws).unwrap();
         // 内存态补了 uuid(证明确实需要迁移)。
-        assert_eq!(loaded["team_owner"]["leader_session_uuid"].as_str().unwrap().len(), 32);
+        assert_eq!(
+            loaded["team_owner"]["leader_session_uuid"]
+                .as_str()
+                .unwrap()
+                .len(),
+            32
+        );
         // 但磁盘未被重写(字节恒等)。
         let after = std::fs::read_to_string(runtime_state_path(&ws)).unwrap();
-        assert_eq!(after, before, "已是迁移等价形的 legacy 文件不得 spurious 重写");
+        assert_eq!(
+            after, before,
+            "已是迁移等价形的 legacy 文件不得 spurious 重写"
+        );
     }
 
-    // A0 GREEN 回归锁(.team/artifacts/a0-rs-lostupdate-locate.md §5.3):锁内 preserve 把磁盘
-    // latest 多出的 agent 补回 stale incoming(防 Python A0 lost-update),同时 deleted_agent_ids
-    // 豁免位必须让 remove-agent 的删除不被 merge 复活(persist.rs:383-385)。
+    // Phase C: persist no longer repairs stale topology by cloning missing rows.
+    // A stale non-lifecycle save that would remove a live row must surface a
+    // typed conflict and leave disk unchanged.
     #[test]
-    fn a0_green_lock_preserve_fills_missing_agents_but_deleted_ids_stay_dead() {
+    fn stale_snapshot_cannot_overwrite_new_topology() {
         let ws = temp_ws();
-        std::fs::create_dir_all(runtime_dir(&ws)).unwrap();
-        std::fs::write(
-            runtime_state_path(&ws),
-            serde_json::to_string_pretty(&json!({
-                "session_name": "team-a",
-                "active_team_key": "team-a",
-                "agents": {
-                    "w1": {"status": "running", "provider": "codex", "agent_id": "w1"},
-                    "kept": {"status": "running", "provider": "codex", "agent_id": "kept"},
-                    "gone": {"status": "running", "provider": "codex", "agent_id": "gone"},
-                },
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        let latest = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "w1": {
+                    "status": "running",
+                    "provider": "codex",
+                    "agent_id": "w1",
+                    "window": "w1-new",
+                    "pane_id": "%2",
+                    "pane_pid": 222,
+                    "spawned_at": "2026-06-01T00:00:00Z",
+                    "spawn_epoch": 2
+                }
+            },
+        });
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "w1": {
+                    "status": "running",
+                    "provider": "codex",
+                    "agent_id": "w1",
+                    "window": "w1-old",
+                    "pane_id": "%1",
+                    "pane_pid": 111,
+                    "spawned_at": "2026-05-31T00:00:00Z",
+                    "spawn_epoch": 1
+                }
+            },
+        });
+        let err = save_runtime_state(&ws, &incoming).expect_err("stale topology must conflict");
+        assert!(matches!(err, StateError::SaveConflict(_)));
+        let message = err.to_string();
+        assert!(message.contains("agent_id=w1"), "message={message}");
+        assert!(message.contains("projection=agents"), "message={message}");
+        assert!(message.contains("pane_id"), "message={message}");
+        assert_eq!(
+            read_state(&ws),
+            latest,
+            "conflict must leave disk unchanged"
+        );
+    }
+
+    #[test]
+    fn vacant_roster_preserve_cannot_resurrect_live_topology() {
+        let ws = temp_ws();
+        let latest = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "w1": {"status": "running", "provider": "codex", "agent_id": "w1"},
+                "joiner": {
+                    "status": "running",
+                    "provider": "codex",
+                    "agent_id": "joiner",
+                    "window": "joiner",
+                    "pane_id": "%9",
+                    "spawned_at": "2026-06-01T00:00:00Z",
+                    "spawn_epoch": 1
+                }
+            },
+        });
+        write_state(&ws, &latest);
         let incoming = json!({
             "session_name": "team-a",
             "active_team_key": "team-a",
             "agents": { "w1": {"status": "running", "provider": "codex", "agent_id": "w1"} },
         });
+        let err = save_runtime_state(&ws, &incoming).expect_err("missing live row must conflict");
+        assert!(matches!(err, StateError::SaveConflict(_)));
+        assert!(err.to_string().contains("agent_id=joiner"));
+    }
+
+    #[test]
+    fn vacant_non_live_roster_preserve_is_allow_list_only() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "typed": {
+                        "agent_id": "typed",
+                        "provider": "codex",
+                        "role": "Developer",
+                        "model": "gpt-5.5",
+                        "status": "running",
+                        "spawn_cwd": "/tmp/old",
+                        "session_id": "old-session",
+                        "rollout_path": "/tmp/old.jsonl"
+                    }
+                },
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {},
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        let typed = saved.pointer("/agents/typed").expect("typed stub");
+        assert_eq!(typed.get("provider").and_then(Value::as_str), Some("codex"));
+        assert_eq!(typed.get("role").and_then(Value::as_str), Some("Developer"));
+        assert_eq!(typed.get("model").and_then(Value::as_str), Some("gpt-5.5"));
+        for forbidden in ["status", "spawn_cwd", "session_id", "rollout_path"] {
+            assert!(
+                typed.get(forbidden).is_none(),
+                "typed roster stub must not copy {forbidden}; typed={typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn reapplying_after_conflict_retries_without_losing_delta() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "w1": {
+                        "agent_id": "w1",
+                        "provider": "codex",
+                        "window": "w1-new",
+                        "pane_id": "%2",
+                        "pane_pid": 222,
+                        "spawn_epoch": 2
+                    }
+                },
+                "delivery": {}
+            }),
+        );
+        let stale_with_delta = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "w1": {
+                    "agent_id": "w1",
+                    "provider": "codex",
+                    "window": "w1-old",
+                    "pane_id": "%1",
+                    "pane_pid": 111,
+                    "spawn_epoch": 1
+                }
+            },
+            "delivery": {"msg-1": {"status": "delivered"}}
+        });
+        let mut reapplied = false;
+        save_runtime_state_reapplying_after_conflict(&ws, &stale_with_delta, |latest| {
+            reapplied = true;
+            latest.as_object_mut().unwrap().insert(
+                "delivery".to_string(),
+                json!({"msg-1": {"status": "delivered"}}),
+            );
+        })
+        .unwrap();
+
+        let saved = read_state(&ws);
+        assert!(reapplied, "SaveConflict path must reload and reapply once");
+        assert_eq!(saved.pointer("/agents/w1/pane_id"), Some(&json!("%2")));
+        assert_eq!(saved.pointer("/agents/w1/window"), Some(&json!("w1-new")));
+        assert_eq!(
+            saved.pointer("/delivery/msg-1/status"),
+            Some(&json!("delivered")),
+            "non-topology delta must survive retry; saved={saved}"
+        );
+    }
+
+    #[test]
+    fn deleted_ids_stay_dead_even_when_latest_has_live_topology() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "gone": {
+                        "status": "running",
+                        "provider": "codex",
+                        "agent_id": "gone",
+                        "window": "gone",
+                        "pane_id": "%7",
+                        "spawn_epoch": 1
+                    },
+                },
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {},
+        });
         save_runtime_state_with_deleted_agents(&ws, &incoming, &["gone"]).unwrap();
         let saved = read_state(&ws);
         assert!(
-            saved.pointer("/agents/kept").is_some_and(Value::is_object),
-            "锁内 preserve 必须把磁盘 latest 多出的 `kept` 补回 stale incoming;saved={saved}"
-        );
-        assert!(
             saved.pointer("/agents/gone").is_none(),
             "deleted_agent_ids 豁免:被 remove 的 `gone` 不得被 preserve 复活;saved={saved}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_topology_authority_only_applies_to_target_agent() {
+        let ws = temp_ws();
+        let latest = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "target": {"agent_id": "target", "provider": "codex", "window": "target", "pane_id": "%1", "spawn_epoch": 1},
+                "other": {"agent_id": "other", "provider": "codex", "window": "other", "pane_id": "%2", "spawn_epoch": 1}
+            },
+        });
+        write_state(&ws, &latest);
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "target": {"agent_id": "target", "provider": "codex", "status": "stopped"},
+                "other": {"agent_id": "other", "provider": "codex", "window": "old-other", "pane_id": "%old", "spawn_epoch": 1}
+            },
+        });
+        let err = save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, &["target"])
+            .expect_err("authorized target must not hide other agent conflict");
+        assert!(matches!(err, StateError::SaveConflict(_)));
+        assert!(err.to_string().contains("agent_id=other"));
+    }
+
+    #[test]
+    fn lifecycle_topology_authority_can_clear_target_topology() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "target": {"agent_id": "target", "provider": "codex", "window": "target", "pane_id": "%1", "spawn_epoch": 1}
+                },
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
+            },
+        });
+        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, &["target"]).unwrap();
+        let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
+        assert!(
+            target.get("pane_id").is_none(),
+            "target topology was intentionally cleared: {target}"
+        );
+        assert!(
+            target.get("window").is_none(),
+            "target window was intentionally cleared: {target}"
+        );
+    }
+
+    #[test]
+    fn owner_epoch_preserve_is_explicit_and_bounded_to_team_entry() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "teams": {
+                    "team-a": {
+                        "agents": {},
+                        "team_owner": {"pane_id": "%7", "owner_epoch": 7},
+                        "leader_receiver": {"pane_id": "%7", "owner_epoch": 7},
+                        "owner_epoch": 7
+                    }
+                }
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "teams": {
+                "team-a": {
+                    "agents": {},
+                    "team_owner": {"pane_id": "%3", "owner_epoch": 3},
+                    "leader_receiver": {"pane_id": "%3", "owner_epoch": 3},
+                    "owner_epoch": 3
+                }
+            }
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(
+            saved
+                .pointer("/teams/team-a/owner_epoch")
+                .and_then(Value::as_u64),
+            Some(7)
+        );
+        assert_eq!(
+            saved
+                .pointer("/teams/team-a/team_owner/pane_id")
+                .and_then(Value::as_str),
+            Some("%7")
+        );
+        assert!(
+            saved.get("team_owner").is_none(),
+            "top-level owner must not be recreated: {saved}"
+        );
+        assert!(
+            saved.get("owner_epoch").is_none(),
+            "top-level owner_epoch must not be recreated: {saved}"
+        );
+    }
+
+    #[test]
+    fn projection_paths_do_not_cross_backfill_topology() {
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {
+                    "top-only": {"agent_id": "top-only", "provider": "codex", "window": "top-only", "pane_id": "%1", "spawn_epoch": 1}
+                },
+                "teams": {
+                    "team-a": {
+                        "agents": {
+                            "team-only": {"agent_id": "team-only", "provider": "codex", "window": "team-only", "pane_id": "%2", "spawn_epoch": 1}
+                        }
+                    }
+                }
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {
+                "top-only": {"agent_id": "top-only", "provider": "codex", "window": "top-only", "pane_id": "%1", "spawn_epoch": 1}
+            },
+            "teams": {
+                "team-a": {
+                    "agents": {
+                        "team-only": {"agent_id": "team-only", "provider": "codex", "window": "team-only", "pane_id": "%2", "spawn_epoch": 1}
+                    }
+                }
+            }
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        assert!(
+            saved.pointer("/agents/team-only").is_none(),
+            "teams.<key> topology must not cross-fill top-level agents; saved={saved}"
+        );
+        assert!(
+            saved.pointer("/teams/team-a/agents/top-only").is_none(),
+            "top-level topology must not cross-fill teams.<key>.agents; saved={saved}"
         );
     }
 
@@ -1354,10 +1896,9 @@ mod tests {
         );
 
         // Re-read from disk (not cache) to confirm the migration was persisted.
-        let on_disk: Value = serde_json::from_str(
-            &std::fs::read_to_string(runtime_dir.join("state.json")).unwrap(),
-        )
-        .unwrap();
+        let on_disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(runtime_dir.join("state.json")).unwrap())
+                .unwrap();
         assert_eq!(
             on_disk.get("team_key").and_then(Value::as_str),
             Some(active),
@@ -1429,7 +1970,9 @@ mod tests {
             Some("session.captured")
         );
         assert_eq!(
-            incoming.get("attribution_confidence").and_then(Value::as_str),
+            incoming
+                .get("attribution_confidence")
+                .and_then(Value::as_str),
             Some("high"),
             "attribution_confidence rides with the tuple"
         );

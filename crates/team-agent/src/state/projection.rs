@@ -14,7 +14,12 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::StateError;
-use crate::state::persist::{load_runtime_state, save_runtime_state_with_deleted_agents, save_runtime_state_with_team_tombstoned_agents};
+use crate::state::persist::{
+    load_runtime_state, save_runtime_state_with_deleted_agents,
+    save_runtime_state_with_lifecycle_topology_authority,
+    save_runtime_state_with_team_tombstone_lifecycle_topology_authority,
+    save_runtime_state_with_team_tombstoned_agents,
+};
 
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
@@ -38,7 +43,9 @@ pub fn team_state_key(state: &Value) -> String {
         } else {
             path.parent().and_then(Path::file_name)
         };
-        let key = key.map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let key = key
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if !key.is_empty() && key != ".team" && key != "runtime" {
             return key;
         }
@@ -53,9 +60,17 @@ pub fn team_state_key(state: &Value) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnerTeamResolution {
     Canonical(String),
-    LegacyAlias { requested: String, canonical: String },
-    Unresolved { requested: String },
-    Ambiguous { requested: String, matches: Vec<String> },
+    LegacyAlias {
+        requested: String,
+        canonical: String,
+    },
+    Unresolved {
+        requested: String,
+    },
+    Ambiguous {
+        requested: String,
+        matches: Vec<String>,
+    },
 }
 
 impl OwnerTeamResolution {
@@ -71,14 +86,19 @@ impl OwnerTeamResolution {
 pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamResolution {
     let requested = owner_team_id.trim();
     if requested.is_empty() {
-        return OwnerTeamResolution::Unresolved { requested: owner_team_id.to_string() };
+        return OwnerTeamResolution::Unresolved {
+            requested: owner_team_id.to_string(),
+        };
     }
     let teams = state.get("teams").and_then(Value::as_object);
     if teams.is_some_and(|teams| teams.contains_key(requested)) {
         return OwnerTeamResolution::Canonical(requested.to_string());
     }
     if teams.is_none_or(Map::is_empty) {
-        let active = state.get("active_team_key").and_then(Value::as_str).unwrap_or("");
+        let active = state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         let derived = team_state_key(state);
         if active == requested || derived == requested {
             return OwnerTeamResolution::Canonical(requested.to_string());
@@ -98,7 +118,9 @@ pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamRes
         return OwnerTeamResolution::Canonical(requested.to_string());
     }
     let Some(teams) = teams else {
-        return OwnerTeamResolution::Unresolved { requested: requested.to_string() };
+        return OwnerTeamResolution::Unresolved {
+            requested: requested.to_string(),
+        };
     };
     let mut matches = Vec::new();
     for (key, entry) in teams {
@@ -109,12 +131,17 @@ pub fn resolve_owner_team_id(state: &Value, owner_team_id: &str) -> OwnerTeamRes
     matches.sort();
     matches.dedup();
     match matches.len() {
-        0 => OwnerTeamResolution::Unresolved { requested: requested.to_string() },
+        0 => OwnerTeamResolution::Unresolved {
+            requested: requested.to_string(),
+        },
         1 => OwnerTeamResolution::LegacyAlias {
             requested: requested.to_string(),
             canonical: matches.remove(0),
         },
-        _ => OwnerTeamResolution::Ambiguous { requested: requested.to_string(), matches },
+        _ => OwnerTeamResolution::Ambiguous {
+            requested: requested.to_string(),
+            matches,
+        },
     }
 }
 
@@ -131,7 +158,12 @@ fn legacy_owner_team_aliases(entry: &Value) -> impl Iterator<Item = String> + '_
         "/legacy_team_name",
         "/legacy_alias",
     ];
-    let list_paths = ["/legacy_aliases", "/legacy_team_aliases", "/legacy_owner_team_ids", "/aliases"];
+    let list_paths = [
+        "/legacy_aliases",
+        "/legacy_team_aliases",
+        "/legacy_owner_team_ids",
+        "/aliases",
+    ];
     let scalars = scalar_paths
         .into_iter()
         .filter_map(|path| entry.pointer(path).and_then(Value::as_str));
@@ -196,7 +228,9 @@ pub fn merge_workspace_team_state(existing: &Value, launched: &Value) -> Value {
     // 异 key → existing 为基,两个 team 都进 teams(existing 仅在缺时 seed)。
     let mut merged = to_object(existing);
     let mut teams = take_object(merged.get("teams"));
-    teams.entry(existing_key).or_insert_with(|| compact_team_state(existing));
+    teams
+        .entry(existing_key)
+        .or_insert_with(|| compact_team_state(existing));
     teams.insert(launched_key, compact_team_state(launched));
     merged.insert("teams".to_string(), Value::Object(teams));
     Value::Object(merged)
@@ -250,7 +284,11 @@ pub fn format_team_candidates(team_states: &Map<String, Value>) -> String {
         let agents = if agent_keys.is_empty() {
             "-".to_string()
         } else {
-            agent_keys.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
+            agent_keys
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
         };
         let session = st
             .get("session_name")
@@ -294,23 +332,37 @@ fn valid_owner_pane_id(pane_id: &str) -> bool {
 /// `_project_top_level_view`(`state.py:167`,C8):把 `teams[team_key]` 投影成扁平顶层视图。
 pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
     // entry = _team_entry_from_state(...) or {} —— 空 dict 亦走 {} 分支(同内容)。
-    let entry_obj: Map<String, Value> =
-        team_entry_from_state(state, team_key).and_then(Value::as_object).cloned().unwrap_or_default();
+    let entry_obj: Map<String, Value> = team_entry_from_state(state, team_key)
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let mut p = entry_obj.clone(); // projection = deepcopy(entry)
-    // setdefault session_name/team_dir ← entry.get(...)(缺则插,值可为 null)。
-    // **0.3.24 excision** (U1-A real-machine RED v2): the ff38ab9 root-state
-    // `or_else` fallback was reverted along with the wave-2 U1-A drift fallback,
-    // since this projection change had no other consumer. v0.3.25 will re-introduce
-    // this together with the writer-shape + rediscover-writer fix — see
-    // `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md`.
+                                   // setdefault session_name/team_dir ← entry.get(...)(缺则插,值可为 null)。
+                                   // **0.3.24 excision** (U1-A real-machine RED v2): the ff38ab9 root-state
+                                   // `or_else` fallback was reverted along with the wave-2 U1-A drift fallback,
+                                   // since this projection change had no other consumer. v0.3.25 will re-introduce
+                                   // this together with the writer-shape + rediscover-writer fix — see
+                                   // `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md`.
     if !p.contains_key("session_name") {
-        p.insert("session_name".to_string(), entry_obj.get("session_name").cloned().unwrap_or(Value::Null));
+        p.insert(
+            "session_name".to_string(),
+            entry_obj
+                .get("session_name")
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
     }
     if !p.contains_key("team_dir") {
-        p.insert("team_dir".to_string(), entry_obj.get("team_dir").cloned().unwrap_or(Value::Null));
+        p.insert(
+            "team_dir".to_string(),
+            entry_obj.get("team_dir").cloned().unwrap_or(Value::Null),
+        );
     }
     // d[k]=v:active_team_key 原位更新或末尾插。
-    p.insert("active_team_key".to_string(), Value::String(team_key.to_string()));
+    p.insert(
+        "active_team_key".to_string(),
+        Value::String(team_key.to_string()),
+    );
     // 保全全量 teams 供消费者看兄弟 team(`state.get("teams") or {}` 的 truthy 语义)。
     p.insert("teams".to_string(), py_or_empty_map(state.get("teams")));
     let has_team_entries = state
@@ -336,8 +388,12 @@ pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
         p.insert("leader_receiver".to_string(), v.clone());
     }
     let _ = has_team_entries; // silence unused warning; kept for clarity.
-    // coordinator:仅顶层有 key 时 setdefault(投影里没有才插)。
-    if state.as_object().is_some_and(|o| o.contains_key("coordinator")) && !p.contains_key("coordinator") {
+                              // coordinator:仅顶层有 key 时 setdefault(投影里没有才插)。
+    if state
+        .as_object()
+        .is_some_and(|o| o.contains_key("coordinator"))
+        && !p.contains_key("coordinator")
+    {
         p.insert("coordinator".to_string(), state["coordinator"].clone());
     }
     Value::Object(p)
@@ -354,12 +410,18 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
     if let Some(team) = team {
         // 无 alive 但 team 命中 active_team_key / 派生 key → 直接以全量 state 投影。
         if alive.is_empty() {
-            let active = state.get("active_team_key").and_then(Value::as_str).unwrap_or("");
+            let active = state
+                .get("active_team_key")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if team == active || team == team_state_key(&state) {
                 let mut projection = state.clone();
                 match projection.as_object_mut() {
                     Some(o) => {
-                        o.insert("active_team_key".to_string(), Value::String(team.to_string()));
+                        o.insert(
+                            "active_team_key".to_string(),
+                            Value::String(team.to_string()),
+                        );
                     }
                     None => projection = json!({ "active_team_key": team }),
                 }
@@ -389,7 +451,10 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         )));
     }
     // 无 team 参数:active 命中 → 投影;唯一 alive → 投影;无 alive → 全量;多 alive → 歧义。
-    let active = state.get("active_team_key").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let active = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
     if let Some(active) = active {
         if alive.contains_key(active) {
             return Ok(project_top_level_view(&state, active));
@@ -412,7 +477,10 @@ fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
     if team == key {
         return true;
     }
-    let session = value.get("session_name").and_then(Value::as_str).unwrap_or("");
+    let session = value
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     if team == session {
         return true;
     }
@@ -434,7 +502,10 @@ fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
 /// `ambiguous_team_target_result`(`state.py:226`):无显式 team 且多候选 → 拒绝 dict;否则 None。
 pub fn ambiguous_team_target_result(state: &Value) -> Option<Value> {
     let alive = team_state_candidates(state);
-    let active = state.get("active_team_key").and_then(Value::as_str).filter(|s| !s.is_empty());
+    let active = state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
     if let Some(active) = active {
         if alive.contains_key(active) {
             return None;
@@ -491,6 +562,26 @@ pub fn save_team_scoped_state(workspace: &Path, team_state: &Value) -> Result<()
     save_team_scoped_state_with_deleted_agents(workspace, team_state, &[])
 }
 
+pub(crate) fn save_team_scoped_state_reapplying_after_conflict<F>(
+    workspace: &Path,
+    team_state: &Value,
+    reapply: F,
+) -> Result<(), StateError>
+where
+    F: FnOnce(&mut Value),
+{
+    match save_team_scoped_state(workspace, team_state) {
+        Ok(()) => Ok(()),
+        Err(StateError::SaveConflict(_)) => {
+            let target_key = team_state_key(team_state);
+            let mut latest = select_runtime_state(workspace, Some(&target_key))?;
+            reapply(&mut latest);
+            save_team_scoped_state(workspace, &latest)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn save_team_scoped_state_with_deleted_agents(
     workspace: &Path,
     team_state: &Value,
@@ -499,12 +590,20 @@ pub(crate) fn save_team_scoped_state_with_deleted_agents(
     save_team_scoped_state_with_merge_exceptions(workspace, team_state, deleted_agent_ids, &[])
 }
 
-pub(crate) fn save_team_scoped_state_with_tombstoned_agents(
+pub(crate) fn save_team_scoped_state_with_tombstone_lifecycle_topology_authority(
     workspace: &Path,
     team_state: &Value,
-    tombstoned_agent_ids: &[&str],
+    agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_team_scoped_state_with_merge_exceptions(workspace, team_state, &[], tombstoned_agent_ids)
+    save_team_scoped_state_with_merge_options(workspace, team_state, &[], agent_ids, agent_ids)
+}
+
+pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority(
+    workspace: &Path,
+    team_state: &Value,
+    agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_team_scoped_state_with_merge_options(workspace, team_state, &[], &[], agent_ids)
 }
 
 fn save_team_scoped_state_with_merge_exceptions(
@@ -512,6 +611,22 @@ fn save_team_scoped_state_with_merge_exceptions(
     team_state: &Value,
     deleted_agent_ids: &[&str],
     tombstoned_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_team_scoped_state_with_merge_options(
+        workspace,
+        team_state,
+        deleted_agent_ids,
+        tombstoned_agent_ids,
+        &[],
+    )
+}
+
+fn save_team_scoped_state_with_merge_options(
+    workspace: &Path,
+    team_state: &Value,
+    deleted_agent_ids: &[&str],
+    tombstoned_agent_ids: &[&str],
+    topology_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let target_key = team_state_key(team_state);
     let existing = load_runtime_state(workspace)?;
@@ -532,7 +647,11 @@ fn save_team_scoped_state_with_merge_exceptions(
                 .and_then(Value::as_str)
                 .is_some_and(|t| t == s)
         });
-    if existing_primary_key.as_deref().is_some_and(|k| k != target_key) && same_session {
+    if existing_primary_key
+        .as_deref()
+        .is_some_and(|k| k != target_key)
+        && same_session
+    {
         existing_primary_key = Some(target_key.clone());
     }
     let existing_teams = take_object(existing.get("teams"));
@@ -541,6 +660,21 @@ fn save_team_scoped_state_with_merge_exceptions(
     // not existing_teams and existing_primary_key == target_key → 纯 save(剔 teams)。
     if existing_teams.is_empty() && existing_primary_key.as_deref() == Some(target_key.as_str()) {
         let merged = compact_team_state(team_state);
+        if !topology_agent_ids.is_empty() {
+            if !tombstoned_agent_ids.is_empty() {
+                return save_runtime_state_with_team_tombstone_lifecycle_topology_authority(
+                    workspace,
+                    &merged,
+                    &target_key,
+                    topology_agent_ids,
+                );
+            }
+            return save_runtime_state_with_lifecycle_topology_authority(
+                workspace,
+                &merged,
+                topology_agent_ids,
+            );
+        }
         if tombstoned_agent_ids.is_empty() {
             return save_runtime_state_with_deleted_agents(workspace, &merged, deleted_agent_ids);
         }
@@ -566,12 +700,36 @@ fn save_team_scoped_state_with_merge_exceptions(
     };
     merged.insert("teams".to_string(), Value::Object(teams));
     // if not merged.get("teams"): merged.pop("teams", None) —— teams 为空 dict(falsy)则剔除。
-    if merged.get("teams").and_then(Value::as_object).is_some_and(Map::is_empty) {
+    if merged
+        .get("teams")
+        .and_then(Value::as_object)
+        .is_some_and(Map::is_empty)
+    {
         merged.remove("teams");
     }
     if tombstoned_agent_ids.is_empty() {
-        save_runtime_state_with_deleted_agents(workspace, &Value::Object(merged), deleted_agent_ids)
+        if !topology_agent_ids.is_empty() {
+            save_runtime_state_with_lifecycle_topology_authority(
+                workspace,
+                &Value::Object(merged),
+                topology_agent_ids,
+            )
+        } else {
+            save_runtime_state_with_deleted_agents(
+                workspace,
+                &Value::Object(merged),
+                deleted_agent_ids,
+            )
+        }
     } else {
+        if !topology_agent_ids.is_empty() {
+            return save_runtime_state_with_team_tombstone_lifecycle_topology_authority(
+                workspace,
+                &Value::Object(merged),
+                &target_key,
+                topology_agent_ids,
+            );
+        }
         save_runtime_state_with_team_tombstoned_agents(
             workspace,
             &Value::Object(merged),
@@ -608,7 +766,11 @@ fn take_object(v: Option<&Value>) -> Map<String, Value> {
 
 /// Python `repr()` of a `str`(与 `model::spec::py_repr_str` 同实现,本地副本免改工作模块)。
 fn py_repr_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::new();
     out.push(quote);
     for c in s.chars() {
@@ -638,7 +800,10 @@ mod tests {
 
     /// 比较紧凑序列化(serde_json::to_string 无空格)—— 同时锁值 + 键插入序。
     fn same_repr(a: &Value, b: &Value) {
-        assert_eq!(serde_json::to_string(a).unwrap(), serde_json::to_string(b).unwrap());
+        assert_eq!(
+            serde_json::to_string(a).unwrap(),
+            serde_json::to_string(b).unwrap()
+        );
     }
 
     fn temp_ws_with_state(state: &Value) -> std::path::PathBuf {
@@ -652,9 +817,18 @@ mod tests {
 
     #[test]
     fn team_state_key_cases() {
-        assert_eq!(team_state_key(&json!({"team_dir": "/ws/.team/myteam"})), "myteam");
-        assert_eq!(team_state_key(&json!({"team_dir": "/ws/.team/runtime", "session_name": "sess"})), "sess");
-        assert_eq!(team_state_key(&json!({"spec_path": "/ws/.team/alpha/TEAM.md"})), "alpha");
+        assert_eq!(
+            team_state_key(&json!({"team_dir": "/ws/.team/myteam"})),
+            "myteam"
+        );
+        assert_eq!(
+            team_state_key(&json!({"team_dir": "/ws/.team/runtime", "session_name": "sess"})),
+            "sess"
+        );
+        assert_eq!(
+            team_state_key(&json!({"spec_path": "/ws/.team/alpha/TEAM.md"})),
+            "alpha"
+        );
         assert_eq!(team_state_key(&json!({"session_name": "sname"})), "sname");
         assert_eq!(team_state_key(&json!({})), "current");
         assert_eq!(team_state_key(&json!({"session_name": ""})), "current");
@@ -691,11 +865,20 @@ mod tests {
             format_team_candidates(&team_state_candidates(&s)),
             "Candidates: ALIVE_CASE session=- agents=-; alive1 session=sa agents=-; nostatus session=sn agents=-"
         );
-        assert_eq!(format_team_candidates(&Map::new()), "No team state was found.");
+        assert_eq!(
+            format_team_candidates(&Map::new()),
+            "No team state was found."
+        );
         let mut m = Map::new();
-        m.insert("k2".to_string(), json!({"session_name": "s2", "agents": {"b": {}, "a": {}}}));
+        m.insert(
+            "k2".to_string(),
+            json!({"session_name": "s2", "agents": {"b": {}, "a": {}}}),
+        );
         m.insert("k1".to_string(), json!({}));
-        assert_eq!(format_team_candidates(&m), "Candidates: k1 session=- agents=-; k2 session=s2 agents=a,b");
+        assert_eq!(
+            format_team_candidates(&m),
+            "Candidates: k1 session=- agents=-; k2 session=s2 agents=a,b"
+        );
     }
 
     #[test]
@@ -717,7 +900,8 @@ mod tests {
 
     #[test]
     fn project_top_level_view_does_not_fall_to_toplevel_owner_when_teams_exist() {
-        let s = json!({"teams": {"t2": {"session_name": "s2"}}, "team_owner": {"pane_id": "%top2"}});
+        let s =
+            json!({"teams": {"t2": {"session_name": "s2"}}, "team_owner": {"pane_id": "%top2"}});
         let expected = json!({
             "session_name": "s2", "team_dir": null, "active_team_key": "t2",
             "teams": {"t2": {"session_name": "s2"}},
@@ -728,7 +912,10 @@ mod tests {
     #[test]
     fn merge_three_branches_golden() {
         same_repr(
-            &merge_workspace_team_state(&json!({}), &json!({"team_dir": "/w/.team/t1", "session_name": "s1", "agents": {}})),
+            &merge_workspace_team_state(
+                &json!({}),
+                &json!({"team_dir": "/w/.team/t1", "session_name": "s1", "agents": {}}),
+            ),
             &json!({"team_dir": "/w/.team/t1", "session_name": "s1", "agents": {},
                     "teams": {"t1": {"team_dir": "/w/.team/t1", "session_name": "s1", "agents": {}}}}),
         );
@@ -790,7 +977,9 @@ mod tests {
         let empty = select_runtime_state(&ws, Some("")).unwrap_err();
         let none = select_runtime_state(&ws, None).unwrap_err();
         assert_eq!(empty.to_string(), none.to_string());
-        assert!(empty.to_string().starts_with("multiple teams found in this workspace"));
+        assert!(empty
+            .to_string()
+            .starts_with("multiple teams found in this workspace"));
     }
 
     #[test]
@@ -823,7 +1012,9 @@ mod tests {
 
     #[test]
     fn select_runtime_state_single_alive_projects() {
-        let ws = temp_ws_with_state(&json!({"teams": {"only": {"status": "alive", "session_name": "so"}}}));
+        let ws = temp_ws_with_state(
+            &json!({"teams": {"only": {"status": "alive", "session_name": "so"}}}),
+        );
         let r = select_runtime_state(&ws, None).unwrap();
         assert_eq!(r["active_team_key"], json!("only"));
         assert_eq!(r["session_name"], json!("so"));

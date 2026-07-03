@@ -96,7 +96,10 @@ impl TeamRuntimePaths {
     }
 
     pub fn for_scope(scope: &TeamScope) -> Self {
-        Self::new(scope.workspace().to_path_buf(), scope.team_key().to_string())
+        Self::new(
+            scope.workspace().to_path_buf(),
+            scope.team_key().to_string(),
+        )
     }
 
     pub fn workspace(&self) -> &Path {
@@ -188,9 +191,7 @@ impl CommandScope {
         let alive = team_state_candidates(&state);
         match alive.len() {
             0 => Self::EmptyWorkspace,
-            1 => Self::Resolved(
-                alive.keys().next().cloned().unwrap_or_default(),
-            ),
+            1 => Self::Resolved(alive.keys().next().cloned().unwrap_or_default()),
             _ => {
                 let mut keys: Vec<String> = alive.keys().cloned().collect();
                 keys.sort();
@@ -241,7 +242,10 @@ mod tests {
     #[test]
     fn team_runtime_paths_layout_matches_existing_runtime_dir_layout() {
         let paths = TeamRuntimePaths::new(PathBuf::from("/ws/proj"), "alpha");
-        assert_eq!(paths.team_dir(), PathBuf::from("/ws/proj/.team/runtime/alpha"));
+        assert_eq!(
+            paths.team_dir(),
+            PathBuf::from("/ws/proj/.team/runtime/alpha")
+        );
         assert_eq!(
             paths.spec_path(),
             PathBuf::from("/ws/proj/.team/runtime/alpha/team.spec.yaml")
@@ -338,7 +342,10 @@ mod tests {
         .unwrap();
         let scope = CommandScope::resolve(&ws, None);
         assert!(scope.is_ambiguous());
-        assert_eq!(scope.candidates(), &["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(
+            scope.candidates(),
+            &["alpha".to_string(), "beta".to_string()]
+        );
     }
 
     #[test]

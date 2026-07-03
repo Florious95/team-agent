@@ -76,23 +76,47 @@ pub fn identity_machine_fingerprint(state: &Value, env: &dyn IdentityEnv) -> Str
 
 /// `_identity_workspace_abspath`(`state.py:264`):按 workspace→team_dir→spec_path→fallback
 /// 顺序派生 workspace 绝对路径(各分支先 `resolve()` 再做 parent 导航)。
-pub fn identity_workspace_abspath(state: &Value, env: &dyn IdentityEnv, workspace: Option<&Path>) -> String {
-    if let Some(ws) = state.get("workspace").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+pub fn identity_workspace_abspath(
+    state: &Value,
+    env: &dyn IdentityEnv,
+    workspace: Option<&Path>,
+) -> String {
+    if let Some(ws) = state
+        .get("workspace")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         return path_str(&realpath_like(Path::new(ws)));
     }
-    if let Some(td) = state.get("team_dir").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    if let Some(td) = state
+        .get("team_dir")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         // resolve().parent.parent
         let r = realpath_like(Path::new(td));
-        let pp = r.parent().and_then(Path::parent).map_or_else(|| r.clone(), Path::to_path_buf);
+        let pp = r
+            .parent()
+            .and_then(Path::parent)
+            .map_or_else(|| r.clone(), Path::to_path_buf);
         return path_str(&pp);
     }
-    if let Some(sp) = state.get("spec_path").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    if let Some(sp) = state
+        .get("spec_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         let r = realpath_like(Path::new(sp));
         let parent = r.parent();
         let grandparent = parent.and_then(Path::parent);
         // grandparent.name == ".team" ? grandparent.parent : parent
-        let result = if grandparent.and_then(Path::file_name).is_some_and(|n| n == std::ffi::OsStr::new(".team")) {
-            grandparent.and_then(Path::parent).map_or_else(|| r.clone(), Path::to_path_buf)
+        let result = if grandparent
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == std::ffi::OsStr::new(".team"))
+        {
+            grandparent
+                .and_then(Path::parent)
+                .map_or_else(|| r.clone(), Path::to_path_buf)
         } else {
             parent.map_or_else(|| r.clone(), Path::to_path_buf)
         };
@@ -146,12 +170,18 @@ pub fn migrate_team_identity(
     for key in ["team_owner", "leader_receiver"] {
         // record 是 dict 且其 leader_session_uuid 为空/缺 → 填。
         let needs = match state.get(key).and_then(Value::as_object) {
-            Some(r) => r.get("leader_session_uuid").and_then(Value::as_str).is_none_or(str::is_empty),
+            Some(r) => r
+                .get("leader_session_uuid")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty),
             None => false,
         };
         if needs {
             if let Some(obj) = state.get_mut(key).and_then(Value::as_object_mut) {
-                obj.insert("leader_session_uuid".to_string(), Value::String(leader_uuid.clone()));
+                obj.insert(
+                    "leader_session_uuid".to_string(),
+                    Value::String(leader_uuid.clone()),
+                );
                 changed = true;
             }
         }
@@ -160,7 +190,11 @@ pub fn migrate_team_identity(
 }
 
 /// `_migrate_state_identity`(`state.py:306`):顶层(有 session_name 时)+ 每个 team 子状态迁移。
-pub fn migrate_state_identity(state: &mut Value, env: &dyn IdentityEnv, workspace: &Path) -> Result<bool, ModelError> {
+pub fn migrate_state_identity(
+    state: &mut Value,
+    env: &dyn IdentityEnv,
+    workspace: &Path,
+) -> Result<bool, ModelError> {
     let mut changed = false;
     if state.get("session_name").is_some_and(json_truthy) {
         changed = migrate_team_identity(state, env, Some(workspace), None)?;
@@ -172,7 +206,11 @@ pub fn migrate_state_identity(state: &mut Value, env: &dyn IdentityEnv, workspac
         .unwrap_or_default();
     for tid in team_keys {
         // 取出 team_state &mut,就地迁移(team_id = key)。
-        if let Some(team_state) = state.get_mut("teams").and_then(Value::as_object_mut).and_then(|t| t.get_mut(&tid)) {
+        if let Some(team_state) = state
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|t| t.get_mut(&tid))
+        {
             if team_state.is_object() {
                 let c = migrate_team_identity(team_state, env, Some(workspace), Some(&tid))?;
                 changed = c || changed;
@@ -277,8 +315,7 @@ pub fn populate_team_owner_from_env(
     // Net behaviour preserved: still writes top-level (legacy dual-write);
     // 3b/3c/3d will remove the read-side projection promote, persist
     // copy-back, and finally the top-level write.
-    let record = crate::state::ownership::OwnershipWrite::new()
-        .with_team_owner(owner.clone());
+    let record = crate::state::ownership::OwnershipWrite::new().with_team_owner(owner.clone());
     crate::state::ownership::write_owner(state, &key, record);
     Ok(Some(owner))
 }
@@ -297,9 +334,17 @@ pub fn apply_first_time_leader_binding(
     now_iso: &str,
     command_looks_usable: impl Fn(&str, &str) -> bool,
 ) -> Value {
-    let command = pane_info.get("pane_current_command").and_then(Value::as_str).unwrap_or("");
+    let command = pane_info
+        .get("pane_current_command")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     // str(receiver.get("provider") or "")
-    let provider = receiver.get("provider").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("").to_string();
+    let provider = receiver
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
     if !command_looks_usable(command, &provider) {
         return json!({
             "ok": false,
@@ -331,8 +376,14 @@ pub fn apply_first_time_leader_binding(
         });
     }
     // receiver.update({leader_session_uuid, machine_fingerprint, owner_epoch: 0})
-    let id_uuid = identity.get("leader_session_uuid").cloned().unwrap_or(Value::Null);
-    let id_fp = identity.get("machine_fingerprint").cloned().unwrap_or(Value::Null);
+    let id_uuid = identity
+        .get("leader_session_uuid")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let id_fp = identity
+        .get("machine_fingerprint")
+        .cloned()
+        .unwrap_or(Value::Null);
     if let Some(r) = receiver.as_object_mut() {
         r.insert("leader_session_uuid".to_string(), id_uuid.clone());
         r.insert("machine_fingerprint".to_string(), id_fp.clone());
@@ -363,12 +414,30 @@ pub fn apply_first_time_leader_binding(
 /// `leader_env_exports`(`state.py:469`):receiver + identity → 6 个 leader env 导出(插入序)。
 pub fn leader_env_exports(receiver: &Value, identity: &Value) -> Vec<(String, String)> {
     vec![
-        ("TEAM_AGENT_LEADER_PANE_ID".to_string(), str_or_empty(receiver.get("pane_id"))),
-        ("TEAM_AGENT_LEADER_PROVIDER".to_string(), str_or_empty(receiver.get("provider"))),
-        ("TEAM_AGENT_LEADER_SESSION_UUID".to_string(), str_or_empty(identity.get("leader_session_uuid"))),
-        ("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), str_or_empty(identity.get("machine_fingerprint"))),
-        ("TEAM_AGENT_WORKSPACE".to_string(), str_or_empty(identity.get("workspace_abspath"))),
-        ("TEAM_AGENT_TEAM_ID".to_string(), str_or_empty(identity.get("team_id"))),
+        (
+            "TEAM_AGENT_LEADER_PANE_ID".to_string(),
+            str_or_empty(receiver.get("pane_id")),
+        ),
+        (
+            "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+            str_or_empty(receiver.get("provider")),
+        ),
+        (
+            "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+            str_or_empty(identity.get("leader_session_uuid")),
+        ),
+        (
+            "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+            str_or_empty(identity.get("machine_fingerprint")),
+        ),
+        (
+            "TEAM_AGENT_WORKSPACE".to_string(),
+            str_or_empty(identity.get("workspace_abspath")),
+        ),
+        (
+            "TEAM_AGENT_TEAM_ID".to_string(),
+            str_or_empty(identity.get("team_id")),
+        ),
     ]
 }
 
@@ -393,7 +462,9 @@ pub fn validate_leader_uuid_from_targets(receiver: &Value, targets: &Value) -> V
         .and_then(|arr| arr.iter().find(|item| item.get("pane_id") == pane_id));
     match target {
         Some(t) => json!({ "ok": true, "pane": t }),
-        None => json!({ "ok": false, "reason": "leader_pane_missing", "error": "tmux pane does not exist" }),
+        None => {
+            json!({ "ok": false, "reason": "leader_pane_missing", "error": "tmux pane does not exist" })
+        }
     }
 }
 
@@ -401,12 +472,19 @@ pub fn validate_leader_uuid_from_targets(receiver: &Value, targets: &Value) -> V
 
 /// `str(v or "")`(string 域):truthy 字符串 → 自身,否则 `""`。
 fn str_or_empty(v: Option<&Value>) -> String {
-    v.and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("").to_string()
+    v.and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Python `repr()` of a `str`(与 `model::spec::py_repr_str` 同实现)。
 fn py_repr_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::new();
     out.push(quote);
     for c in s.chars() {
@@ -443,10 +521,18 @@ mod tests {
         }
     }
     fn env(pairs: &[(&str, &str)]) -> MockEnv {
-        MockEnv(pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect())
+        MockEnv(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        )
     }
     fn same_repr(a: &Value, b: &Value) {
-        assert_eq!(serde_json::to_string(a).unwrap(), serde_json::to_string(b).unwrap());
+        assert_eq!(
+            serde_json::to_string(a).unwrap(),
+            serde_json::to_string(b).unwrap()
+        );
     }
     fn temp_ws() -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -488,8 +574,17 @@ mod tests {
         assert_eq!(identity_os_user(&env(&[])), "");
         // state record fp 优先 env。
         let s = json!({"team_owner": {"machine_fingerprint": "from-owner"}});
-        assert_eq!(identity_machine_fingerprint(&s, &env(&[("TEAM_AGENT_MACHINE_FINGERPRINT", "envfp")])), "from-owner");
-        assert_eq!(identity_machine_fingerprint(&json!({}), &env(&[("TEAM_AGENT_MACHINE_FINGERPRINT", "envfp")])), "envfp");
+        assert_eq!(
+            identity_machine_fingerprint(&s, &env(&[("TEAM_AGENT_MACHINE_FINGERPRINT", "envfp")])),
+            "from-owner"
+        );
+        assert_eq!(
+            identity_machine_fingerprint(
+                &json!({}),
+                &env(&[("TEAM_AGENT_MACHINE_FINGERPRINT", "envfp")])
+            ),
+            "envfp"
+        );
     }
 
     #[test]
@@ -502,7 +597,8 @@ mod tests {
             ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
         ];
         // derived(golden uuid 由 Python 真相源算出;/ws/proj 两机皆不存在 → realpath 词法等价)。
-        let cid = caller_identity_from_env(Some(&json!({})), &env(&base), Some("teamA"), None).unwrap();
+        let cid =
+            caller_identity_from_env(Some(&json!({})), &env(&base), Some("teamA"), None).unwrap();
         assert_eq!(cid.leader_session_uuid, "379f5e361ec429edabea7022391e8ca8");
         assert_eq!(cid.leader_session_uuid_source, "derived");
         assert_eq!(cid.pane_id, "%5");
@@ -511,12 +607,14 @@ mod tests {
 
         let mut env_v: Vec<(&str, &str)> = base.to_vec();
         env_v.push(("TEAM_AGENT_LEADER_SESSION_UUID", "envuuid123"));
-        let cid_env = caller_identity_from_env(Some(&json!({})), &env(&env_v), Some("teamA"), None).unwrap();
+        let cid_env =
+            caller_identity_from_env(Some(&json!({})), &env(&env_v), Some("teamA"), None).unwrap();
         assert_eq!(cid_env.leader_session_uuid, "envuuid123");
         assert_eq!(cid_env.leader_session_uuid_source, "env");
 
         env_v.push(("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", "ovr999"));
-        let cid_ovr = caller_identity_from_env(Some(&json!({})), &env(&env_v), Some("teamA"), None).unwrap();
+        let cid_ovr =
+            caller_identity_from_env(Some(&json!({})), &env(&env_v), Some("teamA"), None).unwrap();
         assert_eq!(cid_ovr.leader_session_uuid, "ovr999");
         assert_eq!(cid_ovr.leader_session_uuid_source, "explicit-override");
     }
@@ -525,7 +623,10 @@ mod tests {
     fn pane_id_falls_back_to_tmux_pane() {
         let cid = caller_identity_from_env(
             Some(&json!({})),
-            &env(&[("TMUX_PANE", "%tmux"), ("TEAM_AGENT_LEADER_SESSION_UUID", "u")]),
+            &env(&[
+                ("TMUX_PANE", "%tmux"),
+                ("TEAM_AGENT_LEADER_SESSION_UUID", "u"),
+            ]),
             Some("t"),
             None,
         )
@@ -537,14 +638,23 @@ mod tests {
     fn migrate_team_identity_fills_then_idempotent() {
         let e = env(&[("USER", "u"), ("TEAM_AGENT_MACHINE_FINGERPRINT", "fp")]);
         let mut state = json!({"team_owner": {"pane_id": "%1"}, "session_name": "s"});
-        let changed = migrate_team_identity(&mut state, &e, Some(Path::new("/ws")), Some("tid")).unwrap();
+        let changed =
+            migrate_team_identity(&mut state, &e, Some(Path::new("/ws")), Some("tid")).unwrap();
         assert!(changed);
-        let uuid = state["team_owner"]["leader_session_uuid"].as_str().unwrap().to_string();
+        let uuid = state["team_owner"]["leader_session_uuid"]
+            .as_str()
+            .unwrap()
+            .to_string();
         // 与 derive 公式一致(workspace=/ws 不存在 → 词法 "/ws")。
-        let expected = LeaderSessionUuid::derive("fp", "/ws", "u", "tid").unwrap().as_str().to_string();
+        let expected = LeaderSessionUuid::derive("fp", "/ws", "u", "tid")
+            .unwrap()
+            .as_str()
+            .to_string();
         assert_eq!(uuid, expected);
         // 二次调用:已有非空 uuid → 不改。
-        assert!(!migrate_team_identity(&mut state, &e, Some(Path::new("/ws")), Some("tid")).unwrap());
+        assert!(
+            !migrate_team_identity(&mut state, &e, Some(Path::new("/ws")), Some("tid")).unwrap()
+        );
     }
 
     #[test]
@@ -557,8 +667,20 @@ mod tests {
         });
         let changed = migrate_state_identity(&mut state, &e, Path::new("/ws")).unwrap();
         assert!(changed);
-        assert!(state["team_owner"]["leader_session_uuid"].as_str().unwrap().len() == 32);
-        assert!(state["teams"]["t1"]["team_owner"]["leader_session_uuid"].as_str().unwrap().len() == 32);
+        assert!(
+            state["team_owner"]["leader_session_uuid"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 32
+        );
+        assert!(
+            state["teams"]["t1"]["team_owner"]["leader_session_uuid"]
+                .as_str()
+                .unwrap()
+                .len()
+                == 32
+        );
         // t1 的 uuid 用 team_id="t1" 派生,异于顶层(team_id=team_state_key=session "s")。
         assert_ne!(
             state["team_owner"]["leader_session_uuid"],
@@ -581,7 +703,9 @@ mod tests {
             ("TEAM_AGENT_LEADER_SESSION_UUID", "u1"),
         ]);
         let mut state = json!({});
-        let owner = populate_team_owner_from_env(&mut state, "autopopulate", &e_with_pane, "TS").unwrap().unwrap();
+        let owner = populate_team_owner_from_env(&mut state, "autopopulate", &e_with_pane, "TS")
+            .unwrap()
+            .unwrap();
         same_repr(
             &owner,
             &json!({"pane_id": "%9", "provider": "codex", "machine_fingerprint": "fp",
@@ -596,14 +720,20 @@ mod tests {
 
         // 无 pane_id → None,不写 owner。
         let mut state2 = json!({});
-        assert!(populate_team_owner_from_env(&mut state2, "x", &env(&[]), "TS").unwrap().is_none());
+        assert!(
+            populate_team_owner_from_env(&mut state2, "x", &env(&[]), "TS")
+                .unwrap()
+                .is_none()
+        );
         let team_key2 = crate::state::projection::team_state_key(&state2);
         assert!(crate::state::ownership::read_owner_value(&state2, &team_key2).is_none());
 
         // 已有 team_owner(缺 uuid)→ 迁移补 uuid 后返回。Legacy top-level shape
         // still recognized (read precedence supports the migration window).
         let mut state3 = json!({"team_owner": {"pane_id": "%1", "machine_fingerprint": "fp"}, "session_name": "s"});
-        let o3 = populate_team_owner_from_env(&mut state3, "x", &env(&[("USER", "u")]), "TS").unwrap().unwrap();
+        let o3 = populate_team_owner_from_env(&mut state3, "x", &env(&[("USER", "u")]), "TS")
+            .unwrap()
+            .unwrap();
         assert_eq!(o3["leader_session_uuid"].as_str().unwrap().len(), 32);
     }
 
@@ -620,9 +750,22 @@ mod tests {
         let mut state = json!({});
         let mut receiver = json!({"pane_id": "%9", "provider": "codex"});
         let identity = json!({"leader_session_uuid": "uuidX", "machine_fingerprint": "fpX"});
-        let pane = json!({"pane_current_command": "codex", "pane_current_path": ws.to_string_lossy()});
-        let r = apply_first_time_leader_binding(&ws, &mut state, &mut receiver, &pane, &identity, "claim", now, |_c, _p| true);
-        same_repr(&r, &json!({"ok": true, "pane": pane, "warning": null, "first_time": true}));
+        let pane =
+            json!({"pane_current_command": "codex", "pane_current_path": ws.to_string_lossy()});
+        let r = apply_first_time_leader_binding(
+            &ws,
+            &mut state,
+            &mut receiver,
+            &pane,
+            &identity,
+            "claim",
+            now,
+            |_c, _p| true,
+        );
+        same_repr(
+            &r,
+            &json!({"ok": true, "pane": pane, "warning": null, "first_time": true}),
+        );
         let team_key = crate::state::projection::team_state_key(&state);
         let team_owner = crate::state::ownership::read_owner_value(&state, &team_key)
             .expect("Stage 3d: team_owner reachable via repository");
@@ -648,11 +791,24 @@ mod tests {
         // wrong command(闭包返回 false)。
         let mut s1 = json!({});
         let mut r1 = json!({"pane_id": "%9", "provider": "codex"});
-        let pane1 = json!({"pane_current_command": "bash", "pane_current_path": ws.to_string_lossy()});
-        let res1 = apply_first_time_leader_binding(&ws, &mut s1, &mut r1, &pane1, &identity, "claim", now, |_c, _p| false);
+        let pane1 =
+            json!({"pane_current_command": "bash", "pane_current_path": ws.to_string_lossy()});
+        let res1 = apply_first_time_leader_binding(
+            &ws,
+            &mut s1,
+            &mut r1,
+            &pane1,
+            &identity,
+            "claim",
+            now,
+            |_c, _p| false,
+        );
         assert_eq!(res1["ok"], json!(false));
         assert_eq!(res1["reason"], json!("leader_pane_wrong_command"));
-        assert_eq!(res1["error"], json!("pane command 'bash' is not a leader host"));
+        assert_eq!(
+            res1["error"],
+            json!("pane command 'bash' is not a leader host")
+        );
         assert_eq!(res1["pane"], pane1);
         assert!(s1.get("team_owner").is_none(), "拒绝不得写 state");
 
@@ -660,12 +816,23 @@ mod tests {
         let mut s2 = json!({});
         let mut r2 = json!({"pane_id": "%9", "provider": "codex"});
         let pane2 = json!({"pane_current_command": "codex", "pane_current_path": "/nowhere/else"});
-        let res2 = apply_first_time_leader_binding(&ws, &mut s2, &mut r2, &pane2, &identity, "claim", now, |_c, _p| true);
+        let res2 = apply_first_time_leader_binding(
+            &ws,
+            &mut s2,
+            &mut r2,
+            &pane2,
+            &identity,
+            "claim",
+            now,
+            |_c, _p| true,
+        );
         assert_eq!(res2["reason"], json!("leader_pane_wrong_workspace"));
         let ws_repr = py_repr_str(&path_str(&realpath_like(&ws)));
         assert_eq!(
             res2["error"],
-            json!(format!("pane cwd '/nowhere/else' does not match workspace {ws_repr}"))
+            json!(format!(
+                "pane cwd '/nowhere/else' does not match workspace {ws_repr}"
+            ))
         );
         assert!(s2.get("team_owner").is_none());
     }
@@ -680,9 +847,18 @@ mod tests {
             exports,
             vec![
                 ("TEAM_AGENT_LEADER_PANE_ID".to_string(), "%1".to_string()),
-                ("TEAM_AGENT_LEADER_PROVIDER".to_string(), "codex".to_string()),
-                ("TEAM_AGENT_LEADER_SESSION_UUID".to_string(), "u1".to_string()),
-                ("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "f1".to_string()),
+                (
+                    "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+                    "codex".to_string()
+                ),
+                (
+                    "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+                    "u1".to_string()
+                ),
+                (
+                    "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+                    "f1".to_string()
+                ),
                 ("TEAM_AGENT_WORKSPACE".to_string(), "/w".to_string()),
                 ("TEAM_AGENT_TEAM_ID".to_string(), "t".to_string()),
             ]
@@ -691,13 +867,22 @@ mod tests {
 
     #[test]
     fn validate_leader_uuid_from_targets_cases() {
-        same_repr(&validate_leader_uuid_from_targets(&json!({"provider": "fake"}), &json!({})), &json!({"ok": true}));
         same_repr(
-            &validate_leader_uuid_from_targets(&json!({"provider": "codex"}), &json!({"ok": false, "error": "boom"})),
+            &validate_leader_uuid_from_targets(&json!({"provider": "fake"}), &json!({})),
+            &json!({"ok": true}),
+        );
+        same_repr(
+            &validate_leader_uuid_from_targets(
+                &json!({"provider": "codex"}),
+                &json!({"ok": false, "error": "boom"}),
+            ),
             &json!({"ok": false, "reason": "leader_uuid_lookup_failed", "error": "boom"}),
         );
         same_repr(
-            &validate_leader_uuid_from_targets(&json!({"provider": "codex"}), &json!({"ok": false})),
+            &validate_leader_uuid_from_targets(
+                &json!({"provider": "codex"}),
+                &json!({"ok": false}),
+            ),
             &json!({"ok": false, "reason": "leader_uuid_lookup_failed", "error": "tmux target scan failed"}),
         );
         same_repr(

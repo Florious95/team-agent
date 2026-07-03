@@ -118,7 +118,9 @@ pub(super) fn spawn_agent_window(
     // persisted agent JSON (state's agent["effort"] field, set by launch).
     let restart_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(agent, provider);
     if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
-        agent, provider, agent_id.as_str(),
+        agent,
+        provider,
+        agent_id.as_str(),
     ) {
         let _ = crate::event_log::EventLog::new(workspace)
             .write("provider.effort_unsupported", event_value);
@@ -200,10 +202,8 @@ pub(super) fn spawn_agent_window(
             .and_then(|i| plan.argv.get(i + 1))
             .cloned();
         let env_overlay_keys: Vec<&String> = env.keys().collect();
-        let tmux_start_mode_pre_spawn = predict_tmux_start_mode(
-            layout_placement,
-            into_existing_session,
-        );
+        let tmux_start_mode_pre_spawn =
+            predict_tmux_start_mode(layout_placement, into_existing_session);
         let spawn_epoch = state_spawn_epoch_for_agent(workspace, agent_id);
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(
@@ -510,16 +510,18 @@ pub(super) fn save_restart_projected_state(
     workspace: &Path,
     state: &mut serde_json::Value,
     team_key: &str,
+    topology_authority_agent_ids: &[&str],
 ) -> Result<(), LifecycleError> {
     sync_restart_team_projections(state, team_key);
-    crate::state::projection::save_team_scoped_state(workspace, state)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(
+        workspace,
+        state,
+        topology_authority_agent_ids,
+    )
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
-pub(super) fn restart_projection_team_key(
-    state: &serde_json::Value,
-    team: Option<&str>,
-) -> String {
+pub(super) fn restart_projection_team_key(state: &serde_json::Value, team: Option<&str>) -> String {
     team.filter(|key| !key.is_empty())
         .map(str::to_string)
         .or_else(|| {
@@ -696,10 +698,7 @@ pub(super) fn resume_backing_probe_for_agent(
                 checked_paths.push(root.clone());
             }
             rollout_ok
-                || codex_session_transcript_exists_with_roots(
-                    session_id.as_str(),
-                    &scan_roots,
-                )
+                || codex_session_transcript_exists_with_roots(session_id.as_str(), &scan_roots)
         }
         Provider::Claude | Provider::ClaudeCode => {
             let rollout_ok = rollout_path_exists(rollout_path);
@@ -796,7 +795,8 @@ fn claude_projects_root_for_agent(agent: &serde_json::Value) -> Option<PathBuf> 
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude").join("projects"))
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".claude").join("projects"))
         })
 }
 

@@ -59,7 +59,10 @@ pub fn detect_idle_fallbacks(
     let idle_workers = stmt
         .query_map(params![team.as_str()], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let worker_set = workers.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let worker_set = workers
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let idle_set = idle_workers
         .iter()
         .cloned()
@@ -74,8 +77,16 @@ pub fn detect_idle_fallbacks(
     }
     let now = chrono::Utc::now().to_rfc3339();
     let mut next_state = state.clone();
-    register_idle_fallback_suppression(&mut next_state, store, &team, &idle_workers, &now)?;
-    crate::state::persist::save_runtime_state(workspace, &next_state)?;
+    let suppression_snapshots =
+        idle_fallback_suppression_snapshots(&next_state, store, &team, &idle_workers)?;
+    register_idle_fallback_suppression(&mut next_state, &team, &now, &suppression_snapshots);
+    crate::state::persist::save_runtime_state_reapplying_after_conflict(
+        workspace,
+        &next_state,
+        |latest| {
+            register_idle_fallback_suppression(latest, &team, &now, &suppression_snapshots);
+        },
+    )?;
     let alert_count = idle_workers.len();
     let content = format!(
         "Idle fallback: all workers idle while {obligation_count} undelivered obligation(s) remain."
@@ -213,7 +224,11 @@ fn active_team_key(workspace: &Path, state: &Value) -> String {
         .and_then(Value::as_str)
         .filter(|team| !team.is_empty())
         .map(ToString::to_string)
-        .or_else(|| workspace.file_name().map(|name| name.to_string_lossy().to_string()))
+        .or_else(|| {
+            workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
         .unwrap_or_else(|| "current".to_string())
 }
 
@@ -298,14 +313,13 @@ fn idle_fallback_suppressed(
         && delivered == delivered_message_ids(store, team, agent_id)?)
 }
 
-fn register_idle_fallback_suppression(
-    state: &mut Value,
+fn idle_fallback_suppression_snapshots(
+    state: &Value,
     store: &MessageStore,
     team: &str,
     idle_workers: &[String],
-    now: &str,
-) -> Result<(), MessagingError> {
-    let snapshots = idle_workers
+) -> Result<Vec<(String, Vec<String>, Vec<String>)>, MessagingError> {
+    idle_workers
         .iter()
         .map(|agent_id| {
             Ok((
@@ -314,23 +328,31 @@ fn register_idle_fallback_suppression(
                 delivered_message_ids(store, team, agent_id)?,
             ))
         })
-        .collect::<Result<Vec<_>, MessagingError>>()?;
+        .collect::<Result<Vec<_>, MessagingError>>()
+}
+
+fn register_idle_fallback_suppression(
+    state: &mut Value,
+    team: &str,
+    now: &str,
+    snapshots: &[(String, Vec<String>, Vec<String>)],
+) {
     let Some(root) = state.as_object_mut() else {
-        return Ok(());
+        return;
     };
     let Some(coordinator) = root
         .entry("coordinator")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
     else {
-        return Ok(());
+        return;
     };
     let Some(last) = coordinator
         .entry("idle_fallback_last_fired_at")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
     else {
-        return Ok(());
+        return;
     };
     last.insert(team.to_string(), serde_json::Value::String(now.to_string()));
     let Some(all) = coordinator
@@ -338,18 +360,18 @@ fn register_idle_fallback_suppression(
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
     else {
-        return Ok(());
+        return;
     };
     let Some(team_map) = all
         .entry(team.to_string())
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
     else {
-        return Ok(());
+        return;
     };
     for (agent_id, assigned, delivered) in snapshots {
         let Some(agent_map) = team_map
-            .entry(agent_id)
+            .entry(agent_id.clone())
             .or_insert_with(|| serde_json::json!({}))
             .as_object_mut()
         else {
@@ -367,7 +389,6 @@ fn register_idle_fallback_suppression(
             }),
         );
     }
-    Ok(())
 }
 
 fn timestamp_in_future(ts: &str) -> bool {
@@ -407,7 +428,11 @@ fn assigned_task_ids(state: &Value, agent_id: &str) -> Vec<String> {
             tasks
                 .iter()
                 .filter(|task| task.get("assignee").and_then(Value::as_str) == Some(agent_id))
-                .filter_map(|task| task.get("id").and_then(Value::as_str).map(ToString::to_string))
+                .filter_map(|task| {
+                    task.get("id")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string)
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

@@ -1,7 +1,7 @@
-use super::*;
 use super::common::*;
 use super::selection::decide_start_mode;
 use super::team_state::write_team_state;
+use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `start_agent(workspace, agent_id, force, open_display, allow_fresh, team)`
@@ -24,8 +24,7 @@ pub fn start_agent(
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     start_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -100,14 +99,15 @@ pub(crate) fn start_agent_at_paths(
         .and_then(|v| v.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?
         .clone();
-    let agent =
-        rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
+    let agent = rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
     if raw_agent
         .get("paused")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(StartAgentOutcome::Paused { agent_id: agent_id.clone() });
+        return Ok(StartAgentOutcome::Paused {
+            agent_id: agent_id.clone(),
+        });
     }
     let session_name = state_session_name(&state);
     let window = agent_window(&agent, agent_id);
@@ -139,7 +139,7 @@ pub(crate) fn start_agent_at_paths(
     if !force && agent_live {
         mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
         let team_key = restart_projection_team_key(&state, team);
-        save_restart_projected_state(workspace, &mut state, &team_key)?;
+        save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
         if let Ok(spec) = load_team_spec(spec_workspace) {
             write_team_state(spec_workspace, &spec, &state)?;
         }
@@ -256,7 +256,7 @@ pub(crate) fn start_agent_at_paths(
     // after spawn" race with coordinator and no double source of truth.
     crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
     let team_key = restart_projection_team_key(&state, team);
-    save_restart_projected_state(workspace, &mut state, &team_key)?;
+    save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
     write_start_agent_start_event(
         workspace,
         agent_id,
@@ -350,9 +350,11 @@ fn pane_conflicts_with_leader_or_other(
     let agent_socket = tmux_socket_field(agent).or(state_socket);
     // Check leader anchor.
     for key in ["leader_receiver", "team_owner"] {
-        if state.get(key).and_then(pane_socket_binding).is_some_and(|leader| {
-            pane_conflicts_on_same_socket(pane_id, agent_socket, leader)
-        }) {
+        if state
+            .get(key)
+            .and_then(pane_socket_binding)
+            .is_some_and(|leader| pane_conflicts_on_same_socket(pane_id, agent_socket, leader))
+        {
             return true;
         }
     }
@@ -424,10 +426,7 @@ fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_
     })
 }
 
-fn agent_pane_live(
-    transport: &dyn crate::transport::Transport,
-    agent: &serde_json::Value,
-) -> bool {
+fn agent_pane_live(transport: &dyn crate::transport::Transport, agent: &serde_json::Value) -> bool {
     let Some(pane) = agent
         .get("pane_id")
         .and_then(serde_json::Value::as_str)
@@ -490,8 +489,7 @@ fn list_same_role_panes(
 /// caller falls back to safer behavior (refuse stop, surface
 /// RequirementUnmet/transport error) when this returns false.
 fn is_per_agent_window(window: &str, agent_id: &AgentId) -> bool {
-    window == agent_id.as_str()
-        && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
+    window == agent_id.as_str() && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
 }
 
 fn tmux_start_mode_for_spawn(
@@ -622,8 +620,7 @@ pub fn stop_agent(
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     stop_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -666,8 +663,7 @@ pub(super) fn stop_agent_at_paths(
     let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
     let spec = load_team_spec(spec_workspace)?;
-    let agent = find_spec_agent(&spec, agent_id)
-        .ok_or_else(|| unknown_worker(agent_id))?;
+    let agent = find_spec_agent(&spec, agent_id).ok_or_else(|| unknown_worker(agent_id))?;
     let session_name = state_session_name_from_spec(&state, &spec);
     let window = state
         .get("agents")
@@ -746,11 +742,15 @@ pub(super) fn stop_agent_at_paths(
             };
         if let Err(e) = kill_result {
             let stderr = match &e {
-                crate::transport::TransportError::Subprocess { stderr, .. } => stderr.trim().to_string(),
+                crate::transport::TransportError::Subprocess { stderr, .. } => {
+                    stderr.trim().to_string()
+                }
                 other => other.to_string(),
             };
             let _ = write_stop_window_failed_event(workspace, agent_id, &target_str, &stderr);
-            return Err(LifecycleError::Transport(format!("failed to stop agent {agent_id}: {stderr}")));
+            return Err(LifecycleError::Transport(format!(
+                "failed to stop agent {agent_id}: {stderr}"
+            )));
         }
         // 0.4.6 Stage 1: drain-and-prove. The pre-fix path trusted `kill_pane`'s
         // success return without waiting for the pane / pid to actually exit.
@@ -773,8 +773,12 @@ pub(super) fn stop_agent_at_paths(
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
-    crate::state::projection::save_team_scoped_state(workspace, &state)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(
+        workspace,
+        &state,
+        &[agent_id.as_str()],
+    )
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:96-99: snapshot (side-effect), then state_file = write_team_state path.
     // snapshot.py:19-21 returns None silently when session_name is falsy — mirror that no-op here so
     // a workspace whose persisted state lacks session_name proceeds to write team_state and return ok
@@ -816,7 +820,9 @@ pub(super) fn resolve_team_scoped_state_or_refuse(
             .unwrap_or("");
         return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
     }
-    state.ok_or_else(|| LifecycleError::StatePersist("resolve_team_scoped_state returned no state".to_string()))
+    state.ok_or_else(|| {
+        LifecycleError::StatePersist("resolve_team_scoped_state returned no state".to_string())
+    })
 }
 
 fn mark_agent_started(
@@ -851,7 +857,10 @@ fn mark_agent_started(
     // codex, claude, copilot. Reset_agent --discard-session already does
     // this at common.rs:1144-1188; here we mirror it for start-agent /
     // restart-agent fresh paths so the fresh-tuple invariant is global.
-    if matches!(start_mode, StartMode::Fresh | StartMode::FreshAfterMissingRollout) {
+    if matches!(
+        start_mode,
+        StartMode::Fresh | StartMode::FreshAfterMissingRollout
+    ) {
         for field in [
             "session_id",
             "rollout_path",
@@ -908,17 +917,10 @@ fn mark_agent_started(
     // so future restart/start cycles read it directly from the agent row.
     if let Some(ref team_id) = spawn.owner_team_id {
         if !team_id.is_empty() {
-            agent.insert(
-                "owner_team_id".to_string(),
-                serde_json::json!(team_id),
-            );
+            agent.insert("owner_team_id".to_string(), serde_json::json!(team_id));
         }
     }
-    crate::lifecycle::launch::persist_command_plan_state(
-        agent,
-        &spawn.plan,
-        &spawn.profile_launch,
-    );
+    crate::lifecycle::launch::persist_command_plan_state(agent, &spawn.plan, &spawn.profile_launch);
     crate::lifecycle::launch::persist_effective_approval_policy(agent, safety);
     if let Some(placement) = spawn.layout_placement.as_ref() {
         agent.insert(
@@ -929,7 +931,10 @@ fn mark_agent_started(
             "layout_index".to_string(),
             serde_json::json!(placement.layout_index),
         );
-        agent.insert("pane_index".to_string(), serde_json::json!(placement.pane_index));
+        agent.insert(
+            "pane_index".to_string(),
+            serde_json::json!(placement.pane_index),
+        );
         agent.insert(
             "display".to_string(),
             serde_json::json!({
@@ -976,8 +981,7 @@ pub fn reset_agent(
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     reset_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -1216,12 +1220,12 @@ fn reset_agent_at_paths(
     sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.
-    crate::state::projection::save_team_scoped_state_with_tombstoned_agents(
+    crate::state::projection::save_team_scoped_state_with_tombstone_lifecycle_topology_authority(
         workspace,
         &state,
         &[agent_id.as_str()],
     )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:125: write_team_state after the discard-save (the intermediate stopped snapshot).
     write_team_state(spec_workspace, &spec, &state)?;
     write_reset_tombstone_event(
@@ -1307,12 +1311,11 @@ fn write_start_agent_start_event(
     // Contract C / F6.4: event log must record the same context-aware argv that the
     // actual spawn used — so the role/tools/MCP context appears in `start_agent.agent_start`.
     let safety = crate::lifecycle::launch::effective_runtime_config_for_worker_spawn()?;
-    let command_agent =
-        crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
-            agent,
-            Some(agent_id.as_str()),
-            provider,
-        );
+    let command_agent = crate::lifecycle::worker_command_context::WorkerCommandAgent::from_json(
+        agent,
+        Some(agent_id.as_str()),
+        provider,
+    );
     let system_prompt =
         crate::lifecycle::worker_command_context::compile_worker_system_prompt(&command_agent)?;
     let tools = crate::lifecycle::worker_command_context::resolved_tool_strings_for_command(
@@ -1324,17 +1327,18 @@ fn write_start_agent_start_event(
     let mcp_config = adapter
         .mcp_config(auth_mode)
         .map_err(|e| LifecycleError::Provider(e.to_string()))?;
-    let team_id = agent
-        .get("owner_team_id")
-        .and_then(|v| v.as_str());
+    let team_id = agent.get("owner_team_id").and_then(|v| v.as_str());
     let mcp_config = crate::lifecycle::launch::resolve_mcp_config(
         mcp_config,
         workspace,
         agent_id.as_str(),
         team_id.unwrap_or(""),
     );
-    let mcp_config_path =
-        crate::lifecycle::launch::write_worker_mcp_config(workspace, agent_id.as_str(), &mcp_config)?;
+    let mcp_config_path = crate::lifecycle::launch::write_worker_mcp_config(
+        workspace,
+        agent_id.as_str(),
+        &mcp_config,
+    )?;
     let profile_launch =
         crate::lifecycle::profile_launch::prepare_provider_profile_launch_from_json(
             workspace,
@@ -1342,16 +1346,15 @@ fn write_start_agent_start_event(
             agent,
             Some(&mcp_config),
         )?;
-    let command_model = profile_launch
-        .command_overrides
-        .model
-        .as_deref()
-        .or(model);
+    let command_model = profile_launch.command_overrides.model.as_deref().or(model);
     // 0.4.x provider effort MVP: start_agent path preserves effort from the
     // persisted agent JSON.
-    let start_agent_effort = crate::lifecycle::launch::provider_effort_for_spawn_json(&agent, provider);
+    let start_agent_effort =
+        crate::lifecycle::launch::provider_effort_for_spawn_json(&agent, provider);
     if let Some(event_value) = crate::lifecycle::launch::provider_effort_event_if_dropped_json(
-        &agent, provider, agent_id.as_str(),
+        &agent,
+        provider,
+        agent_id.as_str(),
     ) {
         let _ = crate::event_log::EventLog::new(workspace)
             .write("provider.effort_unsupported", event_value);
@@ -1443,10 +1446,7 @@ pub(super) fn write_stop_drain_event(
         }
     }
     crate::event_log::EventLog::new(workspace)
-        .write(
-            "stop_agent.drain",
-            serde_json::Value::Object(payload),
-        )
+        .write("stop_agent.drain", serde_json::Value::Object(payload))
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
 }

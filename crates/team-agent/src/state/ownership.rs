@@ -164,13 +164,11 @@ pub fn write_owner(state: &mut Value, team_key: &str, record: OwnershipWrite) {
     }
     // Canonical teams.<key> write. Stage 5 will move this to a per-team
     // state file; the call sites do not change.
-    let teams = state
-        .as_object_mut()
-        .and_then(|root| {
-            root.entry("teams")
-                .or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-        });
+    let teams = state.as_object_mut().and_then(|root| {
+        root.entry("teams")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+    });
     let Some(teams) = teams else { return };
     let entry = teams
         .entry(team_key.to_string())
@@ -402,7 +400,10 @@ mod tests {
         assert!(state.get("owner_epoch").is_none());
         assert!(state.get("leader_receiver").is_none());
         // Canonical teams.<key>: written.
-        assert_eq!(state["teams"]["alpha"]["team_owner"]["pane_id"], json!("%new"));
+        assert_eq!(
+            state["teams"]["alpha"]["team_owner"]["pane_id"],
+            json!("%new")
+        );
         assert_eq!(state["teams"]["alpha"]["owner_epoch"], json!(7));
         assert_eq!(
             state["teams"]["alpha"]["leader_receiver"]["pane_id"],
@@ -442,9 +443,9 @@ mod tests {
         write_owner(&mut state, "", record);
         assert_eq!(state["team_owner"]["pane_id"], json!("%top"));
         assert!(
-            state.get("teams").is_none_or(|teams| teams
-                .as_object()
-                .is_some_and(|map| map.is_empty())),
+            state
+                .get("teams")
+                .is_none_or(|teams| teams.as_object().is_some_and(|map| map.is_empty())),
             "empty team_key must NOT touch teams.<key>"
         );
     }

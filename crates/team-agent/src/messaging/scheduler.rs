@@ -10,7 +10,9 @@ use crate::transport::{PaneId, Transport};
 
 use super::delivery::{deliver_stored_message, handle_trust_retry_needed};
 use super::helpers::{parse_scheduled_kind, status_wire};
-use super::{AlertType, MessagingError, ScheduledKind, TrustRetryPayload, TRUST_RETRY_MAX_ATTEMPTS};
+use super::{
+    AlertType, MessagingError, ScheduledKind, TrustRetryPayload, TRUST_RETRY_MAX_ATTEMPTS,
+};
 
 /// `_fire_due_scheduled_events` (`scheduler.py:41`):coordinator tick 的调度器心脏 —— 分派到期
 /// `send`/`health_ping`/`trust_retry` ([`ScheduledKind`] 穷尽 match),send 失败有界重试。
@@ -50,9 +52,15 @@ pub fn fire_due_scheduled_events(
                     let outcome = deliver_stored_message(
                         workspace,
                         Some(&target),
-                        payload.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+                        payload
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
                         None,
-                        payload.get("sender").and_then(|v| v.as_str()).unwrap_or("leader"),
+                        payload
+                            .get("sender")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("leader"),
                         payload
                             .get("requires_ack")
                             .and_then(|v| v.as_bool())
@@ -61,7 +69,10 @@ pub fn fire_due_scheduled_events(
                             .get("wait_visible")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false),
-                        payload.get("timeout").and_then(|v| v.as_f64()).unwrap_or(30.0),
+                        payload
+                            .get("timeout")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(30.0),
                         None,
                     )?;
                     serde_json::json!({
@@ -114,7 +125,10 @@ pub fn fire_due_scheduled_events(
 
         let (status, result_json) = match fire_one() {
             Ok(result) => {
-                let ok = result.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+                let ok = result
+                    .get("ok")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 (if ok { "done" } else { "failed" }, result.to_string())
             }
             Err(error) => {
@@ -242,7 +256,26 @@ pub fn stuck_cancel(
             },
         );
     }
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::persist::save_runtime_state_reapplying_after_conflict(
+        workspace,
+        &state,
+        |latest| {
+            for kind in &alert_types {
+                upsert_suppression(
+                    latest,
+                    SuppressionRecord {
+                        team: &team,
+                        agent_id,
+                        alert_type: kind,
+                        suppressed_by,
+                        suppressed_at: &now,
+                        assigned_task_ids: assigned.clone(),
+                        delivered_message_ids: delivered.clone(),
+                    },
+                );
+            }
+        },
+    )?;
     crate::event_log::EventLog::new(workspace).write(
         "coordinator.idle_alert_suppressed",
         serde_json::json!({
@@ -273,7 +306,11 @@ fn active_team_key(workspace: &Path, state: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_str)
         .filter(|team| !team.is_empty())
         .map(ToString::to_string)
-        .or_else(|| workspace.file_name().map(|name| name.to_string_lossy().to_string()))
+        .or_else(|| {
+            workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
         .unwrap_or_else(|| "current".to_string())
 }
 
@@ -284,8 +321,14 @@ fn assigned_task_ids(state: &serde_json::Value, agent_id: &str) -> Vec<String> {
         .map(|tasks| {
             tasks
                 .iter()
-                .filter(|task| task.get("assignee").and_then(serde_json::Value::as_str) == Some(agent_id))
-                .filter_map(|task| task.get("id").and_then(serde_json::Value::as_str).map(ToString::to_string))
+                .filter(|task| {
+                    task.get("assignee").and_then(serde_json::Value::as_str) == Some(agent_id)
+                })
+                .filter_map(|task| {
+                    task.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default();

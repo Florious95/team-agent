@@ -12,7 +12,9 @@ use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::event_log::EventLog;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
-use crate::state::persist::{load_runtime_state, save_runtime_state};
+use crate::state::persist::{
+    load_runtime_state, save_runtime_state, save_runtime_state_reapplying_after_conflict,
+};
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
 use crate::messaging::{self, MessageTarget, SendOptions};
@@ -20,13 +22,15 @@ use crate::messaging::{self, MessageTarget, SendOptions};
 use super::helpers::{
     delivery_outcome_value, ensure_object, enum_value, insert_array, is_worker_recipient,
     json_dumps_default, latest_task_for_assignee, latest_uncorrelated_delivered_message_for,
-    non_empty_string, normalized_envelope_value, object_fields,
-    requires_ack_for_target, tool_runtime_error,
+    non_empty_string, normalized_envelope_value, object_fields, requires_ack_for_target,
+    tool_runtime_error,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
 };
-use super::types::{Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers};
+use super::types::{
+    Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TeamOrchestratorTools (tools.py:72) — the 12 typed tool handlers.
@@ -64,7 +68,11 @@ impl TeamOrchestratorTools {
 
     /// Test/explicit-injection constructor: bind identity/scope directly instead of
     /// reading env (so contracts can exercise scoped behavior deterministically).
-    pub fn with_identity(workspace: &Path, agent_id: Option<AgentId>, owner_team_id: Option<TeamKey>) -> Self {
+    pub fn with_identity(
+        workspace: &Path,
+        agent_id: Option<AgentId>,
+        owner_team_id: Option<TeamKey>,
+    ) -> Self {
         Self {
             workspace: std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf()),
             agent_id,
@@ -85,7 +93,11 @@ impl TeamOrchestratorTools {
                 "ValueError",
             ));
         };
-        let Some(task_id) = task.get("id").and_then(Value::as_str).and_then(non_empty_string) else {
+        let Some(task_id) = task
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(non_empty_string)
+        else {
             return Err(ToolError::new(
                 ToolErrorReason::InvalidToolArguments,
                 "assign_task task.id is required",
@@ -112,7 +124,12 @@ impl TeamOrchestratorTools {
             .map(|team| team.as_str().to_string())
             .or_else(|| assignment_team_key(&state));
         reconcile_assigned_task(&mut state, team_key.as_deref(), &task_value);
-        save_runtime_state(&self.workspace, &state).map_err(tool_runtime_error)?;
+        save_runtime_state_reapplying_after_conflict(&self.workspace, &state, |latest| {
+            ensure_object(latest);
+            let latest_team_key = team_key.clone().or_else(|| assignment_team_key(latest));
+            reconcile_assigned_task(latest, latest_team_key.as_deref(), &task_value);
+        })
+        .map_err(tool_runtime_error)?;
 
         let content = assignment_message(task, message);
         let out = self.send_message(
@@ -191,7 +208,8 @@ impl TeamOrchestratorTools {
             ..SendOptions::default()
         };
         if is_worker_recipient(to) {
-            let out = messaging::send_message(&self.workspace, to, content, &opts).map_err(tool_runtime_error)?;
+            let out = messaging::send_message(&self.workspace, to, content, &opts)
+                .map_err(tool_runtime_error)?;
             // tools.py:175-181 — accepted+poll_via ONLY for a REAL message_id; any other
             // outcome falls back to the compacted direct result. Never invent an
             // `mcp_<timestamp>` id: it does not exist in the store and makes the
@@ -209,7 +227,8 @@ impl TeamOrchestratorTools {
                 message_id,
             });
         }
-        let out = messaging::send_message(&self.workspace, to, content, &opts).map_err(tool_runtime_error)?;
+        let out = messaging::send_message(&self.workspace, to, content, &opts)
+            .map_err(tool_runtime_error)?;
         let value = delivery_outcome_value(&out);
         let ok = compact_tool_result(&value)?;
         Ok(SendOutcome::Direct(ok))
@@ -219,7 +238,11 @@ impl TeamOrchestratorTools {
         self.rpc_scope_refused("unknown", None, None)
     }
 
-    pub(crate) fn validate_rpc_scope_args(&self, tool: &str, args: &Value) -> Result<(), ToolError> {
+    pub(crate) fn validate_rpc_scope_args(
+        &self,
+        tool: &str,
+        args: &Value,
+    ) -> Result<(), ToolError> {
         if let Some(nested) = args.get("task").or_else(|| args.get("envelope")) {
             self.validate_rpc_scope_args(tool, nested)?;
         }
@@ -240,10 +263,11 @@ impl TeamOrchestratorTools {
                     Ok(state) => state,
                     Err(error) => return Err(self.scope_unverifiable(&error.to_string())),
                 };
-                let requested_canonical = crate::state::projection::resolve_owner_team_id(&state, requested)
-                    .canonical_key()
-                    .unwrap_or(requested)
-                    .to_string();
+                let requested_canonical =
+                    crate::state::projection::resolve_owner_team_id(&state, requested)
+                        .canonical_key()
+                        .unwrap_or(requested)
+                        .to_string();
                 requested_canonical != owner.as_str()
             }
             (None, Some(_)) => true,
@@ -280,13 +304,17 @@ impl TeamOrchestratorTools {
         if let Some(envelope) = envelope {
             self.validate_rpc_scope_args("report_result", envelope)?;
         }
-        let mut base = envelope.cloned().unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let mut base = envelope
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
         ensure_object(&mut base);
         if let Some(obj) = base.as_object_mut() {
             if !obj.contains_key("summary") {
                 obj.insert(
                     "summary".to_string(),
-                    Value::String(summary.map_or_else(|| "completed".to_string(), ToString::to_string)),
+                    Value::String(
+                        summary.map_or_else(|| "completed".to_string(), ToString::to_string),
+                    ),
                 );
             }
             if !obj.contains_key("status") {
@@ -302,33 +330,38 @@ impl TeamOrchestratorTools {
                 //      task id and no result yet (message-scope correlation —
                 //      collect path: is_message_scoped_result)
                 //   4. "manual" — truly uncorrelated; collect still rejects
-                let owner_team_id_str = self
-                    .owner_team_id
-                    .as_ref()
-                    .map(|t| t.as_str().to_string());
+                let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
                 let resolved = task_id
                     .map(ToString::to_string)
-                    .or_else(|| self.agent_id.as_ref().and_then(|agent| {
-                        latest_task_for_assignee(
-                            &self.workspace,
-                            agent.as_str(),
-                            owner_team_id_str.as_deref(),
-                        )
-                    }))
-                    .or_else(|| self.agent_id.as_ref().and_then(|agent| {
-                        latest_uncorrelated_delivered_message_for(
-                            &self.workspace,
-                            agent.as_str(),
-                            owner_team_id_str.as_deref(),
-                        )
-                    }))
+                    .or_else(|| {
+                        self.agent_id.as_ref().and_then(|agent| {
+                            latest_task_for_assignee(
+                                &self.workspace,
+                                agent.as_str(),
+                                owner_team_id_str.as_deref(),
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        self.agent_id.as_ref().and_then(|agent| {
+                            latest_uncorrelated_delivered_message_for(
+                                &self.workspace,
+                                agent.as_str(),
+                                owner_team_id_str.as_deref(),
+                            )
+                        })
+                    })
                     .unwrap_or_else(|| "manual".to_string());
                 obj.insert("task_id".to_string(), Value::String(resolved));
             }
             if !obj.contains_key("agent_id") {
                 let resolved = agent_id
                     .map(ToString::to_string)
-                    .or_else(|| self.agent_id.as_ref().map(|env_agent| env_agent.as_str().to_string()))
+                    .or_else(|| {
+                        self.agent_id
+                            .as_ref()
+                            .map(|env_agent| env_agent.as_str().to_string())
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 obj.insert("agent_id".to_string(), Value::String(resolved));
             }
@@ -364,8 +397,8 @@ impl TeamOrchestratorTools {
             &env_value,
             owner_team.as_ref().map(TeamKey::as_str),
         )
-            .map_err(tool_runtime_error)
-            .and_then(|value| compact_tool_result(&value))
+        .map_err(tool_runtime_error)
+        .and_then(|value| compact_tool_result(&value))
     }
 
     /// T3-1 cr verdict: the observable record of an unknown→Partial status
@@ -405,7 +438,12 @@ impl TeamOrchestratorTools {
     /// `reset_agent` (`tools.py:333-334`): delegated through the lifecycle tools facade.
     pub fn reset_agent(&self, agent_id: &str, discard_session: bool) -> ToolResult {
         let owner_team = self.canonical_owner_team_key()?;
-        super::lifecycle_tools::reset_agent(&self.workspace, owner_team.as_ref(), agent_id, discard_session)
+        super::lifecycle_tools::reset_agent(
+            &self.workspace,
+            owner_team.as_ref(),
+            agent_id,
+            discard_session,
+        )
     }
 
     /// `add_agent` (`tools.py:336-337`): delegate to real lifecycle add-agent
@@ -442,7 +480,12 @@ impl TeamOrchestratorTools {
     }
 
     /// `fork_agent` (`tools.py:339-340`): delegated through the lifecycle tools facade.
-    pub fn fork_agent(&self, source_agent_id: &str, as_agent_id: &str, label: Option<&str>) -> ToolResult {
+    pub fn fork_agent(
+        &self,
+        source_agent_id: &str,
+        as_agent_id: &str,
+        label: Option<&str>,
+    ) -> ToolResult {
         let owner_team = self.canonical_owner_team_key()?;
         super::lifecycle_tools::fork_agent(
             &self.workspace,
@@ -456,7 +499,12 @@ impl TeamOrchestratorTools {
     /// `request_human` (`tools.py:342-346`): create a `requires_ack` leader message via
     /// the shared leader-delivery funnel; sender = env / inferred / `"unknown"`.
     /// Returns `{ok:true, message_id, status:"needs_human"}`.
-    pub fn request_human(&self, question: &str, task_id: Option<&str>, agent_id: Option<&str>) -> ToolResult {
+    pub fn request_human(
+        &self,
+        question: &str,
+        task_id: Option<&str>,
+        agent_id: Option<&str>,
+    ) -> ToolResult {
         let _owner_team = self.canonical_owner_team_key()?;
         let explicit_sender = agent_id.and_then(non_empty_string);
         let sender = explicit_sender
@@ -495,9 +543,15 @@ impl TeamOrchestratorTools {
         fields.insert("ok".to_string(), Value::Bool(outcome.ok));
         fields.insert(
             "message_id".to_string(),
-            outcome.message_id.clone().map_or(Value::Null, Value::String),
+            outcome
+                .message_id
+                .clone()
+                .map_or(Value::Null, Value::String),
         );
-        fields.insert("status".to_string(), Value::String("needs_human".to_string()));
+        fields.insert(
+            "status".to_string(),
+            Value::String("needs_human".to_string()),
+        );
         Ok(ToolOk { fields })
     }
 
@@ -507,7 +561,9 @@ impl TeamOrchestratorTools {
         let _owner_team = self.canonical_owner_team_key()?;
         messaging::stuck_list(&self.workspace)
             .map_err(tool_runtime_error)
-            .map(|v| ToolOk { fields: object_fields(v) })
+            .map(|v| ToolOk {
+                fields: object_fields(v),
+            })
     }
 
     /// `stuck_cancel` (`tools.py:351-352`): delegate to [`messaging::stuck_cancel`];
@@ -532,10 +588,16 @@ impl TeamOrchestratorTools {
                 });
             }
         };
-        let suppressed_by = self.agent_id.as_ref().map(AgentId::as_str).unwrap_or("leader");
+        let suppressed_by = self
+            .agent_id
+            .as_ref()
+            .map(AgentId::as_str)
+            .unwrap_or("leader");
         messaging::stuck_cancel(&self.workspace, agent_id, alert, suppressed_by)
             .map_err(tool_runtime_error)
-            .map(|v| ToolOk { fields: object_fields(v) })
+            .map(|v| ToolOk {
+                fields: object_fields(v),
+            })
     }
 
     /// `get_visible_peers` (`tools.py:226-247`): C16 scope-filtered peer list — live
@@ -577,7 +639,11 @@ impl TeamOrchestratorTools {
     /// non-`*`/non-leader string target NOT in the visible-peer scope and not the
     /// sender itself, with `scope != workspace`, → `Some(ToolError{PeerNotInScope})`
     /// (also writes `mcp.send_message_refused`). `None` = allowed to proceed.
-    pub fn refuse_cross_team_peer(&self, to: &MessageTarget, scope_override: Option<Scope>) -> Option<ToolError> {
+    pub fn refuse_cross_team_peer(
+        &self,
+        to: &MessageTarget,
+        scope_override: Option<Scope>,
+    ) -> Option<ToolError> {
         let owner_team = match self.canonical_owner_team_key() {
             Ok(team) => team,
             Err(error) => return Some(error),
@@ -599,7 +665,10 @@ impl TeamOrchestratorTools {
             || target == "*"
             || target == "leader"
             || target == "Leader"
-            || self.agent_id.as_ref().is_some_and(|id| id.as_str() == target)
+            || self
+                .agent_id
+                .as_ref()
+                .is_some_and(|id| id.as_str() == target)
         {
             return None;
         }
@@ -620,10 +689,7 @@ impl TeamOrchestratorTools {
         );
         let mut extra = serde_json::Map::new();
         extra.insert("status".to_string(), Value::String("refused".to_string()));
-        extra.insert(
-            "hint".to_string(),
-            Value::String(hint.to_string()),
-        );
+        extra.insert("hint".to_string(), Value::String(hint.to_string()));
         Some(ToolError {
             reason: ToolErrorReason::PeerNotInScope,
             exc_type: "PeerNotInScope".to_string(),
@@ -649,7 +715,9 @@ impl TeamOrchestratorTools {
                 .and_then(Value::as_object)
                 .is_some_and(|teams| !teams.is_empty())
             {
-                return Err(self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP"));
+                return Err(
+                    self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP")
+                );
             }
             return Ok(None);
         };
@@ -674,7 +742,9 @@ impl TeamOrchestratorTools {
                 .and_then(Value::as_object)
                 .is_some_and(|teams| !teams.is_empty())
             {
-                return Err(self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP"));
+                return Err(
+                    self.scope_refused("TEAM_AGENT_OWNER_TEAM_ID is required for multi-team MCP")
+                );
             }
             return Ok(None);
         };
@@ -701,7 +771,10 @@ impl TeamOrchestratorTools {
         );
         let mut extra = serde_json::Map::new();
         extra.insert("status".to_string(), Value::String("refused".to_string()));
-        extra.insert("kind".to_string(), Value::String("scope_unverifiable".to_string()));
+        extra.insert(
+            "kind".to_string(),
+            Value::String("scope_unverifiable".to_string()),
+        );
         extra.insert(
             "next_action".to_string(),
             Value::String("retry shortly or check the runtime state path".to_string()),
@@ -744,7 +817,11 @@ impl TeamOrchestratorTools {
         requested_scope: Option<&str>,
     ) -> ToolError {
         let owner_team_id = self.canonical_owner_team_key_for_event();
-        let agent_id = self.agent_id.as_ref().map(AgentId::as_str).unwrap_or("unknown");
+        let agent_id = self
+            .agent_id
+            .as_ref()
+            .map(AgentId::as_str)
+            .unwrap_or("unknown");
         let _ = EventLog::new(&self.workspace).write(
             "mcp.scope_refused",
             serde_json::json!({
@@ -794,10 +871,20 @@ fn canonicalize_owner_team_id(state: &Value, owner_team_id: &str) -> Option<Stri
 }
 
 fn requested_team_arg(args: &Value) -> Option<String> {
-    ["team", "team_id", "owner_team_id", "owner_team", "target_team"]
-        .iter()
-        .find_map(|key| args.get(*key).and_then(Value::as_str).filter(|s| !s.is_empty()))
-        .map(ToString::to_string)
+    [
+        "team",
+        "team_id",
+        "owner_team_id",
+        "owner_team",
+        "target_team",
+    ]
+    .iter()
+    .find_map(|key| {
+        args.get(*key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    })
+    .map(ToString::to_string)
 }
 
 fn requested_scope_arg(args: &Value) -> Option<String> {
@@ -875,14 +962,12 @@ fn write_team_tasks(state: &mut Value, team_key: &str, tasks: Vec<Value>) {
     let Some(teams_obj) = teams.as_object_mut() else {
         return;
     };
-    let team = teams_obj
-        .entry(team_key.to_string())
-        .or_insert_with(|| {
-            let mut team = serde_json::Map::new();
-            team.insert("tasks".to_string(), Value::Array(Vec::new()));
-            team.insert("status".to_string(), Value::String("alive".to_string()));
-            Value::Object(team)
-        });
+    let team = teams_obj.entry(team_key.to_string()).or_insert_with(|| {
+        let mut team = serde_json::Map::new();
+        team.insert("tasks".to_string(), Value::Array(Vec::new()));
+        team.insert("status".to_string(), Value::String("alive".to_string()));
+        Value::Object(team)
+    });
     let Some(team_obj) = team.as_object_mut() else {
         return;
     };
@@ -894,7 +979,11 @@ fn assignment_message(task: &Value, explicit: Option<&str>) -> String {
         return message.to_string();
     }
     for key in ["description", "title"] {
-        if let Some(text) = task.get(key).and_then(Value::as_str).and_then(non_empty_string) {
+        if let Some(text) = task
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(non_empty_string)
+        {
             return text.to_string();
         }
     }

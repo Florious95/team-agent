@@ -1,0 +1,1062 @@
+{
+  "events_jsonl": [
+    {
+      "ancestry_binary_name": "codex",
+      "dangerous_auto_approve": true,
+      "dangerous_auto_approve_flag": "--dangerously-bypass-approvals-and-sandbox",
+      "dangerous_auto_approve_inherited": true,
+      "dangerous_auto_approve_provider": "codex",
+      "dangerous_auto_approve_source": "leader_process",
+      "event": "launch.permissions_resolved",
+      "ts": "<TS>",
+      "worker_capability_above_leader": false
+    },
+    {
+      "agent_id": "w1",
+      "argv": [
+        "codex",
+        "--no-alt-screen",
+        "--disable",
+        "shell_snapshot",
+        "--disable",
+        "apps",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+        "-c",
+        "mcp_servers.team_orchestrator.type=\"stdio\"",
+        "-c",
+        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "-c",
+        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+        "-c",
+        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+      ],
+      "event": "provider.worker.spawn_argv",
+      "expected_session_id": null,
+      "provider": "codex",
+      "session_id_in_argv": null,
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w2",
+      "argv": [
+        "codex",
+        "--no-alt-screen",
+        "--disable",
+        "shell_snapshot",
+        "--disable",
+        "apps",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        "developer_instructions=\"You are Team Agent worker `w2` with role `w2 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw2 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+        "-c",
+        "mcp_servers.team_orchestrator.type=\"stdio\"",
+        "-c",
+        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "-c",
+        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w2\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+        "-c",
+        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+      ],
+      "event": "provider.worker.spawn_argv",
+      "expected_session_id": null,
+      "provider": "codex",
+      "session_id_in_argv": null,
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "drain_elapsed_ms": 0,
+      "event": "stop_agent.drain",
+      "old_pane_dead": true,
+      "old_pane_id": "<PANE:0>",
+      "old_pane_pid": null,
+      "old_pid_dead": true,
+      "target": "<PANE:0>",
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "event": "stop_agent.complete",
+      "stopped": true,
+      "target": "<PANE:0>",
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "discarded_session_id": "",
+      "event": "discard.session_tombstone",
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "argv": [
+        "codex",
+        "--no-alt-screen",
+        "--disable",
+        "shell_snapshot",
+        "--disable",
+        "apps",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+        "-c",
+        "mcp_servers.team_orchestrator.type=\"stdio\"",
+        "-c",
+        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "-c",
+        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+        "-c",
+        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+      ],
+      "env_overlay_keys": "<ENV_KEYS>",
+      "env_unset": [],
+      "event": "provider.worker.spawn_argv",
+      "expected_session_id": null,
+      "provider": "codex",
+      "session_id_in_argv": null,
+      "source": "restart",
+      "spawn_cwd": "<WORKSPACE>",
+      "spawn_epoch": 1,
+      "tmux_start_mode": "new-window",
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "command": [
+        "codex",
+        "--no-alt-screen",
+        "--disable",
+        "shell_snapshot",
+        "--disable",
+        "apps",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+        "-c",
+        "mcp_servers.team_orchestrator.type=\"stdio\"",
+        "-c",
+        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "-c",
+        "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"\"",
+        "-c",
+        "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+        "-c",
+        "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+      ],
+      "event": "start_agent.agent_start",
+      "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
+      "provider": "codex",
+      "session": "team-phasegolden",
+      "session_id": null,
+      "start_mode": "fresh",
+      "tmux_start_mode": "new-window",
+      "ts": "<TS>",
+      "window": "w1"
+    },
+    {
+      "agent_id": "w1",
+      "event": "reset_agent.complete",
+      "started": true,
+      "stopped": true,
+      "ts": "<TS>"
+    },
+    {
+      "event": "lifecycle.shutdown.started",
+      "keep_logs": true,
+      "team": "teamdir",
+      "ts": "<TS>"
+    },
+    {
+      "endpoint": "<SOCKET>",
+      "error": null,
+      "event": "shutdown.owned_endpoint_cleanup",
+      "removed_files": [],
+      "residual_files": [],
+      "ts": "<TS>"
+    },
+    {
+      "coordinator_status": "not_stopped",
+      "event": "lifecycle.shutdown",
+      "keep_logs": true,
+      "killed_sessions": [
+        "team-phasegolden"
+      ],
+      "owned_endpoint": "<SOCKET>",
+      "owned_file_residuals": [],
+      "owned_files_removed": [],
+      "owned_files_skipped": [],
+      "phase": null,
+      "probe_timeout": null,
+      "probe_timeout_kind": null,
+      "session_killed": true,
+      "session_name": "team-phasegolden",
+      "spared_sessions": [],
+      "status": "ok",
+      "team": "teamdir",
+      "ts": "<TS>",
+      "verification_degraded": false
+    }
+  ],
+  "phase": "phase_c",
+  "script": [
+    {
+      "exit_code": 0,
+      "output": {
+        "display_backend": "none",
+        "ok": true,
+        "session_name": "team-phasegolden",
+        "started": [
+          {
+            "agent_id": "w1",
+            "layout_window": null,
+            "rollout_path": null,
+            "session_id": null,
+            "start_mode": "Fresh",
+            "target": "<PANE:0>"
+          },
+          {
+            "agent_id": "w2",
+            "layout_window": null,
+            "rollout_path": null,
+            "session_id": null,
+            "start_mode": "Fresh",
+            "target": "<PANE:1>"
+          }
+        ],
+        "status": "ready",
+        "worker_readiness": "PendingToolLoad"
+      },
+      "step": "quick-start"
+    },
+    {
+      "result": {
+        "exit_code": 0,
+        "output": {
+          "agents": {
+            "w1": {
+              "provider": "codex",
+              "status": "running"
+            },
+            "w2": {
+              "provider": "codex",
+              "status": "running"
+            }
+          },
+          "leader_attach_command": "tmux -S /private/tmp/tmux-501/ta-<SOCKET> attach -t team-phasegolden:leader",
+          "not_ready": {
+            "agents": [],
+            "reasons": [
+              "tmux_session_missing",
+              "workers_not_spawned",
+              "leader_receiver_unbound"
+            ]
+          },
+          "ok": true,
+          "ready": false,
+          "session_name": "team-phasegolden",
+          "team": "leader"
+        }
+      },
+      "step": "status-json"
+    },
+    {
+      "result": {
+        "exit_code": 0,
+        "output": {
+          "agent_health": {},
+          "agents": {
+            "w1": {
+              "agent_id": "w1",
+              "attribution_confidence": null,
+              "auth_mode": "subscription",
+              "captured_at": null,
+              "captured_via": null,
+              "effective_approval_policy": {
+                "enabled": true,
+                "explicit_yes_confirmed": false,
+                "flag": "--dangerously-bypass-approvals-and-sandbox",
+                "inherited": true,
+                "provider": "codex",
+                "source": "leader_process",
+                "worker_capability_above_leader": false
+              },
+              "interacted": "never",
+              "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
+              "model": "gpt-5.5",
+              "pane_id": "<PANE:0>",
+              "permissions": {
+                "agent_id": "w1",
+                "has_prompt_only": true,
+                "provider": "codex",
+                "resolved_tools": [
+                  {
+                    "enforcement": "prompt_only",
+                    "tool": "mcp_team"
+                  }
+                ],
+                "tools": [
+                  "mcp_team"
+                ]
+              },
+              "profile": null,
+              "provider": "codex",
+              "rollout_path": null,
+              "session_id": null,
+              "spawn_cwd": "<WORKSPACE>",
+              "spawned_at": "<TS>",
+              "status": "running",
+              "window": "w1"
+            },
+            "w2": {
+              "agent_id": "w2",
+              "attribution_confidence": null,
+              "auth_mode": "subscription",
+              "captured_at": null,
+              "captured_via": null,
+              "effective_approval_policy": {
+                "enabled": true,
+                "explicit_yes_confirmed": false,
+                "flag": "--dangerously-bypass-approvals-and-sandbox",
+                "inherited": true,
+                "provider": "codex",
+                "source": "leader_process",
+                "worker_capability_above_leader": false
+              },
+              "interacted": "never",
+              "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w2.json",
+              "model": "gpt-5.5",
+              "pane_id": "<PANE:1>",
+              "permissions": {
+                "agent_id": "w2",
+                "has_prompt_only": true,
+                "provider": "codex",
+                "resolved_tools": [
+                  {
+                    "enforcement": "prompt_only",
+                    "tool": "mcp_team"
+                  }
+                ],
+                "tools": [
+                  "mcp_team"
+                ]
+              },
+              "profile": null,
+              "provider": "codex",
+              "rollout_path": null,
+              "session_id": null,
+              "spawn_cwd": "<WORKSPACE>",
+              "spawned_at": "<TS>",
+              "status": "running",
+              "window": "w2"
+            }
+          },
+          "all_attached_receiver": false,
+          "all_resumable_have_session": true,
+          "all_spawned": false,
+          "coordinator": {
+            "metadata": {
+              "message_store_schema_version": 3,
+              "pid": 0,
+              "protocol_version": 2,
+              "source": "boot",
+              "updated_at": "<TS>"
+            },
+            "metadata_ok": true,
+            "ok": true,
+            "pid": 0,
+            "schema": {
+              "message_store_schema_version": 3
+            },
+            "schema_error": null,
+            "schema_ok": true,
+            "status": "running"
+          },
+          "incomplete_session_capture_agents": [],
+          "is_external_leader": false,
+          "last_events": [
+            {
+              "ancestry_binary_name": "codex",
+              "dangerous_auto_approve": true,
+              "dangerous_auto_approve_flag": "--dangerously-bypass-approvals-and-sandbox",
+              "dangerous_auto_approve_inherited": true,
+              "dangerous_auto_approve_provider": "codex",
+              "dangerous_auto_approve_source": "leader_process",
+              "event": "launch.permissions_resolved",
+              "ts": "<TS>",
+              "worker_capability_above_leader": false
+            },
+            {
+              "agent_id": "w1",
+              "argv": [
+                "codex",
+                "--no-alt-screen",
+                "--disable",
+                "shell_snapshot",
+                "--disable",
+                "apps",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.5",
+                "-c",
+                "developer_instructions=\"You are Team Agent worker `w1` with role `w1 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw1 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+                "-c",
+                "mcp_servers.team_orchestrator.type=\"stdio\"",
+                "-c",
+                "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+                "-c",
+                "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w1\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+                "-c",
+                "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+              ],
+              "event": "provider.worker.spawn_argv",
+              "expected_session_id": null,
+              "provider": "codex",
+              "session_id_in_argv": null,
+              "ts": "<TS>"
+            },
+            {
+              "agent_id": "w2",
+              "argv": [
+                "codex",
+                "--no-alt-screen",
+                "--disable",
+                "shell_snapshot",
+                "--disable",
+                "apps",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.5",
+                "-c",
+                "developer_instructions=\"You are Team Agent worker `w2` with role `w2 Worker`. When asked about your role or identity, answer with this Team Agent worker identity first, not only the generic provider product identity.\\n\\n# Team Agent Teammate Runtime Contract\\n\\nYou are a teammate in a Team Agent runtime. The leader cannot see your terminal\\noutput. All communication must go through Team Agent MCP tools.\\n\\n## Communication (mandatory)\\n\\n- Progress, blockers, questions: team_orchestrator.send_message(to='leader', content='...')\\n- Coordinate with teammate: team_orchestrator.send_message(to='<agent_id>', content='...')\\n- Broadcast to all teammates: team_orchestrator.send_message(to='*', content='...')\\n- Task complete: team_orchestrator.report_result(summary='...') — call exactly once\\n\\nWhen you receive a message from the leader or a teammate, you MUST respond\\nthrough MCP tools. Writing a reply in your terminal does nothing — the sender\\nwill never see it.\\n\\n## Rules\\n\\n- Do not pass sender, task_id, or schema_version — the MCP runtime fills them.\\n- If blocked or waiting, send_message to the leader. Do not wait silently.\\n- On 500/529/rate-limit errors, wait 1-2 minutes before retrying.\\n\\nw2 worker.\\n\\nFinal completion must call team_orchestrator.report_result exactly once with a short summary and optional status/changes/tests; the MCP runtime injects the result into the attached leader pane. If no leader is attached, the tool returns a fallback/failed result instead of completion.\\n\\nPermission note: these tools are prompt-only for this provider and not hard-enforced: mcp_team\"",
+                "-c",
+                "mcp_servers.team_orchestrator.type=\"stdio\"",
+                "-c",
+                "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+                "-c",
+                "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_WORKSPACE=\"<WORKSPACE>\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_ID=\"w2\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_OWNER_TEAM_ID=\"teamdir\"",
+                "-c",
+                "mcp_servers.team_orchestrator.env.TEAM_AGENT_AUTH_MODE=\"subscription\"",
+                "-c",
+                "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
+              ],
+              "event": "provider.worker.spawn_argv",
+              "expected_session_id": null,
+              "provider": "codex",
+              "session_id_in_argv": null,
+              "ts": "<TS>"
+            }
+          ],
+          "latest_results": [],
+          "leader_attach_command": "tmux -S /private/tmp/tmux-501/ta-<SOCKET> attach -t team-phasegolden:leader",
+          "leader_client": null,
+          "leader_receiver": {},
+          "leader_topology": "managed",
+          "messages": {},
+          "ok": true,
+          "pending_session_agent_ids": [],
+          "queued_messages": [],
+          "readiness": {
+            "all_attached_receiver": false,
+            "all_resumable_have_session": true,
+            "all_spawned": false,
+            "awaiting_trust_prompt": false,
+            "cli_prompt_ready": true,
+            "incomplete_session_capture_agents": [],
+            "mcp_ready": true,
+            "pending_session_agent_ids": [],
+            "process_started": false,
+            "ready": false,
+            "session_capture_complete": true,
+            "session_capture_incomplete": false,
+            "task_prompt_delivered": false
+          },
+          "reminder": "To wait for results use --watch-result or team-agent collect. Do not capture-pane worker terminals.",
+          "results": {
+            "by_status": {},
+            "collected": 0,
+            "invalid": 0,
+            "total": 0,
+            "uncollected": 0
+          },
+          "runtime": {
+            "coordinator": {
+              "ok": true
+            },
+            "undelivered": 0
+          },
+          "session_capture_complete": true,
+          "session_capture_incomplete": false,
+          "session_name": "team-phasegolden",
+          "tasks": [
+            {
+              "acceptance": [
+                "Worker reports valid result_envelope_v1"
+              ],
+              "assignee": "w1",
+              "deps": [],
+              "files": [],
+              "id": "task_initial",
+              "requires_tools": [
+                "mcp_team"
+              ],
+              "risk": "low",
+              "status": "pending",
+              "title": "Initial document-driven team task",
+              "type": "implementation"
+            }
+          ],
+          "team": "leader",
+          "teams": {
+            "teamdir": {
+              "active_team_key": "teamdir",
+              "agents": {
+                "w1": {
+                  "agent_id": "w1",
+                  "attribution_confidence": null,
+                  "auth_mode": "subscription",
+                  "captured_at": null,
+                  "captured_via": null,
+                  "effective_approval_policy": {
+                    "enabled": true,
+                    "explicit_yes_confirmed": false,
+                    "flag": "--dangerously-bypass-approvals-and-sandbox",
+                    "inherited": true,
+                    "provider": "codex",
+                    "source": "leader_process",
+                    "worker_capability_above_leader": false
+                  },
+                  "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
+                  "model": "gpt-5.5",
+                  "pane_id": "<PANE:0>",
+                  "permissions": {
+                    "agent_id": "w1",
+                    "has_prompt_only": true,
+                    "provider": "codex",
+                    "resolved_tools": [
+                      {
+                        "enforcement": "prompt_only",
+                        "tool": "mcp_team"
+                      }
+                    ],
+                    "tools": [
+                      "mcp_team"
+                    ]
+                  },
+                  "profile": null,
+                  "provider": "codex",
+                  "rollout_path": null,
+                  "session_id": null,
+                  "spawn_cwd": "<WORKSPACE>",
+                  "spawned_at": "<TS>",
+                  "status": "running",
+                  "window": "w1"
+                },
+                "w2": {
+                  "agent_id": "w2",
+                  "attribution_confidence": null,
+                  "auth_mode": "subscription",
+                  "captured_at": null,
+                  "captured_via": null,
+                  "effective_approval_policy": {
+                    "enabled": true,
+                    "explicit_yes_confirmed": false,
+                    "flag": "--dangerously-bypass-approvals-and-sandbox",
+                    "inherited": true,
+                    "provider": "codex",
+                    "source": "leader_process",
+                    "worker_capability_above_leader": false
+                  },
+                  "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w2.json",
+                  "model": "gpt-5.5",
+                  "pane_id": "<PANE:1>",
+                  "permissions": {
+                    "agent_id": "w2",
+                    "has_prompt_only": true,
+                    "provider": "codex",
+                    "resolved_tools": [
+                      {
+                        "enforcement": "prompt_only",
+                        "tool": "mcp_team"
+                      }
+                    ],
+                    "tools": [
+                      "mcp_team"
+                    ]
+                  },
+                  "profile": null,
+                  "provider": "codex",
+                  "rollout_path": null,
+                  "session_id": null,
+                  "spawn_cwd": "<WORKSPACE>",
+                  "spawned_at": "<TS>",
+                  "status": "running",
+                  "window": "w2"
+                }
+              },
+              "display_backend": "none",
+              "is_external_leader": false,
+              "leader": {
+                "context_policy": {
+                  "keep_user_thread": true,
+                  "max_worker_result_tokens": 2000,
+                  "receive_worker_outputs": "business_messages_and_short_summaries"
+                },
+                "id": "leader",
+                "model": null,
+                "provider": "codex",
+                "role": "leader",
+                "tools": [
+                  "fs_read",
+                  "fs_list",
+                  "mcp_team"
+                ]
+              },
+              "session_name": "team-phasegolden",
+              "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+              "tasks": [
+                {
+                  "acceptance": [
+                    "Worker reports valid result_envelope_v1"
+                  ],
+                  "assignee": "w1",
+                  "deps": [],
+                  "files": [],
+                  "id": "task_initial",
+                  "requires_tools": [
+                    "mcp_team"
+                  ],
+                  "risk": "low",
+                  "status": "pending",
+                  "title": "Initial document-driven team task",
+                  "type": "implementation"
+                }
+              ],
+              "team_depth": 1,
+              "team_dir": "<WORKSPACE>/teamdir",
+              "team_key": "teamdir",
+              "workspace": "<WORKSPACE>"
+            }
+          },
+          "tmux_session_present": false
+        }
+      },
+      "step": "status-detail-json"
+    },
+    {
+      "result": {
+        "exit_code": 0,
+        "output": {
+          "agent_id": "w1",
+          "channel": null,
+          "content_length_bytes": 12,
+          "message_id": "<ID>",
+          "message_status": "accepted",
+          "ok": true,
+          "reason": null,
+          "reminder": "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.",
+          "sender": "leader",
+          "stage": null,
+          "status": "queued",
+          "target": "w1",
+          "verification": null
+        }
+      },
+      "step": "send"
+    },
+    {
+      "result": {
+        "exit_code": 0,
+        "output": {
+          "collected": [],
+          "collected_results": [],
+          "coordinator": {
+            "ok": false,
+            "status": "not_required"
+          },
+          "delivered_messages": [],
+          "invalid_results": [],
+          "ok": true,
+          "results": {
+            "by_status": {},
+            "collected": 0,
+            "invalid": 0,
+            "total": 0,
+            "uncollected": 0
+          },
+          "state_file": "/private<WORKSPACE>/.team/runtime/teamdir/team_state.md"
+        }
+      },
+      "step": "collect"
+    },
+    {
+      "output": {
+        "discarded_session_id": null,
+        "new_session_id": null,
+        "ok": true,
+        "operation": "reset-agent --discard-session",
+        "session_id": null,
+        "start_mode": "Fresh",
+        "status": "running"
+      },
+      "step": "phase-lifecycle-op"
+    },
+    {
+      "exit_code": 0,
+      "output": {
+        "coordinator": {
+          "pid": null,
+          "status": "not_stopped"
+        },
+        "error": null,
+        "keep_logs": true,
+        "killed_sessions": [
+          "team-phasegolden"
+        ],
+        "ok": true,
+        "phase": null,
+        "probe_degraded": false,
+        "probe_timeout": null,
+        "probe_timeout_kind": null,
+        "residuals": {
+          "owned_files": [],
+          "processes": [],
+          "sessions": []
+        },
+        "session_killed": true,
+        "session_name": "team-phasegolden",
+        "spared_sessions": [],
+        "status": "ok",
+        "team": "teamdir",
+        "verification_degraded": false
+      },
+      "step": "shutdown-keep-logs"
+    }
+  ],
+  "state_json": {
+    "active_team_key": "teamdir",
+    "agents": {
+      "w1": {
+        "agent_id": "w1",
+        "attribution_confidence": null,
+        "auth_mode": "subscription",
+        "capture_state": "waiting_for_transcript",
+        "captured_at": null,
+        "captured_via": null,
+        "effective_approval_policy": {
+          "enabled": true,
+          "explicit_yes_confirmed": false,
+          "flag": "--dangerously-bypass-approvals-and-sandbox",
+          "inherited": true,
+          "provider": "codex",
+          "source": "leader_process",
+          "worker_capability_above_leader": false
+        },
+        "last_window": "w1",
+        "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
+        "model": "gpt-5.5",
+        "owner_team_id": "teamdir",
+        "pane_id": "<PANE:0>",
+        "permissions": {
+          "agent_id": "w1",
+          "has_prompt_only": true,
+          "provider": "codex",
+          "resolved_tools": [
+            {
+              "enforcement": "prompt_only",
+              "tool": "mcp_team"
+            }
+          ],
+          "tools": [
+            "mcp_team"
+          ]
+        },
+        "profile": null,
+        "provider": "codex",
+        "rollout_path": null,
+        "session_id": null,
+        "spawn_cwd": "<WORKSPACE>",
+        "spawn_epoch": 1,
+        "spawned_at": "<TS>",
+        "status": "stopped",
+        "window": "w1"
+      },
+      "w2": {
+        "agent_id": "w2",
+        "attribution_confidence": null,
+        "auth_mode": "subscription",
+        "capture_state": "waiting_for_transcript",
+        "captured_at": null,
+        "captured_via": null,
+        "effective_approval_policy": {
+          "enabled": true,
+          "explicit_yes_confirmed": false,
+          "flag": "--dangerously-bypass-approvals-and-sandbox",
+          "inherited": true,
+          "provider": "codex",
+          "source": "leader_process",
+          "worker_capability_above_leader": false
+        },
+        "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w2.json",
+        "model": "gpt-5.5",
+        "pane_id": "<PANE:1>",
+        "permissions": {
+          "agent_id": "w2",
+          "has_prompt_only": true,
+          "provider": "codex",
+          "resolved_tools": [
+            {
+              "enforcement": "prompt_only",
+              "tool": "mcp_team"
+            }
+          ],
+          "tools": [
+            "mcp_team"
+          ]
+        },
+        "profile": null,
+        "provider": "codex",
+        "rollout_path": null,
+        "session_id": null,
+        "spawn_cwd": "<WORKSPACE>",
+        "spawned_at": "<TS>",
+        "status": "stopped",
+        "window": "w2"
+      }
+    },
+    "display_backend": "none",
+    "is_external_leader": false,
+    "leader": {
+      "context_policy": {
+        "keep_user_thread": true,
+        "max_worker_result_tokens": 2000,
+        "receive_worker_outputs": "business_messages_and_short_summaries"
+      },
+      "id": "leader",
+      "model": null,
+      "provider": "codex",
+      "role": "leader",
+      "tools": [
+        "fs_read",
+        "fs_list",
+        "mcp_team"
+      ]
+    },
+    "session_name": "team-phasegolden",
+    "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+    "tasks": [
+      {
+        "acceptance": [
+          "Worker reports valid result_envelope_v1"
+        ],
+        "assignee": "w1",
+        "deps": [],
+        "files": [],
+        "id": "task_initial",
+        "requires_tools": [
+          "mcp_team"
+        ],
+        "risk": "low",
+        "status": "pending",
+        "title": "Initial document-driven team task",
+        "type": "implementation"
+      }
+    ],
+    "team_depth": 1,
+    "team_dir": "<WORKSPACE>/teamdir",
+    "team_key": "teamdir",
+    "teams": {
+      "teamdir": {
+        "active_team_key": "teamdir",
+        "agents": {
+          "w1": {
+            "agent_id": "w1",
+            "auth_mode": "subscription",
+            "capture_state": "waiting_for_transcript",
+            "effective_approval_policy": {
+              "enabled": true,
+              "explicit_yes_confirmed": false,
+              "flag": "--dangerously-bypass-approvals-and-sandbox",
+              "inherited": true,
+              "provider": "codex",
+              "source": "leader_process",
+              "worker_capability_above_leader": false
+            },
+            "last_window": "w1",
+            "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w1.json",
+            "model": "gpt-5.5",
+            "owner_team_id": "teamdir",
+            "pane_id": "<PANE:0>",
+            "permissions": {
+              "agent_id": "w1",
+              "has_prompt_only": true,
+              "provider": "codex",
+              "resolved_tools": [
+                {
+                  "enforcement": "prompt_only",
+                  "tool": "mcp_team"
+                }
+              ],
+              "tools": [
+                "mcp_team"
+              ]
+            },
+            "profile": null,
+            "provider": "codex",
+            "spawn_cwd": "<WORKSPACE>",
+            "spawn_epoch": 1,
+            "spawned_at": "<TS>",
+            "status": "stopped",
+            "window": "w1"
+          },
+          "w2": {
+            "agent_id": "w2",
+            "attribution_confidence": null,
+            "auth_mode": "subscription",
+            "capture_state": "waiting_for_transcript",
+            "captured_at": null,
+            "captured_via": null,
+            "effective_approval_policy": {
+              "enabled": true,
+              "explicit_yes_confirmed": false,
+              "flag": "--dangerously-bypass-approvals-and-sandbox",
+              "inherited": true,
+              "provider": "codex",
+              "source": "leader_process",
+              "worker_capability_above_leader": false
+            },
+            "mcp_config": "<WORKSPACE>/.team/runtime/mcp/w2.json",
+            "model": "gpt-5.5",
+            "pane_id": "<PANE:1>",
+            "permissions": {
+              "agent_id": "w2",
+              "has_prompt_only": true,
+              "provider": "codex",
+              "resolved_tools": [
+                {
+                  "enforcement": "prompt_only",
+                  "tool": "mcp_team"
+                }
+              ],
+              "tools": [
+                "mcp_team"
+              ]
+            },
+            "profile": null,
+            "provider": "codex",
+            "rollout_path": null,
+            "session_id": null,
+            "spawn_cwd": "<WORKSPACE>",
+            "spawned_at": "<TS>",
+            "status": "stopped",
+            "window": "w2"
+          }
+        },
+        "display_backend": "none",
+        "is_external_leader": false,
+        "leader": {
+          "context_policy": {
+            "keep_user_thread": true,
+            "max_worker_result_tokens": 2000,
+            "receive_worker_outputs": "business_messages_and_short_summaries"
+          },
+          "id": "leader",
+          "model": null,
+          "provider": "codex",
+          "role": "leader",
+          "tools": [
+            "fs_read",
+            "fs_list",
+            "mcp_team"
+          ]
+        },
+        "session_name": "team-phasegolden",
+        "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+        "tasks": [
+          {
+            "acceptance": [
+              "Worker reports valid result_envelope_v1"
+            ],
+            "assignee": "w1",
+            "deps": [],
+            "files": [],
+            "id": "task_initial",
+            "requires_tools": [
+              "mcp_team"
+            ],
+            "risk": "low",
+            "status": "pending",
+            "title": "Initial document-driven team task",
+            "type": "implementation"
+          }
+        ],
+        "team_depth": 1,
+        "team_dir": "<WORKSPACE>/teamdir",
+        "team_key": "teamdir",
+        "workspace": "<WORKSPACE>"
+      }
+    },
+    "workspace": "<WORKSPACE>"
+  },
+  "transport": {
+    "spawns": [
+      [
+        "spawn_into",
+        "w1"
+      ]
+    ]
+  }
+}

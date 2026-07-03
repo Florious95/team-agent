@@ -90,11 +90,11 @@ impl McpSimHarness {
     pub fn drive_delivery_once(&self) {
         let store = MessageStore::open(&self.workspace).unwrap();
         let event_log = EventLog::new(&self.workspace);
-        let _ = fire_due_scheduled_events(&self.workspace, &store, &self.backend, &event_log)
-            .unwrap();
+        let _ =
+            fire_due_scheduled_events(&self.workspace, &store, &self.backend, &event_log).unwrap();
         let state = team_agent::state::persist::load_runtime_state(&self.workspace).unwrap();
-        let _ = deliver_pending_messages(&self.workspace, &state, &self.backend, &event_log)
-            .unwrap();
+        let _ =
+            deliver_pending_messages(&self.workspace, &state, &self.backend, &event_log).unwrap();
         std::thread::sleep(Duration::from_millis(150));
     }
 
@@ -104,7 +104,10 @@ impl McpSimHarness {
     }
 
     pub fn pane_text(&self, name: &str) -> String {
-        let pane = self.panes.get(name).unwrap_or_else(|| panic!("unknown pane {name}"));
+        let pane = self
+            .panes
+            .get(name)
+            .unwrap_or_else(|| panic!("unknown pane {name}"));
         self.backend
             .capture(&Target::Pane(pane.clone()), CaptureRange::Full)
             .unwrap()
@@ -116,8 +119,13 @@ impl McpSimHarness {
     }
 
     pub fn events_text(&self) -> String {
-        std::fs::read_to_string(self.workspace.join(".team").join("logs").join("events.jsonl"))
-            .unwrap_or_default()
+        std::fs::read_to_string(
+            self.workspace
+                .join(".team")
+                .join("logs")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default()
     }
 
     pub fn clear_leader_receiver_binding(&self) {
@@ -184,8 +192,10 @@ impl McpSimHarness {
     pub fn scheduled_event_count(&self) -> i64 {
         let store = MessageStore::open(&self.workspace).unwrap();
         let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
-        conn.query_row("select count(*) from scheduled_events", [], |row| row.get(0))
-            .unwrap()
+        conn.query_row("select count(*) from scheduled_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
     fn spawn_pane(&mut self, name: &str, first: bool) {
@@ -394,11 +404,7 @@ pub fn spawn_mcp_client(workspace: &Path, worker_id: &str, owner_team_id: &str) 
         stdin,
         stdout_rx: rx,
         next_id: 1,
-        spawn_spec: McpSpawnSpec {
-            program,
-            args,
-            env,
-        },
+        spawn_spec: McpSpawnSpec { program, args, env },
         trace_path,
     };
     client.assert_initialize_and_tools();

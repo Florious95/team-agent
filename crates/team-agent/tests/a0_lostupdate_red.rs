@@ -1,19 +1,13 @@
-//! A0 lost-update residual gaps: R1/R2 diff-regression contracts + A0 GREEN regression lock.
+//! A0 lost-update Phase C contracts: stale topology conflicts + capture tuple backfill.
 //!
 //! Locate doc (sole basis): `.team/artifacts/a0-rs-lostupdate-locate.md` (fable-architect).
 //! Python 0.2.11 truth: coordinator tick does whole-file load->mutate->save with NO merge
-//! (state.py:493), so a concurrent add-agent registration is permanently overwritten. RS has
-//! a structural in-lock reload+merge guard at the single save chokepoint
-//! (persist.rs:210-221, preserve_latest_roster_entries :272-313) — A0 proper does NOT
-//! reproduce — but two narrow residual gaps remain:
+//! (state.py:493), so a concurrent add-agent registration is permanently overwritten.
 //!
-//! R1: the `same_runtime_projection` gate (persist.rs:273-275) short-circuits the WHOLE
-//!     preserve pass, including the per-team `teams.<k>.agents` merge (:293-304) that is
-//!     team-key self-identifying and safe regardless of which team is active.
-//! R2: `preserve_missing_agents` (persist.rs:387-389) only fills MISSING agent keys
-//!     (`entry().or_insert_with`); for rows present on both sides the stale incoming row
-//!     wins wholesale, silently regressing session-capture fields written between the
-//!     writer's load and save (same family disease as Python).
+//! Phase C design §Behavior Preservation flips the old full-row resurrection contract:
+//! stale non-lifecycle saves racing live topology must fail with SaveConflict and leave
+//! latest topology intact, not clone rows to mask the race. Non-topology merge exceptions
+//! such as complete session-capture tuple backfill remain valid.
 //!
 //! Test shape per locate doc §5: all writers go through the one chokepoint, so the race
 //! is reduced to a single-threaded stale-snapshot direct test — latest on disk, stale
@@ -32,14 +26,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
 use team_agent::state::persist::{runtime_state_path, save_runtime_state};
+use team_agent::state::StateError;
 
-/// RED-R1 (gate boundary loses a registration): when another process flipped
-/// `active_team_key` (e.g. quick-start of team-b) between this writer's load and save,
-/// the projection gate must not short-circuit the per-team preserve — `teams.team-b`
-/// entries are identified by their own key and merging them is always safe.
-/// Today persist.rs:273-275 returns early and the team-b registration is lost.
+/// Phase C rewrite of RED-R1: when another process flipped `active_team_key` and
+/// registered live topology in `teams.team-b` between this writer's load and save,
+/// the stale save must be rejected and latest topology must remain intact.
 #[test]
-fn red_r1_per_team_preserve_must_survive_projection_gate_mismatch() {
+fn stale_team_projection_save_conflicts_and_preserves_latest_topology() {
     let ws = tmp_ws("r1-gate");
     // Disk latest: another process registered `new_agent` into teams.team-b and flipped
     // the active team key to team-b.
@@ -51,7 +44,7 @@ fn red_r1_per_team_preserve_must_survive_projection_gate_mismatch() {
             "agents": { "w1": agent_row("w1", Some("sess-w1")) },
             "teams": {
                 "team-a": { "session_name": "team-a", "agents": { "w1": agent_row("w1", Some("sess-w1")) } },
-                "team-b": { "session_name": "team-b", "agents": { "new_agent": agent_row("new_agent", None) } },
+                "team-b": { "session_name": "team-b", "agents": { "new_agent": live_agent_row("new_agent") } },
             },
         }),
     );
@@ -67,17 +60,22 @@ fn red_r1_per_team_preserve_must_survive_projection_gate_mismatch() {
         },
     });
 
-    save_runtime_state(&ws, &incoming).expect("stale-snapshot save should succeed");
+    let err = save_runtime_state(&ws, &incoming).expect_err("stale live topology must conflict");
+    assert!(matches!(err, StateError::SaveConflict(_)));
+    let message = err.to_string();
+    assert!(message.contains("agent_id=new_agent"), "message={message}");
+    assert!(
+        message.contains("projection=teams.team-b.agents"),
+        "message={message}"
+    );
 
     let saved = read_disk_state(&ws);
     assert!(
         saved
             .pointer("/teams/team-b/agents/new_agent")
             .is_some_and(Value::is_object),
-        "R1: the in-lock per-team preserve (persist.rs:293-304) must run even when the \
-projection gate (persist.rs:273-275) sees a different active_team_key — teams.<k> entries \
-are self-identifying and the team-b registration must survive a stale team-a snapshot save. \
-saved={saved}"
+        "Phase C design §Behavior Preservation: stale saves must not corrupt active \
+topology; saved={saved}"
     );
 }
 
@@ -119,14 +117,14 @@ fn red_r2_session_capture_fields_must_not_regress_from_stale_snapshot() {
     save_runtime_state(&ws, &incoming).expect("stale-snapshot save should succeed");
 
     let saved = read_disk_state(&ws);
-    let row = saved
-        .pointer("/agents/w1")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let row = saved.pointer("/agents/w1").cloned().unwrap_or(Value::Null);
     let mut failures = Vec::new();
     for (field, expected) in [
         ("session_id", json!("sess-cap-1")),
-        ("rollout_path", json!("/home/user/.codex/sessions/rollout-sess-cap-1.jsonl")),
+        (
+            "rollout_path",
+            json!("/home/user/.codex/sessions/rollout-sess-cap-1.jsonl"),
+        ),
         ("captured_at", json!("2026-06-10T03:00:00+00:00")),
         ("captured_via", json!("fs_watch")),
         ("attribution_confidence", json!("high")),
@@ -147,13 +145,11 @@ incoming row had null — capture fields must be monotonic across the in-lock me
     );
 }
 
-/// GREEN regression lock (A0 proper): the existing in-lock reload + missing-key merge is
-/// the structural guard that makes RS NOT reproduce Python's A0 lost-update. Lock it so
-/// the F1/F2 fixes (or any future refactor) cannot regress it: a registration present on
-/// disk in BOTH projections (top-level agents + teams.<active>.agents) must survive a
-/// stale-snapshot save that lacks it, when the projection gate matches.
+/// Phase C rewrite of the A0 GREEN lock: old tests asserted full-row resurrection. The
+/// new contract is stricter around topology: a stale snapshot missing live topology is
+/// rejected, and the disk latest remains the source of truth.
 #[test]
-fn green_a0_lock_stale_snapshot_save_preserves_new_agent_in_both_projections() {
+fn stale_snapshot_missing_live_agent_conflicts_without_corrupting_disk() {
     let ws = tmp_ws("a0-green");
     write_disk_state(
         &ws,
@@ -162,14 +158,14 @@ fn green_a0_lock_stale_snapshot_save_preserves_new_agent_in_both_projections() {
             "active_team_key": "team-a",
             "agents": {
                 "w1": agent_row("w1", Some("sess-w1")),
-                "joined": agent_row("joined", None),
+                "joined": live_agent_row("joined"),
             },
             "teams": {
                 "team-a": {
                     "session_name": "team-a",
                     "agents": {
                         "w1": agent_row("w1", Some("sess-w1")),
-                        "joined": agent_row("joined", None),
+                        "joined": live_agent_row("joined"),
                     },
                 },
             },
@@ -184,16 +180,16 @@ fn green_a0_lock_stale_snapshot_save_preserves_new_agent_in_both_projections() {
         },
     });
 
-    save_runtime_state(&ws, &incoming).expect("stale-snapshot save should succeed");
+    let err = save_runtime_state(&ws, &incoming).expect_err("missing live row must conflict");
+    assert!(matches!(err, StateError::SaveConflict(_)));
+    assert!(err.to_string().contains("agent_id=joined"));
 
     let saved = read_disk_state(&ws);
     for pointer in ["/agents/joined", "/teams/team-a/agents/joined"] {
         assert!(
             saved.pointer(pointer).is_some_and(Value::is_object),
-            "A0 GREEN lock: registration `joined` must be preserved at {pointer} by the \
-in-lock reload+merge (persist.rs:214,221,276,298) — this is the guard that blocks \
-Python's A0 lost-update and it must not be removed by F1/F2 or future refactors. \
-saved={saved}"
+            "Phase C design §Behavior Preservation: latest active topology must stay \
+intact at {pointer}; saved={saved}"
         );
     }
 }
@@ -211,6 +207,25 @@ fn agent_row(id: &str, session_id: Option<&str>) -> Value {
         "agent_id": id,
         "window": id,
         "session_id": session_id,
+        "rollout_path": null,
+        "captured_at": null,
+        "captured_via": null,
+        "attribution_confidence": null,
+        "spawn_cwd": "/ws",
+    })
+}
+
+fn live_agent_row(id: &str) -> Value {
+    json!({
+        "status": "running",
+        "provider": "codex",
+        "agent_id": id,
+        "window": id,
+        "pane_id": format!("%{id}"),
+        "pane_pid": 1000,
+        "spawned_at": "2026-06-01T00:00:00Z",
+        "spawn_epoch": 1,
+        "session_id": null,
         "rollout_path": null,
         "captured_at": null,
         "captured_via": null,

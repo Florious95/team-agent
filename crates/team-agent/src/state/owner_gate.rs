@@ -59,7 +59,10 @@ pub fn check_team_owner(
     if !owner.is_object() || owner.as_object().is_none_or(serde_json::Map::is_empty) {
         return None;
     }
-    let owner_uuid = owner.get("leader_session_uuid").and_then(Value::as_str).unwrap_or("");
+    let owner_uuid = owner
+        .get("leader_session_uuid")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let owner_pane = owner.get("pane_id").and_then(Value::as_str).unwrap_or("");
     let caller_uuid = caller.leader_session_uuid.as_str();
     let caller_pane = caller.pane_id.as_str();
@@ -178,7 +181,9 @@ fn lexical_abs(p: &Path) -> std::path::PathBuf {
     if p.is_absolute() {
         p.to_path_buf()
     } else {
-        std::env::current_dir().map(|cwd| cwd.join(p)).unwrap_or_else(|_| p.to_path_buf())
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
     }
 }
 
@@ -253,7 +258,9 @@ mod tests {
     #[test]
     fn no_owner_allows() {
         assert!(check_team_owner(&json!({}), &caller("%c", "u"), true, &LIVE).is_none());
-        assert!(check_team_owner(&json!({"team_owner": {}}), &caller("%c", "u"), true, &LIVE).is_none());
+        assert!(
+            check_team_owner(&json!({"team_owner": {}}), &caller("%c", "u"), true, &LIVE).is_none()
+        );
     }
 
     #[test]
@@ -298,15 +305,30 @@ mod tests {
     fn worker_bypass_rules() {
         let s = json!({"leader": {"id": "leader"}, "agents": {"worker_a": {}, "worker_b": {}}});
         // worker_a + env worker_a → 绕过。
-        assert_eq!(worker_sender_bypasses_owner_gate(&s, Some("worker_a"), Some("worker_a")), Some("worker_a".to_string()));
+        assert_eq!(
+            worker_sender_bypasses_owner_gate(&s, Some("worker_a"), Some("worker_a")),
+            Some("worker_a".to_string())
+        );
         // leader → 不绕过(走 owner 门)。
-        assert_eq!(worker_sender_bypasses_owner_gate(&s, Some("leader"), Some("leader")), None);
+        assert_eq!(
+            worker_sender_bypasses_owner_gate(&s, Some("leader"), Some("leader")),
+            None
+        );
         // 未注册 agent → 不绕过。
-        assert_eq!(worker_sender_bypasses_owner_gate(&s, Some("ghost"), Some("ghost")), None);
+        assert_eq!(
+            worker_sender_bypasses_owner_gate(&s, Some("ghost"), Some("ghost")),
+            None
+        );
         // sender/env 不一致(伪造)→ 不绕过。
-        assert_eq!(worker_sender_bypasses_owner_gate(&s, Some("worker_b"), Some("worker_a")), None);
+        assert_eq!(
+            worker_sender_bypasses_owner_gate(&s, Some("worker_b"), Some("worker_a")),
+            None
+        );
         // 无 env_agent_id + 已注册 → 绕过(返回 sender)。
-        assert_eq!(worker_sender_bypasses_owner_gate(&s, Some("worker_a"), None), Some("worker_a".to_string()));
+        assert_eq!(
+            worker_sender_bypasses_owner_gate(&s, Some("worker_a"), None),
+            Some("worker_a".to_string())
+        );
     }
 
     // §11 血泪:/tmp → /private/tmp 软链不对称(macOS 真机 bug)。两边 canonicalize → match。
@@ -319,7 +341,10 @@ mod tests {
         let raw = Path::new("/tmp").join(dir.file_name().unwrap());
         let private = Path::new("/private/tmp").join(dir.file_name().unwrap());
         if raw.exists() && private.exists() {
-            assert!(workspace_paths_match(&raw, &private), "/tmp 与 /private/tmp 应 canonicalize 相等");
+            assert!(
+                workspace_paths_match(&raw, &private),
+                "/tmp 与 /private/tmp 应 canonicalize 相等"
+            );
         }
         // 自反:同路径 match。
         assert!(workspace_paths_match(&dir, &dir));
@@ -333,7 +358,10 @@ mod tests {
         let repo_backup = base.join("repo-backup");
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::create_dir_all(&repo_backup).unwrap();
-        assert!(!workspace_paths_match(&repo, &repo_backup), "共享前缀的兄弟目录不得 match");
+        assert!(
+            !workspace_paths_match(&repo, &repo_backup),
+            "共享前缀的兄弟目录不得 match"
+        );
         // 子目录也不 match(禁子串/反推)。
         let sub = repo.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
@@ -359,15 +387,25 @@ mod tests {
         c.leader_session_uuid_source = "derived".to_string();
         let r = check_team_owner(&s, &c, true, &LIVE);
         assert!(r.is_some(), "两边空 uuid 不得 allow;必落拒绝");
-        assert_eq!(r.unwrap()["reason_kind"], json!("owner_takeover_required"), "非 sticky_bind(空 uuid 不算同)");
+        assert_eq!(
+            r.unwrap()["reason_kind"],
+            json!("owner_takeover_required"),
+            "非 sticky_bind(空 uuid 不算同)"
+        );
     }
 
     // 对抗 P2:owner pane liveness == Unknown 时,非 worker caller 也接管;worker 不接管。
     #[test]
     fn unknown_owner_pane_allows_nonworker_takeover() {
         let s = state_owned("%owner", "uuid-owner");
-        assert!(check_team_owner(&s, &caller("%new", "uuid-new"), false, &UNKNOWN).is_none(), "Unknown owner pane + 非 worker → 接管");
-        assert!(check_team_owner(&s, &caller("%new", "uuid-new"), true, &UNKNOWN).is_some(), "worker 即便 Unknown 也不接管");
+        assert!(
+            check_team_owner(&s, &caller("%new", "uuid-new"), false, &UNKNOWN).is_none(),
+            "Unknown owner pane + 非 worker → 接管"
+        );
+        assert!(
+            check_team_owner(&s, &caller("%new", "uuid-new"), true, &UNKNOWN).is_some(),
+            "worker 即便 Unknown 也不接管"
+        );
     }
 
     // 空 caller_pane + 异 uuid + 死 owner:死-owner 接管分支需 caller_pane 非空,故落拒绝。
@@ -375,7 +413,10 @@ mod tests {
     fn empty_caller_pane_diff_uuid_refuses_even_dead_owner() {
         let s = state_owned("%owner", "uuid-owner");
         let r = check_team_owner(&s, &caller("", "uuid-diff"), false, &DEAD);
-        assert!(r.is_some(), "空 caller_pane 不触发死-owner 接管;异 uuid → 拒绝");
+        assert!(
+            r.is_some(),
+            "空 caller_pane 不触发死-owner 接管;异 uuid → 拒绝"
+        );
     }
 
     // 对抗 P0-B(§11 血泪):父目录是软链 + 末段不存在 → realpath_like 解析父软链 → 判 own。
@@ -396,7 +437,10 @@ mod tests {
                 "父软链 + 缺失末段应判 own(realpath_like 解析父软链)"
             );
             // 不同末段仍不 match。
-            assert!(!workspace_paths_match(&link.join("ghostA"), &real.join("ghostB")));
+            assert!(!workspace_paths_match(
+                &link.join("ghostA"),
+                &real.join("ghostB")
+            ));
         }
     }
 

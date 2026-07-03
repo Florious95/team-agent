@@ -34,7 +34,9 @@ use serial_test::serial;
 #[serial(a7_mcp)]
 fn a7_stuck_cancel_unknown_alert_type_must_refuse() {
     let harness = McpSimHarness::new();
-    let _coordinator_guard = CoordinatorStopGuard { ws: harness.workspace_path().to_path_buf() };
+    let _coordinator_guard = CoordinatorStopGuard {
+        ws: harness.workspace_path().to_path_buf(),
+    };
     let mut worker = harness.spawn_mcp_client("worker_b", "teamA");
 
     let call = worker.call_tool(
@@ -47,7 +49,10 @@ fn a7_stuck_cancel_unknown_alert_type_must_refuse() {
         failures.push(format!("ok must be false; body={}", call.body));
     }
     if call.body.get("status") != Some(&json!("refused")) {
-        failures.push(format!("status must be the Python literal `refused`; body={}", call.body));
+        failures.push(format!(
+            "status must be the Python literal `refused`; body={}",
+            call.body
+        ));
     }
     if call.body.get("reason") != Some(&json!("invalid_alert_type")) {
         failures.push(format!(
@@ -68,7 +73,9 @@ fn a7_stuck_cancel_unknown_alert_type_must_refuse() {
 #[serial(a7_mcp)]
 fn a7_stuck_cancel_default_alert_type_is_stuck() {
     let harness = McpSimHarness::new();
-    let _coordinator_guard = CoordinatorStopGuard { ws: harness.workspace_path().to_path_buf() };
+    let _coordinator_guard = CoordinatorStopGuard {
+        ws: harness.workspace_path().to_path_buf(),
+    };
     let mut worker = harness.spawn_mcp_client("worker_b", "teamA");
 
     let call = worker.call_tool("stuck_cancel", json!({"agent_id": "worker_a"}));
@@ -90,14 +97,19 @@ default `all` (wire.rs:447) silently suppresses every alert family; body={}",
 #[serial(a7_mcp)]
 fn a7_send_must_not_fabricate_message_id() {
     let harness = McpSimHarness::new();
-    let _coordinator_guard = CoordinatorStopGuard { ws: harness.workspace_path().to_path_buf() };
+    let _coordinator_guard = CoordinatorStopGuard {
+        ws: harness.workspace_path().to_path_buf(),
+    };
     // A REFUSED delivery (session drift on the recipient — the same refusal the runtime
     // writes, send.rs:449-478) returns ok:false with message_id=None. Combined with a
     // workspace-scoped client (owner_team_id empty) this is exactly the branch where
     // tools.rs:194-196 invents `mcp_<timestamp>` and reports the refused send as
     // accepted with a dead poll_via.
     let mut state = harness.state_value();
-    for pointer in ["/agents/worker_a/status", "/teams/teamA/agents/worker_a/status"] {
+    for pointer in [
+        "/agents/worker_a/status",
+        "/teams/teamA/agents/worker_a/status",
+    ] {
         if let Some(status) = state.pointer_mut(pointer) {
             *status = json!("session_drift");
         }
@@ -136,7 +148,9 @@ fabricated={fabricated:?} body={} raw={}",
 #[serial(a7_mcp)]
 fn a7_fork_agent_label_becomes_new_role() {
     let harness = McpSimHarness::new();
-    let _coordinator_guard = CoordinatorStopGuard { ws: harness.workspace_path().to_path_buf() };
+    let _coordinator_guard = CoordinatorStopGuard {
+        ws: harness.workspace_path().to_path_buf(),
+    };
     seed_forkable_source(&harness);
     // Fork is an owner-side lifecycle op: give the client the owner's identity
     // (caller_identity_from_env reads TEAM_AGENT_LEADER_SESSION_UUID /
@@ -161,11 +175,17 @@ fn a7_fork_agent_label_becomes_new_role() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(shim_dir.join("claude"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            shim_dir.join("claude"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
     let old_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", shim_dir.to_string_lossy(), old_path));
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", shim_dir.to_string_lossy(), old_path),
+    );
     std::env::set_var("TEAM_AGENT_LEADER_SESSION_UUID", "leader-session-team-a");
     std::env::set_var("TEAM_AGENT_LEADER_PANE_ID", &owner_pane);
     let mut worker = harness.spawn_mcp_client("leader", "teamA");
@@ -220,24 +240,55 @@ fn seed_forkable_source(harness: &McpSimHarness) {
     if !rollout.exists() {
         std::fs::write(&rollout, b"{}\n").unwrap();
     }
+    for agent_id in ["worker_a", "worker_b", "worker_c"] {
+        let top_pointer = format!("/agents/{agent_id}");
+        let team_pointer = format!("/teams/teamA/agents/{agent_id}");
+        if let Some(topology) = state.pointer(&top_pointer).cloned() {
+            if let Some(agent) = state
+                .pointer_mut(&team_pointer)
+                .and_then(Value::as_object_mut)
+            {
+                copy_live_topology(agent, &topology);
+            }
+        }
+    }
+    let source_topology = state.pointer("/agents/worker_a").cloned();
     for pointer in ["/agents/worker_a", "/teams/teamA/agents/worker_a"] {
         if let Some(agent) = state.pointer_mut(pointer).and_then(Value::as_object_mut) {
-            agent.insert("session_id".to_string(), json!("11111111-2222-4333-8444-555555555555"));
+            agent.insert(
+                "session_id".to_string(),
+                json!("11111111-2222-4333-8444-555555555555"),
+            );
             agent.insert("rollout_path".to_string(), json!(rollout.to_string_lossy()));
-            agent.insert("captured_at".to_string(), json!("2026-06-25T10:00:00+00:00"));
+            agent.insert(
+                "captured_at".to_string(),
+                json!("2026-06-25T10:00:00+00:00"),
+            );
             agent.insert("captured_via".to_string(), json!("session.captured"));
             agent.insert("role".to_string(), json!("Source Worker"));
             agent.insert("provider".to_string(), json!("claude"));
             agent.insert("auth_mode".to_string(), json!("subscription"));
+            // Phase C no longer cross-backfills live topology between projections. Keep
+            // the forkable source fixture internally consistent so the test exercises
+            // fork label semantics rather than a stale source topology conflict.
+            if let Some(topology) = source_topology.as_ref() {
+                copy_live_topology(agent, topology);
+            }
         }
     }
     // Real-machine state carries spec_path/workspace/team_dir on both projections; the
     // MCP lifecycle workspace resolver follows them to the real compiled spec.
     for pointer in ["", "/teams/teamA"] {
         if let Some(entry) = state.pointer_mut(pointer).and_then(Value::as_object_mut) {
-            entry.insert("spec_path".to_string(), json!(ws.join("team.spec.yaml").to_string_lossy()));
+            entry.insert(
+                "spec_path".to_string(),
+                json!(ws.join("team.spec.yaml").to_string_lossy()),
+            );
             entry.insert("workspace".to_string(), json!(ws.to_string_lossy()));
-            entry.insert("team_dir".to_string(), json!(ws.join("teamdir").to_string_lossy()));
+            entry.insert(
+                "team_dir".to_string(),
+                json!(ws.join("teamdir").to_string_lossy()),
+            );
         }
     }
     let session_name = state
@@ -263,7 +314,11 @@ fn seed_forkable_source(harness: &McpSimHarness) {
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&team_dir).expect("compile fixture team");
-    std::fs::write(ws.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        ws.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     let loaded = team_agent::model::yaml::loads(
         &std::fs::read_to_string(ws.join("team.spec.yaml")).unwrap(),
     )
@@ -271,6 +326,13 @@ fn seed_forkable_source(harness: &McpSimHarness) {
     team_agent::model::spec::validate_spec(&loaded, &ws).expect("fixture spec must validate");
 }
 
+fn copy_live_topology(agent: &mut serde_json::Map<String, Value>, topology: &Value) {
+    for field in ["window", "pane_id", "pane_pid", "spawned_at", "spawn_epoch"] {
+        if let Some(value) = topology.get(field) {
+            agent.insert(field.to_string(), value.clone());
+        }
+    }
+}
 
 /// MCP lifecycle tools may auto-start a coordinator daemon in the temp workspace
 /// (e.g. fork reports coordinator_started). Stop it on drop so tests never leak a
