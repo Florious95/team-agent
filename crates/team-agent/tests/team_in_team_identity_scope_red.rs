@@ -366,8 +366,15 @@ impl Drop for EnvGuard {
 #[derive(Debug, Default)]
 struct RecordingTransport {
     sessions: Mutex<HashSet<String>>,
-    spawned: Mutex<Vec<String>>,
+    spawned: Mutex<Vec<SpawnedPane>>,
     session_present: Mutex<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct SpawnedPane {
+    pane_id: PaneId,
+    session: SessionName,
+    window: WindowName,
 }
 
 impl RecordingTransport {
@@ -379,9 +386,14 @@ impl RecordingTransport {
     fn spawn_result(&self, session: &SessionName, window: &WindowName) -> SpawnResult {
         self.sessions.lock().unwrap().insert(session.as_str().to_string());
         let mut spawned = self.spawned.lock().unwrap();
-        spawned.push(format!("{}:{}", session.as_str(), window.as_str()));
+        let pane_id = PaneId::new(format!("%{}", spawned.len() + 1));
+        spawned.push(SpawnedPane {
+            pane_id: pane_id.clone(),
+            session: session.clone(),
+            window: window.clone(),
+        });
         SpawnResult {
-            pane_id: PaneId::new(format!("%{}", spawned.len())),
+            pane_id,
             session: session.clone(),
             window: window.clone(),
             child_pid: None,
@@ -450,7 +462,25 @@ impl Transport for RecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self
+            .spawned
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|pane| PaneInfo {
+                pane_id: pane.pane_id.clone(),
+                session: pane.session.clone(),
+                window_index: None,
+                window_name: Some(pane.window.clone()),
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: false,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            })
+            .collect())
     }
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {

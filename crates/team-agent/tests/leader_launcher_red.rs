@@ -604,21 +604,46 @@ impl FakeLauncherTools {
         let bin = workspace.join("fake-bin");
         std::fs::create_dir_all(&bin).unwrap();
         let tmux_log = workspace.join("tmux-argv.log");
+        let tmux_state = workspace.join("tmux-state.tsv");
         let provider_log = workspace.join("claude-argv.log");
         write_executable(
             &bin.join("tmux"),
             &format!(
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
+state='{}'
+workspace='{}'
 if [ "$1" = "-V" ]; then
   printf 'tmux 3.4\n'
   exit 0
 fi
+record_spawn() {{
+  session=
+  window=
+  previous=
+  for arg in "$@"; do
+    if [ "$previous" = "-s" ] || [ "$previous" = "-t" ]; then
+      session=$(printf '%s' "$arg" | cut -d: -f1)
+    fi
+    if [ "$previous" = "-n" ]; then
+      window="$arg"
+    fi
+    previous="$arg"
+  done
+  [ -n "$session" ] || session="unknown"
+  [ -n "$window" ] || window="claude_code"
+  printf '%%42\t%s\t0\t%s\t0\t/dev/ttys001\tclaude\t1\t%s\t1\t0\t12345\n' "$session" "$window" "$workspace" > "$state"
+}}
 case " $* " in
   *" has-session "*)
     exit 1
     ;;
   *" new-session "*)
+    record_spawn "$@"
+    exit 0
+    ;;
+  *" new-window "*)
+    record_spawn "$@"
     exit 0
     ;;
   *" display-message "*)
@@ -626,6 +651,7 @@ case " $* " in
     exit 0
     ;;
   *" list-panes "*)
+    [ -f "$state" ] && cat "$state"
     exit 0
     ;;
   *)
@@ -633,7 +659,9 @@ case " $* " in
     ;;
 esac
 "#,
-                tmux_log.display()
+                tmux_log.display(),
+                tmux_state.display(),
+                workspace.display()
             ),
         );
         write_executable(

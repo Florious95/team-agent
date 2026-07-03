@@ -749,6 +749,9 @@ impl Drop for MockAncestry {
 struct RecordedSpawn {
     kind: &'static str,
     argv: Vec<String>,
+    session: SessionName,
+    window: WindowName,
+    pane_id: PaneId,
 }
 
 #[derive(Debug, Default)]
@@ -786,12 +789,16 @@ impl RecordingTransport {
         argv: &[String],
     ) -> SpawnResult {
         let mut spawns = self.spawns.lock().unwrap();
+        let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
             kind,
             argv: argv.to_vec(),
+            session: session.clone(),
+            window: window.clone(),
+            pane_id: pane_id.clone(),
         });
         SpawnResult {
-            pane_id: PaneId::new(format!("%{}", spawns.len())),
+            pane_id,
             session: session.clone(),
             window: window.clone(),
             child_pid: None,
@@ -877,7 +884,25 @@ impl Transport for RecordingTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        Ok(self
+            .spawns
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|spawn| PaneInfo {
+                pane_id: spawn.pane_id.clone(),
+                session: spawn.session.clone(),
+                window_index: None,
+                window_name: Some(spawn.window.clone()),
+                pane_index: None,
+                tty: None,
+                current_command: Some("codex".to_string()),
+                current_path: None,
+                active: false,
+                pane_pid: None,
+                leader_env: BTreeMap::new(),
+            })
+            .collect())
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
