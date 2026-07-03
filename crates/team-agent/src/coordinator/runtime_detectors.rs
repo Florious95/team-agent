@@ -64,7 +64,7 @@ fn detect_compaction(
             "coordinator.compaction_observed",
             json!({
                 "agent_id": fact.agent_id.as_str(),
-                "provider": provider.map(provider_name),
+                "provider": provider.map(runtime_event_provider_name),
                 "team": team,
                 "compaction_count": current,
                 "stuck_loop": false,
@@ -82,7 +82,7 @@ fn detect_compaction(
             "compaction_threshold_crossed.recommend_reset",
             json!({
                 "agent_id": fact.agent_id.as_str(),
-                "provider": provider.map(provider_name),
+                "provider": provider.map(runtime_event_provider_name),
                 "team": team,
                 "compaction_count": current,
                 "threshold": threshold,
@@ -239,7 +239,7 @@ fn detect_leader_api_error(
         json!({
             "leader_session_uuid": leader_session_uuid,
             "error_class": error_class,
-            "provider": provider.map(provider_name),
+            "provider": provider.map(runtime_event_provider_name),
             "partial_response_streamed": partial_response_streamed,
             "worker_dispatch_just_before": [],
             "retry_count": 0,
@@ -545,7 +545,8 @@ fn leader_receiver_provider(receiver: Option<&Value>) -> Option<Provider> {
     serde_json::from_value(Value::String(raw.to_string())).ok()
 }
 
-fn provider_name(provider: Provider) -> &'static str {
+// Event-field grammar, not provider identity parsing.
+fn runtime_event_provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Claude => "claude",
         Provider::ClaudeCode => "claude_code",

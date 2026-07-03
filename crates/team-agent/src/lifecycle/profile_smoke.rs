@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::lifecycle::profile_launch;
 use crate::model::enums::{AuthMode, Provider};
 use crate::model::yaml::Value as YamlValue;
+use crate::provider::wire::provider_wire;
 
 pub(crate) const DEFAULT_PROFILE_SMOKE_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -503,17 +504,6 @@ fn redact_text(raw: &str, secrets: &[&str]) -> String {
         }
     }
     out
-}
-
-fn provider_wire(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Fake => "fake",
-    }
 }
 
 fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {

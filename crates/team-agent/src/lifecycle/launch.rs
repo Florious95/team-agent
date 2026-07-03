@@ -3464,6 +3464,7 @@ fn detect_dangerous_approval_in_argv(argv_tokens: &[String]) -> Option<Dangerous
 }
 
 fn dangerous_leader_flags() -> &'static [(&'static str, &'static str)] {
+    // Process argv command grammar, not persisted provider identity parsing.
     &[
         ("claude", "--dangerously-skip-permissions"),
         ("claude", "--dangerously-skip-permission"),
@@ -3479,6 +3480,7 @@ fn dangerous_leader_flags() -> &'static [(&'static str, &'static str)] {
 }
 
 fn binary_matches_provider(provider: &str, binary: Option<&str>) -> bool {
+    // Binary-name command grammar, not provider identity parsing.
     match (provider, binary) {
         ("codex", Some("codex")) => true,
         ("claude", Some("claude" | "claude-code" | "claude_code")) => true,

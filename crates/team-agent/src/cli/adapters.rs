@@ -993,6 +993,7 @@ fn command_version(command: &str) -> Value {
 }
 
 fn provider_command(provider: &str) -> &str {
+    // E2E provider command grammar, not persisted provider identity parsing.
     match provider {
         "claude" | "claude_code" => "claude",
         "gemini" | "gemini_cli" => "gemini",

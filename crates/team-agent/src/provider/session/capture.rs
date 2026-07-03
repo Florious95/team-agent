@@ -7,7 +7,7 @@ use crate::provider::{
     CapturedSession, CapturedSessionCandidate, CaptureSessionContext, Provider, ProviderAdapter,
     ProviderError, SessionId,
 };
-use crate::provider::wire::parse_provider;
+use crate::provider::wire::{is_claude_family, parse_provider};
 
 pub const SESSION_CAPTURE_CONVERGENCE_DEADLINE_MS: u64 = 12_000;
 pub const SESSION_CAPTURE_CONVERGENCE_POLL_MS: u64 = 250;
@@ -753,7 +753,7 @@ fn agent_session_complete(agent: &Value) -> bool {
         return false;
     }
     let provider_wire = agent.get("provider").and_then(Value::as_str).unwrap_or("");
-    if matches!(provider_wire, "claude" | "claude-code" | "claude_code") {
+    if parse_provider(provider_wire).is_some_and(is_claude_family) {
         return claude_rollout_has_lifecycle_records(path);
     }
     true

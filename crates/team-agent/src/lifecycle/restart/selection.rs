@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+use crate::provider::wire::{parse_canonical_provider, requires_resume_backing};
 
 /// bug-085 四象限 `start_mode` 决策(`start.py:179-188` + `_resume_rollout_missing` `start.py:66-69`),
 /// **从 start_agent 的整条 lock+spawn 路径里分离出的纯函数**(gate gap:porter 需要单元级 RED
@@ -31,7 +32,7 @@ pub fn decide_start_mode(
 }
 
 pub(crate) fn resumable_provider_requires_backing(provider: &str) -> bool {
-    matches!(provider, "codex" | "claude" | "claude_code" | "copilot")
+    parse_canonical_provider(provider).is_some_and(requires_resume_backing)
 }
 
 /// `first_send_at` 严格分类(`_classify_first_send_at`,`orchestration.py:399`)。

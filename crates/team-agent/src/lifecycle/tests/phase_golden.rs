@@ -79,6 +79,29 @@ fn phase_d_golden_events_state_status_zero_drift() {
     );
 }
 
+#[test]
+fn phase_e_golden_events_state_status_zero_drift() {
+    let baseline = phase_fixture_path("phase_e").join("golden.json");
+    let actual = run_phase_golden(PhaseGolden {
+        phase: "phase_e",
+        team_key: "teamdir",
+        lifecycle_op: phase_b_reset_discard_session,
+    });
+    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
+        std::fs::write(&baseline, pretty(&actual)).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&baseline)
+        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
+    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    assert_eq!(
+        actual,
+        expected,
+        "phase E golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+    );
+}
+
 #[derive(Clone, Copy)]
 struct PhaseGolden {
     phase: &'static str,

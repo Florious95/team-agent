@@ -9,6 +9,9 @@ use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
 use crate::model::enums::{PaneLiveness, Provider};
 use crate::model::ids::TeamKey;
+use crate::provider::wire::{
+    is_claude_family, parse_canonical_provider, parse_provider, provider_wire,
+};
 use crate::transport::{
     submit_verification_wire, InjectPayload, InjectReport, InjectVerification, Key, PaneId,
     PaneInfo, SessionName, SubmitVerification, Target, Transport, WindowName,
@@ -1234,11 +1237,12 @@ fn recipient_pane_has_actionable_startup_prompt(
         .and_then(|agents| agents.get(recipient));
     let provider = agent
         .and_then(|agent| agent.get("provider"))
-        .and_then(serde_json::Value::as_str);
-    if !matches!(
-        provider,
-        Some("codex" | "claude" | "claude_code" | "copilot")
-    ) {
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_canonical_provider);
+    let Some(provider) = provider else {
+        return false;
+    };
+    if matches!(provider, Provider::GeminiCli | Provider::Fake) {
         return false;
     }
     // step2-retry/scrollback root-cause (rt binary 6c9c6c1c): once the agent's
@@ -1270,20 +1274,20 @@ fn recipient_pane_has_actionable_startup_prompt(
         _ => return false,
     };
     match provider {
-        Some("codex") => matches!(
+        Provider::Codex => matches!(
             crate::provider::classify_codex_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
                 | crate::provider::StartupScreenDecision::SkipUpdatePrompt
         ),
-        Some("claude" | "claude_code") => matches!(
+        Provider::Claude | Provider::ClaudeCode => matches!(
             crate::provider::classify_claude_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        Some("copilot") => matches!(
+        Provider::Copilot => matches!(
             crate::provider::classify_copilot_startup_screen(&captured),
             crate::provider::StartupScreenDecision::AnswerWorkspaceTrust
         ),
-        _ => false,
+        Provider::GeminiCli | Provider::Fake => false,
     }
 }
 
@@ -1823,12 +1827,14 @@ fn claude_recipient_rollout(
     recipient: &str,
 ) -> Option<(std::path::PathBuf, &'static str)> {
     let agent = state.get("agents")?.get(recipient)?;
-    let provider = agent.get("provider").and_then(serde_json::Value::as_str)?;
-    let provider_wire_str = match provider {
-        "claude" => "claude",
-        "claude_code" | "claude-code" => "claude_code",
-        _ => return None,
-    };
+    let provider = agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_provider)?;
+    if !is_claude_family(provider) {
+        return None;
+    }
+    let provider_wire_str = provider_wire(provider);
     let rollout = agent
         .get("rollout_path")
         .and_then(serde_json::Value::as_str)

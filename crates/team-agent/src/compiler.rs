@@ -29,6 +29,10 @@ use std::path::Path;
 use crate::model::enums::{Provider, ProviderEffort};
 use crate::model::yaml::Value;
 use crate::model::{paths, spec, yaml, ModelError};
+use crate::provider::wire::{
+    builtin_provider_model as wire_builtin_provider_model, is_claude_family,
+    parse_canonical_provider, provider_model_keys,
+};
 
 pub const IGNORED_OWNER_TEAM_ID_FIELD: &str = "owner_team_id";
 
@@ -417,16 +421,8 @@ pub fn compile_role_agent(
                 _ => None,
             })
             .unwrap_or("");
-        let provider_enum = match provider_str {
-            "claude" => Provider::Claude,
-            "claude_code" => Provider::ClaudeCode,
-            "codex" => Provider::Codex,
-            "copilot" => Provider::Copilot,
-            "gemini_cli" => Provider::GeminiCli,
-            "fake" => Provider::Fake,
-            _ => Provider::Codex, // unknown providers caught elsewhere
-        };
-        if effort.is_claude_only() && !matches!(provider_enum, Provider::Claude | Provider::ClaudeCode) {
+        let provider_enum = parse_canonical_provider(provider_str).unwrap_or(Provider::Codex);
+        if effort.is_claude_only() && !is_claude_family(provider_enum) {
             return Err(ModelError::Validation(format!(
                 "{}: effort '{}' is only supported by claude/claude_code (provider: {provider_str})",
                 role_path.display(),
@@ -543,19 +539,14 @@ fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value 
 
 fn provider_model(team_meta: &Value, provider: &str) -> Option<String> {
     let models = team_meta.get("provider_models")?;
-    string_field(models, provider).or_else(|| match provider {
-        "claude_code" => string_field(models, "claude"),
-        "claude" => string_field(models, "claude_code"),
-        _ => None,
-    })
+    let provider = parse_canonical_provider(provider)?;
+    provider_model_keys(provider)
+        .iter()
+        .find_map(|key| string_field(models, key))
 }
 
 fn builtin_provider_model(provider: &str) -> Option<&'static str> {
-    match provider {
-        "claude" | "claude_code" => Some("claude-sonnet-4-6"),
-        "codex" => Some("gpt-5.5"),
-        _ => None,
-    }
+    parse_canonical_provider(provider).and_then(wire_builtin_provider_model)
 }
 
 fn non_empty_trimmed(text: &str) -> Option<String> {

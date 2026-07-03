@@ -131,6 +131,7 @@ pub(crate) fn working_seconds(scrollback: &str) -> Option<u64> {
 }
 
 pub(crate) fn non_provider_command(command: &str) -> Option<&str> {
+    // Activity command grammar, not provider identity parsing.
     let base = command.rsplit('/').next().unwrap_or(command);
     let normalized = base.to_ascii_lowercase();
     match normalized.as_str() {

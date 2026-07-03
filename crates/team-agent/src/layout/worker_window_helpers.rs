@@ -1,14 +1,12 @@
-//! 0.3.28 layout step 2 — small provider-wire helper for layout-layer window naming.
+//! 0.3.28 layout step 2 — small window grammar helper for layout-layer naming.
 //!
-//! Mirrors `leader::helpers::provider_wire` so the layout module does not
-//! depend on the leader module's private helpers. Single source of truth
-//! is `provider_command_name` from `crate::provider::adapter` (the
-//! authoritative provider→string mapping).
+//! Command/UI grammar, not provider identity parsing: leader window names
+//! intentionally collapse `claude_code` to `claude` and use executable-style
+//! labels such as `gemini`.
 
 use crate::model::enums::Provider;
 
-/// Window name used inside the leader session, derived from the provider's
-/// wire identifier (e.g. `claude`, `codex`, `copilot`, `fake`). Mirrors
+/// Window name used inside the leader session. Mirrors
 /// Python's `leader_window_name = provider` (see
 /// `runtime/0.2.11/src/team_agent/leader/__init__.py:114-131`).
 pub fn provider_window_name(provider: Provider) -> &'static str {

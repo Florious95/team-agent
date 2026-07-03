@@ -18,6 +18,7 @@ use crate::model::ids::TaskId;
 use crate::model::task_graph::{find_dependency_cycle, TaskNode};
 use crate::model::yaml::Value as Yaml;
 use crate::model::{permissions, yaml};
+use crate::provider::wire::{is_claude_family, parse_canonical_provider};
 
 /// result_envelope_v1 顶层 required(= allowed)。
 const RESULT_REQUIRED: &[&str] = &[
@@ -175,9 +176,6 @@ fn result_schema_errors(envelope: &Value) -> Vec<String> {
 const ROOT_KEYS: &[&str] = &[
     "version", "team", "leader", "agents", "routing", "communication", "runtime", "context", "tasks",
 ];
-// Copilot 一期加入白名单(design §B compiler.py:249-251 同位 + cr verdict 总裁,
-// MUST-NOT-7 跨厂商等价 — 设计 / cr 已落地 26 约束)。
-const SUPPORTED_PROVIDERS: &[&str] = &["claude", "claude_code", "codex", "copilot", "gemini_cli", "fake"];
 const AUTH_MODES: &[&str] = &["subscription", "official_api", "compatible_api"];
 const VALID_DISPLAY_BACKENDS: &[&str] = &[
     "none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace", "adaptive",
@@ -326,7 +324,7 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
             }
             Some(effort) if effort.is_claude_only() => {
                 let provider = agent.get("provider").and_then(Yaml::as_str).unwrap_or("");
-                if !matches!(provider, "claude" | "claude_code") {
+                if !parse_canonical_provider(provider).is_some_and(is_claude_family) {
                     errors.push(format!(
                         "{path}/effort: effort '{raw}' is only supported by claude/claude_code (provider: {provider})"
                     ));
@@ -476,13 +474,19 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
     }
 
     let leader_provider = leader.and_then(|l| l.get("provider"));
-    if !leader_provider.and_then(Yaml::as_str).is_some_and(|p| SUPPORTED_PROVIDERS.contains(&p)) {
+    if !leader_provider
+        .and_then(Yaml::as_str)
+        .is_some_and(|p| parse_canonical_provider(p).is_some())
+    {
         e.push(format!("/leader/provider: unknown provider {}", py_repr(leader_provider)));
     }
 
     for (idx, agent) in agents.iter().enumerate() {
         let provider = agent.get("provider");
-        if !provider.and_then(Yaml::as_str).is_some_and(|p| SUPPORTED_PROVIDERS.contains(&p)) {
+        if !provider
+            .and_then(Yaml::as_str)
+            .is_some_and(|p| parse_canonical_provider(p).is_some())
+        {
             e.push(format!("/agents/{idx}/provider: unknown provider {}", py_repr(provider)));
         }
         if let Some(auth) = agent.get("auth_mode") {

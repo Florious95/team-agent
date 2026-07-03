@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch};
 use crate::provider::Provider;
+use crate::provider::wire::provider_wire;
 use crate::transport::{PaneId, PaneInfo, SessionName, Transport, WindowName};
 
 use super::helpers::{get_path_str, now_ts, parse_provider, prefix, resolve_workspace_for_hash, sha1_hex_prefix};
@@ -900,17 +901,6 @@ fn old_pane_id(receiver: &LeaderReceiver, owner_record: Option<&TeamOwner>) -> O
 
 fn uuid_prefix(uuid: Option<&LeaderSessionUuid>) -> String {
     uuid.map_or_else(String::new, |value| prefix(value.as_str(), 8).to_string())
-}
-
-fn provider_wire(provider: Provider) -> &'static str {
-    match provider {
-        Provider::Claude => "claude",
-        Provider::ClaudeCode => "claude_code",
-        Provider::Codex => "codex",
-        Provider::Copilot => "copilot",
-        Provider::GeminiCli => "gemini_cli",
-        Provider::Fake => "fake",
-    }
 }
 
 fn event_provider(identity: &OwnerIdentity) -> &'static str {

@@ -8,7 +8,9 @@ use crate::transport::PaneInfo;
 
 use super::helpers::{parse_provider, provider_wire};
 
-const PROVIDER_COMMANDS: &[(&str, Provider)] = &[
+// Command grammar, not provider identity parsing: these are process argv/current-command
+// needles observed in tmux panes.
+const COMMAND_GRAMMAR_PROVIDER_COMMANDS: &[(&str, Provider)] = &[
     ("claude", Provider::ClaudeCode),
     ("claude.exe", Provider::ClaudeCode),
     ("codex", Provider::Codex),
@@ -37,7 +39,7 @@ fn attribute_pane_provider_with_process(
 }
 
 pub(crate) fn attribute_command_provider(command: &str) -> Option<Provider> {
-    provider_from_text(command)
+    provider_from_command_text(command)
 }
 
 pub(crate) fn command_matches_provider(provider: Provider, command: &str) -> bool {
@@ -58,7 +60,7 @@ fn provider_from_env(env: &BTreeMap<String, String>) -> Option<Provider> {
 fn provider_from_pid_argv(pid: u32) -> Option<Provider> {
     process_command_line(pid)
         .as_deref()
-        .and_then(provider_from_text)
+        .and_then(provider_from_command_text)
 }
 
 fn provider_from_pid_env(pid: u32) -> Option<Provider> {
@@ -67,9 +69,9 @@ fn provider_from_pid_env(pid: u32) -> Option<Provider> {
         .and_then(provider_from_env_text)
 }
 
-fn provider_from_text(text: &str) -> Option<Provider> {
+fn provider_from_command_text(text: &str) -> Option<Provider> {
     let lower = text.to_ascii_lowercase();
-    PROVIDER_COMMANDS
+    COMMAND_GRAMMAR_PROVIDER_COMMANDS
         .iter()
         .find_map(|(needle, provider)| lower.contains(needle).then_some(*provider))
 }

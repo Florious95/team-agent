@@ -1,5 +1,6 @@
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
+use crate::provider::wire::{command_name, provider_wire};
 use crate::transport::Transport;
 
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
@@ -781,23 +782,9 @@ pub(crate) fn provider_doctor_checks() -> Value {
     Value::Object(providers)
 }
 
-fn provider_wire(provider: crate::provider::Provider) -> &'static str {
-    match provider {
-        crate::provider::Provider::Claude => "claude",
-        crate::provider::Provider::ClaudeCode => "claude_code",
-        crate::provider::Provider::Codex => "codex",
-        crate::provider::Provider::Copilot => "copilot",
-        crate::provider::Provider::GeminiCli => "gemini_cli",
-        crate::provider::Provider::Fake => "fake",
-    }
-}
-
 fn provider_command(provider: crate::provider::Provider) -> &'static str {
     match provider {
-        crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode => "claude",
-        crate::provider::Provider::Codex => "codex",
-        crate::provider::Provider::Copilot => "copilot",
-        crate::provider::Provider::GeminiCli => "gemini",
         crate::provider::Provider::Fake => "team-agent fake-worker",
+        other => command_name(other),
     }
 }

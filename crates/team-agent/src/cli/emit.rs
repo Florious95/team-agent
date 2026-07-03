@@ -31,7 +31,7 @@ pub fn run(argv: &[String], cwd: &Path) -> ExitCode {
     let Some(command) = argv.first().map(String::as_str) else {
         return emit_missing_subcommand_usage();
     };
-    if command == "codex" || command == "claude" || command == "copilot" {
+    if is_leader_passthrough_command(command) {
         return match cmd_leader_passthrough(command, &argv[1..], cwd) {
             Ok(result) => emit_result(result),
             Err(error) => emit_cli_error(command, &argv[1..], cwd, &error),
@@ -189,6 +189,13 @@ const DISPATCH_COMMANDS: &[&str] = &[
 ];
 
 const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start", "purge-agent"];
+// Command grammar, not provider identity parsing: these are top-level CLI
+// passthrough verbs for starting a leader under a provider executable.
+const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot"];
+
+fn is_leader_passthrough_command(command: &str) -> bool {
+    LEADER_PASSTHROUGH_COMMANDS.contains(&command)
+}
 
 fn emit_missing_subcommand_usage() -> ExitCode {
     emit_usage_error("the following arguments are required: {codex,claude,...,doctor}");
@@ -206,7 +213,7 @@ fn is_known_subcommand(command: &str) -> bool {
 fn command_help(command: Option<&str>) -> String {
     match command {
         None => {
-            let mut commands = vec!["codex", "claude", "copilot"];
+            let mut commands = LEADER_PASSTHROUGH_COMMANDS.to_vec();
             commands.extend_from_slice(DISPATCH_COMMANDS);
             commands.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
             format!(
@@ -276,7 +283,7 @@ fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
 
 /// 在已知子命令里找与 `input` 最接近的一个(Levenshtein ≤ 阈值)。无足够接近者 → None。
 fn nearest_subcommand(input: &str) -> Option<&'static str> {
-    let mut candidates: Vec<&'static str> = vec!["codex", "claude", "copilot"];
+    let mut candidates: Vec<&'static str> = LEADER_PASSTHROUGH_COMMANDS.to_vec();
     candidates.extend_from_slice(DISPATCH_COMMANDS);
     candidates.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
     // 阈值随长度放宽,但短词收紧,避免 'x' 误配任何东西。
