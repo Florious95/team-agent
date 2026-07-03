@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0
+
+This release completes a six-phase internal refactor that was carried out entirely behind the existing public API surface. Every gate (Phase A–F + 12-item subscription gate + leader gate) passed before shipping.
+
+**Six-phase refactor summary**
+
+- **Phase A — Lifecycle transaction lock.** Coordinator state transitions (start/stop/restart) are now serialized through an explicit lock, eliminating the class of races where two concurrent operations would corrupt worker state.
+- **Phase B — Persist merge contract contraction.** The persistence layer's merge surface was narrowed: callers can no longer accidentally clobber in-flight state by passing a partial struct. The contract is now a typed diff rather than a full replacement.
+- **Phase C — Scanner split.** Provider session detection was split into per-provider scanner modules (Claude, Codex, Copilot). Each scanner owns its detection heuristics; the coordinator no longer carries interleaved provider-specific branches.
+- **Phase D — Provider wire single-source.** All provider launch strings (binary names, env vars, session-id flags) are now defined in one place and injected at wire-up time. Duplicate definitions across start/restart/health paths have been removed.
+- **Phase E — Abnormal step modularization.** The "abnormal tick" path (provider died unexpectedly) is now a standalone step module with its own entry/exit contract, making it independently testable and easier to extend.
+- **Phase F — Abnormal-exit transcript-error single gate + recency + CLI 2.1.181 assistant-shape adaptation.** Detecting that a provider exited abnormally (vs. graceful stop) now goes through a single gate that checks transcript recency and is adapted to the Claude CLI 2.1.181 `assistant`-role message shape.
+
+**Bug fixes**
+
+- **Fixed: `doctor` failed to parse paths containing spaces.** The `doctor` subcommand now correctly tokenises space-embedded paths, preventing false-negative health checks on non-standard install locations.
+- **Fixed: `reset` spawn failure is now fail-closed.** Previously, if a coordinator failed to spawn during `reset`, ownership was silently dropped. It now hard-fails and leaves the team in a safe stopped state.
+- **Fixed: `restart` correctly rehydrates worker roles.** After a `restart`, workers that had a custom `--role` are now restored to that role instead of falling back to the default.
+- **Fixed: `send --pane` argument parsing regression (introduced in 0.3.26).** Pane targeting was silently ignored after an internal refactor; this is now restored.
+
+**MCP-CYCLE shape baseline**
+
+The strict MCP-CYCLE shape is a known baseline as of 0.4.10. The functional PASS evidence chain (inbox → event → collect → notify) is complete and has not regressed in this release.
+
 ## 0.4.11
 
 - **Fixed: starting a worker after a failed stop no longer opens a duplicate window.** If `stop` fails, Team Agent now refuses to `start` the same worker until the stop completes, preventing a second window from opening alongside the stale one.
