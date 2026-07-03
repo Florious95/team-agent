@@ -3,11 +3,8 @@
 //! Extracted from `provider/adapter.rs` (0.4.x decoupling step 2). Pure
 //! extraction — byte-identical to the original inline forms. Scope kept
 //! small: base command + resume + permission flags + MCP type→transport
-//! translation. Auth hint (`copilot_auth_hint`) and session store scan
-//! (`scan_copilot_session_store`, `copilot_candidate`) stay in
-//! `adapter.rs` because they depend on `command_on_path` /
-//! `CaptureSessionContext` / sqlite session-store helpers. Step 3 of the
-//! decoupling plan can move those into provider session store hooks.
+//! translation. Auth hint (`copilot_auth_hint`) stays in `adapter.rs`;
+//! session-store scanning lives under `provider/session_scan/copilot.rs`.
 
 use crate::model::enums::AuthMode;
 use crate::provider::McpConfig;

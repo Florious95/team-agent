@@ -1,49 +1,87 @@
-//! unit-7 (Stage 3) — provider session-scan boundary.
+//! Provider session-scan boundary.
 //!
-//! Dedicated home for provider transcript/backing scanning concerns
-//! (today co-located in adapter.rs around lines 511-546 and 969-1078).
-//! Created as part of the unit-7 boundary establishment; full relocation
-//! of the scanning fns is staged into follow-up commits so each diff
-//! stays reviewable.
-//!
-//! See sibling [`crate::provider::session::capture`] for the existing
-//! polling layer (moved under provider/session in unit-6).
+//! `ProviderAdapter` keeps the public polling facade in `adapter.rs`; this
+//! module owns one-shot backing-store scans and provider-specific attribution
+//! filters.
 
-/// Marker label for which scan strategy a provider uses. The Codex jsonl
-/// scan and the Claude transcript scan share the same outer "decide what
-/// to call" hook in adapter.rs; this enum exists to name the branch.
+use std::path::PathBuf;
+
+use crate::provider::types::{CapturedSession, ProviderError, SessionId};
+use crate::provider::Provider;
+
+pub(crate) mod claude;
+pub(crate) mod codex;
+pub(crate) mod common;
+pub(crate) mod copilot;
+
+/// Marker label for which scan strategy a provider uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionScanStrategy {
-    /// Codex rollout jsonl scan (the existing
-    /// `agent_rollout_path`-based check).
     CodexJsonl,
-    /// Claude transcript scan (per-cwd `.claude/projects/<cwd>/*.jsonl`).
     ClaudeTranscript,
-    /// Copilot scan (different home; provider-specific layout).
     CopilotHome,
-    /// Provider does not require a backing scan to decide resume — the
-    /// session-id alone is the authority.
     NotRequired,
 }
 
 impl SessionScanStrategy {
-    pub fn for_provider(provider: crate::provider::Provider) -> Self {
+    pub fn for_provider(provider: Provider) -> Self {
         match provider {
-            crate::provider::Provider::Codex => Self::CodexJsonl,
-            crate::provider::Provider::Claude | crate::provider::Provider::ClaudeCode => {
-                Self::ClaudeTranscript
-            }
-            crate::provider::Provider::Copilot => Self::CopilotHome,
-            crate::provider::Provider::GeminiCli => Self::NotRequired,
-            crate::provider::Provider::Fake => Self::NotRequired,
+            Provider::Codex => Self::CodexJsonl,
+            Provider::Claude | Provider::ClaudeCode => Self::ClaudeTranscript,
+            Provider::Copilot => Self::CopilotHome,
+            Provider::GeminiCli => Self::NotRequired,
+            Provider::Fake => Self::NotRequired,
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureSessionContext {
+    pub agent_id: String,
+    pub spawn_cwd: PathBuf,
+    pub pane_id: Option<String>,
+    pub pane_pid: Option<u32>,
+    pub spawned_at: Option<String>,
+    pub expected_session_id: Option<SessionId>,
+    pub provider_projects_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedSessionCandidate {
+    pub captured: CapturedSession,
+    pub positive_agent_id_match: bool,
+    pub agent_path_match: bool,
+}
+
+pub(crate) fn scan_session_candidates_once(
+    provider: Provider,
+    context: &CaptureSessionContext,
+) -> Result<Vec<CapturedSessionCandidate>, ProviderError> {
+    if matches!(provider, Provider::Copilot) {
+        return Ok(copilot::scan_session_store(context));
+    }
+
+    let candidates = common::candidate_session_files(provider, context)?;
+    let mut out = common::parse_candidate_files(provider, context, candidates);
+
+    if matches!(provider, Provider::Codex) {
+        codex::apply_spawned_at_filter(&mut out, context);
+    }
+
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        return claude::apply_expected_session_filter(context, out);
+    }
+
+    common::apply_spawn_time_window_if_unique(context, &mut out);
+    common::sort_expected_first_if_needed(context, &mut out);
+    Ok(out)
+}
+
+pub(crate) use claude::rollout_path_has_leader_marker as rollout_path_has_claude_leader_marker;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::Provider;
 
     #[test]
     fn strategy_per_provider() {

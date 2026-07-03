@@ -39,10 +39,7 @@ pub enum CommandPlanKind {
 pub fn honors_session_id_for_base_spawn(provider: Provider) -> bool {
     matches!(
         provider,
-        Provider::Codex
-            | Provider::Claude
-            | Provider::ClaudeCode
-            | Provider::Copilot
+        Provider::Claude | Provider::ClaudeCode | Provider::Copilot
     )
 }
 
@@ -56,9 +53,21 @@ mod tests {
     }
 
     #[test]
-    fn real_providers_honor_session_id() {
-        for p in [Provider::Codex, Provider::Claude, Provider::Copilot] {
-            assert!(honors_session_id_for_base_spawn(p));
+    fn provider_matrix_for_base_spawn_session_id_support() {
+        let cases = [
+            (Provider::Claude, true),
+            (Provider::ClaudeCode, true),
+            (Provider::Copilot, true),
+            (Provider::Codex, false),
+            (Provider::GeminiCli, false),
+            (Provider::Fake, false),
+        ];
+        for (provider, expected) in cases {
+            assert_eq!(
+                honors_session_id_for_base_spawn(provider),
+                expected,
+                "{provider:?}"
+            );
         }
     }
 

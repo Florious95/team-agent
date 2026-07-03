@@ -111,6 +111,19 @@ mod tests {
     }
 
     #[test]
+    fn session_capture_uses_wire_parser_not_local_copy() {
+        let capture_rs = include_str!("session/capture.rs");
+        assert!(
+            capture_rs.contains("provider::wire::parse_provider"),
+            "session capture must import the canonical provider parser"
+        );
+        assert!(
+            !capture_rs.contains("fn parse_provider("),
+            "session capture must not carry a local provider parser copy"
+        );
+    }
+
+    #[test]
     fn unknown_string_returns_none() {
         assert_eq!(parse_provider(""), None);
         assert_eq!(parse_provider("openai"), None);

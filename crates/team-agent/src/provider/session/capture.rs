@@ -7,6 +7,7 @@ use crate::provider::{
     CapturedSession, CapturedSessionCandidate, CaptureSessionContext, Provider, ProviderAdapter,
     ProviderError, SessionId,
 };
+use crate::provider::wire::parse_provider;
 
 pub const SESSION_CAPTURE_CONVERGENCE_DEADLINE_MS: u64 = 12_000;
 pub const SESSION_CAPTURE_CONVERGENCE_POLL_MS: u64 = 250;
@@ -499,7 +500,7 @@ pub fn recover_resume_session_from_events(
         };
         // E57 postflight (lane-046-capture-gap): the capture allocator already
         // refuses Claude leader transcripts (P0 d39b5104,
-        // claude_records_have_leader_marker in provider/adapter.rs). Event-log
+        // provider/session_scan/claude.rs leader marker). Event-log
         // repair must apply the SAME filter — otherwise a stale `session.captured`
         // event from a pre-fix run (or from a window where the allocator was
         // bypassed) still pulls the 590MB leader transcript onto a worker on the
@@ -507,7 +508,7 @@ pub fn recover_resume_session_from_events(
         // release-engineer via captured_via=event_log_repair). The check is
         // a no-op for non-Claude providers.
         if let Some(p) = provider {
-            if crate::provider::adapter::rollout_path_has_claude_leader_marker(p, &rollout_path) {
+            if crate::provider::session_scan::rollout_path_has_claude_leader_marker(p, &rollout_path) {
                 continue;
             }
         }
@@ -1124,18 +1125,6 @@ fn captured_provider_session_keys(captured: &CapturedSession) -> BTreeSet<String
         ));
     }
     keys
-}
-
-fn parse_provider(raw: &str) -> Option<Provider> {
-    match raw {
-        "claude" => Some(Provider::Claude),
-        "claude_code" => Some(Provider::ClaudeCode),
-        "codex" => Some(Provider::Codex),
-        "copilot" => Some(Provider::Copilot),
-        "gemini_cli" => Some(Provider::GeminiCli),
-        "fake" => Some(Provider::Fake),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
