@@ -374,16 +374,16 @@ fn phase_fixture_path(phase: &str) -> PathBuf {
 }
 
 struct NormalizeCtx {
-    workspace: String,
-    temp_dir: String,
+    workspace_aliases: Vec<String>,
+    temp_aliases: Vec<String>,
     pane_ids: BTreeMap<String, String>,
 }
 
 impl NormalizeCtx {
     fn new(workspace: &Path) -> Self {
         Self {
-            workspace: workspace.to_string_lossy().to_string(),
-            temp_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            workspace_aliases: path_aliases(workspace),
+            temp_aliases: path_aliases(&std::env::temp_dir()),
             pane_ids: BTreeMap::new(),
         }
     }
@@ -395,6 +395,30 @@ impl NormalizeCtx {
         let token = format!("<PANE:{}>", self.pane_ids.len());
         self.pane_ids.insert(pane.to_string(), token.clone());
         token
+    }
+}
+
+fn path_aliases(path: &Path) -> Vec<String> {
+    let mut aliases = Vec::new();
+    push_path_alias(&mut aliases, path.to_path_buf());
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        push_path_alias(&mut aliases, canonical);
+    }
+    aliases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    aliases.dedup();
+    aliases
+}
+
+fn push_path_alias(aliases: &mut Vec<String>, path: PathBuf) {
+    let path = path.to_string_lossy().to_string();
+    if path.is_empty() {
+        return;
+    }
+    aliases.push(path.clone());
+    if let Some(stripped) = path.strip_prefix("/private/") {
+        aliases.push(format!("/{stripped}"));
+    } else if path.starts_with('/') {
+        aliases.push(format!("/private{path}"));
     }
 }
 
@@ -457,11 +481,82 @@ fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> 
 }
 
 fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
-    normalize_socket_token(
-        &text
-            .replace(&ctx.workspace, "<WORKSPACE>")
-            .replace(&ctx.temp_dir, "<TMP>"),
-    )
+    let mut out = text.to_string();
+    for alias in &ctx.workspace_aliases {
+        out = out.replace(alias, "<WORKSPACE>");
+    }
+    out = out.replace("/private<WORKSPACE>", "<WORKSPACE>");
+    for alias in &ctx.temp_aliases {
+        out = out.replace(alias, "<TMP>");
+    }
+    out = normalize_team_agent_binary_path(&out);
+    out = normalize_tmux_socket_dir(&out);
+    normalize_socket_token(&out)
+}
+
+fn normalize_team_agent_binary_path(text: &str) -> String {
+    let mut out = text.to_string();
+    for marker in [
+        "/target/debug/deps/team_agent-",
+        "/target/debug/team-agent",
+        "/target/release/team-agent",
+    ] {
+        out = replace_path_with_marker(out, marker, "<TEAM_AGENT_BIN>");
+    }
+    out
+}
+
+fn replace_path_with_marker(mut text: String, marker: &str, token: &str) -> String {
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(marker) {
+        let marker_idx = search_from + offset;
+        let start = text[..marker_idx]
+            .rfind(|c: char| matches!(c, '"' | '\'' | ' ' | '[' | '('))
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        let mut end = marker_idx + marker.len();
+        while end < text.len() {
+            let ch = text[end..].chars().next().expect("char at boundary");
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        text.replace_range(start..end, token);
+        search_from = start + token.len();
+    }
+    text
+}
+
+fn normalize_tmux_socket_dir(text: &str) -> String {
+    let out = text
+        .replace("/private/tmp/tmux-", "<TMP>/tmux-")
+        .replace("/tmp/tmux-", "<TMP>/tmux-");
+    normalize_tmux_uid_with_prefix(out, "<TMP>/tmux-")
+}
+
+fn normalize_tmux_uid_with_prefix(mut text: String, prefix: &str) -> String {
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(prefix) {
+        let start = search_from + offset + prefix.len();
+        let mut end = start;
+        while end < text.len() {
+            let ch = text[end..].chars().next().expect("char at boundary");
+            if ch.is_ascii_digit() {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end == start {
+            search_from = start;
+            continue;
+        }
+        text.replace_range(start..end, "<UID>");
+        search_from = start + "<UID>".len();
+    }
+    text
 }
 
 fn normalize_socket_token(text: &str) -> String {

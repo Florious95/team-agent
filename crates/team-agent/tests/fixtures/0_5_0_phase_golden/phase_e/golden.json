@@ -28,7 +28,7 @@
         "-c",
         "mcp_servers.team_orchestrator.type=\"stdio\"",
         "-c",
-        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
         "-c",
         "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
         "-c",
@@ -65,7 +65,7 @@
         "-c",
         "mcp_servers.team_orchestrator.type=\"stdio\"",
         "-c",
-        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
         "-c",
         "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
         "-c",
@@ -126,7 +126,7 @@
         "-c",
         "mcp_servers.team_orchestrator.type=\"stdio\"",
         "-c",
-        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
         "-c",
         "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
         "-c",
@@ -169,7 +169,7 @@
         "-c",
         "mcp_servers.team_orchestrator.type=\"stdio\"",
         "-c",
-        "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
         "-c",
         "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
         "-c",
@@ -282,7 +282,7 @@
               "status": "running"
             }
           },
-          "leader_attach_command": "tmux -S /private/tmp/tmux-501/ta-<SOCKET> attach -t team-phasegolden:leader",
+          "leader_attach_command": "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach -t team-phasegolden:leader",
           "not_ready": {
             "agents": [],
             "reasons": [
@@ -442,7 +442,7 @@
                 "-c",
                 "mcp_servers.team_orchestrator.type=\"stdio\"",
                 "-c",
-                "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+                "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
                 "-c",
                 "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
                 "-c",
@@ -479,7 +479,7 @@
                 "-c",
                 "mcp_servers.team_orchestrator.type=\"stdio\"",
                 "-c",
-                "mcp_servers.team_orchestrator.command=\"/Users/alauda/Documents/code/team-agent-public/target/debug/deps/team_agent-5a9cbfc9c936e9e3\"",
+                "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
                 "-c",
                 "mcp_servers.team_orchestrator.args=[\"mcp-server\",\"--workspace\",\"<WORKSPACE>\"]",
                 "-c",
@@ -501,7 +501,7 @@
             }
           ],
           "latest_results": [],
-          "leader_attach_command": "tmux -S /private/tmp/tmux-501/ta-<SOCKET> attach -t team-phasegolden:leader",
+          "leader_attach_command": "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach -t team-phasegolden:leader",
           "leader_client": null,
           "leader_receiver": {},
           "leader_topology": "managed",
@@ -666,7 +666,7 @@
                 ]
               },
               "session_name": "team-phasegolden",
-              "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+              "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
               "tasks": [
                 {
                   "acceptance": [
@@ -737,7 +737,7 @@
             "total": 0,
             "uncollected": 0
           },
-          "state_file": "/private<WORKSPACE>/.team/runtime/teamdir/team_state.md"
+          "state_file": "<WORKSPACE>/.team/runtime/teamdir/team_state.md"
         }
       },
       "step": "collect"
@@ -896,7 +896,7 @@
       ]
     },
     "session_name": "team-phasegolden",
-    "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+    "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
     "tasks": [
       {
         "acceptance": [
@@ -1024,7 +1024,7 @@
           ]
         },
         "session_name": "team-phasegolden",
-        "spec_path": "/private<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+        "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
         "tasks": [
           {
             "acceptance": [
