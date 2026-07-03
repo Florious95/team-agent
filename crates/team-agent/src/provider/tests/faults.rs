@@ -93,6 +93,54 @@ fn p2_claude_assistant_api_error_fault_uses_uuid_and_structured_details() {
     assert_eq!(facts[0].assistant_uuid.as_deref(), Some("assistant-1"));
 }
 
+#[test]
+fn p2_latest_explicit_error_fact_scans_claude_tail_past_bookkeeping() {
+    let text = [
+        line(serde_json::json!({
+            "type": "assistant",
+            "parentUuid": "245fce6f-2427-4b05-af01-8619df64afab",
+            "uuid": "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+            "requestId": "req_011CceUVQ94dxahgwAHf8sdS",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "There's an issue with the selected model."}
+            ]},
+            "error": "model_not_found",
+            "isApiErrorMessage": true,
+            "apiErrorStatus": 404,
+            "sessionId": "97ec1070-f19b-49ed-b60f-3cb158e92053",
+            "version": "2.1.181"
+        })),
+        line(serde_json::json!({
+            "type": "system",
+            "subtype": "turn_duration",
+            "uuid": "6c96328b-8c01-46c0-b68e-a096a89c904f",
+            "parentUuid": "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+            "sessionId": "97ec1070-f19b-49ed-b60f-3cb158e92053"
+        })),
+        line(serde_json::json!({"type": "file-history-snapshot"})),
+    ]
+    .join("\n");
+
+    let fact = latest_explicit_error_fact(Provider::ClaudeCode, &text)
+        .expect("Claude assistant API error must survive following bookkeeping rows");
+
+    assert_eq!(fact.signature.as_str(), "api_error");
+    assert_eq!(
+        fact.turn_id.as_ref().map(TurnId::as_str),
+        Some("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+    );
+    assert_eq!(fact.api_error_status, Some(404));
+    assert_eq!(fact.error.as_deref(), Some("model_not_found"));
+    assert_eq!(fact.request_id.as_deref(), Some("req_011CceUVQ94dxahgwAHf8sdS"));
+    assert_eq!(
+        fact.assistant_uuid.as_deref(),
+        Some("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+    );
+    assert!(latest_explicit_error_fact(Provider::Copilot, &text).is_none());
+    assert!(latest_explicit_error_fact(Provider::GeminiCli, &text).is_none());
+    assert!(latest_explicit_error_fact(Provider::Fake, &text).is_none());
+}
+
 // P1 — codex requestApproval turn_id = params.turnId OR params.turn_id (codex.py:79).
 #[test]
 fn p2_codex_approval_turn_id_accepts_snake_case() {

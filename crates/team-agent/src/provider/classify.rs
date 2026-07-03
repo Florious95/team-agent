@@ -184,10 +184,22 @@ fn extract_xml_tag(text: &str, tag: &str) -> Option<String> {
 }
 
 pub fn latest_explicit_error_fact(provider: Provider, session_log_text: &str) -> Option<FaultFact> {
-    let record = latest_jsonl_record(session_log_text)?;
+    session_log_text
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find_map(|record| latest_explicit_error_fact_for_record(provider, &record))
+}
+
+fn latest_explicit_error_fact_for_record(
+    provider: Provider,
+    record: &serde_json::Value,
+) -> Option<FaultFact> {
     match provider {
-        Provider::Codex => codex_latest_explicit_error_fact(&record),
-        Provider::Claude | Provider::ClaudeCode => claude_latest_explicit_error_fact(&record),
+        Provider::Codex => codex_latest_explicit_error_fact(record),
+        Provider::Claude | Provider::ClaudeCode => claude_latest_explicit_error_fact(record),
         // C-3-5 cr verdict: copilot N35 通知不依赖 turn-state 分类;一期 Unknown,
         // 与 GeminiCli/Fake 同精神。二期接 sqlite turns 表后再回填。
         Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
@@ -300,15 +312,6 @@ fn extract_lifecycle_facts(provider: Provider, records: &[serde_json::Value]) ->
             Provider::Copilot | Provider::GeminiCli | Provider::Fake => None,
         })
         .collect()
-}
-
-fn latest_jsonl_record(text: &str) -> Option<serde_json::Value> {
-    let last = text
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    serde_json::from_str::<serde_json::Value>(last).ok()
 }
 
 fn codex_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {

@@ -847,7 +847,7 @@ impl Coordinator {
 
     /// #236 `worker.abnormal_exit` watcher.
     ///
-    /// Notify only when the latest transcript/rollout JSONL record is an explicit
+    /// Notify only when the bounded transcript/rollout tail contains a latest explicit
     /// provider error that is fresh for the current worker cohort. A dead process
     /// without an explicit error remains a suppressed `dead_only` audit event; process
     /// liveness is otherwise diagnostic data for this path.
@@ -897,9 +897,10 @@ impl Coordinator {
                     continue;
                 }
             }
-            // P1 (C-P1-1): bounded tail read — the abnormal decision only consumes the
-            // LATEST transcript record; window matches Python `_TAIL_BYTES` (131072,
-            // idle_takeover_wiring.py:13), never less.
+            // P1 (C-P1-1): bounded tail read — the abnormal decision only consumes
+            // this tail window. The provider scan walks backward inside it; window
+            // matches Python `_TAIL_BYTES` (131072, idle_takeover_wiring.py:13),
+            // never less.
             let text = match read_tail_text(&rollout_path, ABNORMAL_TAIL_BYTES) {
                 Ok(text) => text,
                 Err(error) => {
@@ -2481,19 +2482,22 @@ fn abnormal_error_observation_key(
     fact: &crate::provider::FaultFact,
     size: u64,
 ) -> String {
-    let bucket = fact
-        .turn_id
-        .as_ref()
-        .map(|id| id.as_str().to_string())
-        .unwrap_or_else(|| size.to_string());
+    let bucket = abnormal_error_fact_identity(fact).unwrap_or_else(|| size.to_string());
     format!(
-        "worker.abnormal_exit.error:{}:{}:{}:{}:{}",
+        "worker.abnormal_exit.error:{}:{}:{}:{}",
         agent.agent_id,
         agent.rollout_path_display,
         fact.signature.as_str(),
-        bucket,
-        size
+        bucket
     )
+}
+
+fn abnormal_error_fact_identity(fact: &crate::provider::FaultFact) -> Option<String> {
+    fact.assistant_uuid
+        .as_deref()
+        .or(fact.request_id.as_deref())
+        .or_else(|| fact.turn_id.as_ref().map(|id| id.as_str()))
+        .map(str::to_string)
 }
 
 fn abnormal_error_recency(
@@ -3769,6 +3773,211 @@ mod u1_tests {
     }
 
     #[test]
+    fn abnormal_claude_assistant_api_error_followed_by_bookkeeping_still_detected() {
+        let dir = temp_abnormal_dir("claude-api-bookkeeping");
+        let rollout = dir.join("rollout-w1.jsonl");
+        let session_id = "97ec1070-f19b-49ed-b60f-3cb158e92053";
+        std::fs::write(
+            &rollout,
+            format!(
+                "{}{}",
+                claude_assistant_api_error_line(
+                    "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+                    "245fce6f-2427-4b05-af01-8619df64afab",
+                    session_id,
+                    404,
+                    "model_not_found",
+                    Some("req_011CceUVQ94dxahgwAHf8sdS"),
+                ),
+                claude_turn_duration_line(
+                    "6c96328b-8c01-46c0-b68e-a096a89c904f",
+                    "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+                    session_id,
+                ),
+            ),
+        )
+        .unwrap();
+        seed_abnormal_state_with_provider(&dir, &rollout, "alive", 1, "claude_code");
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let first_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(first_check["latest_explicit_error"], serde_json::json!(true));
+        assert_eq!(first_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(first_check["notification"], serde_json::json!(false));
+        assert_eq!(first_check["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(first_check["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            first_check["requestId"],
+            serde_json::json!("req_011CceUVQ94dxahgwAHf8sdS")
+        );
+        assert_eq!(
+            first_check["assistant_uuid"],
+            serde_json::json!("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+        );
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first observed error baselines stale even when followed by turn_duration"
+        );
+        let first_observation_key = abnormal_test_watch(&dir)["last_error_observation_key"]
+            .as_str()
+            .expect("stale baseline persists observation key")
+            .to_string();
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}{}{}",
+                    claude_file_history_snapshot_line(session_id),
+                    claude_last_prompt_line(session_id),
+                    claude_mode_line(session_id),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let after_bookkeeping_events = read_test_events(&dir);
+        let bookkeeping_check =
+            find_event(&after_bookkeeping_events, "worker.abnormal_exit.check")
+                .expect("bookkeeping check event");
+        assert_eq!(bookkeeping_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(bookkeeping_check["notification"], serde_json::json!(false));
+        assert_eq!(
+            bookkeeping_check["assistant_uuid"],
+            serde_json::json!("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+        );
+        assert_eq!(
+            abnormal_test_watch(&dir)["last_error_observation_key"],
+            serde_json::json!(first_observation_key)
+        );
+        assert!(
+            find_event(&after_bookkeeping_events, "worker.abnormal_exit").is_none(),
+            "bookkeeping-only growth after the same error must not notify"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}{}",
+                    claude_assistant_api_error_line(
+                        "11b8790e-718b-4910-bf6a-62d19135a93b",
+                        "ccea3b0f-23e7-48ed-aa57-d59e321becfb",
+                        session_id,
+                        404,
+                        "model_not_found",
+                        Some("req_011CceUhRwYfdmLPbv9nMmqX"),
+                    ),
+                    claude_turn_duration_line(
+                        "2d382eff-783b-48ca-83c1-c93d3dc8b068",
+                        "11b8790e-718b-4910-bf6a-62d19135a93b",
+                        session_id,
+                    ),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("fresh check event");
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        assert_eq!(
+            fresh_check["assistant_uuid"],
+            serde_json::json!("11b8790e-718b-4910-bf6a-62d19135a93b")
+        );
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh API error notification");
+        assert_eq!(abnormal["turn_id"], serde_json::json!("11b8790e-718b-4910-bf6a-62d19135a93b"));
+        assert_eq!(
+            abnormal["requestId"],
+            serde_json::json!("req_011CceUhRwYfdmLPbv9nMmqX")
+        );
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn codex_failed_turn_then_completed_turn_no_fresh_notification() {
+        let dir = temp_abnormal_dir("codex-failed-then-completed");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let first_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(first_check["turn_id"], serde_json::json!("t1"));
+        assert_eq!(first_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(first_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first failed turn is only a stale baseline"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t-complete\",\"status\":\"completed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let after_completed_events = read_test_events(&dir);
+        let completed_check =
+            find_event(&after_completed_events, "worker.abnormal_exit.check")
+                .expect("completed-after-failure check event");
+        assert_eq!(completed_check["turn_id"], serde_json::json!("t1"));
+        assert_eq!(completed_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(completed_check["fresh_error"], serde_json::json!(false));
+        assert_eq!(completed_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&after_completed_events, "worker.abnormal_exit").is_none(),
+            "completed turn after the same old failed turn must not emit a fresh notification"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("new failed turn check event");
+        assert_eq!(fresh_check["turn_id"], serde_json::json!("t2"));
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh Codex failure notification");
+        assert_eq!(abnormal["turn_id"], serde_json::json!("t2"));
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
     fn abnormal_dead_process_without_explicit_error_stays_dead_only() {
         let dir = temp_abnormal_dir("dead-only");
         let rollout = dir.join("rollout-w1.jsonl");
@@ -3946,6 +4155,51 @@ mod u1_tests {
                 .insert("requestId".to_string(), serde_json::json!(request_id));
         }
         format!("{record}\n")
+    }
+
+    fn claude_turn_duration_line(uuid: &str, parent_uuid: &str, session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "system",
+                "subtype": "turn_duration",
+                "uuid": uuid,
+                "parentUuid": parent_uuid,
+                "sessionId": session_id
+            })
+        )
+    }
+
+    fn claude_file_history_snapshot_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "file-history-snapshot",
+                "sessionId": session_id
+            })
+        )
+    }
+
+    fn claude_last_prompt_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "last-prompt",
+                "sessionId": session_id,
+                "prompt": "sanitized"
+            })
+        )
+    }
+
+    fn claude_mode_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "mode",
+                "sessionId": session_id,
+                "mode": "default"
+            })
+        )
     }
 
     fn abnormal_test_watch(dir: &std::path::Path) -> Value {
