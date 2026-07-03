@@ -332,7 +332,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         if fatal_resume_failure {
             continue;
         }
-        let Some(agent) = state
+        let Some(raw_agent) = state
             .get("agents")
             .and_then(|v| v.get(decision.agent_id.as_str()))
             .cloned()
@@ -348,6 +348,11 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             failed_agents.push(restart_failed_agent(decision, "spawn", error));
             continue;
         };
+        let agent = rehydrate_agent_command_context_from_spec(
+            spec_workspace,
+            &decision.agent_id,
+            &raw_agent,
+        );
         let session_id = if matches!(decision.restart_mode, StartMode::Resumed) {
             decision.session_id.as_ref()
         } else {

@@ -418,6 +418,31 @@ fn breal_reset_rehydrates_role_context_from_compiled_spec() {
     );
 }
 
+#[test]
+fn breal_restart_rehydrates_role_context_from_compiled_spec() {
+    let (workspace, _team) = breal_one_worker_workspace();
+    strip_runtime_command_context(&workspace);
+    let transport = BRealTransport::owned();
+
+    crate::lifecycle::restart_with_transport(&workspace, true, Some("teamdir"), &transport)
+        .expect("restart should use spec-rehydrated role context");
+
+    let spawns = transport.spawn_records();
+    let argv = spawns
+        .last()
+        .map(|record| record.join("\n"))
+        .expect("restart must spawn w1");
+    assert!(
+        argv.contains("role `Phase B Real Worker One`")
+            || argv.contains("role Phase B Real Worker One"),
+        "restart spawn argv must carry role from compiled spec/role doc, got:\n{argv}"
+    );
+    assert!(
+        !argv.contains("role `developer`") && !argv.contains("role developer"),
+        "restart spawn argv must not fall back to generic developer, got:\n{argv}"
+    );
+}
+
 fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
     let team = temp_ws().join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -449,6 +474,25 @@ fn breal_workspace() -> (PathBuf, PathBuf) {
         false,
     )
     .expect("quick-start breal fixture");
+    (workspace, team)
+}
+
+fn breal_one_worker_workspace() -> (PathBuf, PathBuf) {
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let team = team_dir_with_roles(&[("w1.md", w1)]);
+    let workspace = team.parent().expect("team workspace").to_path_buf();
+    seed_healthy_coordinator(&workspace);
+    let launch_transport = codex_ready_transport();
+    quick_start_with_transport_in_workspace_with_display(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &launch_transport,
+        false,
+    )
+    .expect("quick-start breal one-worker fixture");
     (workspace, team)
 }
 
