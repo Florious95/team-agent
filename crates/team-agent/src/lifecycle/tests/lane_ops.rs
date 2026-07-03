@@ -27,10 +27,10 @@ impl LaneTransport {
             spawns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
-    fn killed(&self) -> Vec<String> {
+    pub(super) fn killed(&self) -> Vec<String> {
         self.killed.lock().unwrap().clone()
     }
-    fn spawns(&self) -> Vec<(String, Vec<String>)> {
+    pub(super) fn spawns(&self) -> Vec<(String, Vec<String>)> {
         self.spawns.lock().unwrap().clone()
     }
 }
@@ -164,7 +164,7 @@ fn set_context_state_file(ws: &std::path::Path, name: &str) {
 /// Fork workspace: source `alpha` (role doc = `alpha_role`) + `bravo`, alpha seeded RUNNING with a
 /// source `session_id` (so fork reaches the spec-mutation / native-fork gate). Seeded-healthy coordinator
 /// (fork's start_coordinator -> AlreadyRunning, no real daemon). session_name = "team-laneateam".
-fn fork_ws(alpha_role: &str) -> PathBuf {
+pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
     let ws = temp_ws().join("forkv2");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
     std::fs::write(ws.join("TEAM.md"), "---\nname: laneateam\nobjective: Fork v2 probe.\nprovider: codex\n---\n\nteam.\n").unwrap();

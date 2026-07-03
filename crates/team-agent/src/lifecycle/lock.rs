@@ -24,6 +24,10 @@ pub(crate) struct LifecycleLockGuard {
 pub(crate) fn acquire_agent_lifecycle_lock(
     request: LifecycleLockRequest<'_>,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
+    #[cfg(test)]
+    if let Some((timeout, held_long)) = test_lifecycle_lock_deadline_override() {
+        return acquire_agent_lifecycle_lock_with_deadlines(request, timeout, held_long);
+    }
     acquire_agent_lifecycle_lock_with_deadlines(
         request,
         LIFECYCLE_LOCK_TIMEOUT,
@@ -38,6 +42,42 @@ pub(crate) fn acquire_agent_lifecycle_lock_for_test(
     held_long: Duration,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
     acquire_agent_lifecycle_lock_with_deadlines(request, timeout, held_long)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DEADLINE_OVERRIDE: std::cell::Cell<Option<(Duration, Duration)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct LifecycleLockDeadlineOverrideGuard {
+    previous: Option<(Duration, Duration)>,
+}
+
+#[cfg(test)]
+pub(crate) fn override_agent_lifecycle_lock_deadlines_for_test(
+    timeout: Duration,
+    held_long: Duration,
+) -> LifecycleLockDeadlineOverrideGuard {
+    let previous = TEST_DEADLINE_OVERRIDE.with(|override_cell| {
+        let previous = override_cell.get();
+        override_cell.set(Some((timeout, held_long)));
+        previous
+    });
+    LifecycleLockDeadlineOverrideGuard { previous }
+}
+
+#[cfg(test)]
+fn test_lifecycle_lock_deadline_override() -> Option<(Duration, Duration)> {
+    TEST_DEADLINE_OVERRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+impl Drop for LifecycleLockDeadlineOverrideGuard {
+    fn drop(&mut self) {
+        TEST_DEADLINE_OVERRIDE.with(|override_cell| override_cell.set(self.previous));
+    }
 }
 
 fn acquire_agent_lifecycle_lock_with_deadlines(

@@ -1,0 +1,426 @@
+use super::launch_spawn::seed_healthy_coordinator;
+use super::*;
+use crate::cli::{
+    cmd_collect, cmd_send, cmd_status, lifecycle_port, CmdOutput, CmdResult, CollectArgs, SendArgs,
+    StatusArgs,
+};
+use crate::transport::test_support::OfflineTransport;
+use crate::transport::WindowName;
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+#[test]
+fn phase_b_golden_events_state_status_zero_drift() {
+    let baseline = phase_fixture_path("phase_b").join("golden.json");
+    let actual = run_phase_golden(PhaseGolden {
+        phase: "phase_b",
+        team_key: "teamdir",
+        lifecycle_op: phase_b_reset_discard_session,
+    });
+    if std::env::var_os("TEAM_AGENT_UPDATE_GOLDEN").is_some() {
+        std::fs::create_dir_all(baseline.parent().expect("baseline parent")).unwrap();
+        std::fs::write(&baseline, pretty(&actual)).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&baseline)
+        .unwrap_or_else(|e| panic!("missing golden baseline {}: {e}", baseline.display()));
+    let expected: Value = serde_json::from_str(&expected).expect("parse golden baseline");
+    assert_eq!(
+        actual,
+        expected,
+        "phase B golden drift; update intentionally with TEAM_AGENT_UPDATE_GOLDEN=1 only after review"
+    );
+}
+
+#[derive(Clone, Copy)]
+struct PhaseGolden {
+    phase: &'static str,
+    team_key: &'static str,
+    lifecycle_op: fn(&Path, &OfflineTransport, &'static str) -> Value,
+}
+
+fn run_phase_golden(spec: PhaseGolden) -> Value {
+    let team = two_worker_team_dir();
+    let workspace = team.parent().expect("workspace").to_path_buf();
+    seed_healthy_coordinator(&workspace);
+    let launch_transport = codex_ready_transport();
+    let quick_start = quick_start_with_transport_in_workspace_with_display(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &launch_transport,
+        false,
+    );
+    let status_compact = cmd_status(&StatusArgs {
+        agent: None,
+        workspace: workspace.clone(),
+        detail: false,
+        summary: false,
+        json: true,
+        team: Some(spec.team_key.to_string()),
+    });
+    let status_detail = cmd_status(&StatusArgs {
+        agent: None,
+        workspace: workspace.clone(),
+        detail: true,
+        summary: false,
+        json: true,
+        team: Some(spec.team_key.to_string()),
+    });
+    let send = cmd_send(&SendArgs {
+        target: Some("w1".to_string()),
+        message: vec!["phase".to_string(), "golden".to_string()],
+        targets: None,
+        workspace: workspace.clone(),
+        team: Some(spec.team_key.to_string()),
+        task: None,
+        sender: "leader".to_string(),
+        no_ack: true,
+        no_wait: true,
+        watch_result: false,
+        timeout: 0.1,
+        confirm_human: false,
+        json: true,
+        message_id: Some("phase-golden-message".to_string()),
+        pane: None,
+    });
+    let collect = cmd_collect(&CollectArgs {
+        workspace: workspace.clone(),
+        result_file: None,
+        json: true,
+        team: Some(spec.team_key.to_string()),
+    });
+    let lifecycle_transport = codex_ready_transport()
+        .with_session_present(true)
+        .with_windows(vec![WindowName::new("w1"), WindowName::new("w2")]);
+    let lifecycle = (spec.lifecycle_op)(&workspace, &lifecycle_transport, spec.team_key);
+    let shutdown = lifecycle_port::shutdown_with_transport(
+        &workspace,
+        true,
+        Some(spec.team_key),
+        &lifecycle_transport,
+    );
+
+    let raw = json!({
+        "phase": spec.phase,
+        "script": [
+            {
+                "step": "quick-start",
+                "exit_code": if quick_start.is_ok() { 0 } else { 1 },
+                "output": quick_start_value(quick_start),
+            },
+            { "step": "status-json", "result": cmd_value(status_compact) },
+            { "step": "status-detail-json", "result": cmd_value(status_detail) },
+            { "step": "send", "result": cmd_value(send) },
+            { "step": "collect", "result": cmd_value(collect) },
+            { "step": "phase-lifecycle-op", "output": lifecycle },
+            {
+                "step": "shutdown-keep-logs",
+                "exit_code": if shutdown.is_ok() { 0 } else { 1 },
+                "output": match shutdown {
+                    Ok(value) => value,
+                    Err(error) => json!({"ok": false, "error": error.to_string()}),
+                },
+            },
+        ],
+        "events_jsonl": read_events(&workspace),
+        "state_json": read_state(&workspace),
+        "transport": {
+            "spawns": lifecycle_transport.spawn_window_records(),
+        },
+    });
+
+    let mut ctx = NormalizeCtx::new(&workspace);
+    normalize_value(raw, &mut ctx, None)
+}
+
+fn phase_b_reset_discard_session(
+    workspace: &Path,
+    transport: &OfflineTransport,
+    team_key: &'static str,
+) -> Value {
+    match crate::lifecycle::reset_agent_with_transport(
+        workspace,
+        &aid("w1"),
+        true,
+        false,
+        Some(team_key),
+        transport,
+    ) {
+        Ok(ResetAgentOutcome::Reset {
+            start_mode,
+            discarded_session_id,
+            session_id,
+            new_session_id,
+            ..
+        }) => json!({
+            "ok": true,
+            "operation": "reset-agent --discard-session",
+            "status": "running",
+            "start_mode": format!("{start_mode:?}"),
+            "discarded_session_id": discarded_session_id.map(|id| id.as_str().to_string()),
+            "session_id": session_id.map(|id| id.as_str().to_string()),
+            "new_session_id": new_session_id.map(|id| id.as_str().to_string()),
+        }),
+        Ok(other) => json!({
+            "ok": true,
+            "operation": "reset-agent --discard-session",
+            "status": format!("{other:?}"),
+        }),
+        Err(error) => json!({
+            "ok": false,
+            "operation": "reset-agent --discard-session",
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn two_worker_team_dir() -> PathBuf {
+    let team = temp_ws().join("teamdir");
+    std::fs::create_dir_all(team.join("agents")).unwrap();
+    std::fs::write(
+        team.join("TEAM.md"),
+        "---\nname: phasegolden\nobjective: Phase golden.\nprovider: codex\n---\n\nPhase golden team.\n",
+    )
+    .unwrap();
+    for id in ["w1", "w2"] {
+        std::fs::write(team.join("agents").join(format!("{id}.md")), role_doc(id)).unwrap();
+    }
+    team
+}
+
+fn codex_ready_transport() -> OfflineTransport {
+    let mut transport = OfflineTransport::new();
+    for pane in 0..16 {
+        transport = transport.with_capture_for_pane(format!("%{pane}"), "OpenAI Codex");
+    }
+    transport
+}
+
+fn role_doc(id: &str) -> String {
+    format!(
+        "---\nname: {id}\nrole: {id} Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{id} worker.\n"
+    )
+}
+
+fn quick_start_value(result: Result<QuickStartReport, LifecycleError>) -> Value {
+    match result {
+        Ok(QuickStartReport::Ready {
+            session_name,
+            launch,
+            display_backend,
+            worker_readiness,
+            ..
+        }) => {
+            let agents = launch
+                .started
+                .iter()
+                .map(|started| {
+                    json!({
+                        "agent_id": started.agent_id.as_str(),
+                        "target": started.target,
+                        "start_mode": format!("{:?}", started.start_mode),
+                        "session_id": started.session_id.as_ref().map(|id| id.as_str().to_string()),
+                        "rollout_path": started.rollout_path.as_ref().map(|path| path.as_path().to_string_lossy().to_string()),
+                        "layout_window": started.layout_window.as_ref().map(|window| window.as_str().to_string()),
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "ok": true,
+                "status": "ready",
+                "session_name": session_name.as_str(),
+                "display_backend": display_backend,
+                "worker_readiness": format!("{worker_readiness:?}"),
+                "started": agents,
+            })
+        }
+        Ok(other) => json!({"ok": false, "status": format!("{other:?}")}),
+        Err(error) => json!({"ok": false, "error": error.to_string()}),
+    }
+}
+
+fn cmd_value(result: Result<CmdResult, crate::cli::CliError>) -> Value {
+    match result {
+        Ok(cmd) => json!({
+            "exit_code": cmd.exit.code(),
+            "output": match cmd.output {
+                CmdOutput::Json(value) => value,
+                CmdOutput::Human(text) => json!({"human": text}),
+                CmdOutput::None => Value::Null,
+            },
+        }),
+        Err(error) => json!({
+            "exit_code": 1,
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn read_events(workspace: &Path) -> Vec<Value> {
+    let path = crate::model::paths::logs_dir(workspace).join("events.jsonl");
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+fn read_state(workspace: &Path) -> Value {
+    crate::state::persist::load_runtime_state(workspace).unwrap_or_else(|_| json!(null))
+}
+
+fn phase_fixture_path(phase: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("0_5_0_phase_golden")
+        .join(phase)
+}
+
+struct NormalizeCtx {
+    workspace: String,
+    temp_dir: String,
+    pane_ids: BTreeMap<String, String>,
+}
+
+impl NormalizeCtx {
+    fn new(workspace: &Path) -> Self {
+        Self {
+            workspace: workspace.to_string_lossy().to_string(),
+            temp_dir: std::env::temp_dir().to_string_lossy().to_string(),
+            pane_ids: BTreeMap::new(),
+        }
+    }
+
+    fn pane_token(&mut self, pane: &str) -> String {
+        if let Some(token) = self.pane_ids.get(pane) {
+            return token.clone();
+        }
+        let token = format!("<PANE:{}>", self.pane_ids.len());
+        self.pane_ids.insert(pane.to_string(), token.clone());
+        token
+    }
+}
+
+fn normalize_value(value: Value, ctx: &mut NormalizeCtx, key: Option<&str>) -> Value {
+    if matches!(key, Some("env_overlay_keys" | "env_unset_keys")) {
+        return json!("<ENV_KEYS>");
+    }
+    match value {
+        Value::Object(map) => {
+            let sorted = map.into_iter().collect::<BTreeMap<_, _>>();
+            let mut out = Map::new();
+            for (child_key, child) in sorted {
+                out.insert(
+                    child_key.clone(),
+                    normalize_value(child, ctx, Some(child_key.as_str())),
+                );
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| normalize_value(item, ctx, key))
+                .collect(),
+        ),
+        Value::String(text) => normalize_string(text, ctx, key),
+        Value::Number(number) if key_is_pid_or_duration(key) => {
+            if number.is_u64() || number.is_i64() {
+                json!(0)
+            } else {
+                Value::Number(number)
+            }
+        }
+        other => other,
+    }
+}
+
+fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> Value {
+    let key = key.unwrap_or_default();
+    if key_is_timestamp(key) {
+        return json!("<TS>");
+    }
+    if key.contains("endpoint") {
+        return json!("<SOCKET>");
+    }
+    if key_is_id(key, &text) {
+        return json!("<ID>");
+    }
+    if key_contains_path(key) {
+        return json!(normalize_path_string(&text, ctx));
+    }
+    if text.starts_with('%') && text[1..].chars().all(|c| c.is_ascii_digit()) {
+        return json!(ctx.pane_token(&text));
+    }
+    let normalized = normalize_path_string(&text, ctx);
+    if normalized != text {
+        return json!(normalized);
+    }
+    json!(text)
+}
+
+fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
+    normalize_socket_token(
+        &text
+            .replace(&ctx.workspace, "<WORKSPACE>")
+            .replace(&ctx.temp_dir, "<TMP>"),
+    )
+}
+
+fn normalize_socket_token(text: &str) -> String {
+    let mut out = text.to_string();
+    while let Some(idx) = out.find("ta-") {
+        let end = out[idx..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map(|offset| idx + offset)
+            .unwrap_or_else(|| out.len());
+        if end == idx + 3 {
+            break;
+        }
+        out.replace_range(idx..end, "ta-<SOCKET>");
+    }
+    out
+}
+
+fn key_is_timestamp(key: &str) -> bool {
+    key == "ts" || key.ends_with("_at") || key.contains("timestamp")
+}
+
+fn key_is_pid_or_duration(key: Option<&str>) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
+    key.contains("pid")
+        || key.ends_with("_ms")
+        || key.contains("duration")
+        || key.contains("elapsed")
+}
+
+fn key_contains_path(key: &str) -> bool {
+    key.contains("path")
+        || key.contains("workspace")
+        || key.contains("file")
+        || key.contains("socket")
+        || key.contains("endpoint")
+        || key == "log"
+}
+
+fn key_is_id(key: &str, text: &str) -> bool {
+    key == "message_id"
+        || key == "result_id"
+        || key == "watcher_id"
+        || key.ends_with("_message_id")
+        || key.ends_with("_result_id")
+        || text.starts_with("msg_")
+}
+
+fn pretty(value: &Value) -> String {
+    let mut text = serde_json::to_string_pretty(value).unwrap();
+    text.push('\n');
+    text
+}
