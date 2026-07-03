@@ -868,7 +868,7 @@ fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {
 
 fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     let parsed = parse_args(args);
-    let target = if parsed.targets.is_some() {
+    let target = if parsed.targets.is_some() || parsed.pane.is_some() {
         None
     } else {
         parsed.positionals.first().cloned()
@@ -1745,6 +1745,57 @@ mod tests {
             command_help(Some("status")).contains("错误细分走 status --summary"),
             "status help must tell users where detailed error classes live"
         );
+    }
+
+    #[test]
+    fn send_pane_positionals_are_message_not_target() {
+        let cwd = tmp_workspace();
+        let args = send_args(&cli_argv(&["--pane", "%1596", "hello"]), &cwd).unwrap();
+        assert_eq!(args.pane.as_deref(), Some("%1596"));
+        assert_eq!(args.target, None);
+        assert_eq!(args.targets, None);
+        assert_eq!(args.message, vec!["hello".to_string()]);
+
+        let args = send_args(
+            &cli_argv(&["--pane", "%1596", "multi", "word", "message"]),
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(args.target, None);
+        assert_eq!(
+            args.message,
+            vec![
+                "multi".to_string(),
+                "word".to_string(),
+                "message".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn send_pane_still_rejects_to_and_empty_message() {
+        let cwd = tmp_workspace();
+        let args = send_args(
+            &cli_argv(&["--pane", "%1596", "--to", "worker", "hello"]),
+            &cwd,
+        )
+        .unwrap();
+        let err = cmd_send(&args).unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(ref message) if message.contains("--pane and TARGET/--to are mutually exclusive")),
+            "expected --pane/--to mutual-exclusion usage error, got {err:?}"
+        );
+
+        let args = send_args(&cli_argv(&["--pane", "%1596"]), &cwd).unwrap();
+        let err = cmd_send(&args).unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(ref message) if message == "--pane requires a non-empty message"),
+            "expected empty-message usage error, got {err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]
