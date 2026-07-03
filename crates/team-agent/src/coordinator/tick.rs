@@ -1038,6 +1038,10 @@ impl Coordinator {
                     "provider_process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
                     "signature": fact.signature.as_str(),
                     "turn_id": fact.turn_id.as_ref().map(|id| id.as_str()),
+                    "apiErrorStatus": fact.api_error_status,
+                    "error": fact.error.as_deref(),
+                    "requestId": fact.request_id.as_deref(),
+                    "assistant_uuid": fact.assistant_uuid.as_deref(),
                     "size": size,
                     "mtime_ns": mtime_ns,
                     "process_liveness": process_liveness_wire(liveness.state),
@@ -2391,6 +2395,10 @@ fn write_abnormal_check(
             },
             "signature": fact.map(|fact| fact.signature.as_str()),
             "turn_id": fact.and_then(|fact| fact.turn_id.as_ref().map(|id| id.as_str())),
+            "apiErrorStatus": fact.and_then(|fact| fact.api_error_status),
+            "error": fact.and_then(|fact| fact.error.as_deref()),
+            "requestId": fact.and_then(|fact| fact.request_id.as_deref()),
+            "assistant_uuid": fact.and_then(|fact| fact.assistant_uuid.as_deref()),
             "process_liveness": process_liveness_wire(liveness.state),
             "pid_status": liveness.detail.as_str(),
         }),
@@ -3685,6 +3693,82 @@ mod u1_tests {
     }
 
     #[test]
+    fn abnormal_claude_assistant_api_error_events_include_structured_details() {
+        let dir = temp_abnormal_dir("claude-api-details");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            claude_assistant_api_error_line(
+                "assistant-400",
+                "parent-400",
+                "session-400",
+                400,
+                "unknown",
+                None,
+            ),
+        )
+        .unwrap();
+        seed_abnormal_state_with_provider(&dir, &rollout, "alive", 1, "claude_code");
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let stale_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(stale_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(stale_check["notification"], serde_json::json!(false));
+        assert_eq!(stale_check["apiErrorStatus"], serde_json::json!(400));
+        assert_eq!(stale_check["error"], serde_json::json!("unknown"));
+        assert_eq!(stale_check["requestId"], serde_json::json!(null));
+        assert_eq!(stale_check["assistant_uuid"], serde_json::json!("assistant-400"));
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                claude_assistant_api_error_line(
+                    "assistant-404",
+                    "parent-404",
+                    "session-404",
+                    404,
+                    "model_not_found",
+                    Some("req_011CceNfWj2aPY5gtCdakULt"),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("fresh check event");
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        assert_eq!(fresh_check["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(fresh_check["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            fresh_check["requestId"],
+            serde_json::json!("req_011CceNfWj2aPY5gtCdakULt")
+        );
+        assert_eq!(fresh_check["assistant_uuid"], serde_json::json!("assistant-404"));
+
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh alive error notification");
+        assert_eq!(abnormal["signature"], serde_json::json!("api_error"));
+        assert_eq!(abnormal["turn_id"], serde_json::json!("assistant-404"));
+        assert_eq!(abnormal["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(abnormal["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            abnormal["requestId"],
+            serde_json::json!("req_011CceNfWj2aPY5gtCdakULt")
+        );
+        assert_eq!(abnormal["assistant_uuid"], serde_json::json!("assistant-404"));
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
     fn abnormal_dead_process_without_explicit_error_stays_dead_only() {
         let dir = temp_abnormal_dir("dead-only");
         let rollout = dir.join("rollout-w1.jsonl");
@@ -3802,13 +3886,23 @@ mod u1_tests {
         liveness: &str,
         spawn_epoch: u64,
     ) {
+        seed_abnormal_state_with_provider(dir, rollout, liveness, spawn_epoch, "codex");
+    }
+
+    fn seed_abnormal_state_with_provider(
+        dir: &std::path::Path,
+        rollout: &std::path::Path,
+        liveness: &str,
+        spawn_epoch: u64,
+        provider: &str,
+    ) {
         crate::state::persist::save_runtime_state(
             dir,
             &serde_json::json!({
                 "active_team_key": "team",
                 "agents": {
                     "w1": {
-                        "provider": "codex",
+                        "provider": provider,
                         "status": "running",
                         "agent_id": "w1",
                         "session_id": "session-w1",
@@ -3821,6 +3915,37 @@ mod u1_tests {
             }),
         )
         .unwrap();
+    }
+
+    fn claude_assistant_api_error_line(
+        uuid: &str,
+        parent_uuid: &str,
+        session_id: &str,
+        status: i64,
+        error: &str,
+        request_id: Option<&str>,
+    ) -> String {
+        let mut record = serde_json::json!({
+            "type": "assistant",
+            "parentUuid": parent_uuid,
+            "uuid": uuid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "API Error"}]
+            },
+            "error": error,
+            "isApiErrorMessage": true,
+            "apiErrorStatus": status,
+            "sessionId": session_id,
+            "version": "2.1.181"
+        });
+        if let Some(request_id) = request_id {
+            record
+                .as_object_mut()
+                .unwrap()
+                .insert("requestId".to_string(), serde_json::json!(request_id));
+        }
+        format!("{record}\n")
     }
 
     fn abnormal_test_watch(dir: &std::path::Path) -> Value {

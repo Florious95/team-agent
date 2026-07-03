@@ -5,7 +5,7 @@ use super::Provider;
 
 /// `provider_state.read_fault_facts(provider, records)`(`__init__.py:46`)。
 /// 从已解析 records 抽取 fault/approval facts(kind ∈ {error, failed, approval}),
-/// 携 `(signature, turn_id)` C8 dedup key。`api_error` 无 ids 时 `turn_id == None`。
+/// 携 `(signature, turn_id)` C8 dedup key。旧 `api_error` 无 ids 时 `turn_id == None`。
 pub fn read_fault_facts(records: &[serde_json::Value], provider: Provider) -> Vec<FaultFact> {
     records
         .iter()
@@ -22,23 +22,30 @@ pub fn explicit_error_fact(record: &serde_json::Value, provider: Provider) -> Op
     }
 }
 
-fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
-    if record.get("type").and_then(serde_json::Value::as_str) != Some("system")
-        || record.get("subtype").and_then(serde_json::Value::as_str) != Some("api_error")
-        || record.get("level").and_then(serde_json::Value::as_str) != Some("error")
-    {
-        return None;
+pub(crate) fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
+    if claude_record_is_system_api_error(record) {
+        return Some(FaultFact::new(
+            Signature::new("api_error"),
+            claude_system_api_error_turn_id(record),
+            FactKind::Error,
+        ));
     }
-    Some(FaultFact {
-        signature: Signature::new("api_error"),
-        turn_id: record
-            .get("sessionId")
-            .or_else(|| record.get("parentUuid"))
-            .or_else(|| record.get("uuid"))
-            .and_then(serde_json::Value::as_str)
-            .map(TurnId::new),
-        kind: FactKind::Error,
-    })
+    if claude_record_is_assistant_api_error(record) {
+        return Some(
+            FaultFact::new(
+                Signature::new("api_error"),
+                claude_assistant_api_error_turn_id(record),
+                FactKind::Error,
+            )
+            .with_api_error_details(
+                record.get("apiErrorStatus").and_then(serde_json::Value::as_i64),
+                non_empty_string_field(record, "error"),
+                non_empty_string_field(record, "requestId"),
+                non_empty_string_field(record, "uuid"),
+            ),
+        );
+    }
+    None
 }
 
 fn codex_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
@@ -49,11 +56,11 @@ fn codex_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
     if turn.get("status").and_then(serde_json::Value::as_str) != Some("failed") {
         return None;
     }
-    Some(FaultFact {
-        signature: Signature::new("turn_failed"),
-        turn_id: turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
-        kind: FactKind::Failed,
-    })
+    Some(FaultFact::new(
+        Signature::new("turn_failed"),
+        turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+        FactKind::Failed,
+    ))
 }
 
 fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFact> {
@@ -65,38 +72,26 @@ fn fault_fact(provider: Provider, record: &serde_json::Value) -> Option<FaultFac
 }
 
 fn claude_fault_fact(record: &serde_json::Value) -> Option<FaultFact> {
-    if record.get("type").and_then(serde_json::Value::as_str) == Some("system")
-        && record.get("subtype").and_then(serde_json::Value::as_str) == Some("api_error")
-        && record.get("level").and_then(serde_json::Value::as_str) == Some("error")
-    {
-        return Some(FaultFact {
-            signature: Signature::new("api_error"),
-            turn_id: record
-                .get("sessionId")
-                .or_else(|| record.get("parentUuid"))
-                .or_else(|| record.get("uuid"))
-                .and_then(serde_json::Value::as_str)
-                .map(TurnId::new),
-            kind: FactKind::Error,
-        });
+    if let Some(fact) = claude_explicit_error_fact(record) {
+        return Some(fact);
     }
     if record.get("type").and_then(serde_json::Value::as_str) == Some("user")
-        && claude_has_error_tool_result(record)
+        && claude_record_has_error_tool_result(record)
     {
-        return Some(FaultFact {
-            signature: Signature::new("tool_result_is_error"),
-            turn_id: record
+        return Some(FaultFact::new(
+            Signature::new("tool_result_is_error"),
+            record
                 .get("parentUuid")
                 .or_else(|| record.get("uuid"))
                 .and_then(serde_json::Value::as_str)
                 .map(TurnId::new),
-            kind: FactKind::Error,
-        });
+            FactKind::Error,
+        ));
     }
     None
 }
 
-fn claude_has_error_tool_result(record: &serde_json::Value) -> bool {
+pub(crate) fn claude_record_has_error_tool_result(record: &serde_json::Value) -> bool {
     record
         .get("message")
         .and_then(|m| m.get("content"))
@@ -109,29 +104,74 @@ fn claude_has_error_tool_result(record: &serde_json::Value) -> bool {
         })
 }
 
+fn claude_record_is_system_api_error(record: &serde_json::Value) -> bool {
+    record.get("type").and_then(serde_json::Value::as_str) == Some("system")
+        && record.get("subtype").and_then(serde_json::Value::as_str) == Some("api_error")
+        && record.get("level").and_then(serde_json::Value::as_str) == Some("error")
+}
+
+fn claude_system_api_error_turn_id(record: &serde_json::Value) -> Option<TurnId> {
+    record
+        .get("sessionId")
+        .or_else(|| record.get("parentUuid"))
+        .or_else(|| record.get("uuid"))
+        .and_then(serde_json::Value::as_str)
+        .map(TurnId::new)
+}
+
+fn claude_record_is_assistant_api_error(record: &serde_json::Value) -> bool {
+    record.get("type").and_then(serde_json::Value::as_str) == Some("assistant")
+        && record
+            .get("message")
+            .and_then(|message| message.get("role"))
+            .and_then(serde_json::Value::as_str)
+            == Some("assistant")
+        && record.get("isApiErrorMessage").and_then(serde_json::Value::as_bool) == Some(true)
+        && (record.get("apiErrorStatus").and_then(serde_json::Value::as_i64).is_some()
+            || non_empty_string_field(record, "error").is_some()
+            || non_empty_string_field(record, "requestId").is_some())
+}
+
+fn claude_assistant_api_error_turn_id(record: &serde_json::Value) -> Option<TurnId> {
+    record
+        .get("uuid")
+        .or_else(|| record.get("parentUuid"))
+        .or_else(|| record.get("sessionId"))
+        .and_then(serde_json::Value::as_str)
+        .map(TurnId::new)
+}
+
+fn non_empty_string_field(record: &serde_json::Value, key: &str) -> Option<String> {
+    record
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn codex_fault_fact(record: &serde_json::Value) -> Option<FaultFact> {
     let method = record.get("method").and_then(serde_json::Value::as_str);
     if method == Some("turn/completed") {
         let turn = record.get("params").and_then(|p| p.get("turn"))?;
         if turn.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
-            return Some(FaultFact {
-                signature: Signature::new("turn_failed"),
-                turn_id: turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
-                kind: FactKind::Failed,
-            });
+            return Some(FaultFact::new(
+                Signature::new("turn_failed"),
+                turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+                FactKind::Failed,
+            ));
         }
     }
     if method.is_some_and(|m| m.ends_with("requestApproval")) {
-        return Some(FaultFact {
-            signature: Signature::new("approval_required"),
-            turn_id: record
+        return Some(FaultFact::new(
+            Signature::new("approval_required"),
+            record
                 .get("params")
                 .and_then(|p| p.get("turnId"))
                 .or_else(|| record.get("params").and_then(|p| p.get("turn_id")))
                 .and_then(serde_json::Value::as_str)
                 .map(TurnId::new),
-            kind: FactKind::Approval,
-        });
+            FactKind::Approval,
+        ));
     }
     None
 }

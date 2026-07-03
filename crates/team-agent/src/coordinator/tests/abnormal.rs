@@ -166,6 +166,86 @@ fn abnormal_explicit_error_classifier_boundaries_stay_stable() {
         claude_api_fact.turn_id.as_ref().map(|id| id.as_str()),
         Some("sess-1")
     );
+    assert_eq!(claude_api_fact.api_error_status, None);
+    assert_eq!(claude_api_fact.error.as_deref(), None);
+    assert_eq!(claude_api_fact.request_id.as_deref(), None);
+    assert_eq!(claude_api_fact.assistant_uuid.as_deref(), None);
+
+    let claude_400 = line(serde_json::json!({
+        "type": "assistant",
+        "parentUuid": "parent-400",
+        "uuid": "assistant-400",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "API Error: 400 Team Agent truthsource forced invalid_request_error"}
+        ]},
+        "error": "unknown",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 400,
+        "sessionId": "session-400",
+        "version": "2.1.181"
+    }));
+    let claude_400_fact =
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_400)
+            .expect("Claude assistant api error counts as explicit");
+    assert_claude_api_error_fact(
+        &claude_400_fact,
+        "assistant-400",
+        Some(400),
+        Some("unknown"),
+        None,
+        Some("assistant-400"),
+    );
+
+    let claude_404 = line(serde_json::json!({
+        "type": "assistant",
+        "parentUuid": "parent-404",
+        "uuid": "assistant-404",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "There's an issue with the selected model."}
+        ]},
+        "error": "model_not_found",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 404,
+        "sessionId": "session-404",
+        "version": "2.1.181"
+    }));
+    let claude_404_fact =
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_404)
+            .expect("Claude assistant model_not_found counts as explicit");
+    assert_claude_api_error_fact(
+        &claude_404_fact,
+        "assistant-404",
+        Some(404),
+        Some("model_not_found"),
+        None,
+        Some("assistant-404"),
+    );
+
+    let claude_real_request = line(serde_json::json!({
+        "type": "assistant",
+        "parentUuid": "parent-real",
+        "uuid": "assistant-real",
+        "requestId": "req_011CceNfWj2aPY5gtCdakULt",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "There's an issue with the selected model."}
+        ]},
+        "error": "model_not_found",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 404,
+        "sessionId": "session-real",
+        "version": "2.1.181"
+    }));
+    let claude_real_fact =
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_real_request)
+            .expect("Claude assistant api error with requestId counts as explicit");
+    assert_claude_api_error_fact(
+        &claude_real_fact,
+        "assistant-real",
+        Some(404),
+        Some("model_not_found"),
+        Some("req_011CceNfWj2aPY5gtCdakULt"),
+        Some("assistant-real"),
+    );
 
     let claude_tool_result = line(serde_json::json!({
         "type": "user",
@@ -179,6 +259,45 @@ fn abnormal_explicit_error_classifier_boundaries_stay_stable() {
         crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &claude_tool_result)
             .is_none(),
         "Claude tool_result is_error is an abnormal fact, but not an explicit provider-exit error"
+    );
+
+    let ordinary_assistant_text = line(serde_json::json!({
+        "type": "assistant",
+        "uuid": "assistant-text",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "The command returned an error string."}
+        ]},
+        "sessionId": "session-text"
+    }));
+    assert!(
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &ordinary_assistant_text)
+            .is_none(),
+        "ordinary assistant text containing error is not a structured API error"
+    );
+
+    let interrupted = line(serde_json::json!({
+        "type": "user",
+        "uuid": "user-interrupt",
+        "message": {"content": [{"type": "text", "text": "[Request interrupted by user]"}]}
+    }));
+    assert!(
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &interrupted).is_none(),
+        "user interruption is not a provider API error"
+    );
+
+    let empty_api_error_shape = line(serde_json::json!({
+        "type": "assistant",
+        "uuid": "assistant-empty",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "API Error:"}
+        ]},
+        "isApiErrorMessage": true,
+        "sessionId": "session-empty"
+    }));
+    assert!(
+        crate::provider::latest_explicit_error_fact(Provider::ClaudeCode, &empty_api_error_shape)
+            .is_none(),
+        "isApiErrorMessage without status/error/requestId is not enough"
     );
 
     let codex_failed = line(serde_json::json!({
@@ -207,6 +326,23 @@ fn abnormal_explicit_error_classifier_boundaries_stay_stable() {
 
 fn line(value: serde_json::Value) -> String {
     format!("{value}\n")
+}
+
+fn assert_claude_api_error_fact(
+    fact: &crate::provider::FaultFact,
+    turn_id: &str,
+    status: Option<i64>,
+    error: Option<&str>,
+    request_id: Option<&str>,
+    assistant_uuid: Option<&str>,
+) {
+    assert_eq!(fact.signature.as_str(), "api_error");
+    assert_eq!(fact.kind, crate::provider::FactKind::Error);
+    assert_eq!(fact.turn_id.as_ref().map(|id| id.as_str()), Some(turn_id));
+    assert_eq!(fact.api_error_status, status);
+    assert_eq!(fact.error.as_deref(), error);
+    assert_eq!(fact.request_id.as_deref(), request_id);
+    assert_eq!(fact.assistant_uuid.as_deref(), assistant_uuid);
 }
 
 // ═════════════════════════════════════════════════════════════════════════

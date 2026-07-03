@@ -452,12 +452,44 @@ pub struct ClassifyResult {
 }
 
 /// abnormal track 消费的 fault/approval fact(`provider_state.read_fault_facts`)。
-/// C8 dedup key = `(signature, turn_id)`。`turn_id` 可 `None`(`api_error` 无 ids)。
+/// C8 dedup key = `(signature, turn_id)`。`turn_id` 可 `None`(旧 `api_error` 可无 ids)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FaultFact {
     pub signature: Signature,
     pub turn_id: Option<TurnId>,
     pub kind: FactKind,
+    pub api_error_status: Option<i64>,
+    pub error: Option<String>,
+    pub request_id: Option<String>,
+    pub assistant_uuid: Option<String>,
+}
+
+impl FaultFact {
+    pub fn new(signature: Signature, turn_id: Option<TurnId>, kind: FactKind) -> Self {
+        Self {
+            signature,
+            turn_id,
+            kind,
+            api_error_status: None,
+            error: None,
+            request_id: None,
+            assistant_uuid: None,
+        }
+    }
+
+    pub fn with_api_error_details(
+        mut self,
+        api_error_status: Option<i64>,
+        error: Option<String>,
+        request_id: Option<String>,
+        assistant_uuid: Option<String>,
+    ) -> Self {
+        self.api_error_status = api_error_status;
+        self.error = error;
+        self.request_id = request_id;
+        self.assistant_uuid = assistant_uuid;
+        self
+    }
 }
 
 /// take-over reminder 判定结果(`idle_predicate.evaluate_takeover_reminder` `_result`)。

@@ -323,46 +323,18 @@ fn codex_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultF
     if turn.get("status").and_then(serde_json::Value::as_str) != Some("failed") {
         return None;
     }
-    Some(FaultFact {
-        signature: Signature::new("turn_failed"),
-        turn_id: turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
-        kind: FactKind::Failed,
-    })
+    Some(FaultFact::new(
+        Signature::new("turn_failed"),
+        turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+        FactKind::Failed,
+    ))
 }
 
 fn claude_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
-    if claude_record_has_error_tool_result(record) {
+    if super::faults::claude_record_has_error_tool_result(record) {
         return None;
     }
-    if record.get("type").and_then(serde_json::Value::as_str) != Some("system")
-        || record.get("subtype").and_then(serde_json::Value::as_str) != Some("api_error")
-        || record.get("level").and_then(serde_json::Value::as_str) != Some("error")
-    {
-        return None;
-    }
-    Some(FaultFact {
-        signature: Signature::new("api_error"),
-        turn_id: record
-            .get("sessionId")
-            .or_else(|| record.get("parentUuid"))
-            .or_else(|| record.get("uuid"))
-            .and_then(serde_json::Value::as_str)
-            .map(TurnId::new),
-        kind: FactKind::Error,
-    })
-}
-
-fn claude_record_has_error_tool_result(record: &serde_json::Value) -> bool {
-    record
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
-                    && item.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
-            })
-        })
+    super::faults::claude_explicit_error_fact(record)
 }
 
 fn decide_state(fact: &LifecycleFact, process: ProcessLiveness) -> ClassifyResult {
@@ -443,7 +415,7 @@ fn claude_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
             vec!["api_error".to_string()],
         ));
     }
-    if record_type == Some("user") && claude_record_has_error_tool_result(record) {
+    if record_type == Some("user") && super::faults::claude_record_has_error_tool_result(record) {
         return Some(lifecycle(
             FactKind::Error,
             record

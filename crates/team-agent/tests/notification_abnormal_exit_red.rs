@@ -103,6 +103,58 @@ fn notification_abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_
     );
 }
 
+#[test]
+fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source() {
+    let classify = source("src/provider/classify.rs");
+    let faults = source("src/provider/faults.rs");
+    let tick = source("src/coordinator/tick.rs");
+    let mut failures = Vec::new();
+
+    if !classify.contains("claude_record_has_error_tool_result(record)")
+        || !classify.contains("claude_explicit_error_fact(record)")
+    {
+        failures.push(
+            "classify.rs must keep latest-record/tool_result gating and delegate Claude explicit errors to faults.rs"
+                .to_string(),
+        );
+    }
+    if classify.contains("isApiErrorMessage") || classify.contains("apiErrorStatus") {
+        failures.push(
+            "Claude assistant API-error shape must stay single-sourced in provider/faults.rs"
+                .to_string(),
+        );
+    }
+    for needle in [
+        "type",
+        "assistant",
+        "message",
+        "role",
+        "isApiErrorMessage",
+        "apiErrorStatus",
+        "requestId",
+    ] {
+        if !faults.contains(needle) {
+            failures.push(format!("provider/faults.rs missing assistant API-error gate: {needle}"));
+        }
+    }
+    for needle in ["subtype", "api_error", "level"] {
+        if !faults.contains(needle) {
+            failures.push(format!("provider/faults.rs must preserve old system/api_error branch: {needle}"));
+        }
+    }
+    for needle in ["apiErrorStatus", "error", "requestId", "assistant_uuid"] {
+        if !tick.contains(needle) {
+            failures.push(format!("worker.abnormal_exit payload missing structured field: {needle}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Claude assistant API-error classifier contract failed:\n{}",
+        failures.join("\n")
+    );
+}
+
 fn source(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
 }

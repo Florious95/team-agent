@@ -44,6 +44,10 @@ fn p2_claude_api_error_fault_requires_level_error() {
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].signature.as_str(), "api_error");
     assert_eq!(facts[0].turn_id.as_ref().map(TurnId::as_str), Some("s-1"));
+    assert_eq!(facts[0].api_error_status, None);
+    assert_eq!(facts[0].error.as_deref(), None);
+    assert_eq!(facts[0].request_id.as_deref(), None);
+    assert_eq!(facts[0].assistant_uuid.as_deref(), None);
 }
 
 // P1 — claude api_error turn_id fallback chain = sessionId -> parentUuid -> uuid
@@ -59,6 +63,34 @@ fn p2_claude_api_error_turn_id_fallback_parentuuid_then_uuid() {
     let f2 = read_fault_facts(&uu, Provider::ClaudeCode);
     assert_eq!(f2.len(), 1);
     assert_eq!(f2[0].turn_id.as_ref().map(TurnId::as_str), Some("uu-1"));
+}
+
+#[test]
+fn p2_claude_assistant_api_error_fault_uses_uuid_and_structured_details() {
+    let records = vec![serde_json::json!({
+        "type": "assistant",
+        "parentUuid": "parent-1",
+        "uuid": "assistant-1",
+        "requestId": "req_011CceNfWj2aPY5gtCdakULt",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "There's an issue with the selected model."}
+        ]},
+        "error": "model_not_found",
+        "isApiErrorMessage": true,
+        "apiErrorStatus": 404,
+        "sessionId": "session-1",
+        "version": "2.1.181"
+    })];
+
+    let facts = read_fault_facts(&records, Provider::ClaudeCode);
+
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].signature.as_str(), "api_error");
+    assert_eq!(facts[0].turn_id.as_ref().map(TurnId::as_str), Some("assistant-1"));
+    assert_eq!(facts[0].api_error_status, Some(404));
+    assert_eq!(facts[0].error.as_deref(), Some("model_not_found"));
+    assert_eq!(facts[0].request_id.as_deref(), Some("req_011CceNfWj2aPY5gtCdakULt"));
+    assert_eq!(facts[0].assistant_uuid.as_deref(), Some("assistant-1"));
 }
 
 // P1 — codex requestApproval turn_id = params.turnId OR params.turn_id (codex.py:79).
