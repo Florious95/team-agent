@@ -95,12 +95,14 @@ pub(crate) fn start_agent_at_paths(
             .map_err(|e| LifecycleError::StatePersist(e.to_string()))?
     };
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
-    let agent = state
+    let raw_agent = state
         .get("agents")
         .and_then(|v| v.get(agent_id.as_str()))
         .ok_or_else(|| LifecycleError::RequirementUnmet(format!("agent {agent_id} not found")))?
         .clone();
-    if agent
+    let agent =
+        rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, &raw_agent);
+    if raw_agent
         .get("paused")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
@@ -112,7 +114,7 @@ pub(crate) fn start_agent_at_paths(
     let adaptive_layout =
         open_display && crate::lifecycle::launch::state_uses_adaptive_layout(&state);
     let agent_live = if adaptive_layout {
-        agent_pane_live(transport, &agent)
+        agent_pane_live(transport, &raw_agent)
     } else {
         window_exists(transport, &session_name, &window)
     };
@@ -124,7 +126,7 @@ pub(crate) fn start_agent_at_paths(
     // spawn (defensive). The check itself remains a no-op on healthy
     // state — assert_topology_invariants from Step 1 catches the
     // upstream corruption.
-    let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &agent);
+    let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &raw_agent);
     if has_collision {
         eprintln!(
             "team_agent::layout e51_collision_post_step2 agent_id=`{agent_id}` \
@@ -229,7 +231,22 @@ pub(crate) fn start_agent_at_paths(
         None,
         Some(resolved_team_key.as_str()),
     )?;
-    mark_agent_started(&mut state, agent_id, &spawn_window, &spawn, transport, &safety, start_mode)?;
+    verify_spawned_pane_matches_target(
+        transport,
+        &spawn.spawn.pane_id,
+        &session_name,
+        &spawn.spawn.window,
+    )?;
+    let actual_spawn_window = spawn.spawn.window.as_str().to_string();
+    mark_agent_started(
+        &mut state,
+        agent_id,
+        &actual_spawn_window,
+        &spawn,
+        transport,
+        &safety,
+        start_mode,
+    )?;
     // **0.3.24 add-agent socket drift fix**: keep `state.tmux_endpoint` /
     // `state.tmux_socket` synchronized with the transport actually used for the
     // spawn. Without this, add-agent / fork-agent could spawn to a socket that
@@ -240,23 +257,6 @@ pub(crate) fn start_agent_at_paths(
     crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
     let team_key = restart_projection_team_key(&state, team);
     save_restart_projected_state(workspace, &mut state, &team_key)?;
-    // **0.3.24 reachability gate (调整 4)** — strict, non-capture verification
-    // that the spawn actually produced an addressable window/pane on the
-    // transport's socket. Catches the macmini假绿 (`ok=true` returned by
-    // `add_agent` while the spawned `claude` process orphaned on a different
-    // socket and the leader never registered it). We use `has_pane` /
-    // `liveness` / `list_targets` (structural addressing only) — never
-    // `capture` — to avoid contention with E31's pane-readback gate timing.
-    if !spawned_pane_is_reachable(transport, &spawn.spawn.pane_id) {
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "add-agent spawn unreachable: pane {} not addressable on transport \
-             socket {:?} (likely socket drift — see 0.3.24 fix); the agent \
-             process may have orphaned on a different tmux socket. Re-run after \
-             confirming the team's tmux_endpoint persisted via `team-agent status`.",
-            spawn.spawn.pane_id.as_str(),
-            transport.tmux_endpoint().unwrap_or_default()
-        )));
-    }
     write_start_agent_start_event(
         workspace,
         agent_id,
@@ -264,7 +264,7 @@ pub(crate) fn start_agent_at_paths(
         provider,
         start_mode,
         &session_name,
-        &spawn_window,
+        &actual_spawn_window,
         spawn_session_id,
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
@@ -283,40 +283,51 @@ pub(crate) fn start_agent_at_paths(
     })
 }
 
-/// **0.3.24 strict-non-capture reachability gate**. Returns `true` IFF the spawn's
-/// pane is currently addressable on the transport's tmux socket. Uses structural
-/// addressing only (`has_pane` → `liveness` → `list_targets`) — **never**
-/// `capture` — so it does not race with E31's pane-readback gate timing
-/// (E31 reads pane contents after submit; running our own capture here would
-/// either consume the first-paste tokens E31 looks for, or vice versa).
-///
-/// The gate fires after `mark_agent_started` + `save_restart_projected_state`,
-/// so an unreachable pane returns a structured `LifecycleError` that the CLI
-/// surface translates to `ok=false`, replacing the macmini假绿
-/// (`ok=true` with orphaned-on-wrong-socket spawn).
-fn spawned_pane_is_reachable(
+fn verify_spawned_pane_matches_target(
     transport: &dyn crate::transport::Transport,
     pane: &crate::transport::PaneId,
-) -> bool {
-    // (a) authoritative: has_pane Some(true) → addressable.
-    if matches!(transport.has_pane(pane), Ok(Some(true))) {
-        return true;
+    session: &crate::transport::SessionName,
+    window: &crate::transport::WindowName,
+) -> Result<(), LifecycleError> {
+    let targets = transport
+        .list_targets()
+        .map_err(|e| LifecycleError::Transport(e.to_string()))?;
+    let observed = targets.iter().find(|target| target.pane_id == *pane);
+    let Some(observed) = observed else {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "start refused: spawned pane not addressable on transport socket (possible socket drift); window disappeared or spawned pane not owned by requested agent window; requested={}:{} pane={} observed=<missing>",
+            session.as_str(),
+            window.as_str(),
+            pane.as_str()
+        )));
+    };
+    let observed_window = observed
+        .window_name
+        .as_ref()
+        .map(crate::transport::WindowName::as_str)
+        .unwrap_or("<unknown>");
+    if observed.session.as_str() != session.as_str() || observed_window != window.as_str() {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "start refused: spawned pane not owned by requested agent window; requested={}:{} pane={} observed={}:{}",
+            session.as_str(),
+            window.as_str(),
+            pane.as_str(),
+            observed.session.as_str(),
+            observed_window
+        )));
     }
-    // (b) liveness probe: not-Dead → addressable. Dead → unreachable.
     if matches!(
         transport.liveness(pane),
-        Ok(crate::model::enums::PaneLiveness::Live)
+        Ok(crate::model::enums::PaneLiveness::Dead)
     ) {
-        return true;
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "start refused: spawned pane not addressable on transport socket; pane is dead after spawn; requested={}:{} pane={}",
+            session.as_str(),
+            window.as_str(),
+            pane.as_str()
+        )));
     }
-    // (c) last resort: enumeration. If the pane appears in `list_targets()`
-    // (cross-session enumeration on the socket), it is addressable.
-    if let Ok(targets) = transport.list_targets() {
-        if targets.iter().any(|t| t.pane_id.as_str() == pane.as_str()) {
-            return true;
-        }
-    }
-    false
+    Ok(())
 }
 
 /// E51 (0.3.26 P0, restart self-heal): returns `true` when the agent's pane_id

@@ -313,7 +313,16 @@
     // ── 2. spawn_first / spawn_into frame via tmux_spawn_argv; canned output parses pane id ────────
     #[test]
     fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
-        let (be, rec) = backend_with(MockResp::Out(ok("%3")), vec![]);
+        let pane_inventory =
+            "%3\tteamsess\t0\tw1\t0\t/dev/ttys003\tnode\t1\t/work/dir\t1\t0\t123\n";
+        let (be, rec) = backend_with(
+            MockResp::Out(ok("")),
+            vec![
+                MockResp::Out(ok("")),
+                MockResp::Out(ok("%3")),
+                MockResp::Out(ok(pane_inventory)),
+            ],
+        );
         let s = SessionName::new("teamsess");
         let w = WindowName::new("w1");
         let env = BTreeMap::from([("TEAM_AGENT_ID".to_string(), "w1".to_string())]);
@@ -329,11 +338,21 @@
         );
         assert!(cmd.contains("provider-bin"), "the provider argv must be in the sh -lc command; got {cmd}");
         assert_eq!(result.pane_id.as_str(), "%3", "SpawnResult.pane_id must parse from the tmux output");
+        assert_eq!(result.child_pid, Some(123));
     }
 
     #[test]
     fn spawn_into_frames_via_new_window_builder() {
-        let (be, rec) = backend_with(MockResp::Out(ok("%4")), vec![]);
+        let pane_inventory =
+            "%4\tteamsess\t1\tw2\t0\t/dev/ttys004\tnode\t1\t/work/dir\t1\t0\t124\n";
+        let (be, rec) = backend_with(
+            MockResp::Out(ok("")),
+            vec![
+                MockResp::Out(ok("")),
+                MockResp::Out(ok("%4")),
+                MockResp::Out(ok(pane_inventory)),
+            ],
+        );
         let s = SessionName::new("teamsess");
         let w = WindowName::new("w2");
         let result = be
@@ -347,6 +366,36 @@
             "spawn_into must frame via tmux_spawn_argv first=false (new-window -t <s> -n <w> sh -lc <cmd>)"
         );
         assert_eq!(result.pane_id.as_str(), "%4");
+    }
+
+    #[test]
+    fn spawn_with_command_refuses_display_message_pane_owned_by_other_window() {
+        let pane_inventory =
+            "%5\tteamsess\t1\tw2\t0\t/dev/ttys005\tnode\t1\t/work/dir\t1\t0\t125\n";
+        let (be, _rec) = backend_with(
+            MockResp::Out(ok("")),
+            vec![
+                MockResp::Out(ok("")),
+                MockResp::Out(ok("%5")),
+                MockResp::Out(ok(pane_inventory)),
+            ],
+        );
+        let err = be
+            .spawn_into(
+                &SessionName::new("teamsess"),
+                &WindowName::new("w1"),
+                &svec(&["provider-bin"]),
+                Path::new("/work/dir"),
+                &BTreeMap::new(),
+            )
+            .expect_err("display-message fallback to w2 pane must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requested=teamsess:w1")
+                && msg.contains("observed_pane=%5")
+                && msg.contains("observed=teamsess:w2"),
+            "error must include requested/observed ownership evidence, got {msg}"
+        );
     }
 
     #[test]

@@ -311,12 +311,23 @@ pub(super) fn spawn_agent_window(
             agent_id.as_str(),
         );
     }
-    let _ = adapter.handle_startup_prompts(
+    let startup_prompt = adapter.handle_startup_prompts_outcome(
         transport,
         &crate::transport::Target::Pane(spawn.pane_id.clone()),
         30,
         0.5,
     );
+    if let Some(error) = startup_prompt.capture_error.as_deref() {
+        if is_structural_startup_prompt_error(error) {
+            return Err(LifecycleError::Transport(format!(
+                "startup prompt structural failure for {}:{} pane {}: {}",
+                session_name.as_str(),
+                window.as_str(),
+                spawn.pane_id.as_str(),
+                error
+            )));
+        }
+    }
     Ok(SpawnedAgentWindow {
         spawn,
         plan,
@@ -325,6 +336,86 @@ pub(super) fn spawn_agent_window(
         spawn_cwd: spawn_cwd.to_path_buf(),
         owner_team_id: team_id,
     })
+}
+
+fn is_structural_startup_prompt_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "can't find window",
+        "can't find pane",
+        "cannot find window",
+        "cannot find pane",
+        "target not found",
+        "no such pane",
+        "window disappeared",
+        "pane not owned",
+        "not owned by requested",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+pub(super) fn rehydrate_agent_command_context_from_spec(
+    spec_workspace: &Path,
+    agent_id: &AgentId,
+    agent: &serde_json::Value,
+) -> serde_json::Value {
+    let Ok(spec) = load_team_spec(spec_workspace) else {
+        return agent.clone();
+    };
+    let Some(spec_agent) = find_spec_agent(&spec, agent_id) else {
+        return agent.clone();
+    };
+    merge_command_context_fields(agent, spec_agent)
+}
+
+fn merge_command_context_fields(
+    agent: &serde_json::Value,
+    spec_agent: &YamlValue,
+) -> serde_json::Value {
+    let mut merged = agent.clone();
+    let Some(obj) = merged.as_object_mut() else {
+        return merged;
+    };
+    for field in [
+        "role",
+        "tools",
+        "system_prompt",
+        "output_contract",
+        "provider",
+        "model",
+        "auth_mode",
+        "effort",
+        "profile",
+        "permission_mode",
+    ] {
+        if let Some(value) = spec_agent.get(field).and_then(yaml_value_to_json) {
+            obj.insert(field.to_string(), value);
+        }
+    }
+    merged
+}
+
+fn yaml_value_to_json(value: &YamlValue) -> Option<serde_json::Value> {
+    match value {
+        YamlValue::Null => Some(serde_json::Value::Null),
+        YamlValue::Bool(value) => Some(serde_json::json!(value)),
+        YamlValue::Int(value) => Some(serde_json::json!(value)),
+        YamlValue::Float(value) => Some(serde_json::json!(value)),
+        YamlValue::Str(value) => Some(serde_json::json!(value)),
+        YamlValue::List(items) => Some(serde_json::Value::Array(
+            items.iter().filter_map(yaml_value_to_json).collect(),
+        )),
+        YamlValue::Map(items) => {
+            let mut map = serde_json::Map::new();
+            for (key, value) in items {
+                if let Some(value) = yaml_value_to_json(value) {
+                    map.insert(key.clone(), value);
+                }
+            }
+            Some(serde_json::Value::Object(map))
+        }
+    }
 }
 
 /// E43 Fix C helper (0.3.24 bug#3): probe live tmux for a window's existence

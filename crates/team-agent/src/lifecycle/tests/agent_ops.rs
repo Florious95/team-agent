@@ -323,6 +323,7 @@ expected="${TEAM_AGENT_E27_EXPECTED_ENDPOINT}"
 session="${TEAM_AGENT_E27_SESSION_NAME}"
 pane="${TEAM_AGENT_E27_PANE_ID}"
 killed_marker="${log}.killed"
+spawned_marker="${log}.spawned"
 track=0
 case "$*" in
   *"$expected"*|*"$session"*|*"$pane"*) track=1 ;;
@@ -361,6 +362,7 @@ case "$*" in
     exit 0
     ;;
   *"display-message -p -t $session:alpha #{pane_id}"*)
+    : > "$spawned_marker"
     printf '%%9288\n'
     exit 0
     ;;
@@ -368,6 +370,10 @@ case "$*" in
     exit 0
     ;;
   *"list-panes -a -F"*)
+    if [ -f "$spawned_marker" ]; then
+      printf '%%9288\t%s\t0\talpha\t0\t/dev/ttys099\tnode\t1\t/tmp\t1\t0\t9288\n' "$session"
+      exit 0
+    fi
     # Hard-gate post-stop snapshot: no residual same-role panes after kill.
     if [ -f "$killed_marker" ]; then
       exit 0

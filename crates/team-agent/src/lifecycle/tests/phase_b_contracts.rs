@@ -9,7 +9,12 @@ use crate::lifecycle::lock::{
     LifecycleLockRequest,
 };
 use crate::transport::test_support::OfflineTransport;
-use crate::transport::WindowName;
+use crate::transport::{
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
+};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -301,6 +306,118 @@ fn add_fork_remove_share_lifecycle_lock_behavior() {
     );
 }
 
+#[test]
+fn breal_spawn_ownership_mismatch_fails_without_state_pollution() {
+    let (workspace, _team) = breal_workspace();
+    let transport = BRealTransport::misowned();
+
+    let result = crate::lifecycle::reset_agent_with_transport(
+        &workspace,
+        &aid("w1"),
+        true,
+        false,
+        Some("teamdir"),
+        &transport,
+    );
+
+    assert!(
+        matches!(result, Err(LifecycleError::RequirementUnmet(_))),
+        "reset must fail closed when spawn returns another worker's live pane: {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("spawned pane not owned") && err.contains("requested=team-phaseb:w1"),
+        "error must name requested/observed ownership; got {err}"
+    );
+    let state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("team state after failed reset");
+    let w1 = state.pointer("/agents/w1").expect("w1 state");
+    assert_ne!(
+        w1.get("pane_id").and_then(serde_json::Value::as_str),
+        Some("%5"),
+        "failed reset must not write w2's pane into w1 state"
+    );
+    let started_true = read_events(&workspace).into_iter().any(|event| {
+        event.get("event").and_then(serde_json::Value::as_str) == Some("reset_agent.complete")
+            && event.get("agent_id").and_then(serde_json::Value::as_str) == Some("w1")
+            && event.get("started").and_then(serde_json::Value::as_bool) == Some(true)
+    });
+    assert!(
+        !started_true,
+        "failed reset must not emit reset_agent.complete started=true"
+    );
+}
+
+#[test]
+fn breal_provider_missing_window_disappeared_fails_closed() {
+    let (workspace, _team) = breal_workspace();
+    let transport = BRealTransport::dead_after_spawn();
+
+    let result = crate::lifecycle::reset_agent_with_transport(
+        &workspace,
+        &aid("w1"),
+        true,
+        false,
+        Some("teamdir"),
+        &transport,
+    );
+
+    assert!(
+        matches!(result, Err(LifecycleError::RequirementUnmet(_))),
+        "reset must return Err when provider exits and requested window disappears: {result:?}"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("window disappeared") || err.contains("spawned pane not owned"),
+        "error must name window disappearance / ownership failure; got {err}"
+    );
+    let state = crate::state::projection::select_runtime_state(&workspace, Some("teamdir"))
+        .expect("team state after failed reset");
+    let w1 = state.pointer("/agents/w1").expect("w1 state");
+    assert_ne!(
+        w1.get("status").and_then(serde_json::Value::as_str),
+        Some("running"),
+        "failed reset must not mark w1 running"
+    );
+    assert_ne!(
+        w1.get("pane_id").and_then(serde_json::Value::as_str),
+        Some("%9"),
+        "failed reset must not persist disappeared pane"
+    );
+}
+
+#[test]
+fn breal_reset_rehydrates_role_context_from_compiled_spec() {
+    let (workspace, _team) = breal_workspace();
+    strip_runtime_command_context(&workspace);
+    let transport = BRealTransport::owned();
+
+    crate::lifecycle::reset_agent_with_transport(
+        &workspace,
+        &aid("w1"),
+        true,
+        false,
+        Some("teamdir"),
+        &transport,
+    )
+    .expect("reset should use spec-rehydrated role context");
+
+    let spawns = transport.spawn_records();
+    let argv = spawns
+        .last()
+        .map(|record| record.join("\n"))
+        .expect("reset must spawn w1");
+    assert!(
+        argv.contains("role `Phase B Real Worker One`")
+            || argv.contains("role Phase B Real Worker One"),
+        "spawn argv must carry role from compiled spec/role doc, got:\n{argv}"
+    );
+    assert!(
+        !argv.contains("role `developer`") && !argv.contains("role developer"),
+        "spawn argv must not fall back to generic developer, got:\n{argv}"
+    );
+}
+
 fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
     let team = temp_ws().join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -313,6 +430,49 @@ fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
         std::fs::write(team.join("agents").join(file), role_doc).unwrap();
     }
     team
+}
+
+fn breal_workspace() -> (PathBuf, PathBuf) {
+    let w1 = "---\nname: w1\nrole: Phase B Real Worker One\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker one body.\n";
+    let w2 = "---\nname: w2\nrole: Phase B Real Worker Two\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nWorker two body.\n";
+    let team = team_dir_with_roles(&[("w1.md", w1), ("w2.md", w2)]);
+    let workspace = team.parent().expect("team workspace").to_path_buf();
+    seed_healthy_coordinator(&workspace);
+    let launch_transport = codex_ready_transport();
+    quick_start_with_transport_in_workspace_with_display(
+        &workspace,
+        &team,
+        None,
+        true,
+        None,
+        &launch_transport,
+        false,
+    )
+    .expect("quick-start breal fixture");
+    (workspace, team)
+}
+
+fn strip_runtime_command_context(workspace: &std::path::Path) {
+    let mut state = crate::state::projection::select_runtime_state(workspace, Some("teamdir"))
+        .expect("team state");
+    if let Some(agent) = state
+        .pointer_mut("/agents/w1")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for field in [
+            "role",
+            "tools",
+            "system_prompt",
+            "output_contract",
+            "model",
+            "effort",
+            "permission_mode",
+        ] {
+            agent.remove(field);
+        }
+    }
+    crate::state::projection::save_team_scoped_state(workspace, &state)
+        .expect("save stripped team state");
 }
 
 fn role_doc(id: &str) -> String {
@@ -393,4 +553,206 @@ fn read_events(workspace: &std::path::Path) -> Vec<serde_json::Value> {
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
+}
+
+#[derive(Clone, Copy)]
+enum BRealMode {
+    Misowned,
+    DeadAfterSpawn,
+    Owned,
+}
+
+struct BRealTransport {
+    mode: BRealMode,
+    spawns: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+impl BRealTransport {
+    fn misowned() -> Self {
+        Self {
+            mode: BRealMode::Misowned,
+            spawns: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dead_after_spawn() -> Self {
+        Self {
+            mode: BRealMode::DeadAfterSpawn,
+            spawns: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn owned() -> Self {
+        Self {
+            mode: BRealMode::Owned,
+            spawns: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn spawn_records(&self) -> Vec<Vec<String>> {
+        self.spawns.lock().unwrap().clone()
+    }
+
+    fn spawn_result(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+    ) -> SpawnResult {
+        self.spawns.lock().unwrap().push(argv.to_vec());
+        let pane = match self.mode {
+            BRealMode::Misowned => "%5",
+            BRealMode::DeadAfterSpawn => "%9",
+            BRealMode::Owned => "%10",
+        };
+        SpawnResult {
+            pane_id: PaneId::new(pane),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: None,
+        }
+    }
+}
+
+impl Transport for BRealTransport {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+
+    fn spawn_first(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.spawn_result(session, window, argv))
+    }
+
+    fn spawn_into(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.spawn_result(session, window, argv))
+    }
+
+    fn inject(
+        &self,
+        _target: &Target,
+        _payload: &InjectPayload,
+        _submit: Key,
+        _bracketed: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: InjectVerification::NoToken,
+            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            turn_verification: TurnVerification::NotRequired,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
+    }
+
+    fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: "OpenAI Codex".to_string(),
+            range,
+        })
+    }
+
+    fn query(
+        &self,
+        _target: &Target,
+        _field: PaneField,
+    ) -> Result<Option<String>, TransportError> {
+        Ok(Some("node".to_string()))
+    }
+
+    fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+        if matches!(self.mode, BRealMode::DeadAfterSpawn) && pane.as_str() == "%9" {
+            Ok(PaneLiveness::Dead)
+        } else {
+            Ok(PaneLiveness::Live)
+        }
+    }
+
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        Ok(Some(!matches!(
+            (self.mode, pane.as_str()),
+            (BRealMode::DeadAfterSpawn, "%9")
+        )))
+    }
+
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        let mut targets = Vec::new();
+        if matches!(self.mode, BRealMode::Misowned) {
+            targets.push(pane_info("team-phaseb", "w2", "%5", 502));
+        }
+        if matches!(self.mode, BRealMode::Owned) {
+            targets.push(pane_info("team-phaseb", "w1", "%10", 501));
+        }
+        Ok(targets)
+    }
+
+    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
+        Ok(true)
+    }
+
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        Ok(vec![WindowName::new("w1"), WindowName::new("w2")])
+    }
+
+    fn set_session_env(
+        &self,
+        _session: &SessionName,
+        _key: &str,
+        _value: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+
+    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn kill_pane(&self, _pane: &PaneId) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+}
+
+fn pane_info(session: &str, window: &str, pane: &str, pid: u32) -> PaneInfo {
+    PaneInfo {
+        pane_id: PaneId::new(pane),
+        session: SessionName::new(session),
+        window_index: None,
+        window_name: Some(WindowName::new(window)),
+        pane_index: None,
+        tty: None,
+        current_command: Some("node".to_string()),
+        current_path: None,
+        active: false,
+        pane_pid: Some(pid),
+        leader_env: std::collections::BTreeMap::new(),
+    }
 }

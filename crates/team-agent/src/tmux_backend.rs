@@ -675,11 +675,48 @@ impl TmuxBackend {
                 ),
             });
         }
-        Ok(SpawnResult {
-            pane_id: PaneId::new(pane),
-            session: session.clone(),
-            window: window.clone(),
-            child_pid: None,
+        let pane_id = PaneId::new(pane);
+        let targets = self.list_targets()?;
+        if let Some(target) = targets.iter().find(|target| {
+            target.pane_id == pane_id
+                && target.session.as_str() == session.as_str()
+                && target
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == window.as_str())
+        }) {
+            return Ok(SpawnResult {
+                pane_id,
+                session: session.clone(),
+                window: window.clone(),
+                child_pid: target.pane_pid,
+            });
+        }
+        let observed = targets
+            .iter()
+            .find(|target| target.pane_id == pane_id)
+            .map(|target| {
+                format!(
+                    "{}:{}",
+                    target.session.as_str(),
+                    target
+                        .window_name
+                        .as_ref()
+                        .map(WindowName::as_str)
+                        .unwrap_or("<unknown>")
+                )
+            })
+            .unwrap_or_else(|| "<missing-from-list-targets>".to_string());
+        Err(TransportError::Subprocess {
+            argv: pane_argv,
+            code: output.code,
+            stderr: format!(
+                "tmux spawn pane ownership mismatch: requested={}:{} observed_pane={} observed={}",
+                session.as_str(),
+                window.as_str(),
+                pane_id.as_str(),
+                observed
+            ),
         })
     }
 

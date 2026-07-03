@@ -317,6 +317,31 @@ impl OfflineTransport {
             state
                 .pane_presence
                 .insert(format!("%{pane_index}"), state.spawned_panes_addressable);
+            state.liveness.insert(
+                format!("%{pane_index}"),
+                if state.spawned_panes_addressable {
+                    PaneLiveness::Live
+                } else {
+                    PaneLiveness::Dead
+                },
+            );
+            if state.spawned_panes_addressable {
+                let pane_id = PaneId::new(format!("%{pane_index}"));
+                state.targets.retain(|target| target.pane_id != pane_id);
+                state.targets.push(PaneInfo {
+                    pane_id,
+                    session: session.clone(),
+                    window_index: None,
+                    window_name: Some(window.clone()),
+                    pane_index: None,
+                    tty: None,
+                    current_command: None,
+                    current_path: None,
+                    active: false,
+                    pane_pid: None,
+                    leader_env: BTreeMap::new(),
+                });
+            }
             Ok(pane_index)
         })?;
         Ok(SpawnResult {
@@ -527,18 +552,42 @@ impl Transport for OfflineTransport {
         Ok(SetEnvOutcome::Applied)
     }
 
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
-        self.record("kill_session");
+    fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("kill_session");
+            state.targets.retain(|target| target.session != *session);
+            state.windows.clear();
+            state.session_present = false;
+        });
         Ok(())
     }
 
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
-        self.record("kill_window");
+    fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("kill_window");
+            if let Target::SessionWindow { session, window } = target {
+                state.targets.retain(|pane| {
+                    pane.session != *session
+                        || pane
+                            .window_name
+                            .as_ref()
+                            .is_none_or(|name| name != window)
+                });
+                state.windows.retain(|name| name != window);
+            }
+        });
         Ok(())
     }
 
-    fn kill_pane(&self, _pane: &PaneId) -> Result<(), TransportError> {
-        self.record("kill_pane");
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        self.with_state(|state| {
+            state.calls.push("kill_pane");
+            state.targets.retain(|target| target.pane_id != *pane);
+            state.pane_presence.insert(pane.as_str().to_string(), false);
+            state
+                .liveness
+                .insert(pane.as_str().to_string(), PaneLiveness::Dead);
+        });
         Ok(())
     }
 
