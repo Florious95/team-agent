@@ -80,4 +80,23 @@ mod tests {
             assert!(g.as_str().starts_with("tick."));
         }
     }
+
+    #[test]
+    fn ordered_group_labels_are_byte_stable() {
+        let labels = TickStepGroup::ordered()
+            .iter()
+            .map(|group| group.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "tick.session_gate",
+                "tick.health_sync",
+                "tick.delivery",
+                "tick.runtime_prompts",
+                "tick.abnormal",
+                "tick.persist",
+            ]
+        );
+    }
 }

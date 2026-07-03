@@ -1,4 +1,1778 @@
 //! unit-11 (Stage 4) — coordinator tick `abnormal` step group.
 //!
-//! Future home for abnormal-exit detection + classification steps from
-//! `coordinator/tick.rs`.
+//! Abnormal-exit detection + classification step extracted from
+//! `coordinator/tick.rs` without behavior changes.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
+
+use crate::event_log::EventLog;
+use crate::provider::wire::{parse_provider, provider_wire};
+use crate::provider::ProcessLiveness;
+
+use super::super::health::pid_is_running;
+use super::super::tick::TickError;
+use super::super::types::Pid;
+
+/// #236 `worker.abnormal_exit` watcher.
+///
+/// Notify only when the bounded transcript/rollout tail contains a latest explicit
+/// provider error that is fresh for the current worker cohort. A dead process
+/// without an explicit error remains a suppressed `dead_only` audit event; process
+/// liveness is otherwise diagnostic data for this path.
+pub(crate) fn detect_abnormal_exits(
+    workspace: &Path,
+    transport: &dyn crate::transport::Transport,
+    state: &mut Value,
+    event_log: &EventLog,
+    targets: &[crate::transport::PaneInfo],
+) -> Result<(), TickError> {
+    let snapshot = state.clone();
+    let team = crate::state::projection::team_state_key(&snapshot);
+    let session_name = snapshot.get("session_name").and_then(Value::as_str);
+    for agent in abnormal_watch_agents(&snapshot) {
+        let rollout_path = resolve_agent_rollout_path(workspace, &agent.rollout_path);
+        let metadata = match std::fs::metadata(&rollout_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                upsert_abnormal_watch(
+                    state,
+                    &agent.agent_id,
+                    abnormal_watch_payload(
+                        &agent,
+                        None,
+                        None,
+                        ProcessLiveness::Unverifiable,
+                        None,
+                        ErrorRecency::None,
+                        None,
+                        Some(error.to_string()),
+                    ),
+                );
+                continue;
+            }
+        };
+        let size = metadata.len();
+        let mtime_ns = metadata_mtime_ns(&metadata);
+        // P1 (C-P1-2/3): (size, mtime_ns) pair gate — an unchanged transcript is not
+        // read at all (live sample: 332MB whole-file read per agent per 2s tick).
+        // ANY field change (including a size shrink / truncate) falls through to the
+        // re-read below.
+        if let (Some(mtime), Some(stored)) = (
+            mtime_ns,
+            abnormal_watch_stored_metadata(&snapshot, &agent.agent_id),
+        ) {
+            if stored == (size, mtime) {
+                continue;
+            }
+        }
+        // P1 (C-P1-1): bounded tail read — the abnormal decision only consumes
+        // this tail window. The provider scan walks backward inside it; window
+        // matches Python `_TAIL_BYTES` (131072, idle_takeover_wiring.py:13),
+        // never less.
+        let text = match read_tail_text(&rollout_path, ABNORMAL_TAIL_BYTES) {
+            Ok(text) => text,
+            Err(error) => {
+                upsert_abnormal_watch(
+                    state,
+                    &agent.agent_id,
+                    abnormal_watch_payload(
+                        &agent,
+                        Some(size),
+                        mtime_ns,
+                        ProcessLiveness::Unverifiable,
+                        None,
+                        ErrorRecency::None,
+                        None,
+                        Some(error.to_string()),
+                    ),
+                );
+                continue;
+            }
+        };
+        let liveness = agent_process_liveness(&agent, session_name, targets, transport);
+        let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
+        let error_observation_key = fact
+            .as_ref()
+            .map(|fact| abnormal_error_observation_key(&agent, fact, size));
+        let error_observation_cohort = fact.as_ref().map(|_| abnormal_error_cohort_key(&agent));
+        let error_recency = abnormal_error_recency(
+            &snapshot,
+            &agent,
+            error_observation_key.as_deref(),
+            error_observation_cohort.as_deref(),
+        );
+        let decision = abnormal_exit_decision(liveness.state, fact.as_ref(), error_recency);
+        let check_key = abnormal_check_key(
+            &agent,
+            &liveness,
+            fact.as_ref(),
+            error_recency,
+            error_observation_key.as_deref(),
+            size,
+        );
+        upsert_abnormal_watch(
+            state,
+            &agent.agent_id,
+            abnormal_watch_payload(
+                &agent,
+                Some(size),
+                mtime_ns,
+                liveness.state,
+                fact.as_ref().map(|f| f.signature.as_str()),
+                error_recency,
+                error_observation_key.as_deref(),
+                None,
+            ),
+        );
+        if let (Some(observation_key), Some(cohort_key)) = (
+            error_observation_key.as_deref(),
+            error_observation_cohort.as_deref(),
+        ) {
+            mark_abnormal_error_observed(state, &agent.agent_id, observation_key, cohort_key);
+        }
+        if abnormal_last_check_key(state, &agent.agent_id).as_deref() != Some(check_key.as_str()) {
+            write_abnormal_check(
+                event_log,
+                &team,
+                &agent,
+                &liveness,
+                fact.as_ref(),
+                decision,
+                error_recency,
+                size,
+                mtime_ns,
+            )?;
+            mark_abnormal_checked(state, &agent.agent_id, &check_key);
+        }
+        let fact = match (decision, fact) {
+            (AbnormalExitDecision::Notify, Some(fact)) => fact,
+            (AbnormalExitDecision::Suppress(reason), _) => {
+                let suppress_key = abnormal_suppression_key(&agent, &liveness, reason, size);
+                if abnormal_last_suppressed_key(state, &agent.agent_id).as_deref()
+                    != Some(suppress_key.as_str())
+                {
+                    write_abnormal_suppressed(event_log, &team, &agent, &liveness, reason)?;
+                    mark_abnormal_suppressed(state, &agent.agent_id, &suppress_key);
+                }
+                continue;
+            }
+            (AbnormalExitDecision::NoSignal, _) => continue,
+            (AbnormalExitDecision::Notify, None) => continue,
+        };
+        let dedupe_key = abnormal_dedupe_key(&agent, &fact, size);
+        if abnormal_last_notified_key(state, &agent.agent_id).as_deref()
+            == Some(dedupe_key.as_str())
+        {
+            continue;
+        }
+        let content = format_abnormal_exit_message(&team, &agent, &fact, &liveness, size);
+        let outcome = crate::messaging::send_to_leader_receiver(
+            workspace,
+            state,
+            "leader",
+            &content,
+            None,
+            &agent.agent_id,
+            false,
+            Some(&dedupe_key),
+            event_log,
+        )?;
+        let notification_status = if outcome.ok {
+            "queued"
+        } else if matches!(outcome.status, crate::messaging::DeliveryStatus::Blocked) {
+            "rebind_required"
+        } else {
+            "refused"
+        };
+        event_log.write(
+            "worker.abnormal_exit",
+            serde_json::json!({
+                "team_id": team.as_str(),
+                "agent_id": agent.agent_id.as_str(),
+                "provider": provider_wire(agent.provider),
+                "path": agent.rollout_path_display.as_str(),
+                "dead_process": liveness.state == ProcessLiveness::Dead,
+                "process_dead": liveness.state == ProcessLiveness::Dead,
+                "provider_process_dead": liveness.state == ProcessLiveness::Dead,
+                "latest_error": true,
+                "latest_explicit_error": true,
+                "error_recency": error_recency.as_str(),
+                "fresh_error": error_recency.is_fresh(),
+                "dead_process_and_latest_error": liveness.state == ProcessLiveness::Dead,
+                "dead_process_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                "process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                "provider_process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                "signature": fact.signature.as_str(),
+                "turn_id": fact.turn_id.as_ref().map(|id| id.as_str()),
+                "apiErrorStatus": fact.api_error_status,
+                "error": fact.error.as_deref(),
+                "requestId": fact.request_id.as_deref(),
+                "assistant_uuid": fact.assistant_uuid.as_deref(),
+                "size": size,
+                "mtime_ns": mtime_ns,
+                "process_liveness": process_liveness_wire(liveness.state),
+                "pid_status": liveness.detail.as_str(),
+                "notification_message_id": outcome.message_id,
+                "notification_status": notification_status,
+                "notification_channel": outcome.channel,
+            }),
+        )?;
+        mark_abnormal_notified(state, &agent.agent_id, &dedupe_key);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct AbnormalWatchAgent {
+    agent_id: String,
+    provider: crate::model::enums::Provider,
+    rollout_path: PathBuf,
+    rollout_path_display: String,
+    spawn_epoch: Option<u64>,
+    spawned_at: Option<String>,
+    status: Option<String>,
+    process_liveness: Option<ProcessLiveness>,
+    window: Option<String>,
+    pane_id: Option<String>,
+    pid: Option<Pid>,
+    current_command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessCheck {
+    state: ProcessLiveness,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbnormalExitDecision {
+    Notify,
+    Suppress(&'static str),
+    NoSignal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorRecency {
+    None,
+    Stale,
+    Fresh,
+}
+
+impl ErrorRecency {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Stale => "stale",
+            Self::Fresh => "fresh",
+        }
+    }
+
+    fn is_fresh(self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbnormalExitGate {
+    provider_process_dead: bool,
+    latest_explicit_error: bool,
+    error_recency: ErrorRecency,
+}
+
+impl AbnormalExitGate {
+    fn new(
+        process_liveness: ProcessLiveness,
+        latest_explicit_error: bool,
+        error_recency: ErrorRecency,
+    ) -> Self {
+        Self {
+            provider_process_dead: process_liveness == ProcessLiveness::Dead,
+            latest_explicit_error,
+            error_recency,
+        }
+    }
+
+    fn should_notify_worker_abnormal_exit(self) -> bool {
+        should_notify_worker_abnormal_exit(self.latest_explicit_error, self.error_recency)
+    }
+
+    fn suppressed_reason(self) -> Option<&'static str> {
+        match (self.provider_process_dead, self.latest_explicit_error) {
+            (true, false) => Some("dead_only"),
+            _ => None,
+        }
+    }
+}
+
+fn abnormal_exit_decision(
+    process_liveness: ProcessLiveness,
+    latest_explicit_error: Option<&crate::provider::FaultFact>,
+    error_recency: ErrorRecency,
+) -> AbnormalExitDecision {
+    let gate = AbnormalExitGate::new(
+        process_liveness,
+        latest_explicit_error.is_some(),
+        error_recency,
+    );
+    if gate.should_notify_worker_abnormal_exit() {
+        return AbnormalExitDecision::Notify;
+    }
+    match gate.suppressed_reason() {
+        Some(reason) => AbnormalExitDecision::Suppress(reason),
+        None => AbnormalExitDecision::NoSignal,
+    }
+}
+
+fn should_notify_worker_abnormal_exit(
+    latest_explicit_error: bool,
+    error_recency: ErrorRecency,
+) -> bool {
+    latest_explicit_error && error_recency.is_fresh()
+}
+
+fn resolve_agent_rollout_path(workspace: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        workspace.join(path)
+    }
+}
+
+fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
+    let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    agents
+        .iter()
+        .filter_map(|(agent_id, agent)| {
+            if matches!(agent.get("status").and_then(Value::as_str), Some("paused")) {
+                return None;
+            }
+            let provider = agent
+                .get("provider")
+                .and_then(Value::as_str)
+                .and_then(parse_provider)?;
+            let rollout_path_display = ["rollout_path", "transcript_path", "session_log_path"]
+                .into_iter()
+                .find_map(|key| agent.get(key).and_then(Value::as_str))
+                .filter(|path| !path.is_empty())?
+                .to_string();
+            Some(AbnormalWatchAgent {
+                agent_id: agent_id.clone(),
+                provider,
+                rollout_path: PathBuf::from(&rollout_path_display),
+                rollout_path_display,
+                spawn_epoch: agent.get("spawn_epoch").and_then(Value::as_u64),
+                spawned_at: agent
+                    .get("spawned_at")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                status: agent
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                process_liveness: explicit_process_liveness(agent),
+                window: agent
+                    .get("window")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                pane_id: agent
+                    .get("pane_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                pid: agent_pid(agent),
+                current_command: agent
+                    .get("pane_current_command")
+                    .or_else(|| agent.get("current_command"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+fn agent_pid(agent: &Value) -> Option<Pid> {
+    ["provider_pid", "process_id", "pid", "child_pid", "pane_pid"]
+        .into_iter()
+        .find_map(|key| json_u32(agent.get(key)).map(Pid::new))
+}
+
+pub(crate) fn explicit_process_liveness(agent: &Value) -> Option<ProcessLiveness> {
+    if let Some(process) = agent
+        .get("provider_process")
+        .or_else(|| agent.get("process"))
+    {
+        if let Some(liveness) = explicit_process_liveness(process) {
+            return Some(liveness);
+        }
+    }
+    for key in [
+        "provider_process_liveness",
+        "process_liveness",
+        "pane_liveness",
+    ] {
+        match agent.get(key).and_then(Value::as_str) {
+            Some("dead") => return Some(ProcessLiveness::Dead),
+            Some("alive" | "live") => return Some(ProcessLiveness::Alive),
+            Some("unverifiable" | "unknown") => return Some(ProcessLiveness::Unverifiable),
+            _ => {}
+        }
+    }
+    for key in [
+        "provider_process_alive",
+        "process_alive",
+        "provider_alive",
+        "alive",
+    ] {
+        if let Some(alive) = agent.get(key).and_then(Value::as_bool) {
+            return Some(if alive {
+                ProcessLiveness::Alive
+            } else {
+                ProcessLiveness::Dead
+            });
+        }
+    }
+    for key in [
+        "provider_process_dead",
+        "process_dead",
+        "provider_dead",
+        "dead",
+    ] {
+        if let Some(dead) = agent.get(key).and_then(Value::as_bool) {
+            return Some(if dead {
+                ProcessLiveness::Dead
+            } else {
+                ProcessLiveness::Alive
+            });
+        }
+    }
+    for key in ["status", "state", "liveness"] {
+        match agent.get(key).and_then(Value::as_str) {
+            Some("dead" | "exited" | "terminated" | "crashed" | "missing") => {
+                return Some(ProcessLiveness::Dead);
+            }
+            Some("alive" | "live" | "running") => return Some(ProcessLiveness::Alive),
+            Some("unverifiable" | "unknown") => return Some(ProcessLiveness::Unverifiable),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn json_u32(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
+        })
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+fn agent_process_liveness(
+    agent: &AbnormalWatchAgent,
+    session_name: Option<&str>,
+    targets: &[crate::transport::PaneInfo],
+    transport: &dyn crate::transport::Transport,
+) -> ProcessCheck {
+    if let Some(pid) = agent.pid {
+        return pid_process_check("pid", pid);
+    }
+    if let Some(liveness) = agent.process_liveness {
+        return process_check(
+            liveness,
+            format!("explicit:{}", process_liveness_wire(liveness)),
+        );
+    }
+    if agent.status.as_deref().is_some_and(|status| {
+        matches!(
+            status,
+            "stopped" | "missing" | "error" | "dead" | "exited" | "terminated" | "crashed"
+        )
+    }) {
+        return process_check(
+            ProcessLiveness::Dead,
+            format!("status:{}", agent.status.as_deref().unwrap_or("unknown")),
+        );
+    }
+    if let Some(command) = agent.current_command.as_deref() {
+        return command_process_check(agent.provider, command);
+    }
+    if let Some(target) = matching_agent_target(agent, session_name, targets) {
+        if let Some(command) = target.current_command.as_deref() {
+            return pane_command_process_check(agent.provider, target, command);
+        }
+        if let Some(pid) = target.pane_pid.map(Pid::new) {
+            return pid_process_check("pane_pid", pid);
+        }
+        return process_check(
+            ProcessLiveness::Unverifiable,
+            "pane_present_pid_unknown".to_string(),
+        );
+    }
+    if let Some(pane_id) = agent.pane_id.as_deref() {
+        let pane = crate::transport::PaneId::new(pane_id);
+        return match transport.liveness(&pane) {
+            Ok(crate::transport::PaneLiveness::Dead) => {
+                process_check(ProcessLiveness::Dead, format!("pane_dead:{pane_id}"))
+            }
+            Ok(crate::transport::PaneLiveness::Live) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_live_pid_unknown:{pane_id}"),
+            ),
+            Ok(crate::transport::PaneLiveness::Unknown) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_unknown:{pane_id}"),
+            ),
+            Err(error) => process_check(
+                ProcessLiveness::Unverifiable,
+                format!("pane_unverifiable:{pane_id}:{error}"),
+            ),
+        };
+    }
+    let (Some(session), Some(window)) = (session_name, agent.window.as_deref()) else {
+        return process_check(
+            ProcessLiveness::Unverifiable,
+            "missing_session_or_window".to_string(),
+        );
+    };
+    let session = crate::transport::SessionName::new(session);
+    match transport.list_windows(&session) {
+        Ok(windows) if windows.iter().any(|known| known.as_str() == window) => process_check(
+            ProcessLiveness::Unverifiable,
+            "window_present_pid_unknown".to_string(),
+        ),
+        Ok(_) => process_check(ProcessLiveness::Dead, format!("window_missing:{window}")),
+        Err(error) => process_check(
+            ProcessLiveness::Unverifiable,
+            format!("window_unverifiable:{window}:{error}"),
+        ),
+    }
+}
+
+fn matching_agent_target<'a>(
+    agent: &AbnormalWatchAgent,
+    session_name: Option<&str>,
+    targets: &'a [crate::transport::PaneInfo],
+) -> Option<&'a crate::transport::PaneInfo> {
+    if let Some(pane_id) = agent.pane_id.as_deref() {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target.pane_id.as_str() == pane_id)
+        {
+            return Some(target);
+        }
+    }
+    let (Some(session), Some(window)) = (session_name, agent.window.as_deref()) else {
+        return None;
+    };
+    targets.iter().find(|target| {
+        target.session.as_str() == session
+            && target
+                .window_name
+                .as_ref()
+                .is_some_and(|known| known.as_str() == window)
+    })
+}
+
+fn pid_process_check(label: &str, pid: Pid) -> ProcessCheck {
+    match pid_is_running(pid) {
+        Ok(true) => process_check(ProcessLiveness::Alive, format!("{label}_running:{pid}")),
+        Ok(false) => process_check(ProcessLiveness::Dead, format!("{label}_not_running:{pid}")),
+        Err(error) => process_check(
+            ProcessLiveness::Unverifiable,
+            format!("{label}_unverifiable:{pid}:{error}"),
+        ),
+    }
+}
+
+fn command_process_check(provider: crate::model::enums::Provider, command: &str) -> ProcessCheck {
+    if crate::leader::command_matches_provider(provider, command) {
+        process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
+    } else {
+        process_check(
+            ProcessLiveness::Dead,
+            format!("provider_not_foreground:{command}"),
+        )
+    }
+}
+
+fn pane_command_process_check(
+    provider: crate::model::enums::Provider,
+    pane: &crate::transport::PaneInfo,
+    command: &str,
+) -> ProcessCheck {
+    if crate::leader::attribute_pane_provider(pane)
+        .is_some_and(|candidate| crate::leader::provider_matches(candidate, provider))
+    {
+        process_check(ProcessLiveness::Alive, format!("current_command:{command}"))
+    } else {
+        process_check(
+            ProcessLiveness::Dead,
+            format!("provider_not_foreground:{command}"),
+        )
+    }
+}
+
+fn process_check(state: ProcessLiveness, detail: String) -> ProcessCheck {
+    ProcessCheck { state, detail }
+}
+
+fn process_liveness_wire(state: ProcessLiveness) -> &'static str {
+    match state {
+        ProcessLiveness::Alive => "alive",
+        ProcessLiveness::Dead => "dead",
+        ProcessLiveness::Unverifiable => "unverifiable",
+    }
+}
+
+pub(crate) fn metadata_mtime_ns(metadata: &std::fs::Metadata) -> Option<u64> {
+    let duration = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(
+        duration
+            .as_secs()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::from(duration.subsec_nanos())),
+    )
+}
+
+fn abnormal_watch_payload(
+    agent: &AbnormalWatchAgent,
+    size: Option<u64>,
+    mtime_ns: Option<u64>,
+    liveness: ProcessLiveness,
+    signature: Option<&str>,
+    error_recency: ErrorRecency,
+    error_observation_key: Option<&str>,
+    error: Option<String>,
+) -> Value {
+    let liveness_wire = process_liveness_wire(liveness);
+    let dead_process = liveness == ProcessLiveness::Dead;
+    let latest_explicit_error = signature.is_some();
+    let gate = AbnormalExitGate::new(liveness, latest_explicit_error, error_recency);
+    let notify = gate.should_notify_worker_abnormal_exit();
+    let suppressed_reason = gate.suppressed_reason();
+    serde_json::json!({
+        "path": agent.rollout_path_display.as_str(),
+        "provider": provider_wire(agent.provider),
+        "mtime_ns": mtime_ns,
+        "size": size,
+        "last_offset": size,
+        "last_signature": signature,
+        "last_liveness": liveness_wire,
+        "dead_process": dead_process,
+        "process_dead": dead_process,
+        "provider_process_dead": dead_process,
+        "latest_error": latest_explicit_error,
+        "latest_explicit_error": latest_explicit_error,
+        "error_recency": error_recency.as_str(),
+        "fresh_error": error_recency.is_fresh(),
+        "error_observation_key": error_observation_key,
+        "dead_process_and_latest_error": dead_process && latest_explicit_error,
+        "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "provider_process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "suppressed_reason": suppressed_reason,
+        "notification": notify,
+        "last_error": error,
+        "last_checked_at": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+fn upsert_abnormal_watch(state: &mut Value, agent_id: &str, mut payload: Value) {
+    let preserved = [
+        "last_notified_key",
+        "last_notified_at",
+        "last_suppressed_key",
+        "last_suppressed_at",
+        "last_check_key",
+        "last_check_at",
+        "last_error_observation_key",
+        "last_error_observation_cohort",
+        "last_error_observed_at",
+    ]
+    .into_iter()
+    .filter_map(|key| abnormal_watch_field(state, agent_id, key).map(|value| (key, value)))
+    .collect::<Vec<_>>();
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        if let Some(payload_obj) = payload.as_object_mut() {
+            for (key, value) in preserved {
+                payload_obj.insert(key.to_string(), value);
+            }
+        }
+        watch.insert(agent_id.to_string(), payload);
+    }
+}
+
+fn coordinator_child_object<'a>(
+    state: &'a mut Value,
+    key: &str,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    let state_obj = state.as_object_mut()?;
+    let coordinator = state_obj
+        .entry("coordinator".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !coordinator.is_object() {
+        *coordinator = serde_json::json!({});
+    }
+    let coord_obj = coordinator.as_object_mut()?;
+    let child = coord_obj
+        .entry(key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !child.is_object() {
+        *child = serde_json::json!({});
+    }
+    child.as_object_mut()
+}
+
+fn abnormal_last_notified_key(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_notified_key")
+}
+
+fn abnormal_last_suppressed_key(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_suppressed_key")
+}
+
+fn abnormal_last_check_key(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_check_key")
+}
+
+fn abnormal_last_error_observation_key(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_error_observation_key")
+}
+
+fn abnormal_last_error_observation_cohort(state: &Value, agent_id: &str) -> Option<String> {
+    abnormal_watch_str(state, agent_id, "last_error_observation_cohort")
+}
+
+/// P1: Python `_TAIL_BYTES` parity (idle_takeover_wiring.py:13) — RS must not read less.
+const ABNORMAL_TAIL_BYTES: u64 = 131_072;
+
+/// P1: bounded tail read; a partial first line is harmless (the consumer only parses
+/// the latest complete JSONL record) and lossy UTF-8 keeps a mid-codepoint seek safe.
+pub(crate) fn read_tail_text(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// P1: the previous tick's `(size, mtime_ns)` pair from the abnormal watch payload.
+fn abnormal_watch_stored_metadata(state: &Value, agent_id: &str) -> Option<(u64, u64)> {
+    let watch = state
+        .get("coordinator")?
+        .get("abnormal_exit_watch")?
+        .get(agent_id)?;
+    Some((
+        watch.get("size")?.as_u64()?,
+        watch.get("mtime_ns")?.as_u64()?,
+    ))
+}
+
+fn abnormal_watch_str(state: &Value, agent_id: &str, field: &str) -> Option<String> {
+    state
+        .get("coordinator")
+        .and_then(|v| v.get("abnormal_exit_watch"))
+        .and_then(|v| v.get(agent_id))
+        .and_then(|v| v.get(field))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn abnormal_watch_field(state: &Value, agent_id: &str, field: &str) -> Option<Value> {
+    state
+        .get("coordinator")
+        .and_then(|v| v.get("abnormal_exit_watch"))
+        .and_then(|v| v.get(agent_id))
+        .and_then(|v| v.get(field))
+        .cloned()
+}
+
+fn mark_abnormal_notified(state: &mut Value, agent_id: &str, key: &str) {
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        let entry = watch
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("last_notified_key".to_string(), serde_json::json!(key));
+            obj.insert(
+                "last_notified_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+    }
+}
+
+fn mark_abnormal_suppressed(state: &mut Value, agent_id: &str, key: &str) {
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        let entry = watch
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("last_suppressed_key".to_string(), serde_json::json!(key));
+            obj.insert(
+                "last_suppressed_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+    }
+}
+
+fn mark_abnormal_checked(state: &mut Value, agent_id: &str, key: &str) {
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        let entry = watch
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("last_check_key".to_string(), serde_json::json!(key));
+            obj.insert(
+                "last_check_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+    }
+}
+
+fn mark_abnormal_error_observed(
+    state: &mut Value,
+    agent_id: &str,
+    observation_key: &str,
+    cohort_key: &str,
+) {
+    if let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch") {
+        let entry = watch
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert(
+                "last_error_observation_key".to_string(),
+                serde_json::json!(observation_key),
+            );
+            obj.insert(
+                "last_error_observation_cohort".to_string(),
+                serde_json::json!(cohort_key),
+            );
+            obj.insert(
+                "last_error_observed_at".to_string(),
+                serde_json::json!(chrono::Utc::now().to_rfc3339()),
+            );
+        }
+    }
+}
+
+fn write_abnormal_check(
+    event_log: &EventLog,
+    team: &str,
+    agent: &AbnormalWatchAgent,
+    liveness: &ProcessCheck,
+    fact: Option<&crate::provider::FaultFact>,
+    decision: AbnormalExitDecision,
+    error_recency: ErrorRecency,
+    size: u64,
+    mtime_ns: Option<u64>,
+) -> Result<(), TickError> {
+    let dead_process = liveness.state == ProcessLiveness::Dead;
+    let latest_explicit_error = fact.is_some();
+    event_log.write(
+        "worker.abnormal_exit.check",
+        serde_json::json!({
+            "team_id": team,
+            "agent_id": agent.agent_id.as_str(),
+            "provider": provider_wire(agent.provider),
+            "path": agent.rollout_path_display.as_str(),
+            "size": size,
+            "last_offset": size,
+            "mtime_ns": mtime_ns,
+            "dead_process": dead_process,
+            "process_dead": dead_process,
+            "provider_process_dead": dead_process,
+            "latest_error": latest_explicit_error,
+            "latest_explicit_error": latest_explicit_error,
+            "error_recency": error_recency.as_str(),
+            "fresh_error": error_recency.is_fresh(),
+            "dead_process_and_latest_error": dead_process && latest_explicit_error,
+            "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
+            "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+            "provider_process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+            "notification": matches!(decision, AbnormalExitDecision::Notify),
+            "suppressed_reason": match decision {
+                AbnormalExitDecision::Suppress(reason) => Some(reason),
+                AbnormalExitDecision::Notify | AbnormalExitDecision::NoSignal => None,
+            },
+            "signature": fact.map(|fact| fact.signature.as_str()),
+            "turn_id": fact.and_then(|fact| fact.turn_id.as_ref().map(|id| id.as_str())),
+            "apiErrorStatus": fact.and_then(|fact| fact.api_error_status),
+            "error": fact.and_then(|fact| fact.error.as_deref()),
+            "requestId": fact.and_then(|fact| fact.request_id.as_deref()),
+            "assistant_uuid": fact.and_then(|fact| fact.assistant_uuid.as_deref()),
+            "process_liveness": process_liveness_wire(liveness.state),
+            "pid_status": liveness.detail.as_str(),
+        }),
+    )?;
+    Ok(())
+}
+
+fn write_abnormal_suppressed(
+    event_log: &EventLog,
+    team: &str,
+    agent: &AbnormalWatchAgent,
+    liveness: &ProcessCheck,
+    reason: &str,
+) -> Result<(), TickError> {
+    event_log.write(
+        "abnormal_exit.single_signal_suppressed",
+        serde_json::json!({
+            "team_id": team,
+            "agent_id": agent.agent_id.as_str(),
+            "provider": provider_wire(agent.provider),
+            "path": agent.rollout_path_display.as_str(),
+            "reason": reason,
+            "notification": false,
+            "dead_process": liveness.state == ProcessLiveness::Dead,
+            "process_dead": liveness.state == ProcessLiveness::Dead,
+            "provider_process_dead": liveness.state == ProcessLiveness::Dead,
+            "latest_error": false,
+            "latest_explicit_error": false,
+            "error_recency": ErrorRecency::None.as_str(),
+            "fresh_error": false,
+            "dead_process_and_latest_error": false,
+            "dead_process_and_latest_explicit_error": false,
+            "process_dead_and_latest_explicit_error": false,
+            "provider_process_dead_and_latest_explicit_error": false,
+            "process_liveness": process_liveness_wire(liveness.state),
+            "pid_status": liveness.detail.as_str(),
+        }),
+    )?;
+    Ok(())
+}
+
+fn abnormal_dedupe_key(
+    agent: &AbnormalWatchAgent,
+    fact: &crate::provider::FaultFact,
+    size: u64,
+) -> String {
+    let bucket = fact
+        .turn_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| size.to_string());
+    format!(
+        "worker.abnormal_exit:{}:{}:{}:{}",
+        agent.agent_id,
+        agent.rollout_path_display,
+        fact.signature.as_str(),
+        bucket
+    )
+}
+
+fn abnormal_error_cohort_key(agent: &AbnormalWatchAgent) -> String {
+    let cohort = agent
+        .spawn_epoch
+        .map(|epoch| format!("spawn_epoch:{epoch}"))
+        .or_else(|| {
+            agent
+                .spawned_at
+                .as_deref()
+                .map(|spawned_at| format!("spawned_at:{spawned_at}"))
+        })
+        .unwrap_or_else(|| "legacy".to_string());
+    format!(
+        "worker.abnormal_exit.cohort:{}:{}:{}",
+        agent.agent_id, agent.rollout_path_display, cohort
+    )
+}
+
+fn abnormal_error_observation_key(
+    agent: &AbnormalWatchAgent,
+    fact: &crate::provider::FaultFact,
+    size: u64,
+) -> String {
+    let bucket = abnormal_error_fact_identity(fact).unwrap_or_else(|| size.to_string());
+    format!(
+        "worker.abnormal_exit.error:{}:{}:{}:{}",
+        agent.agent_id,
+        agent.rollout_path_display,
+        fact.signature.as_str(),
+        bucket
+    )
+}
+
+fn abnormal_error_fact_identity(fact: &crate::provider::FaultFact) -> Option<String> {
+    fact.assistant_uuid
+        .as_deref()
+        .or(fact.request_id.as_deref())
+        .or_else(|| fact.turn_id.as_ref().map(|id| id.as_str()))
+        .map(str::to_string)
+}
+
+fn abnormal_error_recency(
+    state: &Value,
+    agent: &AbnormalWatchAgent,
+    observation_key: Option<&str>,
+    cohort_key: Option<&str>,
+) -> ErrorRecency {
+    let (Some(observation_key), Some(cohort_key)) = (observation_key, cohort_key) else {
+        return ErrorRecency::None;
+    };
+    let previous_key = abnormal_last_error_observation_key(state, &agent.agent_id);
+    let previous_cohort = abnormal_last_error_observation_cohort(state, &agent.agent_id);
+    match (previous_key.as_deref(), previous_cohort.as_deref()) {
+        (Some(key), Some(cohort)) if cohort == cohort_key && key != observation_key => {
+            ErrorRecency::Fresh
+        }
+        _ => ErrorRecency::Stale,
+    }
+}
+
+fn abnormal_suppression_key(
+    agent: &AbnormalWatchAgent,
+    liveness: &ProcessCheck,
+    reason: &str,
+    size: u64,
+) -> String {
+    format!(
+        "abnormal_exit.single_signal_suppressed:{}:{}:{}:{}:{}",
+        agent.agent_id,
+        agent.rollout_path_display,
+        reason,
+        process_liveness_wire(liveness.state),
+        size
+    )
+}
+
+fn abnormal_check_key(
+    agent: &AbnormalWatchAgent,
+    liveness: &ProcessCheck,
+    fact: Option<&crate::provider::FaultFact>,
+    error_recency: ErrorRecency,
+    error_observation_key: Option<&str>,
+    size: u64,
+) -> String {
+    format!(
+        "worker.abnormal_exit.check:{}:{}:{}:{}:{}:{}:{}",
+        agent.agent_id,
+        agent.rollout_path_display,
+        process_liveness_wire(liveness.state),
+        fact.map(|fact| fact.signature.as_str()).unwrap_or("-"),
+        error_recency.as_str(),
+        error_observation_key.unwrap_or("-"),
+        size
+    )
+}
+
+fn format_abnormal_exit_message(
+    team: &str,
+    agent: &AbnormalWatchAgent,
+    fact: &crate::provider::FaultFact,
+    liveness: &ProcessCheck,
+    size: u64,
+) -> String {
+    let turn_id = fact.turn_id.as_ref().map(|id| id.as_str()).unwrap_or("-");
+    format!(
+        "Team Agent detected a provider abnormal exit.\n\n\
+event: worker.abnormal_exit\n\
+team: {team}\n\
+node: {node}\n\
+provider: {provider}\n\
+signature: {signature}\n\
+turn_id: {turn_id}\n\
+transcript: {path}\n\
+last_offset: {size}\n\
+pid_status: {pid_status}\n\n\
+No automatic restart was performed.",
+        node = agent.agent_id.as_str(),
+        provider = provider_wire(agent.provider),
+        signature = fact.signature.as_str(),
+        path = agent.rollout_path_display.as_str(),
+        pid_status = liveness.detail.as_str(),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::coordinator::tick::Coordinator;
+    use crate::coordinator::types::{ErrorLists, ProviderRegistry, WorkspacePath};
+    use std::io::Write as _;
+
+    struct NormalRegistry;
+
+    impl ProviderRegistry for NormalRegistry {
+        fn adapter_for(
+            &self,
+            provider: crate::provider::Provider,
+        ) -> Box<dyn crate::provider::ProviderAdapter> {
+            crate::provider::get_adapter(provider)
+        }
+
+        fn error_lists(&self, _provider: crate::provider::Provider) -> ErrorLists {
+            ErrorLists::default()
+        }
+    }
+    #[test]
+    fn abnormal_stale_error_baselines_then_fresh_alive_error_notifies() {
+        let dir = temp_abnormal_dir("alive-fresh");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first observed explicit error is stale baseline and must not notify; events={first_events:?}"
+        );
+        let stale_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(stale_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(stale_check["fresh_error"], serde_json::json!(false));
+        assert_eq!(stale_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&first_events, "abnormal_exit.single_signal_suppressed").is_none(),
+            "stale/error-only observations must not emit single-signal suppression"
+        );
+        let watch = abnormal_test_watch(&dir);
+        assert_eq!(watch["error_recency"], serde_json::json!("stale"));
+        assert_eq!(watch["fresh_error"], serde_json::json!(false));
+        assert!(
+            watch["last_error_observation_key"].as_str().is_some(),
+            "first explicit error must persist the stale baseline; watch={watch}"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh alive error notification");
+        assert_eq!(abnormal["provider_process_dead"], serde_json::json!(false));
+        assert_eq!(abnormal["latest_explicit_error"], serde_json::json!(true));
+        assert_eq!(abnormal["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(abnormal["fresh_error"], serde_json::json!(true));
+        assert_eq!(
+            abnormal["provider_process_dead_and_latest_explicit_error"],
+            serde_json::json!(false)
+        );
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn abnormal_claude_assistant_api_error_events_include_structured_details() {
+        let dir = temp_abnormal_dir("claude-api-details");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            claude_assistant_api_error_line(
+                "assistant-400",
+                "parent-400",
+                "session-400",
+                400,
+                "unknown",
+                None,
+            ),
+        )
+        .unwrap();
+        seed_abnormal_state_with_provider(&dir, &rollout, "alive", 1, "claude_code");
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let stale_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(stale_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(stale_check["notification"], serde_json::json!(false));
+        assert_eq!(stale_check["apiErrorStatus"], serde_json::json!(400));
+        assert_eq!(stale_check["error"], serde_json::json!("unknown"));
+        assert_eq!(stale_check["requestId"], serde_json::json!(null));
+        assert_eq!(
+            stale_check["assistant_uuid"],
+            serde_json::json!("assistant-400")
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                claude_assistant_api_error_line(
+                    "assistant-404",
+                    "parent-404",
+                    "session-404",
+                    404,
+                    "model_not_found",
+                    Some("req_011CceNfWj2aPY5gtCdakULt"),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("fresh check event");
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        assert_eq!(fresh_check["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(fresh_check["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            fresh_check["requestId"],
+            serde_json::json!("req_011CceNfWj2aPY5gtCdakULt")
+        );
+        assert_eq!(
+            fresh_check["assistant_uuid"],
+            serde_json::json!("assistant-404")
+        );
+
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh alive error notification");
+        assert_eq!(abnormal["signature"], serde_json::json!("api_error"));
+        assert_eq!(abnormal["turn_id"], serde_json::json!("assistant-404"));
+        assert_eq!(abnormal["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(abnormal["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            abnormal["requestId"],
+            serde_json::json!("req_011CceNfWj2aPY5gtCdakULt")
+        );
+        assert_eq!(
+            abnormal["assistant_uuid"],
+            serde_json::json!("assistant-404")
+        );
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn abnormal_claude_assistant_api_error_followed_by_bookkeeping_still_detected() {
+        let dir = temp_abnormal_dir("claude-api-bookkeeping");
+        let rollout = dir.join("rollout-w1.jsonl");
+        let session_id = "97ec1070-f19b-49ed-b60f-3cb158e92053";
+        std::fs::write(
+            &rollout,
+            format!(
+                "{}{}",
+                claude_assistant_api_error_line(
+                    "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+                    "245fce6f-2427-4b05-af01-8619df64afab",
+                    session_id,
+                    404,
+                    "model_not_found",
+                    Some("req_011CceUVQ94dxahgwAHf8sdS"),
+                ),
+                claude_turn_duration_line(
+                    "6c96328b-8c01-46c0-b68e-a096a89c904f",
+                    "94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6",
+                    session_id,
+                ),
+            ),
+        )
+        .unwrap();
+        seed_abnormal_state_with_provider(&dir, &rollout, "alive", 1, "claude_code");
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let first_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(
+            first_check["latest_explicit_error"],
+            serde_json::json!(true)
+        );
+        assert_eq!(first_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(first_check["notification"], serde_json::json!(false));
+        assert_eq!(first_check["apiErrorStatus"], serde_json::json!(404));
+        assert_eq!(first_check["error"], serde_json::json!("model_not_found"));
+        assert_eq!(
+            first_check["requestId"],
+            serde_json::json!("req_011CceUVQ94dxahgwAHf8sdS")
+        );
+        assert_eq!(
+            first_check["assistant_uuid"],
+            serde_json::json!("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+        );
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first observed error baselines stale even when followed by turn_duration"
+        );
+        let first_observation_key = abnormal_test_watch(&dir)["last_error_observation_key"]
+            .as_str()
+            .expect("stale baseline persists observation key")
+            .to_string();
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}{}{}",
+                    claude_file_history_snapshot_line(session_id),
+                    claude_last_prompt_line(session_id),
+                    claude_mode_line(session_id),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let after_bookkeeping_events = read_test_events(&dir);
+        let bookkeeping_check = find_event(&after_bookkeeping_events, "worker.abnormal_exit.check")
+            .expect("bookkeeping check event");
+        assert_eq!(
+            bookkeeping_check["error_recency"],
+            serde_json::json!("stale")
+        );
+        assert_eq!(bookkeeping_check["notification"], serde_json::json!(false));
+        assert_eq!(
+            bookkeeping_check["assistant_uuid"],
+            serde_json::json!("94e88d55-aac7-46bc-85cd-b7fcfc8a9ef6")
+        );
+        assert_eq!(
+            abnormal_test_watch(&dir)["last_error_observation_key"],
+            serde_json::json!(first_observation_key)
+        );
+        assert!(
+            find_event(&after_bookkeeping_events, "worker.abnormal_exit").is_none(),
+            "bookkeeping-only growth after the same error must not notify"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}{}",
+                    claude_assistant_api_error_line(
+                        "11b8790e-718b-4910-bf6a-62d19135a93b",
+                        "ccea3b0f-23e7-48ed-aa57-d59e321becfb",
+                        session_id,
+                        404,
+                        "model_not_found",
+                        Some("req_011CceUhRwYfdmLPbv9nMmqX"),
+                    ),
+                    claude_turn_duration_line(
+                        "2d382eff-783b-48ca-83c1-c93d3dc8b068",
+                        "11b8790e-718b-4910-bf6a-62d19135a93b",
+                        session_id,
+                    ),
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("fresh check event");
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        assert_eq!(
+            fresh_check["assistant_uuid"],
+            serde_json::json!("11b8790e-718b-4910-bf6a-62d19135a93b")
+        );
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh API error notification");
+        assert_eq!(
+            abnormal["turn_id"],
+            serde_json::json!("11b8790e-718b-4910-bf6a-62d19135a93b")
+        );
+        assert_eq!(
+            abnormal["requestId"],
+            serde_json::json!("req_011CceUhRwYfdmLPbv9nMmqX")
+        );
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn codex_failed_turn_then_completed_turn_no_fresh_notification() {
+        let dir = temp_abnormal_dir("codex-failed-then-completed");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let first_events = read_test_events(&dir);
+        let first_check =
+            find_event(&first_events, "worker.abnormal_exit.check").expect("stale check event");
+        assert_eq!(first_check["turn_id"], serde_json::json!("t1"));
+        assert_eq!(first_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(first_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&first_events, "worker.abnormal_exit").is_none(),
+            "first failed turn is only a stale baseline"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t-complete\",\"status\":\"completed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let after_completed_events = read_test_events(&dir);
+        let completed_check = find_event(&after_completed_events, "worker.abnormal_exit.check")
+            .expect("completed-after-failure check event");
+        assert_eq!(completed_check["turn_id"], serde_json::json!("t1"));
+        assert_eq!(completed_check["error_recency"], serde_json::json!("stale"));
+        assert_eq!(completed_check["fresh_error"], serde_json::json!(false));
+        assert_eq!(completed_check["notification"], serde_json::json!(false));
+        assert!(
+            find_event(&after_completed_events, "worker.abnormal_exit").is_none(),
+            "completed turn after the same old failed turn must not emit a fresh notification"
+        );
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let fresh_check =
+            find_event(&events, "worker.abnormal_exit.check").expect("new failed turn check event");
+        assert_eq!(fresh_check["turn_id"], serde_json::json!("t2"));
+        assert_eq!(fresh_check["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(fresh_check["notification"], serde_json::json!(true));
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh Codex failure notification");
+        assert_eq!(abnormal["turn_id"], serde_json::json!("t2"));
+        assert_eq!(abnormal["notification_status"], serde_json::json!("queued"));
+    }
+
+    #[test]
+    fn abnormal_dead_process_without_explicit_error_stays_dead_only() {
+        let dir = temp_abnormal_dir("dead-only");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"completed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "dead", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        assert!(
+            find_event(&events, "worker.abnormal_exit").is_none(),
+            "dead process without explicit error must not notify; events={events:?}"
+        );
+        let suppressed =
+            find_event(&events, "abnormal_exit.single_signal_suppressed").expect("dead_only");
+        assert_eq!(suppressed["reason"], serde_json::json!("dead_only"));
+        assert_eq!(
+            suppressed["latest_explicit_error"],
+            serde_json::json!(false)
+        );
+        assert_eq!(suppressed["error_recency"], serde_json::json!("none"));
+        assert_eq!(suppressed["fresh_error"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn abnormal_recency_treats_cohort_change_as_stale() {
+        let agent = test_abnormal_agent("/tmp/rollout.jsonl", Some(2), None);
+        let fact = crate::provider::latest_explicit_error_fact(
+            crate::provider::Provider::Codex,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        let observation_key = abnormal_error_observation_key(&agent, &fact, 99);
+        let state = serde_json::json!({
+            "coordinator": {
+                "abnormal_exit_watch": {
+                    "w1": {
+                        "last_error_observation_key": observation_key,
+                        "last_error_observation_cohort": "worker.abnormal_exit.cohort:w1:/tmp/rollout.jsonl:spawn_epoch:1"
+                    }
+                }
+            }
+        });
+        let cohort_key = abnormal_error_cohort_key(&agent);
+
+        let recency = abnormal_error_recency(
+            &state,
+            &agent,
+            Some(observation_key.as_str()),
+            Some(cohort_key.as_str()),
+        );
+
+        assert_eq!(
+            recency,
+            ErrorRecency::Stale,
+            "cohort change baselines the observed error instead of treating it as fresh"
+        );
+    }
+
+    #[test]
+    fn abnormal_dead_fresh_error_event_reports_actual_dead_booleans() {
+        let dir = temp_abnormal_dir("dead-fresh");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "dead", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+        coordinator.tick().unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap()
+            .write_all(
+                b"{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t2\",\"status\":\"failed\"}}}\n",
+            )
+            .unwrap();
+
+        coordinator.tick().unwrap();
+
+        let events = read_test_events(&dir);
+        let abnormal =
+            find_event(&events, "worker.abnormal_exit").expect("fresh dead error notification");
+        assert_eq!(abnormal["provider_process_dead"], serde_json::json!(true));
+        assert_eq!(abnormal["latest_explicit_error"], serde_json::json!(true));
+        assert_eq!(abnormal["error_recency"], serde_json::json!("fresh"));
+        assert_eq!(
+            abnormal["provider_process_dead_and_latest_explicit_error"],
+            serde_json::json!(true)
+        );
+    }
+
+    fn abnormal_test_coordinator(dir: &std::path::Path) -> Coordinator {
+        Coordinator::for_test(
+            WorkspacePath::new(dir.to_path_buf()),
+            Box::new(NormalRegistry),
+            Box::new(
+                crate::transport::test_support::OfflineTransport::new().with_session_present(true),
+            ),
+            None,
+            None,
+        )
+    }
+
+    fn seed_abnormal_state(
+        dir: &std::path::Path,
+        rollout: &std::path::Path,
+        liveness: &str,
+        spawn_epoch: u64,
+    ) {
+        seed_abnormal_state_with_provider(dir, rollout, liveness, spawn_epoch, "codex");
+    }
+
+    fn seed_abnormal_state_with_provider(
+        dir: &std::path::Path,
+        rollout: &std::path::Path,
+        liveness: &str,
+        spawn_epoch: u64,
+        provider: &str,
+    ) {
+        crate::state::persist::save_runtime_state(
+            dir,
+            &serde_json::json!({
+                "active_team_key": "team",
+                "agents": {
+                    "w1": {
+                        "provider": provider,
+                        "status": "running",
+                        "agent_id": "w1",
+                        "session_id": "session-w1",
+                        "rollout_path": rollout.to_string_lossy(),
+                        "spawn_cwd": dir.to_string_lossy(),
+                        "spawn_epoch": spawn_epoch,
+                        "process_liveness": liveness
+                    }
+                }
+            }),
+        )
+        .unwrap();
+    }
+
+    fn claude_assistant_api_error_line(
+        uuid: &str,
+        parent_uuid: &str,
+        session_id: &str,
+        status: i64,
+        error: &str,
+        request_id: Option<&str>,
+    ) -> String {
+        let mut record = serde_json::json!({
+            "type": "assistant",
+            "parentUuid": parent_uuid,
+            "uuid": uuid,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "API Error"}]
+            },
+            "error": error,
+            "isApiErrorMessage": true,
+            "apiErrorStatus": status,
+            "sessionId": session_id,
+            "version": "2.1.181"
+        });
+        if let Some(request_id) = request_id {
+            record
+                .as_object_mut()
+                .unwrap()
+                .insert("requestId".to_string(), serde_json::json!(request_id));
+        }
+        format!("{record}\n")
+    }
+
+    fn claude_turn_duration_line(uuid: &str, parent_uuid: &str, session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "system",
+                "subtype": "turn_duration",
+                "uuid": uuid,
+                "parentUuid": parent_uuid,
+                "sessionId": session_id
+            })
+        )
+    }
+
+    fn claude_file_history_snapshot_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "file-history-snapshot",
+                "sessionId": session_id
+            })
+        )
+    }
+
+    fn claude_last_prompt_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "last-prompt",
+                "sessionId": session_id,
+                "prompt": "sanitized"
+            })
+        )
+    }
+
+    fn claude_mode_line(session_id: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "mode",
+                "sessionId": session_id,
+                "mode": "default"
+            })
+        )
+    }
+
+    fn abnormal_test_watch(dir: &std::path::Path) -> Value {
+        crate::state::persist::load_runtime_state(dir)
+            .unwrap()
+            .pointer("/coordinator/abnormal_exit_watch/w1")
+            .cloned()
+            .unwrap()
+    }
+
+    fn read_test_events(dir: &std::path::Path) -> Vec<Value> {
+        let events_path = crate::model::paths::logs_dir(dir).join("events.jsonl");
+        std::fs::read_to_string(events_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    fn find_event(events: &[Value], name: &str) -> Option<Value> {
+        events
+            .iter()
+            .rev()
+            .find(|event| event.get("event").and_then(Value::as_str) == Some(name))
+            .cloned()
+    }
+
+    fn temp_abnormal_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "team-agent-abnormal-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_abnormal_agent(
+        rollout_path: &str,
+        spawn_epoch: Option<u64>,
+        spawned_at: Option<&str>,
+    ) -> AbnormalWatchAgent {
+        AbnormalWatchAgent {
+            agent_id: "w1".to_string(),
+            provider: crate::provider::Provider::Codex,
+            rollout_path: PathBuf::from(rollout_path),
+            rollout_path_display: rollout_path.to_string(),
+            spawn_epoch,
+            spawned_at: spawned_at.map(str::to_string),
+            status: Some("running".to_string()),
+            process_liveness: Some(ProcessLiveness::Alive),
+            window: None,
+            pane_id: None,
+            pid: None,
+            current_command: None,
+        }
+    }
+}

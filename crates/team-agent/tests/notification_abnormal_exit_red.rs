@@ -107,7 +107,7 @@ fn notification_abnormal_exit_contract_does_not_repurpose_generic_abnormal_fact_
 fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source() {
     let classify = source("src/provider/classify.rs");
     let faults = source("src/provider/faults.rs");
-    let tick = source("src/coordinator/tick.rs");
+    let abnormal = source("src/coordinator/steps/abnormal.rs");
     let mut failures = Vec::new();
 
     if !classify.contains("claude_record_has_error_tool_result(record)")
@@ -143,7 +143,7 @@ fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source()
         }
     }
     for needle in ["apiErrorStatus", "error", "requestId", "assistant_uuid"] {
-        if !tick.contains(needle) {
+        if !abnormal.contains(needle) {
             failures.push(format!("worker.abnormal_exit payload missing structured field: {needle}"));
         }
     }
