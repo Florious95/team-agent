@@ -105,3 +105,10 @@ pub mod tmux_backend;
 // - CR verdict: `.team/artifacts/0.5.x-windows-transport-cr-verdict.md`
 //   (7 constraints; C-1/C-2/C-3/C-5 anchor into this module)
 pub mod conpty;
+
+// 0.5.x Phase 1d Batch 0: backend assembly factory.
+// Truth sources:
+// - Design:    `.team/artifacts/0.5.x-backend-assembly-factory-design.md`
+// - CR verdict: `.team/artifacts/0.5.x-backend-factory-cr-verdict.md`
+//              (6 constraints anchored inside the module doc)
+pub mod transport_factory;

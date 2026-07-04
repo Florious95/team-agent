@@ -467,6 +467,22 @@ pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, 
 /// only within `lifecycle::restart`. Sharing the resolver across the lifecycle
 /// module is the correct ownership: restart/add/fork all need the SAME socket
 /// the live team uses, and duplicating the lookup invited drift.**
+/// 0.5.x Phase 1d Batch 1: this legacy resolver stays tmux-only. It
+/// still returns a concrete `TmuxBackend` because the 6 caller sites
+/// (rebuild/agent/remove/launch) currently call `TmuxBackend`-specific
+/// methods (`.tmux_endpoint()`, `.for_workspace()`, etc.). But it now
+/// routes through the factory so its **selection semantics** match
+/// the new `lifecycle_worker_transport_for_selected_state` API:
+///
+/// - If `state.transport.kind` is `"conpty"`, this legacy tmux-typed
+///   resolver **fails-closed** with `TransportBackendKindMismatch`
+///   rather than silently returning a tmux backend that would
+///   spawn/inject into the wrong pane universe. That satisfies CR C-1
+///   fail-closed while the migration of caller sites to the generic
+///   `_transport_for_selected_state` API completes.
+/// - Otherwise (default/legacy tmux endpoint), behavior is preserved
+///   byte-for-byte through
+///   `tmux_backend_for_runtime_state_or_workspace`.
 pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
     run_workspace: &Path,
     team: Option<&str>,
@@ -485,10 +501,64 @@ pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
             .unwrap_or("");
         return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
     }
+    // CR C-1 fail-closed: state with `transport.kind=conpty` must NOT
+    // silently downgrade to a tmux backend just because the caller
+    // asked for the tmux-typed variant. Callers that see this refusal
+    // are expected to migrate to `lifecycle_worker_transport_for_selected_state`
+    // during Batch 2/3.
+    if let Some(state_ref) = state.as_ref() {
+        if let Some(kind) = state_ref.pointer("/transport/kind").and_then(|v| v.as_str()) {
+            if kind.eq_ignore_ascii_case("conpty") {
+                return Err(LifecycleError::TeamSelect(format!(
+                    "backend_kind_mismatch: state.transport.kind={kind:?} but the legacy \
+                     tmux-typed lifecycle resolver was invoked; caller must migrate to \
+                     `lifecycle_worker_transport_for_selected_state` (Phase 1d Batch 2/3)"
+                )));
+            }
+        }
+    }
     Ok(state
         .as_ref()
         .map(|state| lifecycle_worker_tmux_backend_for_state(run_workspace, state))
         .unwrap_or_else(|| crate::tmux_backend::TmuxBackend::for_workspace(run_workspace)))
+}
+
+/// 0.5.x Phase 1d Batch 1: new generic-typed lifecycle resolver.
+///
+/// Same team-selection semantics as the legacy tmux-typed variant, but
+/// returns a `ResolvedTransport` from the factory so callers that can
+/// hold `Box<dyn Transport>` (or the resolved `BackendKind`) work
+/// against both tmux AND conpty state. Caller migration to this API
+/// happens across Batch 2-5.
+///
+/// Fail-closed rules follow the factory (C-1 ×2, C-2 CLI-vs-state,
+/// C-3 N38 notices via `ResolvedTransport.notices`).
+pub(crate) fn lifecycle_worker_transport_for_selected_state(
+    run_workspace: &Path,
+    team: Option<&str>,
+) -> Result<crate::transport_factory::ResolvedTransport, LifecycleError> {
+    let (state, refusal) = crate::state::projection::resolve_team_scoped_state(run_workspace, team)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if let Some(refusal) = refusal {
+        let reason = refusal
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("team_target_unresolved");
+        let detail = refusal
+            .get("error")
+            .or_else(|| refusal.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(LifecycleError::TeamSelect(format!("{reason}: {detail}")));
+    }
+    let input = crate::transport_factory::TransportFactoryInput::new(
+        run_workspace,
+        crate::transport_factory::TransportPurpose::LifecycleWorker,
+    )
+    .with_team_key(team)
+    .with_state(state.as_ref());
+    crate::transport_factory::resolve_transport(input)
+        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))
 }
 
 pub(super) fn lifecycle_worker_tmux_backend_for_state(

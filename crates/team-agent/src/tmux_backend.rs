@@ -430,6 +430,37 @@ fn runtime_tmux_endpoint_from_state(
 /// stable FNV-1a hash over the canonicalized path. AF_UNIX `sun_path` is ~104 chars and the socket
 /// lives at `/tmp/tmux-<uid>/<name>`, so we must NOT use the (~88-char) session name. §10: a
 /// canonicalize failure falls back to the raw path (never panics).
+/// Public re-export of the crate-private canonical workspace hash used
+/// by the tmux short-socket derivation. `transport_factory` uses this
+/// same hash for the ConPTY `workspace_hash` so both backends see
+/// identical workspace identity. Adding a wrapper (not calling
+/// `socket_name_for_workspace` directly outside this file) keeps the
+/// existing internal API stable.
+pub fn workspace_short_hash_pub(workspace: &Path) -> String {
+    // The tmux short-socket name is `ta-<12 hex>`; the workspace-hash
+    // used by the ConPTY workspace identity is the raw 12-hex portion
+    // (no `ta-` prefix), which is what the shim/pipe name derivation
+    // expects. Reuse the exact same hash so drift is impossible.
+    let name = socket_name_for_workspace(workspace);
+    name.strip_prefix("ta-").unwrap_or(&name).to_string()
+}
+
+/// Public re-export of the crate-private `runtime_tmux_endpoint_from_state`
+/// probe. `transport_factory` uses this to spot the legacy tmux endpoint
+/// in `state` without duplicating the field-precedence logic.
+pub fn runtime_tmux_endpoint_from_state_pub(
+    state: Option<&serde_json::Value>,
+) -> Option<(String, &'static str)> {
+    runtime_tmux_endpoint_from_state(state).map(|(endpoint, source)| {
+        let src = match source {
+            RuntimeTmuxEndpointSource::StateTmuxEndpoint => "state.tmux_endpoint",
+            RuntimeTmuxEndpointSource::StateTmuxSocket => "state.tmux_socket",
+            RuntimeTmuxEndpointSource::WorkspaceFallback => "workspace_fallback",
+        };
+        (endpoint.to_string(), src)
+    })
+}
+
 pub(crate) fn socket_name_for_workspace(workspace: &Path) -> String {
     let canonical = workspace
         .canonicalize()
