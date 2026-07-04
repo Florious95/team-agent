@@ -5,7 +5,7 @@
 # 等抽成独立成员 crate(届时各自顶上 §10 的 deny 锁 + cargo-deny ban)。
 [workspace]
 resolver = "2"
-members = ["crates/team-agent", "crates/win-conpty-phase0"]
+members = ["crates/team-agent", "crates/win-conpty-phase0", "crates/conpty-transport"]
 
 [workspace.package]
 edition = "2021"

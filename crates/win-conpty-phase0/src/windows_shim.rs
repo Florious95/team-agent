@@ -40,8 +40,8 @@ mod windows_shim {
     use std::time::Duration;
 
     use anyhow::{anyhow, Context, Result};
-    use team_agent::conpty::protocol::{read_frame, write_frame, Request};
-    use team_agent::conpty::shim::{PaneRuntime, Shim};
+    use conpty_transport::protocol::{read_frame, write_frame, Request};
+    use conpty_transport::shim::{PaneRuntime, Shim};
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
@@ -222,7 +222,7 @@ mod windows_shim {
     const SCROLLBACK_CAP: usize = 64 * 1024;
 
     impl WindowsPaneRuntime {
-        fn new(spawn: &team_agent::conpty::protocol::SpawnRequest) -> Result<Self> {
+        fn new(spawn: &conpty_transport::protocol::SpawnRequest) -> Result<Self> {
             unsafe {
                 // Two pipes.
                 let mut sa = SECURITY_ATTRIBUTES {

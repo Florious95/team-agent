@@ -37,7 +37,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use super::protocol::{
+use crate::protocol::{
     HelloResult, InjectRequest, Op, ProtocolError, Request, Response, SpawnRequest, SpawnResult,
     CaptureRequest, CaptureResult, PROTOCOL_SCHEMA,
 };
@@ -595,33 +595,36 @@ impl PaneRuntime for FakePaneRuntime {
     }
 }
 
-/// PipeClient impl that talks to a Shim in the same process. Used by
-/// tests and by the Mac/Linux `--backend conpty` fake-worker path (so
-/// the whole Phase 1 six-bullet flow can be exercised without a real
-/// Windows host).
-pub struct LocalShimPipeClient {
+/// Object-safe pipe-client trait so callers can hold a boxed client
+/// without depending on the concrete Windows named-pipe type. The
+/// team-agent crate provides a wrapper that implements its own
+/// `TransportError`-returning trait against this one.
+pub trait PipeClient: Send + Sync {
+    fn request(&self, req: &Request) -> Response;
+}
+
+/// In-process pipe client — used by team-agent's Mac/Linux fake-worker
+/// path + all portable end-to-end tests. Talks directly to the `Shim`
+/// state machine without a real named-pipe.
+pub struct LocalShimClient {
     shim: Arc<Shim>,
 }
 
-impl LocalShimPipeClient {
+impl LocalShimClient {
     pub fn new(shim: Arc<Shim>) -> Self {
         Self { shim }
     }
 }
 
-impl super::backend::PipeClientTrait for LocalShimPipeClient {
-    fn request(
-        &self,
-        req: &Request,
-    ) -> Result<Response, crate::transport::TransportError> {
-        Ok(self.shim.handle(req))
+impl PipeClient for LocalShimClient {
+    fn request(&self, req: &Request) -> Response {
+        self.shim.handle(req)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conpty::backend::PipeClientTrait;
 
     fn fake_factory() -> Box<
         dyn Fn(&SpawnRequest) -> Result<Arc<dyn PaneRuntime>, String> + Send + Sync,
@@ -886,12 +889,12 @@ mod tests {
 
     #[test]
     fn local_shim_client_routes_through_shim_handle() {
-        // The LocalShimPipeClient is used by tests + the Mac/Linux
+        // The LocalShimClient is used by tests + the Mac/Linux
         // fake-worker path to exercise ConPtyBackend end-to-end.
         let shim = make_shim();
-        let client = LocalShimPipeClient::new(Arc::clone(&shim));
+        let client = LocalShimClient::new(Arc::clone(&shim));
         let req = Request::new("cli-1", "wshash", "team-a", "tok-abc", Op::Hello);
-        let resp = client.request(&req).unwrap();
+        let resp = client.request(&req);
         assert!(resp.ok);
     }
 }

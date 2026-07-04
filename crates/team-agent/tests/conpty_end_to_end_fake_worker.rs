@@ -22,9 +22,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use team_agent::conpty::{
-    backend::PipeClientTrait,
+    backend::{PipeClientAdapter, PipeClientTrait},
     protocol::SpawnRequest,
-    shim::{FakePaneRuntime, LocalShimPipeClient, PaneRuntime, Shim},
+    shim::{FakePaneRuntime, LocalShimClient, PaneRuntime, Shim},
     ConPtyBackend,
 };
 use team_agent::transport::{
@@ -43,7 +43,8 @@ fn make_backend() -> ConPtyBackend {
             Ok(Arc::new(FakePaneRuntime::new()) as Arc<dyn PaneRuntime>)
         }),
     ));
-    let client: Box<dyn PipeClientTrait> = Box::new(LocalShimPipeClient::new(shim));
+    let client: Box<dyn PipeClientTrait> =
+        Box::new(PipeClientAdapter(LocalShimClient::new(shim)));
     ConPtyBackend::new("ws-e2e", "team-a")
         .with_pipe_client(client)
         .expect("pipe client should connect for in-memory shim")

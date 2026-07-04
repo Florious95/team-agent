@@ -95,6 +95,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "conpty-transport"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -570,6 +578,7 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "conpty-transport",
  "libc",
  "regex",
  "rusqlite",
@@ -674,9 +683,9 @@ name = "win-conpty-phase0"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "conpty-transport",
  "serde",
  "serde_json",
- "team-agent",
  "windows",
 ]
 

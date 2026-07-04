@@ -1,0 +1,11 @@
+[package]
+name = "conpty-transport"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0"
+description = "0.5.x Windows-native transport: shim wire protocol + portable shim server logic. Portable pure logic; the Windows-side pipe client and ConPTY-backed PaneRuntime live in `crates/win-conpty-phase0/src/windows_shim.rs`."
+publish = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }

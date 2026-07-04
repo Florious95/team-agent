@@ -16,6 +16,7 @@ path = "src/main.rs"
 # step 2 (model) 已落地: serde/serde_json/thiserror/sha2。
 # rusqlite 仍留 workspace 调色板,step 3 (db) 再加(且需联网先 fetch)。
 [dependencies]
+conpty-transport = { path = "../conpty-transport" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

@@ -58,9 +58,9 @@ use crate::transport::{
     TurnVerification, WindowName,
 };
 
-use super::protocol::{
-    self, CaptureRequest, InjectRequest, Op, ProtocolError, Request, Response, SpawnRequest,
-    HelloResult, SpawnResult as ProtoSpawnResult,
+use conpty_transport::{
+    protocol, CaptureRequest, HelloResult, InjectRequest, Op, ProtocolError, Request, Response,
+    SpawnRequest, SpawnResult as ProtoSpawnResult,
 };
 
 /// The `Transport` implementation for the named ConPTY backend.
@@ -295,10 +295,19 @@ fn map_protocol_error(err: Option<&ProtocolError>) -> TransportError {
 /// The `request` method returns the raw `Response`; the backend layer
 /// maps errors into `TransportError`.
 pub trait PipeClientTrait: Send + Sync {
-    fn request(
-        &self,
-        req: &super::protocol::Request,
-    ) -> Result<super::protocol::Response, TransportError>;
+    fn request(&self, req: &Request) -> Result<Response, TransportError>;
+}
+
+/// Wrap a `conpty_transport::PipeClient` (which returns `Response`
+/// directly) into a `PipeClientTrait` (which returns
+/// `Result<Response, TransportError>`). Used by team-agent's fake-worker
+/// path to plug in the portable `LocalShimClient`.
+pub struct PipeClientAdapter<C: conpty_transport::PipeClient>(pub C);
+
+impl<C: conpty_transport::PipeClient> PipeClientTrait for PipeClientAdapter<C> {
+    fn request(&self, req: &Request) -> Result<Response, TransportError> {
+        Ok(self.0.request(req))
+    }
 }
 
 impl Transport for ConPtyBackend {
