@@ -350,13 +350,14 @@ mod conpty_cli {
     }
 
     fn new_request_id() -> String {
-        // Windows: use QueryPerformanceCounter for uniqueness without
-        // pulling uuid into a Phase 1 CLI binary.
-        let mut ctr: i64 = 0;
-        unsafe {
-            windows::Win32::System::Performance::QueryPerformanceCounter(&mut ctr).ok();
-        }
-        format!("req-{ctr:x}-{}", std::process::id())
+        // Combine pid + a monotonic in-process counter for uniqueness
+        // across a single CLI invocation (each `conpty-cli` process
+        // sends at most a few requests, so a static AtomicU64 is
+        // enough).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("req-{}-{}", std::process::id(), n)
     }
 
     fn connect_named_pipe(name: &str) -> Result<HANDLE> {
