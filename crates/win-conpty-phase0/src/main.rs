@@ -39,10 +39,9 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(windows)]
 mod windows_main {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::mem;
     use std::os::windows::ffi::OsStrExt;
-    use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
@@ -50,9 +49,7 @@ mod windows_main {
 
     use anyhow::{anyhow, Context, Result};
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::{
-        CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE, S_OK,
-    };
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Storage::FileSystem::ReadFile;
     use windows::Win32::System::Console::{
@@ -296,10 +293,13 @@ mod windows_main {
                 // wiring documented on
                 // https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session
                 let mut size: usize = 0;
+                // First call with a NULL attribute list to learn the size.
+                // The reserved param is `Option<*const u32>` in windows 0.61;
+                // pass `Some(&0)`.
                 let _ = InitializeProcThreadAttributeList(
-                    LPPROC_THREAD_ATTRIBUTE_LIST(ptr::null_mut()),
+                    None,
                     1,
-                    0,
+                    Some(0),
                     &mut size,
                 );
                 if size == 0 {
@@ -310,7 +310,7 @@ mod windows_main {
                 self.attr_list_buf.resize(size, 0);
                 let attr_list =
                     LPPROC_THREAD_ATTRIBUTE_LIST(self.attr_list_buf.as_mut_ptr() as *mut _);
-                InitializeProcThreadAttributeList(attr_list, 1, 0, &mut size)
+                InitializeProcThreadAttributeList(Some(attr_list), 1, Some(0), &mut size)
                     .context("InitializeProcThreadAttributeList failed")?;
                 UpdateProcThreadAttribute(
                     attr_list,
@@ -360,10 +360,16 @@ mod windows_main {
         fn drain_output(&mut self, budget: Duration) -> Result<String> {
             // ReadFile on the anonymous pipe blocks; hand it to a reader
             // thread and time-box the capture with a stop flag.
+            //
+            // HANDLE = *mut c_void, which is !Send. Marshal it across the
+            // thread boundary as an `isize` and reconstruct on the other
+            // side. Safe: the value is an opaque OS token, not a Rust
+            // pointer to any Rust-owned memory.
             let stop = Arc::new(AtomicBool::new(false));
             let stop_reader = stop.clone();
-            let output_read = self.output_read;
+            let output_read_raw: isize = self.output_read.0 as isize;
             let handle = thread::spawn(move || -> Result<Vec<u8>> {
+                let output_read = HANDLE(output_read_raw as *mut _);
                 let mut acc = Vec::with_capacity(8 * 1024);
                 let mut buf = [0u8; 4096];
                 loop {
