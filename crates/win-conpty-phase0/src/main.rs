@@ -42,6 +42,7 @@ mod windows_main {
     use std::io::Write;
     use std::mem;
     use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::thread;
