@@ -45,11 +45,13 @@ mod windows_shim {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows::Win32::Storage::FileSystem::{
+        ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
+    };
     use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_ACCESS_DUPLEX, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
+        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
@@ -113,7 +115,9 @@ mod windows_shim {
             format!("windows-shim-{}", env!("CARGO_PKG_VERSION")),
             args.pipe_token.clone(),
             Box::new(|spawn| {
-                Ok(Arc::new(WindowsPaneRuntime::new(spawn)?) as Arc<dyn PaneRuntime>)
+                WindowsPaneRuntime::new(spawn)
+                    .map(|p| Arc::new(p) as Arc<dyn PaneRuntime>)
+                    .map_err(|e| e.to_string())
             }),
         ));
         // Accept named-pipe connections and handle them. MVP: single
