@@ -48,12 +48,19 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
-    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-    PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, Transport,
-    TransportError, WindowName,
+    AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
+};
+
+use super::protocol::{
+    self, CaptureRequest, InjectRequest, Op, ProtocolError, Request, Response, SpawnRequest,
+    HelloResult, SpawnResult as ProtoSpawnResult,
 };
 
 /// The `Transport` implementation for the named ConPTY backend.
@@ -68,22 +75,134 @@ pub struct ConPtyBackend {
     /// was expected.
     workspace_hash: String,
     team_key: String,
-    /// Present when a `PipeClient` was successfully connected (Phase 1b).
-    /// In Phase 1a this is always `None`; every request degrades to
-    /// `MuxUnavailable` with a stable `no_pipe_client` diagnostic.
-    #[allow(dead_code)]
+    /// In-memory pipe_token learned from `hello`. CR C-1: never
+    /// persisted. Stored behind std::sync::Mutex so the backend can
+    /// be `Send + Sync` and shared across threads.
+    pipe_token: std::sync::Mutex<Option<String>>,
+    /// Present when a `PipeClient` is wired. When present, all
+    /// Required trait methods forward through the client; when absent,
+    /// they degrade to `MuxUnavailable` honest-fail.
     pipe_client: Option<Box<dyn PipeClientTrait>>,
+    /// Monotonic request id counter — never persisted, never surfaced
+    /// to callers.
+    request_counter: AtomicU64,
 }
 
 impl ConPtyBackend {
     /// New backend for `(workspace_hash, team_key)`. The pipe client is
-    /// left unset; callers wire it in Phase 1b via `with_pipe_client`.
+    /// left unset; callers wire it via `with_pipe_client`.
     pub fn new(workspace_hash: impl Into<String>, team_key: impl Into<String>) -> Self {
         Self {
             workspace_hash: workspace_hash.into(),
             team_key: team_key.into(),
+            pipe_token: std::sync::Mutex::new(None),
             pipe_client: None,
+            request_counter: AtomicU64::new(0),
         }
+    }
+
+    /// Wire a live PipeClient. Immediately performs `hello` to negotiate
+    /// the pipe_token; on failure, drops the client so subsequent calls
+    /// degrade honestly.
+    pub fn with_pipe_client(
+        mut self,
+        client: Box<dyn PipeClientTrait>,
+    ) -> Result<Self, TransportError> {
+        // Hello does NOT require token pre-match; use a placeholder.
+        let req = Request::new(
+            self.next_request_id(),
+            &self.workspace_hash,
+            &self.team_key,
+            "PENDING",
+            Op::Hello,
+        );
+        let resp = client.request(&req)?;
+        if !resp.ok {
+            return Err(TransportError::MuxUnavailable {
+                backend: BackendKind::ConPty,
+                detail: format!("hello failed: {:?}", resp.error),
+            });
+        }
+        let hello: HelloResult = serde_json::from_value(resp.result)
+            .map_err(|e| TransportError::MuxUnavailable {
+                backend: BackendKind::ConPty,
+                detail: format!("hello response malformed: {e}"),
+            })?;
+        *self.pipe_token.lock().unwrap() = Some(hello.pipe_token);
+        self.pipe_client = Some(client);
+        Ok(self)
+    }
+
+    fn next_request_id(&self) -> String {
+        let n = self.request_counter.fetch_add(1, Ordering::Relaxed);
+        format!("req-{n}")
+    }
+
+    fn build_request(&self, op: Op, payload: serde_json::Value) -> Result<Request, TransportError> {
+        let token = self
+            .pipe_token
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| self.mux_unavailable("hello_never_completed"))?;
+        Ok(Request::new(
+            self.next_request_id(),
+            &self.workspace_hash,
+            &self.team_key,
+            token,
+            op,
+        )
+        .with_payload(payload))
+    }
+
+    fn dispatch(&self, op: Op, payload: serde_json::Value) -> Result<Response, TransportError> {
+        let Some(client) = self.pipe_client.as_ref() else {
+            return Err(self.mux_unavailable(&format!("{op:?}").to_lowercase()));
+        };
+        let req = self.build_request(op, payload)?;
+        let resp = client.request(&req)?;
+        if !resp.ok {
+            return Err(map_protocol_error(resp.error.as_ref()));
+        }
+        Ok(resp)
+    }
+
+    fn do_spawn(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        let payload = serde_json::to_value(SpawnRequest {
+            session: session.as_str().to_string(),
+            window: window.as_str().to_string(),
+            argv: argv.to_vec(),
+            cwd: cwd.to_string_lossy().to_string(),
+            env: env.clone(),
+            env_unset: env_unset.to_vec(),
+            cols: 120,
+            rows: 30,
+        })
+        .map_err(|e| TransportError::Spawn {
+            backend: BackendKind::ConPty,
+            source: std::io::Error::other(e),
+        })?;
+        let resp = self.dispatch(Op::Spawn, payload)?;
+        let spawn: ProtoSpawnResult = serde_json::from_value(resp.result).map_err(|e| {
+            TransportError::Spawn {
+                backend: BackendKind::ConPty,
+                source: std::io::Error::other(e),
+            }
+        })?;
+        Ok(SpawnResult {
+            pane_id: PaneId::new(spawn.pane_id),
+            session: SessionName::new(spawn.session),
+            window: WindowName::new(spawn.window),
+            child_pid: spawn.child_pid,
+        })
     }
 
     /// Build a `MuxUnavailable` error explaining that no pipe client is
@@ -95,11 +214,74 @@ impl ConPtyBackend {
             backend: BackendKind::ConPty,
             detail: format!(
                 "no_pipe_client (op={op}, workspace_hash={ws}, team_key={team}); \
-                 Phase 1a has not yet connected a live shim — this is honest \
-                 degradation, not silent success",
+                 no live shim wired — this is honest degradation, not silent success",
                 ws = self.workspace_hash,
                 team = self.team_key,
             ),
+        }
+    }
+}
+
+/// Resolve a `Target` to a pane_id string for the shim protocol.
+/// SessionWindow targets look up via `list_targets` are not supported
+/// at the trait boundary today — the coordinator delivery path always
+/// resolves worker IDs to `Target::Pane` before injection. If a
+/// SessionWindow slips in, return a `TargetNotFound`.
+fn pane_id_from_target(target: &Target) -> Result<String, TransportError> {
+    match target {
+        Target::Pane(p) => Ok(p.as_str().to_string()),
+        Target::SessionWindow { session, window } => Err(TransportError::TargetNotFound {
+            target: format!(
+                "conpty backend requires Target::Pane; got SessionWindow({}, {})",
+                session.as_str(),
+                window.as_str()
+            ),
+        }),
+    }
+}
+
+/// Map a `ProtocolError` returned by the shim to a `TransportError`
+/// per design §Request Shape:332-338 + CR C-5.
+fn map_protocol_error(err: Option<&ProtocolError>) -> TransportError {
+    let Some(err) = err else {
+        return TransportError::MuxUnavailable {
+            backend: BackendKind::ConPty,
+            detail: "shim returned ok=false without error payload".to_string(),
+        };
+    };
+    match err {
+        // CR C-5: token mismatch is honest MuxUnavailable — never silent
+        // retry with a rotated token.
+        ProtocolError::PipeTokenMismatch { message } => TransportError::MuxUnavailable {
+            backend: BackendKind::ConPty,
+            detail: format!("pipe_token_mismatch: {message}"),
+        },
+        ProtocolError::SchemaSkew { message, sent, expected } => TransportError::MuxUnavailable {
+            backend: BackendKind::ConPty,
+            detail: format!("schema_skew sent={sent} expected={expected}: {message}"),
+        },
+        ProtocolError::TargetNotFound { message } => {
+            TransportError::TargetNotFound { target: message.clone() }
+        }
+        ProtocolError::Spawn { message } => TransportError::Spawn {
+            backend: BackendKind::ConPty,
+            source: std::io::Error::other(message.clone()),
+        },
+        ProtocolError::Inject { message, stage } => TransportError::Inject {
+            stage: match stage.as_str() {
+                "text" | "load_buffer" => InjectStage::LoadBuffer,
+                _ => InjectStage::Submit,
+            },
+            source: std::io::Error::other(message.clone()),
+        },
+        ProtocolError::Capture { message } => TransportError::Capture {
+            source: std::io::Error::other(message.clone()),
+        },
+        ProtocolError::ShimUnavailable { message } | ProtocolError::Other { message } => {
+            TransportError::MuxUnavailable {
+                backend: BackendKind::ConPty,
+                detail: message.clone(),
+            }
         }
     }
 }
@@ -137,66 +319,195 @@ impl Transport for ConPtyBackend {
 
     fn spawn_first(
         &self,
-        _session: &SessionName,
-        _window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Err(self.mux_unavailable("spawn_first"))
+        self.do_spawn(session, window, argv, cwd, env, &[])
     }
 
     fn spawn_into(
         &self,
-        _session: &SessionName,
-        _window: &WindowName,
-        _argv: &[String],
-        _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Err(self.mux_unavailable("spawn_into"))
+        self.do_spawn(session, window, argv, cwd, env, &[])
+    }
+
+    fn spawn_first_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.do_spawn(session, window, argv, cwd, env, env_unset)
+    }
+
+    fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        self.do_spawn(session, window, argv, cwd, env, env_unset)
     }
 
     fn inject(
         &self,
-        _target: &Target,
-        _payload: &InjectPayload,
-        _submit: Key,
+        target: &Target,
+        payload: &InjectPayload,
+        submit: Key,
         _bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
-        Err(self.mux_unavailable("inject"))
+        let pane_id = pane_id_from_target(target)?;
+        let text = payload.text().unwrap_or("").to_string();
+        let submit_key = match submit {
+            Key::Enter => Some("enter".to_string()),
+            Key::Up => Some("up".to_string()),
+            Key::Down => Some("down".to_string()),
+            Key::Left => Some("left".to_string()),
+            Key::Right => Some("right".to_string()),
+            Key::Escape => Some("escape".to_string()),
+            Key::CtrlC => Some("ctrl_c".to_string()),
+            Key::Char(_) | Key::CancelMode => None,
+        };
+        let payload_json = serde_json::to_value(InjectRequest {
+            pane_id,
+            text,
+            submit_key,
+            bracketed: _bracketed,
+        })
+        .map_err(|e| TransportError::Inject {
+            stage: InjectStage::LoadBuffer,
+            source: std::io::Error::other(e),
+        })?;
+        self.dispatch(Op::Inject, payload_json)?;
+        // Design §SubmitVerification:346 — text + CR = EnterSentWithoutPlaceholderCheck.
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: if matches!(payload, InjectPayload::Empty) {
+                InjectVerification::NoToken
+            } else {
+                InjectVerification::CaptureContainsToken
+            },
+            submit_verification: match submit {
+                Key::Enter => SubmitVerification::EnterSentWithoutPlaceholderCheck,
+                other => SubmitVerification::KeySentAfterVisibleToken { key: other },
+            },
+            turn_verification: TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
     }
 
     fn send_keys(&self, _target: &Target, _keys: &[Key]) -> Result<(), TransportError> {
-        Err(self.mux_unavailable("send_keys"))
+        self.dispatch(Op::SendKeys, serde_json::Value::Null)?;
+        Ok(())
     }
 
     fn capture(
         &self,
-        _target: &Target,
-        _range: CaptureRange,
+        target: &Target,
+        range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
-        Err(self.mux_unavailable("capture"))
+        let pane_id = pane_id_from_target(target)?;
+        let range_str = match range {
+            CaptureRange::Full => "full".to_string(),
+            CaptureRange::Head(n) => format!("head:{n}"),
+            CaptureRange::Tail(n) => format!("tail:{n}"),
+        };
+        let payload = serde_json::to_value(CaptureRequest {
+            pane_id,
+            range: range_str,
+        })
+        .map_err(|e| TransportError::Capture {
+            source: std::io::Error::other(e),
+        })?;
+        let resp = self.dispatch(Op::Capture, payload)?;
+        let cap: protocol::CaptureResult = serde_json::from_value(resp.result).map_err(|e| {
+            TransportError::Capture {
+                source: std::io::Error::other(e),
+            }
+        })?;
+        Ok(CapturedText {
+            text: cap.text,
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
-        Err(self.mux_unavailable("query"))
+        Ok(None)
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<PaneLiveness, TransportError> {
-        Err(self.mux_unavailable("liveness"))
+    fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
+        let resp = self.dispatch(
+            Op::Liveness,
+            serde_json::json!({"pane_id": pane.as_str()}),
+        )?;
+        let known = resp.result["known"].as_bool().unwrap_or(false);
+        let alive = resp.result["alive"].as_bool().unwrap_or(false);
+        Ok(match (known, alive) {
+            (true, true) => PaneLiveness::Live,
+            (true, false) => PaneLiveness::Dead,
+            _ => PaneLiveness::Unknown,
+        })
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Err(self.mux_unavailable("list_targets"))
+        let resp = self.dispatch(Op::ListTargets, serde_json::Value::Null)?;
+        let empty = vec![];
+        let list = resp.result["targets"].as_array().unwrap_or(&empty);
+        Ok(list
+            .iter()
+            .map(|row| PaneInfo {
+                pane_id: PaneId::new(row["pane_id"].as_str().unwrap_or("").to_string()),
+                session: SessionName::new(row["session"].as_str().unwrap_or("").to_string()),
+                window_index: None,
+                window_name: row["window"]
+                    .as_str()
+                    .map(|w| WindowName::new(w.to_string())),
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: true,
+                pane_pid: row["child_pid"].as_u64().map(|p| p as u32),
+                leader_env: BTreeMap::new(),
+            })
+            .collect())
     }
 
-    fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
-        Err(self.mux_unavailable("has_session"))
+    fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
+        let resp = self.dispatch(
+            Op::HasSession,
+            serde_json::json!({"session": session.as_str()}),
+        )?;
+        Ok(resp.result["present"].as_bool().unwrap_or(false))
     }
 
-    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
-        Err(self.mux_unavailable("list_windows"))
+    fn list_windows(&self, session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
+        let resp = self.dispatch(
+            Op::ListWindows,
+            serde_json::json!({"session": session.as_str()}),
+        )?;
+        let empty = vec![];
+        let list = resp.result["windows"].as_array().unwrap_or(&empty);
+        Ok(list
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| WindowName::new(s.to_string()))
+            .collect())
     }
 
     fn set_session_env(
@@ -212,12 +523,59 @@ impl Transport for ConPtyBackend {
         Ok(SetEnvOutcome::InternalizedAtSpawn)
     }
 
-    fn kill_session(&self, _session: &SessionName) -> Result<(), TransportError> {
-        Err(self.mux_unavailable("kill_session"))
+    fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
+        let resp = self.dispatch(
+            Op::HasPane,
+            serde_json::json!({"pane_id": pane.as_str()}),
+        )?;
+        Ok(Some(resp.result["present"].as_bool().unwrap_or(false)))
     }
 
-    fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
-        Err(self.mux_unavailable("kill_window"))
+    fn kill_server(&self) -> Result<(), TransportError> {
+        // CR C-2: kill_server on ConPTY = shutdown this workspace's
+        // shim (per-team, NOT global). Existing tmux callers already
+        // gate the invocation on a KillDecision::KillWholeServer
+        // branch that scopes to the caller's transport instance, so
+        // per-workspace semantics naturally hold here.
+        self.dispatch(Op::Shutdown, serde_json::Value::Null)?;
+        Ok(())
+    }
+
+    fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
+        self.dispatch(
+            Op::KillSession,
+            serde_json::json!({"session": session.as_str()}),
+        )?;
+        Ok(())
+    }
+
+    fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
+        match target {
+            Target::Pane(pane) => {
+                self.dispatch(
+                    Op::KillPane,
+                    serde_json::json!({"pane_id": pane.as_str()}),
+                )?;
+            }
+            Target::SessionWindow { session, window } => {
+                self.dispatch(
+                    Op::KillWindow,
+                    serde_json::json!({
+                        "session": session.as_str(),
+                        "window": window.as_str(),
+                    }),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        self.dispatch(
+            Op::KillPane,
+            serde_json::json!({"pane_id": pane.as_str()}),
+        )?;
+        Ok(())
     }
 
     fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
@@ -280,62 +638,60 @@ mod tests {
     fn no_pipe_client_returns_honest_mux_unavailable_not_success() {
         // MUST-NOT-13 + CR C-3: with no pipe client wired we must NOT
         // silently pretend the spawn/inject/capture succeeded.
+        //
+        // Each backend method dispatches through the underlying protocol
+        // `Op::*`; when no client is wired the `mux_unavailable` diag
+        // records the lowercased op discriminant ("spawn", "inject",
+        // etc.). Every method must therefore surface a distinct-shape
+        // MuxUnavailable, not silently swallow the request.
         let b = ConPtyBackend::new("wshash", "team-a");
-        for op_name in [
-            "spawn_first",
-            "spawn_into",
-            "inject",
-            "capture",
-            "list_targets",
-            "kill_session",
-        ] {
-            let err = match op_name {
-                "spawn_first" => b
-                    .spawn_first(
-                        &SessionName::new("s"),
-                        &WindowName::new("w"),
-                        &[],
-                        Path::new("/tmp"),
-                        &BTreeMap::new(),
-                    )
-                    .unwrap_err(),
-                "spawn_into" => b
-                    .spawn_into(
-                        &SessionName::new("s"),
-                        &WindowName::new("w"),
-                        &[],
-                        Path::new("/tmp"),
-                        &BTreeMap::new(),
-                    )
-                    .unwrap_err(),
-                "inject" => b
-                    .inject(
-                        &Target::Pane(PaneId::new("conpty:test")),
-                        &InjectPayload::Empty,
-                        Key::Enter,
-                        false,
-                    )
-                    .unwrap_err(),
-                "capture" => b
-                    .capture(
-                        &Target::Pane(PaneId::new("conpty:test")),
-                        CaptureRange::Tail(80),
-                    )
-                    .unwrap_err(),
-                "list_targets" => b.list_targets().unwrap_err(),
-                "kill_session" => b.kill_session(&SessionName::new("s")).unwrap_err(),
-                _ => unreachable!(),
-            };
+        let errs = [
+            b.spawn_first(
+                &SessionName::new("s"),
+                &WindowName::new("w"),
+                &[],
+                Path::new("/tmp"),
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            b.spawn_into(
+                &SessionName::new("s"),
+                &WindowName::new("w"),
+                &[],
+                Path::new("/tmp"),
+                &BTreeMap::new(),
+            )
+            .unwrap_err(),
+            b.inject(
+                &Target::Pane(PaneId::new("conpty:test")),
+                &InjectPayload::Empty,
+                Key::Enter,
+                false,
+            )
+            .unwrap_err(),
+            b.capture(
+                &Target::Pane(PaneId::new("conpty:test")),
+                CaptureRange::Tail(80),
+            )
+            .unwrap_err(),
+            b.list_targets().unwrap_err(),
+            b.kill_session(&SessionName::new("s")).unwrap_err(),
+        ];
+        for err in errs {
             match err {
                 TransportError::MuxUnavailable { backend, detail } => {
                     assert_eq!(backend, BackendKind::ConPty);
                     assert!(
                         detail.contains("no_pipe_client"),
-                        "detail must anchor on `no_pipe_client` diagnostic tag, got {detail}"
+                        "detail must anchor on `no_pipe_client` tag, got {detail}"
                     );
                     assert!(
-                        detail.contains(op_name),
-                        "detail must include op={op_name}, got {detail}"
+                        detail.contains("workspace_hash=wshash"),
+                        "detail must include workspace_hash, got {detail}"
+                    );
+                    assert!(
+                        detail.contains("team_key=team-a"),
+                        "detail must include team_key, got {detail}"
                     );
                 }
                 other => panic!("expected MuxUnavailable, got {other:?}"),

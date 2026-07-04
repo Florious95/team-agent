@@ -37,3 +37,7 @@
 
 pub mod protocol;
 pub mod backend;
+pub mod shim;
+
+pub use backend::{ConPtyBackend, PipeClientTrait};
+pub use shim::{FakePaneRuntime, LocalShimPipeClient, PaneRuntime, Shim};

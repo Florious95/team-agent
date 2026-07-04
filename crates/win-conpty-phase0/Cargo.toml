@@ -10,8 +10,15 @@ publish = false
 name = "win-conpty-phase0"
 path = "src/main.rs"
 
+[[bin]]
+name = "windows-shim"
+path = "src/windows_shim.rs"
+
 [target.'cfg(windows)'.dependencies]
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+team-agent = { path = "../team-agent" }
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
