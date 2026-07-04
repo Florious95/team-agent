@@ -45,6 +45,8 @@ jobs:
         run: cargo build -p win-conpty-phase0 --bin win-conpty-phase0 --release --target x86_64-pc-windows-msvc
       - name: build windows-shim binary (Phase 1b)
         run: cargo build -p win-conpty-phase0 --bin windows-shim --release --target x86_64-pc-windows-msvc
+      - name: build conpty-cli binary (Phase 1c)
+        run: cargo build -p win-conpty-phase0 --bin conpty-cli --release --target x86_64-pc-windows-msvc
       - name: c-4 tracking
         shell: pwsh
         run: |
@@ -52,20 +54,28 @@ jobs:
           $ts  = (Get-Date).ToString("o")
           $phase0Exe = "target\x86_64-pc-windows-msvc\release\win-conpty-phase0.exe"
           $shimExe   = "target\x86_64-pc-windows-msvc\release\windows-shim.exe"
+          $cliExe    = "target\x86_64-pc-windows-msvc\release\conpty-cli.exe"
           $phase0Sha = (Get-FileHash $phase0Exe -Algorithm SHA256).Hash
           $shimSha   = (Get-FileHash $shimExe   -Algorithm SHA256).Hash
+          $cliSha    = (Get-FileHash $cliExe    -Algorithm SHA256).Hash
           Write-Host "phase0-tracking git_rev=$rev"
           Write-Host "phase0-tracking build_timestamp=$ts"
           Write-Host "phase0-tracking binary_sha256=$phase0Sha"
           Write-Host "shim-tracking git_rev=$rev"
           Write-Host "shim-tracking build_timestamp=$ts"
           Write-Host "shim-tracking binary_sha256=$shimSha"
+          Write-Host "cli-tracking git_rev=$rev"
+          Write-Host "cli-tracking build_timestamp=$ts"
+          Write-Host "cli-tracking binary_sha256=$cliSha"
           Add-Content -Path phase0-tracking.txt -Value "git_rev=$rev"
           Add-Content -Path phase0-tracking.txt -Value "build_timestamp=$ts"
           Add-Content -Path phase0-tracking.txt -Value "binary_sha256=$phase0Sha"
           Add-Content -Path shim-tracking.txt -Value "git_rev=$rev"
           Add-Content -Path shim-tracking.txt -Value "build_timestamp=$ts"
           Add-Content -Path shim-tracking.txt -Value "binary_sha256=$shimSha"
+          Add-Content -Path cli-tracking.txt -Value "git_rev=$rev"
+          Add-Content -Path cli-tracking.txt -Value "build_timestamp=$ts"
+          Add-Content -Path cli-tracking.txt -Value "binary_sha256=$cliSha"
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -73,5 +83,7 @@ jobs:
           path: |
             target/x86_64-pc-windows-msvc/release/win-conpty-phase0.exe
             target/x86_64-pc-windows-msvc/release/windows-shim.exe
+            target/x86_64-pc-windows-msvc/release/conpty-cli.exe
             phase0-tracking.txt
             shim-tracking.txt
+            cli-tracking.txt

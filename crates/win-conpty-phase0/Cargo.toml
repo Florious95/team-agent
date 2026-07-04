@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "windows-shim"
 path = "src/windows_shim.rs"
 
+[[bin]]
+name = "conpty-cli"
+path = "src/conpty_cli.rs"
+
 [target.'cfg(windows)'.dependencies]
 anyhow = { workspace = true }
 serde = { workspace = true }
