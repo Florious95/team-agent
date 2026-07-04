@@ -93,3 +93,15 @@ pub mod fake_worker;
 // the real spawn/capture/inject/has_session backend the daemon + launch use (step 9 shipped only
 // the trait + argv-builders). Real subprocess execution is the #[ignore] real-machine boundary.
 pub mod tmux_backend;
+
+// 0.5.x Windows-native transport Phase 1: ConPTY backend + named-pipe
+// protocol. `protocol` is portable (pure logic, tested on all hosts);
+// `backend` compiles on all hosts and returns typed MuxUnavailable when
+// no pipe client is wired (honest degradation, not silent success).
+//
+// Truth source:
+// - Design: `.team/artifacts/0.5.x-windows-native-transport-design.md`
+//   §Transport Boundary + §Named Pipe Control Protocol + §Phase 1
+// - CR verdict: `.team/artifacts/0.5.x-windows-transport-cr-verdict.md`
+//   (7 constraints; C-1/C-2/C-3/C-5 anchor into this module)
+pub mod conpty;
