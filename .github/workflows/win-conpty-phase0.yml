@@ -1,0 +1,50 @@
+name: win-conpty-phase0
+
+# Builds the Windows-only Phase 0 ConPTY proof binary via CI.
+# Triggered manually (`workflow_dispatch`) or on any push to the
+# `feat/win-conpty-phase0` branch. The Mac developer host cannot
+# cross-compile because both the rustup Windows target and crates.io
+# are behind a proxy that returns 403 for these hosts; CI is the
+# hermetic-truth build source (memory `release-verify-ci-hermetic-source-of-truth`).
+#
+# CR C-4 tracking: the workflow prints git rev, build timestamp, and
+# sha256 of the produced .exe into the job log so the gate report can
+# pin them.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/win-conpty-phase0]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: build phase 0 binary
+        run: cargo build -p win-conpty-phase0 --release --target x86_64-pc-windows-msvc
+      - name: c-4 tracking
+        shell: pwsh
+        run: |
+          $exe = "target\x86_64-pc-windows-msvc\release\win-conpty-phase0.exe"
+          $rev = git rev-parse HEAD
+          $ts  = (Get-Date).ToString("o")
+          $sha = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "phase0-tracking git_rev=$rev"
+          Write-Host "phase0-tracking build_timestamp=$ts"
+          Write-Host "phase0-tracking binary_sha256=$sha"
+          Add-Content -Path phase0-tracking.txt -Value "git_rev=$rev"
+          Add-Content -Path phase0-tracking.txt -Value "build_timestamp=$ts"
+          Add-Content -Path phase0-tracking.txt -Value "binary_sha256=$sha"
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-conpty-phase0
+          path: |
+            target/x86_64-pc-windows-msvc/release/win-conpty-phase0.exe
+            phase0-tracking.txt
