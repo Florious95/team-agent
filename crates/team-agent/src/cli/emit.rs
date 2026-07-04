@@ -225,7 +225,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
-        Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
+        Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\nMVP: name-based cross-workspace addressing assumes trusted local caller; no auth gate.".to_string(),
         Some("fallback-send-leader") => "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use.".to_string(),
         Some("fallback-report-result") => "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use.".to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
@@ -668,6 +668,7 @@ struct ParsedArgs {
     out: Option<PathBuf>,
     auth_mode: Option<String>,
     pane: Option<String>,
+    to_name: Option<String>,
     provider: Option<String>,
     message_id: Option<String>,
     content: Option<String>,
@@ -750,6 +751,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--out" => parsed.out = next_arg(args, &mut i).map(PathBuf::from),
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
             "--pane" => parsed.pane = next_arg(args, &mut i),
+            "--to-name" => parsed.to_name = next_arg(args, &mut i),
             "--provider" => parsed.provider = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
             "--content" => parsed.content = next_arg(args, &mut i),
@@ -761,6 +763,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             }
             other if other.starts_with("--pane=") => {
                 parsed.pane = Some(other.trim_start_matches("--pane=").to_string());
+            }
+            other if other.starts_with("--to-name=") => {
+                parsed.to_name = Some(other.trim_start_matches("--to-name=").to_string());
             }
             other if other.starts_with("--provider=") => {
                 parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
@@ -875,7 +880,7 @@ fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {
 
 fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     let parsed = parse_args(args);
-    let target = if parsed.targets.is_some() || parsed.pane.is_some() {
+    let target = if parsed.targets.is_some() || parsed.pane.is_some() || parsed.to_name.is_some() {
         None
     } else {
         parsed.positionals.first().cloned()
@@ -903,6 +908,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         json: parsed.json,
         message_id: parsed.message_id,
         pane: parsed.pane.clone(),
+        to_name: parsed.to_name.clone(),
     })
 }
 
@@ -1602,6 +1608,8 @@ mod tests {
                     "--workspace",
                     "--team",
                     "--targets",
+                    "--to-name",
+                    "--pane",
                     "--watch-result",
                     "--timeout",
                     "--json",
@@ -1765,6 +1773,33 @@ mod tests {
 
         let args = send_args(
             &cli_argv(&["--pane", "%1596", "multi", "word", "message"]),
+            &cwd,
+        )
+        .unwrap();
+        assert_eq!(args.target, None);
+        assert_eq!(
+            args.message,
+            vec![
+                "multi".to_string(),
+                "word".to_string(),
+                "message".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn send_to_name_positionals_are_message_not_target() {
+        let cwd = tmp_workspace();
+        let args = send_args(&cli_argv(&["--to-name", "team-a/qa", "hello"]), &cwd).unwrap();
+        assert_eq!(args.to_name.as_deref(), Some("team-a/qa"));
+        assert_eq!(args.target, None);
+        assert_eq!(args.targets, None);
+        assert_eq!(args.message, vec!["hello".to_string()]);
+
+        let args = send_args(
+            &cli_argv(&["--to-name=team-a/qa", "multi", "word", "message"]),
             &cwd,
         )
         .unwrap();

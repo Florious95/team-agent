@@ -50,6 +50,7 @@ use super::*;
             json: true,
             message_id: None,
             pane: None,
+            to_name: None,
         };
         let _ = cmd_send(&args);
 

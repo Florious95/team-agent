@@ -323,6 +323,10 @@ pub struct SendArgs {
     /// the **cross-team communication** primitive: the target pane does not
     /// need to be in the sender's team.
     pub pane: Option<String>,
+    /// `--to-name <name>` — stable named addressing. Mutually exclusive with
+    /// `target` / `targets` / `--pane`; resolves workspace/team/agent or leader
+    /// name to the current live pane before using direct pane injection.
+    pub to_name: Option<String>,
 }
 
 /// E23 worker-side emergency fallback for `team_orchestrator.send_message`

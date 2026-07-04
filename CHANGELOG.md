@@ -19,6 +19,7 @@ This release completes a six-phase internal refactor that was carried out entire
 - **Fixed: `reset` spawn failure is now fail-closed.** Previously, if a coordinator failed to spawn during `reset`, ownership was silently dropped. It now hard-fails and leaves the team in a safe stopped state.
 - **Fixed: `restart` correctly rehydrates worker roles.** After a `restart`, workers that had a custom `--role` are now restored to that role instead of falling back to the default.
 - **Fixed: `send --pane` argument parsing regression (introduced in 0.3.26).** Pane targeting was silently ignored after an internal refactor; this is now restored.
+- **Added: `send --to-name` resolves stable workspace/team/agent or leader names to the current live pane.** MVP cross-workspace name-based addressing assumes a trusted local caller and has no auth gate.
 
 **MCP-CYCLE shape baseline**
 
