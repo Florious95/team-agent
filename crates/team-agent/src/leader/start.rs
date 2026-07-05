@@ -434,7 +434,12 @@ fn execute_managed_leader_plan(
     let Some(window) = plan.leader_window.as_ref() else {
         return Err(LeaderError::Start("managed leader window missing".to_string()));
     };
-    let transport = TmuxBackend::for_workspace(workspace);
+    // 0.5.x Phase 1d Batch 6: use the factory tmux channel helper
+    // (thin wrapper over `TmuxBackend::for_workspace`) for
+    // grep-visibility of every intentional tmux-only leader-launcher
+    // site. Semantics unchanged; managed leader hosting stays
+    // tmux-only per design §Batch 6.
+    let transport = crate::transport_factory::tmux_workspace_transport(workspace);
     let spawned = ensure_managed_leader_pane(&transport, session, window, plan, workspace)?;
     persist_managed_leader_binding(plan, workspace, &spawned)?;
     spawn_managed_provider_startup_prompt_handler(
@@ -1029,7 +1034,9 @@ fn spawn_managed_provider_startup_prompt_handler(
     pane_id: String,
 ) {
     std::thread::spawn(move || {
-        let transport = TmuxBackend::for_workspace(&workspace);
+        // Phase 1d Batch 6: factory tmux workspace helper for
+        // grep-visibility. Semantics unchanged.
+        let transport = crate::transport_factory::tmux_workspace_transport(&workspace);
         let _ = handle_exec_provider_startup_prompts(
             provider,
             &workspace,
@@ -1042,9 +1049,13 @@ fn spawn_managed_provider_startup_prompt_handler(
 }
 
 fn tmux_transport_for_current_pane() -> TmuxBackend {
+    // Phase 1d Batch 6: factory tmux channel helpers for
+    // grep-visibility. Semantics unchanged; this is intentionally
+    // tmux-only (caller pane = tmux `$TMUX` endpoint or default socket,
+    // MUST-12 anchor).
     crate::tmux_backend::socket_name_from_tmux_env()
-        .map(|endpoint| TmuxBackend::for_tmux_endpoint(&endpoint))
-        .unwrap_or_else(TmuxBackend::new)
+        .map(|endpoint| crate::transport_factory::tmux_endpoint_transport(&endpoint))
+        .unwrap_or_else(crate::transport_factory::tmux_default_transport)
 }
 
 pub fn handle_exec_provider_startup_prompts(
@@ -1113,7 +1124,9 @@ fn provider_command_name(provider: Provider) -> &'static str {
 }
 
 fn tmux_session_exists(workspace: &Path, session: &SessionName) -> Result<bool, LeaderError> {
-    TmuxBackend::for_workspace(workspace)
+    // Phase 1d Batch 6: factory tmux workspace helper for
+    // grep-visibility. Tmux-only anchor (managed leader session lookup).
+    crate::transport_factory::tmux_workspace_transport(workspace)
         .has_session(session)
         .map_err(|e| LeaderError::Start(format!("tmux has-session failed: {e}")))
 }

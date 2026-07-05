@@ -10,7 +10,8 @@ use crate::coordinator::health::{
     coordinator_metadata_ok, pid_is_running, read_coordinator_metadata, terminate_pid_tree,
 };
 use crate::coordinator::types::{OrphanReason, Pid, WorkspacePath};
-use crate::tmux_backend::TmuxBackend;
+// Phase 1d Batch 6: `TmuxBackend` import removed — all sites now use
+// `transport_factory::tmux_socket_name_transport` for grep-visibility.
 use crate::transport::{SessionName, Transport};
 
 #[derive(Debug, Clone)]
@@ -352,7 +353,11 @@ fn tmux_socket_roots() -> Vec<PathBuf> {
 }
 
 fn tmux_list_panes(socket: &str) -> Vec<TmuxPaneRow> {
-    TmuxBackend::for_socket_name(socket)
+    // Phase 1d Batch 6: factory tmux-socket-name helper for
+    // grep-visibility. Tmux-only orphan scanner (enumerates tmux socket
+    // roots); ConPTY orphan diagnostics are a separate shim registry
+    // command, not routed here.
+    crate::transport_factory::tmux_socket_name_transport(socket)
         .list_targets()
         .unwrap_or_default()
         .into_iter()
@@ -664,7 +669,10 @@ fn kill_tmux_session(orphan: &OrphanRecord) -> bool {
     let (Some(socket), Some(session)) = (&orphan.tmux_socket, &orphan.session) else {
         return false;
     };
-    TmuxBackend::for_socket_name(socket)
+    // Phase 1d Batch 6: factory tmux-socket-name helper. Explicit
+    // tmux-only kill; conpty shim orphans are NOT routed here (design
+    // §Batch 6).
+    crate::transport_factory::tmux_socket_name_transport(socket)
         .kill_session(&SessionName::new(session.clone()))
         .is_ok()
 }

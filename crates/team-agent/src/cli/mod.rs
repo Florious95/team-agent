@@ -192,16 +192,40 @@ pub mod lifecycle_port {
         crate::tmux_backend::attach_command_for_workspace(cwd, session, window.as_str())
     }
     /// `runtime.shutdown`(`cmd_shutdown`)。
+    ///
+    /// 0.5.x Phase 1d Batch 5: the workspace-transport branch now routes
+    /// through `transport_factory::resolve_read_only_transport` so a
+    /// conpty team's shutdown reaches the shim rather than a
+    /// no-op tmux backend. Legacy tmux endpoint literal in state still
+    /// takes the `shutdown_transport_for_endpoint` tmux channel helper
+    /// path (intentional — this is the "attached explicit tmux
+    /// endpoint" branch and stays tmux-typed).
+    ///
+    /// `shutdown_with_transport_and_state` is generic over `&dyn
+    /// Transport`, so we hand the boxed factory backend down as
+    /// `&*box`. Factory refusal falls back to the workspace tmux
+    /// backend byte-equivalent to today so daemon liveness paths
+    /// don't crash.
     pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>) -> Result<Value, CliError> {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
-        let transport = if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
-            shutdown_transport_for_endpoint(endpoint)
-        } else {
-            shutdown_workspace_transport(&run_ws)
-        };
-        shutdown_with_transport_and_state(workspace, keep_logs, team, &transport, Some(state))
+        if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
+            let transport = shutdown_transport_for_endpoint(endpoint);
+            return shutdown_with_transport_and_state(
+                workspace, keep_logs, team, &transport, Some(state),
+            );
+        }
+        let boxed: Box<dyn crate::transport::Transport> =
+            match crate::transport_factory::resolve_read_only_transport(
+                &run_ws,
+                Some(&state),
+                crate::transport_factory::TransportPurpose::Shutdown,
+            ) {
+                Ok(r) => r.backend,
+                Err(_) => Box::new(shutdown_workspace_transport(&run_ws)),
+            };
+        shutdown_with_transport_and_state(workspace, keep_logs, team, boxed.as_ref(), Some(state))
     }
 
     /// E12 ①:从 state 锚 pane_id(leader_receiver/team_owner,top+teams)映射到其所在 session
@@ -1191,24 +1215,41 @@ pub mod lifecycle_port {
                 }
             }
         }
-        let workspace_transport = shutdown_workspace_transport(workspace);
-        match crate::transport::Transport::has_session(&workspace_transport, session) {
-            Ok(true) => residual = true,
-            Ok(false) => {}
-            Err(err) if tmux_absent_error(&err.to_string()) => {}
-            Err(err) => {
-                error.get_or_insert_with(|| err.to_string());
-                residual = true;
+        // 0.5.x Phase 1d Batch 5 (design §Batch 5 point 4): a ConPTY
+        // team's residual check MUST NOT read the workspace tmux socket
+        // + shared default tmux socket as evidence for/against ConPTY
+        // residual. Those probes are meaningless for a shim-owned pane
+        // universe: they will always return `has_session=false` (no
+        // tmux session exists) which would look like "no residual" but
+        // gives zero honest information about whether the shim / child
+        // panes have actually been reaped. Skip the tmux fallback
+        // probes when the primary transport is ConPTY; the primary
+        // transport check above already covered the honest question
+        // ("does the shim still have this session?").
+        let primary_is_conpty = matches!(
+            transport.kind(),
+            crate::transport::BackendKind::ConPty
+        );
+        if !primary_is_conpty {
+            let workspace_transport = shutdown_workspace_transport(workspace);
+            match crate::transport::Transport::has_session(&workspace_transport, session) {
+                Ok(true) => residual = true,
+                Ok(false) => {}
+                Err(err) if tmux_absent_error(&err.to_string()) => {}
+                Err(err) => {
+                    error.get_or_insert_with(|| err.to_string());
+                    residual = true;
+                }
             }
-        }
-        let default_transport = crate::tmux_backend::TmuxBackend::new();
-        match crate::transport::Transport::has_session(&default_transport, session) {
-            Ok(true) => residual = true,
-            Ok(false) => {}
-            Err(err) if tmux_absent_error(&err.to_string()) => {}
-            Err(err) => {
-                error.get_or_insert_with(|| err.to_string());
-                residual = true;
+            let default_transport = crate::tmux_backend::TmuxBackend::new();
+            match crate::transport::Transport::has_session(&default_transport, session) {
+                Ok(true) => residual = true,
+                Ok(false) => {}
+                Err(err) if tmux_absent_error(&err.to_string()) => {}
+                Err(err) => {
+                    error.get_or_insert_with(|| err.to_string());
+                    residual = true;
+                }
             }
         }
         let sessions = if residual {

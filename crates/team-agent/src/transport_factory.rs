@@ -451,6 +451,14 @@ pub fn tmux_workspace_transport(workspace: &Path) -> TmuxBackend {
     TmuxBackend::for_workspace(workspace)
 }
 
+/// Tmux transport for a specific named tmux socket (e.g.
+/// `ta-abcdef012345`). Used by orphan-scanner and diagnose paths that
+/// intentionally enumerate the tmux socket roots — NOT for team
+/// backend selection.
+pub fn tmux_socket_name_transport(socket: &str) -> TmuxBackend {
+    TmuxBackend::for_socket_name(socket)
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Tests (§Batch 0 Verification, design.md:220-224).
 // ─────────────────────────────────────────────────────────────────────────

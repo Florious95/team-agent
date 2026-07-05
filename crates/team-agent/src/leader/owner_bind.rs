@@ -262,7 +262,9 @@ fn family_a_identity(
 }
 
 fn tmux_pane_current_command(workspace: &Path, pane: &str) -> Result<String, LeaderError> {
-    TmuxBackend::for_workspace(workspace)
+    // Phase 1d Batch 6: factory tmux workspace helper for grep-visibility.
+    // Tmux-only owner-bind (caller pane = tmux pane).
+    crate::transport_factory::tmux_workspace_transport(workspace)
         .query(
             &Target::Pane(PaneId::new(pane)),
             PaneField::PaneCurrentCommand,
@@ -273,7 +275,8 @@ fn tmux_pane_current_command(workspace: &Path, pane: &str) -> Result<String, Lea
 
 fn tmux_pane_info(workspace: &Path, pane: &str) -> Option<PaneInfo> {
     let target = PaneId::new(pane);
-    TmuxBackend::for_workspace(workspace)
+    // Phase 1d Batch 6: same as above.
+    crate::transport_factory::tmux_workspace_transport(workspace)
         .list_targets()
         .ok()?
         .into_iter()

@@ -156,8 +156,11 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
                 }),
         );
     }
+    // Phase 1d Batch 6: factory tmux workspace helper for
+    // grep-visibility. Semantics unchanged; leader lease discovery is
+    // tmux-only (caller pane = tmux pane, MUST-12 anchor).
     targets.extend(
-        crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+        crate::transport_factory::tmux_workspace_transport(workspace)
             .list_targets()
             .unwrap_or_default()
             .into_iter()
@@ -167,10 +170,12 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
 }
 
 fn tmux_backend_for_endpoint(endpoint: &str) -> crate::tmux_backend::TmuxBackend {
+    // Phase 1d Batch 6: factory tmux channel helpers for grep-visibility.
+    // Same tmux-only semantics as before.
     if endpoint.is_empty() || endpoint == "default" {
-        crate::tmux_backend::TmuxBackend::new()
+        crate::transport_factory::tmux_default_transport()
     } else {
-        crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
+        crate::transport_factory::tmux_endpoint_transport(endpoint)
     }
 }
 
@@ -320,11 +325,13 @@ pub fn claim_leader(
         .unwrap_or_default();
     let raw_state = crate::state::persist::load_runtime_state(workspace)?;
     let event_log = crate::event_log::EventLog::new(workspace);
-    let mut targets = crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+    // Phase 1d Batch 6: factory tmux channel helpers for grep-visibility.
+    // Tmux-only leader-claim path (caller pane enumeration).
+    let mut targets = crate::transport_factory::tmux_workspace_transport(workspace)
         .list_targets()
         .unwrap_or_default();
     targets.extend(
-        crate::tmux_backend::TmuxBackend::new()
+        crate::transport_factory::tmux_default_transport()
             .list_targets()
             .unwrap_or_default(),
     );
