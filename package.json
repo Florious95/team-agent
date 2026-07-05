@@ -1,6 +1,6 @@
 {
   "name": "@team-agent/installer",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "npx installer for Team Agent",
   "keywords": [
     "codex",
@@ -20,9 +20,9 @@
     "team-agent-installer": "npm/install.mjs"
   },
   "optionalDependencies": {
-    "@team-agent/cli-darwin-arm64": "0.5.1",
-    "@team-agent/cli-darwin-x64": "0.5.1",
-    "@team-agent/cli-linux-x64": "0.5.1"
+    "@team-agent/cli-darwin-arm64": "0.5.2",
+    "@team-agent/cli-darwin-x64": "0.5.2",
+    "@team-agent/cli-linux-x64": "0.5.2"
   },
   "scripts": {
     "postinstall": "node npm/bincheck.mjs",

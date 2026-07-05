@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+- **Added: `--backend conpty` transport for Windows-native ConPTY sessions.** A new `--backend` flag lets you explicitly select the transport backend: `tmux` (default, unchanged behaviour) or `conpty` (Windows ConPTY via named pipe). The full chain ships: a portable named-pipe control protocol (`conpty-transport`), a ConPTY shim binary (`win-conpty-phase0`), and a ConPTY backend in the coordinator (`conpty` module). The factory (`transport_factory`) assembles the right backend from persisted state at startup; on non-Windows hosts it returns a typed `MuxUnavailable` rather than silently falling back. Covered by factory guard suite (C-1/C-4/C-5/C-6), pipe-token persistence guard, and ConPTY end-to-end fake-worker tests.
+- **Added: `attach-app-server-leader` subcommand for app-server leader hosting.** Codex app-server sessions can now act as the Team Agent leader host. The new subcommand wires a live Codex app-server pane as the leader receiver, writing the transport-kind tuple atomically and advancing the epoch. MUST-12 is updated: delivery paths are read-only with respect to ownership; the sole ownership-mutation entry point is the explicit `attach-app-server-leader` CLI path.
+
+**Note on CI baseline:** The historically-known red test `leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window` was absent from the merged integration run (0 failures in --tests). CI hermetic run will confirm whether it remains absent or resurfaces; result will be noted in the release report.
+
 ## 0.5.1
 
 - **Added: `send --to-name` resolves stable workspace/team/agent or leader names to the current live pane.** Routes a message to a live tmux pane by stable name (`<workspace>::<team>/<agent>` or `leader`) without needing to look up the pane ID. The MVP assumes a trusted local caller; no auth gate is applied. Design includes 7 architectural constraints and is covered by 13 unit tests; 12/12 real-machine send scenarios passed.
