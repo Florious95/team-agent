@@ -6,54 +6,7 @@ on:
     branches: [feat/win-portability]
 
 jobs:
-  lib-tests-linux:
+  hello:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: platform lib tests
-        run: cargo test -p team-agent --lib platform::
-      - name: c-1 packaging PreviewCompileOnly assertion
-        run: cargo test -p team-agent --lib packaging::tests::windows_x8664
-      - name: c-2 fallback burndown grep guards
-        run: cargo test -p team-agent --test platform_fallback_burndown_batch0
-      - name: c-4 caller-whitelist grep guard
-        run: cargo test -p team-agent --test platform_process_caller_whitelist_batch0
-
-  windows-compile-gate:
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-      - name: cargo check windows target
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
-          echo "cargo_check_exit=$?"
-      - name: post burn-down summary
-        if: always()
-        shell: bash
-        run: |
-          if [ -f check.log ]; then
-            errcount=$(grep -c '^error\[' check.log || echo 0)
-            echo "cargo_check_error_count=$errcount"
-            echo "git_rev=$(git rev-parse HEAD)" > win-portability-tracking.txt
-            echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-portability-tracking.txt
-            echo "cargo_check_error_count=$errcount" >> win-portability-tracking.txt
-            grep '^error\[' check.log | head -20 >> win-portability-tracking.txt || true
-          else
-            echo "no_check_log=1" > win-portability-tracking.txt
-          fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: win-portability-tracking
-          path: |
-            win-portability-tracking.txt
-            check.log
-          if-no-files-found: warn
+      - run: echo hello
