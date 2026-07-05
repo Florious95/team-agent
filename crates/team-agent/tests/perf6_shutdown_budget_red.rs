@@ -105,16 +105,31 @@ pairs must derive from the single entry snapshot (the function is a subset of pr
 
 /// Verdict `term_kill_sequence_preserved` (GREEN lock): the reap path must keep the
 /// TERM -> grace -> KILL escalation order (Gap 37); KILL must never become first-line.
+///
+/// 0.5.x Windows portability Batch 3: the shutdown path now routes
+/// through `crate::platform::process::terminate_pid` with
+/// `SignalKind::TerminateGraceful` (was `libc::SIGTERM`) followed by
+/// `SignalKind::TerminateForce` (was `libc::SIGKILL`). This test
+/// accepts BOTH marker shapes so it catches both a legacy revert AND
+/// a Batch 3 escalation-order break.
 #[test]
 fn perf6_grep_term_before_kill_sequence() {
     let src = cli_mod_source();
     let reap = fn_body(&src, "fn reap_process_tree");
-    let term_pos = reap.find("SIGTERM");
-    let kill_pos = reap.find("SIGKILL");
+    // Prefer the new SignalKind markers (Batch 3+), fall back to
+    // legacy libc::SIGTERM/SIGKILL for pre-Batch-3 code.
+    let term_pos = reap
+        .find("SignalKind::TerminateGraceful")
+        .or_else(|| reap.find("SIGTERM"));
+    let kill_pos = reap
+        .find("SignalKind::TerminateForce")
+        .or_else(|| reap.find("SIGKILL"));
     assert!(
         matches!((term_pos, kill_pos), (Some(t), Some(k)) if t < k),
-        "Gap 37 lock: reap_process_tree must send SIGTERM before SIGKILL (escalation, \
-not first-line kill); term={term_pos:?} kill={kill_pos:?}"
+        "Gap 37 lock: reap_process_tree must send graceful termination \
+         (SignalKind::TerminateGraceful or SIGTERM) BEFORE force \
+         (SignalKind::TerminateForce or SIGKILL); escalation, not \
+         first-line kill; term={term_pos:?} kill={kill_pos:?}"
     );
 }
 

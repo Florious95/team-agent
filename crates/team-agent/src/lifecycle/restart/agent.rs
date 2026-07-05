@@ -559,35 +559,17 @@ pub(super) fn drain_old_pane_and_pid(
     })
 }
 
-/// Best-effort liveness probe for a pid. Returns true if the pid exists
-/// on Unix (signal 0). On other platforms, returns true conservatively.
+/// Best-effort liveness probe for a pid.
+///
+/// 0.5.x Windows portability Batch 3: routes through
+/// `crate::platform::process::pid_is_alive`. Unix uses `kill(pid, 0)`
+/// with the `EPERM = Live` branch preserved byte-for-byte; Windows
+/// uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
+/// `GetExitCodeProcess` (STILL_ACTIVE = Live). The legacy non-Unix
+/// `true` fallback (which broke drain by reporting every pid alive)
+/// is gone.
 pub(super) fn pid_is_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(pid, 0) checks if pid exists without sending a signal.
-        let ret = unsafe { libc::kill(pid as i32, 0) };
-        if ret == 0 {
-            return true;
-        }
-        // EPERM also means the process exists (we just can't signal it).
-        let err = std::io::Error::last_os_error();
-        matches!(err.raw_os_error(), Some(libc::EPERM))
-    }
-    // FIXME(portability): non-Unix fallback returns `true` for every
-    // pid (conservative-but-wrong: makes drain silent-fail — a stale
-    // pane's pid is reported alive, so restart reuses the pane instead
-    // of respawning). Dead code on macOS/Linux (cfg walks unix branch).
-    // Batch 3 removes this via
-    // `crate::platform::process::pid_liveness(pid)` mapping
-    // `ProcessLiveness::Live` → true.
-    // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md`
-    // §Ordered Migration Plan / Batch 3;
-    // CR C-2 grep guard `platform_fallback_burndown_batch0.rs` locks removal.
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
+    crate::platform::process::pid_is_alive(pid)
 }
 
 /// Read state.agents[agent_id].pane_pid (u32) from the runtime state.

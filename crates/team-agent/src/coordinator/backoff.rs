@@ -254,8 +254,11 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// 当前 ppid(`os.getppid()`,孤儿自检输入)。
+///
+/// 0.5.x Windows portability Batch 3: uses `platform::process::current_parent_pid`
+/// so Windows sees a real Toolhelp32-derived ppid instead of `0`.
 fn current_ppid() -> u32 {
-    u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
+    crate::platform::process::current_parent_pid().unwrap_or(0)
 }
 
 /// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,

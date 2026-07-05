@@ -272,16 +272,32 @@ fn coordinator_command_matches_workspace(command: &str, workspaces: &[String]) -
 }
 
 fn terminate_pid(pid: Pid) -> bool {
+    // 0.5.x Windows portability Batch 3: routes signal delivery through
+    // `platform::process::terminate_pid`. Unix keeps
+    // SIGTERM → 5s grace → SIGKILL semantics byte-for-byte
+    // (`SignalKind::TerminateGraceful` → SIGTERM,
+    // `SignalKind::TerminateForce` → SIGKILL). Windows performs
+    // `TerminateProcess` for both kinds; the `TerminationOutcome::ForceOnly`
+    // return on the graceful call is what a future audit-event
+    // emitter (CR C-6) will trigger `platform.terminate_force_only`
+    // on. For this batch the return value is discarded, matching the
+    // current inline `let _ = send_signal(...)` pattern.
     if pid_is_running(pid).ok() == Some(false) {
         return true;
     }
     let pids = process_tree_pids(pid);
     for child in pids.iter().rev() {
-        let _ = send_signal(*child, libc::SIGTERM);
+        let _ = crate::platform::process::terminate_pid(
+            child.get(),
+            crate::platform::process::SignalKind::TerminateGraceful,
+        );
     }
     if !wait_until_all_not_running(&pids, Duration::from_secs(5)) {
         for child in pids.iter().rev() {
-            let _ = send_signal(*child, libc::SIGKILL);
+            let _ = crate::platform::process::terminate_pid(
+                child.get(),
+                crate::platform::process::SignalKind::TerminateForce,
+            );
         }
     }
     wait_until_all_not_running(&pids, Duration::from_secs(5))
@@ -348,16 +364,17 @@ fn wait_until_all_not_running(pids: &[Pid], timeout: Duration) -> bool {
 }
 
 fn reap_child_if_possible(pid: Pid) {
-    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
-        return;
-    };
-    let mut status = 0;
-    unsafe {
-        libc::waitpid(pid_t, &mut status, libc::WNOHANG);
-    }
+    // Batch 3: routed through `platform::process`. Unix `waitpid
+    // (WNOHANG)`; Windows no-op (no zombie model).
+    crate::platform::process::reap_child_if_possible(pid.get());
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
 fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
+    // Retained (dead code post-Batch-3) as a Unix-only helper for any
+    // future non-standard signal delivery. All product paths now use
+    // `crate::platform::process::terminate_pid` with `SignalKind`.
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
         return false;
     };

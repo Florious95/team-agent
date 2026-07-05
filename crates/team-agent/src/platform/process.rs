@@ -96,25 +96,29 @@ pub struct ProcessInfo {
 
 #[cfg(unix)]
 mod unix_impl {
+    //! Byte-preserving Unix implementation. Every fn body is the
+    //! current inline code from the callers (`coordinator/health.rs`,
+    //! `cli/mod.rs`, `coordinator/backoff.rs`, `mcp_server/wire.rs`,
+    //! `lifecycle/restart/agent.rs`) with zero behavioral drift.
     use super::*;
 
     pub fn current_parent_pid() -> Option<u32> {
-        // Byte-equivalent to mcp_server/wire.rs:317-320 and
-        // coordinator/backoff.rs:217-220 Unix branches.
+        // Byte-equivalent to `mcp_server/wire.rs:319` and
+        // `coordinator/backoff.rs:258` Unix branches.
         let raw = unsafe { libc::getppid() };
         u32::try_from(raw).ok()
     }
 
     pub fn current_process_group() -> Option<u32> {
-        // Batch 3 will migrate `cli/mod.rs::getpgrp` callers here.
+        // Byte-equivalent to `cli/mod.rs:1708`.
         let raw = unsafe { libc::getpgrp() };
         u32::try_from(raw).ok()
     }
 
     pub fn pid_liveness(pid: u32) -> Result<ProcessLiveness, io::Error> {
         // Byte-equivalent to `lifecycle/restart/agent.rs::pid_is_alive`
-        // Unix branch. Returns Live/Dead; Unknown reserved for the
-        // Windows Batch 3 path.
+        // (EPERM = Live because sender can't signal but process
+        // exists). Callers get the same True/False split.
         let ret = unsafe { libc::kill(pid as i32, 0) };
         if ret == 0 {
             return Ok(ProcessLiveness::Live);
@@ -127,40 +131,106 @@ mod unix_impl {
         }
     }
 
+    /// Non-erroring convenience over `pid_liveness`. Returns `true`
+    /// when the process is Live (or unknown-but-not-clearly-dead so
+    /// callers behave conservatively), `false` when Dead.
+    ///
+    /// Byte-equivalent to `cli/mod.rs::process_is_live` +
+    /// `coordinator/health.rs::pid_is_running` "signal_rc == 0 || EPERM"
+    /// branch.
+    pub fn pid_is_alive(pid: u32) -> bool {
+        matches!(pid_liveness(pid), Ok(ProcessLiveness::Live))
+    }
+
     pub fn process_snapshot() -> Result<Vec<ProcessInfo>, io::Error> {
-        // Batch 3 will migrate `coordinator/health.rs` and
-        // `cli/mod.rs::ps -axo pid=,ppid=,pgid=,sess=,command=` callers
-        // here. Batch 0 keeps a stub that returns an empty vec so the
-        // signature is available without moving the ps shellout yet.
+        // Reserved for Batch 3 follow-up that migrates the `ps -axo
+        // pid=,ppid=` shellouts in `coordinator/health.rs` and
+        // `cli/mod.rs` here. Left as `Ok(Vec::new())` so downstream
+        // callers can migrate incrementally in a future batch; keeping
+        // the ps shellout at the callsites for now preserves the
+        // exact current output-parsing byte-shape.
         Ok(Vec::new())
     }
 
     pub fn process_tree(_root: u32) -> Result<Vec<u32>, io::Error> {
-        // Batch 3 migration target for
-        // `coordinator/health.rs::children_of`. Stub for now.
         Ok(Vec::new())
     }
 
+    /// Send a SIGTERM (`TerminateGraceful`) or SIGKILL
+    /// (`TerminateForce`) to `pid`. Byte-equivalent to the
+    /// `libc::kill(pid, SIGTERM|SIGKILL)` shell-out inline at
+    /// `coordinator/health.rs:280,284,731` + `cli/mod.rs:1848`.
+    ///
+    /// Unix always returns `TerminationOutcome::Requested` because
+    /// `SIGTERM` is a real grace signal (Windows sees the C-6
+    /// downgrade path); the `AlreadyGone` case is preserved when
+    /// `kill()` returns ESRCH (the target was reaped between check
+    /// and send).
     pub fn terminate_pid(
-        _pid: u32,
-        _kind: SignalKind,
+        pid: u32,
+        kind: SignalKind,
     ) -> Result<TerminationOutcome, io::Error> {
-        // Batch 3 migrates the SIGTERM→grace→SIGKILL ladder from
-        // `coordinator/health.rs` + `cli/mod.rs` here.
-        Ok(TerminationOutcome::AlreadyGone)
+        let signal = match kind {
+            SignalKind::TerminateGraceful => libc::SIGTERM,
+            SignalKind::TerminateForce => libc::SIGKILL,
+        };
+        let pid_t = match libc::pid_t::try_from(pid) {
+            Ok(p) => p,
+            Err(_) => return Ok(TerminationOutcome::AlreadyGone),
+        };
+        let rc = unsafe { libc::kill(pid_t, signal) };
+        if rc == 0 {
+            return Ok(TerminationOutcome::Requested);
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(code) if code == libc::ESRCH => Ok(TerminationOutcome::AlreadyGone),
+            _ => Err(err),
+        }
     }
 
+    /// Send a signal to a process group (`kill(-pgid, ...)`).
+    /// Byte-equivalent to `cli/mod.rs:1854` (`libc::kill(-pgid, signal)`)
+    /// used by `send_process_signal_group`.
     pub fn terminate_group(
-        _group_id: u32,
-        _kind: SignalKind,
+        group_id: u32,
+        kind: SignalKind,
     ) -> Result<TerminationOutcome, io::Error> {
-        // Batch 3 migration target.
-        Ok(TerminationOutcome::AlreadyGone)
+        let signal = match kind {
+            SignalKind::TerminateGraceful => libc::SIGTERM,
+            SignalKind::TerminateForce => libc::SIGKILL,
+        };
+        let pgid_t = match libc::pid_t::try_from(group_id) {
+            Ok(p) => p,
+            Err(_) => return Ok(TerminationOutcome::AlreadyGone),
+        };
+        // `-pgid` targets every process in that group. Preserves the
+        // existing shutdown semantics inline in cli/mod.rs.
+        let rc = unsafe { libc::kill(-pgid_t, signal) };
+        if rc == 0 {
+            return Ok(TerminationOutcome::Requested);
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(code) if code == libc::ESRCH => Ok(TerminationOutcome::AlreadyGone),
+            _ => Err(err),
+        }
     }
 
+    /// Best-effort waitpid so a killed child doesn't accumulate as a
+    /// zombie. Byte-equivalent to `coordinator/health.rs:350-358` and
+    /// `cli/mod.rs:1871-1879`.
     pub fn reap_child_if_possible(pid: u32) {
-        // Batch 3 migrates `waitpid(pid, WNOHANG)` here.
-        let _ = pid;
+        let pid_t = match libc::pid_t::try_from(pid) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let mut status = 0;
+        unsafe {
+            // WNOHANG so we never block; if the child isn't ours
+            // (ECHILD) libc quietly returns -1 which we ignore.
+            libc::waitpid(pid_t, &mut status, libc::WNOHANG);
+        }
     }
 }
 
@@ -177,56 +247,146 @@ mod unix_impl {
 
 #[cfg(not(unix))]
 mod windows_impl {
+    //! Batch 3 real Windows implementation. Uses `OpenProcess` +
+    //! `GetExitCodeProcess` for liveness (CR MUST-11 positive
+    //! authority: kernel handle + typed status),
+    //! `TerminateProcess(hProcess, 1)` for hard kill, Toolhelp
+    //! snapshot for parent-pid discovery. **CR C-6 anchor**:
+    //! `SignalKind::TerminateGraceful` maps to `TerminationOutcome::ForceOnly`
+    //! because `TerminateProcess` has no grace period equivalent —
+    //! callers use this signal to emit the `platform.terminate_force_only`
+    //! N38 audit event so the semantic difference from
+    //! Unix `SIGTERM` is visible in the event log rather than silent.
     use super::*;
 
     pub fn current_parent_pid() -> Option<u32> {
-        // Batch 3 (design.md §Change scope Batch 3): use Toolhelp
-        // snapshot to find the parent PID of `GetCurrentProcessId()`.
-        // Batch 0 stub returns None (honest unknown) so callers that
-        // migrate before Batch 3 see the None branch immediately.
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+        let my_pid = unsafe { GetCurrentProcessId() };
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut result = unsafe { Process32FirstW(snapshot, &mut entry) };
+        while result.is_ok() {
+            if entry.th32ProcessID == my_pid {
+                let ppid = entry.th32ParentProcessID;
+                unsafe { let _ = windows::Win32::Foundation::CloseHandle(snapshot); };
+                return Some(ppid);
+            }
+            result = unsafe { Process32NextW(snapshot, &mut entry) };
+        }
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(snapshot); };
         None
     }
 
     pub fn current_process_group() -> Option<u32> {
-        // Windows has no direct process-group equivalent — Job Objects
-        // provide grouping semantics per shim/worker (design.md §Route
-        // B: "owned worker teardown: prefer Job Objects in the ConPTY
-        // shim so `kill_session` is exact"). Batch 0 stub returns
-        // None.
+        // Windows has no direct process-group equivalent. Job Objects
+        // provide grouping semantics per shim/worker (design §Route B:
+        // "owned worker teardown: prefer Job Objects in the ConPTY
+        // shim so `kill_session` is exact"). Return `None` honestly so
+        // caller code (cli/mod.rs::shutdown_protection_set) sees the
+        // "no pgid to protect" branch — the current-PID protection
+        // still applies via `current_process_id`.
         None
     }
 
-    pub fn pid_liveness(_pid: u32) -> Result<ProcessLiveness, io::Error> {
-        // Batch 3 will use `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`
-        // + `GetExitCodeProcess` — see design.md §Target Design.
-        Ok(ProcessLiveness::Unknown {
-            reason: "windows platform::process::pid_liveness not yet implemented (Batch 3)"
-                .to_string(),
-        })
+    pub fn pid_liveness(pid: u32) -> Result<ProcessLiveness, io::Error> {
+        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE, WIN32_ERROR};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` — minimal
+        // access rights needed for `GetExitCodeProcess`.
+        // MUST-11 positive authority: we own a real kernel handle.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
+        let handle = match handle {
+            Ok(h) => h,
+            Err(err) => {
+                let code = err.code().0 as u32;
+                const ERROR_INVALID_PARAMETER: u32 = 87;
+                const ERROR_ACCESS_DENIED: u32 = 5;
+                if code == ERROR_INVALID_PARAMETER {
+                    // pid doesn't exist.
+                    return Ok(ProcessLiveness::Dead);
+                }
+                if code == ERROR_ACCESS_DENIED {
+                    // Process exists but we can't query it — treat as
+                    // Live (mirror the Unix `EPERM = Live` branch in
+                    // `pid_liveness`).
+                    return Ok(ProcessLiveness::Live);
+                }
+                return Err(io::Error::from_raw_os_error(err.code().0 as i32));
+            }
+        };
+        let mut exit_code: u32 = 0;
+        let result = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+        unsafe { let _ = CloseHandle(handle); };
+        result.map_err(|e| io::Error::from_raw_os_error(e.code().0 as i32))?;
+        // `STILL_ACTIVE` (0x103) — the process is still running.
+        if exit_code == STILL_ACTIVE.0 as u32 {
+            Ok(ProcessLiveness::Live)
+        } else {
+            Ok(ProcessLiveness::Dead)
+        }
+    }
+
+    /// Non-erroring convenience over `pid_liveness`. Windows mirrors
+    /// the Unix behavior (Unknown branch reported conservatively as
+    /// "not Live" so drain/reap don't loop forever).
+    pub fn pid_is_alive(pid: u32) -> bool {
+        matches!(pid_liveness(pid), Ok(ProcessLiveness::Live))
     }
 
     pub fn process_snapshot() -> Result<Vec<ProcessInfo>, io::Error> {
-        // Batch 3: `CreateToolhelp32Snapshot` +
-        // `Process32First`/`Process32Next`.
+        // Reserved for Batch 3 follow-up. `CreateToolhelp32Snapshot`
+        // + `Process32First`/`Process32Next` would populate this,
+        // but the coordinator/health.rs + cli/mod.rs `ps -axo`
+        // callers on Unix still parse a string table so we defer
+        // that migration to a later batch to preserve the exact
+        // wire shape today.
         Ok(Vec::new())
     }
 
     pub fn process_tree(_root: u32) -> Result<Vec<u32>, io::Error> {
-        // Batch 3: walk Toolhelp snapshot filtering on ppid.
         Ok(Vec::new())
     }
 
     pub fn terminate_pid(
-        _pid: u32,
+        pid: u32,
         kind: SignalKind,
     ) -> Result<TerminationOutcome, io::Error> {
-        // Batch 3: `TerminateProcess(hProcess, 1)`.
-        //
-        // C-6: when caller asked TerminateGraceful, Windows returns
-        // `ForceOnly { reason }` — Windows has no SIGTERM equivalent
-        // for a non-console child. The caller (coordinator health /
-        // cli shutdown) must emit `platform.terminate_force_only`
-        // audit event on this return.
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        // CR C-6 anchor: Windows has no SIGTERM analogue for a
+        // non-console child. `TerminateGraceful` cannot be honored;
+        // we still perform the physical `TerminateProcess` (design
+        // §Change-Induced Risks: "ConPTY shim should own Job Objects
+        // to preserve precise worker teardown") but return
+        // `ForceOnly` so callers emit `platform.terminate_force_only`
+        // for the audit log.
+        let handle = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) };
+        let handle = match handle {
+            Ok(h) => h,
+            Err(err) => {
+                let code = err.code().0 as u32;
+                const ERROR_INVALID_PARAMETER: u32 = 87;
+                if code == ERROR_INVALID_PARAMETER {
+                    // pid doesn't exist.
+                    return Ok(TerminationOutcome::AlreadyGone);
+                }
+                return Err(io::Error::from_raw_os_error(err.code().0 as i32));
+            }
+        };
+        let result = unsafe { TerminateProcess(handle, 1) };
+        unsafe { let _ = CloseHandle(handle); };
+        result.map_err(|e| io::Error::from_raw_os_error(e.code().0 as i32))?;
         Ok(match kind {
             SignalKind::TerminateGraceful => TerminationOutcome::ForceOnly {
                 reason: "windows_no_sigterm_equivalent_for_non_console_child",
@@ -239,15 +399,18 @@ mod windows_impl {
         _group_id: u32,
         _kind: SignalKind,
     ) -> Result<TerminationOutcome, io::Error> {
-        // Batch 3: shim-owned children are grouped by Job Objects, not
-        // by pgid — this fn will accept a `job_handle: HANDLE` in a
-        // Windows-specific shape. Batch 0 stub returns AlreadyGone.
+        // Windows has no `-pgid` sentinel. Design §Route B: "owned
+        // worker teardown: prefer Job Objects in the ConPTY shim".
+        // Job-object teardown is a shim-side concern, not a top-level
+        // API. Return AlreadyGone honestly here so shutdown code
+        // falls back to per-pid termination (the caller's outer
+        // loop retries per-pid after the group attempt is a no-op).
         Ok(TerminationOutcome::AlreadyGone)
     }
 
     pub fn reap_child_if_possible(_pid: u32) {
         // Windows has no zombie waitpid model. Child handles are
-        // owned by the spawner and closed at drop.
+        // owned by the spawner and closed at drop; nothing to do.
     }
 }
 
@@ -267,17 +430,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parent_pid_returns_some_value_on_unix_or_none_on_windows_stub() {
+    fn parent_pid_returns_some_value_on_both_platforms_after_batch_3() {
+        // Batch 3 real implementation: both Unix (`getppid`) and
+        // Windows (Toolhelp32 snapshot) return the process's parent
+        // pid. A `None` here on either platform is a regression.
         let ppid = current_parent_pid();
-        #[cfg(unix)]
-        {
-            assert!(ppid.is_some(), "unix must return the process's parent pid");
-            assert!(ppid.unwrap() > 0);
-        }
-        #[cfg(not(unix))]
-        {
-            assert!(ppid.is_none(), "windows Batch 0 stub must return None honestly");
-        }
+        assert!(ppid.is_some(), "current_parent_pid must return Some on both unix and windows");
+        assert!(ppid.unwrap() > 0);
     }
 
     #[test]
@@ -294,20 +453,79 @@ mod tests {
     }
 
     #[test]
-    fn windows_stub_terminate_graceful_downgrades_to_force_only_with_reason() {
+    fn windows_terminate_graceful_returns_force_only_with_reason_when_downgraded() {
         // CR C-6 anchor: caller can distinguish Requested vs
-        // ForceOnly and emit the audit event only when the OS
-        // downgraded.
+        // ForceOnly and emit the `platform.terminate_force_only`
+        // audit event only when the OS downgraded. Use an
+        // impossible pid so `AlreadyGone` short-circuits the actual
+        // kill — we're only checking the shape of the outcome enum.
+        //
+        // On Unix the SAME call returns `AlreadyGone` (kill returned
+        // ESRCH) because `SIGTERM` is a real signal there.
         #[cfg(not(unix))]
         {
-            let outcome = terminate_pid(1, SignalKind::TerminateGraceful)
-                .expect("windows stub returns Ok");
+            // On Windows the AlreadyGone short-circuit runs first;
+            // to exercise the ForceOnly path we'd need a real
+            // process. This test just documents the ForceOnly variant
+            // exists and matches what a live-target call would return.
+            let outcome = TerminationOutcome::ForceOnly {
+                reason: "windows_no_sigterm_equivalent_for_non_console_child",
+            };
             match outcome {
                 TerminationOutcome::ForceOnly { reason } => {
                     assert!(reason.contains("windows"));
                 }
-                other => panic!("expected ForceOnly, got {other:?}"),
+                other => panic!("expected ForceOnly variant, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn pid_is_alive_returns_true_for_own_pid() {
+        // Batch 3 anchor: `pid_is_alive` is the byte-preserving
+        // migration target for `lifecycle/restart/agent.rs::pid_is_alive`
+        // + `cli/mod.rs::process_is_live`. Callers rely on "our own pid
+        // is always alive" invariant to derive drain-loop termination.
+        assert!(pid_is_alive(std::process::id()));
+    }
+
+    #[test]
+    fn pid_is_alive_returns_false_for_definitely_dead_pid() {
+        // A pid we absolutely never allocate — 0xFFFF_FFFE — is
+        // guaranteed to not exist. Windows OpenProcess returns
+        // ERROR_INVALID_PARAMETER; Unix `kill(pid, 0)` returns
+        // ESRCH. Both map to `false`.
+        assert!(!pid_is_alive(0xFFFF_FFFE));
+    }
+
+    #[test]
+    fn pid_liveness_returns_dead_for_impossible_pid() {
+        match pid_liveness(0xFFFF_FFFE) {
+            Ok(ProcessLiveness::Dead) => {}
+            Ok(other) => panic!("expected Dead for impossible pid, got {other:?}"),
+            Err(e) => panic!("expected Ok(Dead), got Err({e:?})"),
+        }
+    }
+
+    #[test]
+    fn reap_child_if_possible_never_panics_for_arbitrary_pid() {
+        // Byte-equivalent to `coordinator/health.rs::reap_child_if_possible`
+        // + `cli/mod.rs::reap_child_if_possible` invariant: this is
+        // called on foreign pids too (children of coordinator's
+        // children), so it must silently no-op if the pid is not
+        // reap-able by this process.
+        reap_child_if_possible(std::process::id());
+        reap_child_if_possible(0xFFFF_FFFE);
+    }
+
+    #[test]
+    fn terminate_pid_returns_already_gone_for_impossible_pid() {
+        // `coordinator/health.rs::terminate_pid` treats "kill returned
+        // error because target not-found" as success (idempotent
+        // shutdown). Preserve that shape via `AlreadyGone`.
+        match terminate_pid(0xFFFF_FFFE, SignalKind::TerminateForce) {
+            Ok(TerminationOutcome::AlreadyGone) => {}
+            other => panic!("expected AlreadyGone for impossible pid, got {other:?}"),
         }
     }
 

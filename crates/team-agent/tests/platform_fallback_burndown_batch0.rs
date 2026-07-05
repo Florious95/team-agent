@@ -29,46 +29,85 @@ fn src(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
+/// Strip `//` comment lines so grep guards don't fire on doc-comments
+/// that explain what's forbidden.
+fn strip_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 #[test]
-fn c2_wire_rs_fallback_carries_active_fixme_marker() {
+fn c2_wire_rs_fallback_removed_after_batch_3() {
+    // Batch 3 landed: `parent_pid()` now routes through
+    // `platform::process::current_parent_pid` on both Unix and Windows.
     let body = src("mcp_server/wire.rs");
-    // Fallback still present (Batch 3 removes it).
+    // Fallback SHOULD BE GONE — no cfg-gated non-Unix `parent_pid` fn.
     assert!(
-        body.contains("#[cfg(not(unix))]") && body.contains("fn parent_pid()"),
-        "wire.rs non-Unix `parent_pid()` fallback missing — was Batch 3 landed \
-         without also updating this burndown tracker?"
+        !(body.contains("#[cfg(not(unix))]") && body.contains("fn parent_pid()")),
+        "CR C-2: wire.rs `parent_pid()` non-Unix cfg-gated fallback must \
+         be REMOVED after Batch 3. Reintroduction returns Windows to \
+         `0` (fake parent pid → MCP metadata + orphan detection break)."
     );
-    // FIXME marker present with target batch.
+    // FIXME marker must be gone at this site.
     assert!(
-        body.contains("FIXME(portability)") && body.contains("Batch 3"),
-        "wire.rs non-Unix fallback must carry `FIXME(portability)` + `Batch 3` \
-         markers so the burndown target is grep-visible (CR C-2)."
+        !body.contains("FIXME(portability)"),
+        "CR C-2: wire.rs no longer needs the FIXME marker after Batch 3."
     );
-    // Names the replacement API.
+    // Positive anchor: platform migration marker present.
     assert!(
         body.contains("crate::platform::process::current_parent_pid"),
-        "wire.rs FIXME must name the Batch 3 replacement \
-         `crate::platform::process::current_parent_pid` (CR C-2)."
+        "Batch 3 migration marker missing: `parent_pid` must call \
+         `crate::platform::process::current_parent_pid`."
+    );
+    // Legacy libc call gone from CODE (not from doc comments that
+    // reference the API for context).
+    let code = strip_comments(&body);
+    assert!(
+        !code.contains("libc::getppid"),
+        "CR C-2: wire.rs must NOT call `libc::getppid` directly after \
+         Batch 3 — the getppid goes through `platform::process`."
     );
 }
 
 #[test]
-fn c2_restart_agent_fallback_carries_active_fixme_marker() {
+fn c2_restart_agent_fallback_removed_after_batch_3() {
+    // Batch 3 landed: `pid_is_alive` now routes through
+    // `platform::process::pid_is_alive` on both platforms.
     let body = src("lifecycle/restart/agent.rs");
+    // The old cfg-gated non-Unix `true` fallback SHOULD BE GONE. A
+    // pattern-based check: the specific comment marker used inside
+    // the old fallback must not reappear.
     assert!(
-        body.contains("#[cfg(not(unix))]") && body.contains("true"),
-        "restart/agent.rs non-Unix `pid_is_alive() = true` fallback missing \
-         — was Batch 3 landed without also updating this burndown tracker?"
+        !body.contains("On other platforms, returns true conservatively"),
+        "CR C-2: restart/agent.rs `pid_is_alive() = true` non-Unix \
+         fallback must be REMOVED after Batch 3. Reintroduction \
+         breaks drain by treating every stale pid as alive."
     );
+    // FIXME marker must be gone.
     assert!(
-        body.contains("FIXME(portability)") && body.contains("Batch 3"),
-        "restart/agent.rs non-Unix fallback must carry `FIXME(portability)` \
-         + `Batch 3` markers (CR C-2)."
+        !body.contains("FIXME(portability)"),
+        "CR C-2: restart/agent.rs no longer needs the FIXME marker \
+         after Batch 3."
     );
+    // Positive anchor: platform migration marker present.
     assert!(
-        body.contains("crate::platform::process::pid_liveness"),
-        "restart/agent.rs FIXME must name the Batch 3 replacement \
-         `crate::platform::process::pid_liveness` (CR C-2)."
+        body.contains("crate::platform::process::pid_is_alive"),
+        "Batch 3 migration marker missing: `pid_is_alive` must call \
+         `crate::platform::process::pid_is_alive`."
+    );
+    // Legacy libc calls gone from CODE (not from doc comments).
+    let code = strip_comments(&body);
+    assert!(
+        !code.contains("libc::kill(pid as i32, 0)"),
+        "CR C-2: restart/agent.rs must NOT call `libc::kill(pid, 0)` \
+         directly after Batch 3."
     );
 }
 
@@ -103,11 +142,11 @@ fn c2_persist_rs_fallback_removed_after_batch_2() {
          `crate::platform::file_lock::try_lock_once_nonblocking` (acquire) \
          and `crate::platform::file_lock::unlock` (Drop)."
     );
-    // Legacy Unix inline calls must be gone from the fn body — if the
-    // cfg-gated `libc::flock` block reappears, someone reverted the
-    // migration.
+    // Legacy Unix inline calls must be gone from CODE (not from doc
+    // comments).
+    let code = strip_comments(&body);
     assert!(
-        !body.contains("libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB)"),
+        !code.contains("libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB)"),
         "CR C-2: persist.rs must NOT call `libc::flock` directly after \
          Batch 2 — the whole polling loop goes through \
          `platform::file_lock`."

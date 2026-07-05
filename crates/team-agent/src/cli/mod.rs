@@ -1353,34 +1353,48 @@ pub mod lifecycle_port {
             return;
         }
         for pid in pids.iter().rev() {
-            send_process_signal(*pid, libc::SIGTERM);
+            let _ = crate::platform::process::terminate_pid(
+                *pid,
+                crate::platform::process::SignalKind::TerminateGraceful,
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
         for pid in pids.iter().rev() {
-            send_process_signal(*pid, libc::SIGKILL);
+            let _ = crate::platform::process::terminate_pid(
+                *pid,
+                crate::platform::process::SignalKind::TerminateForce,
+            );
         }
         wait_for_processes_gone(&pids, std::time::Duration::from_secs(1));
     }
 
     fn reap_process_groups(pgids: &[u32], protected: &ShutdownProtection) {
+        // 0.5.x Windows portability Batch 3: routes group termination
+        // through `platform::process::terminate_group`. Unix keeps
+        // `kill(-pgid, SIGTERM|SIGKILL)` semantics byte-for-byte;
+        // Windows returns AlreadyGone (no pgid concept — Job Object
+        // teardown is the shim-side concern per design §Route B).
+        // The `pgid_t <= 1 || protected.contains_pgid(...)` filter
+        // stays in place so pgid 0/1 (kernel/init) and the caller's
+        // own group are never targeted.
         for pgid in pgids {
-            let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
-                continue;
-            };
-            if pgid_t <= 1 || protected.contains_pgid(*pgid) {
+            if *pgid <= 1 || protected.contains_pgid(*pgid) {
                 continue;
             }
-            send_process_signal_group(pgid_t, libc::SIGTERM);
+            let _ = crate::platform::process::terminate_group(
+                *pgid,
+                crate::platform::process::SignalKind::TerminateGraceful,
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
         for pgid in pgids {
-            let Ok(pgid_t) = libc::pid_t::try_from(*pgid) else {
-                continue;
-            };
-            if pgid_t <= 1 || protected.contains_pgid(*pgid) {
+            if *pgid <= 1 || protected.contains_pgid(*pgid) {
                 continue;
             }
-            send_process_signal_group(pgid_t, libc::SIGKILL);
+            let _ = crate::platform::process::terminate_group(
+                *pgid,
+                crate::platform::process::SignalKind::TerminateForce,
+            );
         }
     }
 
@@ -1705,7 +1719,10 @@ pub mod lifecycle_port {
         let mut protected = ShutdownProtection::default();
         let current = std::process::id();
         protected.pids.insert(current);
-        if let Ok(pgid) = u32::try_from(unsafe { libc::getpgrp() }) {
+        // 0.5.x Windows portability Batch 3: use platform primitive.
+        // Windows returns None (no pgid concept) and the branch is
+        // skipped honestly.
+        if let Some(pgid) = crate::platform::process::current_process_group() {
             protected.pgids.insert(pgid);
         }
         let mut cursor = current;
@@ -1840,54 +1857,31 @@ pub mod lifecycle_port {
         }
     }
 
-    fn send_process_signal(pid: u32, signal: libc::c_int) {
-        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
-            return;
-        };
-        unsafe {
-            libc::kill(pid_t, signal);
-        }
-    }
-
-    fn send_process_signal_group(pgid: libc::pid_t, signal: libc::c_int) {
-        unsafe {
-            libc::kill(-pgid, signal);
-        }
-    }
+    // 0.5.x Windows portability Batch 3: the four inline helpers
+    // (send_process_signal, send_process_signal_group,
+    // reap_child_if_possible, process_is_live) have been replaced
+    // by direct calls through `crate::platform::process::*` at the
+    // shutdown callsites above. The private helpers are removed so
+    // there's a single source of truth for signal/waitpid/liveness
+    // semantics; Unix behavior is byte-preserving (SignalKind maps
+    // 1:1 to SIGTERM/SIGKILL, ProcessLiveness::Live == the previous
+    // `kill(pid, 0) == 0 || EPERM` branch).
 
     fn wait_for_processes_gone(pids: &[u32], timeout: std::time::Duration) {
         let start = std::time::Instant::now();
         loop {
             for pid in pids {
-                reap_child_if_possible(*pid);
+                crate::platform::process::reap_child_if_possible(*pid);
             }
-            if !pids.iter().any(|pid| process_is_live(*pid)) || start.elapsed() >= timeout {
+            if !pids
+                .iter()
+                .any(|pid| crate::platform::process::pid_is_alive(*pid))
+                || start.elapsed() >= timeout
+            {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-    }
-
-    fn reap_child_if_possible(pid: u32) {
-        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
-            return;
-        };
-        let mut status = 0;
-        unsafe {
-            libc::waitpid(pid_t, &mut status, libc::WNOHANG);
-        }
-    }
-
-    fn process_is_live(pid: u32) -> bool {
-        let Ok(pid_t) = libc::pid_t::try_from(pid) else {
-            return false;
-        };
-        let rc = unsafe { libc::kill(pid_t, 0) };
-        if rc == 0 {
-            return true;
-        }
-        let err = std::io::Error::last_os_error();
-        err.raw_os_error() == Some(libc::EPERM)
     }
 
     fn process_pgids(
@@ -1927,7 +1921,10 @@ pub mod lifecycle_port {
             .map(|process| process.pid)
             .collect::<std::collections::BTreeSet<_>>();
         for pid in root_pids {
-            if !protected.contains_pid(*pid) && process_is_live(*pid) && seen.insert(*pid) {
+            if !protected.contains_pid(*pid)
+                && crate::platform::process::pid_is_alive(*pid)
+                && seen.insert(*pid)
+            {
                 residuals.push(ProcessInfo {
                     pid: *pid,
                     ppid: 0,
