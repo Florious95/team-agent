@@ -42,12 +42,25 @@ fn pipe_token_string_appears_only_inside_conpty_module() {
             continue;
         }
         // Allowed home: `src/conpty/**` (protocol.rs / backend.rs).
+        //
+        // Batch 6+ 内存流转白名单 (人审 2026-07-06 leader msg_368574801700):
+        // `coordinator/conpty_shim.rs` legitimately references
+        // `pipe_token` because it (a) generates a fresh token via
+        // `fresh_pipe_token()` and (b) passes it via
+        // `Command::env("TA_CONPTY_PIPE_TOKEN", token)` on the shim
+        // spawn. The token STAYS in memory — never touches
+        // `state.json` (structural guard
+        // `state_layout_records_only_pid_pipe_name_pipe_ready` in
+        // `conpty_shim.rs::tests` enforces that).
         let rel = path
             .strip_prefix(&src_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        if rel.starts_with("conpty/") || rel == "conpty.rs" {
+        if rel.starts_with("conpty/")
+            || rel == "conpty.rs"
+            || rel == "coordinator/conpty_shim.rs"
+        {
             continue;
         }
         offenders.push(rel);
