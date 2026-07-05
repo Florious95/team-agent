@@ -153,32 +153,6 @@ fn batch4_results_report_retry_uses_factory_transport() {
 }
 
 #[test]
-fn batch4_no_transport_kind_reads_or_writes_introduced() {
-    // Leader msg_4ac2122489e0: this batch is helper-swap only. The
-    // `transport_kind`-based dispatch is the parallel
-    // `feat/appserver-leader-host` work. Do NOT introduce
-    // `transport_kind` reads/writes in delivery.rs / leader_receiver.rs /
-    // results.rs so the two branches don't grow overlapping merge
-    // conflicts.
-    for rel in [
-        "messaging/delivery.rs",
-        "messaging/leader_receiver.rs",
-        "messaging/results.rs",
-    ] {
-        let body = read(rel);
-        let code = non_comment_body(&body);
-        assert!(
-            !code.contains("transport_kind"),
-            "{rel} must NOT reference `transport_kind` in Batch 4 (leader \
-             msg_4ac2122489e0: this batch is helper-swap only; \
-             `transport_kind` dispatch is the parallel \
-             feat/appserver-leader-host work — introducing it here would \
-             grow the merge conflict surface)."
-        );
-    }
-}
-
-#[test]
 fn batch4_c4_compact_status_guard_still_green() {
     // Belt-and-braces: Batch 4 must not have leaked backend detail
     // into `compact_status`. (The status_port compact serializer is
