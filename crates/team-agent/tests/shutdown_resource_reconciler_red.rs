@@ -1,3 +1,8 @@
+// 0.5.x Windows portability Batch 5: test uses `libc::kill` and
+// `libc::pid_t` to verify tmux + Unix process-tree reconciliation.
+// tmux is Unix-only; pgid/process-tree semantics differ on Windows
+// (Job Objects). Unix-only test file.
+#![cfg(unix)]
 //! #248 RED: shutdown must reconcile tmux sessions and pane process trees before
 //! reporting success.
 //!
