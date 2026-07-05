@@ -168,16 +168,19 @@ mod imp {
     }
 
     fn protocol_error_response(reason: &str) -> Response {
-        Response {
-            id: String::new(),
-            ok: false,
-            result: serde_json::Value::Null,
-            error: Some(crate::protocol::ProtocolError {
-                code: "named_pipe_io".to_string(),
-                message: reason.to_string(),
-                details: None,
-            }),
-        }
+        // Use the `TargetNotFound` variant with a descriptive message
+        // so `ConPtyBackend` maps the response to a typed
+        // `TransportError::MuxUnavailable` per CR C-1. We avoid the
+        // more specific variants (`PipeTokenMismatch`, `SchemaSkew`)
+        // because those carry additional semantic meaning callers
+        // key on. A generic transport-layer I/O failure is more
+        // honest surfacing as "the named target is unreachable".
+        Response::err(
+            String::new(),
+            crate::protocol::ProtocolError::TargetNotFound {
+                message: format!("named_pipe_io: {reason}"),
+            },
+        )
     }
 
     struct PipeIo(HANDLE);

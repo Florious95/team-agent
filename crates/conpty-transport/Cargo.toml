@@ -12,12 +12,17 @@ serde_json = { workspace = true }
 
 # 0.5.x Windows portability Batch 5: `named_pipe_client` module uses
 # `CreateFileW`/`WaitNamedPipeW`/`ReadFile`/`WriteFile` on Windows.
-# Same `windows = "0.61"` version + subset of features already used by
-# `win-conpty-phase0` and `team-agent::platform`.
+# Same `windows = "0.61"` version + full feature set of
+# `win-conpty-phase0` for API completeness (some type params in
+# CreateFileW resolve via Win32_Security/Foundation only when
+# transitively brought in by the caller crate).
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.61"
 features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Pipes",
+    "Win32_System_Threading",
 ]
