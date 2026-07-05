@@ -335,42 +335,6 @@ fn build_tmux(input: &TransportFactoryInput<'_>, source: &'static str) -> Resolv
     }
 }
 
-/// 0.5.x Windows portability Batch 5: gate the automatic
-/// `NamedPipeClient` connect on Windows. The factory attempts a real
-/// pipe connection only when either
-///
-/// - `input.state.transport.shim.pipe_ready == true` (the coordinator
-///   sets this after starting the shim binary and confirming its
-///   `ConnectNamedPipe` acceptance), OR
-/// - the caller passes `TEAM_AGENT_FORCE_CONPTY_PIPE_CONNECT=1` in
-///   the process environment (test/diagnostic override).
-///
-/// When neither signal is present, `build_conpty` returns a backend
-/// without a wired client — same shape the pre-Batch-5 factory always
-/// produced, so tests that assert `notices.is_empty()` stay stable
-/// across platforms. Runtime callers (worker lifecycle) start the
-/// shim first and mark it ready in state before asking the factory,
-/// so on the real hot path this gate opens whenever a live shim
-/// exists.
-#[cfg(windows)]
-fn conpty_pipe_ready(input: &TransportFactoryInput<'_>) -> bool {
-    if std::env::var("TEAM_AGENT_FORCE_CONPTY_PIPE_CONNECT")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    let Some(state) = input.state else {
-        return false;
-    };
-    state
-        .get("transport")
-        .and_then(|t| t.get("shim"))
-        .and_then(|s| s.get("pipe_ready"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
 fn build_conpty(
     input: &TransportFactoryInput<'_>,
     source: &'static str,
@@ -393,73 +357,54 @@ fn build_conpty(
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut backend = ConPtyBackend::new(workspace_hash.clone(), team_key);
     let mut notices = Vec::new();
-    // 0.5.x Windows portability Batch 5: on Windows try to auto-wire a
-    // real `NamedPipeClient` so `ConPtyBackend` can talk to the live
-    // shim. On Unix the client stays absent — the ConPTY factory path
-    // is never called with a real shim there, so we preserve the
-    // pre-Batch-5 "honest MuxUnavailable" behavior byte-for-byte.
+    // 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): factory returns to
+    // pure assembly. `build_conpty` used to call
+    // `NamedPipeClient::connect(_, 2000)` inline when
+    // `conpty_pipe_ready(input)` said state hinted the shim was up.
+    // That was a real CR C-5 violation — every `status`/`diagnose`
+    // resolve on Windows could block 2 seconds probing a
+    // non-existent pipe.
     //
-    // Gate: only attempt the connect when state hints that a shim was
-    // launched (`state.transport.shim.pipe_ready == true`) or the
-    // caller-supplied env override forces it. Without this gate the
-    // factory would spend 250ms probing a non-existent pipe on every
-    // resolve, and every test that runs on the Windows target would
-    // have to filter out a spurious `conpty_pipe_client_unwired`
-    // notice. When the gate opens and the connect fails, we DO NOT
-    // silently downgrade — we leave the client absent so subsequent
-    // trait calls fail with `TransportError::MuxUnavailable`. That's
-    // the "honest degradation, no silent success" path CR C-1
-    // requires. A single `transport.conpty_pipe_client_unwired`
-    // notice tells the operator why.
+    // Post-fix: the factory only STASHES the pipe hint via
+    // `ConPtyBackend::with_pipe_hint(pipe_name)`. The backend's
+    // `ensure_pipe_client` performs the connect + Hello lazily on
+    // the first Op that needs the pipe. Callers that don't need
+    // the pipe (status, resolve-only paths) never pay the connect
+    // cost.
+    //
+    // The Batch 6 direct-handoff path (`lifecycle/launch.rs`
+    // quick-start conpty) stays byte-compatible: it hands its
+    // Hello-connected client to `with_pipe_client` AFTER
+    // `resolve_transport` returns, and the client just becomes the
+    // backend's initial cache value so lazy connect is a no-op on
+    // the first Op.
     #[cfg(windows)]
     {
-        if conpty_pipe_ready(input) {
-            let pipe_name = conpty_transport::pipe_name_for(&workspace_hash, team_key);
-            // 0.5.x Windows portability Batch 7: wait up to 2s for
-            // the shim to be listening. On the launch hot path the
-            // coordinator side JUST spawned + handshook the shim,
-            // then dropped that client — the shim's accept loop has
-            // to close+recreate the pipe instance before we can
-            // re-connect. 250ms was tight in real-machine testing
-            // on batch7-28741378487; 2s covers the race window
-            // comfortably without stalling healthy paths (a listening
-            // shim replies to WaitNamedPipeW in <10ms).
-            match conpty_transport::NamedPipeClient::connect(&pipe_name, 2000) {
-                Ok(client) => {
-                    let adapter = crate::conpty::PipeClientAdapter(client);
-                    // `with_pipe_client` takes `mut self` — it either
-                    // returns the wired backend or consumes the input
-                    // and returns an error. Rebuild an unwired
-                    // backend on error so the outer `Box::new(backend)`
-                    // still has a live value.
-                    match backend.with_pipe_client(Box::new(adapter)) {
-                        Ok(wired) => backend = wired,
-                        Err(e) => {
-                            backend = ConPtyBackend::new(
-                                workspace_hash.clone(),
-                                team_key,
-                            );
-                            notices.push(TransportNotice {
-                                event: "transport.conpty_pipe_client_unwired",
-                                payload: serde_json::json!({
-                                    "pipe_name": pipe_name,
-                                    "reason": format!("hello_failed: {e}"),
-                                }),
-                            });
-                        }
-                    }
-                }
-                Err(e) => {
-                    notices.push(TransportNotice {
-                        event: "transport.conpty_pipe_client_unwired",
-                        payload: serde_json::json!({
-                            "pipe_name": pipe_name,
-                            "reason": format!("connect_failed: {e}"),
-                        }),
-                    });
-                }
+        if let Some(state) = input.state {
+            if let Some(pipe_name) = state
+                .pointer("/transport/shim/pipe_name")
+                .and_then(|v| v.as_str())
+            {
+                backend = backend.with_pipe_hint(pipe_name);
             }
         }
+        // Non-state env override still respected (test/diagnostic
+        // path). When set, derive the hint from workspace_hash +
+        // team_key so `dispatch` can lazily connect the first Op.
+        if std::env::var("TEAM_AGENT_FORCE_CONPTY_PIPE_CONNECT")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            && backend.pipe_hint_ref().is_none()
+        {
+            let pipe_name = conpty_transport::pipe_name_for(&workspace_hash, team_key);
+            backend = backend.with_pipe_hint(pipe_name);
+        }
+    }
+    // Suppress unused warnings on Unix where the cfg(windows) block
+    // above compiles to nothing.
+    #[cfg(not(windows))]
+    {
+        let _ = &workspace_hash;
     }
     // C-3: if state has BOTH `transport.kind=conpty` and a legacy
     // `tmux_endpoint`, tell the caller so they emit
@@ -739,18 +684,26 @@ mod tests {
         }
     }
 
-    // 0.5.x Windows portability Batch 5: pipe_ready gate — with the
-    // hint set BUT no shim actually running, Windows emits a single
-    // typed `transport.conpty_pipe_client_unwired` notice. Cross-
-    // platform check: on Unix the block is cfg'd out so the behavior
-    // is still "no notice" (no shim ever exists there).
+    // 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): factory returns to
+    // pure assembly. The `transport.conpty_pipe_client_unwired`
+    // notice is REMOVED from `build_conpty` — connect is deferred to
+    // the backend's `ensure_pipe_client` lazy path, which surfaces
+    // failures as `TransportError::MuxUnavailable` at Op call time
+    // (not at resolve time).
+    //
+    // Cross-platform: resolve NEVER emits pipe-client notices on
+    // either platform now. This test locks that invariant so a
+    // future revert would fire loudly.
     #[test]
-    fn conpty_with_pipe_ready_hint_but_no_shim_emits_typed_notice_on_windows() {
+    fn conpty_resolve_emits_no_pipe_client_notice_after_c5_fix() {
         let workspace = ws();
         let state = serde_json::json!({
             "transport": {
                 "kind": "conpty",
-                "shim": { "pipe_ready": true },
+                "shim": {
+                    "pipe_name": r"\\.\pipe\team-agent-conpty-test-team-a",
+                    "pipe_ready": true
+                },
             }
         });
         let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
@@ -763,27 +716,15 @@ mod tests {
             .iter()
             .filter(|n| n.event == "transport.conpty_pipe_client_unwired")
             .collect();
-        #[cfg(windows)]
-        {
-            assert_eq!(
-                pipe_notices.len(),
-                1,
-                "Windows must emit exactly one typed pipe-client notice \
-                 when the pipe_ready hint is set but no shim is running"
-            );
-            // Notice payload must carry both `pipe_name` and `reason`
-            // so operators can diagnose the mismatch.
-            let payload = &pipe_notices[0].payload;
-            assert!(payload.get("pipe_name").is_some());
-            assert!(payload.get("reason").is_some());
-        }
-        #[cfg(not(windows))]
-        {
-            assert!(
-                pipe_notices.is_empty(),
-                "non-Windows must never emit the pipe-client notice"
-            );
-        }
+        assert!(
+            pipe_notices.is_empty(),
+            "CR C-5 fix: resolve must not emit pipe-client notices \
+             (connect deferred to backend lazy path). Found: {:?}",
+            pipe_notices
+                .iter()
+                .map(|n| &n.event)
+                .collect::<Vec<_>>()
+        );
     }
 
     // Wire-string invariants for RequestedTransportBackend so a rename
