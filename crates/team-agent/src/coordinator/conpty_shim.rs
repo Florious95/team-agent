@@ -383,6 +383,22 @@ fn finalize(
         }),
     );
     save_runtime_state(workspace, &state).map_err(|e| ShimError::StatePersist { source: e })?;
+    // Also flip the in-process env override so the factory's Batch 5
+    // `conpty_pipe_ready` gate opens on the SAME process's next
+    // `resolve_transport` call, independent of whether the
+    // subsequent state save round-trips our `transport.shim` block
+    // through disk without clobbering. This is safe because the env
+    // var is process-local (does not leak to child processes we
+    // spawn later, unlike TA_CONPTY_PIPE_TOKEN which we explicitly
+    // pass via Command::env). Set only after the state persist
+    // succeeded so we never lie about readiness.
+    //
+    // SAFETY: `std::env::set_var` is safe on single-threaded code
+    // paths. Quick-start runs on the main thread before any worker
+    // thread spawns; the factory's env read is on the same thread.
+    unsafe {
+        std::env::set_var("TEAM_AGENT_FORCE_CONPTY_PIPE_CONNECT", "1");
+    }
     Ok(ShimHandle {
         child: Some(child),
         pid,
