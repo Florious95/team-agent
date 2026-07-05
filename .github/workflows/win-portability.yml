@@ -5,9 +5,13 @@ name: win-portability
 # - Ubuntu job: primary green-required. Runs platform lib tests + C-1
 #   packaging assertion + C-2 fallback burn-down + C-4 caller
 #   whitelist guard.
-# - Windows compile-gate job: continue-on-error. `cargo check
-#   --target x86_64-pc-windows-msvc` is expected RED in Batch 0;
-#   Batches 1-4 burn the error count down.
+# - Windows compile-gate job: **hard-red** as of Batch 4 (0 lib+bin
+#   errors on `feat/win-portability` HEAD). `continue-on-error: true`
+#   on the job was removed; a broken compile now fails CI. The
+#   per-step `continue-on-error: true` is kept on `cargo check
+#   --tests` because Batch 5's job is to burn THAT surface down —
+#   the test-target error count is captured as a burn-down reference
+#   without failing the gate yet.
 #
 # Note: `cargo test ... platform::` command has trailing `::` which
 # GitHub's YAML lexer misparses as a key marker unless the whole
@@ -43,7 +47,9 @@ jobs:
 
   windows-compile-gate:
     runs-on: windows-latest
-    continue-on-error: true
+    # Batch 4: `continue-on-error: true` REMOVED from the job level.
+    # `cargo check --lib --bin team-agent` on the Windows target is
+    # expected GREEN. A broken compile now fails the gate.
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -51,14 +57,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: cargo check windows target
-        continue-on-error: true
+      - name: cargo check windows target (lib+bin, hard-red gate)
         shell: bash
         run: |
-          set +e
+          # Batch 4: `set +e` REMOVED — a non-zero cargo exit fails
+          # this step, which now fails the job. The burn-down summary
+          # step reads the tee'd log for artifact tracking; the pass/
+          # fail decision comes straight from cargo's exit code.
           cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
-          echo "cargo_check_exit=$?"
-      - name: post burn-down summary
+      - name: post burn-down summary (lib+bin)
         if: always()
         shell: bash
         run: |
@@ -78,6 +85,32 @@ jobs:
           else
             echo "no_check_log=1" > win-portability-tracking.txt
           fi
+      - name: cargo check windows target (--tests, Batch 5 burn-down reference)
+        # This step is CAPTURE-ONLY. `cargo check --tests` on the
+        # Windows target is expected RED until Batch 5. Its role in
+        # this workflow is to record the error count so Batch 5 has a
+        # burn-down starting point. `continue-on-error: true` on this
+        # step means the RED cargo exit does NOT fail the gate; the
+        # error-count is written to the burn-down artifact for later
+        # inspection.
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          cargo check --target x86_64-pc-windows-msvc -p team-agent --tests 2>&1 | tee check-tests.log
+          echo "cargo_check_tests_exit=$?"
+      - name: post --tests burn-down summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f check-tests.log ]; then
+            errcount=$(grep -oc 'error\[E[0-9][0-9]*\]' check-tests.log || echo 0)
+            echo "cargo_check_tests_error_count=$errcount"
+            echo "" >> win-portability-tracking.txt
+            echo "# --tests burn-down reference (Batch 5 target)" >> win-portability-tracking.txt
+            echo "cargo_check_tests_error_count=$errcount" >> win-portability-tracking.txt
+            grep -o 'error\[E[0-9][0-9]*\]' check-tests.log | sort | uniq -c | sort -rn >> win-portability-tracking.txt || true
+          fi
       - name: upload burn-down artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -86,4 +119,5 @@ jobs:
           path: |
             win-portability-tracking.txt
             check.log
+            check-tests.log
           if-no-files-found: warn
