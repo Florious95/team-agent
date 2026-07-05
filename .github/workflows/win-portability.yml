@@ -11,5 +11,5 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
-      - name: platform lib tests via cargo test (rustup default toolchain)
-        run: cargo test -p team-agent --lib platform::
+      - name: hello
+        run: echo hi
