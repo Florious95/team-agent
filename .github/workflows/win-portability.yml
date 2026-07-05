@@ -63,12 +63,18 @@ jobs:
         shell: bash
         run: |
           if [ -f check.log ]; then
-            errcount=$(grep -c '^error\[' check.log || echo 0)
+            # cargo's error output includes ANSI color escape codes at
+            # line start (e.g. `\x1b[1m\x1b[91merror[E0433]...`), so
+            # `^error\[` never matches. Grep by the error class token
+            # `error[E<digits>]` which survives color-coded output.
+            errcount=$(grep -oc 'error\[E[0-9][0-9]*\]' check.log || echo 0)
             echo "cargo_check_error_count=$errcount"
             echo "git_rev=$(git rev-parse HEAD)" > win-portability-tracking.txt
             echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-portability-tracking.txt
             echo "cargo_check_error_count=$errcount" >> win-portability-tracking.txt
-            grep '^error\[' check.log | head -20 >> win-portability-tracking.txt || true
+            echo "" >> win-portability-tracking.txt
+            echo "# Error class breakdown (burn-down evidence)" >> win-portability-tracking.txt
+            grep -o 'error\[E[0-9][0-9]*\]' check.log | sort | uniq -c | sort -rn >> win-portability-tracking.txt || true
           else
             echo "no_check_log=1" > win-portability-tracking.txt
           fi
