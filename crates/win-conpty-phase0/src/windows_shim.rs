@@ -49,9 +49,10 @@ mod windows_shim {
         ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
     };
     use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
+    use windows::Win32::Storage::FileSystem::FlushFileBuffers;
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
@@ -132,19 +133,63 @@ mod windows_shim {
                     .map_err(|e| e.to_string())
             }),
         ));
-        // Accept named-pipe connections and handle them. MVP: single
-        // connection at a time (Phase 3 will multiplex).
+        // 0.5.x Windows portability Batch 7 F4 fix. Two race-safety
+        // changes to the accept loop that fixes the batch-6 reuse
+        // race (real-machine finding on batch6-28740159680):
+        //
+        // 1. `ConnectNamedPipe` returns `FALSE` with
+        //    `GetLastError() == ERROR_PIPE_CONNECTED (0x80070217)`
+        //    when a client connected between `CreateNamedPipe` and
+        //    `ConnectNamedPipe`. That is documented as SUCCESS —
+        //    the client is already connected, we just need to serve
+        //    them. Batch 5's `?` on the error propagation killed the
+        //    accept loop on this benign condition.
+        // 2. Before `CloseHandle` on end-of-serve, run
+        //    `FlushFileBuffers` + `DisconnectNamedPipe` so the OS
+        //    releases the pipe INSTANCE cleanly, preventing the
+        //    next `CreateNamedPipe` from racing into a "half-closed"
+        //    state that the peer sees as ERROR_PIPE_CONNECTED to
+        //    a stale instance.
+        //
+        // MVP: single connection at a time (Phase 3 will multiplex).
         loop {
             let handle = create_named_pipe(&args.pipe_name)?;
             eprintln!("windows-shim: waiting for client on {}", args.pipe_name);
-            unsafe {
-                ConnectNamedPipe(handle, None).context("ConnectNamedPipe")?;
+            let connect_ok = unsafe {
+                match ConnectNamedPipe(handle, None) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        // ERROR_PIPE_CONNECTED (0x80070217 in HRESULT
+                        // form, 535 in Win32) = client raced in
+                        // before our ConnectNamedPipe call. Treat as
+                        // success and proceed to serve.
+                        let code = err.code().0 as u32;
+                        code == 0x80070217 || code == 535
+                    }
+                }
+            };
+            if !connect_ok {
+                let last = std::io::Error::last_os_error();
+                eprintln!("windows-shim: ConnectNamedPipe failed: {last:?}");
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                // Continue rather than propagate — a transient OS
+                // hiccup should not kill the accept loop.
+                continue;
             }
             eprintln!("windows-shim: client connected");
             if let Err(e) = serve(handle, Arc::clone(&shim)) {
                 eprintln!("windows-shim: connection error: {e:?}");
             }
-            unsafe { CloseHandle(handle).ok() };
+            // Clean shutdown of this pipe instance so the next
+            // CreateNamedPipe gets a fresh instance without a race
+            // window (Batch 7 F4 anchor).
+            unsafe {
+                let _ = FlushFileBuffers(handle);
+                let _ = DisconnectNamedPipe(handle);
+                let _ = CloseHandle(handle);
+            }
         }
     }
 
