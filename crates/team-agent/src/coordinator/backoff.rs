@@ -36,19 +36,58 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // CP-1: the daemon's whole tick surface (has_session / capture / inject / list_windows / kill)
     // runs through this backend. Prefer the persisted runtime endpoint so attached explicit-socket
     // teams are checked on the same socket as lifecycle worker operations.
+    //
+    // 0.5.x Phase 1d Batch 3: coordinator boot now routes through
+    // `transport_factory::resolve_transport` so `state.transport.kind =
+    // conpty` boots the ConPTY backend, not a tmux backend that would
+    // fake `has_session()`. Tmux behavior is byte-equivalent (Layer 3
+    // legacy `tmux_endpoint` → same `tmux_backend_for_runtime_state_or_workspace`
+    // shape inside the factory's `build_tmux`).
     let state = crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
-    let tmux_selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+    let factory_input = crate::transport_factory::TransportFactoryInput::new(
         args.workspace.as_path(),
-        state.as_ref(),
-    );
+        crate::transport_factory::TransportPurpose::Coordinator,
+    )
+    .with_state(state.as_ref());
+    let resolved = match crate::transport_factory::resolve_transport(factory_input) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // Fail-closed honest degradation: coordinator boots with a
+            // tmux-workspace backend so it doesn't crash, but records
+            // the assembly refusal in the boot metadata source so the
+            // event log shows the reason. This preserves the daemon
+            // liveness path while making the failure explicit.
+            eprintln!(
+                "coordinator: transport_factory refused ({e}); falling back to tmux workspace for daemon liveness"
+            );
+            let sel = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+                args.workspace.as_path(),
+                state.as_ref(),
+            );
+            let metadata = DaemonTmuxEndpointMetadata {
+                tmux_endpoint_used: sel.tmux_endpoint_used.clone(),
+                tmux_endpoint_source: "factory_refused_fallback",
+            };
+            let coord = Coordinator::new(
+                args.workspace.clone(),
+                Box::new(RealProviderRegistry),
+                Box::new(sel.backend),
+            );
+            return run_daemon_with_coordinator_and_boot_tmux(&args, &coord, Some(metadata));
+        }
+    };
+    // Preserve tmux boot metadata byte-equivalent for tmux teams.
+    // ConPTY teams get their source string but no tmux endpoint (design
+    // §Behavior Equivalence: same `tmux_endpoint_used` for tmux; None
+    // + honest source for conpty).
     let tmux_metadata = DaemonTmuxEndpointMetadata {
-        tmux_endpoint_used: tmux_selection.tmux_endpoint_used.clone(),
-        tmux_endpoint_source: tmux_selection.tmux_endpoint_source.as_str(),
+        tmux_endpoint_used: resolved.tmux_endpoint_used.clone(),
+        tmux_endpoint_source: resolved.source,
     };
     let coordinator = Coordinator::new(
         args.workspace.clone(),
         Box::new(RealProviderRegistry),
-        Box::new(tmux_selection.backend),
+        resolved.backend,
     );
     run_daemon_with_coordinator_and_boot_tmux(&args, &coordinator, Some(tmux_metadata))
 }

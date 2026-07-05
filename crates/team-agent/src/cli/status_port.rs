@@ -280,7 +280,29 @@ use rusqlite::params;
         if let (Some(session), Some(agents)) = (session, state.get("agents").and_then(Value::as_object)) {
             let run_ws = crate::model::paths::canonical_run_workspace(workspace)
                 .unwrap_or_else(|_| workspace.to_path_buf());
-            let backend = crate::tmux_backend::TmuxBackend::for_workspace(&run_ws);
+            // 0.5.x Phase 1d Batch 3: use the factory-resolved backend
+            // so conpty teams get their scrollback from the shim rather
+            // than a fake tmux capture that always returns empty. Tmux
+            // teams take the same code path as before (byte-equivalent).
+            let resolved = crate::transport_factory::resolve_read_only_transport(
+                &run_ws,
+                Some(state),
+                crate::transport_factory::TransportPurpose::Status,
+            );
+            let backend: Box<dyn crate::transport::Transport> = match resolved {
+                Ok(r) => r.backend,
+                Err(_) => {
+                    // Read-path fallback: refused factory means we don't
+                    // try to inspect approval prompts. Empty vec = no
+                    // waiting approvals, honest.
+                    return Ok(json!({
+                        "ok": true,
+                        "waiting": false,
+                        "waiting_count": 0,
+                        "approvals": [],
+                    }));
+                }
+            };
             for (agent_id, agent_state) in agents {
                 if agent.is_some_and(|wanted| wanted != agent_id) {
                     continue;
@@ -469,14 +491,30 @@ use rusqlite::params;
         }
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .unwrap_or_else(|_| workspace.to_path_buf());
-        let selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+        // 0.5.x Phase 1d Batch 3: route through the factory so a
+        // conpty team does NOT get its `has_session` probe served by a
+        // tmux backend (which would always return false and drive the
+        // reader into a false `tmux_session_missing` state — design
+        // §Batch 3 Verification anchor). Tmux teams see byte-equivalent
+        // behavior because factory Layer 3 (legacy tmux endpoint) uses
+        // the same `tmux_backend_for_runtime_state_or_workspace` shape.
+        let resolved = crate::transport_factory::resolve_read_only_transport(
             &run_ws,
             Some(state),
+            crate::transport_factory::TransportPurpose::Status,
         );
-        selection
-            .backend
-            .has_session(&crate::transport::SessionName::new(name))
-            .unwrap_or(false)
+        match resolved {
+            Ok(r) => r
+                .backend
+                .has_session(&crate::transport::SessionName::new(name))
+                .unwrap_or(false),
+            Err(_) => {
+                // Factory refused (e.g. explicit conpty without a
+                // resolvable team_key). Honest: return false rather
+                // than pretend a tmux session exists.
+                false
+            }
+        }
     }
 
     fn message_counts(conn: &rusqlite::Connection, owner_team_id: Option<&str>) -> Result<Value, CliError> {

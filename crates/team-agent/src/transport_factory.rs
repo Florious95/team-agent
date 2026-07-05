@@ -397,6 +397,38 @@ fn build_conpty(
 // selection surface. Callers grep for these names to signal intent.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// 0.5.x Phase 1d Batch 3 read-path convenience: build a
+/// `ResolvedTransport` for a plain workspace + optional state pair.
+///
+/// This is the single entrypoint the coordinator boot / status /
+/// diagnose read-only paths use. It follows the same 5-layer resolution
+/// order as `resolve_transport`; it does NOT accept a CLI backend
+/// override (read paths don't have one) — that avoids accidentally
+/// widening the CLI surface at every reader.
+///
+/// On `Err`, callers should fall back to a tmux workspace transport
+/// (byte-equivalent to today's shape) and record the refusal so
+/// telemetry stays honest.
+pub fn resolve_read_only_transport(
+    workspace: &Path,
+    state: Option<&serde_json::Value>,
+    purpose: TransportPurpose,
+) -> Result<ResolvedTransport, TransportFactoryError> {
+    let input = TransportFactoryInput::new(workspace, purpose)
+        .with_state(state)
+        // Read paths never pass a team_key — they use whatever state
+        // says. If `state.transport.kind = conpty` but there is no
+        // team_key, factory refuses (C-1 ①), which is the same honest
+        // signal we want to surface to the coordinator/status reader.
+        .with_team_key(
+            state
+                .and_then(|s| s.get("teams"))
+                .and_then(|t| t.as_object())
+                .and_then(|obj| obj.keys().next().map(String::as_str)),
+        );
+    resolve_transport(input)
+}
+
 /// Tmux transport for a caller-supplied tmux endpoint literal. Used by
 /// leader launcher, diagnose/orphans, and external leader pane
 /// discovery — NOT for worker/team selection.

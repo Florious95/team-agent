@@ -717,8 +717,22 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
     .map_err(|e| CliError::Runtime(e.to_string()))?;
     let state = selected.state;
     let event_log = selected.run_workspace.join(".team").join("logs").join("events.jsonl");
-    let backend = crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace);
-    let (issues, suggested_repairs) = diagnose_runtime(&state, &backend);
+    // 0.5.x Phase 1d Batch 3: factory-routed diagnose backend so
+    // conpty teams get accurate `has_session` / capture from the shim
+    // rather than a workspace tmux fallback (which would always miss
+    // the ConPTY pane universe).
+    let backend: Box<dyn crate::transport::Transport> =
+        match crate::transport_factory::resolve_read_only_transport(
+            &selected.run_workspace,
+            Some(&state),
+            crate::transport_factory::TransportPurpose::Diagnose,
+        ) {
+            Ok(r) => r.backend,
+            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+                &selected.run_workspace,
+            )),
+        };
+    let (issues, suggested_repairs) = diagnose_runtime(&state, backend.as_ref());
     let ok = issues.as_array().is_some_and(Vec::is_empty);
     Ok(CmdResult::from_json(
         json!({
@@ -802,7 +816,21 @@ pub fn cmd_peek(args: &PeekArgs) -> Result<CmdResult, CliError> {
     let Some((session, window, target)) = agent_pane_id(&state, &args.agent, agent_state) else {
         return Ok(peek_unavailable(&args.agent, args.json));
     };
-    let backend = crate::tmux_backend::TmuxBackend::for_workspace(&args.workspace);
+    // 0.5.x Phase 1d Batch 3: factory-routed peek backend so conpty
+    // teams peek from the shim scrollback rather than a workspace
+    // tmux capture that would always be empty. Tmux teams keep
+    // byte-equivalent behavior.
+    let backend: Box<dyn crate::transport::Transport> =
+        match crate::transport_factory::resolve_read_only_transport(
+            &args.workspace,
+            Some(&state),
+            crate::transport_factory::TransportPurpose::Status,
+        ) {
+            Ok(r) => r.backend,
+            Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(
+                &args.workspace,
+            )),
+        };
     let windows = backend
         .list_windows(&crate::transport::SessionName::new(session.clone()))
         .map_err(|e| CliError::Runtime(e.to_string()))?;

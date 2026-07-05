@@ -483,14 +483,23 @@ fn inject_tmux_session_present(workspace: &std::path::Path, state: &mut Value) {
         return;
     };
     let session_name_owned = session_name.to_string();
-    let selection = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+    // 0.5.x Phase 1d Batch 3: factory-routed read path. conpty state
+    // hits the shim; tmux state hits the persisted endpoint (byte-
+    // equivalent). Diagnose no longer reports `tmux_session_missing`
+    // for a conpty team just because it can't find a tmux session on
+    // the workspace socket (design §Batch 3 Verification anchor).
+    let resolved = crate::transport_factory::resolve_read_only_transport(
         workspace,
         Some(state),
+        crate::transport_factory::TransportPurpose::Diagnose,
     );
-    let present = selection
-        .backend
-        .has_session(&crate::transport::SessionName::new(session_name_owned))
-        .unwrap_or(false);
+    let present = match resolved {
+        Ok(r) => r
+            .backend
+            .has_session(&crate::transport::SessionName::new(session_name_owned))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
     if let Value::Object(map) = state {
         map.insert("tmux_session_present".to_string(), Value::Bool(present));
     }
