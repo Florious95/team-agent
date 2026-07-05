@@ -6,7 +6,10 @@ on:
     branches: [feat/win-portability]
 
 jobs:
-  hello:
+  lib-tests-linux:
     runs-on: ubuntu-latest
     steps:
-      - run: echo hello
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: platform lib tests via cargo test (rustup default toolchain)
+        run: cargo test -p team-agent --lib platform::
