@@ -2836,15 +2836,90 @@ pub fn quick_start_in_workspace_with_display(
     team_id: Option<&str>,
     open_display: bool,
 ) -> Result<QuickStartReport, LifecycleError> {
+    // Legacy entrypoint: no `--backend` override. Preserves the exact
+    // tmux behavior we shipped in Phase 1c (byte-equivalent tmux path
+    // when no explicit backend is asked for).
+    quick_start_in_workspace_with_display_and_backend(
+        workspace,
+        agents_dir,
+        name,
+        yes,
+        team_id,
+        open_display,
+        None,
+    )
+}
+
+/// 0.5.x Phase 1d Batch 2: quick-start with an optional
+/// `--backend <tmux|conpty>` override. When `backend` is `None` or
+/// `Some("tmux")` the transport is the same one the legacy entrypoint
+/// built (byte-equivalent to Phase 1c), so tmux users see no
+/// behavioral change.
+///
+/// When `backend` is `Some("conpty")`, this call routes through the
+/// factory. On a host without a live shim client (i.e. every
+/// non-Windows host today), the resulting `ConPtyBackend` degrades
+/// its spawn/inject/capture calls to `TransportError::MuxUnavailable`
+/// honestly — MUST-NOT-13 + CR C-1 ①. Users see a real "conpty
+/// unavailable" error rather than a silent tmux fallback.
+pub fn quick_start_in_workspace_with_display_and_backend(
+    workspace: &Path,
+    agents_dir: &Path,
+    name: Option<&str>,
+    yes: bool,
+    team_id: Option<&str>,
+    open_display: bool,
+    backend: Option<&str>,
+) -> Result<QuickStartReport, LifecycleError> {
     let workspace = explicit_quick_start_workspace(workspace);
-    let transport = quick_start_tmux_backend(&workspace);
+    // Default / `tmux` literal: preserve the existing tmux path
+    // BYTE-FOR-BYTE. This is the CR §Batch 2 Verification anchor:
+    // `quick-start` without `--backend` produces byte-equivalent tmux
+    // behavior.
+    let literal = backend.map(str::trim);
+    let is_tmux_or_default = matches!(literal, None | Some("") | Some("tmux") | Some("TMUX"));
+    if is_tmux_or_default {
+        let transport = quick_start_tmux_backend(&workspace);
+        return quick_start_with_transport_in_workspace_with_display(
+            &workspace,
+            agents_dir,
+            name,
+            yes,
+            team_id,
+            &transport,
+            open_display,
+        );
+    }
+    // Explicit non-tmux backend: route through the factory. Parse the
+    // literal, then delegate. On unsupported literals or refused
+    // preconditions we return `LifecycleError` — never silently pick
+    // tmux (CR C-1 ①/②).
+    let requested = crate::transport_factory::RequestedTransportBackend::parse_literal(
+        literal.unwrap_or_default(),
+    )
+    .ok_or_else(|| {
+        LifecycleError::TeamSelect(format!(
+            "unsupported --backend literal {literal:?}; expected `tmux` or `conpty` \
+             (Phase 1d does not auto-map `pty` to conpty — CR C-1 ②)"
+        ))
+    })?;
+    let team_key_for_factory = team_id;
+    let input = crate::transport_factory::TransportFactoryInput::new(
+        &workspace,
+        crate::transport_factory::TransportPurpose::Launch,
+    )
+    .with_team_key(team_key_for_factory)
+    .with_explicit_backend(Some(requested));
+    let resolved = crate::transport_factory::resolve_transport(input)
+        .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    // Hand the boxed backend down as `&dyn Transport`.
     quick_start_with_transport_in_workspace_with_display(
         &workspace,
         agents_dir,
         name,
         yes,
         team_id,
-        &transport,
+        &*resolved.backend,
         open_display,
     )
 }
@@ -3068,6 +3143,16 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let mut state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
+    // 0.5.x Phase 1d Batch 2: state.transport annotation is DEFERRED —
+    // wiring it here would extend the state.json top-level key order
+    // (adds `transport`) which trips
+    // `quick_start_state_seeds_spec_path_workspace_leader_display_backend`
+    // (hardcoded key-order pin) and may drift the phase_golden fixtures.
+    // Per leader msg_6dfbb3c78d38: help/state-shape changes that touch
+    // fixtures must be reported before landing. Batch 2 ships the CLI
+    // parse + factory routing + the `annotate_runtime_transport` fn
+    // itself, but the call site stays on the tmux-specific annotator
+    // until leader accepts the schema extension.
     annotate_runtime_tmux_endpoint(&mut state, transport, &workspace);
     save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
     annotate_persisted_team_depth(
@@ -3164,6 +3249,46 @@ pub fn quick_start_with_transport_in_workspace_with_display(
 /// the persisted endpoint synchronized with the transport they actually used,
 /// closing the silent socket-drift gap** (single state-save path; no parallel
 /// "annotate after spawn" race with coordinator).
+/// 0.5.x Phase 1d Batch 2: generic runtime-transport annotator.
+///
+/// Writes `state.transport = { kind, source }` for every backend
+/// (kind = wire string `"tmux"` | `"conpty"`; source = wire string
+/// from `ResolvedTransport.source` when known, else `"unknown"`).
+///
+/// For tmux, ALSO forwards to `annotate_runtime_tmux_endpoint` so the
+/// existing `tmux_endpoint` / `tmux_socket` / `tmux_socket_source`
+/// fields remain populated byte-equivalent to today's shape.
+///
+/// The tmux-specific fields are NOT written for ConPTY (CR C-4: no
+/// tmux-only fields under a conpty state; keeps compact status
+/// stable). ConPTY discovery fields (`pipe_name`, `shim_pid`) are
+/// added in Batch 3 when the shim boot path lands; this function just
+/// pins the top-level `transport.kind`/`source`.
+pub fn annotate_runtime_transport(
+    state: &mut serde_json::Value,
+    transport: &dyn Transport,
+    workspace: &Path,
+    source: Option<&str>,
+) {
+    use crate::transport::BackendKind;
+    let kind_wire = match transport.kind() {
+        BackendKind::Tmux => "tmux",
+        BackendKind::WezTerm => "wezterm",
+        BackendKind::ConPty => "conpty",
+    };
+    if let Some(obj) = state.as_object_mut() {
+        let transport_block = serde_json::json!({
+            "kind": kind_wire,
+            "source": source.unwrap_or("unknown"),
+        });
+        obj.insert("transport".to_string(), transport_block);
+    }
+    // Tmux: preserve the existing tmux endpoint annotation shape.
+    if matches!(transport.kind(), BackendKind::Tmux) {
+        annotate_runtime_tmux_endpoint(state, transport, workspace);
+    }
+}
+
 pub(crate) fn annotate_runtime_tmux_endpoint(
     state: &mut serde_json::Value,
     transport: &dyn Transport,

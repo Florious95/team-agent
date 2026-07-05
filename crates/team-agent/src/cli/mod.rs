@@ -118,14 +118,16 @@ pub mod lifecycle_port {
         team_id: Option<&str>,
         yes: bool,
         open_display: bool,
+        backend: Option<&str>,
     ) -> Result<Value, CliError> {
-        match crate::lifecycle::quick_start_in_workspace_with_display(
+        match crate::lifecycle::quick_start_in_workspace_with_display_and_backend(
             workspace,
             agents_dir,
             name,
             yes,
             team_id,
             open_display,
+            backend,
         ) {
             Ok(report) => Ok(quick_start_value(report)),
             Err(e) => Ok(error_value(e)),

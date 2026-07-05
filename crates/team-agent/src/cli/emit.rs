@@ -210,6 +210,23 @@ fn is_known_subcommand(command: &str) -> bool {
     DISPATCH_COMMANDS.contains(&command) || SPEC_ONLY_HELP_COMMANDS.contains(&command)
 }
 
+/// Test-only public accessor for `command_help` — allows integration
+/// tests to grep the help copy without depending on internal parser
+/// machinery.
+pub fn __test_command_help(command: Option<&str>) -> String {
+    command_help(command)
+}
+
+/// Test-only public accessor for `quick_start_args` — allows
+/// integration tests to exercise the parser without going through
+/// stdio + the full `main` entrypoint.
+pub fn __test_quick_start_args(
+    args: &[String],
+    cwd: &std::path::Path,
+) -> Result<crate::cli::types::QuickStartArgs, crate::cli::CliError> {
+    quick_start_args(args, cwd)
+}
+
 fn command_help(command: Option<&str>) -> String {
     match command {
         None => {
@@ -222,7 +239,7 @@ fn command_help(command: Option<&str>) -> String {
             )
         }
         Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
-        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.".to_string(),
+        Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).".to_string(),
         Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]".to_string(),
@@ -675,6 +692,10 @@ struct ParsedArgs {
     agent_id: Option<String>,
     task_id: Option<String>,
     result_json: Option<String>,
+    /// 0.5.x Phase 1d Batch 2: quick-start `--backend <tmux|conpty>`.
+    /// Raw string (validated at the quick-start builder); the factory
+    /// enforces literal semantics.
+    backend: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> ParsedArgs {
@@ -716,6 +737,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             }
             "--force" => parsed.force = true,
             "--no-display" => parsed.no_display = true,
+            "--backend" => parsed.backend = next_arg(args, &mut i),
             "--discard-session" => parsed.discard_session = true,
             "--role-file" => parsed.role_file = next_arg(args, &mut i),
             "--as" => parsed.as_agent = next_arg(args, &mut i),
@@ -828,6 +850,20 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
     } else {
         workspace.join(agents_dir)
     };
+    // 0.5.x Phase 1d Batch 2: validate the `--backend` literal up-front
+    // so users get a fast, actionable error instead of a downstream
+    // factory refusal. Accept the same literals as the factory
+    // `RequestedTransportBackend::parse_literal`.
+    if let Some(literal) = parsed.backend.as_deref() {
+        let normalized = literal.trim().to_ascii_lowercase();
+        if normalized != "tmux" && normalized != "conpty" {
+            return Err(CliError::Usage(format!(
+                "--backend must be `tmux` or `conpty`, got {literal:?}. \
+                 `pty` is not a supported literal in Phase 1d (design \
+                 §Non-Goals + CR C-1 ②)."
+            )));
+        }
+    }
     Ok(QuickStartArgs {
         workspace,
         agents_dir,
@@ -836,6 +872,7 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         yes: parsed.yes,
         no_display: parsed.no_display,
         json: parsed.json,
+        backend: parsed.backend,
     })
 }
 

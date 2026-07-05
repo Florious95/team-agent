@@ -272,6 +272,13 @@ pub struct QuickStartArgs {
     pub yes: bool,
     pub no_display: bool,
     pub json: bool,
+    /// 0.5.x Phase 1d Batch 2: explicit backend override
+    /// (`--backend <tmux|conpty>`). `None` = default (factory 5-layer
+    /// resolution; almost always `tmux` on a cold quick-start).
+    /// Explicit `Some("conpty")` on a host without a live shim client
+    /// surfaces `MuxUnavailable` honestly (CR C-1 ①) — NEVER silent
+    /// downgrade to tmux. Explicit `Some("pty")` refuses (CR C-1 ②).
+    pub backend: Option<String>,
     // Stage QR (quick-start/restart separation, design doc
     // .team/artifacts/quickstart-restart-separation-design.md): the
     // `fresh` field is intentionally REMOVED. Reset semantics now live

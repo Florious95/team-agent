@@ -206,6 +206,7 @@ fn current_uid() -> Option<String> {
             team_id: None,
             yes: true,
             no_display: false,
+            backend: None,
             json: true,
         };
         let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
@@ -240,6 +241,7 @@ fn current_uid() -> Option<String> {
             team_id: None,
             yes: false,
             no_display: false,
+            backend: None,
             json: true,
         };
         let text = outcome_text(cmd_quick_start(&args));
