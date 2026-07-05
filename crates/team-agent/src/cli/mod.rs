@@ -943,6 +943,17 @@ pub mod lifecycle_port {
                 }),
             )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
+        // 0.5.x Windows portability Batch 6 Option A (leader
+        // constraint 3): if a ConPTY shim was recorded in
+        // `state.transport.shim.pid`, terminate it explicitly via
+        // `platform::process::terminate_pid`. Unix always sees
+        // `recorded_shim_pid == None` so this is a no-op there;
+        // Windows quick-start with `--backend conpty` triggered the
+        // spawn, so shutdown must symmetrically reap it. The
+        // termination outcome (Requested / ForceOnly / AlreadyGone)
+        // is surfaced in the shutdown JSON so operators can audit
+        // whether the shim was actually running vs already gone.
+        let shim_outcome = shutdown_conpty_shim(&run_workspace);
         Ok(json!({
             "ok": ok,
             "status": status,
@@ -966,8 +977,50 @@ pub mod lifecycle_port {
             "coordinator": {
                 "status": coordinator_status,
                 "pid": coordinator_pid,
-            }
+            },
+            "conpty_shim": shim_outcome,
         }))
+    }
+
+    /// 0.5.x Windows portability Batch 6 Option A: locate and
+    /// terminate the ConPTY shim if `state.transport.shim.pid` is
+    /// recorded. Returns a JSON blob for the shutdown response so
+    /// operators can distinguish "no shim was ever launched" from
+    /// "shim terminated cleanly" from "shim already gone".
+    fn shutdown_conpty_shim(_workspace: &Path) -> serde_json::Value {
+        #[cfg(windows)]
+        {
+            let Some(pid) = crate::coordinator::conpty_shim::recorded_shim_pid(_workspace) else {
+                return json!({ "action": "no_shim_recorded" });
+            };
+            // Prefer graceful termination — Windows maps this to
+            // `TerminationOutcome::ForceOnly` (Batch 3 anchor: no
+            // SIGTERM equivalent for non-console child), which
+            // surfaces the honest audit signal in the JSON.
+            let outcome = crate::platform::process::terminate_pid(
+                pid,
+                crate::platform::process::SignalKind::TerminateForce,
+            );
+            match outcome {
+                Ok(crate::platform::process::TerminationOutcome::Requested) => {
+                    json!({ "pid": pid, "action": "terminated" })
+                }
+                Ok(crate::platform::process::TerminationOutcome::AlreadyGone) => {
+                    json!({ "pid": pid, "action": "already_gone" })
+                }
+                Ok(crate::platform::process::TerminationOutcome::ForceOnly { reason }) => {
+                    json!({ "pid": pid, "action": "terminated_force_only", "reason": reason })
+                }
+                Err(e) => {
+                    json!({ "pid": pid, "action": "terminate_failed", "reason": e.to_string() })
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = _workspace;
+            json!({ "action": "unix_no_shim_concept" })
+        }
     }
 
     /// T5 (harvest §1 / A2): the bounded stop RETAINS the JoinHandle and reclaims the

@@ -87,18 +87,31 @@ mod windows_shim {
                 _ => {}
             }
         }
+        // 0.5.x Windows portability Batch 6 Option A (CR C-1):
+        // `pipe_token` MUST NOT come from argv (visible to any
+        // `ps -o command=` / `Get-CimInstance Win32_Process`
+        // enumeration). Preferred path: `TA_CONPTY_PIPE_TOKEN` env
+        // var populated by the coordinator's `Command::env(...)`
+        // before spawn. The `--pipe-token` argv arg is retained for
+        // manual-launch diagnostics only and is now marked as an
+        // insecure fallback in the help text.
+        let env_token = std::env::var("TA_CONPTY_PIPE_TOKEN").ok();
         Ok(Args {
             workspace_hash: workspace_hash
                 .ok_or_else(|| anyhow!("--workspace-hash required"))?,
             team_key: team_key.ok_or_else(|| anyhow!("--team required"))?,
             pipe_name: pipe_name.ok_or_else(|| anyhow!("--pipe-name required"))?,
-            pipe_token: pipe_token
+            pipe_token: env_token
+                .or(pipe_token)
                 .unwrap_or_else(|| format!("tok-{:x}", std::process::id())),
         })
     }
 
     pub(super) fn run() -> Result<()> {
         let args = parse_args()?;
+        // CR C-1: `pipe_token` is NEVER logged. The remaining
+        // startup line is diagnostic (workspace_hash/team/pipe name
+        // are non-secret identifiers derivable from the state file).
         eprintln!(
             "windows-shim: workspace_hash={} team={} pipe={} pid={} version={}",
             args.workspace_hash,
@@ -107,7 +120,6 @@ mod windows_shim {
             std::process::id(),
             env!("CARGO_PKG_VERSION")
         );
-        eprintln!("windows-shim: pipe_token={}", args.pipe_token);
         let shim = Arc::new(Shim::new(
             args.workspace_hash.clone(),
             args.team_key.clone(),

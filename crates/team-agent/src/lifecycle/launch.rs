@@ -2904,12 +2904,73 @@ pub fn quick_start_in_workspace_with_display_and_backend(
         ))
     })?;
     let team_key_for_factory = team_id;
+    // 0.5.x Windows portability Batch 6 Option A (leader msg_5f5f8c986ee8):
+    // if the caller asked for ConPTY and we're on Windows, spawn the
+    // shim BEFORE the factory resolve. The factory's Batch 5
+    // `conpty_pipe_ready` gate needs `state.transport.shim.pipe_ready
+    // == true` to attempt the client connect — the coordinator side
+    // is what writes that marker. On non-Windows this block is
+    // cfg'd out; on Windows without --backend conpty the branch is
+    // never entered.
+    //
+    // Spawn is idempotent: `spawn_shim_and_handshake` completes the
+    // Hello handshake and only then persists state, so a partial
+    // spawn cannot poison a subsequent quick-start attempt with a
+    // stale `pipe_ready=true` marker.
+    //
+    // If spawn fails we surface the typed `ShimError` verbatim
+    // (BinaryMissing / Spawn / ConnectTimeout / HelloFailed) —
+    // callers see the N38 three-line action guidance and no silent
+    // downgrade to tmux (CR C-1 fail-closed).
+    #[cfg(windows)]
+    if matches!(
+        requested,
+        crate::transport_factory::RequestedTransportBackend::ConPty
+    ) {
+        let team_key_str = team_key_for_factory.ok_or_else(|| {
+            LifecycleError::TeamSelect(
+                "team_key required for --backend conpty on Windows (Batch 6 Option A)".to_string(),
+            )
+        })?;
+        let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(&workspace);
+        let handle = crate::coordinator::conpty_shim::spawn_shim_and_handshake(
+            &workspace,
+            team_key_str,
+            &workspace_hash,
+        )
+        .map_err(|e| LifecycleError::TeamSelect(format!("conpty shim spawn: {e}")))?;
+        // Detach so the shim survives beyond this fn — `shutdown`
+        // will terminate it explicitly by reading
+        // `state.transport.shim.pid` and calling
+        // `platform::process::terminate_pid` (leader constraint 3).
+        // The `client` inside the handle is dropped here; the
+        // factory below will open a FRESH `NamedPipeClient` via
+        // Batch 5's `conpty_pipe_ready` gate, which is a cleaner
+        // ownership boundary (the launch client and the runtime
+        // client are separate short-lived vs long-lived
+        // connections).
+        let _shim_pid = handle.detach();
+    }
     let input = crate::transport_factory::TransportFactoryInput::new(
         &workspace,
         crate::transport_factory::TransportPurpose::Launch,
     )
     .with_team_key(team_key_for_factory)
     .with_explicit_backend(Some(requested));
+    // On Windows we need the factory to SEE the newly-persisted
+    // `state.transport.shim.pipe_ready = true` marker, so provide the
+    // fresh state.json value to the factory input.
+    #[cfg(windows)]
+    let state_value = std::fs::read_to_string(
+        crate::state::persist::runtime_state_path(&workspace),
+    )
+    .ok()
+    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    #[cfg(windows)]
+    let input = match state_value.as_ref() {
+        Some(v) => input.with_state(Some(v)),
+        None => input,
+    };
     let resolved = crate::transport_factory::resolve_transport(input)
         .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // Hand the boxed backend down as `&dyn Transport`.
