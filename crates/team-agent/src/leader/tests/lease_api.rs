@@ -451,3 +451,26 @@ fn app_server_delivery_paths_are_read_only_and_binding_entry_is_explicit() {
         "I-RN-2: app-server ownership mutation must be reachable through the explicit CLI entry"
     );
 }
+
+#[test]
+fn messaging_leader_receiver_module_exports_no_ownership_writer() {
+    let leader_receiver = include_str!("../../messaging/leader_receiver.rs");
+    for forbidden in [
+        "pub fn claim_leader_receiver",
+        "write_owner(",
+        "with_leader_receiver(",
+        "with_team_owner(",
+        "save_runtime_state",
+    ] {
+        assert!(
+            !leader_receiver.contains(forbidden),
+            "MUST-12/I-RN-1: messaging/leader_receiver.rs may read receiver fields but must not expose ownership writes; forbidden={forbidden}"
+        );
+    }
+
+    let messaging_mod = include_str!("../../messaging/mod.rs");
+    assert!(
+        !messaging_mod.contains("claim_leader_receiver"),
+        "MUST-12/I-RN-2: messaging/mod.rs must not re-export ownership writer APIs"
+    );
+}

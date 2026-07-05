@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::event_log::EventLog;
 use crate::message_store::{MessageStore, NotificationClaimParams};
-use crate::model::ids::{OwnerEpoch, TaskId};
+use crate::model::ids::TaskId;
 use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
 
 use super::helpers::MessageStatusShadow;
@@ -180,131 +180,6 @@ pub fn send_to_leader_receiver_with_message_id(
         reason: None,
         channel: Some("leader_receiver".to_string()),
     })
-}
-
-/// `claim_leader_receiver` (`leader.py:348`):认领/接管 leader pane + `owner_epoch++`。身份判定
-/// 借 step 10 原语 (`_target_matches_owner_identity`/`_leader_command_looks_usable`)。
-pub fn claim_leader_receiver(
-    workspace: &Path,
-    state: &mut serde_json::Value,
-    candidate: &serde_json::Value,
-    event_log: &EventLog,
-    confirm: bool,
-    expected_epoch: Option<OwnerEpoch>,
-) -> Result<serde_json::Value, MessagingError> {
-    if !confirm {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "status": "refused",
-            "reason": "confirm_required",
-            "action": "team-agent claim-leader --confirm",
-        }));
-    }
-    if let Some(expected) = expected_epoch {
-        if owner_epoch(state).is_some_and(|current| current != expected.0) {
-            let owner_epoch = owner_epoch(state).unwrap_or(0);
-            let bound_pane_id = leader_pane_id(state).map(ToString::to_string);
-            let value = serde_json::json!({
-                "ok": false,
-                "status": "refused",
-                "reason": "owner_epoch_advanced",
-                "owner_epoch": owner_epoch,
-                "bound_pane_id": bound_pane_id,
-            });
-            event_log.write("leader_receiver.claim_refused", value.clone())?;
-            return Ok(value);
-        }
-    }
-    let candidate_pane = candidate.get("pane_id").and_then(Value::as_str);
-    if candidate_pane.is_some() && candidate_pane == leader_pane_id(state) {
-        return Ok(serde_json::json!({
-            "ok": true,
-            "status": "already_bound",
-            "pane_id": candidate_pane,
-            "owner_epoch": owner_epoch(state).unwrap_or(0),
-        }));
-    }
-    let next_epoch = owner_epoch(state).unwrap_or(0).saturating_add(1);
-    let Some(root) = state.as_object_mut() else {
-        return Err(MessagingError::Routing(
-            "runtime state root is not an object".to_string(),
-        ));
-    };
-    // Build the updated owner + receiver values in-place (field-level
-    // mutation preserves any extra fields the caller carries), then publish
-    // through the ownership repository. This keeps `claim_leader_receiver`'s
-    // legacy field-merge semantics while sourcing all owner mutations from
-    // one API surface (Stage 3a, architect direction 2026-06-23).
-    let mut owner_value = root
-        .get("team_owner")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(owner) = owner_value.as_object_mut() {
-        owner.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
-    }
-    let mut receiver_value = root
-        .get("leader_receiver")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(receiver) = receiver_value.as_object_mut() {
-        receiver.insert("mode".to_string(), serde_json::json!("direct_tmux"));
-        receiver.insert("owner_epoch".to_string(), serde_json::json!(next_epoch));
-        copy_candidate_field(receiver, candidate, "pane_id");
-        copy_candidate_field(receiver, candidate, "provider");
-        copy_candidate_field(receiver, candidate, "leader_session_uuid");
-        if let Some(socket) = candidate
-            .get("tmux_socket")
-            .and_then(Value::as_str)
-            .filter(|socket| std::path::Path::new(socket).is_absolute())
-            .map(str::to_string)
-            .or_else(crate::tmux_backend::socket_name_from_tmux_env)
-        {
-            receiver.insert("tmux_socket".to_string(), serde_json::json!(socket));
-        }
-    }
-    // The `root` borrow above is released by NLL before this call.
-    let team_key = crate::state::projection::team_state_key(state);
-    let record = crate::state::ownership::OwnershipWrite::new()
-        .with_team_owner(owner_value)
-        .with_leader_receiver(receiver_value)
-        .with_owner_epoch(next_epoch);
-    crate::state::ownership::write_owner(state, &team_key, record);
-    crate::state::persist::save_runtime_state_reapplying_after_conflict(
-        workspace,
-        state,
-        |latest| {
-            let team_key = crate::state::projection::team_state_key(latest);
-            let record = crate::state::ownership::OwnershipWrite::new()
-                .with_team_owner(
-                    state
-                        .get("team_owner")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({})),
-                )
-                .with_leader_receiver(
-                    state
-                        .get("leader_receiver")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({})),
-                )
-                .with_owner_epoch(next_epoch);
-            crate::state::ownership::write_owner(latest, &team_key, record);
-        },
-    )?;
-    event_log.write(
-        "leader_receiver.claimed",
-        serde_json::json!({"owner_epoch": next_epoch, "candidate": candidate}),
-    )?;
-    let receiver = state
-        .get("leader_receiver")
-        .cloned()
-        .unwrap_or_else(|| candidate.clone());
-    Ok(serde_json::json!({
-        "ok": true,
-        "status": "claimed",
-        "leader_receiver": receiver,
-        "owner_epoch": next_epoch,
-    }))
 }
 
 /// `_mirror_peer_message_to_leader` (`leader.py:31`):peer→peer 消息镜像到 leader receiver。
@@ -620,10 +495,4 @@ fn render_fallback_pane_message(content: &str, message_id: &str, primary_error: 
          {content}\n\n\
          [team-agent-token:{message_id}]"
     )
-}
-
-fn copy_candidate_field(out: &mut serde_json::Map<String, Value>, candidate: &Value, key: &str) {
-    if let Some(value) = candidate.get(key) {
-        out.insert(key.to_string(), value.clone());
-    }
 }
