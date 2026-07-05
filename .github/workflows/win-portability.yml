@@ -1,17 +1,14 @@
 name: win-portability
 
-# 0.5.x Windows portability CI:
+# 0.5.x Windows portability CI.
 #
-# - Ubuntu job: build + run the new `platform::` lib tests + the C-1
-#   packaging assertion + C-2 fallback burndown + C-4 caller whitelist.
-#   This is the primary green-required job.
-# - Windows compile-gate job: `cargo check --target
-#   x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent`
-#   with `continue-on-error: true`. Batch 0 expects RED (Unix-only
-#   imports still leak from tmux_backend / coordinator / lifecycle /
-#   cli / codex_app_server); Batches 1-4 burn the error count down.
-#   The job records the count as a build-artifact so subsequent
-#   batches can measure burn-down.
+# - Ubuntu job: primary green-required. Runs platform lib tests +
+#   C-1 packaging assertion + C-2 fallback burn-down + C-4 caller
+#   whitelist guard.
+# - Windows compile-gate job: continue-on-error. `cargo check
+#   --target x86_64-pc-windows-msvc` is expected RED in Batch 0;
+#   Batches 1-4 burn the error count down. Upload check.log so we
+#   can measure the burn-down.
 #
 # Truth source:
 # - Design:    .team/artifacts/0.5.x-windows-portability-survey-design.md
@@ -26,10 +23,8 @@ jobs:
   lib-tests-linux:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: platform lib tests
         run: cargo test -p team-agent --lib platform::
       - name: c-1 packaging PreviewCompileOnly assertion
@@ -39,57 +34,46 @@ jobs:
       - name: c-4 caller-whitelist grep guard
         run: cargo test -p team-agent --test platform_process_caller_whitelist_batch0
 
-  # Batch 0 compile-only Windows gate. Expected RED today; Batches
-  # 1-4 will turn it GREEN. `continue-on-error: true` means the job
-  # visibly runs but does NOT block other jobs or the workflow status.
-  # The `check-error-count` step captures the burn-down baseline.
   windows-compile-gate:
     runs-on: windows-latest
     continue-on-error: true
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      # `cargo check` returns non-zero on Batch 0 today; we capture
-      # stderr, count errors, then post the count as a job summary +
-      # tracking artifact so Batch 1-4 can measure burn-down.
       - name: cargo check --target x86_64-pc-windows-msvc (RED expected in Batch 0)
-        id: check
-        shell: pwsh
         continue-on-error: true
+        shell: bash
         run: |
-          $ErrorActionPreference = "Continue"
-          cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | Tee-Object -FilePath check.log
-          $exit = $LASTEXITCODE
-          Write-Host "cargo check exit code: $exit"
-          "cargo_check_exit=$exit" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-      - name: count errors and post burn-down summary
-        shell: pwsh
+          set +e
+          cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
+          echo "cargo_check_exit=$?"
+      - name: post burn-down summary
+        shell: bash
         run: |
-          if (Test-Path check.log) {
-            $errLines = Select-String -Path check.log -Pattern '^error\[' | Measure-Object
-            $errCount = $errLines.Count
-            $shortMsg = Select-String -Path check.log -Pattern '^error\[' | Select-Object -First 12 | ForEach-Object { $_.Line }
-            Write-Host "windows-portability-tracking cargo_check_error_count=$errCount"
-            Write-Host "windows-portability-tracking git_rev=$(git rev-parse HEAD)"
-            Write-Host "windows-portability-tracking build_timestamp=$((Get-Date).ToString('o'))"
-            Add-Content -Path win-portability-tracking.txt -Value "git_rev=$(git rev-parse HEAD)"
-            Add-Content -Path win-portability-tracking.txt -Value "build_timestamp=$((Get-Date).ToString('o'))"
-            Add-Content -Path win-portability-tracking.txt -Value "cargo_check_exit=${{ steps.check.outputs.cargo_check_exit }}"
-            Add-Content -Path win-portability-tracking.txt -Value "cargo_check_error_count=$errCount"
-            Add-Content -Path win-portability-tracking.txt -Value ""
-            Add-Content -Path win-portability-tracking.txt -Value "# First 12 error headers (burn-down evidence)"
-            $shortMsg | ForEach-Object { Add-Content -Path win-portability-tracking.txt -Value $_ }
-            "## Windows portability compile-gate burn-down`n`n- error count: $errCount`n- exit: ${{ steps.check.outputs.cargo_check_exit }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          } else {
-            Write-Host "windows-portability-tracking no_check_log"
-            Add-Content -Path win-portability-tracking.txt -Value "status=no_check_log"
-          }
-      - name: upload burn-down artifact
-        uses: actions/upload-artifact@v4
+          if [ -f check.log ]; then
+            errcount=$(grep -c "^error\[" check.log || echo 0)
+            echo "windows-portability-tracking git_rev=$(git rev-parse HEAD)"
+            echo "windows-portability-tracking build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "windows-portability-tracking cargo_check_error_count=$errcount"
+            {
+              echo "git_rev=$(git rev-parse HEAD)"
+              echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              echo "cargo_check_error_count=$errcount"
+              echo ""
+              echo "# First 20 error headers (burn-down evidence)"
+              grep "^error\[" check.log | head -20 || true
+            } > win-portability-tracking.txt
+            {
+              echo "## Windows portability compile-gate burn-down"
+              echo ""
+              echo "- error count: $errcount"
+            } >> $GITHUB_STEP_SUMMARY
+          else
+            echo "status=no_check_log" > win-portability-tracking.txt
+          fi
+      - uses: actions/upload-artifact@v4
         with:
           name: win-portability-tracking
           path: |
