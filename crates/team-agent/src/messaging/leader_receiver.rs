@@ -411,18 +411,25 @@ pub fn deliver_to_leader_fallback_pane(
     let rendered = render_fallback_pane_message(content, message_id, primary_error);
     let target = Target::Pane(PaneId::new(&pane_id));
     let payload = InjectPayload::Text(rendered);
+    // 0.5.x Phase 1d Batch 4: leader-fallback pane inject uses the
+    // factory tmux channel helpers so `grep transport_factory::tmux_`
+    // enumerates every tmux-only leader-channel site. Semantics are
+    // identical to the previous direct `TmuxBackend::*` calls
+    // (helpers are thin wrappers). `transport_kind`-based dispatch
+    // is the parallel `feat/appserver-leader-host` work; this batch
+    // stays helper-swap only.
     let inject_result = leader_tmux_socket(state)
         .and_then(|socket| {
-            let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+            let backend = crate::transport_factory::tmux_endpoint_transport(socket);
             backend.inject(&target, &payload, Key::Enter, true).ok()
         })
         .map(Ok)
         .unwrap_or_else(|| {
-            let backend = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+            let backend = crate::transport_factory::tmux_workspace_transport(workspace);
             backend.inject(&target, &payload, Key::Enter, true)
         })
         .or_else(|_| {
-            let backend = crate::tmux_backend::TmuxBackend::new();
+            let backend = crate::transport_factory::tmux_default_transport();
             backend.inject(&target, &payload, Key::Enter, true)
         });
 
@@ -563,18 +570,21 @@ pub(crate) fn leader_pane_bound_but_not_live(workspace: &Path, state: &Value) ->
 }
 
 fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
+    // 0.5.x Phase 1d Batch 4: leader liveness uses factory tmux
+    // channel helpers. Semantics unchanged; `transport_kind`-based
+    // dispatch is the parallel feat/appserver-leader-host work.
     if let Some(socket) = leader_tmux_socket(state) {
-        return crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket)
+        return crate::transport_factory::tmux_endpoint_transport(socket)
             .list_targets()
             .unwrap_or_default()
             .iter()
             .any(|target| target.pane_id.as_str() == pane_id);
     }
-    let mut targets = crate::tmux_backend::TmuxBackend::for_workspace(workspace)
+    let mut targets = crate::transport_factory::tmux_workspace_transport(workspace)
         .list_targets()
         .unwrap_or_default();
     targets.extend(
-        crate::tmux_backend::TmuxBackend::new()
+        crate::transport_factory::tmux_default_transport()
             .list_targets()
             .unwrap_or_default(),
     );

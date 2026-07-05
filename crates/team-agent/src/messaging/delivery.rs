@@ -802,16 +802,24 @@ fn leader_receiver_pane_is_usable(
     )
 }
 
+/// 0.5.x Phase 1d Batch 4: the `Owned` variant now carries a boxed
+/// `Transport` trait object rather than a concrete `TmuxBackend`. All
+/// existing leader-fallback sites still supply a `TmuxBackend` here
+/// (Batch 4 is a helper replacement at the leader channel only —
+/// `transport_kind`-based dispatch belongs to the parallel
+/// `feat/appserver-leader-host` work per leader msg_4ac2122489e0),
+/// but the type is now open so a future conpty leader-hosting flow
+/// can plug in without another enum widen.
 enum DeliveryTransport<'a> {
     Borrowed(&'a dyn Transport),
-    Owned(crate::tmux_backend::TmuxBackend),
+    Owned(Box<dyn Transport>),
 }
 
 impl<'a> DeliveryTransport<'a> {
     fn as_transport(&'a self) -> &'a dyn Transport {
         match self {
             Self::Borrowed(transport) => *transport,
-            Self::Owned(transport) => transport,
+            Self::Owned(transport) => transport.as_ref(),
         }
     }
 }
@@ -825,6 +833,14 @@ fn delivery_transport_for_recipient<'a>(
     if recipient != "leader" {
         return DeliveryTransport::Borrowed(product_transport);
     }
+    // 0.5.x Phase 1d Batch 4: leader-fallback chain uses the factory
+    // tmux channel helpers instead of `TmuxBackend::{new,for_workspace,
+    // for_tmux_endpoint}` directly. Semantics are identical (helpers
+    // are thin wrappers) but `grep -rn transport_factory::tmux_` at any
+    // future point returns every intentional tmux-only leader-channel
+    // site. Leader-channel dispatch by `transport_kind` is the parallel
+    // `feat/appserver-leader-host` work — this batch stays helper-swap
+    // only per leader msg_4ac2122489e0.
     let pane_id = leader_receiver_pane_id(state);
     let Some(socket) = leader_receiver_tmux_socket(state) else {
         if let Some(pane_id) = pane_id {
@@ -834,14 +850,14 @@ fn delivery_transport_for_recipient<'a>(
                 .iter()
                 .any(|target| target.pane_id.as_str() == pane_id);
             if !in_workspace {
-                let default_backend = crate::tmux_backend::TmuxBackend::new();
+                let default_backend = crate::transport_factory::tmux_default_transport();
                 if default_backend
                     .list_targets()
                     .unwrap_or_default()
                     .iter()
                     .any(|target| target.pane_id.as_str() == pane_id)
                 {
-                    return DeliveryTransport::Owned(default_backend);
+                    return DeliveryTransport::Owned(Box::new(default_backend));
                 }
             }
         }
@@ -850,7 +866,7 @@ fn delivery_transport_for_recipient<'a>(
     if socket == crate::tmux_backend::socket_name_for_workspace(workspace) {
         DeliveryTransport::Borrowed(product_transport)
     } else {
-        let endpoint_backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket);
+        let endpoint_backend = crate::transport_factory::tmux_endpoint_transport(socket);
         if let Some(pane_id) = pane_id {
             if endpoint_backend
                 .list_targets()
@@ -858,7 +874,7 @@ fn delivery_transport_for_recipient<'a>(
                 .iter()
                 .any(|target| target.pane_id.as_str() == pane_id)
             {
-                return DeliveryTransport::Owned(endpoint_backend);
+                return DeliveryTransport::Owned(Box::new(endpoint_backend));
             }
             if product_transport
                 .list_targets()
@@ -868,17 +884,17 @@ fn delivery_transport_for_recipient<'a>(
             {
                 return DeliveryTransport::Borrowed(product_transport);
             }
-            let default_backend = crate::tmux_backend::TmuxBackend::new();
+            let default_backend = crate::transport_factory::tmux_default_transport();
             if default_backend
                 .list_targets()
                 .unwrap_or_default()
                 .iter()
                 .any(|target| target.pane_id.as_str() == pane_id)
             {
-                return DeliveryTransport::Owned(default_backend);
+                return DeliveryTransport::Owned(Box::new(default_backend));
             }
         }
-        DeliveryTransport::Owned(endpoint_backend)
+        DeliveryTransport::Owned(Box::new(endpoint_backend))
     }
 }
 

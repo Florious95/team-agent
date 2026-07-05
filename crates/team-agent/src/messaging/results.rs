@@ -744,17 +744,32 @@ fn report_result_for_owner_team_inner(
     };
     if let Some(message_id) = outcome.message_id.clone() {
         let store = MessageStore::open(workspace)?;
-        let transport = crate::tmux_backend::TmuxBackend::for_workspace(workspace);
+        // 0.5.x Phase 1d Batch 4: report_result retry uses the runtime
+        // factory transport so a conpty team's report notification
+        // goes to the shim (design §Batch 4). Previously we always
+        // built `TmuxBackend::for_workspace`, which for a conpty team
+        // silently no-op'd the retry. Factory refusal falls back to
+        // tmux workspace (byte-equivalent tmux teams; honest failure
+        // for conpty teams without a resolvable factory input).
         let delivery_state_raw = crate::state::persist::load_runtime_state(workspace)
             .unwrap_or_else(|_| state_for_owner.clone());
         let delivery_state = report_owner_state(&delivery_state_raw, &owner_team);
+        let transport: Box<dyn crate::transport::Transport> =
+            match crate::transport_factory::resolve_read_only_transport(
+                workspace,
+                Some(&delivery_state),
+                crate::transport_factory::TransportPurpose::MessageDelivery,
+            ) {
+                Ok(r) => r.backend,
+                Err(_) => Box::new(crate::tmux_backend::TmuxBackend::for_workspace(workspace)),
+            };
         let mut primary_error: Option<String> = None;
         for attempt in 0..3 {
             let _ = store.mark(&message_id, "accepted", None);
             match super::delivery::deliver_pending_message(
                 workspace,
                 &store,
-                &transport,
+                transport.as_ref(),
                 &message_id,
                 &event_log,
                 &delivery_state,
@@ -781,7 +796,7 @@ fn report_result_for_owner_team_inner(
             match super::delivery::deliver_pending_messages(
                 workspace,
                 &delivery_state,
-                &transport,
+                transport.as_ref(),
                 &event_log,
             ) {
                 Ok(delivered)
