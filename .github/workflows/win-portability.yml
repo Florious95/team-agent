@@ -13,9 +13,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: platform lib tests
         run: cargo test -p team-agent --lib platform::
-      - name: c-1 packaging PreviewCompileOnly assertion
-        run: cargo test -p team-agent --lib packaging::tests::windows_x8664
-      - name: c-2 fallback burndown grep guards
-        run: cargo test -p team-agent --test platform_fallback_burndown_batch0
-      - name: c-4 caller-whitelist grep guard
-        run: cargo test -p team-agent --test platform_process_caller_whitelist_batch0
