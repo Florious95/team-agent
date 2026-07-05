@@ -3143,17 +3143,16 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
     let mut state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
-    // 0.5.x Phase 1d Batch 2: state.transport annotation is DEFERRED —
-    // wiring it here would extend the state.json top-level key order
-    // (adds `transport`) which trips
-    // `quick_start_state_seeds_spec_path_workspace_leader_display_backend`
-    // (hardcoded key-order pin) and may drift the phase_golden fixtures.
-    // Per leader msg_6dfbb3c78d38: help/state-shape changes that touch
-    // fixtures must be reported before landing. Batch 2 ships the CLI
-    // parse + factory routing + the `annotate_runtime_transport` fn
-    // itself, but the call site stays on the tmux-specific annotator
-    // until leader accepts the schema extension.
-    annotate_runtime_tmux_endpoint(&mut state, transport, &workspace);
+    // 0.5.x Phase 1d hot-path 接线(裁决1 msg_76e1d98202b8): use the
+    // generic annotator that writes `state.transport = { kind, source }`
+    // for every backend AND (for tmux) preserves the existing
+    // `tmux_endpoint`/`tmux_socket`/`tmux_socket_source` fields via the
+    // inner `annotate_runtime_tmux_endpoint` call. Source is threaded
+    // from the caller-side factory selection when available; the
+    // legacy quick-start entrypoint currently passes `None` (defaults
+    // to "unknown" in the payload) — Phase 2 refactor will thread
+    // ResolvedTransport.source through the launch signature.
+    annotate_runtime_transport(&mut state, transport, &workspace, None);
     save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
     annotate_persisted_team_depth(
         &workspace,

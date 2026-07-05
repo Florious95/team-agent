@@ -47,6 +47,19 @@ jobs:
         run: cargo build -p win-conpty-phase0 --bin windows-shim --release --target x86_64-pc-windows-msvc
       - name: build conpty-cli binary (Phase 1c)
         run: cargo build -p win-conpty-phase0 --bin conpty-cli --release --target x86_64-pc-windows-msvc
+      # 0.5.x Phase 1d 收尾 (msg_76e1d98202b8): also build the
+      # team-agent.exe so SSH acceptance can invoke the real CLI on
+      # Windows (`team-agent quick-start --backend conpty` etc.). This
+      # may fail today because team-agent still has Unix-only code
+      # paths (std::os::unix / libc::pid_t etc.); if so, that's the
+      # honest signal Phase 2 needs to address before Windows leader
+      # hosting lands. `continue-on-error` here so the shim/cli
+      # binaries are still uploaded even if team-agent.exe won't cross
+      # yet; the gate report Round 5 records the outcome truthfully.
+      - name: build team-agent.exe (best-effort)
+        id: team_agent_exe
+        continue-on-error: true
+        run: cargo build -p team-agent --bin team-agent --release --target x86_64-pc-windows-msvc
       - name: c-4 tracking
         shell: pwsh
         run: |
@@ -76,6 +89,23 @@ jobs:
           Add-Content -Path cli-tracking.txt -Value "git_rev=$rev"
           Add-Content -Path cli-tracking.txt -Value "build_timestamp=$ts"
           Add-Content -Path cli-tracking.txt -Value "binary_sha256=$cliSha"
+          # 0.5.x Phase 1d 收尾: team-agent.exe tracking (may be
+          # missing if the best-effort build step above didn't yet
+          # cross to Windows — record explicitly so the gate report is
+          # honest).
+          $taExe = "target\x86_64-pc-windows-msvc\release\team-agent.exe"
+          if (Test-Path $taExe) {
+            $taSha = (Get-FileHash $taExe -Algorithm SHA256).Hash
+            Write-Host "team-agent-tracking git_rev=$rev"
+            Write-Host "team-agent-tracking build_timestamp=$ts"
+            Write-Host "team-agent-tracking binary_sha256=$taSha"
+            Add-Content -Path team-agent-tracking.txt -Value "git_rev=$rev"
+            Add-Content -Path team-agent-tracking.txt -Value "build_timestamp=$ts"
+            Add-Content -Path team-agent-tracking.txt -Value "binary_sha256=$taSha"
+          } else {
+            Write-Host "team-agent-tracking status=not_built"
+            Add-Content -Path team-agent-tracking.txt -Value "status=not_built (Unix-only deps in team-agent lib not yet ported for cross-compile)"
+          }
       - name: upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -84,6 +114,9 @@ jobs:
             target/x86_64-pc-windows-msvc/release/win-conpty-phase0.exe
             target/x86_64-pc-windows-msvc/release/windows-shim.exe
             target/x86_64-pc-windows-msvc/release/conpty-cli.exe
+            target/x86_64-pc-windows-msvc/release/team-agent.exe
             phase0-tracking.txt
             shim-tracking.txt
             cli-tracking.txt
+            team-agent-tracking.txt
+          if-no-files-found: warn

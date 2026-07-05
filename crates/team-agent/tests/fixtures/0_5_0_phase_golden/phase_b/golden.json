@@ -706,6 +706,10 @@
               "team_depth": 1,
               "team_dir": "<WORKSPACE>/teamdir",
               "team_key": "teamdir",
+              "transport": {
+                "kind": "tmux",
+                "source": "unknown"
+              },
               "workspace": "<WORKSPACE>"
             }
           },
@@ -1064,8 +1068,16 @@
         "team_depth": 1,
         "team_dir": "<WORKSPACE>/teamdir",
         "team_key": "teamdir",
+        "transport": {
+          "kind": "tmux",
+          "source": "unknown"
+        },
         "workspace": "<WORKSPACE>"
       }
+    },
+    "transport": {
+      "kind": "tmux",
+      "source": "unknown"
     },
     "workspace": "<WORKSPACE>"
   },

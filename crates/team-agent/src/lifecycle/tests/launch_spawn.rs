@@ -2693,6 +2693,13 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "tasks",
             "display_backend",
             "is_external_leader",
+            // 0.5.x Phase 1d hot-path 接线 (裁决1 msg_76e1d98202b8):
+            // `transport = { kind, source }` inserted here by
+            // `annotate_runtime_transport`. Kind is `"tmux"` for the
+            // default tmux path (byte-equivalent behavior + new metadata
+            // field); source is `"unknown"` until Phase 2 threads
+            // `ResolvedTransport.source` through the launch call site.
+            "transport",
             // 0.4.0 refactor: `team_key` added as top-level topology marker
             // alongside active_team_key (refactor-modular-architecture). The
             // owner / leader_receiver / owner_epoch invariants below still
