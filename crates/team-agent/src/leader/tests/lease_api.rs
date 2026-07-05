@@ -302,3 +302,152 @@ fn r8_requeued_exhausted_watchers_event_payload_golden_shape() {
     assert_eq!(payload.get("count").and_then(|v| v.as_u64()), Some(1), "count == number of requeued watchers");
     assert_eq!(payload.get("trigger").and_then(|v| v.as_str()), Some("attach_leader"));
 }
+
+#[test]
+fn app_server_attach_writes_transport_kind_tuple_and_advances_epoch() {
+    let ws = std::env::temp_dir().join(format!(
+        "ta_rs_app_attach_{}_{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    ));
+    std::fs::create_dir_all(&ws).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({
+            "active_team_key": "team-a",
+            "teams": {"team-a": {"team_key": "team-a", "agents": {}}},
+        }),
+    )
+    .unwrap();
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "attach-ok",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-live",
+            ws.to_str().unwrap(),
+        ),
+    );
+
+    let out = attach_app_server_leader(&ws, Some("team-a"), fake.endpoint(), "thread-live")
+        .expect("app-server attach should succeed");
+
+    assert_eq!(out["ok"], serde_json::json!(true));
+    assert_eq!(out["leader_receiver"]["transport_kind"], serde_json::json!("codex_app_server"));
+    assert_eq!(out["leader_receiver"]["mode"], serde_json::json!("codex_app_server"));
+    assert_eq!(
+        out["leader_receiver"]["app_server"]["thread_id"],
+        serde_json::json!("thread-live")
+    );
+    assert_eq!(
+        out["leader_receiver"]["app_server"]["session_id"],
+        serde_json::json!("session-live")
+    );
+    assert_eq!(
+        out["leader_receiver"]["app_server"]["cwd"],
+        serde_json::json!(ws.to_str().unwrap())
+    );
+
+    let saved = crate::state::projection::select_runtime_state(&ws, Some("team-a")).unwrap();
+    assert_eq!(
+        saved["leader_receiver"]["app_server"]["thread_id"],
+        serde_json::json!("thread-live")
+    );
+    assert_eq!(saved["leader_receiver"].get("pane_id"), None);
+    assert_eq!(saved["team_owner"]["transport_kind"], serde_json::json!("codex_app_server"));
+    assert_eq!(saved["owner_epoch"], serde_json::json!(1));
+}
+
+#[test]
+fn app_server_attach_rejects_world_writable_socket_without_state_write() {
+    let ws = std::env::temp_dir().join(format!(
+        "ta_rs_app_attach_badmode_{}_{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    ));
+    std::fs::create_dir_all(&ws).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"active_team_key": "team-a", "teams": {"team-a": {"agents": {}}}}),
+    )
+    .unwrap();
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "attach-world",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-live",
+            ws.to_str().unwrap(),
+        ),
+    );
+    let mut perms = std::fs::metadata(fake.path()).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o777);
+    std::fs::set_permissions(fake.path(), perms).unwrap();
+
+    let err = attach_app_server_leader(&ws, Some("team-a"), fake.endpoint(), "thread-live")
+        .expect_err("world-writable app-server socket must be rejected");
+    assert!(
+        err.to_string().contains("socket_ownership_invalid"),
+        "unexpected error: {err}"
+    );
+    let saved = crate::state::projection::select_runtime_state(&ws, Some("team-a")).unwrap();
+    assert!(
+        saved.get("leader_receiver").is_none(),
+        "failed attach must not write leader_receiver: {saved}"
+    );
+}
+
+#[test]
+fn app_server_attach_rejects_missing_user_agent_without_state_write() {
+    let ws = std::env::temp_dir().join(format!(
+        "ta_rs_app_attach_no_ua_{}_{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    ));
+    std::fs::create_dir_all(&ws).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &serde_json::json!({"active_team_key": "team-a", "teams": {"team-a": {"agents": {}}}}),
+    )
+    .unwrap();
+    let mut script = crate::app_server_test_support::FakeAppServerScript::happy(
+        "thread-live",
+        "session-live",
+        ws.to_str().unwrap(),
+    );
+    script.user_agent = None;
+    let fake = crate::app_server_test_support::FakeAppServer::start("attach-no-ua", script);
+
+    let err = attach_app_server_leader(&ws, Some("team-a"), fake.endpoint(), "thread-live")
+        .expect_err("missing initialize.userAgent must fail closed");
+    assert!(
+        err.to_string()
+            .contains("protocol_mismatch_missing_user_agent"),
+        "unexpected error: {err}"
+    );
+    let saved = crate::state::projection::select_runtime_state(&ws, Some("team-a")).unwrap();
+    assert!(
+        saved.get("leader_receiver").is_none(),
+        "failed attach must not write leader_receiver: {saved}"
+    );
+}
+
+#[test]
+fn app_server_delivery_paths_are_read_only_and_binding_entry_is_explicit() {
+    let delivery = include_str!("../../messaging/delivery.rs");
+    assert!(
+        !delivery.contains("write_owner(")
+            && !delivery.contains("with_leader_receiver(")
+            && !delivery.contains("with_team_owner("),
+        "MUST-12/I-RN-1: delivery may read typed leader_receiver fields but must not write ownership"
+    );
+    let lease = include_str!("../lease.rs");
+    assert!(
+        lease.contains("fn write_leader_receiver_transport("),
+        "C-5: mode and transport_kind must be stamped by a single receiver transport helper"
+    );
+    let cli = include_str!("../../cli/attach_app_server_leader.rs");
+    assert!(
+        cli.contains("attach_app_server_leader("),
+        "I-RN-2: app-server ownership mutation must be reachable through the explicit CLI entry"
+    );
+}

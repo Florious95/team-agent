@@ -17,7 +17,9 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         }
         let content = args.message.join(" ");
         if content.is_empty() {
-            return Err(CliError::Usage("--to-name requires a non-empty message".to_string()));
+            return Err(CliError::Usage(
+                "--to-name requires a non-empty message".to_string(),
+            ));
         }
         let (resolved, transport) =
             match crate::cli::named_address::resolve_name_for_cli(&args.workspace, to_name) {
@@ -52,7 +54,9 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         }
         let content = args.message.join(" ");
         if content.is_empty() {
-            return Err(CliError::Usage("--pane requires a non-empty message".to_string()));
+            return Err(CliError::Usage(
+                "--pane requires a non-empty message".to_string(),
+            ));
         }
         let mut value = send_to_pane_direct(
             &args.workspace,
@@ -191,13 +195,22 @@ fn send_to_named_pane_direct(
 
     let message_id = format!("named_send_{}", chrono::Utc::now().timestamp_millis());
     let rendered = render_message(sender, task_id, content, &message_id);
-    let target = Target::Pane(PaneId::new(&resolved.pane_id));
     let sender_run_workspace = crate::model::paths::canonical_run_workspace(sender_workspace)
         .unwrap_or_else(|_| sender_workspace.to_path_buf());
     let event_log = crate::event_log::EventLog::new(&sender_run_workspace);
     if let Some(warning) = &resolved.warning {
         eprintln!("warning: {warning}");
     }
+    if resolved.transport_kind.as_deref() == Some("codex_app_server") {
+        return send_to_named_app_server_leader(
+            &event_log,
+            resolved,
+            &message_id,
+            &rendered,
+            sender,
+        );
+    }
+    let target = Target::Pane(PaneId::new(&resolved.pane_id));
     let report = transport
         .inject(&target, &InjectPayload::Text(rendered), Key::Enter, true)
         .map_err(|e| {
@@ -239,6 +252,88 @@ fn send_to_named_pane_direct(
         obj.insert("ok".to_string(), serde_json::json!(ok));
     }
     Ok(value)
+}
+
+fn send_to_named_app_server_leader(
+    event_log: &crate::event_log::EventLog,
+    resolved: &crate::cli::named_address::ResolvedNamedAddress,
+    message_id: &str,
+    rendered: &str,
+    sender: &str,
+) -> Result<serde_json::Value, CliError> {
+    let receiver = serde_json::json!({
+        "mode": "codex_app_server",
+        "transport_kind": "codex_app_server",
+        "app_server": resolved.app_server.clone().unwrap_or(serde_json::Value::Null),
+    });
+    let binding = crate::codex_app_server::binding_from_receiver(&receiver)
+        .map_err(|error| CliError::Runtime(format!("invalid app-server named leader: {error}")))?;
+    let target_kind = named_target_kind_wire(resolved.target_kind);
+    let base_event = serde_json::json!({
+        "to_name": resolved.raw_name,
+        "target_kind": target_kind,
+        "sender": sender,
+        "sender_workspace": resolved.sender_workspace.display().to_string(),
+        "target_workspace": resolved.target_workspace.display().to_string(),
+        "team_key": resolved.team_key,
+        "agent_id": resolved.agent_id,
+        "transport_kind": "codex_app_server",
+        "socket": binding.socket,
+        "thread_id": binding.thread_id,
+        "message_id": message_id,
+    });
+    match crate::codex_app_server::submit_to_bound_thread(&binding, message_id, rendered) {
+        Ok(submit) => {
+            let event = merge_json(
+                base_event.clone(),
+                serde_json::json!({
+                    "ok": true,
+                    "turn_id": submit.turn_id,
+                    "turn_status": submit.turn_status,
+                }),
+            );
+            let _ = event_log.write("send.name_app_server", event.clone());
+            Ok(event)
+        }
+        Err(crate::codex_app_server::AppServerError::LeaderBusy(message)) => {
+            let event = merge_json(
+                base_event.clone(),
+                serde_json::json!({
+                    "ok": false,
+                    "status": "retry_scheduled",
+                    "reason": "leader_busy",
+                    "channel": "leader_busy",
+                    "error": message,
+                }),
+            );
+            let _ = event_log.write("send.name_app_server", event.clone());
+            Ok(event)
+        }
+        Err(error) => {
+            let event = merge_json(
+                base_event.clone(),
+                serde_json::json!({
+                    "ok": false,
+                    "status": "refused",
+                    "reason": error.code(),
+                    "channel": "rebind_required",
+                    "error": error.to_string(),
+                    "action": "run team-agent attach-app-server-leader for the target team",
+                }),
+            );
+            let _ = event_log.write("send.name_app_server", event.clone());
+            Ok(event)
+        }
+    }
+}
+
+fn merge_json(mut left: serde_json::Value, right: serde_json::Value) -> serde_json::Value {
+    if let (Some(left), Some(right)) = (left.as_object_mut(), right.as_object()) {
+        for (key, value) in right {
+            left.insert(key.clone(), value.clone());
+        }
+    }
+    left
 }
 
 fn named_target_kind_wire(kind: crate::cli::named_address::NamedTargetKind) -> &'static str {

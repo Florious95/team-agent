@@ -1894,6 +1894,238 @@ fn e51_delivery_keeps_same_socket_pane_conflict_guard() {
     );
 }
 
+fn app_server_state(
+    ws: &Path,
+    endpoint: &str,
+    thread_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "active_team_key": "team-a",
+        "teams": {
+            "team-a": {
+                "team_key": "team-a",
+                "agents": {},
+                "leader_receiver": {
+                    "mode": "codex_app_server",
+                    "transport_kind": "codex_app_server",
+                    "status": "attached",
+                    "provider": "codex",
+                    "owner_epoch": 7,
+                    "app_server": {
+                        "socket": endpoint,
+                        "thread_id": thread_id,
+                        "session_id": session_id,
+                        "cwd": ws.to_string_lossy(),
+                        "cli_version": "codex-appserver-team-agent-test/0.139.0",
+                        "bound_at": "2026-07-05T00:00:00Z"
+                    }
+                },
+                "team_owner": {
+                    "provider": "codex",
+                    "transport_kind": "codex_app_server",
+                    "owner_epoch": 7
+                },
+                "owner_epoch": 7
+            }
+        }
+    })
+}
+
+#[test]
+fn app_server_leader_delivery_marks_delivered_without_tmux_transport() {
+    let ws = tmp_ws("appdeliver");
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "deliver-ok",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-live",
+            ws.to_str().unwrap(),
+        ),
+    );
+    let state = app_server_state(&ws, fake.endpoint(), "thread-live", "session-live");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(
+            None,
+            "worker_a",
+            "leader",
+            "app server hello",
+            None,
+            false,
+            Some("team-a"),
+        )
+        .unwrap();
+
+    let out = deliver_pending_message(&ws, &store, &NoopTransport, &message_id, &log, &state)
+        .expect("app-server delivery should not require tmux transport");
+
+    assert!(
+        out.ok,
+        "app-server turn/start acceptance is delivery proof: {out:?}"
+    );
+    assert_eq!(out.message_status.0, "delivered");
+    assert_eq!(out.channel.as_deref(), Some("codex_app_server"));
+    let turns = fake.received_turns();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0]["params"]["clientUserMessageId"],
+        serde_json::json!(message_id)
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.app_server_submitted")
+        }),
+        "delivery must emit app-server submission event; events={events:?}"
+    );
+}
+
+#[test]
+fn app_server_leader_delivery_stale_tuple_fails_closed_with_event() {
+    let ws = tmp_ws("appstale");
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "deliver-stale",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-new",
+            ws.to_str().unwrap(),
+        ),
+    );
+    let state = app_server_state(&ws, fake.endpoint(), "thread-live", "session-old");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(
+            None,
+            "worker_a",
+            "leader",
+            "stale",
+            None,
+            false,
+            Some("team-a"),
+        )
+        .unwrap();
+
+    let out = deliver_pending_message(&ws, &store, &NoopTransport, &message_id, &log, &state)
+        .expect("stale app-server binding should be a business failure, not panic");
+
+    assert!(!out.ok);
+    assert_eq!(out.channel.as_deref(), Some("rebind_required"));
+    assert_eq!(out.message_status.0, "failed");
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.app_server_thread_stale")
+                && event.get("message_id").and_then(serde_json::Value::as_str)
+                    == Some(message_id.as_str())
+        }),
+        "stale app-server tuple must emit app_server_thread_stale; events={events:?}"
+    );
+}
+
+#[test]
+fn app_server_leader_delivery_fails_closed_on_mode_transport_conflict() {
+    let ws = tmp_ws("appconflict");
+    let mut state = app_server_state(
+        &ws,
+        "unix:///tmp/team-agent-should-not-connect.sock",
+        "thread-live",
+        "session-live",
+    );
+    state["teams"]["team-a"]["leader_receiver"]["mode"] = serde_json::json!("direct_tmux");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(
+            None,
+            "worker_a",
+            "leader",
+            "conflict",
+            None,
+            false,
+            Some("team-a"),
+        )
+        .unwrap();
+
+    let out = deliver_pending_message(&ws, &store, &NoopTransport, &message_id, &log, &state)
+        .expect("transport conflict should be a business failure");
+
+    assert!(!out.ok);
+    assert_eq!(out.channel.as_deref(), Some("rebind_required"));
+    assert_eq!(out.message_status.0, "failed");
+    assert_eq!(
+        out.verification.as_deref(),
+        Some("run team-agent claim-leader, takeover, or attach-app-server-leader")
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.delivery_blocked")
+                && event.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("leader_receiver_transport_conflict")
+        }),
+        "transport conflict must emit explicit fail-closed event; events={events:?}"
+    );
+}
+
+#[test]
+fn app_server_leader_busy_is_retryable_and_does_not_steer() {
+    let ws = tmp_ws("appbusy");
+    let mut script = crate::app_server_test_support::FakeAppServerScript::happy(
+        "thread-live",
+        "session-live",
+        ws.to_str().unwrap(),
+    );
+    script.turn_error = Some("thread already has an active turn".to_string());
+    let fake = crate::app_server_test_support::FakeAppServer::start("deliver-busy", script);
+    let state = app_server_state(&ws, fake.endpoint(), "thread-live", "session-live");
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let message_id = store
+        .create_message(
+            None,
+            "worker_a",
+            "leader",
+            "busy",
+            None,
+            false,
+            Some("team-a"),
+        )
+        .unwrap();
+
+    let out = deliver_pending_message(&ws, &store, &NoopTransport, &message_id, &log, &state)
+        .expect("leader busy should be retryable");
+
+    assert!(!out.ok);
+    assert_eq!(out.status, DeliveryStatus::RetryScheduled);
+    assert_eq!(out.channel.as_deref(), Some("leader_busy"));
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let status: String = conn
+        .query_row(
+            "select status from messages where message_id = ?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "target_resolved", "busy leader remains retryable");
+    let turns = fake.received_turns();
+    assert_eq!(
+        turns.len(),
+        1,
+        "must only call turn/start, never turn/steer"
+    );
+    assert_eq!(turns[0]["method"], serde_json::json!("turn/start"));
+}
+
 #[test]
 fn u1_multi_team_send_does_not_backfill_top_level_leader_binding() {
     let ws = tmp_ws("u1backfill");

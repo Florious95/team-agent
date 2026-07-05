@@ -53,6 +53,7 @@ pub(crate) const SEND_REMINDER: &str = "Message delivered. Wait for the worker t
 pub(crate) const STATUS_REMINDER: &str = "To wait for results use --watch-result or team-agent collect. Do not capture-pane worker terminals.";
 
 pub mod adapters;
+pub mod attach_app_server_leader;
 pub mod diagnose;
 pub mod emit;
 pub mod helpers;
@@ -64,6 +65,7 @@ pub mod status;
 pub mod types;
 
 pub use adapters::*;
+pub use attach_app_server_leader::*;
 pub use diagnose::*;
 pub use emit::*;
 pub use leader::*;

@@ -75,6 +75,38 @@ fn leader_team(session: &str, pane: &str, socket: &str) -> serde_json::Value {
     })
 }
 
+fn app_server_leader_team(
+    ws: &Path,
+    endpoint: &str,
+    thread_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    json!({
+        "session_name": "alpha-session",
+        "agents": {},
+        "leader_receiver": {
+            "mode": "codex_app_server",
+            "transport_kind": "codex_app_server",
+            "status": "attached",
+            "provider": "codex",
+            "owner_epoch": 3,
+            "app_server": {
+                "socket": endpoint,
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "cwd": ws.to_string_lossy(),
+                "cli_version": "codex-appserver-team-agent-test/0.139.0",
+                "bound_at": "2026-07-05T00:00:00Z"
+            }
+        },
+        "team_owner": {
+            "provider": "codex",
+            "transport_kind": "codex_app_server",
+            "owner_epoch": 3
+        }
+    })
+}
+
 fn pane(session: &str, window: &str, pane_id: &str) -> PaneInfo {
     PaneInfo {
         pane_id: PaneId::new(pane_id),
@@ -320,6 +352,105 @@ fn resolve_leader_name_after_rebind() {
     let resolved = resolve_name_with_transport(&ws, "alpha/leader", &transport).unwrap();
     assert_eq!(resolved.pane_id, "%new");
     assert_eq!(resolved.target_kind, NamedTargetKind::Leader);
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn resolve_app_server_leader_name_uses_typed_receiver_not_tmux_pane() {
+    let ws = named_ws("appserver-leader-resolve");
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "named-resolve",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-live",
+            ws.to_str().unwrap(),
+        ),
+    );
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": app_server_leader_team(&ws, fake.endpoint(), "thread-live", "session-live")
+        })),
+    );
+
+    let resolved = resolve_name_with_transport(&ws, "alpha/leader", &OfflineTransport::new())
+        .expect("app-server leader name resolves by typed receiver");
+
+    assert_eq!(resolved.target_kind, NamedTargetKind::Leader);
+    assert_eq!(resolved.transport_kind.as_deref(), Some("codex_app_server"));
+    assert!(
+        resolved.pane_id.is_empty(),
+        "app-server leader is not pane-addressed"
+    );
+    assert_eq!(
+        resolved
+            .app_server
+            .as_ref()
+            .and_then(|app| app.get("thread_id"))
+            .and_then(serde_json::Value::as_str),
+        Some("thread-live")
+    );
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn resolve_app_server_leader_name_fails_closed_on_transport_conflict() {
+    let ws = named_ws("appserver-leader-conflict");
+    let mut team = app_server_leader_team(
+        &ws,
+        "unix:///tmp/team-agent-should-not-connect.sock",
+        "thread-live",
+        "session-live",
+    );
+    team["leader_receiver"]["mode"] = json!("direct_tmux");
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": team
+        })),
+    );
+
+    let err = resolve_name_with_transport(&ws, "alpha/leader", &OfflineTransport::new())
+        .expect_err("conflicting mode/transport_kind must fail closed");
+
+    assert_eq!(err.kind, NamedAddressErrorKind::NameNotLive);
+    assert!(err.log.contains("mode=direct_tmux"), "{err}");
+    assert!(err.log.contains("transport_kind=codex_app_server"), "{err}");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn send_to_name_app_server_leader_submits_turn_without_tmux_pane() {
+    let ws = named_ws("appserver-leader-send");
+    let fake = crate::app_server_test_support::FakeAppServer::start(
+        "named-send",
+        crate::app_server_test_support::FakeAppServerScript::happy(
+            "thread-live",
+            "session-live",
+            ws.to_str().unwrap(),
+        ),
+    );
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "alpha": app_server_leader_team(&ws, fake.endpoint(), "thread-live", "session-live")
+        })),
+    );
+    let args = named_send_args(&ws, Some("alpha/leader"), None, None, &["hello appserver"]);
+
+    let result = cmd_send(&args).expect("named app-server send should succeed");
+    let value = match result.output {
+        CmdOutput::Json(value) => value,
+        other => panic!("expected json output, got {other:?}"),
+    };
+
+    assert_eq!(value["ok"], json!(true));
+    assert_eq!(value["transport_kind"], json!("codex_app_server"));
+    assert_eq!(fake.received_turns().len(), 1);
+    assert_eq!(
+        fake.received_turns()[0]["params"]["clientUserMessageId"],
+        value["message_id"]
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

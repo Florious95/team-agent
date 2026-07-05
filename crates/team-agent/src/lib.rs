@@ -92,4 +92,8 @@ pub mod fake_worker;
 // tmux_backend — concrete tmux Transport executor (Command::new tmux via a CommandRunner seam);
 // the real spawn/capture/inject/has_session backend the daemon + launch use (step 9 shipped only
 // the trait + argv-builders). Real subprocess execution is the #[ignore] real-machine boundary.
+pub mod codex_app_server;
 pub mod tmux_backend;
+
+#[cfg(test)]
+pub(crate) mod app_server_test_support;
