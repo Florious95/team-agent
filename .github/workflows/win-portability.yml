@@ -117,3 +117,64 @@ jobs:
             check.log
             check-tests.log
           if-no-files-found: warn
+
+  # 0.5.x Windows portability Batch 6: produce the Windows release
+  # binaries and pin their sha256 in a tracking file. The Mac dev
+  # host cross-compiles nothing; the artifact produced here is the
+  # single source of truth for Batch 6 real-machine testing. Runs
+  # only after the compile-gate is GREEN so we never ship a broken
+  # binary to the real-machine step.
+  windows-build:
+    runs-on: windows-latest
+    needs: windows-compile-gate
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: cargo build release (team-agent + win-conpty-phase0 bins)
+        shell: bash
+        run: |
+          # `team-agent` produces `team-agent.exe`.
+          # `win-conpty-phase0` produces `windows-shim.exe`, `conpty-cli.exe`,
+          # and its own `win-conpty-phase0.exe` diagnostic bin.
+          cargo build --release --target x86_64-pc-windows-msvc \
+            -p team-agent \
+            -p win-conpty-phase0
+      - name: sha256 tracking (Batch 6 C-4 anchor)
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/x86_64-pc-windows-msvc/release"
+          echo "# team-agent Batch 6 Windows release binaries" > win-batch6-tracking.txt
+          echo "git_rev=$(git rev-parse HEAD)" >> win-batch6-tracking.txt
+          echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-batch6-tracking.txt
+          echo "" >> win-batch6-tracking.txt
+          for bin in team-agent.exe windows-shim.exe conpty-cli.exe; do
+            path="$out/$bin"
+            if [ -f "$path" ]; then
+              size=$(stat -c %s "$path" 2>/dev/null || wc -c < "$path")
+              sha=$(sha256sum "$path" | awk '{print $1}')
+              echo "$bin sha256=$sha size=$size" | tee -a win-batch6-tracking.txt
+            else
+              echo "MISSING $bin" | tee -a win-batch6-tracking.txt
+              exit 1
+            fi
+          done
+          # Emit team-agent.exe sha as a step output so downstream can
+          # verify remote sha matches without re-reading the file.
+          ta_sha=$(sha256sum "$out/team-agent.exe" | awk '{print $1}')
+          echo "team_agent_sha=$ta_sha" >> "$GITHUB_OUTPUT"
+      - name: upload team-agent-win-batch6 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: team-agent-win-batch6
+          path: |
+            target/x86_64-pc-windows-msvc/release/team-agent.exe
+            target/x86_64-pc-windows-msvc/release/windows-shim.exe
+            target/x86_64-pc-windows-msvc/release/conpty-cli.exe
+            win-batch6-tracking.txt
+          if-no-files-found: error
