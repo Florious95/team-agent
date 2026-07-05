@@ -12,4 +12,4 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
       - name: platform lib tests
-        run: cargo test -p team-agent --lib platform::
+        run: "cargo test -p team-agent --lib platform::"
