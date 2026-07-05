@@ -1,19 +1,5 @@
 name: win-portability
 
-# 0.5.x Windows portability CI.
-#
-# - Ubuntu job: primary green-required. Runs platform lib tests +
-#   C-1 packaging assertion + C-2 fallback burn-down + C-4 caller
-#   whitelist guard.
-# - Windows compile-gate job: continue-on-error. `cargo check
-#   --target x86_64-pc-windows-msvc` is expected RED in Batch 0;
-#   Batches 1-4 burn the error count down. Upload check.log so we
-#   can measure the burn-down.
-#
-# Truth source:
-# - Design:    .team/artifacts/0.5.x-windows-portability-survey-design.md
-# - CR verdict: .team/artifacts/0.5.x-windows-portability-cr-verdict.md
-
 on:
   workflow_dispatch:
   push:
@@ -42,7 +28,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-      - name: cargo check --target x86_64-pc-windows-msvc (RED expected in Batch 0)
+      - name: cargo check windows target
         continue-on-error: true
         shell: bash
         run: |
@@ -50,30 +36,21 @@ jobs:
           cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
           echo "cargo_check_exit=$?"
       - name: post burn-down summary
+        if: always()
         shell: bash
         run: |
           if [ -f check.log ]; then
-            errcount=$(grep -c "^error\[" check.log || echo 0)
-            echo "windows-portability-tracking git_rev=$(git rev-parse HEAD)"
-            echo "windows-portability-tracking build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "windows-portability-tracking cargo_check_error_count=$errcount"
-            {
-              echo "git_rev=$(git rev-parse HEAD)"
-              echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-              echo "cargo_check_error_count=$errcount"
-              echo ""
-              echo "# First 20 error headers (burn-down evidence)"
-              grep "^error\[" check.log | head -20 || true
-            } > win-portability-tracking.txt
-            {
-              echo "## Windows portability compile-gate burn-down"
-              echo ""
-              echo "- error count: $errcount"
-            } >> $GITHUB_STEP_SUMMARY
+            errcount=$(grep -c '^error\[' check.log || echo 0)
+            echo "cargo_check_error_count=$errcount"
+            echo "git_rev=$(git rev-parse HEAD)" > win-portability-tracking.txt
+            echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-portability-tracking.txt
+            echo "cargo_check_error_count=$errcount" >> win-portability-tracking.txt
+            grep '^error\[' check.log | head -20 >> win-portability-tracking.txt || true
           else
-            echo "status=no_check_log" > win-portability-tracking.txt
+            echo "no_check_log=1" > win-portability-tracking.txt
           fi
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: win-portability-tracking
           path: |
