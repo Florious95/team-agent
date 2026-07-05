@@ -504,18 +504,20 @@ pub fn ensure_shim_running(
                 Err(_e) => {
                     // Recorded shim is dead-in-effect (pipe closed
                     // or Hello failed even though pid is alive).
-                    // Mark stale + fall through to spawn.
-                    let _ = mark_transport_unavailable(
-                        workspace,
-                        "recorded_shim_reconnect_failed",
-                    );
+                    // Fall through to spawn — DO NOT mark stale
+                    // here because the fresh spawn's finalize will
+                    // atomically REPLACE the shim block with the
+                    // new pid + pipe_ready:true. Emitting an
+                    // unavailable event now + finalize's re-write
+                    // was creating a race where the unavailable
+                    // reason lingered even after finalize completed
+                    // (real-machine batch8-28742934836 evidence).
                 }
             }
-        } else {
-            // Pid is dead; clear the marker so downstream code
-            // doesn't think it can reconnect.
-            let _ = mark_transport_unavailable(workspace, "recorded_shim_pid_gone");
         }
+        // Pid is dead OR reconnect failed. Do NOT mark unavailable
+        // here — the fresh spawn below overwrites the shim block
+        // authoritatively.
     }
     // Path 2: spawn a fresh shim.
     spawn_shim_and_handshake(workspace, team_key, workspace_hash)
