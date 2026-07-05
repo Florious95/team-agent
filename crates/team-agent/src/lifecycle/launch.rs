@@ -2922,34 +2922,63 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     // (BinaryMissing / Spawn / ConnectTimeout / HelloFailed) —
     // callers see the N38 three-line action guidance and no silent
     // downgrade to tmux (CR C-1 fail-closed).
+    // 0.5.x Windows portability Batch 6 Option A. On Windows +
+    // `--backend conpty`, spawn the shim, perform Hello, THEN hand
+    // the already-connected `NamedPipeClient` to `ConPtyBackend`
+    // directly — bypassing the factory's re-connect attempt.
+    //
+    // Why bypass factory re-wiring: real-machine finding on
+    // batch6-28739912081 showed the shim's `CreateNamedPipe`/
+    // `ConnectNamedPipe` reuse race after the Hello client
+    // disconnects (0x80070217 ERROR_PIPE_CONNECTED). Keeping the
+    // ONE client that already succeeded the handshake is safer
+    // than closing it and hoping the shim recovers in time for
+    // the factory's next connect.
+    //
+    // On non-Windows this whole block is cfg'd out and we fall
+    // through to the standard factory path.
     #[cfg(windows)]
-    if matches!(
-        requested,
-        crate::transport_factory::RequestedTransportBackend::ConPty
-    ) {
-        let team_key_str = team_key_for_factory.ok_or_else(|| {
-            LifecycleError::TeamSelect(
-                "team_key required for --backend conpty on Windows (Batch 6 Option A)".to_string(),
+    {
+        if matches!(
+            requested,
+            crate::transport_factory::RequestedTransportBackend::ConPty
+        ) {
+            let team_key_str = team_key_for_factory.ok_or_else(|| {
+                LifecycleError::TeamSelect(
+                    "team_key required for --backend conpty on Windows (Batch 6 Option A)"
+                        .to_string(),
+                )
+            })?;
+            let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(&workspace);
+            let mut handle = crate::coordinator::conpty_shim::spawn_shim_and_handshake(
+                &workspace,
+                team_key_str,
+                &workspace_hash,
             )
-        })?;
-        let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(&workspace);
-        let handle = crate::coordinator::conpty_shim::spawn_shim_and_handshake(
-            &workspace,
-            team_key_str,
-            &workspace_hash,
-        )
-        .map_err(|e| LifecycleError::TeamSelect(format!("conpty shim spawn: {e}")))?;
-        // Detach so the shim survives beyond this fn — `shutdown`
-        // will terminate it explicitly by reading
-        // `state.transport.shim.pid` and calling
-        // `platform::process::terminate_pid` (leader constraint 3).
-        // The `client` inside the handle is dropped here; the
-        // factory below will open a FRESH `NamedPipeClient` via
-        // Batch 5's `conpty_pipe_ready` gate, which is a cleaner
-        // ownership boundary (the launch client and the runtime
-        // client are separate short-lived vs long-lived
-        // connections).
-        let _shim_pid = handle.detach();
+            .map_err(|e| LifecycleError::TeamSelect(format!("conpty shim spawn: {e}")))?;
+            let client = handle.take_client().ok_or_else(|| {
+                LifecycleError::TeamSelect(
+                    "conpty shim handshake produced no client (internal invariant)".to_string(),
+                )
+            })?;
+            let _shim_pid = handle.detach();
+            let adapter = crate::conpty::PipeClientAdapter(client);
+            let backend = crate::conpty::ConPtyBackend::new(
+                workspace_hash.clone(),
+                team_key_str.to_string(),
+            )
+            .with_pipe_client(Box::new(adapter))
+            .map_err(|e| LifecycleError::TeamSelect(format!("conpty backend wire: {e}")))?;
+            return quick_start_with_transport_in_workspace_with_display(
+                &workspace,
+                agents_dir,
+                name,
+                yes,
+                team_id,
+                &backend,
+                open_display,
+            );
+        }
     }
     let input = crate::transport_factory::TransportFactoryInput::new(
         &workspace,
@@ -2957,20 +2986,6 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     )
     .with_team_key(team_key_for_factory)
     .with_explicit_backend(Some(requested));
-    // On Windows we need the factory to SEE the newly-persisted
-    // `state.transport.shim.pipe_ready = true` marker, so provide the
-    // fresh state.json value to the factory input.
-    #[cfg(windows)]
-    let state_value = std::fs::read_to_string(
-        crate::state::persist::runtime_state_path(&workspace),
-    )
-    .ok()
-    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
-    #[cfg(windows)]
-    let input = match state_value.as_ref() {
-        Some(v) => input.with_state(Some(v)),
-        None => input,
-    };
     let resolved = crate::transport_factory::resolve_transport(input)
         .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
     // Hand the boxed backend down as `&dyn Transport`.
