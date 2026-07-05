@@ -418,9 +418,18 @@ fn build_conpty(
             match conpty_transport::NamedPipeClient::connect(&pipe_name, 250) {
                 Ok(client) => {
                     let adapter = crate::conpty::PipeClientAdapter(client);
+                    // `with_pipe_client` takes `mut self` — it either
+                    // returns the wired backend or consumes the input
+                    // and returns an error. Rebuild an unwired
+                    // backend on error so the outer `Box::new(backend)`
+                    // still has a live value.
                     match backend.with_pipe_client(Box::new(adapter)) {
                         Ok(wired) => backend = wired,
                         Err(e) => {
+                            backend = ConPtyBackend::new(
+                                workspace_hash.clone(),
+                                team_key,
+                            );
                             notices.push(TransportNotice {
                                 event: "transport.conpty_pipe_client_unwired",
                                 payload: serde_json::json!({
