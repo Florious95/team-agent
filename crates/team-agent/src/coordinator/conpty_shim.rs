@@ -238,24 +238,49 @@ pub fn spawn_shim_and_handshake(
             pipe_name: pipe_name.clone(),
             source: e,
         })?;
-    let child = Command::new(&shim_exe)
-        .args([
-            "--workspace-hash",
-            workspace_hash,
-            "--team",
-            team_key,
-            "--pipe-name",
-            &pipe_name,
-        ])
-        .env("TA_CONPTY_PIPE_TOKEN", &pipe_token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|e| ShimError::Spawn {
-            pipe_name: pipe_name.clone(),
-            source: e,
-        })?;
+    let mut cmd = Command::new(&shim_exe);
+    cmd.args([
+        "--workspace-hash",
+        workspace_hash,
+        "--team",
+        team_key,
+        "--pipe-name",
+        &pipe_name,
+    ])
+    .env("TA_CONPTY_PIPE_TOKEN", &pipe_token)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::from(stderr_file));
+    // 0.5.x Windows portability Batch 8 F7 fix (leader msg_590b4dce0f68):
+    // set `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` creation
+    // flags so the shim truly outlives its parent (coordinator).
+    // Without these flags, Windows job-object semantics can kill
+    // the shim when the parent exits — the exact failure Batch 7
+    // real-machine testing surfaced on batch7-28741981337 (shim
+    // dead by coord's first tick because it was a child of the
+    // one-shot quick-start process).
+    //
+    // - `DETACHED_PROCESS` (0x08): the shim doesn't inherit the
+    //   parent's console handle (which could cause the shim to
+    //   attempt console I/O and exit when the parent's console
+    //   goes away).
+    // - `CREATE_BREAKAWAY_FROM_JOB` (0x01000000): removes the shim
+    //   from any job object the parent was in (common under
+    //   PowerShell / cmd.exe run-from-terminal scenarios).
+    //
+    // Combined: the shim is a truly detached child, not a
+    // grandchild of any transient parent-side supervisor.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+    }
+    let child = cmd.spawn().map_err(|e| ShimError::Spawn {
+        pipe_name: pipe_name.clone(),
+        source: e,
+    })?;
 
     let pid = child.id();
 
@@ -429,6 +454,222 @@ pub fn recorded_shim_pid(workspace: &Path) -> Option<u32> {
         .get("pid")?
         .as_u64()
         .and_then(|v| u32::try_from(v).ok())
+}
+
+/// Read `state.transport.shim.pipe_name` for reconnect routing.
+pub fn recorded_shim_pipe_name(workspace: &Path) -> Option<String> {
+    let state_path = runtime_state_path(workspace);
+    if !state_path.exists() {
+        return None;
+    }
+    let text = std::fs::read_to_string(&state_path).ok()?;
+    let state: Value = serde_json::from_str(&text).ok()?;
+    state
+        .get("transport")?
+        .get("shim")?
+        .get("pipe_name")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
+/// idempotent shim-ownership entry point owned by the coordinator.
+///
+/// The design's §Shim Lifecycle chapter reads: "shim 是 per-(workspace,
+/// team) 长寿进程,coordinator 可死可重连". This fn is the ONE entry
+/// point that both quick-start (via `ensure_coordinator_running`) and
+/// coord tick monitor call.
+///
+/// Behavior:
+///
+/// 1. If `state.transport.shim.pid` is recorded AND the pid is alive,
+///    call `reconnect_recorded_shim` — the shim is a per-(workspace,
+///    team) singleton and we just re-Hello to prove wire compatibility.
+/// 2. Otherwise, `spawn_shim_and_handshake` — spawn a fresh shim,
+///    perform Hello, persist state.
+///
+/// This gives the "coord can die, shim survives" invariant: a fresh
+/// coord that finds a live shim just reconnects; a fresh coord that
+/// finds no shim spawns one.
+pub fn ensure_shim_running(
+    workspace: &Path,
+    team_key: &str,
+    workspace_hash: &str,
+) -> Result<ShimHandle, ShimError> {
+    // Path 1: reconnect if state has a live shim recorded.
+    if let Some(pid) = recorded_shim_pid(workspace) {
+        if crate::platform::process::pid_is_alive(pid) {
+            match reconnect_recorded_shim(workspace, team_key, workspace_hash) {
+                Ok(handle) => return Ok(handle),
+                Err(_e) => {
+                    // Recorded shim is dead-in-effect (pipe closed
+                    // or Hello failed even though pid is alive).
+                    // Mark stale + fall through to spawn.
+                    let _ = mark_transport_unavailable(
+                        workspace,
+                        "recorded_shim_reconnect_failed",
+                    );
+                }
+            }
+        } else {
+            // Pid is dead; clear the marker so downstream code
+            // doesn't think it can reconnect.
+            let _ = mark_transport_unavailable(workspace, "recorded_shim_pid_gone");
+        }
+    }
+    // Path 2: spawn a fresh shim.
+    spawn_shim_and_handshake(workspace, team_key, workspace_hash)
+}
+
+/// 0.5.x Windows portability Batch 8 F7: reconnect to an already-
+/// running shim by reading `state.transport.shim.pipe_name` and
+/// opening a fresh `NamedPipeClient` + performing Hello.
+///
+/// Does NOT spawn a new shim. Returns `ShimError::ConnectTimeout` /
+/// `HelloFailed` on failure. Callers (post-crash coord restart)
+/// treat these errors as "recorded shim is dead → mark stale +
+/// consider re-spawn via `ensure_shim_running`".
+///
+/// Handle returned from this fn has no owned child (the shim is
+/// somebody else's — usually a previous coord instance). `detach()`
+/// on the handle is a no-op for the child.
+pub fn reconnect_recorded_shim(
+    workspace: &Path,
+    team_key: &str,
+    _workspace_hash: &str,
+) -> Result<ShimHandle, ShimError> {
+    let pipe_name = recorded_shim_pipe_name(workspace).ok_or_else(|| {
+        ShimError::ConnectTimeout {
+            attempts: 0,
+            pipe_name: "<state.transport.shim.pipe_name missing>".to_string(),
+        }
+    })?;
+    // For reconnect we don't have the original pipe_token (CR C-1:
+    // token was never persisted). Hello is designed to accept any
+    // token from the client and echo back the shim's own token, so
+    // we use a placeholder and validate the shim's reply instead.
+    //
+    // NOTE: with reconnect, we're proving wire compatibility, not
+    // authenticating a fresh token exchange. The shim's own token
+    // is the authoritative one for subsequent requests; if the
+    // shim rotated tokens, the shim rejects subsequent non-Hello
+    // requests with `PipeTokenMismatch` and the client must
+    // re-Hello — which is exactly what this fn does.
+    let placeholder_token = "PENDING-RECONNECT";
+    let mut last_err: Option<ShimError> = None;
+    for attempt in 1..=CONNECT_ATTEMPTS {
+        match NamedPipeClient::connect(&pipe_name, 500) {
+            Ok(mut client) => {
+                match reconnect_hello(&mut client, team_key) {
+                    Ok(()) => {
+                        return Ok(ShimHandle {
+                            child: None,
+                            pid: recorded_shim_pid(workspace).unwrap_or(0),
+                            pipe_name,
+                            client: Some(client),
+                        });
+                    }
+                    Err(reason) => {
+                        return Err(ShimError::HelloFailed {
+                            pipe_name,
+                            reason,
+                        });
+                    }
+                }
+            }
+            Err(err) => {
+                let _ = attempt;
+                let _ = placeholder_token;
+                last_err = Some(ShimError::ConnectTimeout {
+                    attempts: 1,
+                    pipe_name: format!("{pipe_name} (io: {err})"),
+                });
+                std::thread::sleep(CONNECT_BACKOFF);
+            }
+        }
+    }
+    Err(last_err.unwrap_or(ShimError::ConnectTimeout {
+        attempts: CONNECT_ATTEMPTS,
+        pipe_name,
+    }))
+}
+
+/// Reconnect Hello: the client sends Hello with the current workspace/
+/// team scope; the shim replies with its OWN pipe_token (which the
+/// client doesn't know yet). We just validate `resp.ok`.
+fn reconnect_hello(
+    client: &mut NamedPipeClient,
+    team_key: &str,
+) -> Result<(), String> {
+    use conpty_transport::{Op, PipeClient, Request};
+    let req = Request::new(
+        "coord-reconnect-hello",
+        "", // workspace_hash isn't authoritative for reconnect
+        team_key,
+        "PENDING-RECONNECT",
+        Op::Hello,
+    );
+    let resp = client.request(&req);
+    if !resp.ok {
+        return Err(format!("reconnect hello ok=false: {:?}", resp.error));
+    }
+    Ok(())
+}
+
+/// 0.5.x Windows portability Batch 8 F7: emit the C-3 stale-family
+/// event when the coordinator's tick loop finds the shim
+/// unreachable. Also clears `state.transport.shim.pipe_ready` so
+/// downstream code sees the truthful state.
+///
+/// The event name (`transport.conpty_shim_unavailable`) is picked
+/// deliberately to live in the same event family as other
+/// stale-transport signals (see design §C-3 anchor). Consumers
+/// (status --detail, doctor, MCP status) can grep for
+/// `transport.conpty_shim_*` and get the full stale picture.
+///
+/// This is a no-op on Unix (no shim concept, no state to clear).
+/// The Windows-only `#[cfg]` gate is at the mod level (see
+/// `coordinator/mod.rs`); on Unix this file isn't compiled, so
+/// downstream callers must cfg-gate their reference themselves.
+pub fn mark_transport_unavailable(
+    workspace: &Path,
+    reason: &str,
+) -> Result<(), StateError> {
+    // Best-effort event emission — a failed event write should not
+    // fail the caller. The state-clearing step below is authoritative.
+    if let Ok(event_log) = std::panic::catch_unwind(|| {
+        crate::event_log::EventLog::new(workspace)
+    }) {
+        let _ = event_log.write(
+            "transport.conpty_shim_unavailable",
+            serde_json::json!({
+                "reason": reason,
+                "workspace": workspace.display().to_string(),
+            }),
+        );
+    }
+    // Clear the shim block from state so subsequent factory
+    // `conpty_pipe_ready` checks return false and the operator sees
+    // an honest "no live shim" via status --detail.
+    let state_path = runtime_state_path(workspace);
+    if !state_path.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&state_path).map_err(StateError::from)?;
+    let mut state: Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(transport) = state
+        .get_mut("transport")
+        .and_then(|t| t.as_object_mut())
+    {
+        if let Some(shim) = transport.get_mut("shim").and_then(|s| s.as_object_mut()) {
+            shim.insert("pipe_ready".to_string(), serde_json::json!(false));
+            shim.insert(
+                "unavailable_reason".to_string(),
+                serde_json::json!(reason),
+            );
+        }
+    }
+    save_runtime_state(workspace, &state)
 }
 
 #[cfg(test)]

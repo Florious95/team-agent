@@ -158,6 +158,57 @@ fn run_daemon_with_coordinator_and_boot_tmux(
         }
     }
     event_log.write("coordinator.boot", boot_event)?;
+
+    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
+    // coordinator takes ownership of shim lifecycle. Idempotent:
+    // spawns a fresh shim if none is recorded, reconnects if
+    // `state.transport.shim.pid` names a living shim (post-crash
+    // restart path). Failures are non-fatal for the coord daemon —
+    // the tick loop's transport calls will surface honest
+    // MuxUnavailable errors and `mark_transport_unavailable`
+    // emits the C-3 stale-family event.
+    //
+    // On non-Windows this call is cfg'd out (there's no shim
+    // concept on Unix).
+    #[cfg(windows)]
+    {
+        let state_for_team_key =
+            crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
+        let team_key_opt = state_for_team_key
+            .as_ref()
+            .and_then(|s| s.get("active_team_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(team_key) = team_key_opt {
+            let workspace_hash =
+                crate::tmux_backend::workspace_short_hash_pub(args.workspace.as_path());
+            match crate::coordinator::conpty_shim::ensure_shim_running(
+                args.workspace.as_path(),
+                &team_key,
+                &workspace_hash,
+            ) {
+                Ok(handle) => {
+                    // Detach so the shim survives beyond this
+                    // coordinator instance (F7 core invariant).
+                    let _shim_pid = handle.detach();
+                    eprintln!("coordinator: shim ensured (pid={_shim_pid})");
+                }
+                Err(e) => {
+                    // Honest degradation: emit the stale-family
+                    // event, coord continues without a shim. Tick
+                    // loop will surface `mux_unavailable` on any
+                    // transport call.
+                    eprintln!("coordinator: shim ensure failed: {e}");
+                    let _ = crate::coordinator::conpty_shim::mark_transport_unavailable(
+                        args.workspace.as_path(),
+                        &format!("boot_ensure_failed: {e}"),
+                    );
+                }
+            }
+        }
+    }
+
     let tick_interval = match args.tick_interval_sec {
         Some(v) if v > 0.0 => v,
         _ => resolve_tick_interval(&args.workspace)?,
