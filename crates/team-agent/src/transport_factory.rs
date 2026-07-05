@@ -415,7 +415,16 @@ fn build_conpty(
     {
         if conpty_pipe_ready(input) {
             let pipe_name = conpty_transport::pipe_name_for(&workspace_hash, team_key);
-            match conpty_transport::NamedPipeClient::connect(&pipe_name, 250) {
+            // 0.5.x Windows portability Batch 7: wait up to 2s for
+            // the shim to be listening. On the launch hot path the
+            // coordinator side JUST spawned + handshook the shim,
+            // then dropped that client — the shim's accept loop has
+            // to close+recreate the pipe instance before we can
+            // re-connect. 250ms was tight in real-machine testing
+            // on batch7-28741378487; 2s covers the race window
+            // comfortably without stalling healthy paths (a listening
+            // shim replies to WaitNamedPipeW in <10ms).
+            match conpty_transport::NamedPipeClient::connect(&pipe_name, 2000) {
                 Ok(client) => {
                     let adapter = crate::conpty::PipeClientAdapter(client);
                     // `with_pipe_client` takes `mut self` — it either
