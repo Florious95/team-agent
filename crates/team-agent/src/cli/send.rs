@@ -7,6 +7,38 @@ use crate::messaging::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, Delivery
 /// `cmd_send`(`commands.py:164`)。解析 target(`--to` fanout / 单 target / `*`)→ [`MessageTarget`],
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
+    if let Some(ref to_name) = args.to_name {
+        if args.pane.is_some() || args.target.is_some() || args.targets.is_some() {
+            return Err(CliError::Usage(
+                "--to-name and --pane/TARGET/--to are mutually exclusive: \
+                 --to-name resolves a stable workspace/team/name to a live pane"
+                    .to_string(),
+            ));
+        }
+        let content = args.message.join(" ");
+        if content.is_empty() {
+            return Err(CliError::Usage("--to-name requires a non-empty message".to_string()));
+        }
+        let (resolved, transport) =
+            match crate::cli::named_address::resolve_name_for_cli(&args.workspace, to_name) {
+                Ok(resolved) => resolved,
+                Err(error) if args.json => {
+                    return Ok(CmdResult::from_json(error.to_json(), args.json));
+                }
+                Err(error) => return Err(CliError::Usage(error.n38_message())),
+            };
+        let mut value = send_to_named_pane_direct(
+            &args.workspace,
+            transport.as_ref(),
+            &resolved,
+            &content,
+            &args.sender,
+            args.task.as_deref(),
+            args.json,
+        )?;
+        add_send_reminder_if_ok(&mut value);
+        return Ok(CmdResult::from_json(value, args.json));
+    }
     // F1 (0.3.26, cross-team send): --pane <pane_id> direct targeting.
     // Mutually exclusive with target / --to (agent-name routing).
     if let Some(ref pane_id) = args.pane {
@@ -143,6 +175,78 @@ fn send_to_pane_direct(
         "inject_verification": format!("{:?}", report.inject_verification),
         "in_team": in_team,
     }))
+}
+
+fn send_to_named_pane_direct(
+    sender_workspace: &Path,
+    transport: &dyn crate::transport::Transport,
+    resolved: &crate::cli::named_address::ResolvedNamedAddress,
+    content: &str,
+    sender: &str,
+    task_id: Option<&str>,
+    _json: bool,
+) -> Result<serde_json::Value, CliError> {
+    use crate::messaging::delivery::render_message;
+    use crate::transport::{InjectPayload, Key, PaneId, Target};
+
+    let message_id = format!("named_send_{}", chrono::Utc::now().timestamp_millis());
+    let rendered = render_message(sender, task_id, content, &message_id);
+    let target = Target::Pane(PaneId::new(&resolved.pane_id));
+    let sender_run_workspace = crate::model::paths::canonical_run_workspace(sender_workspace)
+        .unwrap_or_else(|_| sender_workspace.to_path_buf());
+    let event_log = crate::event_log::EventLog::new(&sender_run_workspace);
+    if let Some(warning) = &resolved.warning {
+        eprintln!("warning: {warning}");
+    }
+    let report = transport
+        .inject(&target, &InjectPayload::Text(rendered), Key::Enter, true)
+        .map_err(|e| {
+            CliError::Runtime(format!(
+                "inject to named target {} pane {} failed: {e}",
+                resolved.raw_name, resolved.pane_id
+            ))
+        })?;
+    let target_kind = named_target_kind_wire(resolved.target_kind);
+    let event = serde_json::json!({
+        "to_name": resolved.raw_name,
+        "target_kind": target_kind,
+        "sender": sender,
+        "sender_workspace": sender_run_workspace.display().to_string(),
+        "target_workspace": resolved.target_workspace.display().to_string(),
+        "team_key": resolved.team_key,
+        "agent_id": resolved.agent_id,
+        "pane_id": resolved.pane_id,
+        "session_name": resolved.session_name,
+        "window_name": resolved.window_name,
+        "tmux_endpoint": resolved.tmux_endpoint,
+        "state_pane_id": resolved.state_pane_id,
+        "state_pane_stale": resolved.state_pane_stale,
+        "agent_status": resolved.agent_status,
+        "warning": resolved.warning,
+        "message_id": message_id,
+        "submit_verification": crate::transport::submit_verification_wire(report.submit_verification),
+        "inject_verification": format!("{:?}", report.inject_verification),
+    });
+    let _ = event_log.write("send.name_direct", event.clone());
+    let ok = matches!(
+        report.submit_verification,
+        crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck
+            | crate::transport::SubmitVerification::PastedContentPromptAbsentAfterSubmit
+            | crate::transport::SubmitVerification::KeySentAfterVisibleToken { .. }
+    );
+    let mut value = event;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("ok".to_string(), serde_json::json!(ok));
+    }
+    Ok(value)
+}
+
+fn named_target_kind_wire(kind: crate::cli::named_address::NamedTargetKind) -> &'static str {
+    match kind {
+        crate::cli::named_address::NamedTargetKind::Worker => "worker",
+        crate::cli::named_address::NamedTargetKind::Leader => "leader",
+        crate::cli::named_address::NamedTargetKind::SessionWindow => "session_window",
+    }
 }
 
 pub fn cmd_fallback_send_leader(args: &FallbackSendLeaderArgs) -> Result<CmdResult, CliError> {

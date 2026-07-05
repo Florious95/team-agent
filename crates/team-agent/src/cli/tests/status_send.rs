@@ -447,6 +447,7 @@ use super::*;
             json: false,
             message_id: None,
             pane: None,
+            to_name: None,
         }
     }
 

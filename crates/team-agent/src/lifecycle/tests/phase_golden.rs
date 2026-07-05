@@ -11,6 +11,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
+const CALLER_IDENTITY_ENVS: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "TEAM_AGENT_LEADER_PANE_ID",
+    "TEAM_AGENT_LEADER_SESSION_UUID",
+    "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+    "TEAM_AGENT_LEADER_PROVIDER",
+    "TEAM_AGENT_MACHINE_FINGERPRINT",
+    "TEAM_AGENT_WORKSPACE",
+    "TEAM_AGENT_TEAM_ID",
+    "TEAM_AGENT_OWNER_TEAM_ID",
+    "TEAM_AGENT_ACTIVE_TEAM",
+    "TEAM_AGENT_ID",
+];
 
 #[test]
 #[serial_test::serial(env)]
@@ -141,6 +155,10 @@ struct PhaseGolden {
 
 fn run_phase_golden(spec: PhaseGolden) -> Value {
     let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
+    let _caller_identity = CALLER_IDENTITY_ENVS
+        .iter()
+        .map(|key| EnvVarGuard::unset(key))
+        .collect::<Vec<_>>();
     let team = two_worker_team_dir();
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
@@ -186,6 +204,7 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         json: true,
         message_id: Some("phase-golden-message".to_string()),
         pane: None,
+        to_name: None,
     });
     let collect = cmd_collect(&CollectArgs {
         workspace: workspace.clone(),
@@ -391,6 +410,14 @@ impl EnvVarGuard {
         let previous = std::env::var(key).ok();
         unsafe {
             std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::remove_var(key);
         }
         Self { key, previous }
     }

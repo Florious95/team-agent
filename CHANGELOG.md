@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- **Added: `send --to-name` resolves stable workspace/team/agent or leader names to the current live pane.** Routes a message to a live tmux pane by stable name (`<workspace>::<team>/<agent>` or `leader`) without needing to look up the pane ID. The MVP assumes a trusted local caller; no auth gate is applied. Design includes 7 architectural constraints and is covered by 13 unit tests; 12/12 real-machine send scenarios passed.
+
 ## 0.5.0
 
 This release completes a six-phase internal refactor that was carried out entirely behind the existing public API surface. Every gate (Phase A–F + 12-item subscription gate + leader gate) passed before shipping.

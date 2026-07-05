@@ -87,6 +87,7 @@ mod divergence;
 mod lane_c;
 mod leader_watch;
 mod missing_subcommands;
+mod named_address;
 mod repair_state_byte_lock;
 mod peer_allow;
 mod run_delegation;
