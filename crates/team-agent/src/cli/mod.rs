@@ -946,15 +946,14 @@ pub mod lifecycle_port {
         // 0.5.x Windows portability Batch 6 Option A (leader
         // constraint 3): if a ConPTY shim was recorded in
         // `state.transport.shim.pid`, terminate it explicitly via
-        // `platform::process::terminate_pid`. Unix always sees
-        // `recorded_shim_pid == None` so this is a no-op there;
-        // Windows quick-start with `--backend conpty` triggered the
-        // spawn, so shutdown must symmetrically reap it. The
-        // termination outcome (Requested / ForceOnly / AlreadyGone)
-        // is surfaced in the shutdown JSON so operators can audit
-        // whether the shim was actually running vs already gone.
-        let shim_outcome = shutdown_conpty_shim(&run_workspace);
-        Ok(json!({
+        // `platform::process::terminate_pid`.
+        //
+        // Batch 7 refinement: the field is emitted into the shutdown
+        // JSON only on Windows so Unix golden fixtures stay
+        // byte-preserving. The Unix behavior is a no-op (no shim
+        // concept there); adding a placeholder key would just noise
+        // up the fixtures.
+        let mut response = json!({
             "ok": ok,
             "status": status,
             "phase": phase,
@@ -978,8 +977,21 @@ pub mod lifecycle_port {
                 "status": coordinator_status,
                 "pid": coordinator_pid,
             },
-            "conpty_shim": shim_outcome,
-        }))
+        });
+        #[cfg(windows)]
+        {
+            if let Some(obj) = response.as_object_mut() {
+                obj.insert(
+                    "conpty_shim".to_string(),
+                    shutdown_conpty_shim(&run_workspace),
+                );
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &run_workspace;
+        }
+        Ok(response)
     }
 
     /// 0.5.x Windows portability Batch 6 Option A: locate and
@@ -987,39 +999,35 @@ pub mod lifecycle_port {
     /// recorded. Returns a JSON blob for the shutdown response so
     /// operators can distinguish "no shim was ever launched" from
     /// "shim terminated cleanly" from "shim already gone".
-    fn shutdown_conpty_shim(_workspace: &Path) -> serde_json::Value {
-        #[cfg(windows)]
-        {
-            let Some(pid) = crate::coordinator::conpty_shim::recorded_shim_pid(_workspace) else {
-                return json!({ "action": "no_shim_recorded" });
-            };
-            // Prefer graceful termination — Windows maps this to
-            // `TerminationOutcome::ForceOnly` (Batch 3 anchor: no
-            // SIGTERM equivalent for non-console child), which
-            // surfaces the honest audit signal in the JSON.
-            let outcome = crate::platform::process::terminate_pid(
-                pid,
-                crate::platform::process::SignalKind::TerminateForce,
-            );
-            match outcome {
-                Ok(crate::platform::process::TerminationOutcome::Requested) => {
-                    json!({ "pid": pid, "action": "terminated" })
-                }
-                Ok(crate::platform::process::TerminationOutcome::AlreadyGone) => {
-                    json!({ "pid": pid, "action": "already_gone" })
-                }
-                Ok(crate::platform::process::TerminationOutcome::ForceOnly { reason }) => {
-                    json!({ "pid": pid, "action": "terminated_force_only", "reason": reason })
-                }
-                Err(e) => {
-                    json!({ "pid": pid, "action": "terminate_failed", "reason": e.to_string() })
-                }
+    ///
+    /// Windows-only; caller (`shutdown_with_transport_and_state`)
+    /// only invokes on Windows. Unix has no shim concept.
+    #[cfg(windows)]
+    fn shutdown_conpty_shim(workspace: &Path) -> serde_json::Value {
+        let Some(pid) = crate::coordinator::conpty_shim::recorded_shim_pid(workspace) else {
+            return json!({ "action": "no_shim_recorded" });
+        };
+        // Prefer graceful termination — Windows maps this to
+        // `TerminationOutcome::ForceOnly` (Batch 3 anchor: no
+        // SIGTERM equivalent for non-console child), which
+        // surfaces the honest audit signal in the JSON.
+        let outcome = crate::platform::process::terminate_pid(
+            pid,
+            crate::platform::process::SignalKind::TerminateForce,
+        );
+        match outcome {
+            Ok(crate::platform::process::TerminationOutcome::Requested) => {
+                json!({ "pid": pid, "action": "terminated" })
             }
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = _workspace;
-            json!({ "action": "unix_no_shim_concept" })
+            Ok(crate::platform::process::TerminationOutcome::AlreadyGone) => {
+                json!({ "pid": pid, "action": "already_gone" })
+            }
+            Ok(crate::platform::process::TerminationOutcome::ForceOnly { reason }) => {
+                json!({ "pid": pid, "action": "terminated_force_only", "reason": reason })
+            }
+            Err(e) => {
+                json!({ "pid": pid, "action": "terminate_failed", "reason": e.to_string() })
+            }
         }
     }
 
