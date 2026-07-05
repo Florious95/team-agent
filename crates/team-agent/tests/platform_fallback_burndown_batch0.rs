@@ -73,21 +73,43 @@ fn c2_restart_agent_fallback_carries_active_fixme_marker() {
 }
 
 #[test]
-fn c2_persist_rs_fallback_carries_active_fixme_marker() {
+fn c2_persist_rs_fallback_removed_after_batch_2() {
+    // Batch 2 landed: `RuntimeLock` now routes through
+    // `platform::file_lock::{try_lock_once_nonblocking, unlock}` on
+    // both Unix and Windows. The old `not yet implemented on non-unix`
+    // fallback is gone.
     let body = src("state/persist.rs");
+    // Fallback string must be GONE — a regression that reintroduced
+    // the not-implemented branch would fire this assertion.
     assert!(
-        body.contains("runtime lock not yet implemented on non-unix"),
-        "persist.rs non-Unix `RuntimeLock` fallback missing — was Batch 2 \
-         landed without also updating this burndown tracker?"
+        !body.contains("runtime lock not yet implemented on non-unix"),
+        "CR C-2: persist.rs `not yet implemented on non-unix` fallback \
+         must be REMOVED after Batch 2. Reintroduction would put Windows \
+         back on the silent-lock-never-succeeds path."
     );
+    // The FIXME(portability) + Batch 2 comment block should also be
+    // gone (no more work at this site).
     assert!(
-        body.contains("FIXME(portability)") && body.contains("Batch 2"),
-        "persist.rs non-Unix fallback must carry `FIXME(portability)` + \
-         `Batch 2` markers (CR C-2)."
+        !body.contains("FIXME(portability)"),
+        "CR C-2: persist.rs no longer needs the FIXME marker after \
+         Batch 2. If someone reintroduced a FIXME, they should also \
+         remove or narrow it."
     );
+    // Positive anchor: the platform migration marker is present.
     assert!(
-        body.contains("crate::platform::file_lock::try_lock_exclusive"),
-        "persist.rs FIXME must name the Batch 2 replacement \
-         `crate::platform::file_lock::try_lock_exclusive` (CR C-2)."
+        body.contains("crate::platform::file_lock::try_lock_once_nonblocking")
+            && body.contains("crate::platform::file_lock::unlock"),
+        "Batch 2 migration marker missing: `RuntimeLock` must call \
+         `crate::platform::file_lock::try_lock_once_nonblocking` (acquire) \
+         and `crate::platform::file_lock::unlock` (Drop)."
+    );
+    // Legacy Unix inline calls must be gone from the fn body — if the
+    // cfg-gated `libc::flock` block reappears, someone reverted the
+    // migration.
+    assert!(
+        !body.contains("libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB)"),
+        "CR C-2: persist.rs must NOT call `libc::flock` directly after \
+         Batch 2 — the whole polling loop goes through \
+         `platform::file_lock`."
     );
 }

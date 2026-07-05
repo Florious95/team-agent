@@ -27,6 +27,20 @@ chrono.workspace = true
 libc.workspace = true
 rusqlite.workspace = true       # step 3 db(bundled SQLite,静态链接)
 
+# 0.5.x Windows portability Batch 2: `platform::file_lock` uses
+# `LockFileEx`/`UnlockFileEx` from `Win32_Storage_FileSystem` +
+# `Win32_System_IO::OVERLAPPED`. Uses the same `windows = "0.61"`
+# crate as `win-conpty-phase0` so the workspace shares a single
+# Windows-API crate + already-locked Cargo.lock version. Batch 3
+# will extend the feature set for `platform::process`.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+]
+
 [dev-dependencies]
 serial_test = { version = "3", features = ["file_locks"] }
 

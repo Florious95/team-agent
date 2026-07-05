@@ -146,7 +146,14 @@ fn errno_name(errno: Option<i32>) -> Option<&'static str> {
 }
 
 /// `runtime.py:_runtime_lock` 的 flock 版(RAII;Drop 释放)。state-save 不发锁事件。
-/// POSIX flock(unix);Windows 锁(LockFileEx)延平台层(step 9+)。
+///
+/// 0.5.x Windows portability Batch 2: migrated to
+/// `crate::platform::file_lock::{try_lock_once_nonblocking, unlock}` so
+/// the same polling loop + timeout + `StateError::Locked(name)` shape
+/// works on both Unix (`flock`) and Windows (`LockFileEx`) — 1:1
+/// semantic mapping. The Batch 0 non-Unix `not_yet_implemented`
+/// fallback is now removed (CR C-2 fallback burn-down; grep guard
+/// `platform_fallback_burndown_batch0.rs` flipped in this batch).
 struct RuntimeLock {
     #[allow(dead_code)]
     file: std::fs::File,
@@ -160,51 +167,37 @@ impl RuntimeLock {
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            let start = Instant::now();
-            loop {
-                // SAFETY: fd 来自打开的 lock_file,LOCK_EX|LOCK_NB 非阻塞。
-                let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-                if rc == 0 {
-                    return Ok(Self { file });
+        let start = Instant::now();
+        loop {
+            match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => {
+                    if start.elapsed().as_secs_f64() >= timeout {
+                        return Err(StateError::Locked(name.to_string()));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                if start.elapsed().as_secs_f64() >= timeout {
-                    return Err(StateError::Locked(name.to_string()));
+                Err(e) => {
+                    // Byte-preserving: a real I/O error surfaces as a
+                    // `StateError::Io` (via `From<io::Error>`), same as
+                    // the current inline code would if `file.open()`
+                    // failed. The lock-would-block case took the
+                    // Ok(false) arm above.
+                    return Err(StateError::from(e));
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
-        }
-        // FIXME(portability): non-Unix branch always reports
-        // `Locked(... not yet implemented on non-unix)`. This is dead
-        // code on macOS/Linux (cfg walks the unix branch) but on
-        // Windows currently prevents any state save from succeeding.
-        // Batch 2 removes this via
-        // `crate::platform::file_lock::try_lock_exclusive(path, timeout)`.
-        // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md`
-        // §Ordered Migration Plan / Batch 2;
-        // CR C-2 grep guard `platform_fallback_burndown_batch0.rs` locks removal.
-        #[cfg(not(unix))]
-        {
-            let _ = timeout;
-            Err(StateError::Locked(format!(
-                "{name} (runtime lock not yet implemented on non-unix)"
-            )))
         }
     }
 }
 
-#[cfg(unix)]
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: 释放本进程持有的 flock。
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        // Best-effort unlock. OS releases on handle close if this fails.
+        let _ = crate::platform::file_lock::unlock(&self.file);
     }
 }
 

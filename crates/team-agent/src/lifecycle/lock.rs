@@ -85,6 +85,16 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     timeout: Duration,
     held_long: Duration,
 ) -> Result<LifecycleLockGuard, LifecycleError> {
+    // 0.5.x Windows portability Batch 2: migrated to
+    // `crate::platform::file_lock::{try_lock_once_nonblocking, unlock}`
+    // so the same polling loop + waiter file + 5s `lock_held_long`
+    // event + 30s N38 timeout error shape works on both Unix (`flock`)
+    // and Windows (`LockFileEx`). The Batch 0 non-Unix stub that
+    // returned `lock_timeout_error` unconditionally is now gone —
+    // Windows callers get real lock behavior. Byte-preserving on Unix:
+    // the polling cadence, waiter file writes, `lock_held_long_event`
+    // emission, and error shape are all unchanged relative to the
+    // pre-Batch-2 unix branch.
     let lock_path = agent_lifecycle_lock_path(request.workspace);
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)
@@ -100,42 +110,38 @@ fn acquire_agent_lifecycle_lock_with_deadlines(
     let started = Instant::now();
     let mut long_event_written = false;
     let mut waiter = None;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = file.as_raw_fd();
-        loop {
-            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 {
+    loop {
+        match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
+            Ok(true) => {
                 write_lock_metadata(&mut file, &request, &lock_path)?;
                 return Ok(LifecycleLockGuard { file });
             }
-            let elapsed = started.elapsed();
-            if waiter.is_none() {
-                waiter = WaiterFile::create(&request, &lock_path).ok();
+            Ok(false) => {}
+            Err(e) => {
+                return Err(LifecycleError::StatePersist(format!(
+                    "lifecycle lock acquire io error at {}: {e}",
+                    lock_path.display()
+                )));
             }
-            if let Some(waiter) = waiter.as_ref() {
-                let _ = waiter.write(&request, elapsed);
-            }
-            if !long_event_written && elapsed >= held_long {
-                let _ =
-                    write_lock_held_long_event(&request, &lock_path, elapsed, held_long, timeout);
-                long_event_written = true;
-            }
-            if elapsed >= timeout {
-                return Err(lock_timeout_error(&request, &lock_path, elapsed));
-            }
-            std::thread::sleep(std::cmp::min(
-                Duration::from_millis(50),
-                timeout.saturating_sub(elapsed),
-            ));
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
         let elapsed = started.elapsed();
-        Err(lock_timeout_error(&request, &lock_path, elapsed))
+        if waiter.is_none() {
+            waiter = WaiterFile::create(&request, &lock_path).ok();
+        }
+        if let Some(waiter) = waiter.as_ref() {
+            let _ = waiter.write(&request, elapsed);
+        }
+        if !long_event_written && elapsed >= held_long {
+            let _ = write_lock_held_long_event(&request, &lock_path, elapsed, held_long, timeout);
+            long_event_written = true;
+        }
+        if elapsed >= timeout {
+            return Err(lock_timeout_error(&request, &lock_path, elapsed));
+        }
+        std::thread::sleep(std::cmp::min(
+            Duration::from_millis(50),
+            timeout.saturating_sub(elapsed),
+        ));
     }
 }
 
@@ -293,10 +299,11 @@ impl Drop for WaiterFile {
     }
 }
 
-#[cfg(unix)]
 impl Drop for LifecycleLockGuard {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        // Batch 2: unlock via platform primitive. Best-effort — OS
+        // releases when the file handle closes anyway. Uniform on
+        // both `flock(LOCK_UN)` (unix) and `UnlockFileEx` (windows).
+        let _ = crate::platform::file_lock::unlock(&self.file);
     }
 }
