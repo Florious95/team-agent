@@ -252,7 +252,7 @@ pub fn spawn_shim_and_handshake(
         // the polling inside the OS instead of our sleep loop.
         match NamedPipeClient::connect(&pipe_name, 100) {
             Ok(mut client) => {
-                match perform_hello(&mut client, &pipe_token) {
+                match perform_hello(&mut client, &pipe_token, workspace_hash, team_key) {
                     Ok(()) => {
                         return finalize(child, pid, pipe_name, client, workspace);
                     }
@@ -304,9 +304,16 @@ pub fn spawn_shim_and_handshake(
 /// primitive. Success is defined as `response.ok == true` AND
 /// `response.result.pipe_token == expected_token` — the shim echoes
 /// the token back to prove server-side receipt.
+///
+/// N18 isolation: `workspace_hash` + `team_key` must be non-empty and
+/// match the shim's own binding — the shim rejects requests scoped
+/// to a different tuple with `ProtocolError::ShimUnavailable`. We
+/// pass them through unchanged from the caller.
 fn perform_hello(
     client: &mut NamedPipeClient,
     expected_token: &str,
+    workspace_hash: &str,
+    team_key: &str,
 ) -> Result<(), String> {
     use conpty_transport::{Op, PipeClient, Request};
     // Request id doesn't need to be unique across the shim's
@@ -314,8 +321,8 @@ fn perform_hello(
     // the reply is easy to spot in a wire log.
     let req = Request::new(
         "coord-hello",
-        "", // workspace_hash — Hello doesn't gate on this.
-        "", // team_key — same.
+        workspace_hash,
+        team_key,
         expected_token,
         Op::Hello,
     );
