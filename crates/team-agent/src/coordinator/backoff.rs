@@ -27,6 +27,14 @@ pub struct DaemonArgs {
     pub once: bool,
     /// `--tick-interval`(`__main__.py:29`)。`None` → 读 spec `runtime.tick_interval_sec`。
     pub tick_interval_sec: Option<f64>,
+    /// 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+    /// team_key passed via `--team` CLI so the coordinator daemon
+    /// doesn't have to derive from state at boot time. That derivation
+    /// (Batch 7 F5) got trapped by Batch 8's seed-state pattern
+    /// (F8 root cause). Preserving the derivation as a fallback when
+    /// `team_key` is None keeps Unix daemons and pre-existing test
+    /// harnesses byte-preserving.
+    pub team_key: Option<String>,
 }
 
 /// daemon 主循环(`main`,`__main__.py:25-98`)。写 pid/meta(source=boot)、装信号→STOP、孤儿自检、
@@ -44,24 +52,27 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // legacy `tmux_endpoint` → same `tmux_backend_for_runtime_state_or_workspace`
     // shape inside the factory's `build_tmux`).
     let state = crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
-    // 0.5.x Windows portability Batch 7 F5 (leader msg_700a016675d0):
-    // derive `team_key` from `state.active_team_key` so the factory
-    // can build a ConPty backend when state says `transport.kind=
-    // conpty`. Without this, the factory refuses ConPty (missing
-    // team_key precondition) and falls back to tmux — which on
-    // Windows means the daemon never talks to the shim and every
-    // MCP-facing operation surfaces `coordinator_unavailable`.
-    //
-    // Unix daemons pass through the None branch (state.active_team_key
-    // is only written by tmux/conpty-aware code paths that this fn
-    // doesn't otherwise care about), so tmux behavior stays
-    // byte-equivalent.
-    let team_key_from_state = state
-        .as_ref()
-        .and_then(|s| s.get("active_team_key"))
-        .and_then(|v| v.as_str())
+    // 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+    // team_key priority is now `args.team_key` (from `--team` CLI)
+    // > `state.active_team_key` fallback. The Batch 7 F5 derivation
+    // stays as the fallback so pre-Batch-9 tests + Unix daemons
+    // continue byte-preserving. Callers that CAN pass `--team`
+    // (Batch 9 quick-start on Windows) do — that avoids the F8
+    // seed-state trap where writing active_team_key to state ahead
+    // of coord spawn made downstream launch code think "existing
+    // runtime, use restart" and skip spec compile.
+    let team_key_from_state = args
+        .team_key
+        .clone()
         .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.get("active_team_key"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
     let mut factory_input = crate::transport_factory::TransportFactoryInput::new(
         args.workspace.as_path(),
         crate::transport_factory::TransportPurpose::Coordinator,

@@ -53,6 +53,21 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
 /// `start_coordinator`(`lifecycle.py:49-121`):幂等 — 已健康 no-op(AlreadyRunning);metadata 不兼容
 /// 先 stop 再起;schema 不兼容拒启 + hint;否则 spawn `team-agent coordinator --workspace <ws>`。
 pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, StartError> {
+    start_coordinator_with_team(workspace, None)
+}
+
+/// 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+/// forward `--team` to the spawned coord daemon so it doesn't have
+/// to derive team_key from `state.active_team_key` at boot. The
+/// derivation stays as fallback (see `coordinator::backoff::run_daemon`),
+/// so Unix daemons and pre-existing test harnesses are byte-preserving.
+///
+/// Callers that CAN pass team_key (Batch 9 quick-start Windows path)
+/// SHOULD — that avoids Batch 8's F8 seed-state trap.
+pub fn start_coordinator_with_team(
+    workspace: &WorkspacePath,
+    team_key: Option<&str>,
+) -> Result<StartReport, StartError> {
     let health = coordinator_health(workspace);
     if health.ok {
         return Ok(StartReport {
@@ -101,7 +116,13 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["coordinator", "--workspace"])
-        .arg(workspace.as_path())
+        .arg(workspace.as_path());
+    if let Some(tk) = team_key {
+        if !tk.is_empty() {
+            command.args(["--team", tk]);
+        }
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));

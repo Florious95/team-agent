@@ -87,7 +87,7 @@ fn start_coordinator_fresh_workspace_decides_started() {
 fn run_daemon_once_writes_boot_metadata_and_returns_ok() {
     let (wp, dir) = daemon_ws();
     crate::state::persist::save_runtime_state(&dir, &serde_json::json!({"session_name": "team-x", "agents": {}})).unwrap();
-    let r = run_daemon(DaemonArgs { workspace: wp.clone(), once: true, tick_interval_sec: None });
+    let r = run_daemon(DaemonArgs { workspace: wp.clone(), once: true, tick_interval_sec: None, team_key: None });
     assert!(r.is_ok(), "run_daemon --once must return Ok; got {r:?}");
     assert!(coordinator_meta_path(&wp).exists(), "run_daemon must write the coordinator boot metadata");
 }
@@ -438,6 +438,7 @@ fn run_daemon_backs_off_on_transient_tick_err_then_recovers_without_exiting() {
         workspace: WorkspacePath::new(dir.clone()),
         once: false,
         tick_interval_sec: Some(0.01), // tiny backoff so the test is fast
+        team_key: None,
     };
     let result = run_daemon_with_coordinator(&args, &coord);
     assert!(

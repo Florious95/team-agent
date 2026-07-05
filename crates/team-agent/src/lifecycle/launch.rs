@@ -2927,42 +2927,26 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     ) {
         let team_key_str = team_key_for_factory.ok_or_else(|| {
             LifecycleError::TeamSelect(
-                "team_key required for --backend conpty on Windows (Batch 8 F7)".to_string(),
+                "team_key required for --backend conpty on Windows (Batch 9 F8)".to_string(),
             )
         })?;
-        // Seed state.active_team_key + state.transport.kind BEFORE
-        // starting the coordinator so its boot-time
-        // `ensure_shim_running` sees the right team scope. Without
-        // this seed the coord boots with active_team_key=None and
-        // its factory refuses ConPty (missing team_key precondition)
-        // → tmux fallback → no shim ensure → CHECK 2 no_pipe_client.
-        {
-            let state_path = crate::state::persist::runtime_state_path(&workspace);
-            let mut state = std::fs::read_to_string(&state_path)
-                .ok()
-                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
-            if let Some(obj) = state.as_object_mut() {
-                obj.insert(
-                    "active_team_key".to_string(),
-                    serde_json::Value::String(team_key_str.to_string()),
-                );
-                let transport = obj
-                    .entry("transport".to_string())
-                    .or_insert_with(|| serde_json::json!({}));
-                if let Some(t_obj) = transport.as_object_mut() {
-                    t_obj.insert(
-                        "kind".to_string(),
-                        serde_json::Value::String("conpty".to_string()),
-                    );
-                }
-            }
-            let _ =
-                crate::state::persist::save_runtime_state(&workspace, &state);
-        }
+        // 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+        // Batch 8's seed-state pattern (writing active_team_key +
+        // transport.kind to state.json before start_coordinator)
+        // caused downstream launch code to see "existing runtime, use
+        // restart" and skip spec compile. F8 fix: pass `--team`
+        // directly to the coord daemon via `start_coordinator_with_team`
+        // so state doesn't need pre-seeding.
+        //
+        // The coord daemon's `run_daemon_with_coordinator_and_boot_tmux`
+        // then calls `ensure_shim_running` with the CLI-supplied
+        // team_key. When quick-start's downstream code runs, state.json
+        // still has whatever it had before (empty on fresh launch), so
+        // the spec-compile + worker-spawn path runs normally.
         let run_ws = crate::coordinator::WorkspacePath::new(workspace.clone());
-        let start_report = crate::coordinator::health::start_coordinator(&run_ws)
-            .map_err(|e| LifecycleError::TeamSelect(format!("coordinator start: {e}")))?;
+        let start_report =
+            crate::coordinator::health::start_coordinator_with_team(&run_ws, Some(team_key_str))
+                .map_err(|e| LifecycleError::TeamSelect(format!("coordinator start: {e}")))?;
         if !start_report.ok {
             return Err(LifecycleError::TeamSelect(format!(
                 "coordinator start failed: schema_error={:?}, action={:?}",
