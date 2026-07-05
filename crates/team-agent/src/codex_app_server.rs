@@ -1,10 +1,31 @@
 //! Minimal Codex app-server Unix-socket WebSocket client for leader delivery.
+//!
+//! 0.5.x Windows portability Batch 1: this client is fundamentally
+//! Unix-only (`UnixStream` WebSocket handshake, uid/mode socket
+//! ownership check). On Windows we still expose the same public API
+//! surface so `messaging/delivery.rs`, `cli/send.rs`, `cli/named_address.rs`,
+//! `leader/lease.rs` compile identically. Windows implementations of
+//! `attach_probe` + `submit_to_bound_thread` return
+//! `AppServerError::SocketUnreachable("codex_app_server unix socket not supported on this platform (Windows)")`
+//! (N38 three-line typed unsupported: code+reason+action are baked into
+//! `AppServerError::code()` and the `Display` impl). Truth source:
+//! `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 1.
+//!
+//! Portable pieces below (types, JSON helpers) stay unconditional so
+//! `receiver_is_app_server` / `binding_from_receiver` work identically
+//! everywhere.
 
 use serde_json::{json, Value};
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 pub const APP_SERVER_PROTOCOL_FIXTURE_CLI_MIN: &str = "0.139.0";
@@ -79,6 +100,7 @@ impl std::fmt::Display for AppServerError {
 
 impl std::error::Error for AppServerError {}
 
+#[cfg(unix)]
 pub fn attach_probe(endpoint: &str, thread_id: &str) -> Result<AppServerBinding, AppServerError> {
     check_socket_ownership(endpoint)?;
     let socket = socket_path(endpoint)?;
@@ -95,6 +117,21 @@ pub fn attach_probe(endpoint: &str, thread_id: &str) -> Result<AppServerBinding,
     })
 }
 
+/// Batch 1 Windows N38 typed-unsupported stub. Callers see the same
+/// `AppServerError` shape as Unix — no silent success, no panic.
+#[cfg(not(unix))]
+pub fn attach_probe(
+    _endpoint: &str,
+    _thread_id: &str,
+) -> Result<AppServerBinding, AppServerError> {
+    Err(AppServerError::SocketUnreachable(
+        "codex_app_server unix-socket client not supported on this platform \
+         (Windows); use codex CLI stdio or ConPTY worker delivery instead"
+            .to_string(),
+    ))
+}
+
+#[cfg(unix)]
 pub fn submit_to_bound_thread(
     binding: &AppServerBinding,
     message_id: &str,
@@ -106,6 +143,19 @@ pub fn submit_to_bound_thread(
     let resume = client.resume(&binding.thread_id)?;
     validate_tuple(binding, &user_agent, &resume)?;
     client.turn_start(&binding.thread_id, message_id, rendered)
+}
+
+#[cfg(not(unix))]
+pub fn submit_to_bound_thread(
+    _binding: &AppServerBinding,
+    _message_id: &str,
+    _rendered: &str,
+) -> Result<AppServerSubmit, AppServerError> {
+    Err(AppServerError::SocketUnreachable(
+        "codex_app_server unix-socket submit not supported on this platform \
+         (Windows); use codex CLI stdio or ConPTY worker delivery instead"
+            .to_string(),
+    ))
 }
 
 pub fn binding_from_receiver(receiver: &Value) -> Result<AppServerBinding, AppServerError> {
@@ -135,6 +185,7 @@ fn required_str<'a>(value: &'a Value, field: &str) -> Result<&'a str, AppServerE
         .ok_or_else(|| AppServerError::ProtocolMismatch(format!("missing {field}")))
 }
 
+#[cfg(unix)]
 fn validate_tuple(
     binding: &AppServerBinding,
     user_agent: &str,
@@ -163,6 +214,7 @@ fn validate_tuple(
     Ok(())
 }
 
+#[cfg(unix)]
 fn check_socket_ownership(endpoint: &str) -> Result<(), AppServerError> {
     let path = socket_path(endpoint)?;
     let meta = std::fs::metadata(&path)
@@ -189,6 +241,7 @@ fn check_socket_ownership(endpoint: &str) -> Result<(), AppServerError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn socket_path(endpoint: &str) -> Result<PathBuf, AppServerError> {
     let raw = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
     if raw.is_empty() {
@@ -199,17 +252,20 @@ fn socket_path(endpoint: &str) -> Result<PathBuf, AppServerError> {
     Ok(PathBuf::from(raw))
 }
 
+#[cfg(unix)]
 struct ThreadResume {
     thread_id: String,
     session_id: String,
     cwd: String,
 }
 
+#[cfg(unix)]
 struct AppServerClient {
     stream: UnixStream,
     next_id: u64,
 }
 
+#[cfg(unix)]
 impl AppServerClient {
     fn connect(path: &Path) -> Result<Self, AppServerError> {
         let mut stream = UnixStream::connect(path)
@@ -386,17 +442,20 @@ impl AppServerClient {
     }
 }
 
+#[cfg(unix)]
 fn is_approval_method(method: &str) -> bool {
     method.contains("requestApproval")
         || method.contains("requestUserInput")
         || method.contains("elicitation/request")
 }
 
+#[cfg(unix)]
 fn looks_busy(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("active turn") || lower.contains("already has") || lower.contains("busy")
 }
 
+#[cfg(unix)]
 fn read_http_response(stream: &mut UnixStream) -> Result<String, AppServerError> {
     let mut data = Vec::new();
     let mut buf = [0u8; 1];
@@ -414,6 +473,7 @@ fn read_http_response(stream: &mut UnixStream) -> Result<String, AppServerError>
     Ok(String::from_utf8_lossy(&data).to_string())
 }
 
+#[cfg(unix)]
 fn write_ws_text(stream: &mut UnixStream, text: &str) -> Result<(), AppServerError> {
     let payload = text.as_bytes();
     let mut frame = vec![0x81];
@@ -436,6 +496,7 @@ fn write_ws_text(stream: &mut UnixStream, text: &str) -> Result<(), AppServerErr
         .map_err(|e| AppServerError::Io(e.to_string()))
 }
 
+#[cfg(unix)]
 fn read_ws_text(stream: &mut UnixStream) -> Result<String, AppServerError> {
     loop {
         let mut header = [0u8; 2];
