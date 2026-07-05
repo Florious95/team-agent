@@ -1,5 +1,24 @@
 name: win-portability
 
+# 0.5.x Windows portability CI.
+#
+# - Ubuntu job: primary green-required. Runs platform lib tests + C-1
+#   packaging assertion + C-2 fallback burn-down + C-4 caller
+#   whitelist guard.
+# - Windows compile-gate job: continue-on-error. `cargo check
+#   --target x86_64-pc-windows-msvc` is expected RED in Batch 0;
+#   Batches 1-4 burn the error count down.
+#
+# Note: `cargo test ... platform::` command has trailing `::` which
+# GitHub's YAML lexer misparses as a key marker unless the whole
+# `run:` string is quoted. Every `run:` in this file uses explicit
+# double quotes so future rename of the module path (e.g. `platform`
+# → `platform_layer`) does not silently break the workflow.
+#
+# Truth source:
+# - Design:    .team/artifacts/0.5.x-windows-portability-survey-design.md
+# - CR verdict: .team/artifacts/0.5.x-windows-portability-cr-verdict.md
+
 on:
   workflow_dispatch:
   push:
@@ -11,5 +30,54 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
       - name: platform lib tests
         run: "cargo test -p team-agent --lib platform::"
+      - name: c-1 packaging PreviewCompileOnly assertion
+        run: "cargo test -p team-agent --lib packaging::tests::windows_x8664"
+      - name: c-2 fallback burndown grep guards
+        run: "cargo test -p team-agent --test platform_fallback_burndown_batch0"
+      - name: c-4 caller-whitelist grep guard
+        run: "cargo test -p team-agent --test platform_process_caller_whitelist_batch0"
+
+  windows-compile-gate:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: cargo check windows target
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
+          echo "cargo_check_exit=$?"
+      - name: post burn-down summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f check.log ]; then
+            errcount=$(grep -c '^error\[' check.log || echo 0)
+            echo "cargo_check_error_count=$errcount"
+            echo "git_rev=$(git rev-parse HEAD)" > win-portability-tracking.txt
+            echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-portability-tracking.txt
+            echo "cargo_check_error_count=$errcount" >> win-portability-tracking.txt
+            grep '^error\[' check.log | head -20 >> win-portability-tracking.txt || true
+          else
+            echo "no_check_log=1" > win-portability-tracking.txt
+          fi
+      - name: upload burn-down artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-portability-tracking
+          path: |
+            win-portability-tracking.txt
+            check.log
+          if-no-files-found: warn
