@@ -1932,6 +1932,9 @@ fn app_server_state(
     })
 }
 
+// 0.5.x Windows portability Batch 5: FakeAppServer uses Unix domain
+// sockets — Unix-only.
+#[cfg(unix)]
 #[test]
 fn app_server_leader_delivery_marks_delivered_without_tmux_transport() {
     let ws = tmp_ws("appdeliver");
@@ -1984,6 +1987,7 @@ fn app_server_leader_delivery_marks_delivered_without_tmux_transport() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn app_server_leader_delivery_stale_tuple_fails_closed_with_event() {
     let ws = tmp_ws("appstale");
@@ -2076,6 +2080,7 @@ fn app_server_leader_delivery_fails_closed_on_mode_transport_conflict() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn app_server_leader_busy_is_retryable_and_does_not_steer() {
     let ws = tmp_ws("appbusy");
