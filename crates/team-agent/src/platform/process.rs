@@ -307,17 +307,19 @@ mod windows_impl {
         let handle = match handle {
             Ok(h) => h,
             Err(err) => {
-                let code = err.code().0 as u32;
+                // Both raw Win32 error codes and their HRESULT
+                // encodings (HRESULT_FROM_WIN32) are accepted so
+                // future windows-crate API changes don't silently
+                // break the code mapping.
+                let raw = err.code().0 as u32;
                 const ERROR_INVALID_PARAMETER: u32 = 87;
+                const E_INVALIDARG_HRESULT: u32 = 0x80070057;
                 const ERROR_ACCESS_DENIED: u32 = 5;
-                if code == ERROR_INVALID_PARAMETER {
-                    // pid doesn't exist.
+                const E_ACCESSDENIED_HRESULT: u32 = 0x80070005;
+                if raw == ERROR_INVALID_PARAMETER || raw == E_INVALIDARG_HRESULT {
                     return Ok(ProcessLiveness::Dead);
                 }
-                if code == ERROR_ACCESS_DENIED {
-                    // Process exists but we can't query it — treat as
-                    // Live (mirror the Unix `EPERM = Live` branch in
-                    // `pid_liveness`).
+                if raw == ERROR_ACCESS_DENIED || raw == E_ACCESSDENIED_HRESULT {
                     return Ok(ProcessLiveness::Live);
                 }
                 return Err(io::Error::from_raw_os_error(err.code().0 as i32));
@@ -375,10 +377,17 @@ mod windows_impl {
         let handle = match handle {
             Ok(h) => h,
             Err(err) => {
-                let code = err.code().0 as u32;
+                // `err.code().0` is a HRESULT, not a raw Win32 error.
+                // For Win32 errors it takes the form
+                // `HRESULT_FROM_WIN32(win32)` = `0x8007<win32 low 16>`.
+                // Accept BOTH the raw Win32 form (in case a future
+                // windows-crate API returns it) and the HRESULT form.
+                let raw = err.code().0 as u32;
                 const ERROR_INVALID_PARAMETER: u32 = 87;
-                if code == ERROR_INVALID_PARAMETER {
-                    // pid doesn't exist.
+                const E_INVALIDARG_HRESULT: u32 = 0x80070057; // HRESULT_FROM_WIN32(87)
+                if raw == ERROR_INVALID_PARAMETER || raw == E_INVALIDARG_HRESULT {
+                    // pid doesn't exist (or reaped between recorded
+                    // spawn and this shutdown call).
                     return Ok(TerminationOutcome::AlreadyGone);
                 }
                 return Err(io::Error::from_raw_os_error(err.code().0 as i32));
