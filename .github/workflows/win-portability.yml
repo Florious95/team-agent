@@ -11,5 +11,5 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
-      - name: hello
-        run: echo hi
+      - name: platform lib tests
+        run: cargo test -p team-agent --lib platform::
