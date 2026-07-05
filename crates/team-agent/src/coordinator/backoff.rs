@@ -44,11 +44,32 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // legacy `tmux_endpoint` → same `tmux_backend_for_runtime_state_or_workspace`
     // shape inside the factory's `build_tmux`).
     let state = crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
-    let factory_input = crate::transport_factory::TransportFactoryInput::new(
+    // 0.5.x Windows portability Batch 7 F5 (leader msg_700a016675d0):
+    // derive `team_key` from `state.active_team_key` so the factory
+    // can build a ConPty backend when state says `transport.kind=
+    // conpty`. Without this, the factory refuses ConPty (missing
+    // team_key precondition) and falls back to tmux — which on
+    // Windows means the daemon never talks to the shim and every
+    // MCP-facing operation surfaces `coordinator_unavailable`.
+    //
+    // Unix daemons pass through the None branch (state.active_team_key
+    // is only written by tmux/conpty-aware code paths that this fn
+    // doesn't otherwise care about), so tmux behavior stays
+    // byte-equivalent.
+    let team_key_from_state = state
+        .as_ref()
+        .and_then(|s| s.get("active_team_key"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mut factory_input = crate::transport_factory::TransportFactoryInput::new(
         args.workspace.as_path(),
         crate::transport_factory::TransportPurpose::Coordinator,
     )
     .with_state(state.as_ref());
+    if let Some(ref team_key) = team_key_from_state {
+        factory_input = factory_input.with_team_key(Some(team_key));
+    }
     let resolved = match crate::transport_factory::resolve_transport(factory_input) {
         Ok(resolved) => resolved,
         Err(e) => {
