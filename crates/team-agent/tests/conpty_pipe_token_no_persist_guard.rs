@@ -42,12 +42,18 @@ fn pipe_token_string_appears_only_inside_conpty_module() {
             continue;
         }
         // Allowed home: `src/conpty/**` (protocol.rs / backend.rs).
+        // Also allowed: `src/coordinator/conpty_shim.rs` — in-memory use only
+        // (token generated → passed via env → hello handshake, never persisted);
+        // human-reviewed 2026-07-06 (leader msg_3641d33fca10 + msg_368574801700);
+        // guarded by its own `pipe_token_is_never_written_to_state_json` test.
         let rel = path
             .strip_prefix(&src_root)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        if rel.starts_with("conpty/") || rel == "conpty.rs" {
+        if rel.starts_with("conpty/") || rel == "conpty.rs"
+            || rel == "coordinator/conpty_shim.rs"
+        {
             continue;
         }
         offenders.push(rel);
