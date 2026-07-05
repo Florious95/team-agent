@@ -558,12 +558,75 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
 
 fn normalize_team_agent_binary_path(text: &str) -> String {
     let mut out = text.to_string();
+    // 0.5.0 hermetic 教训「环境路径类 token 化」的直接延伸
+    // (leader msg_6ee04cf5aee8):归一化改为结构判据,不绑路径前缀。
+    // 用户 CARGO_TARGET_DIR 可以指到任意目录(默认 `<repo>/target`,
+    // 全局改道时是 `/Volumes/nvme/cargo-target`,CI 时可能是别的)。
+    // 结构判据:任意绝对路径下的 `/deps/team_agent-<hex>`(可选 `.exe`)
+    // → `<TEAM_AGENT_BIN>`。同时保留旧 marker 兼容(处理旧固定字符串
+    // 出现在 output 里,以及 `debug/team-agent` / `release/team-agent`
+    // 这两个非 `/deps/` 分支)。
+    out = normalize_deps_team_agent_by_structure(&out);
     for marker in [
         "/target/debug/deps/team_agent-",
         "/target/debug/team-agent",
         "/target/release/team-agent",
     ] {
         out = replace_path_with_marker(out, marker, "<TEAM_AGENT_BIN>");
+    }
+    out
+}
+
+/// Structural (path-prefix-independent) normalization for
+/// `/…/deps/team_agent-<hex>(.exe)?` occurrences. Scans the input for
+/// every `/deps/team_agent-` marker and rewrites the containing
+/// absolute path token to `<TEAM_AGENT_BIN>`, no matter which
+/// `CARGO_TARGET_DIR` produced it.
+fn normalize_deps_team_agent_by_structure(text: &str) -> String {
+    const MARKER: &str = "/deps/team_agent-";
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let Some(rel) = text[i..].find(MARKER) else {
+            out.push_str(&text[i..]);
+            break;
+        };
+        let marker_idx = i + rel;
+        // Locate the start of the absolute path token: walk back from
+        // `marker_idx` while the byte is not one of a small set of
+        // delimiters (quote, whitespace, `[`, `(`, `,`, `:` after
+        // whitespace). The absolute-path anchor MUST also start with
+        // `/` — if the containing token is not absolute, skip
+        // rewriting so we don't eat unrelated text.
+        let path_start = text[..marker_idx]
+            .rfind(|c: char| matches!(c, '"' | '\'' | ' ' | '[' | '(' | ',' | '\n' | '\t'))
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        // Confirm the token starts with `/` (absolute path).
+        if !text[path_start..].starts_with('/') {
+            // Not an absolute path — leave alone.
+            out.push_str(&text[i..marker_idx + MARKER.len()]);
+            i = marker_idx + MARKER.len();
+            continue;
+        }
+        // Extend the end past the hex hash + optional `.exe`. Same
+        // continuation rule as `replace_path_with_marker`: alnum + `-`
+        // + `_` + `.`.
+        let mut path_end = marker_idx + MARKER.len();
+        while path_end < text.len() {
+            let ch = text[path_end..].chars().next().expect("char at boundary");
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                path_end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        // Emit everything up to the path start, then the token, then
+        // continue past the eaten span.
+        out.push_str(&text[i..path_start]);
+        out.push_str("<TEAM_AGENT_BIN>");
+        i = path_end;
     }
     out
 }
