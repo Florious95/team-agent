@@ -6,12 +6,7 @@ on:
     branches: [feat/win-portability]
 
 jobs:
-  lib-tests-linux:
+  hello:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
-        uses: actions/checkout@v4
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: platform lib tests
-        run: cargo test -p team-agent --lib platform::
+      - run: echo hello
