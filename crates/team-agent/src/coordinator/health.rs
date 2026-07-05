@@ -400,6 +400,21 @@ fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
 
 /// `pid_is_running`(`metadata.py:16-25`):`os.kill(pid, 0)` + `ps -o stat=` 查 zombie(Z* → 不算活)。
 /// §10 fallible:进程探测 I/O 可失败 → Result。
+///
+/// 0.5.x Windows portability Batch 4: this function has UNIQUE
+/// coordinator-metadata semantics — it treats `EPERM` as "not
+/// running" (different from `platform::process::pid_liveness` which
+/// treats `EPERM` as Live) because the coordinator only owns
+/// processes it can signal, and uses `ps -o stat=` for zombie
+/// detection. The `ps` shellout is Unix-only.
+///
+/// On Windows the coordinator-metadata identity check runs through
+/// `platform::process::pid_liveness` instead (Windows has no zombie
+/// state — a process is either Live or Dead — so the additional
+/// `ps stat=` step has no analogue). This preserves the coordinator's
+/// "am I the owner" check without silently reporting stale pids as
+/// alive.
+#[cfg(unix)]
 pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
         return Ok(false);
@@ -422,6 +437,23 @@ pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     }
     let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(!stat.is_empty() && !stat.starts_with('Z'))
+}
+
+/// Windows shim: no `ps stat=` zombie detection needed (Windows has
+/// no zombie state — a process is either Live or Dead). Route through
+/// `platform::process::pid_liveness` and map to bool. The EPERM
+/// semantic ("we can't signal → treat as not running") maps to
+/// Windows `ERROR_ACCESS_DENIED` which the platform layer already
+/// treats as `Live`; so on Windows the coordinator sees a process
+/// it can't query as still-running (safer than pretending it's gone
+/// and losing the ownership handle).
+#[cfg(not(unix))]
+pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
+    match crate::platform::process::pid_liveness(pid.get())? {
+        crate::platform::process::ProcessLiveness::Live => Ok(true),
+        crate::platform::process::ProcessLiveness::Dead => Ok(false),
+        crate::platform::process::ProcessLiveness::Unknown { .. } => Ok(false),
+    }
 }
 
 /// `read_coordinator_metadata`(`metadata.py:28-34`)。读 `coordinator.json`;损坏/缺失/非 dict → `None`。

@@ -3644,102 +3644,21 @@ fn process_ancestry_argv(pid: u32) -> Vec<Vec<String>> {
     out
 }
 
-#[cfg(target_os = "linux")]
-fn process_argv_tokens(pid: u32) -> Option<Vec<String>> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let argv_tokens = String::from_utf8_lossy(&bytes)
-        .split('\0')
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    (!argv_tokens.is_empty()).then_some(argv_tokens)
-}
+// 0.5.x Windows portability Batch 4: `process_argv_tokens` and
+// `process_parent_pid` route through `crate::platform::argv`. Unix
+// impls are byte-preserving (Linux `/proc/<pid>/cmdline`, macOS
+// `sysctl(KERN_PROCARGS2)`, other Unix `ps -p ... -o command=`).
+// Windows returns `None` per design §Batch 4 conservative anchor:
+// unknown argv must never infer elevated approval; callers already
+// treat `None` as "no elevation inherited" via
+// `disabled_dangerous_approval()`.
 
-#[cfg(target_os = "macos")]
 fn process_argv_tokens(pid: u32) -> Option<Vec<String>> {
-    use std::mem::size_of;
-
-    let mut mib = [
-        libc::CTL_KERN,
-        libc::KERN_PROCARGS2,
-        i32::try_from(pid).ok()?,
-    ];
-    let mut size = 0usize;
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as u32,
-            std::ptr::null_mut(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || size <= size_of::<libc::c_int>() {
-        return None;
-    }
-    let mut buf = vec![0u8; size];
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as u32,
-            buf.as_mut_ptr().cast(),
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if rc != 0 || size <= size_of::<libc::c_int>() {
-        return None;
-    }
-    let argc = i32::from_ne_bytes(buf.get(..size_of::<libc::c_int>())?.try_into().ok()?) as usize;
-    let mut offset = size_of::<libc::c_int>();
-    while offset < size && buf[offset] != 0 {
-        offset += 1;
-    }
-    while offset < size && buf[offset] == 0 {
-        offset += 1;
-    }
-    let raw = String::from_utf8_lossy(&buf[offset..size]);
-    let argv_tokens = raw
-        .split('\0')
-        .filter(|token| !token.is_empty())
-        .take(argc)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    (!argv_tokens.is_empty()).then_some(argv_tokens)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn process_argv_tokens(pid: u32) -> Option<Vec<String>> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let argv_tokens = text
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    (!argv_tokens.is_empty()).then_some(argv_tokens)
+    crate::platform::argv::argv_tokens(pid)
 }
 
 fn process_parent_pid(pid: u32) -> Option<u32> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "ppid="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok()
+    crate::platform::argv::parent_pid(pid)
 }
 
 /// `add_agent(workspace, agent_id, role_file_path, open_display, team)`

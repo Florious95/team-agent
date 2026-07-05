@@ -1894,8 +1894,15 @@ pub mod lifecycle_port {
             .filter_map(|pid| table.iter().find(|process| process.pid == *pid))
             .filter_map(|process| process.pgid)
             .filter(|pgid| {
-                libc::pid_t::try_from(*pgid)
-                    .map(|pgid_t| pgid_t > 1 && !protected.contains_pgid(*pgid))
+                // 0.5.x Windows portability Batch 4: `libc::pid_t` was
+                // used here as a signed-integer conversion gate to
+                // reject values > INT_MAX. Replace with the equivalent
+                // `i32::try_from` (pgid_t is `c_int` on every Unix we
+                // support). Windows has no pgid concept so `pgids`
+                // is empty in practice — the filter is dead code on
+                // Windows but must still compile.
+                i32::try_from(*pgid)
+                    .map(|pgid_int| pgid_int > 1 && !protected.contains_pgid(*pgid))
                     .unwrap_or(false)
             })
             .collect::<Vec<_>>();
