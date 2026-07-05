@@ -98,6 +98,8 @@ pub(crate) struct ResolvedNamedAddress {
     pub session_name: Option<String>,
     pub window_name: Option<String>,
     pub tmux_endpoint: Option<String>,
+    pub transport_kind: Option<String>,
+    pub app_server: Option<Value>,
     pub state_pane_id: Option<String>,
     pub state_pane_stale: bool,
     pub agent_status: Option<String>,
@@ -428,6 +430,8 @@ fn resolve_worker(
                 session_name: Some(session.to_string()),
                 window_name: Some(window.to_string()),
                 tmux_endpoint: transport.tmux_endpoint(),
+                transport_kind: Some("direct_tmux".to_string()),
+                app_server: None,
                 state_pane_id,
                 state_pane_stale,
                 agent_status,
@@ -541,6 +545,28 @@ fn resolve_leader(
         state.get("leader_receiver")
     }
     .ok_or_else(|| name_not_live_leader(team, None, None, None, transport.tmux_endpoint()))?;
+    if let Some((mode, transport_kind)) = receiver_transport_conflict(receiver) {
+        let mut err = NamedAddressError::new(
+            NamedAddressErrorKind::NameNotLive,
+            "leader_receiver mode/transport_kind conflict",
+        );
+        err.action =
+            "Rebind the leader: team-agent claim-leader, takeover, or attach-app-server-leader"
+                .to_string();
+        err.log = format!(
+            "name={team}/leader mode={mode} transport_kind={transport_kind} expected=single_transport_kind"
+        );
+        return Err(err);
+    }
+    if crate::codex_app_server::receiver_is_app_server(receiver) {
+        return resolve_app_server_leader(
+            sender_workspace,
+            target_workspace,
+            team,
+            parsed,
+            receiver,
+        );
+    }
     let pane_id = string_field(receiver, "pane_id")
         .filter(|pane| !pane.is_empty())
         .ok_or_else(|| name_not_live_leader(team, None, None, None, transport.tmux_endpoint()))?;
@@ -566,6 +592,8 @@ fn resolve_leader(
             session_name: session.map(str::to_string),
             window_name: window.map(str::to_string),
             tmux_endpoint: socket,
+            transport_kind: Some("direct_tmux".to_string()),
+            app_server: None,
             state_pane_id: Some(pane_id.to_string()),
             state_pane_stale: false,
             agent_status: None,
@@ -597,6 +625,87 @@ fn resolve_leader(
     }
 }
 
+fn receiver_transport_conflict(receiver: &Value) -> Option<(String, String)> {
+    let mode = receiver.get("mode").and_then(Value::as_str)?;
+    let transport_kind = receiver.get("transport_kind").and_then(Value::as_str)?;
+    if !mode.is_empty() && !transport_kind.is_empty() && mode != transport_kind {
+        return Some((mode.to_string(), transport_kind.to_string()));
+    }
+    None
+}
+
+fn resolve_app_server_leader(
+    sender_workspace: &Path,
+    target_workspace: &Path,
+    team: &str,
+    parsed: &ParsedNamedAddress,
+    receiver: &Value,
+) -> Result<ResolvedNamedAddress, NamedAddressError> {
+    let expected = crate::codex_app_server::binding_from_receiver(receiver).map_err(|error| {
+        let mut err = NamedAddressError::new(
+            NamedAddressErrorKind::NameNotLive,
+            format!("app-server leader receiver is incomplete: {error}"),
+        );
+        err.action = format!("Rebind the leader: team-agent attach-app-server-leader --team {team} --socket <socket> --thread-id <thread_id>");
+        err.log = format!("name={team}/leader expected=leader_receiver.app_server");
+        err
+    })?;
+    let actual = crate::codex_app_server::attach_probe(&expected.socket, &expected.thread_id)
+        .map_err(|error| {
+            let mut err = NamedAddressError::new(
+                NamedAddressErrorKind::NameNotLive,
+                format!("app-server leader thread is not live: {error}"),
+            );
+            err.action = format!("Rebind the leader: team-agent attach-app-server-leader --team {team} --socket {} --thread-id {}", expected.socket, expected.thread_id);
+            err.log = format!(
+                "name={team}/leader socket={} thread_id={} reason={}",
+                expected.socket,
+                expected.thread_id,
+                error
+            );
+            err
+        })?;
+    if actual.thread_id != expected.thread_id
+        || actual.session_id != expected.session_id
+        || actual.cwd != expected.cwd
+        || actual.cli_version != expected.cli_version
+    {
+        let mut err = NamedAddressError::new(
+            NamedAddressErrorKind::NameNotLive,
+            "app-server leader thread identity tuple is stale",
+        );
+        err.action = format!("Rebind the leader: team-agent attach-app-server-leader --team {team} --socket {} --thread-id {}", expected.socket, expected.thread_id);
+        err.log = format!(
+            "name={team}/leader expected_thread={} actual_thread={} expected_session={} actual_session={} expected_cwd={} actual_cwd={}",
+            expected.thread_id,
+            actual.thread_id,
+            expected.session_id,
+            actual.session_id,
+            expected.cwd,
+            actual.cwd
+        );
+        return Err(err);
+    }
+    Ok(ResolvedNamedAddress {
+        raw_name: parsed.display_name(),
+        target_kind: NamedTargetKind::Leader,
+        sender_workspace: sender_workspace.to_path_buf(),
+        target_workspace: target_workspace.to_path_buf(),
+        team_key: Some(team.to_string()),
+        agent_id: None,
+        pane_id: String::new(),
+        session_name: None,
+        window_name: None,
+        tmux_endpoint: None,
+        transport_kind: Some("codex_app_server".to_string()),
+        app_server: receiver.get("app_server").cloned(),
+        state_pane_id: None,
+        state_pane_stale: false,
+        agent_status: None,
+        warning: None,
+    })
+}
+
 fn resolve_session_window(
     sender_workspace: &Path,
     target_workspace: &Path,
@@ -619,6 +728,8 @@ fn resolve_session_window(
             session_name: Some(session.to_string()),
             window_name: Some(window.to_string()),
             tmux_endpoint: transport.tmux_endpoint(),
+            transport_kind: Some("direct_tmux".to_string()),
+            app_server: None,
             state_pane_id: None,
             state_pane_stale: false,
             agent_status: None,

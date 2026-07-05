@@ -621,7 +621,7 @@ fn delivery_grep_guard_no_owner_mutation() {
     let send_to_leader_body = leader_receiver
         .split("pub fn send_to_leader_receiver")
         .nth(1)
-        .and_then(|tail| tail.split("/// `claim_leader_receiver`").next())
+        .and_then(|tail| tail.split("pub fn mirror_peer_message_to_leader").next())
         .unwrap_or("");
     let send = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/send.rs")).unwrap();
     let scheduler = std::fs::read_to_string(concat!(

@@ -447,6 +447,16 @@ pub struct AttachLeaderArgs {
     pub json: bool,
 }
 
+/// Explicit Codex app-server leader binding args.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachAppServerLeaderArgs {
+    pub workspace: PathBuf,
+    pub team: Option<String>,
+    pub socket: String,
+    pub thread_id: String,
+    pub json: bool,
+}
+
 /// `identity`(`parser.py:256`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityArgs {

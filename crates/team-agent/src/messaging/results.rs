@@ -724,6 +724,19 @@ fn report_result_for_owner_team_inner(
         &event_log,
     ) {
         Ok(outcome) => outcome,
+        Err(error) if report_state_has_app_server_receiver(&state) => {
+            let message_id = format!("fallback:{result_id}");
+            crate::messaging::DeliveryOutcome {
+                ok: false,
+                status: crate::messaging::DeliveryStatus::Failed,
+                message_status: super::helpers::MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id),
+                verification: Some(format!("leader_funnel_error:{error}")),
+                stage: None,
+                reason: Some(crate::messaging::DeliveryRefusal::LeaderNotAttached),
+                channel: Some("codex_app_server".to_string()),
+            }
+        }
         Err(error) => {
             let message_id = format!("fallback:{result_id}");
             let fallback_error = fallback_primary_error_text(
@@ -839,24 +852,26 @@ fn report_result_for_owner_team_inner(
             }
         }
         if !outcome.ok {
-            let fallback_error = primary_error.unwrap_or_else(|| {
-                format!(
-                    "leader_notification_primary_failed:{}",
-                    super::helpers::status_wire(outcome.status)
-                )
-            });
-            let fallback_error =
-                fallback_primary_error_text(fallback_primary_error, fallback_error);
-            outcome = super::leader_receiver::deliver_to_leader_fallback_pane(
-                workspace,
-                &delivery_state,
-                &message_id,
-                Some(&result_id),
-                &content,
-                false,
-                Some(&fallback_error),
-                &event_log,
-            )?;
+            if !report_state_has_app_server_receiver(&delivery_state) {
+                let fallback_error = primary_error.unwrap_or_else(|| {
+                    format!(
+                        "leader_notification_primary_failed:{}",
+                        super::helpers::status_wire(outcome.status)
+                    )
+                });
+                let fallback_error =
+                    fallback_primary_error_text(fallback_primary_error, fallback_error);
+                outcome = super::leader_receiver::deliver_to_leader_fallback_pane(
+                    workspace,
+                    &delivery_state,
+                    &message_id,
+                    Some(&result_id),
+                    &content,
+                    false,
+                    Some(&fallback_error),
+                    &event_log,
+                )?;
+            }
         }
     }
     let leader_notified = outcome.ok;
@@ -950,6 +965,33 @@ fn report_owner_state(state: &serde_json::Value, owner_team: &str) -> serde_json
         );
     }
     state
+}
+
+fn report_state_has_app_server_receiver(state: &serde_json::Value) -> bool {
+    report_leader_receiver_value(state).is_some_and(crate::codex_app_server::receiver_is_app_server)
+}
+
+fn report_leader_receiver_value(state: &serde_json::Value) -> Option<&serde_json::Value> {
+    state
+        .get("leader_receiver")
+        .or_else(|| {
+            state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|team| state.get("teams").and_then(|teams| teams.get(team)))
+                .and_then(|team| team.get("leader_receiver"))
+        })
+        .or_else(|| {
+            let teams = state.get("teams").and_then(serde_json::Value::as_object)?;
+            if teams.len() == 1 {
+                teams
+                    .values()
+                    .next()
+                    .and_then(|team| team.get("leader_receiver"))
+            } else {
+                None
+            }
+        })
 }
 
 fn insert_result_if_absent(

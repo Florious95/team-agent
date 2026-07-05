@@ -134,6 +134,58 @@ pub fn attach_leader(
     })
 }
 
+/// Explicit app-server leader binding. Validates the supplied socket/thread tuple
+/// before writing the typed physical-channel anchor through the lease primitive.
+pub fn attach_app_server_leader(
+    workspace: &Path,
+    team: Option<&str>,
+    socket: &str,
+    thread_id: &str,
+) -> Result<Value, LeaderError> {
+    let binding = crate::codex_app_server::attach_probe(socket, thread_id)
+        .map_err(|error| LeaderError::Validation(error.to_string()))?;
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let scoped_team = team.filter(|value| !value.is_empty());
+    let mut state = if scoped_team.is_some() {
+        crate::state::projection::select_runtime_state(workspace, scoped_team)?
+    } else {
+        crate::state::persist::load_runtime_state(workspace)?
+    };
+    if !state.is_object() {
+        state = json!({});
+    }
+    if let Some(team) = scoped_team {
+        state["active_team_key"] = json!(team);
+    }
+    let team_key = canonical_owner_write_key(&state);
+    let next_epoch = OwnerEpoch(current_owner_epoch(&state).0.saturating_add(1));
+    let receiver = app_server_receiver_value(&binding, next_epoch);
+    let owner = app_server_owner_value(next_epoch);
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver.clone())
+        .with_team_owner(owner.clone())
+        .with_owner_epoch(next_epoch.0);
+    crate::state::ownership::write_owner(&mut state, &team_key, record);
+    write_claim_state(workspace, &state, scoped_team, Some(&team_key))?;
+    event_log.write(
+        super::LeaderEvent::ReceiverAttached.name(),
+        json!({
+            "transport_kind": "codex_app_server",
+            "thread_id": binding.thread_id,
+            "owner_epoch": next_epoch.0,
+            "team": team_key,
+        }),
+    )?;
+    Ok(json!({
+        "ok": true,
+        "status": "claimed",
+        "team": team_key,
+        "owner_epoch": next_epoch.0,
+        "leader_receiver": receiver,
+        "team_owner": owner,
+    }))
+}
+
 #[derive(Clone)]
 struct AttachLeaderTarget {
     info: PaneInfo,
@@ -1062,7 +1114,7 @@ fn write_binding_to_state(
     }
     let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
-        .with_leader_receiver(serde_json::to_value(receiver)?)
+        .with_leader_receiver(tmux_receiver_value(receiver)?)
         .with_team_owner(serde_json::to_value(owner)?)
         .with_owner_epoch(owner.owner_epoch.0);
     crate::state::ownership::write_owner(state, &team_key, record);
@@ -1081,9 +1133,87 @@ fn write_receiver_to_state(
     }
     let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
-        .with_leader_receiver(serde_json::to_value(receiver)?);
+        .with_leader_receiver(tmux_receiver_value(receiver)?);
     crate::state::ownership::write_owner(state, &team_key, record);
     Ok(())
+}
+
+fn tmux_receiver_value(receiver: &LeaderReceiver) -> Result<Value, LeaderError> {
+    Ok(write_leader_receiver_transport(
+        serde_json::to_value(receiver)?,
+        "direct_tmux",
+    ))
+}
+
+fn app_server_receiver_value(
+    binding: &crate::codex_app_server::AppServerBinding,
+    epoch: OwnerEpoch,
+) -> Value {
+    write_leader_receiver_transport(
+        json!({
+            "status": "attached",
+            "provider": "codex",
+            "owner_epoch": epoch.0,
+            "app_server": {
+                "socket": binding.socket,
+                "thread_id": binding.thread_id,
+                "session_id": binding.session_id,
+                "cwd": binding.cwd,
+                "cli_version": binding.cli_version,
+                "bound_at": binding.bound_at,
+                "source": "app-server"
+            }
+        }),
+        "codex_app_server",
+    )
+}
+
+fn app_server_owner_value(epoch: OwnerEpoch) -> Value {
+    json!({
+        "provider": "codex",
+        "transport_kind": "codex_app_server",
+        "owner_epoch": epoch.0,
+        "claimed_at": now_ts(),
+        "claimed_via": "attach-app-server-leader",
+        "os_user": std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default(),
+    })
+}
+
+fn write_leader_receiver_transport(mut receiver: Value, transport_kind: &str) -> Value {
+    if let Some(obj) = receiver.as_object_mut() {
+        obj.insert("mode".to_string(), json!(transport_kind));
+        match transport_kind {
+            "codex_app_server" => {
+                obj.insert("transport_kind".to_string(), json!(transport_kind));
+                for legacy in [
+                    "pane_id",
+                    "tmux_socket",
+                    "session_name",
+                    "window_index",
+                    "window_name",
+                    "pane_index",
+                    "pane_tty",
+                    "pane_current_command",
+                    "fingerprint",
+                    "leader_session_uuid",
+                    "attached_at",
+                    "discovery",
+                    "requested_provider",
+                    "warning",
+                ] {
+                    obj.remove(legacy);
+                }
+            }
+            "direct_tmux" => {
+                obj.remove("app_server");
+                obj.remove("transport_kind");
+            }
+            _ => {}
+        }
+    }
+    receiver
 }
 
 /// Stage 3 owner persist fix (architect direction 2026-06-24): determine

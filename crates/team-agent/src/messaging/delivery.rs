@@ -179,6 +179,29 @@ pub fn deliver_pending_message(
             channel: None,
         });
     };
+    if message.recipient == "leader" {
+        if let Some(receiver) = leader_receiver_value(state) {
+            if let Some(outcome) = leader_receiver_transport_conflict_outcome(
+                store,
+                event_log,
+                message_id,
+                receiver,
+                &message.sender,
+            )? {
+                return Ok(outcome);
+            }
+            if crate::codex_app_server::receiver_is_app_server(receiver) {
+                return deliver_leader_via_app_server(
+                    store,
+                    event_log,
+                    state,
+                    message_id,
+                    &message,
+                    canonical_owner_team_id.as_deref(),
+                );
+            }
+        }
+    }
     if message.recipient == "leader" && leader_receiver_has_noncanonical_tmux_socket(state) {
         store.mark(message_id, "failed", Some("leader_not_attached"))?;
         event_log.write(
@@ -604,6 +627,223 @@ pub fn render_message(
     format!("{header}:\n\n{content}\n\n[team-agent-token:{message_id}]")
 }
 
+fn deliver_leader_via_app_server(
+    store: &MessageStore,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+    message_id: &str,
+    message: &PendingMessage,
+    owner_team_id: Option<&str>,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let receiver = leader_receiver_value(state).ok_or_else(|| {
+        MessagingError::Routing("codex_app_server leader_receiver missing".to_string())
+    })?;
+    let binding = match crate::codex_app_server::binding_from_receiver(receiver) {
+        Ok(binding) => binding,
+        Err(error) => {
+            return Ok(app_server_delivery_failure(
+                store,
+                event_log,
+                receiver,
+                message_id,
+                &message.sender,
+                owner_team_id,
+                &error,
+            )?);
+        }
+    };
+    let rendered = render_message(
+        &message.sender,
+        message.task_id.as_deref(),
+        &message.content,
+        message_id,
+    );
+    match crate::codex_app_server::submit_to_bound_thread(&binding, message_id, &rendered) {
+        Ok(submit) => {
+            store.mark(message_id, "delivered", None)?;
+            event_log.write(
+                "message.delivered",
+                serde_json::json!({"message_id": message_id}),
+            )?;
+            event_log.write(
+                "leader_receiver.app_server_submitted",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "owner_team_id": owner_team_id,
+                    "owner_epoch": receiver_owner_epoch(receiver),
+                    "socket": binding.socket,
+                    "thread_id": binding.thread_id,
+                    "turn_id": submit.turn_id,
+                    "turn_status": submit.turn_status,
+                }),
+            )?;
+            Ok(DeliveryOutcome {
+                ok: true,
+                status: DeliveryStatus::Delivered,
+                message_status: MessageStatusShadow("delivered".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: None,
+                stage: None,
+                reason: None,
+                channel: Some("codex_app_server".to_string()),
+            })
+        }
+        Err(error) => app_server_delivery_failure(
+            store,
+            event_log,
+            receiver,
+            message_id,
+            &message.sender,
+            owner_team_id,
+            &error,
+        ),
+    }
+}
+
+fn app_server_delivery_failure(
+    store: &MessageStore,
+    event_log: &EventLog,
+    receiver: &serde_json::Value,
+    message_id: &str,
+    sender: &str,
+    owner_team_id: Option<&str>,
+    error: &crate::codex_app_server::AppServerError,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let action = app_server_rebind_action(owner_team_id, receiver);
+    match error {
+        crate::codex_app_server::AppServerError::LeaderBusy(message) => {
+            store.mark(message_id, "target_resolved", Some("leader_busy"))?;
+            event_log.write(
+                "leader_receiver.app_server_busy",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "reason": "leader_busy",
+                    "error": message,
+                }),
+            )?;
+            Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::RetryScheduled,
+                message_status: MessageStatusShadow("target_resolved".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some("leader_busy".to_string()),
+                stage: None,
+                reason: Some(DeliveryRefusal::RecipientBusy),
+                channel: Some("leader_busy".to_string()),
+            })
+        }
+        crate::codex_app_server::AppServerError::ThreadStale { expected, actual } => {
+            store.mark(message_id, "failed", Some(error.code()))?;
+            event_log.write(
+                "leader_receiver.app_server_thread_stale",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "owner_team_id": owner_team_id,
+                    "owner_epoch": receiver_owner_epoch(receiver),
+                    "expected": expected,
+                    "actual": actual,
+                    "action": action,
+                }),
+            )?;
+            Ok(rebind_required_outcome(message_id, &action))
+        }
+        crate::codex_app_server::AppServerError::ApprovalUnsupported(method) => {
+            store.mark(message_id, "failed", Some("approval_unsupported"))?;
+            event_log.write(
+                "codex_app_server.approval_unsupported",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "method": method,
+                    "action": "handle approval in the Codex app-server session",
+                }),
+            )?;
+            Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Blocked,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some("handle approval in the Codex app-server session".to_string()),
+                stage: None,
+                reason: Some(DeliveryRefusal::MissingPermissions),
+                channel: Some("codex_app_server".to_string()),
+            })
+        }
+        crate::codex_app_server::AppServerError::ProtocolMismatch(_)
+        | crate::codex_app_server::AppServerError::MissingUserAgent => {
+            store.mark(message_id, "failed", Some(error.code()))?;
+            event_log.write(
+                "leader_receiver.app_server_protocol_mismatch",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "owner_team_id": owner_team_id,
+                    "owner_epoch": receiver_owner_epoch(receiver),
+                    "reason": error.code(),
+                    "error": error.to_string(),
+                    "action": action,
+                }),
+            )?;
+            Ok(rebind_required_outcome(message_id, &action))
+        }
+        crate::codex_app_server::AppServerError::SocketUnreachable(_)
+        | crate::codex_app_server::AppServerError::SocketOwnershipInvalid(_)
+        | crate::codex_app_server::AppServerError::ThreadNotLive(_)
+        | crate::codex_app_server::AppServerError::Io(_)
+        | crate::codex_app_server::AppServerError::Json(_) => {
+            store.mark(message_id, "failed", Some(error.code()))?;
+            event_log.write(
+                "leader_receiver.delivery_blocked",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "reason": error.code(),
+                    "channel": "rebind_required",
+                    "action": action,
+                    "error": error.to_string(),
+                }),
+            )?;
+            Ok(rebind_required_outcome(message_id, &action))
+        }
+    }
+}
+
+fn rebind_required_outcome(message_id: &str, action: &str) -> DeliveryOutcome {
+    DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Refused,
+        message_status: MessageStatusShadow("failed".to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some(action.to_string()),
+        stage: None,
+        reason: Some(DeliveryRefusal::LeaderNotAttached),
+        channel: Some("rebind_required".to_string()),
+    }
+}
+
+fn app_server_rebind_action(owner_team_id: Option<&str>, receiver: &serde_json::Value) -> String {
+    let team = owner_team_id
+        .filter(|team| !team.is_empty())
+        .map(|team| format!(" --team {team}"))
+        .unwrap_or_default();
+    let Some(app) = receiver.get("app_server") else {
+        return format!("run team-agent attach-app-server-leader{team} --socket <socket> --thread-id <thread_id>");
+    };
+    let socket = app
+        .get("socket")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<socket>");
+    let thread_id = app
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<thread_id>");
+    format!(
+        "run team-agent attach-app-server-leader{team} --socket {socket} --thread-id {thread_id}"
+    )
+}
+
 /// Resolve a recipient agent-id to a tmux-RESOLVABLE inject target: the persisted pane-id if present,
 /// else a session-qualified `SessionWindow` (state.session_name + the agent's window, defaulting to the
 /// id). NEVER the bare agent-id as a pane — a clientless coordinator cannot resolve that
@@ -768,6 +1008,70 @@ fn leader_receiver_pane_id(state: &serde_json::Value) -> Option<&str> {
     leader_receiver_pane_id_in_state(state)
         .or_else(|| active_team_entry(state).and_then(leader_receiver_pane_id_in_state))
         .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_id_in_state))
+}
+
+fn leader_receiver_value(state: &serde_json::Value) -> Option<&serde_json::Value> {
+    leader_receiver_value_in_state(state)
+        .or_else(|| active_team_entry(state).and_then(leader_receiver_value_in_state))
+        .or_else(|| only_team_entry(state).and_then(leader_receiver_value_in_state))
+}
+
+fn leader_receiver_value_in_state(state: &serde_json::Value) -> Option<&serde_json::Value> {
+    state.get("leader_receiver")
+}
+
+fn receiver_owner_epoch(receiver: &serde_json::Value) -> Option<u64> {
+    receiver
+        .get("owner_epoch")
+        .and_then(serde_json::Value::as_u64)
+}
+
+fn leader_receiver_transport_conflict_outcome(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    receiver: &serde_json::Value,
+    sender: &str,
+) -> Result<Option<DeliveryOutcome>, MessagingError> {
+    let mode = receiver.get("mode").and_then(serde_json::Value::as_str);
+    let transport_kind = receiver
+        .get("transport_kind")
+        .and_then(serde_json::Value::as_str);
+    if let (Some(mode), Some(transport_kind)) = (mode, transport_kind) {
+        if !mode.is_empty() && !transport_kind.is_empty() && mode != transport_kind {
+            store.mark(
+                message_id,
+                "failed",
+                Some("leader_receiver_transport_conflict"),
+            )?;
+            event_log.write(
+                "leader_receiver.delivery_blocked",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": sender,
+                    "reason": "leader_receiver_transport_conflict",
+                    "mode": mode,
+                    "transport_kind": transport_kind,
+                    "channel": "rebind_required",
+                    "action": "run team-agent claim-leader, takeover, or attach-app-server-leader",
+                }),
+            )?;
+            return Ok(Some(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Refused,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(
+                    "run team-agent claim-leader, takeover, or attach-app-server-leader"
+                        .to_string(),
+                ),
+                stage: None,
+                reason: Some(DeliveryRefusal::LeaderNotAttached),
+                channel: Some("rebind_required".to_string()),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn leader_receiver_pane_binding(state: &serde_json::Value) -> Option<PaneSocketBinding<'_>> {

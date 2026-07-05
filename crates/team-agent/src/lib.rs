@@ -92,6 +92,7 @@ pub mod fake_worker;
 // tmux_backend — concrete tmux Transport executor (Command::new tmux via a CommandRunner seam);
 // the real spawn/capture/inject/has_session backend the daemon + launch use (step 9 shipped only
 // the trait + argv-builders). Real subprocess execution is the #[ignore] real-machine boundary.
+pub mod codex_app_server;
 pub mod tmux_backend;
 
 // 0.5.x Windows-native transport Phase 1: ConPTY backend + named-pipe
@@ -112,3 +113,6 @@ pub mod conpty;
 // - CR verdict: `.team/artifacts/0.5.x-backend-factory-cr-verdict.md`
 //              (6 constraints anchored inside the module doc)
 pub mod transport_factory;
+
+#[cfg(test)]
+pub(crate) mod app_server_test_support;

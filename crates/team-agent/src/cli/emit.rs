@@ -112,6 +112,10 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "claim-leader" => cmd_claim_leader(&claim_leader_args(args, cwd)).map(emit_result),
         // Real dispatch: `cmd_attach_leader` writes the `leader_receiver` binding.
         "attach-leader" => cmd_attach_leader(&attach_leader_args(args, cwd)?).map(emit_result),
+        "attach-app-server-leader" => {
+            cmd_attach_app_server_leader(&attach_app_server_leader_args(args, cwd)?)
+                .map(emit_result)
+        }
         "identity" => cmd_identity(&identity_args(args, cwd)).map(emit_result),
         "approvals" => cmd_approvals(&approvals_args(args, cwd)).map(emit_result),
         "inbox" => cmd_inbox(&inbox_args(args, cwd)?).map(emit_result),
@@ -167,6 +171,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "takeover",
     "claim-leader",
     "attach-leader",
+    "attach-app-server-leader",
     "identity",
     "approvals",
     "inbox",
@@ -264,6 +269,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("takeover") => "usage: team-agent takeover [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
         Some("claim-leader") => "usage: team-agent claim-leader [--workspace WORKSPACE] [--team TEAM] [--confirm] [--json]".to_string(),
         Some("attach-leader") => "usage: team-agent attach-leader [--workspace WORKSPACE] [--team TEAM] [--pane PANE] [--provider PROVIDER] [--confirm] [--json]".to_string(),
+        Some("attach-app-server-leader") => "usage: team-agent attach-app-server-leader [--workspace WORKSPACE] [--team TEAM] --socket unix:///path.sock --thread-id THREAD_ID [--json]".to_string(),
         Some("identity") => "usage: team-agent identity [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("approvals") => "usage: team-agent approvals [AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("inbox") => "usage: team-agent inbox AGENT [--workspace WORKSPACE] [--team TEAM] [--limit N] [--since CURSOR] [--json]".to_string(),
@@ -687,6 +693,8 @@ struct ParsedArgs {
     pane: Option<String>,
     to_name: Option<String>,
     provider: Option<String>,
+    socket: Option<String>,
+    thread_id: Option<String>,
     message_id: Option<String>,
     content: Option<String>,
     primary_error: Option<String>,
@@ -775,6 +783,8 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--pane" => parsed.pane = next_arg(args, &mut i),
             "--to-name" => parsed.to_name = next_arg(args, &mut i),
             "--provider" => parsed.provider = next_arg(args, &mut i),
+            "--socket" => parsed.socket = next_arg(args, &mut i),
+            "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
             "--message-id" => parsed.message_id = next_arg(args, &mut i),
             "--content" => parsed.content = next_arg(args, &mut i),
             "--primary-error" => parsed.primary_error = next_arg(args, &mut i),
@@ -791,6 +801,12 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             }
             other if other.starts_with("--provider=") => {
                 parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
+            }
+            other if other.starts_with("--socket=") => {
+                parsed.socket = Some(other.trim_start_matches("--socket=").to_string());
+            }
+            other if other.starts_with("--thread-id=") => {
+                parsed.thread_id = Some(other.trim_start_matches("--thread-id=").to_string());
             }
             other if other.starts_with('-') => {}
             other => parsed.positionals.push(other.to_string()),
@@ -1112,6 +1128,26 @@ fn attach_leader_args(args: &[String], cwd: &Path) -> Result<AttachLeaderArgs, C
             .map(crate::transport::PaneId::new),
         provider: parse_cli_provider(parsed.provider.as_deref())?,
         confirm: parsed.confirm,
+        json: parsed.json,
+    })
+}
+
+fn attach_app_server_leader_args(
+    args: &[String],
+    cwd: &Path,
+) -> Result<AttachAppServerLeaderArgs, CliError> {
+    let parsed = parse_args(args);
+    Ok(AttachAppServerLeaderArgs {
+        workspace: workspace(&parsed, cwd),
+        team: parsed.team,
+        socket: parsed
+            .socket
+            .filter(|socket| !socket.is_empty())
+            .ok_or_else(|| CliError::Usage("missing --socket".to_string()))?,
+        thread_id: parsed
+            .thread_id
+            .filter(|thread_id| !thread_id.is_empty())
+            .ok_or_else(|| CliError::Usage("missing --thread-id".to_string()))?,
         json: parsed.json,
     })
 }

@@ -583,7 +583,7 @@ fn send_to_leader_receiver_entrypoint_has_no_private_attached_precheck() {
     let body = src
         .split("pub fn send_to_leader_receiver")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn claim_leader_receiver").next())
+        .and_then(|tail| tail.split("pub fn mirror_peer_message_to_leader").next())
         .expect("send_to_leader_receiver body");
 
     for forbidden in [
