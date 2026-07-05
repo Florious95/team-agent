@@ -121,5 +121,11 @@ pub mod conpty;
 //              (6 constraints anchored inside the module doc)
 pub mod transport_factory;
 
-#[cfg(test)]
+// 0.5.x Windows portability Batch 5: `app_server_test_support` is a
+// Unix-domain-socket fake for the Codex app-server client. It is
+// Unix-only because the code-under-test (`codex_app_server`) is
+// Unix-only via cfg (Windows gets typed `SocketUnreachable`
+// unsupported returns). Cfg-gating the module keeps `cargo check
+// --tests --target x86_64-pc-windows-msvc` compilable.
+#[cfg(all(test, unix))]
 pub(crate) mod app_server_test_support;

@@ -296,7 +296,7 @@ mod windows_impl {
     }
 
     pub fn pid_liveness(pid: u32) -> Result<ProcessLiveness, io::Error> {
-        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE, WIN32_ERROR};
+        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
         use windows::Win32::System::Threading::{
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };

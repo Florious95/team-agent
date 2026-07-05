@@ -85,20 +85,16 @@ jobs:
           else
             echo "no_check_log=1" > win-portability-tracking.txt
           fi
-      - name: cargo check windows target (--tests, Batch 5 burn-down reference)
-        # This step is CAPTURE-ONLY. `cargo check --tests` on the
-        # Windows target is expected RED until Batch 5. Its role in
-        # this workflow is to record the error count so Batch 5 has a
-        # burn-down starting point. `continue-on-error: true` on this
-        # step means the RED cargo exit does NOT fail the gate; the
-        # error-count is written to the burn-down artifact for later
-        # inspection.
-        continue-on-error: true
+      - name: cargo check windows target (--tests, hard-red gate)
+        # Batch 5 landed: `cargo check --tests` on the Windows target
+        # was RED with 10 errors in Batch 4; Batch 5 cfg-gates all
+        # Unix-only test files + fixes tmux/codex/lease/tick/agent_ops
+        # test-support so the test target compiles. The `continue-on-
+        # error: true` + `set +e` are REMOVED — a broken `cargo check
+        # --tests` now fails the gate.
         shell: bash
         run: |
-          set +e
           cargo check --target x86_64-pc-windows-msvc -p team-agent --tests 2>&1 | tee check-tests.log
-          echo "cargo_check_tests_exit=$?"
       - name: post --tests burn-down summary
         if: always()
         shell: bash

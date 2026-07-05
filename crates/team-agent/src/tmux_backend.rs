@@ -2294,5 +2294,10 @@ fn non_empty(raw: &str) -> Option<&str> {
     }
 }
 
-#[cfg(test)]
+// 0.5.x Windows portability Batch 5: the `tmux_backend/tests.rs`
+// module uses `std::os::unix::net::UnixListener` for its mock
+// runner + verifies Unix-specific socket-root derivation. Since the
+// tmux backend itself only functions on Unix (design § Route B —
+// tmux is a Unix concept), the test module stays Unix-only.
+#[cfg(all(test, unix))]
 mod tests;

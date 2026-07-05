@@ -12,6 +12,7 @@
 //! - Design:    `.team/artifacts/0.5.x-windows-native-transport-design.md`
 //! - CR verdict: `.team/artifacts/0.5.x-windows-transport-cr-verdict.md`
 
+pub mod named_pipe_client;
 pub mod protocol;
 pub mod shim;
 
@@ -21,3 +22,6 @@ pub use protocol::{
     Response, SpawnRequest, SpawnResult, MAX_FRAME_BYTES, PROTOCOL_SCHEMA,
 };
 pub use shim::{FakePaneRuntime, LocalShimClient, PaneEntry, PaneRuntime, PipeClient, Shim};
+pub use named_pipe_client::pipe_name_for;
+#[cfg(windows)]
+pub use named_pipe_client::NamedPipeClient;

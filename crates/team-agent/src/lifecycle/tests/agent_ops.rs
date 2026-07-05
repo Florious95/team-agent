@@ -287,6 +287,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
+#[cfg(unix)]
 struct TmuxShim {
     log: std::path::PathBuf,
     _path: EnvVarGuard,
@@ -297,6 +298,7 @@ struct TmuxShim {
     _real_tmux: EnvVarGuard,
 }
 
+#[cfg(unix)]
 fn install_e27_tmux_shim(expected_endpoint: &str, session_name: &str) -> TmuxShim {
     use std::os::unix::fs::PermissionsExt;
 
@@ -441,6 +443,9 @@ fn assert_only_expected_socket_used(log: &std::path::Path, expected_endpoint: &s
     }
 }
 
+// 0.5.x Windows portability Batch 5: E27 tests use a shell-script
+// tmux shim + Unix socket paths. Unix-only.
+#[cfg(unix)]
 #[test]
 #[serial_test::serial(env)]
 fn e27_stop_agent_uses_attached_explicit_state_socket() {
@@ -461,6 +466,7 @@ fn e27_stop_agent_uses_attached_explicit_state_socket() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[serial_test::serial(env)]
 fn e27_reset_agent_uses_attached_explicit_state_socket_for_stop_and_spawn() {
@@ -491,6 +497,7 @@ fn e27_reset_agent_uses_attached_explicit_state_socket_for_stop_and_spawn() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[serial_test::serial(env)]
 fn e27_stop_agent_expands_short_state_socket_name() {

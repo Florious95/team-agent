@@ -192,6 +192,12 @@ fn p2_tick_skips_tmux_gate_when_session_name_absent() {
 
 // P1 — pid_is_running must use os.kill(pid,0) first: a pid owned by another user (pid 1 /
 // launchd, root) is EPERM → not signalable → False. Current only `ps -p` (rc=0) → True.
+//
+// 0.5.x Windows portability Batch 5: this test's PREMISE is Unix
+// specific (pid 1 = init/launchd, EPERM semantics). On Windows,
+// pid_is_running routes through `platform::process::pid_liveness` which
+// has different accessible-pid semantics. Unix-only test.
+#[cfg(unix)]
 #[test]
 fn p2_pid_is_running_false_for_cross_user_pid() {
     // The cross-user semantics only hold for a non-root caller (root CAN signal pid 1).
