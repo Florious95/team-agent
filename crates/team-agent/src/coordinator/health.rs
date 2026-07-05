@@ -135,7 +135,23 @@ fn detach_daemon_child(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn detach_daemon_child(command: &mut Command) {
+    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
+    // detach the coordinator daemon on Windows via
+    // `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` creation flags,
+    // matching what `coordinator::conpty_shim::spawn_shim_and_handshake`
+    // does for the shim. Without these flags, an SSH-launched
+    // quick-start blocks waiting for the coord daemon's process
+    // tree to exit (never happens — daemon runs forever), and the
+    // quick-start caller sees a hung command.
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn detach_daemon_child(_command: &mut Command) {}
 
 /// `stop_coordinator`(`lifecycle.py:228-247`):SIGTERM pid + 清 pid/meta → typed report。
