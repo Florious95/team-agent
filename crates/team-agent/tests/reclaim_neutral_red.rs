@@ -1,3 +1,8 @@
+// 0.5.x Windows portability Batch 5: entire file uses `TmuxCase`
+// which builds tmux sessions with `std::os::unix::fs::symlink` +
+// shell scripts. tmux is Unix-only conceptually, so cfg-gate the
+// whole file rather than sprinkle cfg on every test.
+#![cfg(unix)]
 //! #235 reclaim-neutral delivery contracts.
 //!
 //! User-visible contract: delivery/report/retry paths never claim or take over a leader
