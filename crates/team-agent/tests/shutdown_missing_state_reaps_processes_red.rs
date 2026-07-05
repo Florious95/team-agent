@@ -186,10 +186,9 @@ fn tmp_dir(tag: &str) -> PathBuf {
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    let Ok(pid_t) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    unsafe { libc::kill(pid_t, 0) == 0 }
+    // 0.5.x Windows portability Batch 5: route through
+    // `platform::process::pid_is_alive` for cross-platform compile.
+    team_agent::platform::process::pid_is_alive(pid)
 }
 
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
