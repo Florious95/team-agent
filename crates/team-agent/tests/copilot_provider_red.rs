@@ -26,9 +26,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use serial_test::serial;
@@ -42,8 +42,13 @@ use team_agent::transport::{
     WindowName,
 };
 
+#[path = "support/temp_workspace.rs"]
+mod temp_workspace;
+use temp_workspace::TempWorkspace;
+
 const ANCESTRY_KEY: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
 const NEUTRAL_ANCESTRY: &str = "[\"/bin/zsh\"]";
+const COPILOT_TMP_PREFIX: &str = "ta-rs-copilot";
 
 /// Face 1+3 (§C1 golden + C-5-3, verdict cases `copilot_argv_golden_per_role_tools`
 /// and `non_dangerous_argv_contains_deny_flags_no_allow_all`): a restricted copilot
@@ -477,7 +482,7 @@ fn copilot_phase1_classify_is_explicit_unknown_and_never_idles() {
     )
     .unwrap();
     let coord = team_agent::coordinator::Coordinator::new(
-        team_agent::coordinator::WorkspacePath::new(ws.clone()),
+        team_agent::coordinator::WorkspacePath::new(ws.to_path_buf()),
         Box::new(RealAdapterRegistry),
         Box::new(RecordingTransport::with_session_present()),
     );
@@ -590,7 +595,7 @@ fn copilot_session_capture_is_sqlite_point_query_not_directory_scan() {
         .capture_session_candidates(
             &team_agent::provider::CaptureSessionContext {
                 agent_id: "worker_a".to_string(),
-                spawn_cwd: spawn_cwd.clone(),
+                spawn_cwd: spawn_cwd.to_path_buf(),
                 pane_id: None,
                 pane_pid: None,
                 spawned_at: None,
@@ -617,7 +622,7 @@ query (id == expected_session_id), not from scanning provider-home files; candid
         .capture_session_candidates(
             &team_agent::provider::CaptureSessionContext {
                 agent_id: "worker_a".to_string(),
-                spawn_cwd: spawn_cwd.clone(),
+                spawn_cwd: spawn_cwd.to_path_buf(),
                 pane_id: None,
                 pane_pid: None,
                 spawned_at: None,
@@ -1100,6 +1105,44 @@ store) must emit a passthrough-warning event at spawn (phase-1 observe-only); ev
     );
 }
 
+#[test]
+#[serial(env)]
+fn copilot_tmp_workspace_guard_cleans_and_sweeps_dead_pid_stale_roots() {
+    if TempWorkspace::keep_enabled() {
+        let _kept = tmp_ws("keep-escape");
+        assert!(
+            !copilot_tmp_entries().is_empty(),
+            "TEAM_AGENT_KEEP_TEST_TMP=1 should preserve copilot tmp roots for debugging"
+        );
+        return;
+    }
+
+    sweep_stale_copilot_tmp_roots();
+    assert_eq!(
+        copilot_tmp_entries().len(),
+        0,
+        "test precondition: stale dead-pid ta-rs-copilot-* roots should be cleaned before assertion"
+    );
+
+    let stale = std::env::temp_dir().join("ta-rs-copilot-stale-dead-999999999-0");
+    let _ = std::fs::remove_dir_all(&stale);
+    std::fs::create_dir_all(&stale).unwrap();
+    {
+        let guarded = tmp_ws("drop-check");
+        assert!(
+            !stale.exists(),
+            "tmp_ws must sweep stale ta-rs-copilot-* roots before creating a new root"
+        );
+        assert!(guarded.exists(), "guarded copilot tmp root should exist while the guard is alive");
+    }
+
+    assert_eq!(
+        copilot_tmp_entries().len(),
+        0,
+        "TempWorkspace Drop must remove copilot tmp roots after normal test exit"
+    );
+}
+
 // ───────────────────────────────────── fixtures ─────────────────────────────────────
 
 struct TeamOpts;
@@ -1283,18 +1326,33 @@ fn flag_values(argv: &[String], flag: &str) -> Vec<String> {
 
 struct EnvGuard {
     previous: Vec<(&'static str, Option<String>)>,
+    _owned_paths: Vec<TempWorkspace>,
 }
 
 impl EnvGuard {
     fn set(values: &[(&'static str, &'static str)]) -> Self {
+        let mut owned_paths = Vec::new();
+        let mut resolved = values
+            .iter()
+            .map(|(key, value)| (*key, (*value).to_string()))
+            .collect::<Vec<_>>();
+        if !values.iter().any(|(key, _)| *key == "PATH") {
+            let shim = copilot_empty_mcp_list_shim("path-shim");
+            resolved.push(("PATH", shim.path().to_string_lossy().into_owned()));
+            owned_paths.push(shim);
+        }
+        Self::set_owned(resolved, owned_paths)
+    }
+
+    fn set_owned(values: Vec<(&'static str, String)>, owned_paths: Vec<TempWorkspace>) -> Self {
         let previous = values
             .iter()
             .map(|(key, _)| (*key, std::env::var(key).ok()))
             .collect::<Vec<_>>();
-        for (key, value) in values {
+        for (key, value) in &values {
             std::env::set_var(key, value);
         }
-        Self { previous }
+        Self { previous, _owned_paths: owned_paths }
     }
 }
 
@@ -1456,14 +1514,100 @@ impl Transport for RecordingTransport {
     }
 }
 
-fn tmp_ws(tag: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "ta-rs-copilot-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(dir).unwrap()
+fn tmp_ws(tag: &str) -> TempWorkspace {
+    sweep_stale_copilot_tmp_roots();
+    TempWorkspace::new(COPILOT_TMP_PREFIX, tag)
+}
+
+fn copilot_empty_mcp_list_shim(tag: &str) -> TempWorkspace {
+    let bin = tmp_ws(tag);
+    std::fs::write(
+        bin.join("copilot"),
+        "#!/bin/sh\nif [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"list\" ]; then\n  exit 0\nfi\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join("copilot"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    bin
+}
+
+fn copilot_tmp_search_roots() -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut roots = Vec::new();
+    for root in [std::env::temp_dir(), PathBuf::from("/private/tmp")] {
+        if !root.is_dir() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+        if seen.insert(canonical.clone()) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
+
+fn copilot_tmp_entries() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in copilot_tmp_search_roots() {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("ta-rs-copilot-") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+fn sweep_stale_copilot_tmp_roots() {
+    for path in copilot_tmp_entries() {
+        if copilot_tmp_path_has_dead_owner_pid(&path) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+fn copilot_tmp_path_has_dead_owner_pid(path: &Path) -> bool {
+    let Some(pid) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(copilot_tmp_pid_from_name)
+    else {
+        return false;
+    };
+    pid != std::process::id() && !pid_is_live(pid)
+}
+
+fn copilot_tmp_pid_from_name(name: &str) -> Option<u32> {
+    if !name.starts_with("ta-rs-copilot-") {
+        return None;
+    }
+    name.rsplit('-').nth(1)?.parse().ok()
+}
+
+fn pid_is_live(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
