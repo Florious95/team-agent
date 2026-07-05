@@ -9,7 +9,9 @@ jobs:
   lib-tests-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
       - name: platform lib tests
         run: cargo test -p team-agent --lib platform::
