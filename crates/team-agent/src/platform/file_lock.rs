@@ -171,7 +171,7 @@ fn try_lock_once_windows(file: &File) -> io::Result<bool> {
         LockFileEx(
             handle,
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
+            Some(0),
             u32::MAX,
             u32::MAX,
             &mut overlapped,
@@ -199,7 +199,7 @@ fn unlock_windows(file: &File) -> io::Result<()> {
     use windows::Win32::System::IO::OVERLAPPED;
     let handle = HANDLE(file.as_raw_handle() as *mut _);
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    let result = unsafe { UnlockFileEx(handle, 0, u32::MAX, u32::MAX, &mut overlapped) };
+    let result = unsafe { UnlockFileEx(handle, Some(0), u32::MAX, u32::MAX, &mut overlapped) };
     result.map_err(|e| io::Error::from_raw_os_error(e.code().0 as i32))
 }
 
