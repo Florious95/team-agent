@@ -78,6 +78,13 @@ pub mod diagnose;
 // 富返回类型,fn body unimplemented!(),P2 porter 落实现)。lifecycle=quick-start/restart/display;
 // mcp_server=stdio MCP tool handlers;cli=clap 子命令;packaging=install/migrate/repair。
 pub mod lifecycle;
+
+// 0.5.x Windows portability Batch 0: platform abstraction layer.
+// Truth sources:
+// - Design:    `.team/artifacts/0.5.x-windows-portability-survey-design.md`
+// - CR verdict: `.team/artifacts/0.5.x-windows-portability-cr-verdict.md`
+//              (6 constraints anchored inside the module doc)
+pub mod platform;
 // 0.3.28 — unified adaptive layout manager (single source of truth for tmux
 // topology decisions). See `.team/artifacts/adaptive-layout-full-architecture-locate.md`.
 pub mod layout;

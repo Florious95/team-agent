@@ -319,6 +319,13 @@ fn parent_pid() -> u32 {
     u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
 }
 
+// FIXME(portability): non-Unix fallback returns 0 (fake parent pid).
+// This is dead code on macOS/Linux (cfg walks the unix branch) but
+// would silently degrade MCP metadata + orphan detection on Windows.
+// Batch 3 removes this via `crate::platform::process::current_parent_pid`.
+// Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md`
+// §Ordered Migration Plan / Batch 3;
+// CR C-2 grep guard `platform_fallback_burndown_batch0.rs` locks removal.
 #[cfg(not(unix))]
 fn parent_pid() -> u32 {
     0

@@ -222,12 +222,47 @@ fn linux_aarch64_is_native() {
 }
 
 #[test]
-fn windows_x8664_is_native_per_transport_design() {
-    // skeleton:203/211 — Windows 原生一等 (WezTerm/ConPTY,非 tmux)。
-    // 不是 Unsupported,不是 RequiresWslTmux — 是 Native.
-    assert_eq!(
-        platform_support(ReleaseTarget::WindowsX8664),
-        PlatformSupport::Native
+fn windows_x8664_is_preview_compile_only_during_batch_0_to_5() {
+    // 0.5.x Windows portability CR C-1 (P0):
+    // Windows previously claimed `PlatformSupport::Native` but
+    // `cargo check --target x86_64-pc-windows-msvc` was RED — the
+    // Unix-only `std::os::unix` / `libc::pid_t` calls in
+    // tmux_backend/coordinator/lifecycle/packaging never compiled on
+    // Windows. Claiming Native was a MUST-NOT-13 假绿承诺 (user
+    // installs and immediately hits build failures).
+    //
+    // This test locks the honest downgrade in place until Batch 6/7
+    // real-machine gates pass. Promoting Windows back to `Native`
+    // requires:
+    //   1. Batch 6 fake-provider smoke on the SSH host (design §Batch 6)
+    //   2. Batch 7 real-machine subscription serial (CR §C-5)
+    // Both flip this test to `assert PlatformSupport::Native` in a
+    // deliberate PR — no silent regen.
+    //
+    // Truth source: `.team/artifacts/0.5.x-windows-portability-cr-verdict.md` §C-1.
+    match platform_support(ReleaseTarget::WindowsX8664) {
+        PlatformSupport::PreviewCompileOnly { preview_gate, note } => {
+            assert_eq!(preview_gate, "compile_gate");
+            assert!(note.contains("compile_gate") || note.contains("cargo check"));
+        }
+        other => panic!(
+            "Windows must stay `PreviewCompileOnly` while the compile gate is RED; \
+             promoting back to `Native` requires Batch 6 + Batch 7 real-machine gates. \
+             Got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn windows_x8664_is_not_native_yet_c1_hard_lock() {
+    // Belt-and-braces companion for the above — a distinct assertion
+    // that fires clearly if a future refactor of `PlatformSupport`
+    // changes variant names.
+    let support = platform_support(ReleaseTarget::WindowsX8664);
+    assert_ne!(
+        support,
+        PlatformSupport::Native,
+        "CR C-1: Windows must NOT be Native until Batch 6/7 gates pass"
     );
 }
 

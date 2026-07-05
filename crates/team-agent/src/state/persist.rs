@@ -180,6 +180,15 @@ impl RuntimeLock {
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
+        // FIXME(portability): non-Unix branch always reports
+        // `Locked(... not yet implemented on non-unix)`. This is dead
+        // code on macOS/Linux (cfg walks the unix branch) but on
+        // Windows currently prevents any state save from succeeding.
+        // Batch 2 removes this via
+        // `crate::platform::file_lock::try_lock_exclusive(path, timeout)`.
+        // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md`
+        // §Ordered Migration Plan / Batch 2;
+        // CR C-2 grep guard `platform_fallback_burndown_batch0.rs` locks removal.
         #[cfg(not(unix))]
         {
             let _ = timeout;

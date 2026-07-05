@@ -162,13 +162,27 @@ pub enum ReleaseTarget {
 }
 
 /// 平台支持等级(§8:如实声明,不假装兼容)。
+///
+/// 0.5.x Windows portability CR C-1 (P0) 引入 `PreviewCompileOnly`:
+/// Windows 目前 `cargo check --target x86_64-pc-windows-msvc` **仍红**
+/// (三处 non-Unix fallback + platform 层未接入 + Batch 1-4 未完成);
+/// 保持 `Native` 会构成 MUST-NOT-13 假绿承诺 → 用户装 Windows 二进制
+/// 会真报错。降级为 `PreviewCompileOnly` 明示"当前 Windows 尚未通过
+/// 编译门,Batch 6/7 真机订阅测通过前不承诺 Native"。
+/// Truth source: `.team/artifacts/0.5.x-windows-portability-cr-verdict.md` §C-1。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "level")]
 pub enum PlatformSupport {
-    /// 原生一等(macOS/Linux tmux;Windows WezTerm/ConPTY,见 transport-backend-design.md)。
+    /// 原生一等(macOS/Linux tmux)。
     Native,
     /// 需 WSL + tmux backend(显式标要求,不假装原生)。
     RequiresWslTmux { note: String },
+    /// Windows 移植进行中,`cargo check` 仍红或 Batch 6/7 真机订阅测未过。
+    /// 用户不应期待可运行的 `.exe`;`preview_gate` 字段说明当前挡位
+    /// (`compile_gate` = Batch 0-4 编译门,`fake_provider_smoke` = Batch 6,
+    /// `subscription_realmachine` = Batch 7)。
+    /// 该档位不承诺可用,仅承诺"正在移植 + 每 Batch 有 CI 编译门追踪"。
+    PreviewCompileOnly { preview_gate: String, note: String },
     /// 当前 release 矩阵不覆盖。
     Unsupported { reason: String },
 }
@@ -179,8 +193,22 @@ pub fn platform_support(target: ReleaseTarget) -> PlatformSupport {
         ReleaseTarget::MacosAarch64
         | ReleaseTarget::MacosX8664
         | ReleaseTarget::LinuxX8664
-        | ReleaseTarget::LinuxAarch64
-        | ReleaseTarget::WindowsX8664 => PlatformSupport::Native,
+        | ReleaseTarget::LinuxAarch64 => PlatformSupport::Native,
+        // 0.5.x Windows portability CR C-1 (P0):
+        // `cargo check --target x86_64-pc-windows-msvc` 是当前挡位;
+        // Batch 6 fake-provider smoke + Batch 7 真机订阅测通过后
+        // 才升回 `Native`。历史 tag 期间 Windows 曾声明为 Native 但
+        // 从未通过编译门,构成 MUST-NOT-13 假绿承诺 → 本 batch 降级。
+        ReleaseTarget::WindowsX8664 => PlatformSupport::PreviewCompileOnly {
+            preview_gate: "compile_gate".to_string(),
+            note: "Windows native port in progress; `cargo check --target x86_64-pc-windows-msvc` \
+                   is the current gate. See \
+                   `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 0-6 \
+                   and CR verdict §C-1 for burn-down status. Promote back to `Native` only \
+                   after Batch 6 (fake-provider smoke) + Batch 7 (subscription real-machine) \
+                   pass on the SSH host."
+                .to_string(),
+        },
     }
 }
 

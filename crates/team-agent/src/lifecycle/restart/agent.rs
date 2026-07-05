@@ -573,6 +573,16 @@ pub(super) fn pid_is_alive(pid: u32) -> bool {
         let err = std::io::Error::last_os_error();
         matches!(err.raw_os_error(), Some(libc::EPERM))
     }
+    // FIXME(portability): non-Unix fallback returns `true` for every
+    // pid (conservative-but-wrong: makes drain silent-fail — a stale
+    // pane's pid is reported alive, so restart reuses the pane instead
+    // of respawning). Dead code on macOS/Linux (cfg walks unix branch).
+    // Batch 3 removes this via
+    // `crate::platform::process::pid_liveness(pid)` mapping
+    // `ProcessLiveness::Live` → true.
+    // Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md`
+    // §Ordered Migration Plan / Batch 3;
+    // CR C-2 grep guard `platform_fallback_burndown_batch0.rs` locks removal.
     #[cfg(not(unix))]
     {
         let _ = pid;
