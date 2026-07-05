@@ -219,9 +219,25 @@ pub fn spawn_shim_and_handshake(
     let pipe_token = fresh_pipe_token();
 
     // Spawn the shim. `TA_CONPTY_PIPE_TOKEN` is the secret channel;
-    // argv carries only non-secret identifiers. `stdout`/`stderr`
-    // routed to null so leaked descriptors don't hold parent handles
-    // open (Windows named-pipe semantics).
+    // argv carries only non-secret identifiers.
+    //
+    // Batch 6 real-machine diagnostic: route shim stderr to a
+    // predictable log file under `.team/logs/conpty-shim.err.log`
+    // so operators can diagnose Hello failures / pipe races. stdout
+    // is null (shim doesn't use stdout by design). CR C-1 hold:
+    // stderr NEVER contains the pipe_token (windows_shim.rs strips
+    // it from the startup log line).
+    let log_dir = workspace.join(".team").join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let stderr_log = log_dir.join("conpty-shim.err.log");
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log)
+        .map_err(|e| ShimError::Spawn {
+            pipe_name: pipe_name.clone(),
+            source: e,
+        })?;
     let child = Command::new(&shim_exe)
         .args([
             "--workspace-hash",
@@ -234,7 +250,7 @@ pub fn spawn_shim_and_handshake(
         .env("TA_CONPTY_PIPE_TOKEN", &pipe_token)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(stderr_file))
         .spawn()
         .map_err(|e| ShimError::Spawn {
             pipe_name: pipe_name.clone(),
