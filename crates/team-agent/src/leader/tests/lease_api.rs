@@ -303,6 +303,11 @@ fn r8_requeued_exhausted_watchers_event_payload_golden_shape() {
     assert_eq!(payload.get("trigger").and_then(|v| v.as_str()), Some("attach_leader"));
 }
 
+// 0.5.x Windows portability Batch 5: `FakeAppServer` uses UNIX domain
+// sockets to fake the Codex app-server. Codex app-server client is
+// Unix-only (Windows returns typed `SocketUnreachable`), so these
+// tests are Unix-only too.
+#[cfg(unix)]
 #[test]
 fn app_server_attach_writes_transport_kind_tuple_and_advances_epoch() {
     let ws = std::env::temp_dir().join(format!(
@@ -357,6 +362,7 @@ fn app_server_attach_writes_transport_kind_tuple_and_advances_epoch() {
     assert_eq!(saved["owner_epoch"], serde_json::json!(1));
 }
 
+#[cfg(unix)]
 #[test]
 fn app_server_attach_rejects_world_writable_socket_without_state_write() {
     let ws = std::env::temp_dir().join(format!(
@@ -396,6 +402,7 @@ fn app_server_attach_rejects_world_writable_socket_without_state_write() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn app_server_attach_rejects_missing_user_agent_without_state_write() {
     let ws = std::env::temp_dir().join(format!(

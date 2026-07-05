@@ -342,14 +342,25 @@ fn tmux_socket_names() -> Vec<String> {
 }
 
 fn tmux_socket_roots() -> Vec<PathBuf> {
-    let uid = unsafe { libc::geteuid() };
-    let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
-    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-        roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+    // 0.5.x Windows portability Batch 1: tmux orphan scan is Unix-only
+    // (design §Layering Strategy — "ConPTY orphan diagnostics should be
+    // a separate shim registry command later"). On Windows return
+    // empty so the caller loops zero times honestly.
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+        }
+        roots.sort();
+        roots.dedup();
+        roots
     }
-    roots.sort();
-    roots.dedup();
-    roots
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
 }
 
 fn tmux_list_panes(socket: &str) -> Vec<TmuxPaneRow> {

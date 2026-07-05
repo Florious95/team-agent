@@ -1517,10 +1517,15 @@ fn peek_args(args: &[String], cwd: &Path) -> Result<PeekArgs, CliError> {
 fn run_coordinator(args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
     let parsed = parse_args(args);
     let workspace = crate::coordinator::WorkspacePath::new(workspace(&parsed, cwd));
+    // 0.5.x Windows portability Batch 9 F8: pass `--team` through
+    // to the daemon so it doesn't have to derive from state at
+    // boot time. `parse_args` already recognizes `--team`; we just
+    // thread the value into `DaemonArgs::team_key`.
     crate::coordinator::run_daemon(crate::coordinator::DaemonArgs {
         workspace,
         once: parsed.once,
         tick_interval_sec: parsed.tick_interval,
+        team_key: parsed.team.clone(),
     })
     .map(|()| ExitCode::Ok)
     .map_err(|e| CliError::Runtime(e.to_string()))

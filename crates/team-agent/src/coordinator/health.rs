@@ -53,6 +53,21 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
 /// `start_coordinator`(`lifecycle.py:49-121`):幂等 — 已健康 no-op(AlreadyRunning);metadata 不兼容
 /// 先 stop 再起;schema 不兼容拒启 + hint;否则 spawn `team-agent coordinator --workspace <ws>`。
 pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, StartError> {
+    start_coordinator_with_team(workspace, None)
+}
+
+/// 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+/// forward `--team` to the spawned coord daemon so it doesn't have
+/// to derive team_key from `state.active_team_key` at boot. The
+/// derivation stays as fallback (see `coordinator::backoff::run_daemon`),
+/// so Unix daemons and pre-existing test harnesses are byte-preserving.
+///
+/// Callers that CAN pass team_key (Batch 9 quick-start Windows path)
+/// SHOULD — that avoids Batch 8's F8 seed-state trap.
+pub fn start_coordinator_with_team(
+    workspace: &WorkspacePath,
+    team_key: Option<&str>,
+) -> Result<StartReport, StartError> {
     let health = coordinator_health(workspace);
     if health.ok {
         return Ok(StartReport {
@@ -101,7 +116,13 @@ pub fn start_coordinator(workspace: &WorkspacePath) -> Result<StartReport, Start
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["coordinator", "--workspace"])
-        .arg(workspace.as_path())
+        .arg(workspace.as_path());
+    if let Some(tk) = team_key {
+        if !tk.is_empty() {
+            command.args(["--team", tk]);
+        }
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
@@ -135,7 +156,23 @@ fn detach_daemon_child(command: &mut Command) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn detach_daemon_child(command: &mut Command) {
+    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
+    // detach the coordinator daemon on Windows via
+    // `DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB` creation flags,
+    // matching what `coordinator::conpty_shim::spawn_shim_and_handshake`
+    // does for the shim. Without these flags, an SSH-launched
+    // quick-start blocks waiting for the coord daemon's process
+    // tree to exit (never happens — daemon runs forever), and the
+    // quick-start caller sees a hung command.
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+    command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(not(any(unix, windows)))]
 fn detach_daemon_child(_command: &mut Command) {}
 
 /// `stop_coordinator`(`lifecycle.py:228-247`):SIGTERM pid + 清 pid/meta → typed report。
@@ -272,16 +309,32 @@ fn coordinator_command_matches_workspace(command: &str, workspaces: &[String]) -
 }
 
 fn terminate_pid(pid: Pid) -> bool {
+    // 0.5.x Windows portability Batch 3: routes signal delivery through
+    // `platform::process::terminate_pid`. Unix keeps
+    // SIGTERM → 5s grace → SIGKILL semantics byte-for-byte
+    // (`SignalKind::TerminateGraceful` → SIGTERM,
+    // `SignalKind::TerminateForce` → SIGKILL). Windows performs
+    // `TerminateProcess` for both kinds; the `TerminationOutcome::ForceOnly`
+    // return on the graceful call is what a future audit-event
+    // emitter (CR C-6) will trigger `platform.terminate_force_only`
+    // on. For this batch the return value is discarded, matching the
+    // current inline `let _ = send_signal(...)` pattern.
     if pid_is_running(pid).ok() == Some(false) {
         return true;
     }
     let pids = process_tree_pids(pid);
     for child in pids.iter().rev() {
-        let _ = send_signal(*child, libc::SIGTERM);
+        let _ = crate::platform::process::terminate_pid(
+            child.get(),
+            crate::platform::process::SignalKind::TerminateGraceful,
+        );
     }
     if !wait_until_all_not_running(&pids, Duration::from_secs(5)) {
         for child in pids.iter().rev() {
-            let _ = send_signal(*child, libc::SIGKILL);
+            let _ = crate::platform::process::terminate_pid(
+                child.get(),
+                crate::platform::process::SignalKind::TerminateForce,
+            );
         }
     }
     wait_until_all_not_running(&pids, Duration::from_secs(5))
@@ -348,16 +401,17 @@ fn wait_until_all_not_running(pids: &[Pid], timeout: Duration) -> bool {
 }
 
 fn reap_child_if_possible(pid: Pid) {
-    let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
-        return;
-    };
-    let mut status = 0;
-    unsafe {
-        libc::waitpid(pid_t, &mut status, libc::WNOHANG);
-    }
+    // Batch 3: routed through `platform::process`. Unix `waitpid
+    // (WNOHANG)`; Windows no-op (no zombie model).
+    crate::platform::process::reap_child_if_possible(pid.get());
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
 fn send_signal(pid: Pid, signal: libc::c_int) -> bool {
+    // Retained (dead code post-Batch-3) as a Unix-only helper for any
+    // future non-standard signal delivery. All product paths now use
+    // `crate::platform::process::terminate_pid` with `SignalKind`.
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
         return false;
     };
@@ -383,6 +437,21 @@ fn wait_until_not_running(pid: Pid, timeout: Duration) -> bool {
 
 /// `pid_is_running`(`metadata.py:16-25`):`os.kill(pid, 0)` + `ps -o stat=` 查 zombie(Z* → 不算活)。
 /// §10 fallible:进程探测 I/O 可失败 → Result。
+///
+/// 0.5.x Windows portability Batch 4: this function has UNIQUE
+/// coordinator-metadata semantics — it treats `EPERM` as "not
+/// running" (different from `platform::process::pid_liveness` which
+/// treats `EPERM` as Live) because the coordinator only owns
+/// processes it can signal, and uses `ps -o stat=` for zombie
+/// detection. The `ps` shellout is Unix-only.
+///
+/// On Windows the coordinator-metadata identity check runs through
+/// `platform::process::pid_liveness` instead (Windows has no zombie
+/// state — a process is either Live or Dead — so the additional
+/// `ps stat=` step has no analogue). This preserves the coordinator's
+/// "am I the owner" check without silently reporting stale pids as
+/// alive.
+#[cfg(unix)]
 pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     let Ok(pid_t) = libc::pid_t::try_from(pid.get()) else {
         return Ok(false);
@@ -405,6 +474,23 @@ pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
     }
     let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
     Ok(!stat.is_empty() && !stat.starts_with('Z'))
+}
+
+/// Windows shim: no `ps stat=` zombie detection needed (Windows has
+/// no zombie state — a process is either Live or Dead). Route through
+/// `platform::process::pid_liveness` and map to bool. The EPERM
+/// semantic ("we can't signal → treat as not running") maps to
+/// Windows `ERROR_ACCESS_DENIED` which the platform layer already
+/// treats as `Live`; so on Windows the coordinator sees a process
+/// it can't query as still-running (safer than pretending it's gone
+/// and losing the ownership handle).
+#[cfg(not(unix))]
+pub fn pid_is_running(pid: Pid) -> Result<bool, std::io::Error> {
+    match crate::platform::process::pid_liveness(pid.get())? {
+        crate::platform::process::ProcessLiveness::Live => Ok(true),
+        crate::platform::process::ProcessLiveness::Dead => Ok(false),
+        crate::platform::process::ProcessLiveness::Unknown { .. } => Ok(false),
+    }
 }
 
 /// `read_coordinator_metadata`(`metadata.py:28-34`)。读 `coordinator.json`;损坏/缺失/非 dict → `None`。

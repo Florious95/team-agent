@@ -1,3 +1,9 @@
+// 0.5.x Windows portability Batch 5: test uses `libc::kill`,
+// `libc::pid_t`, `libc::SIGKILL`, and Unix pgid semantics. Provider
+// shutdown residuals model tmux + Unix process groups which are
+// concepts Windows does not have (Job Objects handle grouping there).
+// Unix-only test file.
+#![cfg(unix)]
 //! #248 RED: true provider shutdown residuals cannot depend only on fake pane pids.
 //!
 //! Architect fixture: true Codex shutdown can leave node/Codex/MCP processes after

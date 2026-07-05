@@ -355,6 +355,9 @@ fn resolve_leader_name_after_rebind() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+// 0.5.x Windows portability Batch 5: `FakeAppServer` uses Unix
+// domain sockets — Unix-only.
+#[cfg(unix)]
 #[test]
 fn resolve_app_server_leader_name_uses_typed_receiver_not_tmux_pane() {
     let ws = named_ws("appserver-leader-resolve");
@@ -419,6 +422,7 @@ fn resolve_app_server_leader_name_fails_closed_on_transport_conflict() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
+#[cfg(unix)]
 #[test]
 fn send_to_name_app_server_leader_submits_turn_without_tmux_pane() {
     let ws = named_ws("appserver-leader-send");

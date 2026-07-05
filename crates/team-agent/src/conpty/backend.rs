@@ -82,7 +82,19 @@ pub struct ConPtyBackend {
     /// Present when a `PipeClient` is wired. When present, all
     /// Required trait methods forward through the client; when absent,
     /// they degrade to `MuxUnavailable` honest-fail.
-    pipe_client: Option<Box<dyn PipeClientTrait>>,
+    ///
+    /// 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): behind a Mutex so
+    /// the lazy `ensure_pipe_client` path can populate it on first
+    /// Op call. Prior shape kept it in `Option<...>` outside a lock,
+    /// which was fine when the factory pre-wired via
+    /// `with_pipe_client` but is racy under lazy semantics.
+    pipe_client: std::sync::Mutex<Option<Box<dyn PipeClientTrait>>>,
+    /// Optional pipe-name hint used by lazy connect. The factory
+    /// stashes this when it sees `state.transport.shim.pipe_name`
+    /// (Batch 5+), and `ensure_pipe_client` uses it on first Op that
+    /// needs the pipe. `None` = factory had no hint → backend stays
+    /// unwired.
+    pipe_hint: Option<String>,
     /// Monotonic request id counter — never persisted, never surfaced
     /// to callers.
     request_counter: AtomicU64,
@@ -90,22 +102,51 @@ pub struct ConPtyBackend {
 
 impl ConPtyBackend {
     /// New backend for `(workspace_hash, team_key)`. The pipe client is
-    /// left unset; callers wire it via `with_pipe_client`.
+    /// left unset; callers wire it via `with_pipe_client` (Batch 6
+    /// direct-handoff) or `with_pipe_hint` (Batch 5+ lazy connect).
     pub fn new(workspace_hash: impl Into<String>, team_key: impl Into<String>) -> Self {
         Self {
             workspace_hash: workspace_hash.into(),
             team_key: team_key.into(),
             pipe_token: std::sync::Mutex::new(None),
-            pipe_client: None,
+            pipe_client: std::sync::Mutex::new(None),
+            pipe_hint: None,
             request_counter: AtomicU64::new(0),
         }
+    }
+
+    /// 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): stash a pipe-name
+    /// hint for lazy connect. This is what the factory uses in
+    /// `build_conpty` — no I/O at resolve time; the connect is
+    /// deferred to the first Op that needs the pipe.
+    ///
+    /// Idempotent: calling twice with the same hint is a no-op;
+    /// calling with a different hint overrides the previous. The
+    /// factory calls this ONCE per resolve.
+    pub fn with_pipe_hint(mut self, pipe_name: impl Into<String>) -> Self {
+        self.pipe_hint = Some(pipe_name.into());
+        self
+    }
+
+    /// Read the current pipe-name hint (for factory logic that
+    /// derives a fallback hint from env override).
+    pub fn pipe_hint_ref(&self) -> Option<&str> {
+        self.pipe_hint.as_deref()
     }
 
     /// Wire a live PipeClient. Immediately performs `hello` to negotiate
     /// the pipe_token; on failure, drops the client so subsequent calls
     /// degrade honestly.
+    ///
+    /// Used by `lifecycle/launch.rs` Batch 6 direct-handoff path
+    /// (quick-start conpty spawn on Windows), where the coordinator
+    /// already has a Hello-connected client from
+    /// `coordinator::conpty_shim::spawn_shim_and_handshake`. The
+    /// client becomes the backend's initial `pipe_client` cache
+    /// value, unifying with the lazy path (subsequent Ops just find
+    /// a wired client and skip the lazy `ensure_pipe_client` cost).
     pub fn with_pipe_client(
-        mut self,
+        self,
         client: Box<dyn PipeClientTrait>,
     ) -> Result<Self, TransportError> {
         // Hello does NOT require token pre-match; use a placeholder.
@@ -129,8 +170,72 @@ impl ConPtyBackend {
                 detail: format!("hello response malformed: {e}"),
             })?;
         *self.pipe_token.lock().unwrap() = Some(hello.pipe_token);
-        self.pipe_client = Some(client);
+        *self.pipe_client.lock().unwrap() = Some(client);
         Ok(self)
+    }
+
+    /// 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): the lazy-connect
+    /// helper. Called from `dispatch` on the first Op that needs the
+    /// pipe.
+    ///
+    /// Semantics:
+    /// 1. If `pipe_client` is already set (Batch 6 direct-handoff or
+    ///    a prior lazy connect), return Ok immediately.
+    /// 2. Else if `pipe_hint` is set, attempt
+    ///    `NamedPipeClient::connect(&hint, 2000)` (the same 2000ms
+    ///    timeout the factory used pre-C-5-fix — leader constraint
+    ///    "沿用 2000ms 语义"), perform Hello, cache the client.
+    /// 3. Else return `MuxUnavailable::no_pipe_client`.
+    ///
+    /// On Unix this fn is a no-op stub — `NamedPipeClient` doesn't
+    /// exist there. Callers that reach this path on Unix already
+    /// have `pipe_client == None` and fall to the error branch,
+    /// which is the pre-C-5-fix behavior.
+    fn ensure_pipe_client(&self) -> Result<(), TransportError> {
+        // Fast path: already wired.
+        if self.pipe_client.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        // Lazy path: need a hint + Windows backend.
+        #[cfg(windows)]
+        {
+            let Some(pipe_name) = self.pipe_hint.as_ref() else {
+                return Err(self.mux_unavailable("no_pipe_hint"));
+            };
+            let client = conpty_transport::NamedPipeClient::connect(pipe_name, 2000)
+                .map_err(|e| self.mux_unavailable(&format!("connect_failed: {e}")))?;
+            let adapter = crate::conpty::PipeClientAdapter(client);
+            // Perform Hello inline to negotiate pipe_token.
+            let req = Request::new(
+                self.next_request_id(),
+                &self.workspace_hash,
+                &self.team_key,
+                "PENDING",
+                Op::Hello,
+            );
+            let resp = adapter.request(&req)?;
+            if !resp.ok {
+                return Err(TransportError::MuxUnavailable {
+                    backend: BackendKind::ConPty,
+                    detail: format!("hello_failed: {:?}", resp.error),
+                });
+            }
+            let hello: HelloResult = serde_json::from_value(resp.result).map_err(|e| {
+                TransportError::MuxUnavailable {
+                    backend: BackendKind::ConPty,
+                    detail: format!("hello_response_malformed: {e}"),
+                }
+            })?;
+            *self.pipe_token.lock().unwrap() = Some(hello.pipe_token);
+            *self.pipe_client.lock().unwrap() = Some(Box::new(adapter));
+            Ok(())
+        }
+        #[cfg(not(windows))]
+        {
+            // Unix has no NamedPipeClient. If we got here without a
+            // wired client, degrade honestly.
+            Err(self.mux_unavailable("no_pipe_client"))
+        }
     }
 
     fn next_request_id(&self) -> String {
@@ -156,10 +261,17 @@ impl ConPtyBackend {
     }
 
     fn dispatch(&self, op: Op, payload: serde_json::Value) -> Result<Response, TransportError> {
-        let Some(client) = self.pipe_client.as_ref() else {
-            return Err(self.mux_unavailable(&format!("{op:?}").to_lowercase()));
-        };
+        // 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): trigger the
+        // lazy connect + Hello on first Op that needs the pipe. If a
+        // client was pre-wired (Batch 6 direct-handoff) or a prior
+        // Op already connected, `ensure_pipe_client` is a fast
+        // no-op.
+        self.ensure_pipe_client()?;
         let req = self.build_request(op, payload)?;
+        let client_guard = self.pipe_client.lock().unwrap();
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| self.mux_unavailable(&format!("{op:?}").to_lowercase()))?;
         let resp = client.request(&req)?;
         if !resp.ok {
             return Err(map_protocol_error(resp.error.as_ref()));

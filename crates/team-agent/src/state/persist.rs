@@ -146,7 +146,14 @@ fn errno_name(errno: Option<i32>) -> Option<&'static str> {
 }
 
 /// `runtime.py:_runtime_lock` 的 flock 版(RAII;Drop 释放)。state-save 不发锁事件。
-/// POSIX flock(unix);Windows 锁(LockFileEx)延平台层(step 9+)。
+///
+/// 0.5.x Windows portability Batch 2: migrated to
+/// `crate::platform::file_lock::{try_lock_once_nonblocking, unlock}` so
+/// the same polling loop + timeout + `StateError::Locked(name)` shape
+/// works on both Unix (`flock`) and Windows (`LockFileEx`) — 1:1
+/// semantic mapping. The Batch 0 non-Unix `not_yet_implemented`
+/// fallback is now removed (CR C-2 fallback burn-down; grep guard
+/// `platform_fallback_burndown_batch0.rs` flipped in this batch).
 struct RuntimeLock {
     #[allow(dead_code)]
     file: std::fs::File,
@@ -160,42 +167,37 @@ impl RuntimeLock {
         }
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = file.as_raw_fd();
-            let start = Instant::now();
-            loop {
-                // SAFETY: fd 来自打开的 lock_file,LOCK_EX|LOCK_NB 非阻塞。
-                let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
-                if rc == 0 {
-                    return Ok(Self { file });
+        let start = Instant::now();
+        loop {
+            match crate::platform::file_lock::try_lock_once_nonblocking(&file) {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => {
+                    if start.elapsed().as_secs_f64() >= timeout {
+                        return Err(StateError::Locked(name.to_string()));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
-                if start.elapsed().as_secs_f64() >= timeout {
-                    return Err(StateError::Locked(name.to_string()));
+                Err(e) => {
+                    // Byte-preserving: a real I/O error surfaces as a
+                    // `StateError::Io` (via `From<io::Error>`), same as
+                    // the current inline code would if `file.open()`
+                    // failed. The lock-would-block case took the
+                    // Ok(false) arm above.
+                    return Err(StateError::from(e));
                 }
-                std::thread::sleep(Duration::from_millis(50));
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = timeout;
-            Err(StateError::Locked(format!(
-                "{name} (runtime lock not yet implemented on non-unix)"
-            )))
         }
     }
 }
 
-#[cfg(unix)]
 impl Drop for RuntimeLock {
     fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: 释放本进程持有的 flock。
-        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        // Best-effort unlock. OS releases on handle close if this fails.
+        let _ = crate::platform::file_lock::unlock(&self.file);
     }
 }
 
@@ -451,6 +453,18 @@ fn apply_persist_merge_contract(
         // teams.<key> entry-scoped preservation at :370 remains so legacy
         // teams.<key>.team_owner entries still survive a save that omits
         // them.
+
+        // 0.5.x Windows portability Batch 7 F6 (leader msg_700a016675d0):
+        // preserve `state.transport.shim` across saves. The coordinator
+        // writes this block when it spawns `windows-shim.exe` during
+        // quick-start (see `coordinator::conpty_shim::finalize`).
+        // Downstream saves inside the same quick-start (leader-persist,
+        // worker-persist) construct their `incoming` state from an
+        // in-memory copy that predates the shim-spawn, so without this
+        // preserve step the shim block is silently dropped. That
+        // clobber broke Batch 6 CHECK 6 (`shutdown` couldn't route to
+        // the shim pid because `state.transport.shim.pid` was gone).
+        preserve_transport_shim(incoming, latest);
     }
 
     let latest_teams = latest.get("teams").and_then(Value::as_object);
@@ -476,6 +490,47 @@ fn apply_persist_merge_contract(
         }
     }
     Ok(())
+}
+
+/// 0.5.x Windows portability Batch 7 F6: copy `latest.transport.shim`
+/// into `incoming` if the incoming save omitted it. The coordinator's
+/// `conpty_shim::finalize` writes `state.transport.shim = {pid,
+/// pipe_name, pipe_ready}` after Hello succeeds. If a subsequent save
+/// in the same quick-start starts from a stale in-memory `Value` that
+/// predates the finalize, this preserve step keeps the on-disk shim
+/// block alive.
+///
+/// Only runs when the top-level projection matches (same active team
+/// key + same session name) — no risk of leaking a shim block into
+/// an unrelated projection.
+///
+/// Windows-relevant behavior; on Unix `transport.shim` is never
+/// written, so this fn is a no-op (both branches see `None`).
+fn preserve_transport_shim(incoming: &mut Value, latest: &Value) {
+    // The shim block only matters when `latest` has one AND
+    // `incoming` doesn't (or `incoming.transport` doesn't exist).
+    let Some(latest_shim) = latest
+        .get("transport")
+        .and_then(|t| t.get("shim"))
+        .cloned()
+    else {
+        return;
+    };
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+    let transport = incoming_obj
+        .entry("transport".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(transport_obj) = transport.as_object_mut() else {
+        return;
+    };
+    // If the incoming already has a shim block, respect it (the
+    // caller has authoritative newer state — e.g. shim was rotated).
+    if transport_obj.contains_key("shim") {
+        return;
+    }
+    transport_obj.insert("shim".to_string(), latest_shim);
 }
 
 fn should_skip_capture_backfill(
@@ -1693,6 +1748,131 @@ mod tests {
         assert!(
             saved.get("owner_epoch").is_none(),
             "top-level owner_epoch must not be recreated: {saved}"
+        );
+    }
+
+    // 0.5.x Windows portability Batch 7 F6 (leader msg_700a016675d0):
+    // `state.transport.shim` must survive a downstream save whose
+    // `incoming` was constructed from a stale in-memory Value.
+    #[test]
+    fn transport_shim_block_is_preserved_across_merge() {
+        let ws = temp_ws();
+        // Disk state has the shim block (coordinator wrote it after
+        // Hello succeeded).
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {},
+                "transport": {
+                    "kind": "conpty",
+                    "shim": { "pid": 4242, "pipe_name": r"\\.\pipe\team-agent-conpty-abc-team-a", "pipe_ready": true }
+                }
+            }),
+        );
+        // Incoming save (leader-persist or worker-persist) doesn't
+        // know about the shim block.
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {},
+            "transport": {
+                "kind": "conpty"
+            }
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        // Shim block must survive the merge.
+        assert_eq!(
+            saved.pointer("/transport/shim/pid").and_then(Value::as_u64),
+            Some(4242),
+            "shim.pid must be preserved: {saved}"
+        );
+        assert_eq!(
+            saved
+                .pointer("/transport/shim/pipe_name")
+                .and_then(Value::as_str),
+            Some(r"\\.\pipe\team-agent-conpty-abc-team-a"),
+        );
+        assert_eq!(
+            saved
+                .pointer("/transport/shim/pipe_ready")
+                .and_then(Value::as_bool),
+            Some(true),
+        );
+        // And the incoming's `transport.kind` still wins.
+        assert_eq!(
+            saved.pointer("/transport/kind").and_then(Value::as_str),
+            Some("conpty"),
+        );
+    }
+
+    #[test]
+    fn transport_shim_incoming_authoritative_overrides_latest() {
+        // If the caller has a NEWER shim block (e.g. rotation), it
+        // wins — preserve_transport_shim only fills in the gap.
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {},
+                "transport": {
+                    "kind": "conpty",
+                    "shim": { "pid": 1000, "pipe_name": "old", "pipe_ready": true }
+                }
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {},
+            "transport": {
+                "kind": "conpty",
+                "shim": { "pid": 9999, "pipe_name": "new", "pipe_ready": true }
+            }
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        assert_eq!(
+            saved.pointer("/transport/shim/pid").and_then(Value::as_u64),
+            Some(9999),
+            "incoming shim block must win when both sides have one"
+        );
+        assert_eq!(
+            saved
+                .pointer("/transport/shim/pipe_name")
+                .and_then(Value::as_str),
+            Some("new"),
+        );
+    }
+
+    #[test]
+    fn transport_shim_no_leak_when_latest_lacks_block() {
+        // If disk has no shim block, save must not synthesize one.
+        let ws = temp_ws();
+        write_state(
+            &ws,
+            &json!({
+                "session_name": "team-a",
+                "active_team_key": "team-a",
+                "agents": {},
+                "transport": {"kind": "tmux"}
+            }),
+        );
+        let incoming = json!({
+            "session_name": "team-a",
+            "active_team_key": "team-a",
+            "agents": {},
+            "transport": {"kind": "tmux"}
+        });
+        save_runtime_state(&ws, &incoming).unwrap();
+        let saved = read_state(&ws);
+        assert!(
+            saved.pointer("/transport/shim").is_none(),
+            "shim must not appear when neither side had one: {saved}"
         );
     }
 

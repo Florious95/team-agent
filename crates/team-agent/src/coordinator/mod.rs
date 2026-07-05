@@ -62,6 +62,14 @@ use crate::provider::{ProviderAdapter, TurnId, TurnState};
 use serde_json::Value;
 
 pub mod backoff;
+// 0.5.x Windows portability Batch 6 Option A: shim lifecycle
+// manager. Windows-only per design §Shim Lifecycle (the shim binary
+// exists only on Windows; Unix uses tmux). Cfg-gated at the module
+// level so callers can `crate::coordinator::conpty_shim::...`
+// uniformly on Windows and get a compile error (rather than a
+// silent no-op) on Unix — Unix code paths never reach for the shim.
+#[cfg(windows)]
+pub mod conpty_shim;
 pub mod health;
 pub mod orphan;
 pub mod runtime_detectors;

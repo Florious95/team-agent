@@ -1,4 +1,7 @@
+// 0.5.x Windows portability Batch 5: test installs shell-script
+// shims via `chmod +x` — Unix-only.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg(unix)]
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt;

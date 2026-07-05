@@ -1,0 +1,180 @@
+name: win-portability
+
+# 0.5.x Windows portability CI.
+#
+# - Ubuntu job: primary green-required. Runs platform lib tests + C-1
+#   packaging assertion + C-2 fallback burn-down + C-4 caller
+#   whitelist guard.
+# - Windows compile-gate job: **hard-red** as of Batch 4 (0 lib+bin
+#   errors on `feat/win-portability` HEAD). `continue-on-error: true`
+#   on the job was removed; a broken compile now fails CI. The
+#   per-step `continue-on-error: true` is kept on `cargo check
+#   --tests` because Batch 5's job is to burn THAT surface down —
+#   the test-target error count is captured as a burn-down reference
+#   without failing the gate yet.
+#
+# Note: `cargo test ... platform::` command has trailing `::` which
+# GitHub's YAML lexer misparses as a key marker unless the whole
+# `run:` string is quoted. Every `run:` in this file uses explicit
+# double quotes so future rename of the module path (e.g. `platform`
+# → `platform_layer`) does not silently break the workflow.
+#
+# Truth source:
+# - Design:    .team/artifacts/0.5.x-windows-portability-survey-design.md
+# - CR verdict: .team/artifacts/0.5.x-windows-portability-cr-verdict.md
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/win-portability]
+
+jobs:
+  lib-tests-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: platform lib tests
+        run: "cargo test -p team-agent --lib platform::"
+      - name: c-1 packaging PreviewCompileOnly assertion
+        run: "cargo test -p team-agent --lib packaging::tests::windows_x8664"
+      - name: c-2 fallback burndown grep guards
+        run: "cargo test -p team-agent --test platform_fallback_burndown_batch0"
+      - name: c-4 caller-whitelist grep guard
+        run: "cargo test -p team-agent --test platform_process_caller_whitelist_batch0"
+
+  windows-compile-gate:
+    runs-on: windows-latest
+    # Batch 4: `continue-on-error: true` REMOVED from the job level.
+    # `cargo check --lib --bin team-agent` on the Windows target is
+    # expected GREEN. A broken compile now fails the gate.
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: cargo check windows target (lib+bin, hard-red gate)
+        shell: bash
+        run: |
+          # Batch 4: `set +e` REMOVED — a non-zero cargo exit fails
+          # this step, which now fails the job. The burn-down summary
+          # step reads the tee'd log for artifact tracking; the pass/
+          # fail decision comes straight from cargo's exit code.
+          cargo check --target x86_64-pc-windows-msvc -p team-agent --lib --bin team-agent 2>&1 | tee check.log
+      - name: post burn-down summary (lib+bin)
+        if: always()
+        shell: bash
+        run: |
+          if [ -f check.log ]; then
+            # cargo's error output includes ANSI color escape codes at
+            # line start (e.g. `\x1b[1m\x1b[91merror[E0433]...`), so
+            # `^error\[` never matches. Grep by the error class token
+            # `error[E<digits>]` which survives color-coded output.
+            errcount=$(grep -oc 'error\[E[0-9][0-9]*\]' check.log || echo 0)
+            echo "cargo_check_error_count=$errcount"
+            echo "git_rev=$(git rev-parse HEAD)" > win-portability-tracking.txt
+            echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-portability-tracking.txt
+            echo "cargo_check_error_count=$errcount" >> win-portability-tracking.txt
+            echo "" >> win-portability-tracking.txt
+            echo "# Error class breakdown (burn-down evidence)" >> win-portability-tracking.txt
+            grep -o 'error\[E[0-9][0-9]*\]' check.log | sort | uniq -c | sort -rn >> win-portability-tracking.txt || true
+          else
+            echo "no_check_log=1" > win-portability-tracking.txt
+          fi
+      - name: cargo check windows target (--tests, hard-red gate)
+        # Batch 5 landed: `cargo check --tests` on the Windows target
+        # was RED with 10 errors in Batch 4; Batch 5 cfg-gates all
+        # Unix-only test files + fixes tmux/codex/lease/tick/agent_ops
+        # test-support so the test target compiles. The `continue-on-
+        # error: true` + `set +e` are REMOVED — a broken `cargo check
+        # --tests` now fails the gate.
+        shell: bash
+        run: |
+          cargo check --target x86_64-pc-windows-msvc -p team-agent --tests 2>&1 | tee check-tests.log
+      - name: post --tests burn-down summary
+        if: always()
+        shell: bash
+        run: |
+          if [ -f check-tests.log ]; then
+            errcount=$(grep -oc 'error\[E[0-9][0-9]*\]' check-tests.log || echo 0)
+            echo "cargo_check_tests_error_count=$errcount"
+            echo "" >> win-portability-tracking.txt
+            echo "# --tests burn-down reference (Batch 5 target)" >> win-portability-tracking.txt
+            echo "cargo_check_tests_error_count=$errcount" >> win-portability-tracking.txt
+            grep -o 'error\[E[0-9][0-9]*\]' check-tests.log | sort | uniq -c | sort -rn >> win-portability-tracking.txt || true
+          fi
+      - name: upload burn-down artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-portability-tracking
+          path: |
+            win-portability-tracking.txt
+            check.log
+            check-tests.log
+          if-no-files-found: warn
+
+  # 0.5.x Windows portability Batch 6: produce the Windows release
+  # binaries and pin their sha256 in a tracking file. The Mac dev
+  # host cross-compiles nothing; the artifact produced here is the
+  # single source of truth for Batch 6 real-machine testing. Runs
+  # only after the compile-gate is GREEN so we never ship a broken
+  # binary to the real-machine step.
+  windows-build:
+    runs-on: windows-latest
+    needs: windows-compile-gate
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: cargo build release (team-agent + win-conpty-phase0 bins)
+        shell: bash
+        run: |
+          # `team-agent` produces `team-agent.exe`.
+          # `win-conpty-phase0` produces `windows-shim.exe`, `conpty-cli.exe`,
+          # and its own `win-conpty-phase0.exe` diagnostic bin.
+          cargo build --release --target x86_64-pc-windows-msvc \
+            -p team-agent \
+            -p win-conpty-phase0
+      - name: sha256 tracking (Batch 6 C-4 anchor)
+        id: sha
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="target/x86_64-pc-windows-msvc/release"
+          echo "# team-agent Batch 6 Windows release binaries" > win-batch6-tracking.txt
+          echo "git_rev=$(git rev-parse HEAD)" >> win-batch6-tracking.txt
+          echo "build_timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> win-batch6-tracking.txt
+          echo "" >> win-batch6-tracking.txt
+          for bin in team-agent.exe windows-shim.exe conpty-cli.exe; do
+            path="$out/$bin"
+            if [ -f "$path" ]; then
+              size=$(stat -c %s "$path" 2>/dev/null || wc -c < "$path")
+              sha=$(sha256sum "$path" | awk '{print $1}')
+              echo "$bin sha256=$sha size=$size" | tee -a win-batch6-tracking.txt
+            else
+              echo "MISSING $bin" | tee -a win-batch6-tracking.txt
+              exit 1
+            fi
+          done
+          # Emit team-agent.exe sha as a step output so downstream can
+          # verify remote sha matches without re-reading the file.
+          ta_sha=$(sha256sum "$out/team-agent.exe" | awk '{print $1}')
+          echo "team_agent_sha=$ta_sha" >> "$GITHUB_OUTPUT"
+      - name: upload team-agent-win-batch6 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: team-agent-win-batch6
+          path: |
+            target/x86_64-pc-windows-msvc/release/team-agent.exe
+            target/x86_64-pc-windows-msvc/release/windows-shim.exe
+            target/x86_64-pc-windows-msvc/release/conpty-cli.exe
+            win-batch6-tracking.txt
+          if-no-files-found: error

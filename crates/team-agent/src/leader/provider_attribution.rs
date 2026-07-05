@@ -98,44 +98,29 @@ fn provider_wire_for_command_attribution(provider: Provider) -> &'static str {
     }
 }
 
-#[cfg(target_os = "linux")]
+// 0.5.x Windows portability Batch 4: process command-line + environ
+// probes route through `crate::platform::argv`. Unix keeps
+// byte-preserving semantics (Linux `/proc/<pid>/cmdline` + `environ`;
+// other Unix `ps -p ... -o command=`; macOS environ is `None` because
+// the pre-batch code also returned `None` on non-Linux). Windows
+// returns `None` per design §Batch 4 conservative anchor (unknown
+// argv must never infer elevated approval).
+//
+// The command-line format expected by the caller is a
+// whitespace-joined single string, so we join the argv tokens after
+// the platform probe. On the non-Linux Unix `ps` fallback path the
+// tokens come already whitespace-split from `ps -o command=`; joining
+// them back with spaces reproduces the exact pre-batch shape.
 fn process_command_line(pid: u32) -> Option<String> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let parts = bytes
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).to_string())
-        .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| parts.join(" "))
+    let argv = crate::platform::argv::argv_tokens(pid)?;
+    if argv.is_empty() {
+        return None;
+    }
+    Some(argv.join(" "))
 }
 
-#[cfg(target_os = "linux")]
 fn process_environment(pid: u32) -> Option<String> {
-    String::from_utf8(std::fs::read(format!("/proc/{pid}/environ")).ok()?).ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_command_line(pid: u32) -> Option<String> {
-    let output = crate::os_probe::bounded_command_output_with_probe(
-        Command::new("ps")
-            .arg("-p")
-            .arg(pid.to_string())
-            .args(["-o", "command="]),
-        "provider_argv",
-        Some(pid),
-    )
-    .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_environment(pid: u32) -> Option<String> {
-    let _ = pid;
-    None
+    crate::platform::argv::environ_text(pid)
 }
 
 #[cfg(test)]

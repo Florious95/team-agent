@@ -18,6 +18,13 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
+// 0.5.x Windows portability Batch 1: gate the sole Unix API surface
+// in this concrete tmux backend (FileTypeExt::is_socket + libc::geteuid
+// tmux-socket-root derivation). The rest of the file is Command::new
+// "tmux" shellouts that compile on Windows but return runtime errors
+// honestly (tmux binary absent → typed subprocess error).
+// Truth source: `.team/artifacts/0.5.x-windows-portability-survey-design.md` §Batch 1.
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -489,10 +496,24 @@ pub(crate) fn socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
     if let Some(existing) = existing_socket_path_for_name(socket_name) {
         return Some(existing);
     }
-    let uid = unsafe { libc::geteuid() };
-    let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
-    let default_root = default_root.canonicalize().unwrap_or(default_root);
-    Some(default_root.join(socket_name))
+    // Batch 1: tmux uses `/tmp/tmux-<uid>/` on Unix; on Windows this
+    // helper is dead code (Command::new "tmux" fails at spawn time
+    // before this path is dereferenced). N38 typed unsupported honored
+    // at the shellout boundary.
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let default_root = PathBuf::from(format!("/tmp/tmux-{uid}"));
+        let default_root = default_root.canonicalize().unwrap_or(default_root);
+        Some(default_root.join(socket_name))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: tmux socket-root derivation is meaningless. Return
+        // None so the caller sees the honest "no such socket" branch.
+        let _ = socket_name;
+        None
+    }
 }
 
 fn existing_socket_path_for_name(socket_name: &str) -> Option<PathBuf> {
@@ -582,14 +603,25 @@ pub(crate) fn attach_commands_for_windows<'a>(
 }
 
 pub(crate) fn tmux_socket_roots() -> Vec<PathBuf> {
-    let uid = unsafe { libc::geteuid() };
-    let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
-    if let Some(tmpdir) = std::env::var_os("TMPDIR") {
-        roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+    // Batch 1: `/tmp/tmux-<uid>` root enumeration is Unix-only tmux
+    // convention. On Windows return empty so the caller loops zero
+    // times (honest "no tmux socket roots" — tmux is not deployed on
+    // native Windows without WSL, and WSL is out of scope).
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::geteuid() };
+        let mut roots = vec![PathBuf::from(format!("/tmp/tmux-{uid}"))];
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            roots.push(PathBuf::from(tmpdir).join(format!("tmux-{uid}")));
+        }
+        roots.sort();
+        roots.dedup();
+        roots
     }
-    roots.sort();
-    roots.dedup();
-    roots
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
 }
 
 pub(crate) fn tmux_socket_endpoints() -> Vec<String> {
@@ -602,7 +634,20 @@ pub(crate) fn tmux_socket_endpoints() -> Vec<String> {
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if !file_type.is_socket() {
+            // Batch 1: `FileTypeExt::is_socket` is Unix-only. Dead code
+            // on Windows because `tmux_socket_roots()` returns empty
+            // there (no /tmp/tmux-<uid> convention). We still cfg the
+            // method call so `cargo check --target x86_64-pc-windows-msvc`
+            // sees no `std::os::unix::fs::FileTypeExt` reference.
+            #[cfg(unix)]
+            {
+                if !file_type.is_socket() {
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = file_type;
                 continue;
             }
             let path = entry.path();
@@ -2249,5 +2294,10 @@ fn non_empty(raw: &str) -> Option<&str> {
     }
 }
 
-#[cfg(test)]
+// 0.5.x Windows portability Batch 5: the `tmux_backend/tests.rs`
+// module uses `std::os::unix::net::UnixListener` for its mock
+// runner + verifies Unix-specific socket-root derivation. Since the
+// tmux backend itself only functions on Unix (design § Route B —
+// tmux is a Unix concept), the test module stays Unix-only.
+#[cfg(all(test, unix))]
 mod tests;

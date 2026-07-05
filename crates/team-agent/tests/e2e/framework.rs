@@ -328,14 +328,25 @@ impl TestWorkspace {
         if !self.pid_is_owned_coordinator(pid) {
             return false;
         }
-        let _ = send_signal(pid, libc::SIGTERM);
+        let _ = team_agent::platform::process::terminate_pid(
+            pid,
+            team_agent::platform::process::SignalKind::TerminateGraceful,
+        );
         if wait_until_pid_exits(pid, Duration::from_millis(1500)) {
             return true;
         }
         if !self.pid_is_owned_coordinator(pid) {
             return !pid_is_running(pid);
         }
-        let _ = send_signal(pid, libc::SIGKILL);
+        // 0.5.x Windows portability Batch 5: route the kill through
+        // `platform::process::terminate_pid` so the helper compiles
+        // on both platforms. Unix uses SIGKILL byte-equivalent to
+        // the previous inline `libc::kill(pid, SIGKILL)`; Windows
+        // uses TerminateProcess.
+        let _ = team_agent::platform::process::terminate_pid(
+            pid,
+            team_agent::platform::process::SignalKind::TerminateForce,
+        );
         wait_until_pid_exits(pid, Duration::from_millis(1500))
     }
 }
@@ -454,13 +465,12 @@ fn is_installed_team_agent_binary(binary: &str) -> bool {
 }
 
 fn pid_is_running(pid: u32) -> bool {
-    (unsafe { libc::kill(pid as libc::pid_t, 0) == 0 })
-        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-fn send_signal(pid: u32, signal: libc::c_int) -> bool {
-    (unsafe { libc::kill(pid as libc::pid_t, signal) == 0 })
-        || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    // 0.5.x Windows portability Batch 5: route through
+    // `platform::process::pid_is_alive` — same shape on both
+    // platforms. The former inline `libc::kill(pid, 0)` +
+    // last-os-error ESRCH check maps to `ProcessLiveness::Live` /
+    // `Dead` from `pid_liveness`.
+    team_agent::platform::process::pid_is_alive(pid)
 }
 
 fn wait_until_pid_exits(pid: u32, timeout: Duration) -> bool {

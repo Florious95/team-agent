@@ -351,12 +351,61 @@ fn build_conpty(
     // the same source of truth the tmux short-socket derivation uses,
     // so the shim + tmux socket see identical workspace identity.
     let workspace_hash = crate::tmux_backend::workspace_short_hash_pub(input.workspace);
-    // No pipe client is wired here (that's Batch 2/3 scope). Without
-    // a live client, `ConPtyBackend` degrades to `MuxUnavailable`
-    // honestly — which is exactly what C-1 requires when the caller
-    // asked for conpty on a host with no shim.
-    let backend = ConPtyBackend::new(workspace_hash, team_key);
+    // `mut` because the Windows branch below may reassign after a
+    // successful pipe connect + `with_pipe_client` handshake. On
+    // Unix the binding stays as-constructed.
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut backend = ConPtyBackend::new(workspace_hash.clone(), team_key);
     let mut notices = Vec::new();
+    // 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): factory returns to
+    // pure assembly. `build_conpty` used to call
+    // `NamedPipeClient::connect(_, 2000)` inline when
+    // `conpty_pipe_ready(input)` said state hinted the shim was up.
+    // That was a real CR C-5 violation — every `status`/`diagnose`
+    // resolve on Windows could block 2 seconds probing a
+    // non-existent pipe.
+    //
+    // Post-fix: the factory only STASHES the pipe hint via
+    // `ConPtyBackend::with_pipe_hint(pipe_name)`. The backend's
+    // `ensure_pipe_client` performs the connect + Hello lazily on
+    // the first Op that needs the pipe. Callers that don't need
+    // the pipe (status, resolve-only paths) never pay the connect
+    // cost.
+    //
+    // The Batch 6 direct-handoff path (`lifecycle/launch.rs`
+    // quick-start conpty) stays byte-compatible: it hands its
+    // Hello-connected client to `with_pipe_client` AFTER
+    // `resolve_transport` returns, and the client just becomes the
+    // backend's initial cache value so lazy connect is a no-op on
+    // the first Op.
+    #[cfg(windows)]
+    {
+        if let Some(state) = input.state {
+            if let Some(pipe_name) = state
+                .pointer("/transport/shim/pipe_name")
+                .and_then(|v| v.as_str())
+            {
+                backend = backend.with_pipe_hint(pipe_name);
+            }
+        }
+        // Non-state env override still respected (test/diagnostic
+        // path). When set, derive the hint from workspace_hash +
+        // team_key so `dispatch` can lazily connect the first Op.
+        if std::env::var("TEAM_AGENT_FORCE_CONPTY_PIPE_CONNECT")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            && backend.pipe_hint_ref().is_none()
+        {
+            let pipe_name = conpty_transport::pipe_name_for(&workspace_hash, team_key);
+            backend = backend.with_pipe_hint(pipe_name);
+        }
+    }
+    // Suppress unused warnings on Unix where the cfg(windows) block
+    // above compiles to nothing.
+    #[cfg(not(windows))]
+    {
+        let _ = &workspace_hash;
+    }
     // C-3: if state has BOTH `transport.kind=conpty` and a legacy
     // `tmux_endpoint`, tell the caller so they emit
     // `transport.legacy_tmux_endpoint_ignored`. Same shape for the
@@ -606,6 +655,76 @@ mod tests {
         let resolved = resolve_transport(input).expect("must succeed");
         assert_eq!(resolved.kind, BackendKind::ConPty);
         assert!(resolved.notices.is_empty());
+    }
+
+    // 0.5.x Windows portability Batch 5: pipe_ready gate — without a
+    // shim.pipe_ready hint (or the force-env override) the factory
+    // must NOT attempt a connect. Cross-platform test — the
+    // `conpty_pipe_ready` gate is only referenced inside cfg(windows)
+    // but the observable behavior (no notice, no wired client) is
+    // identical on Unix.
+    #[test]
+    fn conpty_without_pipe_ready_hint_emits_no_pipe_client_notice() {
+        let workspace = ws();
+        let state = serde_json::json!({ "transport": { "kind": "conpty" } });
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+            .with_team_key(Some("team-a"))
+            .with_state(Some(&state));
+        let resolved = resolve_transport(input).expect("must succeed");
+        assert_eq!(resolved.kind, BackendKind::ConPty);
+        // No pipe-client notice must appear regardless of platform:
+        // on Unix the block is cfg'd out; on Windows the gate is
+        // closed because no `transport.shim.pipe_ready = true` in
+        // state.
+        for notice in &resolved.notices {
+            assert_ne!(
+                notice.event, "transport.conpty_pipe_client_unwired",
+                "no pipe-client notice without a pipe_ready hint"
+            );
+        }
+    }
+
+    // 0.5.x CR C-5 fix (leader msg_a89b5a03bbf0): factory returns to
+    // pure assembly. The `transport.conpty_pipe_client_unwired`
+    // notice is REMOVED from `build_conpty` — connect is deferred to
+    // the backend's `ensure_pipe_client` lazy path, which surfaces
+    // failures as `TransportError::MuxUnavailable` at Op call time
+    // (not at resolve time).
+    //
+    // Cross-platform: resolve NEVER emits pipe-client notices on
+    // either platform now. This test locks that invariant so a
+    // future revert would fire loudly.
+    #[test]
+    fn conpty_resolve_emits_no_pipe_client_notice_after_c5_fix() {
+        let workspace = ws();
+        let state = serde_json::json!({
+            "transport": {
+                "kind": "conpty",
+                "shim": {
+                    "pipe_name": r"\\.\pipe\team-agent-conpty-test-team-a",
+                    "pipe_ready": true
+                },
+            }
+        });
+        let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
+            .with_team_key(Some("team-a"))
+            .with_state(Some(&state));
+        let resolved = resolve_transport(input).expect("must succeed");
+        assert_eq!(resolved.kind, BackendKind::ConPty);
+        let pipe_notices: Vec<_> = resolved
+            .notices
+            .iter()
+            .filter(|n| n.event == "transport.conpty_pipe_client_unwired")
+            .collect();
+        assert!(
+            pipe_notices.is_empty(),
+            "CR C-5 fix: resolve must not emit pipe-client notices \
+             (connect deferred to backend lazy path). Found: {:?}",
+            pipe_notices
+                .iter()
+                .map(|n| &n.event)
+                .collect::<Vec<_>>()
+        );
     }
 
     // Wire-string invariants for RequestedTransportBackend so a rename

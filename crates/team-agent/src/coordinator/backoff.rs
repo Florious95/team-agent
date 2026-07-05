@@ -27,6 +27,14 @@ pub struct DaemonArgs {
     pub once: bool,
     /// `--tick-interval`(`__main__.py:29`)。`None` → 读 spec `runtime.tick_interval_sec`。
     pub tick_interval_sec: Option<f64>,
+    /// 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+    /// team_key passed via `--team` CLI so the coordinator daemon
+    /// doesn't have to derive from state at boot time. That derivation
+    /// (Batch 7 F5) got trapped by Batch 8's seed-state pattern
+    /// (F8 root cause). Preserving the derivation as a fallback when
+    /// `team_key` is None keeps Unix daemons and pre-existing test
+    /// harnesses byte-preserving.
+    pub team_key: Option<String>,
 }
 
 /// daemon 主循环(`main`,`__main__.py:25-98`)。写 pid/meta(source=boot)、装信号→STOP、孤儿自检、
@@ -44,11 +52,35 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // legacy `tmux_endpoint` → same `tmux_backend_for_runtime_state_or_workspace`
     // shape inside the factory's `build_tmux`).
     let state = crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
-    let factory_input = crate::transport_factory::TransportFactoryInput::new(
+    // 0.5.x Windows portability Batch 9 F8 (leader msg_2a4cc1fa54c0):
+    // team_key priority is now `args.team_key` (from `--team` CLI)
+    // > `state.active_team_key` fallback. The Batch 7 F5 derivation
+    // stays as the fallback so pre-Batch-9 tests + Unix daemons
+    // continue byte-preserving. Callers that CAN pass `--team`
+    // (Batch 9 quick-start on Windows) do — that avoids the F8
+    // seed-state trap where writing active_team_key to state ahead
+    // of coord spawn made downstream launch code think "existing
+    // runtime, use restart" and skip spec compile.
+    let team_key_from_state = args
+        .team_key
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.get("active_team_key"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let mut factory_input = crate::transport_factory::TransportFactoryInput::new(
         args.workspace.as_path(),
         crate::transport_factory::TransportPurpose::Coordinator,
     )
     .with_state(state.as_ref());
+    if let Some(ref team_key) = team_key_from_state {
+        factory_input = factory_input.with_team_key(Some(team_key));
+    }
     let resolved = match crate::transport_factory::resolve_transport(factory_input) {
         Ok(resolved) => resolved,
         Err(e) => {
@@ -137,6 +169,57 @@ fn run_daemon_with_coordinator_and_boot_tmux(
         }
     }
     event_log.write("coordinator.boot", boot_event)?;
+
+    // 0.5.x Windows portability Batch 8 F7 (leader msg_590b4dce0f68):
+    // coordinator takes ownership of shim lifecycle. Idempotent:
+    // spawns a fresh shim if none is recorded, reconnects if
+    // `state.transport.shim.pid` names a living shim (post-crash
+    // restart path). Failures are non-fatal for the coord daemon —
+    // the tick loop's transport calls will surface honest
+    // MuxUnavailable errors and `mark_transport_unavailable`
+    // emits the C-3 stale-family event.
+    //
+    // On non-Windows this call is cfg'd out (there's no shim
+    // concept on Unix).
+    #[cfg(windows)]
+    {
+        let state_for_team_key =
+            crate::state::persist::load_runtime_state(args.workspace.as_path()).ok();
+        let team_key_opt = state_for_team_key
+            .as_ref()
+            .and_then(|s| s.get("active_team_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(team_key) = team_key_opt {
+            let workspace_hash =
+                crate::tmux_backend::workspace_short_hash_pub(args.workspace.as_path());
+            match crate::coordinator::conpty_shim::ensure_shim_running(
+                args.workspace.as_path(),
+                &team_key,
+                &workspace_hash,
+            ) {
+                Ok(handle) => {
+                    // Detach so the shim survives beyond this
+                    // coordinator instance (F7 core invariant).
+                    let _shim_pid = handle.detach();
+                    eprintln!("coordinator: shim ensured (pid={_shim_pid})");
+                }
+                Err(e) => {
+                    // Honest degradation: emit the stale-family
+                    // event, coord continues without a shim. Tick
+                    // loop will surface `mux_unavailable` on any
+                    // transport call.
+                    eprintln!("coordinator: shim ensure failed: {e}");
+                    let _ = crate::coordinator::conpty_shim::mark_transport_unavailable(
+                        args.workspace.as_path(),
+                        &format!("boot_ensure_failed: {e}"),
+                    );
+                }
+            }
+        }
+    }
+
     let tick_interval = match args.tick_interval_sec {
         Some(v) if v > 0.0 => v,
         _ => resolve_tick_interval(&args.workspace)?,
@@ -254,8 +337,11 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// 当前 ppid(`os.getppid()`,孤儿自检输入)。
+///
+/// 0.5.x Windows portability Batch 3: uses `platform::process::current_parent_pid`
+/// so Windows sees a real Toolhelp32-derived ppid instead of `0`.
 fn current_ppid() -> u32 {
-    u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
+    crate::platform::process::current_parent_pid().unwrap_or(0)
 }
 
 /// 计算 tick 间隔(`_tick_interval`,`__main__.py:104-115`)。读 spec `runtime.tick_interval_sec`,

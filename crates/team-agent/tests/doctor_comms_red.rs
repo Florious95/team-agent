@@ -1,4 +1,9 @@
+// 0.5.x Windows portability Batch 5: this test file installs shell-
+// script shims via `chmod +x` and probes Unix socket paths — Unix-
+// only. Cfg-gate the whole file so `cargo check --tests --target
+// x86_64-pc-windows-msvc` compiles cleanly.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

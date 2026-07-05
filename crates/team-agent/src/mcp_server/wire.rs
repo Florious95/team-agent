@@ -314,14 +314,13 @@ fn non_empty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[cfg(unix)]
+// 0.5.x Windows portability Batch 3: parent-pid probe routes through
+// `crate::platform::process::current_parent_pid`. Unix uses
+// `libc::getppid`; Windows uses Toolhelp32Snapshot. Both return
+// `Option<u32>`; the legacy `0` fallback (which would have silently
+// degraded MCP metadata + orphan detection on Windows) is gone.
 fn parent_pid() -> u32 {
-    u32::try_from(unsafe { libc::getppid() }).unwrap_or(0)
-}
-
-#[cfg(not(unix))]
-fn parent_pid() -> u32 {
-    0
+    crate::platform::process::current_parent_pid().unwrap_or(0)
 }
 
 fn error_response_value(id: RpcId, code: i64, message: String) -> Value {
