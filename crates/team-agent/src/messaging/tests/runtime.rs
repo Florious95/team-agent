@@ -2730,3 +2730,397 @@ fn e15_direct_inject_is_gated_by_deliver_failure_not_unconditional() {
         "E23: private direct inject must stay deleted; all callers use deliver_to_leader_fallback_pane"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// 0.5.4 gate054 — cross-team notify boundary.
+//
+// Triage: .team/artifacts/0.5.4-gate-crossteam-notify-triage.md
+//
+// Shape (regression):
+//   - Gate team's `leader_receiver` records `pane_id=%1`, `tmux_socket=/tmp/gate`,
+//     `status="rebind_required"` (disposable leader was killed post-restart).
+//   - The main tmux server has a live `%1` on the workspace-canonical socket.
+//   - `deliver_pending_message` MUST refuse with `channel=rebind_required` and
+//     MUST NOT probe the main/default tmux server for the same pane id.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn gate054_rebind_required_status_refuses_leader_delivery_without_cross_server_probe() {
+    let ws = tmp_ws("gate054status");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    // Explicit endpoint socket (non-canonical for this workspace) with a
+    // stale receiver demoted to `rebind_required` after the gate's leader
+    // window was killed.
+    let state = serde_json::json!({
+        "session_name": "team-gate054",
+        "tmux_endpoint": "/tmp/gate-socket-does-not-exist",
+        "leader_receiver": {
+            "pane_id": "%1",
+            "tmux_socket": "/tmp/gate-socket-does-not-exist",
+            "status": "rebind_required"
+        },
+        "agents": {
+            "probe": {"provider": "fake", "pane_id": "%0", "window": "probe"}
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(
+            None,
+            "probe",
+            "leader",
+            "gate054 must not leak",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    // The transport we pass is the "main"/default server backend which does
+    // have a live `%1`. If the fix regresses and delivery falls back cross-
+    // server by pane id, it would inject here.
+    let default_backend = OfflineTransport::new()
+        .with_targets(vec![pane_info("%1", "team-main", "leader")]);
+
+    let out = deliver_pending_message(&ws, &store, &default_backend, &message_id, &log, &state)
+        .expect("status guard must be a business refusal, not panic");
+
+    assert!(
+        !out.ok,
+        "0.5.4 gate054: leader_receiver.status='rebind_required' must refuse delivery"
+    );
+    assert_eq!(out.channel.as_deref(), Some("rebind_required"));
+    assert_eq!(out.message_status.0, "failed");
+    assert_eq!(out.reason, Some(DeliveryRefusal::LeaderNotAttached));
+    // Cross-server invariant: even though the default backend has a live `%1`
+    // matching the recorded receiver pane id, delivery MUST NOT inject there.
+    assert!(
+        default_backend.inject_targets().is_empty(),
+        "0.5.4 gate054: leader delivery must not cross to a different tmux server by pane id; \
+         inject_targets={:?}",
+        default_backend.inject_targets()
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.delivery_blocked")
+                && event.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("leader_receiver_not_attached")
+                && event.get("channel").and_then(serde_json::Value::as_str)
+                    == Some("rebind_required")
+                && event.get("status").and_then(serde_json::Value::as_str)
+                    == Some("rebind_required")
+        }),
+        "0.5.4 gate054: refused status must audit as leader_receiver_not_attached / rebind_required; events={events:?}"
+    );
+}
+
+#[test]
+fn gate054_attached_status_still_delivers_when_pane_is_live() {
+    // Companion negative: prove the new status gate does NOT over-refuse when
+    // `status="attached"` and the workspace-canonical socket has the pane.
+    let ws = tmp_ws("gate054ok");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-gate054ok",
+        "leader_receiver": {
+            "pane_id": "%leader",
+            "status": "attached"
+        },
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "w1", "leader", "hi", None, false, None)
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_targets(vec![pane_info("%leader", "team-gate054ok", "leader")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
+        .expect("attached leader must still deliver");
+
+    assert!(
+        out.ok,
+        "0.5.4 gate054: status='attached' with a live pane must not be over-refused: {out:?}"
+    );
+    assert_eq!(out.message_status.0, "delivered");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// 0.5.5 gate054 B-arm — deliver_to_leader_fallback_pane must not cross to
+// another tmux server by pane id when a socket is recorded.
+//
+// Triage: real-machine acceptance B-fail — primary path (delivery.rs) refused
+// with rebind_required, but report_result's fallback_pane bailout selected a
+// same-numbered pane (%1) on the default tmux server (the main team's leader)
+// and returned leader_notified:true / delivered_via=fallback_pane.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn gate054_fallback_pane_socket_recorded_does_not_cross_to_default_server() {
+    use crate::messaging::deliver_to_leader_fallback_pane;
+    let ws = tmp_ws("gate054fallback");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    // Recorded socket points at a non-existent endpoint (mimics the gate
+    // team's private socket after its leader session was killed). The main
+    // team's default tmux server MAY have a same-numbered `%1` — the fix
+    // must refuse to inject there.
+    let bogus_socket = format!("/tmp/team-agent-gate054-nonexistent-{}", std::process::id());
+    let state = serde_json::json!({
+        "session_name": "team-gate054",
+        "leader_receiver": {
+            "pane_id": "%1",
+            "tmux_socket": bogus_socket,
+            "status": "rebind_required"
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "coordinator", "leader", "fallback payload", None, false, None)
+        .unwrap();
+
+    let outcome = deliver_to_leader_fallback_pane(
+        &ws,
+        &state,
+        &message_id,
+        Some("res_gate054_fallback"),
+        "S3 restart complete",
+        false, // primary was NOT ok (report_result path)
+        Some("primary_delivery_error:leader_not_attached"),
+        &log,
+    )
+    .expect("fallback pane primitive must not panic");
+
+    // Must NOT succeed by crossing to another server.
+    assert!(
+        !outcome.ok,
+        "0.5.5 gate054: fallback_pane must not cross a recorded socket boundary: outcome={outcome:?}"
+    );
+    // Loud-not-silent: caller wire status resolves to rebind_required
+    // (results.rs matches channel or Blocked → 'rebind_required').
+    assert!(
+        outcome.channel.as_deref() == Some("rebind_required")
+            || matches!(outcome.status, DeliveryStatus::Blocked),
+        "0.5.5 gate054: cross-boundary refusal must surface as rebind_required, got outcome={outcome:?}"
+    );
+    // Audit noise: fallback_pane_attempt + fallback_pane_failed with the
+    // recorded socket_bound=true forensic field.
+    let events = log.tail(0).unwrap();
+    let attempt = events
+        .iter()
+        .find(|e| {
+            e.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.fallback_pane_attempt")
+        });
+    assert!(
+        attempt.is_some(),
+        "fallback_pane_attempt audit must fire even on socket-bounded refusal; events={events:?}"
+    );
+    let failed = events.iter().find(|e| {
+        e.get("event").and_then(serde_json::Value::as_str)
+            == Some("leader_receiver.fallback_pane_failed")
+    });
+    assert!(
+        failed.is_some(),
+        "fallback_pane_failed audit must fire when the recorded socket rejects inject; events={events:?}"
+    );
+    assert_eq!(
+        failed
+            .and_then(|e| e.get("socket_bound"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "socket_bound forensic field must record the boundary state"
+    );
+}
+
+#[test]
+fn gate054_rebind_replay_requeues_failed_leader_message_on_attach() {
+    // Round-2 real-machine shape: direct report_result → primary refused with
+    // rebind_required → row is `status=failed, error=leader_not_attached`.
+    // `attach-leader` must requeue it back to `status=accepted` so the
+    // coordinator tick's `deliver_pending_messages` replays it to the new
+    // leader pane. Same message_id — no second replay mechanism, no new
+    // watcher, exactly-once via leader_notification_log PK.
+    use crate::model::ids::TeamKey;
+    let ws = tmp_ws("gate054replay");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let team_id = "gate055r2b";
+
+    // Seed the same shape the primary-path refusal leaves behind.
+    let message_id = store
+        .create_message(
+            None,
+            "probe-worker",
+            "leader",
+            "B2_NOTIFY report_result payload",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    store
+        .mark(&message_id, "failed", Some("leader_not_attached"))
+        .unwrap();
+    // Sanity: precondition matches acceptance evidence.
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let (status_before, error_before): (String, Option<String>) = conn
+        .query_row(
+            "select status, error from messages where message_id = ?1",
+            [&message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status_before, "failed");
+    assert_eq!(error_before.as_deref(), Some("leader_not_attached"));
+
+    // The attach-leader path calls requeue_delivery_exhausted_watchers with
+    // the newly-claimed pane. Even with NO exhausted watchers to requeue,
+    // it must flip the blocked leader row back to accepted.
+    let team = TeamKey::new(team_id);
+    let new_pane = PaneId::new("%1"); // new leader window on the private socket
+    let notices = crate::messaging::requeue_delivery_exhausted_watchers(
+        &ws, &store, &log, &team, &new_pane,
+    )
+    .unwrap();
+    assert!(
+        notices.is_empty(),
+        "no exhausted watchers seeded → no watcher notices; only the message row should have been requeued"
+    );
+
+    let (status_after, error_after): (String, Option<String>) = conn
+        .query_row(
+            "select status, error from messages where message_id = ?1",
+            [&message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status_after, "accepted",
+        "gate054 round-2: rebind_required leader row must flip back to 'accepted' on attach-leader"
+    );
+    assert!(
+        error_after.is_none(),
+        "gate054 round-2: error must be cleared on requeue so deliver_pending_message replays cleanly"
+    );
+
+    // Audit noise: leader_receiver.blocked_messages_requeued fired with the
+    // exact team + claimed pane + count for status/monitor observability.
+    let events = log.tail(0).unwrap();
+    let requeued = events.iter().find(|e| {
+        e.get("event").and_then(serde_json::Value::as_str)
+            == Some("leader_receiver.blocked_messages_requeued")
+    });
+    assert!(
+        requeued.is_some(),
+        "attach-leader requeue of blocked leader messages must audit; events={events:?}"
+    );
+    assert_eq!(
+        requeued
+            .and_then(|e| e.get("count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        requeued
+            .and_then(|e| e.get("team_id"))
+            .and_then(serde_json::Value::as_str),
+        Some(team_id)
+    );
+}
+
+#[test]
+fn gate054_status_surfaces_pending_leader_notifications() {
+    // Round-2: user-facing visibility — status must show the blocked leader
+    // notification as pending, not just as `messages.failed=1`.
+    use crate::cli::status_port::status_scoped;
+    let ws = tmp_ws("gate054status");
+    let store = store_for(&ws);
+    let team_id = "gate055r2b";
+
+    let message_id = store
+        .create_message(
+            None,
+            "probe-worker",
+            "leader",
+            "B2_NOTIFY report_result payload",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    store
+        .mark(&message_id, "failed", Some("leader_not_attached"))
+        .unwrap();
+
+    // Minimal runtime state so status can render.
+    let state = serde_json::json!({
+        "session_name": format!("team-{team_id}"),
+        "active_team_key": team_id,
+        "teams": {team_id: {"team_key": team_id}},
+        "leader_receiver": {
+            "pane_id": "%1",
+            "status": "rebind_required",
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let payload = status_scoped(&ws, &state, Some(team_id), false, false).unwrap();
+    let pending = payload
+        .get("pending_leader_notifications")
+        .and_then(serde_json::Value::as_array)
+        .expect("status must expose pending_leader_notifications as an array");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the blocked leader message must appear in pending_leader_notifications"
+    );
+    let entry = &pending[0];
+    assert_eq!(
+        entry.get("message_id").and_then(serde_json::Value::as_str),
+        Some(message_id.as_str())
+    );
+    assert_eq!(
+        entry.get("channel").and_then(serde_json::Value::as_str),
+        Some("rebind_required")
+    );
+    assert!(entry
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|action| action.contains("attach-leader")
+            || action.contains("takeover")));
+}
+
+#[test]
+fn gate054_fallback_pane_grep_guard_no_cross_server_chain_when_socket_recorded() {
+    // Structural grep: the recorded-socket branch of the fallback inject
+    // chain must NOT compose the workspace or default tmux backends after
+    // the endpoint backend rejects. This is the byte-level fence against
+    // silent regression.
+    let src = include_str!("../leader_receiver.rs");
+    let inject_start = src
+        .find("let inject_result: Result<InjectReport, TransportError>")
+        .expect("fallback inject chain must remain single-typed");
+    let inject_end = src[inject_start..]
+        .find("};\n\n    match inject_result")
+        .map(|off| inject_start + off + 2)
+        .expect("fallback inject chain must terminate before match");
+    let chain = &src[inject_start..inject_end];
+    // The socket-recorded arm is the `Some(socket) => {..}` block. It must
+    // NOT contain a workspace or default fallback.
+    let some_arm_start = chain.find("Some(socket) => {").expect("Some(socket) arm");
+    let some_arm_end = chain[some_arm_start..]
+        .find("None => {")
+        .map(|off| some_arm_start + off)
+        .expect("None arm must follow");
+    let some_arm = &chain[some_arm_start..some_arm_end];
+    assert!(
+        !some_arm.contains("tmux_workspace_transport")
+            && !some_arm.contains("tmux_default_transport"),
+        "0.5.5 gate054: socket-recorded fallback arm must not compose workspace/default backends; arm={some_arm}"
+    );
+}

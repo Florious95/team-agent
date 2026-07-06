@@ -190,6 +190,42 @@ pub fn deliver_pending_message(
             )? {
                 return Ok(outcome);
             }
+            // 0.5.4 gate054 cross-team leak fix: a `leader_receiver.status`
+            // other than `"attached"` (restart demotes killed-session receivers
+            // to `"rebind_required"` — lifecycle/restart/rebuild.rs:1311) MUST
+            // refuse delivery before any pane injection or cross-server pane-id
+            // probing. Without this gate, a stale receiver on team A's socket
+            // could otherwise fall back to the same pane id on the main tmux
+            // server (delivery.rs:1150-1201) and inject A's leader traffic into
+            // team B's leader pane. See .team/artifacts/0.5.4-gate-crossteam-notify-triage.md.
+            if let Some(status) = leader_receiver_status(state) {
+                if status != "attached" {
+                    store.mark(message_id, "failed", Some("leader_not_attached"))?;
+                    event_log.write(
+                        "leader_receiver.delivery_blocked",
+                        serde_json::json!({
+                            "message_id": message_id,
+                            "sender": message.sender,
+                            "reason": "leader_receiver_not_attached",
+                            "channel": "rebind_required",
+                            "action": "run team-agent attach-leader or team-agent takeover",
+                            "status": status,
+                        }),
+                    )?;
+                    return Ok(DeliveryOutcome {
+                        ok: false,
+                        status: DeliveryStatus::Refused,
+                        message_status: MessageStatusShadow("failed".to_string()),
+                        message_id: Some(message_id.to_string()),
+                        verification: Some(
+                            "run team-agent attach-leader or team-agent takeover".to_string(),
+                        ),
+                        stage: None,
+                        reason: Some(DeliveryRefusal::LeaderNotAttached),
+                        channel: Some("rebind_required".to_string()),
+                    });
+                }
+            }
             if crate::codex_app_server::receiver_is_app_server(receiver) {
                 return deliver_leader_via_app_server(
                     store,
@@ -1170,34 +1206,17 @@ fn delivery_transport_for_recipient<'a>(
     if socket == crate::tmux_backend::socket_name_for_workspace(workspace) {
         DeliveryTransport::Borrowed(product_transport)
     } else {
+        // 0.5.4 gate054 cross-team leak fix: when `leader_receiver.tmux_socket`
+        // is present and non-canonical, it is a hard channel boundary — the
+        // caller (team A on socket X) explicitly recorded which tmux server
+        // hosts its leader pane. Pane ids (`%N`) are only unique per tmux
+        // server, so probing product/default servers for the same pane id and
+        // switching transports on a match can cross the team/tmux boundary and
+        // inject A's leader traffic into team B's leader pane. If the pane is
+        // absent on the recorded endpoint, let the downstream
+        // `leader_receiver_pane_is_usable` guard produce `rebind_required`
+        // instead of falling back to another server.
         let endpoint_backend = crate::transport_factory::tmux_endpoint_transport(socket);
-        if let Some(pane_id) = pane_id {
-            if endpoint_backend
-                .list_targets()
-                .unwrap_or_default()
-                .iter()
-                .any(|target| target.pane_id.as_str() == pane_id)
-            {
-                return DeliveryTransport::Owned(Box::new(endpoint_backend));
-            }
-            if product_transport
-                .list_targets()
-                .unwrap_or_default()
-                .iter()
-                .any(|target| target.pane_id.as_str() == pane_id)
-            {
-                return DeliveryTransport::Borrowed(product_transport);
-            }
-            let default_backend = crate::transport_factory::tmux_default_transport();
-            if default_backend
-                .list_targets()
-                .unwrap_or_default()
-                .iter()
-                .any(|target| target.pane_id.as_str() == pane_id)
-            {
-                return DeliveryTransport::Owned(Box::new(default_backend));
-            }
-        }
         DeliveryTransport::Owned(Box::new(endpoint_backend))
     }
 }
@@ -1235,6 +1254,15 @@ fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_
 
 fn leader_receiver_tmux_socket(state: &serde_json::Value) -> Option<&str> {
     leader_receiver_field(state, "tmux_socket")
+}
+
+/// 0.5.4 gate054 cross-team leak fix: read the bound `leader_receiver.status`
+/// through the same team-scope resolution as [`leader_receiver_tmux_socket`].
+/// Restart marks demoted receivers as `"rebind_required"`
+/// (lifecycle/restart/rebuild.rs:1311); delivery must refuse before injecting
+/// or cross-server pane-id probing (delivery.rs:1150-1201).
+fn leader_receiver_status(state: &serde_json::Value) -> Option<&str> {
+    leader_receiver_field(state, "status")
 }
 
 fn leader_receiver_has_noncanonical_tmux_socket(state: &serde_json::Value) -> bool {
