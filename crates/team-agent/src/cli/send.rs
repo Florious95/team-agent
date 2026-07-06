@@ -90,9 +90,12 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     {
         return Ok(CmdResult::from_json(amb, args.json));
     }
-    let outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
-    let mut value = delivery_outcome_json(&outcome, &target, &content, &opts);
+    let mut outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
     if opts.watch_result {
+        outcome = observe_initial_delivery_for_watch(&selected, &target, &outcome, &opts)?;
+    }
+    let mut value = delivery_outcome_json(&outcome, &target, &content, &opts);
+    if opts.watch_result && initial_delivery_allows_watch(outcome.status) {
         if let Some(obj) = value.as_object_mut() {
             obj.insert("watch".to_string(), watch_notice_json(&target, &opts));
         }
@@ -575,6 +578,48 @@ fn primary_delivery_succeeded(status: DeliveryStatus) -> bool {
     )
 }
 
+fn initial_delivery_allows_watch(status: DeliveryStatus) -> bool {
+    matches!(
+        status,
+        DeliveryStatus::Delivered | DeliveryStatus::AlreadyDelivered
+    )
+}
+
+fn observe_initial_delivery_for_watch(
+    selected: &crate::state::selector::SelectedTeam,
+    target: &MessageTarget,
+    outcome: &DeliveryOutcome,
+    opts: &SendOptions,
+) -> Result<DeliveryOutcome, CliError> {
+    if !matches!(target, MessageTarget::Single(agent) if !agent.is_empty()) {
+        return Ok(outcome.clone());
+    }
+    if !matches!(outcome.status, DeliveryStatus::Queued) {
+        return Ok(outcome.clone());
+    }
+    let Some(message_id) = outcome.message_id.as_deref() else {
+        return Ok(outcome.clone());
+    };
+    let store = crate::message_store::MessageStore::open(&selected.run_workspace)
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &selected.run_workspace,
+        opts.team.as_ref().map(TeamKey::as_str),
+    )
+    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let event_log = crate::event_log::EventLog::new(&selected.run_workspace);
+    let state = selected_state_with_active_key(selected);
+    crate::messaging::delivery::deliver_pending_message(
+        &selected.run_workspace,
+        &store,
+        &transport,
+        message_id,
+        &event_log,
+        &state,
+    )
+    .map_err(CliError::from)
+}
+
 fn is_business_reject_text(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     [
@@ -668,6 +713,8 @@ fn delivery_outcome_json(
     json!({
         "ok": outcome.ok,
         "status": delivery_status_wire(outcome.status),
+        "delivery_status": api_delivery_status(outcome),
+        "delivered": delivery_proven(outcome.status),
         "target": target_wire,
         "agent_id": first_target(target),
         "content_length_bytes": content.len(),
@@ -679,6 +726,26 @@ fn delivery_outcome_json(
         "reason": outcome.reason.map(delivery_refusal_wire),
         "channel": outcome.channel,
     })
+}
+
+fn api_delivery_status(outcome: &DeliveryOutcome) -> &'static str {
+    if delivery_proven(outcome.status) {
+        return "delivered";
+    }
+    if matches!(outcome.status, DeliveryStatus::Queued) && outcome.message_status.0 == "accepted" {
+        return "pending";
+    }
+    delivery_status_wire(outcome.status)
+}
+
+fn delivery_proven(status: DeliveryStatus) -> bool {
+    matches!(
+        status,
+        DeliveryStatus::Delivered
+            | DeliveryStatus::AlreadyDelivered
+            | DeliveryStatus::BroadcastDelivered
+            | DeliveryStatus::FanoutDelivered
+    )
 }
 
 fn add_send_reminder_if_ok(value: &mut Value) {

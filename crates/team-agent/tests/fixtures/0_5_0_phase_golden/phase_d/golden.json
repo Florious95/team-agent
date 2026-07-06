@@ -741,6 +741,8 @@
           "agent_id": "w1",
           "channel": null,
           "content_length_bytes": 12,
+          "delivered": false,
+          "delivery_status": "pending",
           "message_id": "<ID>",
           "message_status": "accepted",
           "ok": true,

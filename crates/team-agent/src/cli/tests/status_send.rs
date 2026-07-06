@@ -511,33 +511,26 @@ use super::*;
     }
 
     #[test]
-    fn cmd_send_watch_result_surfaces_registered_notice() {
-        // gate CRITICAL: --watch-result -> SendOptions.watch_result=true -> send_message attaches
-        // result['watch']={status:'registered', watcher_id, task_id, agent_id, notice}
-        // (send.py:322-337). That dict MUST survive verbatim into CmdResult Json output.
+    fn cmd_send_watch_result_does_not_register_before_delivery() {
+        // 0.5.x send contract: --watch-result may only advertise a watcher after
+        // initial worker delivery is physically proven.
         let r = cmd_send(&send_args_fixture()).expect("cmd_send returns CmdResult");
         let v = match r.output {
             CmdOutput::Json(v) => v,
             other => panic!("expected Json, got {other:?}"),
         };
-        let watch = v
-            .get("watch")
-            .expect("watch_result:true MUST attach result['watch'] (send.py:326)");
-        assert_eq!(
-            watch.get("status").and_then(|s| s.as_str()),
-            Some("registered"),
-            "registered-watcher notice status must be exactly 'registered'"
+        assert!(
+            v.get("delivery_status").and_then(|s| s.as_str()).is_some(),
+            "send output must expose delivery_status; got {v}"
         );
-        assert!(watch.get("watcher_id").is_some(), "watch notice carries watcher_id");
         assert_eq!(
-            watch.get("agent_id").and_then(|s| s.as_str()),
-            Some("alice"),
-            "watch notice agent_id == the send target"
+            v.get("delivered").and_then(|s| s.as_bool()),
+            Some(false),
+            "undelivered send outcome must not look delivered"
         );
-        // non-queued notice golden bytes (send.py:335):
-        assert_eq!(
-            watch.get("notice").and_then(|s| s.as_str()),
-            Some("Team Agent will collect the result and notify the leader when this task reports completion.")
+        assert!(
+            !v.as_object().unwrap().contains_key("watch"),
+            "watch_result:true must not attach result['watch'] before delivery; got {v}"
         );
     }
 

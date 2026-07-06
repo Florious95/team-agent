@@ -144,6 +144,9 @@ pub(crate) fn start_agent_at_paths(
             write_team_state(spec_workspace, &spec, &state)?;
         }
         let coordinator_started = start_coordinator_for_workspace(workspace)?;
+        requeue_and_deliver_worker_target_missing_messages(
+            workspace, agent_id, &team_key, &state, transport,
+        )?;
         let target = format!("{}:{window}", session_name.as_str());
         write_start_agent_noop_event(workspace, agent_id, &target, coordinator_started)?;
         return Ok(StartAgentOutcome::Noop {
@@ -283,6 +286,9 @@ pub(crate) fn start_agent_at_paths(
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     let coordinator_started = start_coordinator_for_workspace(workspace)?;
+    requeue_and_deliver_worker_target_missing_messages(
+        workspace, agent_id, &team_key, &state, transport,
+    )?;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),
@@ -295,6 +301,38 @@ pub(crate) fn start_agent_at_paths(
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
+}
+
+fn requeue_and_deliver_worker_target_missing_messages(
+    workspace: &Path,
+    agent_id: &AgentId,
+    team_key: &str,
+    state: &serde_json::Value,
+    transport: &dyn crate::transport::Transport,
+) -> Result<(), LifecycleError> {
+    let store = crate::message_store::MessageStore::open(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let ids = crate::messaging::delivery::requeue_worker_target_missing_messages(
+        workspace,
+        &store,
+        &event_log,
+        agent_id.as_str(),
+        Some(team_key),
+    )
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    for message_id in ids {
+        crate::messaging::delivery::deliver_pending_message(
+            workspace,
+            &store,
+            transport,
+            &message_id,
+            &event_log,
+            state,
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    }
+    Ok(())
 }
 
 fn verify_spawned_pane_matches_target(
