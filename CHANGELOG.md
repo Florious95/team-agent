@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.6
+
+- **Fix: `report_result` attributes to the current message turn as the primary source.** When a worker calls `report_result`, the coordinator now looks up the worker's current in-flight message turn first. If the turn is open and matches the worker's `agent_id`, the result is attributed to that message — superseding the previous fallback-first behaviour that could attribute results to a stale prior delivery. The injected result simultaneously arms the turn's `turn_open` marker so the next result call for the same worker correctly recognises a fresh turn.
+- **Fix: historical backfill is capped to messages delivered after the latest known result.** The fallback path (used when no current turn is in flight) no longer considers messages delivered before the last confirmed result. This prevents a post-restart worker from having its fresh result silently attributed to an old, already-resolved delivery from a prior session.
+- **Fix: `delivered` semantics remain strict throughout.** A message is marked `delivered` only when physical delivery to the tmux pane succeeds. The current-turn attribution fix does not relax this invariant — attribution and delivery status are updated independently, so attribution to the current turn does not imply delivery success.
+
 ## 0.5.5
 
 - **Fix: `send` accepted ≠ delivered — semantic split with `delivery_status` field.** The response envelope now carries a `delivery_status` field (`delivered` / `blocked` / `queued_pane_missing` / …) separate from the top-level `ok` / `status`. `accepted` means the message entered the queue; `delivered` means it reached the tmux target. Callers can now distinguish physical delivery from queue acceptance without parsing `reason`.
