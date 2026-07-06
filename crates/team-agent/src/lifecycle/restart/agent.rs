@@ -143,6 +143,7 @@ pub(crate) fn start_agent_at_paths(
         if let Ok(spec) = load_team_spec(spec_workspace) {
             write_team_state(spec_workspace, &spec, &state)?;
         }
+        replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
         let coordinator_started = start_coordinator_for_workspace(workspace)?;
         let target = format!("{}:{window}", session_name.as_str());
         write_start_agent_noop_event(workspace, agent_id, &target, coordinator_started)?;
@@ -282,6 +283,7 @@ pub(crate) fn start_agent_at_paths(
         spawn_session_id,
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
+    replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
     let coordinator_started = start_coordinator_for_workspace(workspace)?;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
@@ -295,6 +297,33 @@ pub(crate) fn start_agent_at_paths(
         new_session_id: spawn.plan.expected_session_id.clone(),
         rollout_path,
     })
+}
+
+fn replay_worker_target_missing_messages(
+    workspace: &Path,
+    agent_id: &AgentId,
+    team_key: &str,
+    state: &serde_json::Value,
+    transport: &dyn crate::transport::Transport,
+) -> Result<(), LifecycleError> {
+    let store = crate::message_store::MessageStore::open(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let ids = crate::messaging::delivery::requeue_worker_target_missing_messages(
+        workspace,
+        &store,
+        &event_log,
+        agent_id.as_str(),
+        Some(team_key),
+    )
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if !ids.is_empty() {
+        crate::messaging::delivery::deliver_pending_messages(
+            workspace, state, transport, &event_log,
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    }
+    Ok(())
 }
 
 fn verify_spawned_pane_matches_target(

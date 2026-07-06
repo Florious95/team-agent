@@ -1684,6 +1684,58 @@ fn slice1_inject_failures_are_bounded_and_stop_retrying_same_message() {
 }
 
 #[test]
+fn target_missing_session_window_blocks_without_generic_inject_exhaustion() {
+    let ws = tmp_ws("targetmissing");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-targetmissing",
+        "leader_receiver": {"pane_id": "%leader"},
+        "agents": {"w1": {"provider": "fake", "window": "w1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "leader", "w1", "ping", None, false, None)
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_session_present(true)
+        .with_targets(vec![pane_info("%2", "team-targetmissing", "other")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
+        .expect("target-missing classification should be a delivery outcome");
+
+    assert!(!out.ok);
+    assert_eq!(out.status, DeliveryStatus::Blocked);
+    assert_eq!(out.message_status.0, "queued_pane_missing");
+    assert_eq!(out.reason, Some(DeliveryRefusal::TmuxTargetMissing));
+    assert!(
+        transport.inject_targets().is_empty(),
+        "target-missing must block before physical inject; targets={:?}",
+        transport.inject_targets()
+    );
+
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let (status, error): (String, Option<String>) = conn
+        .query_row(
+            "select status, error from messages where message_id = ?1",
+            [&message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "queued_pane_missing");
+    assert_eq!(error.as_deref(), Some("tmux_target_missing"));
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("send.inject_blocked")
+                && event.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("tmux_target_missing")
+        }),
+        "target-missing block must be explicit in events; events={events:?}"
+    );
+}
+
+#[test]
 fn u1_projection_refused_emits_delivery_event() {
     let ws = tmp_ws("u1projref");
     let store = store_for(&ws);

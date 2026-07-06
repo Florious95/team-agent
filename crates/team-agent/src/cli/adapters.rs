@@ -1468,7 +1468,15 @@ fn format_inbox_human(
         for message in messages {
             let sender = message.get("sender").and_then(Value::as_str).unwrap_or("-");
             let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-            lines.push(format!("- {sender}: {content}"));
+            let status = message.get("status").and_then(Value::as_str).unwrap_or("-");
+            let attempts = message
+                .get("delivery_attempts")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let error = message.get("error").and_then(Value::as_str).unwrap_or("-");
+            lines.push(format!(
+                "- {sender}: {content} [status={status} attempts={attempts} error={error}]"
+            ));
         }
     }
     let pending = uncollected_result_count(workspace, owner_team_id)?;

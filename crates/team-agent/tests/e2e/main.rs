@@ -50,6 +50,9 @@ mod cases {
     mod send_002_send_to_stopped;
     mod send_003_send_json_shape;
     mod send_007_send_broadcast;
+    mod send_008_watch_result_missing_worker_window;
+    mod send_009_worker_repair_requeues_blocked_message;
+    mod inbox_001_delivery_status_visible;
     mod agent_001_start_agent_repair_missing_window;
     mod agent_002_stop_agent_single_worker;
     mod agent_003_reset_agent_discard_session;

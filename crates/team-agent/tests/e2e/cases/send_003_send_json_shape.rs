@@ -3,7 +3,7 @@
 //! Locks the public JSON shape that callers (skill / scribe / external
 //! orchestrators) depend on. Required keys on a normal send:
 //!   ok, agent_id, target, sender, content_length_bytes, message_id,
-//!   status, message_status.
+//!   status, message_status, delivery_status, delivered.
 //! `reminder` must be present and non-empty so worker pane scraping is
 //! discouraged at the API boundary.
 //!
@@ -26,10 +26,15 @@ fn send_003_send_json_shape_locks_public_keys() {
     let out = run_ta(
         &ws,
         &[
-            "send", "a", body,
-            "--workspace", ws_path,
-            "--sender", "leader",
-            "--message-id", mid,
+            "send",
+            "a",
+            body,
+            "--workspace",
+            ws_path,
+            "--sender",
+            "leader",
+            "--message-id",
+            mid,
             "--no-wait",
             "--json",
         ],
@@ -46,6 +51,8 @@ fn send_003_send_json_shape_locks_public_keys() {
         "/message_id",
         "/status",
         "/message_status",
+        "/delivery_status",
+        "/delivered",
     ];
     for p in &required {
         assert_json_field_present(&j, p);
@@ -54,6 +61,8 @@ fn send_003_send_json_shape_locks_public_keys() {
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
     assert_json_field_eq_bool(&j, "/ok", true);
+    assert_json_field_eq_str(&j, "/delivery_status", "pending");
+    assert_json_field_eq_bool(&j, "/delivered", false);
 
     // Pre-release 0.4.0: `content` must NOT appear in the send response.
     // Operators / scripts that need the body read it via `inbox`.
@@ -71,7 +80,10 @@ fn send_003_send_json_shape_locks_public_keys() {
         "content_length_bytes must equal the byte length of the body sent; got {j}"
     );
 
-    let reminder = j.pointer("/reminder").and_then(|v| v.as_str()).unwrap_or("");
+    let reminder = j
+        .pointer("/reminder")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     assert!(
         !reminder.is_empty(),
         "send JSON should include a non-empty 'reminder'; got {j}"

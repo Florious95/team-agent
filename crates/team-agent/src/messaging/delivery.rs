@@ -165,7 +165,7 @@ pub fn deliver_pending_message(
     };
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
-    } else if message.status == "target_resolved" {
+    } else if message.status == "target_resolved" && message.error.is_some() {
         bump_delivery_attempts(store, message_id)?
     } else {
         return Ok(DeliveryOutcome {
@@ -288,6 +288,16 @@ pub fn deliver_pending_message(
         });
     }
     let target = resolve_inject_target(state, &message.recipient, transport, &live_targets);
+    if let Some(outcome) = block_missing_worker_target(
+        store,
+        event_log,
+        message_id,
+        &message.recipient,
+        &target,
+        &live_targets,
+    )? {
+        return Ok(outcome);
+    }
     // Contract B / MUST-10 / N31/N32: physical paste+Enter into a startup trust/update
     // menu is NOT provider delivery — the menu consumes the Enter and the task text
     // is lost (PROBE-2 root-cause). Before injection, peek at the recipient's pane for
@@ -357,6 +367,15 @@ pub fn deliver_pending_message(
                     reason: Some(DeliveryRefusal::LeaderNotAttached),
                     channel: Some("rebind_required".to_string()),
                 });
+            }
+            if transport_error_is_target_missing(&error) {
+                return mark_worker_target_missing(
+                    store,
+                    event_log,
+                    message_id,
+                    &message.recipient,
+                    Some(reason),
+                );
             }
             event_log.write(
                 "send.inject_failed",
@@ -572,6 +591,136 @@ pub fn deliver_pending_message(
         canonical_owner_team_id.as_deref(),
     )?;
     Ok(outcome)
+}
+
+fn block_missing_worker_target(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    recipient: &str,
+    target: &Target,
+    live_targets: &[PaneInfo],
+) -> Result<Option<DeliveryOutcome>, MessagingError> {
+    let Target::SessionWindow { session, window } = target else {
+        return Ok(None);
+    };
+    if live_targets.is_empty() {
+        return Ok(None);
+    }
+    if window.as_str().ends_with("_pane_conflicts_with_leader") {
+        return Ok(None);
+    }
+    if live_targets.iter().any(|pane| {
+        pane.session.as_str() == session.as_str()
+            && pane
+                .window_name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == window.as_str())
+    }) {
+        return Ok(None);
+    }
+    mark_worker_target_missing(store, event_log, message_id, recipient, None).map(Some)
+}
+
+fn mark_worker_target_missing(
+    store: &MessageStore,
+    event_log: &EventLog,
+    message_id: &str,
+    recipient: &str,
+    verification: Option<String>,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let action = format!("run team-agent start-agent {recipient} --allow-fresh");
+    store.mark(
+        message_id,
+        "queued_pane_missing",
+        Some("tmux_target_missing"),
+    )?;
+    event_log.write(
+        "send.inject_blocked",
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": recipient,
+            "reason": "tmux_target_missing",
+            "channel": "delivery_blocked",
+            "action": action,
+            "verification": verification,
+        }),
+    )?;
+    Ok(DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Blocked,
+        message_status: MessageStatusShadow("queued_pane_missing".to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: verification.or(Some(action)),
+        stage: Some(DeliveryStage::Inject),
+        reason: Some(DeliveryRefusal::TmuxTargetMissing),
+        channel: Some("delivery_blocked".to_string()),
+    })
+}
+
+fn transport_error_is_target_missing(error: &crate::transport::TransportError) -> bool {
+    match error {
+        crate::transport::TransportError::TargetNotFound { .. } => true,
+        crate::transport::TransportError::Subprocess { stderr, .. } => {
+            let stderr = stderr.to_ascii_lowercase();
+            (stderr.contains("can't find") || stderr.contains("no such"))
+                && (stderr.contains("pane")
+                    || stderr.contains("window")
+                    || stderr.contains("session"))
+        }
+        _ => false,
+    }
+}
+
+pub fn requeue_worker_target_missing_messages(
+    workspace: &Path,
+    store: &MessageStore,
+    event_log: &EventLog,
+    recipient: &str,
+    owner_team_id: Option<&str>,
+) -> Result<Vec<String>, MessagingError> {
+    let conn = crate::db::schema::open_db(store.db_path())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "select message_id from messages
+         where recipient = ?1
+           and status = 'queued_pane_missing'
+           and error = 'tmux_target_missing'
+           and (
+               (?2 is null and owner_team_id is null)
+               or owner_team_id = ?2
+           )
+         order by created_at, message_id",
+    )?;
+    let ids = stmt
+        .query_map(params![recipient, owner_team_id], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for message_id in &ids {
+        conn.execute(
+            "update messages
+             set status = 'accepted',
+                 error = null,
+                 updated_at = ?2
+             where message_id = ?1",
+            params![message_id, now.as_str()],
+        )?;
+    }
+    if !ids.is_empty() {
+        event_log.write(
+            "worker_receiver.blocked_messages_requeued",
+            serde_json::json!({
+                "recipient": recipient,
+                "owner_team_id": owner_team_id,
+                "count": ids.len(),
+                "message_ids": ids,
+            }),
+        )?;
+    }
+    let _ = workspace;
+    Ok(ids)
 }
 
 /// 0.3.27: promoted to pub(crate) for leader_receiver.rs verification gate.
@@ -1494,6 +1643,7 @@ struct PendingMessage {
     task_id: Option<String>,
     owner_team_id: Option<String>,
     status: String,
+    error: Option<String>,
     delivery_attempts: u32,
 }
 
@@ -1504,7 +1654,7 @@ fn message_for_delivery(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let message = conn
         .query_row(
-            "select sender, recipient, content, task_id, owner_team_id, status, delivery_attempts from messages where message_id = ?1",
+            "select sender, recipient, content, task_id, owner_team_id, status, error, delivery_attempts from messages where message_id = ?1",
             params![message_id],
             |row| {
                 Ok(PendingMessage {
@@ -1514,7 +1664,8 @@ fn message_for_delivery(
                     task_id: row.get::<_, Option<String>>(3)?,
                     owner_team_id: row.get::<_, Option<String>>(4)?,
                     status: row.get::<_, String>(5)?,
-                    delivery_attempts: row.get::<_, i64>(6)?.max(0) as u32,
+                    error: row.get::<_, Option<String>>(6)?,
+                    delivery_attempts: row.get::<_, i64>(7)?.max(0) as u32,
                 })
             },
         )
