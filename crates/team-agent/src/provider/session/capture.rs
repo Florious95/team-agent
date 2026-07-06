@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::provider::wire::{is_claude_family, parse_provider};
 use crate::provider::{
-    CapturedSession, CapturedSessionCandidate, CaptureSessionContext, Provider, ProviderAdapter,
+    CaptureSessionContext, CapturedSession, CapturedSessionCandidate, Provider, ProviderAdapter,
     ProviderError, SessionId,
 };
-use crate::provider::wire::{is_claude_family, parse_provider};
 
 pub const SESSION_CAPTURE_CONVERGENCE_DEADLINE_MS: u64 = 12_000;
 pub const SESSION_CAPTURE_CONVERGENCE_POLL_MS: u64 = 250;
@@ -20,6 +20,7 @@ pub struct CapturePassReport {
     pub pending: Vec<String>,
     pub assigned: Vec<String>,
     pub ambiguous: Vec<AmbiguousSessionCapture>,
+    pub identity_mismatches: Vec<SessionIdentityMismatch>,
     pub capture_failures: Vec<SessionCaptureFailure>,
     pub candidate_count_by_agent: BTreeMap<String, usize>,
     /// 0.4.6 Stage 3: agents that transitioned into the
@@ -38,6 +39,16 @@ pub struct SessionCaptureFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmbiguousSessionCapture {
     pub agent_id: String,
+    pub spawn_cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIdentityMismatch {
+    pub agent_id: String,
+    pub expected_agent_id: String,
+    pub embedded_agent_id: String,
+    pub session_id: Option<String>,
+    pub rollout_path: Option<String>,
     pub spawn_cwd: String,
 }
 
@@ -123,8 +134,9 @@ where
         })?;
         if missing.is_empty() {
             if !report.ambiguous.is_empty() {
-                let final_report = capture_missing_provider_sessions_once(state, adapter_for, true, timeout_s)
-                    .map_err(|e| e.to_string())?;
+                let final_report =
+                    capture_missing_provider_sessions_once(state, adapter_for, true, timeout_s)
+                        .map_err(|e| e.to_string())?;
                 changed |= final_report.changed;
             }
             return Ok(SessionConvergence {
@@ -209,10 +221,50 @@ where
         ..CapturePassReport::default()
     };
     for item in pending {
-        let Some(agent_obj) = agents.get_mut(&item.agent_id).and_then(Value::as_object_mut) else {
+        let Some(agent_obj) = agents
+            .get_mut(&item.agent_id)
+            .and_then(Value::as_object_mut)
+        else {
             continue;
         };
         if let Some(candidate) = assignments.get(&item.agent_id) {
+            if let Some(embedded_agent_id) = candidate
+                .embedded_agent_id
+                .as_deref()
+                .filter(|embedded| *embedded != item.agent_id.as_str())
+            {
+                report.identity_mismatches.push(SessionIdentityMismatch {
+                    agent_id: item.agent_id.clone(),
+                    expected_agent_id: item.agent_id.clone(),
+                    embedded_agent_id: embedded_agent_id.to_string(),
+                    session_id: candidate
+                        .captured
+                        .session_id
+                        .as_ref()
+                        .map(|session| session.as_str().to_string()),
+                    rollout_path: candidate
+                        .captured
+                        .rollout_path
+                        .as_ref()
+                        .map(|path| path.as_path().to_string_lossy().to_string()),
+                    spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
+                });
+                if finalize_ambiguous {
+                    agent_obj.insert(
+                        "capture_state".to_string(),
+                        serde_json::json!("session_identity_mismatch"),
+                    );
+                    agent_obj.insert(
+                        "session_identity_mismatch".to_string(),
+                        serde_json::json!({
+                            "expected_agent_id": item.agent_id,
+                            "embedded_agent_id": embedded_agent_id,
+                        }),
+                    );
+                    report.changed = true;
+                }
+                continue;
+            }
             // Stage 1 (identity-boundary unified plan, architect direction
             // 2026-06-23): defensive expected-id guard. The adapter scanner
             // is the primary defence (Claude no longer falls back to same-
@@ -235,10 +287,7 @@ where
                     spawn_cwd: item.context.spawn_cwd.to_string_lossy().to_string(),
                 });
                 if finalize_ambiguous {
-                    agent_obj.insert(
-                        "attribution_ambiguous".to_string(),
-                        serde_json::json!(true),
-                    );
+                    agent_obj.insert("attribution_ambiguous".to_string(), serde_json::json!(true));
                     // 0.4.6 tuple-atomic contract (audit:93): do NOT write
                     // `captured_at` for ambiguity diagnostics. `captured_at`
                     // is part of the authoritative tuple and may only be
@@ -308,19 +357,21 @@ where
         // _pending_session_id (or _pending is absent, meaning no rebind in
         // flight).
         let pending_mismatch = match (
-            agent_obj.get("_pending_session_id").and_then(Value::as_str).filter(|s| !s.is_empty()),
-            agent_obj.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty()),
+            agent_obj
+                .get("_pending_session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
+            agent_obj
+                .get("session_id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty()),
         ) {
             (Some(pending), Some(current)) => pending != current,
             _ => false,
         };
         if has_session && !pending_mismatch {
             // Captured already — fix state field if drifted.
-            if agent_obj
-                .get("capture_state")
-                .and_then(Value::as_str)
-                != Some("captured")
-            {
+            if agent_obj.get("capture_state").and_then(Value::as_str) != Some("captured") {
                 agent_obj.insert("capture_state".to_string(), serde_json::json!("captured"));
                 report.changed = true;
             }
@@ -337,10 +388,7 @@ where
             .and_then(Value::as_str)
             .map(str::to_string);
         if prev_state.as_deref() != Some(next_state) {
-            agent_obj.insert(
-                "capture_state".to_string(),
-                serde_json::json!(next_state),
-            );
+            agent_obj.insert("capture_state".to_string(), serde_json::json!(next_state));
             report.changed = true;
             if next_state == "transcript_missing" {
                 report.transcript_missing.push(TranscriptMissing {
@@ -439,7 +487,8 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
     let mut out = agents
         .iter()
         .filter_map(|(agent_id, agent)| {
-            if pending_session_capture(agent_id, agent, &mut crate::provider::get_adapter).is_some() {
+            if pending_session_capture(agent_id, agent, &mut crate::provider::get_adapter).is_some()
+            {
                 Some(agent_id.clone())
             } else {
                 None
@@ -508,7 +557,10 @@ pub fn recover_resume_session_from_events(
         // release-engineer via captured_via=event_log_repair). The check is
         // a no-op for non-Claude providers.
         if let Some(p) = provider {
-            if crate::provider::session_scan::rollout_path_has_claude_leader_marker(p, &rollout_path) {
+            if crate::provider::session_scan::rollout_path_has_claude_leader_marker(
+                p,
+                &rollout_path,
+            ) {
                 continue;
             }
         }
@@ -874,25 +926,27 @@ fn allocate_session_candidates(
         if assignments.contains_key(&item.agent_id) {
             continue;
         }
-        // P0 (lane-046-capture-gap): Claude/ClaudeCode with no
-        // expected_session_id (natural fresh — Stage 1 expected-id miss
-        // guard cannot fire) must NOT accept the weak `Any` fallback.
-        // Without this guard, a same-cwd leader transcript (no positive
-        // agent-id match, no path match) becomes the sole candidate via
-        // the time window and gets attributed to a worker. Only
-        // positive-agent-id / path-agent-id can authoritatively bind a
-        // Claude no-expected worker session.
-        let claude_no_expected = matches!(
-            item.provider,
-            Provider::Claude | Provider::ClaudeCode
-        ) && item.context.expected_session_id.is_none();
-        if claude_no_expected {
+        // P0 (lane-046-capture-gap): Claude without a framework expected
+        // session id must not accept the weak `Any` fallback.
+        if provider_no_expected_requires_positive_attribution(item) {
             if candidates_by_agent
                 .get(&item.agent_id)
                 .is_some_and(|candidates| !candidates.is_empty())
             {
                 ambiguous.insert(item.agent_id.clone());
             }
+            continue;
+        }
+        // 0.5.x Codex cross-bind: a single provider-specific candidate may be
+        // captured when it has no conflicting embedded identity, but a same-cwd
+        // multi-candidate set must remain ambiguous instead of using weak
+        // sorted zip / Any attribution.
+        if codex_no_expected(item)
+            && candidates_by_agent
+                .get(&item.agent_id)
+                .is_some_and(|candidates| candidates.len() > 1)
+        {
+            ambiguous.insert(item.agent_id.clone());
             continue;
         }
         match unique_available_candidate(
@@ -923,16 +977,14 @@ fn allocate_global_one_to_one(
     claimed: &mut BTreeSet<String>,
     assignments: &mut BTreeMap<String, CapturedSessionCandidate>,
 ) {
-    // P0 (lane-046-capture-gap): exclude Claude no-expected agents from the
-    // global one-to-one weak allocator. They must use PositiveAgentId or
-    // PathAgentId only — see allocate_session_candidates Any-block.
+    // P0 (lane-046-capture-gap + 0.5.x Codex cross-bind): exclude
+    // no-expected agents from the global one-to-one weak allocator. They must
+    // use PositiveAgentId, PathAgentId, or the per-agent unique-candidate path
+    // only.
     let remaining_agents = pending
         .iter()
         .filter(|item| !assignments.contains_key(&item.agent_id))
-        .filter(|item| {
-            !(matches!(item.provider, Provider::Claude | Provider::ClaudeCode)
-                && item.context.expected_session_id.is_none())
-        })
+        .filter(|item| !provider_no_expected_disables_global_one_to_one(item))
         .map(|item| item.agent_id.clone())
         .collect::<Vec<_>>();
     if remaining_agents.is_empty() {
@@ -961,6 +1013,22 @@ fn allocate_global_one_to_one(
         claimed.extend(captured_provider_session_keys(&candidate.captured));
         assignments.insert(agent_id, candidate);
     }
+}
+
+fn provider_no_expected_requires_positive_attribution(item: &PendingSessionCapture) -> bool {
+    matches!(item.provider, Provider::Claude | Provider::ClaudeCode)
+        && item.context.expected_session_id.is_none()
+}
+
+fn provider_no_expected_disables_global_one_to_one(item: &PendingSessionCapture) -> bool {
+    matches!(
+        item.provider,
+        Provider::Codex | Provider::Claude | Provider::ClaudeCode
+    ) && item.context.expected_session_id.is_none()
+}
+
+fn codex_no_expected(item: &PendingSessionCapture) -> bool {
+    matches!(item.provider, Provider::Codex) && item.context.expected_session_id.is_none()
 }
 
 fn unique_available_candidate(
@@ -992,7 +1060,10 @@ enum CandidateMatchKind {
     Any,
 }
 
-fn candidate_keys_collide(candidate: &CapturedSessionCandidate, claimed: &BTreeSet<String>) -> bool {
+fn candidate_keys_collide(
+    candidate: &CapturedSessionCandidate,
+    claimed: &BTreeSet<String>,
+) -> bool {
     captured_provider_session_keys(&candidate.captured)
         .iter()
         .any(|key| claimed.contains(key))
@@ -1049,10 +1120,7 @@ fn apply_captured_session(
     // agent_session_complete. Also stamp capture_state="captured" for
     // diagnose/status observability.
     agent_obj.remove("_pending_session_id");
-    agent_obj.insert(
-        "capture_state".to_string(),
-        serde_json::json!("captured"),
-    );
+    agent_obj.insert("capture_state".to_string(), serde_json::json!("captured"));
     true
 }
 
@@ -1357,6 +1425,7 @@ mod u1_tests {
                 attribution_confidence: Confidence::High,
                 spawn_cwd: PathBuf::from("/tmp/u1-cwd"),
             },
+            embedded_agent_id: None,
             positive_agent_id_match: false,
             agent_path_match: false,
         }
@@ -1371,6 +1440,7 @@ mod u1_tests {
                 attribution_confidence: Confidence::High,
                 spawn_cwd: PathBuf::from("/tmp/u1-cwd"),
             },
+            embedded_agent_id: None,
             positive_agent_id_match: true,
             agent_path_match: false,
         }
@@ -1421,6 +1491,204 @@ mod u1_tests {
         assert!(
             agent.get("session_id").is_none(),
             "agent.session_id must remain empty when capture is refused; got {agent:?}"
+        );
+    }
+
+    #[test]
+    fn codex_no_expected_same_cwd_candidates_without_identity_do_not_global_zip_assign() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "frontend": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                },
+                "ios-dev": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let candidates = vec![
+            leader_like_candidate(
+                "019f3327-c35a-7023-b3cd-1bea93a7a157",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-frontend-poison.jsonl",
+            ),
+            leader_like_candidate(
+                "019f3327-d6d7-7c80-846a-0db4821714fb",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-poison.jsonl",
+            ),
+        ];
+        let mut canned = BTreeMap::new();
+        canned.insert("frontend".to_string(), candidates.clone());
+        canned.insert("ios-dev".to_string(), candidates);
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+        assert!(
+            report.assigned.is_empty(),
+            "Codex no-expected same-cwd candidates with no positive identity must stay ambiguous, not global one-to-one assigned; report={report:?}"
+        );
+        assert_eq!(
+            report
+                .ambiguous
+                .iter()
+                .map(|item| item.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["frontend", "ios-dev"],
+            "both workers should be marked ambiguous instead of receiving weak zipped tuples"
+        );
+        let agents = state["agents"].as_object().expect("agents object");
+        assert!(agents["frontend"].get("session_id").is_none());
+        assert!(agents["ios-dev"].get("session_id").is_none());
+    }
+
+    #[test]
+    fn codex_no_expected_single_candidate_without_identity_still_captures() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "subgreeter": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let mut canned = BTreeMap::new();
+        canned.insert(
+            "subgreeter".to_string(),
+            vec![leader_like_candidate(
+                "sess-sub-captured",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-sub.jsonl",
+            )],
+        );
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+
+        assert_eq!(report.assigned, vec!["subgreeter".to_string()]);
+        assert!(report.ambiguous.is_empty(), "report={report:?}");
+        assert_eq!(
+            state["agents"]["subgreeter"]["session_id"].as_str(),
+            Some("sess-sub-captured")
+        );
+    }
+
+    #[test]
+    fn codex_embedded_identity_assigns_each_same_cwd_worker_to_own_rollout() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "frontend": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                },
+                "ios-dev": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let frontend = CapturedSessionCandidate {
+            embedded_agent_id: Some("frontend".to_string()),
+            positive_agent_id_match: true,
+            ..leader_like_candidate(
+                "019f3327-frontend",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-frontend.jsonl",
+            )
+        };
+        let ios = CapturedSessionCandidate {
+            embedded_agent_id: Some("ios-dev".to_string()),
+            positive_agent_id_match: true,
+            ..leader_like_candidate(
+                "019f3327-ios-dev",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
+            )
+        };
+        let mut canned = BTreeMap::new();
+        canned.insert("frontend".to_string(), vec![frontend]);
+        canned.insert("ios-dev".to_string(), vec![ios]);
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+
+        assert_eq!(
+            report.assigned,
+            vec!["frontend".to_string(), "ios-dev".to_string()]
+        );
+        assert!(report.ambiguous.is_empty());
+        assert_eq!(
+            state["agents"]["frontend"]["session_id"].as_str(),
+            Some("019f3327-frontend")
+        );
+        assert_eq!(
+            state["agents"]["ios-dev"]["session_id"].as_str(),
+            Some("019f3327-ios-dev")
+        );
+    }
+
+    #[test]
+    fn apply_time_identity_guard_refuses_mismatched_candidate() {
+        let mut state = serde_json::json!({
+            "agents": {
+                "frontend": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": "/tmp/u1-cwd"
+                }
+            }
+        });
+        let candidate = CapturedSessionCandidate {
+            embedded_agent_id: Some("ios-dev".to_string()),
+            positive_agent_id_match: true,
+            ..leader_like_candidate(
+                "019f3327-c35a-7023-b3cd-1bea93a7a157",
+                "/Users/alauda/.codex/sessions/2026/07/06/rollout-ios-dev.jsonl",
+            )
+        };
+        let mut canned = BTreeMap::new();
+        canned.insert("frontend".to_string(), vec![candidate]);
+        let canned_for_adapter = canned.clone();
+        let mut adapter_for = move |provider| {
+            Box::new(
+                test_support::CaptureCandidatesAdapter::new(provider, None, "")
+                    .with_candidates(canned_for_adapter.clone()),
+            ) as Box<dyn ProviderAdapter>
+        };
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture pass succeeds");
+
+        assert!(report.assigned.is_empty());
+        assert_eq!(report.identity_mismatches.len(), 1);
+        assert_eq!(report.identity_mismatches[0].agent_id, "frontend");
+        assert_eq!(report.identity_mismatches[0].embedded_agent_id, "ios-dev");
+        assert!(state["agents"]["frontend"].get("session_id").is_none());
+        assert_eq!(
+            state["agents"]["frontend"]["capture_state"].as_str(),
+            Some("session_identity_mismatch")
         );
     }
 
@@ -1639,10 +1907,7 @@ mod u1_tests {
         // only one left that honors framework-supplied --session-id). Switch
         // this test to Copilot to preserve the pre-pass invariant coverage.
         use crate::provider::{CaptureVia, Confidence, RolloutPath};
-        let dir = std::env::temp_dir().join(format!(
-            "ta-stage1-allocator-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ta-stage1-allocator-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let rollout_a = dir.join("9a2d1668.jsonl");
         let rollout_b = dir.join("3e824e89.jsonl");
@@ -1650,27 +1915,25 @@ mod u1_tests {
         std::fs::write(&rollout_b, b"{}\n").unwrap();
         let candidate_a = CapturedSessionCandidate {
             captured: CapturedSession {
-                session_id: Some(SessionId::new(
-                    "9a2d1668-8987-4c36-8bde-a5135b10da02",
-                )),
+                session_id: Some(SessionId::new("9a2d1668-8987-4c36-8bde-a5135b10da02")),
                 rollout_path: Some(RolloutPath::new(rollout_a.clone())),
                 captured_via: CaptureVia::FsWatch,
                 attribution_confidence: Confidence::High,
                 spawn_cwd: dir.clone(),
             },
+            embedded_agent_id: None,
             positive_agent_id_match: false,
             agent_path_match: false,
         };
         let candidate_b = CapturedSessionCandidate {
             captured: CapturedSession {
-                session_id: Some(SessionId::new(
-                    "3e824e89-25ac-4b3f-b272-b4f733f6403c",
-                )),
+                session_id: Some(SessionId::new("3e824e89-25ac-4b3f-b272-b4f733f6403c")),
                 rollout_path: Some(RolloutPath::new(rollout_b.clone())),
                 captured_via: CaptureVia::FsWatch,
                 attribution_confidence: Confidence::High,
                 spawn_cwd: dir.clone(),
             },
+            embedded_agent_id: None,
             positive_agent_id_match: false,
             agent_path_match: false,
         };
@@ -1698,9 +1961,8 @@ mod u1_tests {
         });
         let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Copilot, None, "")
             .with_candidates(candidates_by_agent);
-        let mut adapter_for = move |_provider| {
-            Box::new(adapter.clone()) as Box<dyn ProviderAdapter>
-        };
+        let mut adapter_for =
+            move |_provider| Box::new(adapter.clone()) as Box<dyn ProviderAdapter>;
 
         let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
             .expect("allocator pass should succeed");
@@ -1762,7 +2024,8 @@ mod u1_tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let workspace = std::env::temp_dir().join(format!("ta-e57-recover-{}-{}", std::process::id(), uniq));
+        let workspace =
+            std::env::temp_dir().join(format!("ta-e57-recover-{}-{}", std::process::id(), uniq));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).expect("workspace");
 
@@ -1832,10 +2095,7 @@ mod u1_tests {
     /// the stale rollout look authoritative.
     #[test]
     fn agent_session_complete_returns_false_on_pending_mismatch() {
-        let dir = std::env::temp_dir().join(format!(
-            "ta-pending-mismatch-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ta-pending-mismatch-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let rollout = dir.join("old.jsonl");
         std::fs::write(&rollout, "{\"type\":\"assistant\"}\n").unwrap();
@@ -1898,7 +2158,9 @@ mod u1_tests {
              (agent={agent:?})"
         );
         assert_eq!(
-            agent.get("capture_state").and_then(serde_json::Value::as_str),
+            agent
+                .get("capture_state")
+                .and_then(serde_json::Value::as_str),
             Some("captured"),
             "S1-CAPTURE-001: capture_state must be stamped 'captured'"
         );

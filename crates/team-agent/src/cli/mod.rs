@@ -210,14 +210,22 @@ pub mod lifecycle_port {
     /// `&*box`. Factory refusal falls back to the workspace tmux
     /// backend byte-equivalent to today so daemon liveness paths
     /// don't crash.
-    pub fn shutdown(workspace: &Path, keep_logs: bool, team: Option<&str>) -> Result<Value, CliError> {
+    pub fn shutdown(
+        workspace: &Path,
+        keep_logs: bool,
+        team: Option<&str>,
+    ) -> Result<Value, CliError> {
         let run_ws = crate::model::paths::canonical_run_workspace(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let state = shutdown_state_for_team(&run_ws, team)?;
         if let Some(endpoint) = legacy_worker_tmux_endpoint(&state) {
             let transport = shutdown_transport_for_endpoint(endpoint);
             return shutdown_with_transport_and_state(
-                workspace, keep_logs, team, &transport, Some(state),
+                workspace,
+                keep_logs,
+                team,
+                &transport,
+                Some(state),
             );
         }
         let boxed: Box<dyn crate::transport::Transport> =
@@ -352,11 +360,7 @@ pub mod lifecycle_port {
         let anchor_sessions = anchor_sessions_from_state(state, &pane_targets, event_log);
         match sessions_to_kill(&sessions, &anchor_sessions) {
             KillDecision::KillServerExclusive => {
-                if state
-                    .get("tmux_socket_source")
-                    .and_then(Value::as_str)
-                    == Some("leader_env")
-                {
+                if state.get("tmux_socket_source").and_then(Value::as_str) == Some("leader_env") {
                     let _ = event_log.write(
                         "shutdown.kill_server_skipped_shared_socket",
                         json!({
@@ -463,10 +467,7 @@ pub mod lifecycle_port {
             .cloned()
             .collect::<Vec<_>>();
         if let Some(anchored) = target_spared_for_anchor {
-            if !spared
-                .iter()
-                .any(|s| s.as_str() == anchored.as_str())
-            {
+            if !spared.iter().any(|s| s.as_str() == anchored.as_str()) {
                 spared.push(anchored);
             }
         }
@@ -486,7 +487,10 @@ pub mod lifecycle_port {
             // (this function) computes its own `to_kill` from `target`. Any
             // leader-prefixed entry here is a topology violation introduced
             // somewhere upstream. Log loudly and skip the kill.
-            if session.as_str().starts_with(crate::leader::LEADER_SESSION_PREFIX) {
+            if session
+                .as_str()
+                .starts_with(crate::leader::LEADER_SESSION_PREFIX)
+            {
                 eprintln!(
                     "team_agent::layout shutdown_invariant_violation kind=KillListContainsLeaderSession \
                      session=`{}` action=skipping_kill (post-Step-9 will hard-fail)",
@@ -723,11 +727,7 @@ pub mod lifecycle_port {
             if crate::state::projection::state_is_managed_leader(&state)
                 && session_has_leader_anchor
             {
-                let _ = event_log_write_session_spared(
-                    &run_workspace,
-                    session,
-                    &leader_anchor_ids,
-                );
+                let _ = event_log_write_session_spared(&run_workspace, session, &leader_anchor_ids);
                 push_unique_session(&mut spared_sessions, session.clone());
                 let worker_panes = collect_session_worker_panes(
                     &state,
@@ -742,10 +742,8 @@ pub mod lifecycle_port {
                         }
                     }
                 }
-                let _ = crate::lifecycle::display::close_team_display_backends(
-                    &run_workspace,
-                    session,
-                );
+                let _ =
+                    crate::lifecycle::display::close_team_display_backends(&run_workspace, session);
             } else {
                 push_unique_session(&mut killed_sessions, session.clone());
                 if let Err(error) = transport.kill_session(session) {
@@ -753,10 +751,8 @@ pub mod lifecycle_port {
                         kill_error = Some(error.to_string());
                     }
                 }
-                let _ = crate::lifecycle::display::close_team_display_backends(
-                    &run_workspace,
-                    session,
-                );
+                let _ =
+                    crate::lifecycle::display::close_team_display_backends(&run_workspace, session);
             }
         }
         deadline.check("reap_workspace_residuals")?;
@@ -953,7 +949,7 @@ pub mod lifecycle_port {
         // byte-preserving. The Unix behavior is a no-op (no shim
         // concept there); adding a placeholder key would just noise
         // up the fixtures.
-        let mut response = json!({
+        let response = json!({
             "ok": ok,
             "status": status,
             "phase": phase,
@@ -978,6 +974,8 @@ pub mod lifecycle_port {
                 "pid": coordinator_pid,
             },
         });
+        #[cfg(windows)]
+        let mut response = response;
         #[cfg(windows)]
         {
             if let Some(obj) = response.as_object_mut() {
@@ -1291,10 +1289,7 @@ pub mod lifecycle_port {
         // probes when the primary transport is ConPTY; the primary
         // transport check above already covered the honest question
         // ("does the shim still have this session?").
-        let primary_is_conpty = matches!(
-            transport.kind(),
-            crate::transport::BackendKind::ConPty
-        );
+        let primary_is_conpty = matches!(transport.kind(), crate::transport::BackendKind::ConPty);
         if !primary_is_conpty {
             let workspace_transport = shutdown_workspace_transport(workspace);
             match crate::transport::Transport::has_session(&workspace_transport, session) {
@@ -2938,14 +2933,38 @@ pub mod lifecycle_port {
                                     );
                                 }
                             }
+                            if let crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
+                                expected_agent_id,
+                                embedded_agent_id,
+                                session_id,
+                                rollout_path,
+                            } = reason
+                            {
+                                entry.insert(
+                                    "expected_agent_id".to_string(),
+                                    json!(expected_agent_id),
+                                );
+                                entry.insert(
+                                    "embedded_agent_id".to_string(),
+                                    json!(embedded_agent_id),
+                                );
+                                entry.insert(
+                                    "poisoned_session_id".to_string(),
+                                    json!(session_id),
+                                );
+                                if let Some(path) = rollout_path {
+                                    entry.insert(
+                                        "rollout_path".to_string(),
+                                        json!(path.to_string_lossy()),
+                                    );
+                                }
+                            }
                         }
                         Value::Object(entry)
                     })
                     .collect();
-                let unresumable_ids: Vec<&str> = unresumable
-                    .iter()
-                    .map(|w| w.agent_id.as_str())
-                    .collect();
+                let unresumable_ids: Vec<&str> =
+                    unresumable.iter().map(|w| w.agent_id.as_str()).collect();
                 // Layer 2 self-healing (leader follow-up 2026-06-22): when
                 // EVERY unresumable worker shares the same structured
                 // refusal_reason wire string, refine the top-level `status`
@@ -3036,6 +3055,46 @@ pub mod lifecycle_port {
                                 unresumable_ids.join(", "),
                             ),
                         ),
+                        "session_identity_mismatch" => {
+                            let mut lines = Vec::new();
+                            for w in unresumable.iter() {
+                                if let Some(
+                                    crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
+                                        expected_agent_id,
+                                        embedded_agent_id,
+                                        session_id,
+                                        rollout_path,
+                                    },
+                                ) = w.refusal_reason.as_ref()
+                                {
+                                    let path = rollout_path
+                                        .as_ref()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "<unknown>".to_string());
+                                    lines.push(format!(
+                                        "  {}: session {} points to transcript identity {} at {} (expected {})",
+                                        w.agent_id.as_str(),
+                                        session_id,
+                                        embedded_agent_id,
+                                        path,
+                                        expected_agent_id
+                                    ));
+                                }
+                            }
+                            let mut msg = format!(
+                                "restart refused: provider session identity mismatch for {} worker(s) ({}). Pass --allow-fresh to discard the poisoned tuple and start fresh.",
+                                unresumable.len(),
+                                unresumable_ids.join(", "),
+                            );
+                            if !lines.is_empty() {
+                                msg.push_str("\nMismatched sessions:");
+                                for line in &lines {
+                                    msg.push('\n');
+                                    msg.push_str(line);
+                                }
+                            }
+                            ("refused_session_identity_mismatch".to_string(), msg)
+                        }
                         _ => ("refused_resume_atomicity".to_string(), error.clone()),
                     }
                 } else {

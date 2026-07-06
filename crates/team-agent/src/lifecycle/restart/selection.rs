@@ -67,7 +67,11 @@ pub fn classify_first_send_at(raw: &serde_json::Value) -> FirstSendAtState {
 ///   * lifecycle/restart/common.rs::restart_required_missing_session_agent_ids
 pub(crate) fn restart_agent_has_context_to_preserve(agent: &serde_json::Value) -> bool {
     let has_valid_first_send_at = matches!(
-        classify_first_send_at(agent.get("first_send_at").unwrap_or(&serde_json::Value::Null)),
+        classify_first_send_at(
+            agent
+                .get("first_send_at")
+                .unwrap_or(&serde_json::Value::Null)
+        ),
         FirstSendAtState::Valid
     );
     if has_valid_first_send_at {
@@ -242,6 +246,7 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         let provider = agent_provider(agent);
         let provider_wire = provider_wire(provider);
         let provider_can_resume = provider_supports_resume(provider);
+        let rollout_path = agent_rollout_path(agent);
         // Layer 2 self-healing (leader follow-up 2026-06-22): use the
         // structured probe so we can carry the list of paths the runtime
         // actually checked into the refusal — operators need to see WHICH
@@ -256,16 +261,15 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                         agent,
                         provider,
                         session,
-                        agent_rollout_path(agent).as_ref(),
+                        rollout_path.as_ref(),
                     );
                     (probe.exists, probe.checked_paths)
                 }
                 (None, Some(_), true) if resumable_provider_requires_backing(provider_wire) => {
-                    let path_opt = agent_rollout_path(agent);
-                    let exists = path_opt
+                    let exists = rollout_path
                         .as_ref()
                         .is_some_and(|path| path.as_path().exists());
-                    let checked = path_opt
+                    let checked = rollout_path
                         .as_ref()
                         .map(|p| vec![p.as_path().to_path_buf()])
                         .unwrap_or_default();
@@ -273,6 +277,12 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                 }
                 _ => (true, Vec::new()),
             };
+        let identity_probe =
+            session_identity_probe_for_agent(&agent_id, provider, rollout_path.as_ref());
+        let session_identity_mismatch = session_id.is_some()
+            && provider_can_resume
+            && resume_backing_exists
+            && identity_probe.identity_ok == Some(false);
         // 0.4.7 partial-resume + RESTART-RESUME-001 (0.4.8): when a worker
         // has NEVER been captured (no session_id AND no context-bearing
         // signal at all), it is structurally non-resumable — there is no
@@ -292,7 +302,11 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
         let _ = first_send_at_state; // retained for the Corrupt branch above
         let never_captured =
             restart_agent_never_captured(agent, session_id.as_ref().map(|s| s.as_str()));
-        let decision = if session_id.is_some() && provider_can_resume && resume_backing_exists {
+        let decision = if session_id.is_some()
+            && provider_can_resume
+            && resume_backing_exists
+            && !session_identity_mismatch
+        {
             ResumeDecision::Resume
         } else if session_id.is_some() && allow_fresh {
             ResumeDecision::FreshStart
@@ -313,7 +327,24 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
             // (round-tripped through ResumeRefusalReason::wire) so the
             // CLI/JSON contract does not change.
             let (reason_str, structured) = if session_id.is_some() {
-                if !provider_can_resume {
+                if session_identity_mismatch {
+                    let session = session_id
+                        .as_ref()
+                        .map(|session| session.as_str().to_string())
+                        .unwrap_or_default();
+                    (
+                        "session_identity_mismatch".to_string(),
+                        crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
+                            expected_agent_id: agent_id.as_str().to_string(),
+                            embedded_agent_id: identity_probe
+                                .embedded_agent_id
+                                .clone()
+                                .unwrap_or_default(),
+                            session_id: session,
+                            rollout_path: identity_probe.rollout_path.clone(),
+                        },
+                    )
+                } else if !provider_can_resume {
                     (
                         "session_unresumable".to_string(),
                         crate::provider::session::ResumeRefusalReason::ProviderResumeUnsupported {
@@ -330,17 +361,15 @@ pub(crate) fn classify_restart_plan_with_resume_validation(
                     // a recovery hint pointing at the agent_id (used as
                     // launch-time `--name`) and spawn_cwd. Operator-facing
                     // diagnostic only — no auto-resume off the hint.
-                    let recovery_hint = Some(
-                        crate::provider::session::RecoveryHint {
-                            provider_session_name_hint: Some(agent_id.as_str().to_string()),
-                            spawn_cwd: agent
-                                .get("spawn_cwd")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                                .map(std::path::PathBuf::from),
-                            provider: provider_wire.to_string(),
-                        },
-                    );
+                    let recovery_hint = Some(crate::provider::session::RecoveryHint {
+                        provider_session_name_hint: Some(agent_id.as_str().to_string()),
+                        spawn_cwd: agent
+                            .get("spawn_cwd")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(std::path::PathBuf::from),
+                        provider: provider_wire.to_string(),
+                    });
                     (
                         "session_unresumable".to_string(),
                         crate::provider::session::ResumeRefusalReason::SessionBackingStoreMissing {

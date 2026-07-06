@@ -553,6 +553,19 @@ impl Coordinator {
                 }),
             )?;
         }
+        for mismatch in &report.identity_mismatches {
+            event_log.write(
+                "provider.session.identity_mismatch",
+                serde_json::json!({
+                    "agent_id": mismatch.agent_id,
+                    "expected_agent_id": mismatch.expected_agent_id,
+                    "embedded_agent_id": mismatch.embedded_agent_id,
+                    "session_id": mismatch.session_id,
+                    "rollout_path": mismatch.rollout_path,
+                    "spawn_cwd": mismatch.spawn_cwd,
+                }),
+            )?;
+        }
         for ambiguous in report.ambiguous {
             let candidate_count = report
                 .candidate_count_by_agent

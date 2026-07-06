@@ -507,7 +507,10 @@ pub(crate) fn lifecycle_worker_tmux_backend_for_selected_state(
     // are expected to migrate to `lifecycle_worker_transport_for_selected_state`
     // during Batch 2/3.
     if let Some(state_ref) = state.as_ref() {
-        if let Some(kind) = state_ref.pointer("/transport/kind").and_then(|v| v.as_str()) {
+        if let Some(kind) = state_ref
+            .pointer("/transport/kind")
+            .and_then(|v| v.as_str())
+        {
             if kind.eq_ignore_ascii_case("conpty") {
                 return Err(LifecycleError::TeamSelect(format!(
                     "backend_kind_mismatch: state.transport.kind={kind:?} but the legacy \
@@ -737,6 +740,37 @@ pub(super) fn resume_backing_exists_for_agent(
 pub(super) struct BackingProbeResult {
     pub exists: bool,
     pub checked_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionIdentityProbeResult {
+    pub identity_ok: Option<bool>,
+    pub embedded_agent_id: Option<String>,
+    pub rollout_path: Option<PathBuf>,
+}
+
+pub(crate) fn session_identity_probe_for_agent(
+    agent_id: &AgentId,
+    _provider: Provider,
+    rollout_path: Option<&RolloutPath>,
+) -> SessionIdentityProbeResult {
+    let Some(path) = rollout_path.map(RolloutPath::as_path) else {
+        return SessionIdentityProbeResult {
+            identity_ok: None,
+            embedded_agent_id: None,
+            rollout_path: None,
+        };
+    };
+    let embedded_agent_id =
+        crate::provider::session_scan::common::rollout_path_embedded_team_agent_worker_id(path);
+    let identity_ok = embedded_agent_id
+        .as_deref()
+        .map(|embedded| embedded == agent_id.as_str());
+    SessionIdentityProbeResult {
+        identity_ok,
+        embedded_agent_id,
+        rollout_path: Some(path.to_path_buf()),
+    }
 }
 
 pub(super) fn resume_backing_probe_for_agent(

@@ -572,6 +572,11 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                 &session_id,
                 agent_rollout_path(&agent).as_ref(),
             );
+            let identity_probe = session_identity_probe_for_agent(
+                &decision.agent_id,
+                provider,
+                agent_rollout_path(&agent).as_ref(),
+            );
             write_restart_resume_postflight_event(
                 &selected.run_workspace,
                 &decision.agent_id,
@@ -579,9 +584,24 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                 probe.exists,
                 &probe.checked_paths,
                 /* recaptured = */ false,
+                identity_probe.identity_ok,
+                identity_probe.embedded_agent_id.as_deref(),
             )?;
-            if probe.exists {
+            if probe.exists && identity_probe.identity_ok != Some(false) {
                 survivors.push(decision);
+                continue;
+            }
+            if identity_probe.identity_ok == Some(false) {
+                let phase = "resume_postflight";
+                let error = "session_identity_mismatch_after_restart".to_string();
+                mark_agent_restart_failed(&mut state, &decision, &error);
+                let _ = write_restart_agent_failed_event(
+                    &selected.run_workspace,
+                    &decision,
+                    phase,
+                    &error,
+                );
+                postflight_failed.push(restart_failed_agent(&decision, phase, error));
                 continue;
             }
             // 0.4.6 tuple-atomic contract: backing went missing between
@@ -640,6 +660,11 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                 &session_id,
                 agent_rollout_path(&agent_after).as_ref(),
             );
+            let identity_probe_after = session_identity_probe_for_agent(
+                &decision.agent_id,
+                provider,
+                agent_rollout_path(&agent_after).as_ref(),
+            );
             write_restart_resume_postflight_event(
                 &selected.run_workspace,
                 &decision.agent_id,
@@ -647,14 +672,20 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                 probe_after.exists,
                 &probe_after.checked_paths,
                 /* recaptured = */ true,
+                identity_probe_after.identity_ok,
+                identity_probe_after.embedded_agent_id.as_deref(),
             )?;
-            if probe_after.exists {
+            if probe_after.exists && identity_probe_after.identity_ok != Some(false) {
                 survivors.push(decision);
                 continue;
             }
             // Still missing. Demote the agent.
             let phase = "resume_postflight";
-            let error = "session_backing_store_missing_after_restart".to_string();
+            let error = if identity_probe_after.identity_ok == Some(false) {
+                "session_identity_mismatch_after_restart".to_string()
+            } else {
+                "session_backing_store_missing_after_restart".to_string()
+            };
             mark_agent_restart_failed(&mut state, &decision, &error);
             let _ =
                 write_restart_agent_failed_event(&selected.run_workspace, &decision, phase, &error);
@@ -1676,6 +1707,8 @@ fn write_restart_resume_postflight_event(
     exists: bool,
     checked_paths: &[std::path::PathBuf],
     recaptured: bool,
+    identity_ok: Option<bool>,
+    embedded_agent_id: Option<&str>,
 ) -> Result<(), LifecycleError> {
     crate::event_log::EventLog::new(workspace)
         .write(
@@ -1689,6 +1722,8 @@ fn write_restart_resume_postflight_event(
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect::<Vec<_>>(),
                 "recaptured": recaptured,
+                "identity_ok": identity_ok,
+                "embedded_agent_id": embedded_agent_id,
             }),
         )
         .map(|_| ())
@@ -1875,6 +1910,32 @@ fn write_restart_resume_decision_event(
                             obj.insert(
                                 "recovery_hint".to_string(),
                                 serde_json::Value::Object(h),
+                            );
+                        }
+                    }
+                    if let crate::provider::session::ResumeRefusalReason::SessionIdentityMismatch {
+                        expected_agent_id,
+                        embedded_agent_id,
+                        session_id,
+                        rollout_path,
+                    } = structured
+                    {
+                        obj.insert(
+                            "expected_agent_id".to_string(),
+                            serde_json::json!(expected_agent_id),
+                        );
+                        obj.insert(
+                            "embedded_agent_id".to_string(),
+                            serde_json::json!(embedded_agent_id),
+                        );
+                        obj.insert(
+                            "poisoned_session_id".to_string(),
+                            serde_json::json!(session_id),
+                        );
+                        if let Some(path) = rollout_path {
+                            obj.insert(
+                                "rollout_path".to_string(),
+                                serde_json::json!(path.to_string_lossy()),
                             );
                         }
                     }

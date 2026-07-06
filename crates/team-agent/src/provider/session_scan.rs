@@ -49,6 +49,7 @@ pub struct CaptureSessionContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedSessionCandidate {
     pub captured: CapturedSession,
+    pub embedded_agent_id: Option<String>,
     pub positive_agent_id_match: bool,
     pub agent_path_match: bool,
 }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::transport::test_support::OfflineTransport;
-use serial_test::serial;
 use serde_json::json;
+use serial_test::serial;
 
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
@@ -35,7 +35,12 @@ fn role_doc(id: &str) -> String {
     )
 }
 
-fn layout_pane(session: &str, window: &str, pane: &str, pane_index: u32) -> crate::transport::PaneInfo {
+fn layout_pane(
+    session: &str,
+    window: &str,
+    pane: &str,
+    pane_index: u32,
+) -> crate::transport::PaneInfo {
     crate::transport::PaneInfo {
         pane_id: crate::transport::PaneId::new(pane),
         session: crate::transport::SessionName::new(session),
@@ -232,17 +237,16 @@ fn quick_start_default_workspace_compiled_spec_uses_project_root() {
     let workspace = temp_ws();
     std::fs::create_dir_all(workspace.join("agents")).unwrap();
     std::fs::write(workspace.join("TEAM.md"), QS_TEAM_MD).unwrap();
-    std::fs::write(workspace.join("agents").join("implementer.md"), QS_VALID_ROLE).unwrap();
+    std::fs::write(
+        workspace.join("agents").join("implementer.md"),
+        QS_VALID_ROLE,
+    )
+    .unwrap();
     seed_healthy_coordinator(&workspace);
     let transport = OfflineTransport::new();
 
     let report = quick_start_with_transport_in_workspace(
-        &workspace,
-        &workspace,
-        None,
-        true,
-        None,
-        &transport,
+        &workspace, &workspace, None, true, None, &transport,
     )
     .expect("quick-start workspace-root team should reach a report");
     assert!(
@@ -264,7 +268,11 @@ fn quick_start_default_workspace_compiled_spec_uses_project_root() {
         Some(workspace.to_string_lossy().as_ref()),
         "compiled team.workspace must be the project root, not its parent"
     );
-    for agent in spec.get("agents").and_then(crate::model::yaml::Value::as_list).unwrap() {
+    for agent in spec
+        .get("agents")
+        .and_then(crate::model::yaml::Value::as_list)
+        .unwrap()
+    {
         assert_eq!(
             agent
                 .get("working_directory")
@@ -1119,13 +1127,17 @@ fn adaptive_layout_plan_8_workers_is_3_3_2() {
     assert_eq!(
         windows,
         vec![
-            "team-w1", "team-w1", "team-w1", "team-w2", "team-w2", "team-w2", "team-w3",
-            "team-w3",
+            "team-w1", "team-w1", "team-w1", "team-w2", "team-w2", "team-w2", "team-w3", "team-w3",
         ]
     );
     let pane_counts = ["team-w1", "team-w2", "team-w3"]
         .into_iter()
-        .map(|window| windows.iter().filter(|actual| actual.as_str() == window).count())
+        .map(|window| {
+            windows
+                .iter()
+                .filter(|actual| actual.as_str() == window)
+                .count()
+        })
         .collect::<Vec<_>>();
     assert_eq!(pane_counts, vec![3, 3, 2]);
     assert_eq!(
@@ -1158,9 +1170,12 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
         .expect("quick_start_with_transport must reach Ready");
 
     let (launch, attach_commands, display_backend) = match report {
-        QuickStartReport::Ready { launch, attach_commands, display_backend, .. } => {
-            (*launch, attach_commands, display_backend)
-        }
+        QuickStartReport::Ready {
+            launch,
+            attach_commands,
+            display_backend,
+            ..
+        } => (*launch, attach_commands, display_backend),
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
     // 0.3.28 Step 4b: adaptive 3-pane tiling replaced with 1-window-per-agent
@@ -1183,7 +1198,9 @@ fn quick_start_default_adaptive_groups_workers_into_layout_panes() {
             .pane_title_records()
             .iter()
             .all(|(session, _, _, _)| Some(session.as_str())
-                == state.get("session_name").and_then(serde_json::Value::as_str)),
+                == state
+                    .get("session_name")
+                    .and_then(serde_json::Value::as_str)),
         "pane titles must be configured inside the team session"
     );
     // Each worker lives in its OWN window named `agent_id` (Python parity).
@@ -1226,7 +1243,9 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
-        QuickStartReport::Ready { attach_commands, .. } => attach_commands,
+        QuickStartReport::Ready {
+            attach_commands, ..
+        } => attach_commands,
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
 
@@ -1244,7 +1263,10 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
     assert_eq!(state["tmux_endpoint"], json!(endpoint));
     assert_eq!(state["tmux_socket"], json!(endpoint));
     assert_eq!(state["is_external_leader"], json!(false));
-    assert_eq!(state["teams"]["teamdir"]["is_external_leader"], json!(false));
+    assert_eq!(
+        state["teams"]["teamdir"]["is_external_leader"],
+        json!(false)
+    );
 }
 
 #[test]
@@ -1264,8 +1286,7 @@ fn annotate_runtime_tmux_endpoint_persists_workspace_socket_as_full_path() {
         "runtime endpoint state must persist the full tmux socket path, not the short -L name"
     );
     assert_eq!(
-        state["tmux_socket"],
-        state["tmux_endpoint"],
+        state["tmux_socket"], state["tmux_endpoint"],
         "tmux_socket mirrors the canonical persisted endpoint"
     );
 }
@@ -1301,7 +1322,9 @@ fn quick_start_preserves_managed_leader_topology_and_emits_leader_attach_command
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport must reach Ready");
     let attach_commands = match report {
-        QuickStartReport::Ready { attach_commands, .. } => attach_commands,
+        QuickStartReport::Ready {
+            attach_commands, ..
+        } => attach_commands,
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
 
@@ -1381,7 +1404,9 @@ fn quick_start_no_display_keeps_one_window_per_agent() {
     .expect("quick_start_with_transport must reach Ready");
 
     let display_backend = match report {
-        QuickStartReport::Ready { display_backend, .. } => display_backend,
+        QuickStartReport::Ready {
+            display_backend, ..
+        } => display_backend,
         other => panic!("quick_start must reach Ready; got {other:?}"),
     };
     assert_eq!(display_backend, "none");
@@ -1690,9 +1715,7 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
     std::fs::create_dir_all(&dated).unwrap();
     let alpha_session = "019ee540-37ed-7a20-a141-1d654224d209";
     std::fs::write(
-        dated.join(format!(
-            "rollout-2026-06-20T21-37-31-{alpha_session}.jsonl"
-        )),
+        dated.join(format!("rollout-2026-06-20T21-37-31-{alpha_session}.jsonl")),
         "{}\n",
     )
     .unwrap();
@@ -2362,10 +2385,7 @@ fn fork_refuses_source_with_partial_tuple() {
     let src_id = crate::model::ids::AgentId::new("src");
     let dst_id = crate::model::ids::AgentId::new("clone");
     let result = crate::lifecycle::fork_agent_with_transport(
-        &ws,
-        &src_id,
-        &dst_id,
-        None,  // label
+        &ws, &src_id, &dst_id, None,  // label
         false, // open_display
         None,  // team
         &transport,
@@ -2433,7 +2453,10 @@ fn add_agent_adaptive_splits_last_non_full_layout_window() {
         "last non-full layout window should be split"
     );
     let (_raw, state) = raw_runtime_state(&team);
-    assert_eq!(state.pointer("/agents/w3/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(
+        state.pointer("/agents/w3/layout_window"),
+        Some(&json!("team-w1"))
+    );
     assert_eq!(state.pointer("/agents/w3/pane_index"), Some(&json!(2)));
 }
 
@@ -2495,7 +2518,10 @@ fn add_agent_adaptive_creates_suffix_window_when_last_layout_full_and_name_colli
         "full last layout window should create next window with collision suffix"
     );
     let (_raw, state) = raw_runtime_state(&team);
-    assert_eq!(state.pointer("/agents/w4/layout_window"), Some(&json!("team-w2-2")));
+    assert_eq!(
+        state.pointer("/agents/w4/layout_window"),
+        Some(&json!("team-w2-2"))
+    );
     assert_eq!(state.pointer("/agents/w4/pane_index"), Some(&json!(0)));
 }
 
@@ -2508,7 +2534,11 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
         .collect::<Vec<_>>();
     let team = quick_start_team_dir_with_roles(&role_refs);
     let spec = crate::compiler::compile_team(&team).unwrap();
-    std::fs::write(team.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        crate::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     let session = "team-layout-stop";
     crate::state::persist::save_runtime_state(
         &team,
@@ -2529,8 +2559,7 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
         ])
         .with_pane_presence("%2", true);
 
-    let report =
-        stop_agent_with_transport(&team, &AgentId::new("w2"), None, &transport).unwrap();
+    let report = stop_agent_with_transport(&team, &AgentId::new("w2"), None, &transport).unwrap();
 
     assert!(report.stopped);
     assert_eq!(report.target, "%2");
@@ -2544,7 +2573,10 @@ fn stop_agent_adaptive_kills_target_pane_not_shared_layout_window() {
     );
     let (_raw, state) = raw_runtime_state(&team);
     assert_eq!(state.pointer("/agents/w1/pane_id"), Some(&json!("%1")));
-    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(
+        state.pointer("/agents/w1/layout_window"),
+        Some(&json!("team-w1"))
+    );
 }
 
 #[test]
@@ -2587,7 +2619,10 @@ fn start_agent_adaptive_restarts_missing_pane_in_existing_layout_window() {
         "missing worker pane should be rebuilt in its existing layout window"
     );
     let (_raw, state) = raw_runtime_state(&ws);
-    assert_eq!(state.pointer("/agents/w1/layout_window"), Some(&json!("team-w1")));
+    assert_eq!(
+        state.pointer("/agents/w1/layout_window"),
+        Some(&json!("team-w1"))
+    );
     assert_eq!(state.pointer("/agents/w1/window"), Some(&json!("team-w1")));
     assert_eq!(state.pointer("/agents/w2/pane_id"), Some(&json!("%2")));
 }
@@ -2848,6 +2883,21 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
         json!("%0"),
         "#252 RC2: launch must persist the real pane_id returned by the transport, not drop it when pane_pid is unavailable"
     );
+    let events = crate::event_log::EventLog::new(workspace)
+        .tail(0)
+        .expect("read event log");
+    let spawn_event = events
+        .iter()
+        .find(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("provider.worker.spawn_argv")
+                && event.get("agent_id").and_then(serde_json::Value::as_str) == Some("implementer")
+        })
+        .unwrap_or_else(|| panic!("provider.worker.spawn_argv missing; events={events:?}"));
+    assert_eq!(spawn_event["spawn_cwd"], json!(workspace.to_string_lossy()));
+    assert_eq!(spawn_event["spawned_at"], json!(FIXED_SPAWNED_AT));
+    assert_eq!(spawn_event["source"], json!("launch"));
+    assert_eq!(spawn_event["spawn_epoch"], json!(0));
 }
 
 // Stage B2 — golden launch/core.py:171-173 writes paused workers as exactly
@@ -2945,12 +2995,12 @@ fn add_agent_resolves_to_persisted_endpoint_socket_not_workspace_hash() {
     )
     .unwrap();
 
-    let resolved = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-        &team, None,
-    )
-    .expect("resolver must succeed when state is present");
+    let resolved =
+        crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(&team, None)
+            .expect("resolver must succeed when state is present");
 
-    let endpoint = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
+    let endpoint =
+        <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
     assert_eq!(
         endpoint.as_deref(),
         Some(live_endpoint.as_str()),
@@ -2973,12 +3023,12 @@ fn add_agent_resolver_falls_back_to_workspace_socket_when_no_persisted_endpoint(
     std::fs::create_dir_all(&team).unwrap();
     // NOTE: no save_runtime_state — cold workspace, no persisted endpoint.
 
-    let resolved = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
-        &team, None,
-    )
-    .expect("resolver must succeed (fall back to for_workspace) on cold workspace");
+    let resolved =
+        crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(&team, None)
+            .expect("resolver must succeed (fall back to for_workspace) on cold workspace");
 
-    let endpoint = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
+    let endpoint =
+        <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(&resolved);
     let fallback = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::tmux_endpoint(
         &crate::tmux_backend::TmuxBackend::for_workspace(&team),
     );
@@ -3044,7 +3094,9 @@ fn add_agent_reachability_gate_returns_error_when_spawn_pane_not_addressable() {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("unreachable") || err_msg.contains("not addressable") || err_msg.contains("socket drift"),
+        err_msg.contains("unreachable")
+            || err_msg.contains("not addressable")
+            || err_msg.contains("socket drift"),
         "0.3.24 reachability gate: error message must name the unreachable / \
          socket-drift symptom so operators can diagnose. Got: {err_msg}"
     );
@@ -3701,16 +3753,31 @@ fn e45_is_adaptive_layout_window_recognises_team_w_pattern_only() {
     assert!(is_adapt("team-w1"), "team-w1 must be adaptive");
     assert!(is_adapt("team-w2"), "team-w2 must be adaptive");
     assert!(is_adapt("team-w42"), "team-w42 must be adaptive");
-    assert!(is_adapt("team-w7-suffix"), "team-w7-suffix must be adaptive");
+    assert!(
+        is_adapt("team-w7-suffix"),
+        "team-w7-suffix must be adaptive"
+    );
 
-    assert!(!is_adapt("developer"), "developer is per-agent, not adaptive");
-    assert!(!is_adapt("architect"), "architect is per-agent, not adaptive");
+    assert!(
+        !is_adapt("developer"),
+        "developer is per-agent, not adaptive"
+    );
+    assert!(
+        !is_adapt("architect"),
+        "architect is per-agent, not adaptive"
+    );
     assert!(!is_adapt("demo-director"), "demo-director is per-agent");
     assert!(!is_adapt("leader"), "leader is not adaptive");
     assert!(!is_adapt(""), "empty is not adaptive");
     assert!(!is_adapt("team-w"), "team-w (no index) is not adaptive");
-    assert!(!is_adapt("team-w0"), "team-w0 (index 0 invalid post-subtract) is not adaptive");
-    assert!(!is_adapt("team-wfoo"), "team-wfoo (non-numeric) is not adaptive");
+    assert!(
+        !is_adapt("team-w0"),
+        "team-w0 (index 0 invalid post-subtract) is not adaptive"
+    );
+    assert!(
+        !is_adapt("team-wfoo"),
+        "team-wfoo (non-numeric) is not adaptive"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

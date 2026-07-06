@@ -1,14 +1,20 @@
 //! diagnose/preflight/wait-ready CLI helpers.
 use super::*;
-use crate::provider::wire::{command_name, provider_wire};
+use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
 
-    if let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        match backend.has_session(&crate::transport::SessionName::new(session_name.to_string())) {
+    if let Some(session_name) = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        match backend.has_session(&crate::transport::SessionName::new(
+            session_name.to_string(),
+        )) {
             Ok(true) => {}
             Ok(false) => {
                 issues.push(json!("tmux_session_missing"));
@@ -69,13 +75,55 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
         }
     }
 
-    if let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-        if let Ok(windows) = backend.list_windows(&crate::transport::SessionName::new(session_name.to_string())) {
+    if let Some(session_name) = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(windows) = backend.list_windows(&crate::transport::SessionName::new(
+            session_name.to_string(),
+        )) {
             if let Some(agents) = state.get("agents").and_then(Value::as_object) {
                 for (agent_id, agent_state) in agents {
+                    let provider = agent_state
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .and_then(parse_provider)
+                        .unwrap_or(crate::provider::Provider::Codex);
+                    let rollout_path = agent_state
+                        .get("rollout_path")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .map(crate::provider::RolloutPath::new);
+                    let identity_probe =
+                        crate::lifecycle::restart::session_identity_probe_for_agent(
+                            &crate::model::ids::AgentId::new(agent_id.clone()),
+                            provider,
+                            rollout_path.as_ref(),
+                        );
+                    if identity_probe.identity_ok == Some(false) {
+                        let issue = format!("session_identity_mismatch:{agent_id}");
+                        issues.push(json!(issue));
+                        repairs.push(json!({
+                            "issue": format!("session_identity_mismatch:{agent_id}"),
+                            "action": format!(
+                                "run `team-agent restart --allow-fresh` to discard the poisoned session tuple for `{agent_id}`"
+                            ),
+                            "expected_agent_id": agent_id,
+                            "embedded_agent_id": identity_probe.embedded_agent_id,
+                            "rollout_path": identity_probe
+                                .rollout_path
+                                .map(|path| path.to_string_lossy().to_string()),
+                        }));
+                    }
                     let window = ["window", "window_name"]
                         .iter()
-                        .find_map(|key| agent_state.get(*key).and_then(Value::as_str).filter(|s| !s.is_empty()))
+                        .find_map(|key| {
+                            agent_state
+                                .get(*key)
+                                .and_then(Value::as_str)
+                                .filter(|s| !s.is_empty())
+                        })
                         .unwrap_or(agent_id);
                     if !windows.iter().any(|w| w.as_str() == window) {
                         issues.push(json!(format!("worker_window_missing:{agent_id}")));
@@ -131,6 +179,80 @@ fn leader_receiver_attached(state: &Value) -> bool {
     mode_direct && status_attached && pane_present
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_codex_identity_rollout(
+        workspace: &std::path::Path,
+        session_id: &str,
+        embedded_agent_id: &str,
+    ) -> std::path::PathBuf {
+        let path = workspace.join("rollout-poison.jsonl");
+        let text = format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
+             {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
+             {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
+            workspace.to_string_lossy()
+        );
+        std::fs::write(&path, text).expect("write rollout");
+        path
+    }
+
+    #[test]
+    fn diagnose_surfaces_codex_session_identity_mismatch() {
+        let workspace =
+            std::env::temp_dir().join(format!("ta-diagnose-crossbind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        std::fs::create_dir_all(&workspace).unwrap();
+        let rollout = write_codex_identity_rollout(
+            &workspace,
+            "019f3327-c35a-7023-b3cd-1bea93a7a157",
+            "ios-dev",
+        );
+        let state = json!({
+            "session_name": "team-fixture",
+            "leader_receiver": {
+                "mode": "direct_tmux",
+                "status": "attached",
+                "pane_id": "%leader",
+                "provider": "codex"
+            },
+            "agents": {
+                "frontend": {
+                    "provider": "codex",
+                    "status": "running",
+                    "session_id": "019f3327-c35a-7023-b3cd-1bea93a7a157",
+                    "rollout_path": rollout.to_string_lossy(),
+                    "captured_at": "2026-07-05T17:04:04Z",
+                    "captured_via": "fs_watch",
+                    "spawn_cwd": workspace.to_string_lossy(),
+                    "window": "frontend"
+                }
+            }
+        });
+        let backend = crate::transport::test_support::OfflineTransport::new()
+            .with_session_present(true)
+            .with_windows(vec![crate::transport::WindowName::new("frontend")]);
+        let (issues, repairs) = diagnose_runtime(&state, &backend);
+        assert!(
+            issues
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item.as_str()
+                    == Some("session_identity_mismatch:frontend"))),
+            "diagnose must surface session_identity_mismatch for poisoned Codex tuples; issues={issues}"
+        );
+        assert!(
+            repairs.as_array().is_some_and(|items| items.iter().any(|item| {
+                item.get("issue").and_then(Value::as_str)
+                    == Some("session_identity_mismatch:frontend")
+            })),
+            "diagnose should include an explicit repair hint for the mismatched tuple; repairs={repairs}"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+}
+
 pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, CliError> {
     let mut checks = Vec::new();
     let mut next_actions = Vec::new();
@@ -150,7 +272,9 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
                 "ok": false,
                 "error": error.to_string(),
             }));
-            next_actions.push(json!("fix TEAM.md and role front matter, then run preflight again"));
+            next_actions.push(json!(
+                "fix TEAM.md and role front matter, then run preflight again"
+            ));
             None
         }
     };
@@ -183,7 +307,11 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
 
     let workspace = crate::model::paths::team_workspace(team)
         .map_err(|error| CliError::Runtime(error.to_string()))?;
-    let profile_dir_exists = workspace.join(".team").join("current").join("profiles").exists()
+    let profile_dir_exists = workspace
+        .join(".team")
+        .join("current")
+        .join("profiles")
+        .exists()
         || team.join("profiles").exists();
     let profile_dir_check = json!({
         "name": "profile_dir",
@@ -229,7 +357,10 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
     let summary = if ok {
         "preflight passed".to_string()
     } else {
-        format!("preflight found blockers: {}", blocker_names(&blockers).join(", "))
+        format!(
+            "preflight found blockers: {}",
+            blocker_names(&blockers).join(", ")
+        )
     };
     let checks_value = Value::Array(checks);
     let details_log = write_details_log(
@@ -255,7 +386,9 @@ pub(crate) fn build_preflight_report(team: &std::path::Path) -> Result<Value, Cl
     Ok(report)
 }
 
-pub(crate) fn build_profile_smoke_check_for_team(team: &std::path::Path) -> Result<Value, CliError> {
+pub(crate) fn build_profile_smoke_check_for_team(
+    team: &std::path::Path,
+) -> Result<Value, CliError> {
     let workspace = crate::model::paths::team_workspace(team)
         .map_err(|error| CliError::Runtime(error.to_string()))?;
     let spec = match crate::compiler::compile_team(team) {
@@ -376,10 +509,14 @@ pub(crate) fn build_wait_ready_report(
             }));
         }
     };
-    let timeout = if timeout.is_finite() && timeout > 0.0 { timeout } else { 0.0 };
+    let timeout = if timeout.is_finite() && timeout > 0.0 {
+        timeout
+    } else {
+        0.0
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout);
     let mut readiness;
-    let mut state_read_error: Option<String> = None;
+    let mut state_read_error: Option<String>;
     loop {
         let mut state = match crate::state::projection::select_runtime_state(
             &selected.run_workspace,
@@ -419,7 +556,9 @@ pub(crate) fn build_wait_ready_report(
             "error",
             "state_read_error",
             "runtime state could not be read",
-            vec![json!("inspect .team/runtime/state.json (corrupt or unreadable) and retry")],
+            vec![json!(
+                "inspect .team/runtime/state.json (corrupt or unreadable) and retry"
+            )],
         )
     } else if awaiting_trust {
         (
@@ -427,11 +566,17 @@ pub(crate) fn build_wait_ready_report(
             "pending",
             "awaiting_trust_prompt",
             "workers are awaiting trust prompt",
-            vec![json!("answer the provider trust prompt, then run wait-ready again")],
+            vec![json!(
+                "answer the provider trust prompt, then run wait-ready again"
+            )],
         )
     } else if ready {
         (true, "ready", "ready", "workers ready", Vec::new())
-    } else if readiness.get("session_capture_complete").and_then(Value::as_bool) == Some(false) {
+    } else if readiness
+        .get("session_capture_complete")
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
         (
             false,
             "pending",
@@ -445,7 +590,9 @@ pub(crate) fn build_wait_ready_report(
             "timeout",
             "workers_not_ready",
             "workers not ready before timeout",
-            vec![json!("inspect team-agent diagnose output and worker terminals")],
+            vec![json!(
+                "inspect team-agent diagnose output and worker terminals"
+            )],
         )
     };
     let details_log = write_details_log(
@@ -479,7 +626,11 @@ fn inject_tmux_session_present(workspace: &std::path::Path, state: &mut Value) {
     // runtime actually uses (state.tmux_endpoint / tmux_socket), not the
     // workspace-hash socket. Otherwise readiness reports `process_started=false`
     // even though the session is alive on the persisted socket.
-    let Some(session_name) = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+    let Some(session_name) = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
         return;
     };
     let session_name_owned = session_name.to_string();
@@ -519,14 +670,11 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
         .get("leader_receiver")
         .and_then(Value::as_object)
         .is_some_and(|receiver| {
-            receiver
-                .get("status")
-                .and_then(Value::as_str)
-                == Some("attached")
+            receiver.get("status").and_then(Value::as_str) == Some("attached")
                 || receiver
-                .get("pane_id")
-                .and_then(Value::as_str)
-                .is_some_and(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
+                    .get("pane_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|pane| !pane.is_empty() && pane != "__team_agent_unbound__")
         });
 
     if let Some(agents) = agents {
@@ -544,8 +692,7 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
                         Some("running" | "busy" | "ready")
                     )
             });
-        mcp_ready = !agents.is_empty()
-            && agents.values().all(agent_mcp_ready);
+        mcp_ready = !agents.is_empty() && agents.values().all(agent_mcp_ready);
         task_prompt_delivered = !agents.is_empty()
             && (message_counts_positive(state.get("messages"))
                 || agents.values().all(|agent| {
@@ -560,7 +707,8 @@ pub(crate) fn wait_readiness(state: &Value) -> Value {
                 .and_then(Value::as_str)
                 == Some("awaiting_trust_prompt")
         });
-        incomplete_sessions = crate::session_capture::incomplete_interacted_resumable_agent_ids(state);
+        incomplete_sessions =
+            crate::session_capture::incomplete_interacted_resumable_agent_ids(state);
     }
     let all_resumable_have_session = incomplete_sessions.is_empty();
     let session_capture_incomplete = !all_resumable_have_session;
@@ -591,7 +739,9 @@ fn inject_message_counts(workspace: &std::path::Path, state: &mut Value) -> Resu
     let mut stmt = conn
         .prepare("select status, count(*) from messages group by status order by status")
         .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let mut rows = stmt.query([]).map_err(|e| CliError::Runtime(e.to_string()))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
     let mut messages = Map::new();
     while let Some(row) = rows.next().map_err(|e| CliError::Runtime(e.to_string()))? {
         let status: String = row.get(0).map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -619,7 +769,10 @@ fn message_counts_positive(value: Option<&Value>) -> bool {
 fn legacy_process_started(agents: &serde_json::Map<String, Value>) -> bool {
     !agents.is_empty()
         && agents.values().all(|agent| {
-            agent.get("pane_id").and_then(Value::as_str).is_some_and(|s| !s.is_empty())
+            agent
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
                 || agent.get("pid").and_then(Value::as_i64).is_some()
                 || agent.get("process_started").and_then(Value::as_bool) == Some(true)
                 || fake_agent_started(agent)
@@ -717,7 +870,10 @@ fn preflight_blockers(checks: &[Value]) -> Vec<Value> {
         .iter()
         .filter(|check| check.get("ok").and_then(Value::as_bool) == Some(false))
         .map(|check| {
-            let name = check.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let name = check
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let reason = check
                 .get("error")
                 .or_else(|| check.get("reason"))
@@ -747,7 +903,11 @@ fn yaml_path_str<'a>(value: &'a crate::model::yaml::Value, keys: &[&str]) -> Opt
     current.as_str()
 }
 
-fn write_details_log(workspace: &std::path::Path, prefix: &str, value: &Value) -> Result<std::path::PathBuf, CliError> {
+fn write_details_log(
+    workspace: &std::path::Path,
+    prefix: &str,
+    value: &Value,
+) -> Result<std::path::PathBuf, CliError> {
     let logs = workspace.join(".team").join("logs");
     std::fs::create_dir_all(&logs)?;
     let path = logs.join(format!("{prefix}-{}.json", timestamp_slug()));

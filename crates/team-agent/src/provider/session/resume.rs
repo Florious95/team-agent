@@ -95,9 +95,14 @@ pub enum ResumeRefusalReason {
     SessionCaptureIncomplete,
     /// State session_id differs from the provider's observed session
     /// (T6 L5.5 drift). Caller should reconcile before resuming.
-    SessionDrift {
-        expected: String,
-        actual: String,
+    SessionDrift { expected: String, actual: String },
+    /// The persisted provider backing exists, but the transcript itself
+    /// declares a different Team Agent worker identity.
+    SessionIdentityMismatch {
+        expected_agent_id: String,
+        embedded_agent_id: String,
+        session_id: String,
+        rollout_path: Option<PathBuf>,
     },
     /// Catch-all for refusals the structured shape hasn't taxonomized
     /// yet. Carries the legacy free-form string. This variant exists so
@@ -118,11 +123,10 @@ impl ResumeRefusalReason {
             ResumeRefusalReason::SessionBackingStoreMissing { .. } => {
                 "session_backing_store_missing"
             }
-            ResumeRefusalReason::ProviderResumeUnsupported { .. } => {
-                "provider_resume_unsupported"
-            }
+            ResumeRefusalReason::ProviderResumeUnsupported { .. } => "provider_resume_unsupported",
             ResumeRefusalReason::SessionCaptureIncomplete => "session_capture_incomplete",
             ResumeRefusalReason::SessionDrift { .. } => "session_drift",
+            ResumeRefusalReason::SessionIdentityMismatch { .. } => "session_identity_mismatch",
             // For Other we still report the legacy wire so the existing
             // `session_unresumable` JSON shape is preserved end-to-end.
             ResumeRefusalReason::Other { .. } => "session_unresumable",
@@ -134,16 +138,20 @@ impl ResumeRefusalReason {
     pub fn from_legacy(reason: &str) -> Self {
         match reason {
             "no_persisted_session_id" => ResumeRefusalReason::NoSessionId,
-            "session_backing_store_missing" => {
-                ResumeRefusalReason::SessionBackingStoreMissing {
-                    checked_paths: Vec::new(),
-                    recovery_hint: None,
-                }
-            }
+            "session_backing_store_missing" => ResumeRefusalReason::SessionBackingStoreMissing {
+                checked_paths: Vec::new(),
+                recovery_hint: None,
+            },
             "provider_resume_unsupported" => ResumeRefusalReason::ProviderResumeUnsupported {
                 provider: String::new(),
             },
             "session_capture_incomplete" => ResumeRefusalReason::SessionCaptureIncomplete,
+            "session_identity_mismatch" => ResumeRefusalReason::SessionIdentityMismatch {
+                expected_agent_id: String::new(),
+                embedded_agent_id: String::new(),
+                session_id: String::new(),
+                rollout_path: None,
+            },
             other => ResumeRefusalReason::Other {
                 legacy_reason: other.to_string(),
             },
@@ -155,15 +163,11 @@ impl ResumeRefusalReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumePreflightOutcome {
     /// Worker can resume from the named session.
-    Resume {
-        session_id: String,
-    },
+    Resume { session_id: String },
     /// `--allow-fresh` was set; worker will start fresh.
     FreshStart,
     /// Resume refused. Caller MUST NOT proceed with teardown/spawn.
-    Refuse {
-        reason: ResumeRefusalReason,
-    },
+    Refuse { reason: ResumeRefusalReason },
 }
 
 /// Information about whether a provider backing file is present on disk.
@@ -239,9 +243,7 @@ impl ResumePreflight {
                 } else {
                     ResumePreflightOutcome::Refuse {
                         reason: ResumeRefusalReason::SessionBackingStoreMissing {
-                            checked_paths: backing
-                                .map(|b| b.paths.clone())
-                                .unwrap_or_default(),
+                            checked_paths: backing.map(|b| b.paths.clone()).unwrap_or_default(),
                             recovery_hint,
                         },
                     }
@@ -272,6 +274,7 @@ mod tests {
             "session_backing_store_missing",
             "provider_resume_unsupported",
             "session_capture_incomplete",
+            "session_identity_mismatch",
         ] {
             assert_eq!(ResumeRefusalReason::from_legacy(wire).wire(), wire);
         }
@@ -383,10 +386,11 @@ mod tests {
         );
         match out {
             ResumePreflightOutcome::Refuse {
-                reason: ResumeRefusalReason::SessionBackingStoreMissing {
-                    recovery_hint: Some(h),
-                    ..
-                },
+                reason:
+                    ResumeRefusalReason::SessionBackingStoreMissing {
+                        recovery_hint: Some(h),
+                        ..
+                    },
             } => {
                 assert_eq!(h, hint);
             }
@@ -405,9 +409,7 @@ mod tests {
         let out = ResumePreflight::check(Some("sess-x"), true, Some(&backing), "codex", false);
         match out {
             ResumePreflightOutcome::Refuse {
-                reason: ResumeRefusalReason::SessionBackingStoreMissing {
-                    recovery_hint, ..
-                },
+                reason: ResumeRefusalReason::SessionBackingStoreMissing { recovery_hint, .. },
             } => {
                 assert!(recovery_hint.is_none());
             }

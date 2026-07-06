@@ -5,12 +5,12 @@ use std::process::Command;
 
 use super::helpers::patterns;
 use super::types::{
-    AuthHintStatus, CapturedSession, CommandPlan, McpConfig, ProviderCaps,
-    ProviderCommandContext, ProviderError, SessionId, StatusPatterns,
+    AuthHintStatus, CapturedSession, CommandPlan, McpConfig, ProviderCaps, ProviderCommandContext,
+    ProviderError, SessionId, StatusPatterns,
 };
 use super::{AuthMode, Provider};
 
-pub use crate::provider::session_scan::{CapturedSessionCandidate, CaptureSessionContext};
+pub use crate::provider::session_scan::{CaptureSessionContext, CapturedSessionCandidate};
 
 // ===========================================================================
 // TRAIT: ProviderAdapter (method SIGNATURES only — 无 body)
@@ -70,7 +70,7 @@ pub trait ProviderAdapter {
             ctx.model,
             ctx.tools,
         )
-            .map(CommandPlan::argv_only)
+        .map(CommandPlan::argv_only)
     }
 
     /// 启动后从 provider session 日志捕获 session_id + rollout_path
@@ -95,6 +95,7 @@ pub trait ProviderAdapter {
             .into_iter()
             .map(|captured| CapturedSessionCandidate {
                 captured,
+                embedded_agent_id: None,
                 positive_agent_id_match: false,
                 agent_path_match: false,
             })
@@ -183,7 +184,7 @@ pub trait ProviderAdapter {
             ctx.model,
             ctx.tools,
         )
-            .map(CommandPlan::argv_only)
+        .map(CommandPlan::argv_only)
     }
 
     /// 计算本 provider 该用的 MCP server 配置(`adapter.py` mcp_config;claude
@@ -226,19 +227,17 @@ pub trait ProviderAdapter {
         sleep_s: f64,
     ) -> super::startup_prompt::StartupPromptOutcome {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match self.provider() {
-            Provider::Codex => {
-                super::startup_prompt::codex_handle_startup_prompts(transport, target, checks, sleep_s)
-            }
+            Provider::Codex => super::startup_prompt::codex_handle_startup_prompts(
+                transport, target, checks, sleep_s,
+            ),
             Provider::Claude | Provider::ClaudeCode => {
                 super::startup_prompt::claude_handle_startup_prompts(
                     transport, target, checks, sleep_s,
                 )
             }
-            Provider::Copilot => {
-                super::startup_prompt::copilot_handle_startup_prompts(
-                    transport, target, checks, sleep_s,
-                )
-            }
+            Provider::Copilot => super::startup_prompt::copilot_handle_startup_prompts(
+                transport, target, checks, sleep_s,
+            ),
             _ => super::startup_prompt::StartupPromptOutcome::default(),
         }))
         .unwrap_or_default()
@@ -342,7 +341,9 @@ impl ProviderAdapter for BasicProviderAdapter {
         let output = Command::new(command_name(self.provider))
             .arg("--version")
             .output()
-            .map_err(|e| ProviderError::Io(format!("{} --version: {e}", command_name(self.provider))))?;
+            .map_err(|e| {
+                ProviderError::Io(format!("{} --version: {e}", command_name(self.provider)))
+            })?;
         if !output.status.success() {
             return Ok("unknown".to_string());
         }
@@ -390,10 +391,24 @@ impl ProviderAdapter for BasicProviderAdapter {
         tools: &[&str],
     ) -> Result<Vec<String>, ProviderError> {
         match self.provider {
-            Provider::Claude | Provider::ClaudeCode => {
-                Ok(claude_launch_command(self, auth_mode, mcp_config, system_prompt, model, tools)?)
-            }
-            Provider::Codex => Ok(codex_base_command(None, auth_mode, mcp_config, system_prompt, model, tools, None, None)),
+            Provider::Claude | Provider::ClaudeCode => Ok(claude_launch_command(
+                self,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                tools,
+            )?),
+            Provider::Codex => Ok(codex_base_command(
+                None,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                tools,
+                None,
+                None,
+            )),
             // §C1 worker argv 形态 + C-1/C-5/C-6 cr verdict:
             //   copilot --no-color --no-auto-update [<dangerous|granular>] [--model]
             //          --additional-mcp-config <inline json> --session-id <expected_uuid> -C <cwd>
@@ -401,7 +416,11 @@ impl ProviderAdapter for BasicProviderAdapter {
             // AGENTS.md(launch 路径写文件,见 lifecycle/launch.rs)注入,**不入 argv**
             // (B2 灵魂件降级,C-1-2 禁 silent 写全局)。
             Provider::Copilot => Ok(copilot_base_command(
-                auth_mode, mcp_config, system_prompt, model, tools,
+                auth_mode,
+                mcp_config,
+                system_prompt,
+                model,
+                tools,
             )),
             Provider::GeminiCli => {
                 let mut argv = vec!["gemini".to_string()];
@@ -439,7 +458,9 @@ impl ProviderAdapter for BasicProviderAdapter {
                 // `--resume <existing_id>` on a session id that already has
                 // a real transcript.
                 let expected = next_session_token();
-                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
                 let projects_root = ctx
                     .profile_launch
                     .and_then(|profile| profile.claude_projects_root.clone());
@@ -614,7 +635,9 @@ impl ProviderAdapter for BasicProviderAdapter {
             )));
         }
         let Some(session_id) = session_id else {
-            return Err(ProviderError::ResumeUnavailable("resume requires session_id".to_string()));
+            return Err(ProviderError::ResumeUnavailable(
+                "resume requires session_id".to_string(),
+            ));
         };
         match self.provider {
             Provider::Codex => {
@@ -632,8 +655,16 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
-                let mut argv =
-                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false, None)?;
+                let mut argv = claude_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    tools,
+                    false,
+                    None,
+                )?;
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -641,9 +672,8 @@ impl ProviderAdapter for BasicProviderAdapter {
             // §C1 cr verdict:resume 同 base + `--resume <sid>`(去 --session-id,
             // copilot --resume 接受 id|name)。
             Provider::Copilot => {
-                let mut argv = copilot_base_command_resume(
-                    auth_mode, mcp_config, system_prompt, model, tools,
-                );
+                let mut argv =
+                    copilot_base_command_resume(auth_mode, mcp_config, system_prompt, model, tools);
                 argv.push("--resume".to_string());
                 argv.push(session_id.as_str().to_string());
                 Ok(argv)
@@ -663,9 +693,13 @@ impl ProviderAdapter for BasicProviderAdapter {
         match self.provider {
             Provider::Claude | Provider::ClaudeCode => {
                 let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable("resume requires session_id".to_string()));
+                    return Err(ProviderError::ResumeUnavailable(
+                        "resume requires session_id".to_string(),
+                    ));
                 };
-                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
                 let model = claude_context_model(ctx);
                 let mut argv = claude_base_command(
                     self,
@@ -758,7 +792,9 @@ impl ProviderAdapter for BasicProviderAdapter {
             )));
         }
         let Some(session_id) = session_id else {
-            return Err(ProviderError::ResumeUnavailable("fork requires session_id".to_string()));
+            return Err(ProviderError::ResumeUnavailable(
+                "fork requires session_id".to_string(),
+            ));
         };
         match self.provider {
             Provider::Codex => {
@@ -776,8 +812,16 @@ impl ProviderAdapter for BasicProviderAdapter {
                 Ok(argv)
             }
             Provider::Claude | Provider::ClaudeCode => {
-                let mut argv =
-                    claude_base_command(self, auth_mode, mcp_config, system_prompt, model, tools, false, None)?;
+                let mut argv = claude_base_command(
+                    self,
+                    auth_mode,
+                    mcp_config,
+                    system_prompt,
+                    model,
+                    tools,
+                    false,
+                    None,
+                )?;
                 argv.push("--session-id".to_string());
                 argv.push(next_session_token());
                 argv.push("--resume".to_string());
@@ -792,10 +836,12 @@ impl ProviderAdapter for BasicProviderAdapter {
             Provider::Copilot => Err(ProviderError::CapabilityUnsupported(
                 "copilot CLI 无 fork 旗标,session-store 不支持 branched continuation".to_string(),
             )),
-            Provider::GeminiCli | Provider::Fake => Err(ProviderError::CapabilityUnsupported(format!(
-                "{} does not support native session fork",
-                provider_wire(self.provider)
-            ))),
+            Provider::GeminiCli | Provider::Fake => {
+                Err(ProviderError::CapabilityUnsupported(format!(
+                    "{} does not support native session fork",
+                    provider_wire(self.provider)
+                )))
+            }
         }
     }
 
@@ -813,10 +859,14 @@ impl ProviderAdapter for BasicProviderAdapter {
                     )));
                 }
                 let Some(session_id) = session_id else {
-                    return Err(ProviderError::ResumeUnavailable("fork requires session_id".to_string()));
+                    return Err(ProviderError::ResumeUnavailable(
+                        "fork requires session_id".to_string(),
+                    ));
                 };
                 let expected = next_session_token();
-                let managed = ctx.profile_launch.is_some_and(|profile| profile.managed_mcp_config);
+                let managed = ctx
+                    .profile_launch
+                    .is_some_and(|profile| profile.managed_mcp_config);
                 let projects_root = ctx
                     .profile_launch
                     .and_then(|profile| profile.claude_projects_root.clone());
@@ -910,10 +960,22 @@ impl ProviderAdapter for BasicProviderAdapter {
 
     fn status_patterns(&self) -> Result<StatusPatterns, ProviderError> {
         match self.provider {
-            Provider::Claude | Provider::ClaudeCode => patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback"),
-            Provider::Codex => patterns(r"(›|❯|codex>)", r"•.*esc to interrupt", r"Error|Traceback|panic"),
-            Provider::Copilot => patterns(r"(?m)^\s*❯\s*$| / commands · \? help", r"working|processing", r"Error|panic"),
-            Provider::GeminiCli | Provider::Fake => patterns(r">", r"working|processing", r"Error|Traceback"),
+            Provider::Claude | Provider::ClaudeCode => {
+                patterns(r"[>❯]\s", r"[✶✢✽✻✳·].*…", r"Error|Traceback")
+            }
+            Provider::Codex => patterns(
+                r"(›|❯|codex>)",
+                r"•.*esc to interrupt",
+                r"Error|Traceback|panic",
+            ),
+            Provider::Copilot => patterns(
+                r"(?m)^\s*❯\s*$| / commands · \? help",
+                r"working|processing",
+                r"Error|panic",
+            ),
+            Provider::GeminiCli | Provider::Fake => {
+                patterns(r">", r"working|processing", r"Error|Traceback")
+            }
         }
     }
 
