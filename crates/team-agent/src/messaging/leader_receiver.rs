@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::event_log::EventLog;
 use crate::message_store::{MessageStore, NotificationClaimParams};
 use crate::model::ids::TaskId;
-use crate::transport::{InjectPayload, Key, PaneId, Target, Transport};
+use crate::transport::{InjectPayload, InjectReport, Key, PaneId, Target, Transport, TransportError};
 
 use super::helpers::MessageStatusShadow;
 use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError};
@@ -286,27 +286,41 @@ pub fn deliver_to_leader_fallback_pane(
     let rendered = render_fallback_pane_message(content, message_id, primary_error);
     let target = Target::Pane(PaneId::new(&pane_id));
     let payload = InjectPayload::Text(rendered);
-    // 0.5.x Phase 1d Batch 4: leader-fallback pane inject uses the
-    // factory tmux channel helpers so `grep transport_factory::tmux_`
-    // enumerates every tmux-only leader-channel site. Semantics are
-    // identical to the previous direct `TmuxBackend::*` calls
-    // (helpers are thin wrappers). `transport_kind`-based dispatch
-    // is the parallel `feat/appserver-leader-host` work; this batch
-    // stays helper-swap only.
-    let inject_result = leader_tmux_socket(state)
-        .and_then(|socket| {
+    // 0.5.5 gate054 cross-team notify boundary: when the leader receiver
+    // has a recorded `tmux_socket` (canonical), that socket is a HARD
+    // channel boundary. Pane ids (`%N`) are only unique per tmux server,
+    // so falling back from a missing/dead pane on the recorded endpoint
+    // to the workspace-canonical or default tmux server can inject team
+    // A's leader traffic into team B's leader pane on a different socket
+    // (real-machine gate054 acceptance B-arm: private socket %1 absent
+    // after leader kill, default server's %1 was the main leader — the
+    // prior chain silently landed A's `report_result` there).
+    //
+    // Loud-not-silent (user tie-break E23 / N32): if the recorded endpoint
+    // rejects the inject we return `Blocked` with `channel=rebind_required`
+    // and audit `leader_receiver.fallback_pane_failed` — the message row
+    // stays pending in the store, coordinator surfaces the pending
+    // notification via status/monitor, and no cross-server injection is
+    // attempted.
+    let inject_result: Result<InjectReport, TransportError> = match leader_tmux_socket(state) {
+        Some(socket) => {
             let backend = crate::transport_factory::tmux_endpoint_transport(socket);
-            backend.inject(&target, &payload, Key::Enter, true).ok()
-        })
-        .map(Ok)
-        .unwrap_or_else(|| {
+            backend.inject(&target, &payload, Key::Enter, true)
+        }
+        None => {
+            // No socket recorded → legacy (pre-0.5) shape where the receiver
+            // was implicitly bound to the workspace-canonical tmux server.
+            // Keep the workspace→default chain here (single team assumption)
+            // but never mix it with a recorded-socket team.
             let backend = crate::transport_factory::tmux_workspace_transport(workspace);
-            backend.inject(&target, &payload, Key::Enter, true)
-        })
-        .or_else(|_| {
-            let backend = crate::transport_factory::tmux_default_transport();
-            backend.inject(&target, &payload, Key::Enter, true)
-        });
+            backend
+                .inject(&target, &payload, Key::Enter, true)
+                .or_else(|_| {
+                    let backend = crate::transport_factory::tmux_default_transport();
+                    backend.inject(&target, &payload, Key::Enter, true)
+                })
+        }
+    };
 
     match inject_result {
         Ok(report) => {
@@ -367,6 +381,14 @@ pub fn deliver_to_leader_fallback_pane(
             }
         }
         Err(error) => {
+            // 0.5.5 gate054: when a leader_receiver.tmux_socket is recorded,
+            // a fallback inject error is a HARD team-boundary event — we do
+            // not cross to workspace/default tmux (see the inject_result
+            // branch above). Surface `rebind_required` so callers wire the
+            // notification status accordingly; the row stays pending in the
+            // store and the audit event carries the same forensic fields as
+            // the pre-fix path.
+            let socket_bound = leader_tmux_socket(state).is_some();
             event_log.write(
                 "leader_receiver.fallback_pane_failed",
                 serde_json::json!({
@@ -377,17 +399,28 @@ pub fn deliver_to_leader_fallback_pane(
                     "primary_error": primary_error,
                     "delivered_via": "fallback_pane",
                     "reason": error.to_string(),
+                    "socket_bound": socket_bound,
                 }),
             )?;
+            // Row status is left untouched so status/monitor surfaces the
+            // pending notification until the operator rebinds the leader.
+            let (status, channel) = if socket_bound {
+                (
+                    DeliveryStatus::Blocked,
+                    "rebind_required".to_string(),
+                )
+            } else {
+                (DeliveryStatus::Failed, "fallback_pane".to_string())
+            };
             Ok(DeliveryOutcome {
                 ok: false,
-                status: DeliveryStatus::Failed,
+                status,
                 message_status: MessageStatusShadow("failed".to_string()),
                 message_id: Some(message_id.to_string()),
                 verification: Some(error.to_string()),
                 stage: None,
                 reason: Some(DeliveryRefusal::TmuxTargetMissing),
-                channel: Some("fallback_pane".to_string()),
+                channel: Some(channel),
             })
         }
     }
@@ -445,9 +478,11 @@ pub(crate) fn leader_pane_bound_but_not_live(workspace: &Path, state: &Value) ->
 }
 
 fn leader_pane_is_live(workspace: &Path, state: &Value, pane_id: &str) -> bool {
-    // 0.5.x Phase 1d Batch 4: leader liveness uses factory tmux
-    // channel helpers. Semantics unchanged; `transport_kind`-based
-    // dispatch is the parallel feat/appserver-leader-host work.
+    // 0.5.5 gate054 boundary: when a socket is recorded, liveness is
+    // scoped to that endpoint. Never union with workspace/default targets
+    // (pane ids are only unique per tmux server; a stray same-numbered
+    // pane on another server would falsely report "live" and steer the
+    // fallback path into a cross-team inject).
     if let Some(socket) = leader_tmux_socket(state) {
         return crate::transport_factory::tmux_endpoint_transport(socket)
             .list_targets()

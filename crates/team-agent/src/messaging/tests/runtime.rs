@@ -2848,3 +2848,121 @@ fn gate054_attached_status_still_delivers_when_pane_is_live() {
     );
     assert_eq!(out.message_status.0, "delivered");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// 0.5.5 gate054 B-arm — deliver_to_leader_fallback_pane must not cross to
+// another tmux server by pane id when a socket is recorded.
+//
+// Triage: real-machine acceptance B-fail — primary path (delivery.rs) refused
+// with rebind_required, but report_result's fallback_pane bailout selected a
+// same-numbered pane (%1) on the default tmux server (the main team's leader)
+// and returned leader_notified:true / delivered_via=fallback_pane.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn gate054_fallback_pane_socket_recorded_does_not_cross_to_default_server() {
+    use crate::messaging::deliver_to_leader_fallback_pane;
+    let ws = tmp_ws("gate054fallback");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    // Recorded socket points at a non-existent endpoint (mimics the gate
+    // team's private socket after its leader session was killed). The main
+    // team's default tmux server MAY have a same-numbered `%1` — the fix
+    // must refuse to inject there.
+    let bogus_socket = format!("/tmp/team-agent-gate054-nonexistent-{}", std::process::id());
+    let state = serde_json::json!({
+        "session_name": "team-gate054",
+        "leader_receiver": {
+            "pane_id": "%1",
+            "tmux_socket": bogus_socket,
+            "status": "rebind_required"
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "coordinator", "leader", "fallback payload", None, false, None)
+        .unwrap();
+
+    let outcome = deliver_to_leader_fallback_pane(
+        &ws,
+        &state,
+        &message_id,
+        Some("res_gate054_fallback"),
+        "S3 restart complete",
+        false, // primary was NOT ok (report_result path)
+        Some("primary_delivery_error:leader_not_attached"),
+        &log,
+    )
+    .expect("fallback pane primitive must not panic");
+
+    // Must NOT succeed by crossing to another server.
+    assert!(
+        !outcome.ok,
+        "0.5.5 gate054: fallback_pane must not cross a recorded socket boundary: outcome={outcome:?}"
+    );
+    // Loud-not-silent: caller wire status resolves to rebind_required
+    // (results.rs matches channel or Blocked → 'rebind_required').
+    assert!(
+        outcome.channel.as_deref() == Some("rebind_required")
+            || matches!(outcome.status, DeliveryStatus::Blocked),
+        "0.5.5 gate054: cross-boundary refusal must surface as rebind_required, got outcome={outcome:?}"
+    );
+    // Audit noise: fallback_pane_attempt + fallback_pane_failed with the
+    // recorded socket_bound=true forensic field.
+    let events = log.tail(0).unwrap();
+    let attempt = events
+        .iter()
+        .find(|e| {
+            e.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.fallback_pane_attempt")
+        });
+    assert!(
+        attempt.is_some(),
+        "fallback_pane_attempt audit must fire even on socket-bounded refusal; events={events:?}"
+    );
+    let failed = events.iter().find(|e| {
+        e.get("event").and_then(serde_json::Value::as_str)
+            == Some("leader_receiver.fallback_pane_failed")
+    });
+    assert!(
+        failed.is_some(),
+        "fallback_pane_failed audit must fire when the recorded socket rejects inject; events={events:?}"
+    );
+    assert_eq!(
+        failed
+            .and_then(|e| e.get("socket_bound"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "socket_bound forensic field must record the boundary state"
+    );
+}
+
+#[test]
+fn gate054_fallback_pane_grep_guard_no_cross_server_chain_when_socket_recorded() {
+    // Structural grep: the recorded-socket branch of the fallback inject
+    // chain must NOT compose the workspace or default tmux backends after
+    // the endpoint backend rejects. This is the byte-level fence against
+    // silent regression.
+    let src = include_str!("../leader_receiver.rs");
+    let inject_start = src
+        .find("let inject_result: Result<InjectReport, TransportError>")
+        .expect("fallback inject chain must remain single-typed");
+    let inject_end = src[inject_start..]
+        .find("};\n\n    match inject_result")
+        .map(|off| inject_start + off + 2)
+        .expect("fallback inject chain must terminate before match");
+    let chain = &src[inject_start..inject_end];
+    // The socket-recorded arm is the `Some(socket) => {..}` block. It must
+    // NOT contain a workspace or default fallback.
+    let some_arm_start = chain.find("Some(socket) => {").expect("Some(socket) arm");
+    let some_arm_end = chain[some_arm_start..]
+        .find("None => {")
+        .map(|off| some_arm_start + off)
+        .expect("None arm must follow");
+    let some_arm = &chain[some_arm_start..some_arm_end];
+    assert!(
+        !some_arm.contains("tmux_workspace_transport")
+            && !some_arm.contains("tmux_default_transport"),
+        "0.5.5 gate054: socket-recorded fallback arm must not compose workspace/default backends; arm={some_arm}"
+    );
+}
