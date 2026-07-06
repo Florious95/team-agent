@@ -99,6 +99,7 @@ use rusqlite::params;
             "tasks": tasks,
             "messages": message_counts(&conn, owner_team_id)?,
             "queued_messages": queued_messages(&conn, owner_team_id, 8)?,
+            "pending_leader_notifications": pending_leader_notifications(&conn, owner_team_id, 8)?,
             "results": result_counts(&conn, owner_team_id)?,
             "latest_results": latest_result_summaries(&store, owner_team_id)?,
             "readiness": readiness,
@@ -628,6 +629,67 @@ use rusqlite::params;
                     "delivery_attempts": row.get::<_, i64>(4)?,
                 }))
             };
+        let rows = match owner_team_id {
+            Some(team) => stmt.query_map(params![team, limit], map_row),
+            None => stmt.query_map(params![limit], map_row),
+        }
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let values = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        Ok(Value::Array(values))
+    }
+
+    /// 0.5.5 gate054 round-2: leader notifications that were refused with
+    /// `rebind_required` (status=failed, error=leader_not_attached) sit as
+    /// failed rows in the store; without a dedicated status field the
+    /// operator sees only `messages.failed=N` and cannot tell that the
+    /// notifications are waiting for a rebind. This field surfaces them
+    /// alongside `queued_messages` so `attach-leader` / `takeover` is
+    /// visibly the fix. Once the pane is rebound the requeue path flips
+    /// each row back to `status=accepted` and it drops out of this list.
+    fn pending_leader_notifications(
+        conn: &rusqlite::Connection,
+        owner_team_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Value, CliError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let sql = match owner_team_id {
+            Some(_) => {
+                "select message_id, sender, status, error, created_at, delivery_attempts
+                 from messages
+                 where recipient = 'leader'
+                   and status = 'failed'
+                   and error = 'leader_not_attached'
+                   and owner_team_id = ?1
+                 order by created_at desc
+                 limit ?2"
+            }
+            None => {
+                "select message_id, sender, status, error, created_at, delivery_attempts
+                 from messages
+                 where recipient = 'leader'
+                   and status = 'failed'
+                   and error = 'leader_not_attached'
+                 order by created_at desc
+                 limit ?1"
+            }
+        };
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(json!({
+                "message_id": row.get::<_, String>(0)?,
+                "sender": row.get::<_, Option<String>>(1)?,
+                "status": row.get::<_, String>(2)?,
+                "error": row.get::<_, Option<String>>(3)?,
+                "created_at": row.get::<_, Option<String>>(4)?,
+                "delivery_attempts": row.get::<_, i64>(5)?,
+                "channel": "rebind_required",
+                "action": "run team-agent attach-leader or team-agent takeover",
+            }))
+        };
         let rows = match owner_team_id {
             Some(team) => stmt.query_map(params![team, limit], map_row),
             None => stmt.query_map(params![limit], map_row),
