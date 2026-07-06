@@ -99,9 +99,9 @@ pub use wire::*;
 // pub(crate) 子项 (normalize 的 list helpers、wire 的 dispatch_tool 等) 经此再导出,
 // 使 `#[cfg(test)] mod tests` 的 `use super::*` 与跨子模块引用解析不变。
 pub(crate) use helpers::{
-    delivery_outcome_value, ensure_object, enum_value, insert_array, latest_task_for_assignee,
-    non_empty_string, normalize_token, normalized_envelope_value, object_fields, text_field,
-    text_of_value, tool_error_reason_wire, tool_runtime_error,
+    delivery_outcome_value, ensure_object, enum_value, insert_array, latest_reportable_message_for,
+    latest_task_for_assignee, non_empty_string, normalize_token, normalized_envelope_value,
+    object_fields, text_field, text_of_value, tool_error_reason_wire, tool_runtime_error,
 };
 pub(crate) use normalize::{
     normalize_artifacts, normalize_changes, normalize_next_actions, normalize_risks, normalize_tests,

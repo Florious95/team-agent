@@ -460,6 +460,14 @@ pub fn deliver_pending_message(
             });
         }
     };
+    record_current_turn_after_inject_if_leader_to_worker_scoped(
+        workspace,
+        &message.sender,
+        &message.recipient,
+        message_id,
+        event_log,
+        canonical_owner_team_id.as_deref(),
+    )?;
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
     // Leader pane: inject success is delivery proof. Worker pane: post-submit
@@ -1892,7 +1900,7 @@ pub fn execute_trust_retry(
 }
 
 /// `_record_turn_open_if_leader_to_worker` (`delivery.py:430`):**take-over arm 来自真实投递**
-/// (card §121) —— 仅 leader→worker 注入**成功后**才调 `record_turn_open_after_delivery`,绝不凭空 arm。
+/// (card §121) —— 仅 leader→worker 注入/投递成功后才 arm,绝不凭空 arm。
 pub fn record_turn_open_if_leader_to_worker(
     workspace: &Path,
     state: &serde_json::Value,
@@ -1905,6 +1913,30 @@ pub fn record_turn_open_if_leader_to_worker(
     record_turn_open_if_leader_to_worker_scoped(
         workspace, sender, recipient, delivered, event_log, None,
     )
+}
+
+fn record_current_turn_after_inject_if_leader_to_worker_scoped(
+    workspace: &Path,
+    sender: &str,
+    recipient: &str,
+    message_id: &str,
+    event_log: &EventLog,
+    owner_team_id: Option<&str>,
+) -> Result<(), MessagingError> {
+    if !matches!(sender, "leader" | "Leader") || recipient == "leader" {
+        return Ok(());
+    }
+    let message_id = Some(message_id.to_string());
+    let mut state = scoped_state_for_write(workspace, owner_team_id)?;
+    arm_turn_open(&mut state, recipient, &message_id);
+    save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
+        arm_turn_open(latest, recipient, &message_id);
+    })?;
+    event_log.write(
+        "turn_open.armed_after_inject",
+        serde_json::json!({"agent_id": recipient, "message_id": message_id}),
+    )?;
+    Ok(())
 }
 
 fn record_turn_open_if_leader_to_worker_scoped(
@@ -1941,6 +1973,19 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         obj.insert(
             "turn_open".to_string(),
             serde_json::json!({"armed": true, "node_id": recipient, "turn_id": message_id}),
+        );
+    }
+    if let Some(agent) = root
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(recipient))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        agent.insert(
+            "current_task_id".to_string(),
+            message_id.as_ref().map_or(serde_json::Value::Null, |id| {
+                serde_json::Value::String(id.clone())
+            }),
         );
     }
 }

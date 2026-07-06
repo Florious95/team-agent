@@ -21,9 +21,8 @@ use crate::messaging::{self, MessageTarget, SendOptions};
 
 use super::helpers::{
     delivery_outcome_value, ensure_object, enum_value, insert_array, is_worker_recipient,
-    json_dumps_default, latest_task_for_assignee, latest_uncorrelated_delivered_message_for,
-    non_empty_string, normalized_envelope_value, object_fields, requires_ack_for_target,
-    tool_runtime_error,
+    json_dumps_default, latest_reportable_message_for, latest_task_for_assignee, non_empty_string,
+    normalized_envelope_value, object_fields, requires_ack_for_target, tool_runtime_error,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
@@ -326,9 +325,9 @@ impl TeamOrchestratorTools {
                 //   1. explicit arg
                 //   2. latest nonterminal task assigned to this agent in
                 //      teams.<owner>.tasks (scoped) → top-level tasks
-                //   3. latest delivered direct message to this agent with no
-                //      task id and no result yet (message-scope correlation —
-                //      collect path: is_message_scoped_result)
+                //   3. current/in-flight reportable direct message to this agent
+                //      with no task id and no result yet (message-scope
+                //      correlation — collect path: is_message_scoped_result)
                 //   4. "manual" — truly uncorrelated; collect still rejects
                 let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
                 let resolved = task_id
@@ -344,7 +343,7 @@ impl TeamOrchestratorTools {
                     })
                     .or_else(|| {
                         self.agent_id.as_ref().and_then(|agent| {
-                            latest_uncorrelated_delivered_message_for(
+                            latest_reportable_message_for(
                                 &self.workspace,
                                 agent.as_str(),
                                 owner_team_id_str.as_deref(),

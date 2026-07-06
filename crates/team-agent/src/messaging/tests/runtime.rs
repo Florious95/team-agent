@@ -1575,6 +1575,17 @@ fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
         "0.3.30: positive readback alone must not mark delivered when submit is unverified"
     );
     assert_ne!(out.message_status.0, "delivered");
+    let updated = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        updated.pointer("/coordinator/turn_open/turn_id"),
+        Some(&serde_json::json!(message_id)),
+        "current-turn fact is armed immediately after physical inject succeeds"
+    );
+    assert_eq!(
+        updated.pointer("/agents/w1/current_task_id"),
+        Some(&serde_json::json!(message_id)),
+        "agent current_task_id is armed without marking the message delivered"
+    );
 }
 
 #[test]
