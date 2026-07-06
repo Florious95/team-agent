@@ -101,11 +101,8 @@ fn layer2_backing_missing_refusal_carries_checked_paths_and_recovery_hint() {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let ws = std::env::temp_dir().join(format!(
-        "ta_rs_l2_backingmiss_{}_{}",
-        std::process::id(),
-        n
-    ));
+    let ws =
+        std::env::temp_dir().join(format!("ta_rs_l2_backingmiss_{}_{}", std::process::id(), n));
     std::fs::create_dir_all(&ws).unwrap();
 
     let missing_rollout = ws.join(".missing-rollout.jsonl");
@@ -166,6 +163,148 @@ fn layer2_backing_missing_refusal_carries_checked_paths_and_recovery_hint() {
             other
         ),
     }
+}
+
+fn write_codex_identity_rollout(
+    workspace: &std::path::Path,
+    file_name: &str,
+    session_id: &str,
+    embedded_agent_id: &str,
+) -> std::path::PathBuf {
+    let path = workspace.join(file_name);
+    let text = format!(
+        "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
+         {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
+         {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
+        workspace.to_string_lossy()
+    );
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn restart_refuses_codex_session_identity_mismatch_without_allow_fresh() {
+    let ws = temp_ws();
+    let rollout = write_codex_identity_rollout(
+        &ws,
+        "rollout-frontend-poison.jsonl",
+        "019f3327-c35a-7023-b3cd-1bea93a7a157",
+        "ios-dev",
+    );
+    let state = json!({
+        "agents": {
+            "frontend": {
+                "provider": "codex",
+                "status": "running",
+                "session_id": "019f3327-c35a-7023-b3cd-1bea93a7a157",
+                "rollout_path": rollout.to_string_lossy(),
+                "captured_at": "2026-07-05T17:04:04Z",
+                "captured_via": "fs_watch",
+                "spawn_cwd": ws.to_string_lossy(),
+                "first_send_at": "2026-07-05T17:10:00Z"
+            }
+        }
+    });
+
+    let plan = crate::lifecycle::restart::classify_restart_plan_with_resume_validation(
+        Some(&ws),
+        &state,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(plan.decisions.len(), 1);
+    assert_eq!(plan.decisions[0].decision, ResumeDecision::Refuse);
+    assert_eq!(plan.unresumable.len(), 1);
+    let entry = &plan.unresumable[0];
+    assert_eq!(entry.agent_id.as_str(), "frontend");
+    assert_eq!(entry.reason, "session_identity_mismatch");
+    assert_eq!(
+        entry
+            .refusal_reason
+            .as_ref()
+            .map(crate::provider::session::ResumeRefusalReason::wire),
+        Some("session_identity_mismatch")
+    );
+}
+
+#[test]
+fn restart_identity_probe_reports_real_frontend_ios_dev_mismatch_shape() {
+    let ws = temp_ws();
+    let rollout = write_codex_identity_rollout(
+        &ws,
+        "rollout-frontend-poison.jsonl",
+        "019f3327-c35a-7023-b3cd-1bea93a7a157",
+        "ios-dev",
+    );
+    let rollout_path = crate::provider::RolloutPath::new(rollout.clone());
+    let probe = crate::lifecycle::restart::session_identity_probe_for_agent(
+        &aid("frontend"),
+        crate::provider::Provider::Codex,
+        Some(&rollout_path),
+    );
+    assert_eq!(probe.identity_ok, Some(false));
+    assert_eq!(probe.embedded_agent_id.as_deref(), Some("ios-dev"));
+    assert_eq!(probe.rollout_path.as_deref(), Some(rollout.as_path()));
+}
+
+#[test]
+fn restart_allow_fresh_only_fresh_starts_mismatched_codex_worker() {
+    let ws = temp_ws();
+    let frontend_rollout = write_codex_identity_rollout(
+        &ws,
+        "rollout-frontend-poison.jsonl",
+        "019f3327-c35a-7023-b3cd-1bea93a7a157",
+        "ios-dev",
+    );
+    let backend_rollout = write_codex_identity_rollout(
+        &ws,
+        "rollout-backend-valid.jsonl",
+        "019f3327-backend-valid",
+        "backend",
+    );
+    let state = json!({
+        "agents": {
+            "frontend": {
+                "provider": "codex",
+                "status": "running",
+                "session_id": "019f3327-c35a-7023-b3cd-1bea93a7a157",
+                "rollout_path": frontend_rollout.to_string_lossy(),
+                "captured_at": "2026-07-05T17:04:04Z",
+                "captured_via": "fs_watch",
+                "spawn_cwd": ws.to_string_lossy()
+            },
+            "backend": {
+                "provider": "codex",
+                "status": "running",
+                "session_id": "019f3327-backend-valid",
+                "rollout_path": backend_rollout.to_string_lossy(),
+                "captured_at": "2026-07-05T17:04:05Z",
+                "captured_via": "fs_watch",
+                "spawn_cwd": ws.to_string_lossy()
+            }
+        }
+    });
+
+    let plan = crate::lifecycle::restart::classify_restart_plan_with_resume_validation(
+        Some(&ws),
+        &state,
+        true,
+    )
+    .unwrap();
+
+    assert!(
+        plan.unresumable.is_empty(),
+        "allow_fresh should convert the poisoned worker to fresh without refusing; got {:?}",
+        plan.unresumable
+    );
+    let decisions = plan
+        .decisions
+        .iter()
+        .map(|decision| (decision.agent_id.as_str(), decision.decision))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(decisions.get("frontend"), Some(&ResumeDecision::FreshStart));
+    assert_eq!(decisions.get("backend"), Some(&ResumeDecision::Resume));
 }
 
 #[test]

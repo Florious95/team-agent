@@ -48,6 +48,7 @@ fn copilot_candidate(
             attribution_confidence: Confidence::High,
             spawn_cwd: context.spawn_cwd.clone(),
         },
+        embedded_agent_id: None,
         positive_agent_id_match: false,
         agent_path_match: false,
     }

@@ -98,7 +98,15 @@ pub(super) fn parse_candidate_files(
         } else {
             Confidence::Low
         };
-        let positive_agent_id_match = candidate_text_has_team_agent_id(&text, context);
+        let embedded_agent_id = embedded_team_agent_worker_id_from_text(&text);
+        if embedded_agent_id
+            .as_deref()
+            .is_some_and(|id| id != context.agent_id.as_str())
+        {
+            continue;
+        }
+        let positive_agent_id_match = candidate_text_has_team_agent_id(&text, context)
+            || embedded_agent_id.as_deref() == Some(context.agent_id.as_str());
         let agent_path_match = candidate_path_matches_agent_id(&path, context);
         if matches!(provider, Provider::Claude | Provider::ClaudeCode)
             && super::claude::records_have_leader_marker(&records)
@@ -113,6 +121,7 @@ pub(super) fn parse_candidate_files(
                 attribution_confidence,
                 spawn_cwd: context.spawn_cwd.clone(),
             },
+            embedded_agent_id,
             positive_agent_id_match,
             agent_path_match,
         });
@@ -308,6 +317,28 @@ fn candidate_text_has_team_agent_id(text: &str, context: &CaptureSessionContext)
     .any(|needle| text.contains(needle))
 }
 
+pub(crate) fn embedded_team_agent_worker_id_from_text(text: &str) -> Option<String> {
+    const PREFIX: &str = "You are Team Agent worker `";
+    let start = text.find(PREFIX)? + PREFIX.len();
+    let rest = &text[start..];
+    let end = rest.find('`')?;
+    let id = &rest[..end];
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+pub(crate) fn rollout_path_embedded_team_agent_worker_id(path: &Path) -> Option<String> {
+    read_head_text(path, CAPTURE_HEAD_BYTES)
+        .ok()
+        .and_then(|text| embedded_team_agent_worker_id_from_text(&text))
+}
+
 fn candidate_path_matches_agent_id(path: &Path, context: &CaptureSessionContext) -> bool {
     let id = context.agent_id.as_str();
     if id.is_empty() {
@@ -347,4 +378,89 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
 fn path_is_under_team_runtime(path: &Path) -> bool {
     path.components()
         .any(|c| c.as_os_str() == std::ffi::OsStr::new(".team"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("ta-session-scan-{name}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn write_codex_rollout(path: &Path, cwd: &Path, session_id: &str, embedded_agent_id: &str) {
+        let text = format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
+             {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
+             {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
+            cwd.to_string_lossy()
+        );
+        std::fs::write(path, text).expect("write codex rollout");
+    }
+
+    #[test]
+    fn codex_prompt_worker_identity_is_a_positive_match() {
+        let dir = temp_dir("positive");
+        let rollout = dir.join("rollout-frontend.jsonl");
+        write_codex_rollout(&rollout, &dir, "sess-frontend", "frontend");
+        let context = CaptureSessionContext {
+            agent_id: "frontend".to_string(),
+            spawn_cwd: dir.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        let candidates = parse_candidate_files(
+            Provider::Codex,
+            &context,
+            vec![SessionCandidate {
+                path: rollout.clone(),
+                requires_cwd_match: false,
+            }],
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            candidates[0].positive_agent_id_match,
+            "Codex transcript prompt identity must be treated as a positive worker id source"
+        );
+        let _ = std::fs::remove_file(&rollout);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_prompt_worker_identity_mismatch_is_rejected_for_that_agent() {
+        let dir = temp_dir("mismatch");
+        let rollout = dir.join("rollout-ios-dev.jsonl");
+        write_codex_rollout(&rollout, &dir, "sess-ios-dev", "ios-dev");
+        let context = CaptureSessionContext {
+            agent_id: "frontend".to_string(),
+            spawn_cwd: dir.clone(),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        let candidates = parse_candidate_files(
+            Provider::Codex,
+            &context,
+            vec![SessionCandidate {
+                path: rollout.clone(),
+                requires_cwd_match: false,
+            }],
+        );
+        assert!(
+            candidates.is_empty(),
+            "state agent=frontend must not accept a Codex rollout whose prompt says ios-dev"
+        );
+        let _ = std::fs::remove_file(&rollout);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -374,6 +374,8 @@ fn spawn_agents(
                 );
             }
         }
+        let spawn_epoch = u64::try_from(started.len()).unwrap_or(u64::MAX);
+        let spawned_at = spawn_timestamp_for_agent(u32::try_from(spawn_epoch).unwrap_or(u32::MAX));
         // E6 层1 实证3 + 诊断留痕:落最终 worker argv(spawn 前的真实形态)。
         // 任何"--session-id 预定 UUID 没生效"必须能从 events.jsonl 回答:argv 里到底有没有它。
         // 抽出 --session-id 值单列,方便和盘上 ~/.claude/projects/<cwd> 实际落的 UUID 对账。
@@ -393,6 +395,10 @@ fn spawn_agents(
                     "argv": plan.argv,
                     "session_id_in_argv": session_id_in_argv,
                     "expected_session_id": plan.expected_session_id.as_ref().map(|s| s.as_str()),
+                    "spawn_cwd": workspace.to_string_lossy(),
+                    "spawned_at": spawned_at.as_str(),
+                    "source": "launch",
+                    "spawn_epoch": spawn_epoch,
                 }),
             );
         }
@@ -473,6 +479,7 @@ fn spawn_agents(
             agent_id,
             start_mode: StartMode::Fresh,
             target: spawn.pane_id.as_str().to_string(),
+            spawned_at,
             session_id: None,
             rollout_path: None,
             pending_session_id: plan.expected_session_id.clone(),
@@ -872,7 +879,9 @@ fn persist_spawn_agent_state(
             continue;
         }
         let pane_pid = pane_pids_by_agent.get(id).copied();
-        let spawned_at = spawn_timestamp_for_agent(spawn_index);
+        let spawned_at = started_agent
+            .map(|started| started.spawned_at.clone())
+            .unwrap_or_else(|| spawn_timestamp_for_agent(spawn_index));
         spawn_index = spawn_index.saturating_add(1);
         agents.insert(
             id.to_string(),
@@ -2970,11 +2979,10 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     // `state.transport.shim.pipe_ready = true` marker so its
     // `conpty_pipe_ready` gate opens.
     #[cfg(windows)]
-    let state_value = std::fs::read_to_string(crate::state::persist::runtime_state_path(
-        &workspace,
-    ))
-    .ok()
-    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let state_value =
+        std::fs::read_to_string(crate::state::persist::runtime_state_path(&workspace))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
     #[cfg(windows)]
     let input = match state_value.as_ref() {
         Some(v) => input.with_state(Some(v)),

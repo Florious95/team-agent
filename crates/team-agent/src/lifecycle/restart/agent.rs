@@ -256,7 +256,21 @@ pub(crate) fn start_agent_at_paths(
     // after spawn" race with coordinator and no double source of truth.
     crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
     let team_key = restart_projection_team_key(&state, team);
-    save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
+    let skip_capture_backfill = if matches!(
+        start_mode,
+        StartMode::Fresh | StartMode::FreshAfterMissingRollout
+    ) {
+        vec![agent_id.as_str()]
+    } else {
+        Vec::new()
+    };
+    save_restart_projected_state_with_capture_backfill_skip(
+        workspace,
+        &mut state,
+        &team_key,
+        &skip_capture_backfill,
+        &[agent_id.as_str()],
+    )?;
     write_start_agent_start_event(
         workspace,
         agent_id,

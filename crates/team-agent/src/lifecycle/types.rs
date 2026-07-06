@@ -440,6 +440,7 @@ pub struct StartedAgent {
     pub agent_id: AgentId,
     pub start_mode: StartMode,
     pub target: String,
+    pub spawned_at: String,
     pub session_id: Option<SessionId>,
     pub rollout_path: Option<RolloutPath>,
     pub pending_session_id: Option<SessionId>,

@@ -17,6 +17,7 @@ use super::StateError;
 use crate::state::persist::{
     load_runtime_state, save_runtime_state_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority,
+    save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents,
 };
@@ -595,7 +596,7 @@ pub(crate) fn save_team_scoped_state_with_tombstone_lifecycle_topology_authority
     team_state: &Value,
     agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_team_scoped_state_with_merge_options(workspace, team_state, &[], agent_ids, agent_ids)
+    save_team_scoped_state_with_merge_options(workspace, team_state, &[], agent_ids, &[], agent_ids)
 }
 
 pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority(
@@ -603,7 +604,23 @@ pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority(
     team_state: &Value,
     agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_team_scoped_state_with_merge_options(workspace, team_state, &[], &[], agent_ids)
+    save_team_scoped_state_with_merge_options(workspace, team_state, &[], &[], &[], agent_ids)
+}
+
+pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+    workspace: &Path,
+    team_state: &Value,
+    skip_capture_backfill_agent_ids: &[&str],
+    topology_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_team_scoped_state_with_merge_options(
+        workspace,
+        team_state,
+        &[],
+        &[],
+        skip_capture_backfill_agent_ids,
+        topology_agent_ids,
+    )
 }
 
 fn save_team_scoped_state_with_merge_exceptions(
@@ -618,6 +635,7 @@ fn save_team_scoped_state_with_merge_exceptions(
         deleted_agent_ids,
         tombstoned_agent_ids,
         &[],
+        &[],
     )
 }
 
@@ -626,6 +644,7 @@ fn save_team_scoped_state_with_merge_options(
     team_state: &Value,
     deleted_agent_ids: &[&str],
     tombstoned_agent_ids: &[&str],
+    skip_capture_backfill_agent_ids: &[&str],
     topology_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let target_key = team_state_key(team_state);
@@ -669,10 +688,28 @@ fn save_team_scoped_state_with_merge_options(
                     topology_agent_ids,
                 );
             }
+            if !skip_capture_backfill_agent_ids.is_empty() {
+                return save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+                    workspace,
+                    &merged,
+                    &target_key,
+                    skip_capture_backfill_agent_ids,
+                    topology_agent_ids,
+                );
+            }
             return save_runtime_state_with_lifecycle_topology_authority(
                 workspace,
                 &merged,
                 topology_agent_ids,
+            );
+        }
+        if !skip_capture_backfill_agent_ids.is_empty() {
+            return save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+                workspace,
+                &merged,
+                &target_key,
+                skip_capture_backfill_agent_ids,
+                &[],
             );
         }
         if tombstoned_agent_ids.is_empty() {
@@ -709,10 +746,28 @@ fn save_team_scoped_state_with_merge_options(
     }
     if tombstoned_agent_ids.is_empty() {
         if !topology_agent_ids.is_empty() {
-            save_runtime_state_with_lifecycle_topology_authority(
+            if !skip_capture_backfill_agent_ids.is_empty() {
+                save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+                    workspace,
+                    &Value::Object(merged),
+                    &target_key,
+                    skip_capture_backfill_agent_ids,
+                    topology_agent_ids,
+                )
+            } else {
+                save_runtime_state_with_lifecycle_topology_authority(
+                    workspace,
+                    &Value::Object(merged),
+                    topology_agent_ids,
+                )
+            }
+        } else if !skip_capture_backfill_agent_ids.is_empty() {
+            save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
                 workspace,
                 &Value::Object(merged),
-                topology_agent_ids,
+                &target_key,
+                skip_capture_backfill_agent_ids,
+                &[],
             )
         } else {
             save_runtime_state_with_deleted_agents(

@@ -49,6 +49,10 @@
       "expected_session_id": null,
       "provider": "codex",
       "session_id_in_argv": null,
+      "source": "launch",
+      "spawn_cwd": "<WORKSPACE>",
+      "spawn_epoch": 0,
+      "spawned_at": "<TS>",
       "ts": "<TS>"
     },
     {
@@ -89,6 +93,10 @@
       "expected_session_id": null,
       "provider": "codex",
       "session_id_in_argv": null,
+      "source": "launch",
+      "spawn_cwd": "<WORKSPACE>",
+      "spawn_epoch": 1,
+      "spawned_at": "<TS>",
       "ts": "<TS>"
     },
     {
@@ -475,6 +483,10 @@
               "expected_session_id": null,
               "provider": "codex",
               "session_id_in_argv": null,
+              "source": "launch",
+              "spawn_cwd": "<WORKSPACE>",
+              "spawn_epoch": 0,
+              "spawned_at": "<TS>",
               "ts": "<TS>"
             },
             {
@@ -515,6 +527,10 @@
               "expected_session_id": null,
               "provider": "codex",
               "session_id_in_argv": null,
+              "source": "launch",
+              "spawn_cwd": "<WORKSPACE>",
+              "spawn_epoch": 1,
+              "spawned_at": "<TS>",
               "ts": "<TS>"
             }
           ],
