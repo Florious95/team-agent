@@ -493,6 +493,60 @@ fn seed_team_spec(ws: &std::path::Path) {
         .unwrap();
     }
     #[test]
+    fn remove_agent_spec_running_refusal_lists_all_required_flags_once() {
+        let ws = tmp_workspace();
+        seed_remove_agent_workspace(&ws, "running");
+        let out = json_output(
+            cmd_remove_agent(&RemoveAgentArgs {
+                agent: "fake_impl".to_string(),
+                workspace: ws.clone(),
+                team: None,
+                from_spec: false,
+                confirm: false,
+                force: false,
+                json: true,
+            })
+            .unwrap(),
+        );
+        assert_eq!(out["ok"], json!(false));
+        assert_eq!(out["status"], json!("refused"));
+        assert_eq!(out["reason"], json!("remove_agent_flags_required"));
+        for flag in ["--from-spec", "--confirm", "--force"] {
+            assert!(
+                out["error"].as_str().is_some_and(|s| s.contains(flag))
+                    && out["action"].as_str().is_some_and(|s| s.contains(flag))
+                    && out["command"].as_str().is_some_and(|s| s.contains(flag)),
+                "refusal must mention {flag} in error/action/copyable command; got {out}"
+            );
+        }
+        let with_confirm = json_output(
+            cmd_remove_agent(&RemoveAgentArgs {
+                agent: "fake_impl".to_string(),
+                workspace: ws.clone(),
+                team: None,
+                from_spec: false,
+                confirm: true,
+                force: false,
+                json: true,
+            })
+            .unwrap(),
+        );
+        assert_eq!(with_confirm["reason"], json!("remove_agent_flags_required"));
+        for flag in ["--from-spec", "--confirm", "--force"] {
+            assert!(
+                with_confirm["error"].as_str().is_some_and(|s| s.contains(flag))
+                    && with_confirm["action"].as_str().is_some_and(|s| s.contains(flag))
+                    && with_confirm["command"].as_str().is_some_and(|s| s.contains(flag)),
+                "refusal with --confirm must still give the full command including {flag}; got {with_confirm}"
+            );
+        }
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert!(
+            state["agents"].get("fake_impl").is_some(),
+            "refused remove-agent must not delete the spec-defined running agent"
+        );
+    }
+    #[test]
     fn remove_agent_running_refusal_is_not_success_envelope() {
         let ws = tmp_workspace();
         seed_remove_agent_workspace(&ws, "running");

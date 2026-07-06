@@ -609,6 +609,15 @@ pub struct ForkAgentReport {
     pub session_id: Option<SessionId>,
 }
 
+/// Read-only remove-agent flag requirements for the target's current state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveAgentFlagRequirements {
+    pub agent_id: AgentId,
+    pub from_spec_required: bool,
+    pub force_required: bool,
+    pub has_session: bool,
+}
+
 /// `remove_agent(...)` 结果(`agents.py:54/56/150`)。`_RemoveRollback` 快照
 /// spec/state/team_state/role_file/agent_health 字节级回滚(Gap 16)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,6 +633,12 @@ pub enum RemoveAgentOutcome {
     RefusedFromSpecConfirm { agent_id: AgentId },
     /// 运行中未传 force(`agents.py:56`)。
     RefusedForceRequired { agent_id: AgentId },
+    /// Multiple required destructive flags are absent; report them together.
+    RefusedRequiredFlags {
+        agent_id: AgentId,
+        from_spec_required: bool,
+        force_required: bool,
+    },
 }
 
 /// `restart(...)` 结果(`orchestration.py:114/142/387`)。Route B:**先全量验证**

@@ -60,15 +60,37 @@ pub fn remove_agent_with_transport(
     )
 }
 
-fn remove_agent_at_paths(
+pub fn remove_agent_flag_requirements(
+    workspace: &Path,
+    agent_id: &AgentId,
+    team: Option<&str>,
+) -> Result<RemoveAgentFlagRequirements, LifecycleError> {
+    let paths = lifecycle_paths(workspace, team)?;
+    let transport =
+        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    Ok(remove_agent_preflight(
+        &paths.run_workspace,
+        &paths.spec_workspace,
+        agent_id,
+        team,
+        &transport,
+    )?
+    .requirements)
+}
+
+struct RemoveAgentPreflight {
+    state: serde_json::Value,
+    spec: YamlValue,
+    requirements: RemoveAgentFlagRequirements,
+}
+
+fn remove_agent_preflight(
     workspace: &Path,
     spec_workspace: &Path,
     agent_id: &AgentId,
-    from_spec: bool,
-    force: bool,
     team: Option<&str>,
     transport: &dyn crate::transport::Transport,
-) -> Result<RemoveAgentOutcome, LifecycleError> {
+) -> Result<RemoveAgentPreflight, LifecycleError> {
     // golden agents.py:34-41: resolve_team_scoped_state FIRST (surfaces the team_target_ambiguous /
     // team_target_unresolved refusal before the owner gate), THEN the owner gate, THEN load_spec +
     // _find_worker (unknown-worker raise). Mirror the stop/reset wiring so remove is byte-symmetric:
@@ -80,27 +102,84 @@ fn remove_agent_at_paths(
         return Err(unknown_worker(agent_id));
     };
     let dynamic_agent = is_dynamic_agent(&state, spec_agent, agent_id);
-    if !dynamic_agent && !from_spec {
-        return Ok(RemoveAgentOutcome::RefusedFromSpecConfirm {
+    let force_required = agent_is_running(&state, agent_id, transport);
+    let has_session = state
+        .get("session_name")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+        || state
+            .get("agents")
+            .and_then(|v| v.get(agent_id.as_str()))
+            .is_some_and(agent_has_session);
+    Ok(RemoveAgentPreflight {
+        state,
+        spec,
+        requirements: RemoveAgentFlagRequirements {
             agent_id: agent_id.clone(),
-        });
-    }
-    if agent_is_running(&state, agent_id, transport) && !force {
-        return Ok(RemoveAgentOutcome::RefusedForceRequired {
-            agent_id: agent_id.clone(),
+            from_spec_required: !dynamic_agent,
+            force_required,
+            has_session,
+        },
+    })
+}
+
+fn agent_has_session(agent: &serde_json::Value) -> bool {
+    ["session_id", "_pending_session_id", "rollout_path"]
+        .iter()
+        .any(|key| {
+            agent
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+        })
+}
+
+fn remove_agent_at_paths(
+    workspace: &Path,
+    spec_workspace: &Path,
+    agent_id: &AgentId,
+    from_spec: bool,
+    force: bool,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+) -> Result<RemoveAgentOutcome, LifecycleError> {
+    let preflight = remove_agent_preflight(workspace, spec_workspace, agent_id, team, transport)?;
+    let missing_from_spec = preflight.requirements.from_spec_required && !from_spec;
+    let missing_force = preflight.requirements.force_required && !force;
+    if missing_from_spec || missing_force {
+        return Ok(if missing_from_spec && missing_force {
+            RemoveAgentOutcome::RefusedRequiredFlags {
+                agent_id: agent_id.clone(),
+                from_spec_required: true,
+                force_required: true,
+            }
+        } else if missing_from_spec {
+            RemoveAgentOutcome::RefusedFromSpecConfirm {
+                agent_id: agent_id.clone(),
+            }
+        } else {
+            RemoveAgentOutcome::RefusedForceRequired {
+                agent_id: agent_id.clone(),
+            }
         });
     }
     let paths = LifecyclePathRefs {
         run_workspace: workspace,
         spec_workspace,
     };
-    let mut rollback = RemoveRollback::capture(paths.run_workspace, paths.spec_workspace, &spec, &state, agent_id)?;
-    rollback.restore_running = force && agent_is_running(&state, agent_id, transport);
+    let mut rollback = RemoveRollback::capture(
+        paths.run_workspace,
+        paths.spec_workspace,
+        &preflight.spec,
+        &preflight.state,
+        agent_id,
+    )?;
+    rollback.restore_running = force && preflight.requirements.force_required;
     let result = remove_agent_inner(
         &paths,
         agent_id,
-        &spec,
-        state,
+        &preflight.spec,
+        preflight.state,
         force,
         team,
         transport,
