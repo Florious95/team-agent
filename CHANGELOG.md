@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.5
+
+- **Fix: `send` accepted ≠ delivered — semantic split with `delivery_status` field.** The response envelope now carries a `delivery_status` field (`delivered` / `blocked` / `queued_pane_missing` / …) separate from the top-level `ok` / `status`. `accepted` means the message entered the queue; `delivered` means it reached the tmux target. Callers can now distinguish physical delivery from queue acceptance without parsing `reason`.
+- **Fix: `--watch-result` observes initial delivery, not just result collection.** When a worker window is missing at send time, `--watch-result` no longer registers a result watcher before the message has been physically delivered. The response carries `"channel": "delivery_blocked"` and no `watch` key until delivery succeeds.
+- **Fix: tmux target missing classified as recoverable `blocked`, not permanent failure.** `queued_pane_missing` is now a typed blocked status. The message stays in the queue and is replayed when `start-agent` repairs the missing window.
+- **Fix: `start-agent` repair replays blocked messages with the same `message_id` (idempotent).** When a worker window is repaired, queued messages are redelivered using their original `message_id`. Replaying the same id a second time is a no-op — the coordinator deduplicates by id, so retry-safe callers receive exactly-once semantics.
+- **Fix: leader notification delivery enforces socket boundary exclusivity.** Leader receiver delivery now requires that the target pane's tmux socket matches the recorded `leader_receiver` socket. Cross-server delivery (fallback to a pane on a different tmux server) is refused when a socket is on record, preventing silent delivery to the wrong server.
+- **Fix: `fallback_pane` boundary enforced with loud refusal.** When a `fallback_pane` would cross to a different tmux server than the recorded socket, delivery is refused with a structured error rather than silently delivering to the wrong pane.
+- **Fix: pending leader notifications replayed after `attach-leader` re-bind.** When a leader receiver is re-attached (via `attach-app-server-leader` or equivalent), any leader-bound messages that failed delivery while the receiver was absent are now replayed. `status` exposes these as `pending_leader_notifications` so operators can observe the replay queue before and after attachment.
+
 ## 0.5.4
 
 - **Fix: Codex session identity crossbind — same-cwd multi-worker capture corrected.** When multiple Codex workers start in the same working directory, session attribution previously relied on recency and could assign a session to the wrong worker. Sessions are now attributed by reading the embedded `TEAM_AGENT_AGENT_ID` identity marker from the rollout transcript head. Real-machine acceptance: 8 same-cwd Codex workers each captured a distinct session, with `attribution_confidence: high` for all eight.
