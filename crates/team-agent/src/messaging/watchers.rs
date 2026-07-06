@@ -436,45 +436,61 @@ pub fn requeue_after_claim_leader(
             }),
         )?;
     }
-    // #231 C-5: requeue blocked leader-bound messages that hit I-4 `rebind_required`
-    // while no leader pane was attached. Same row, same message_id — flip status back
-    // from `failed`/`leader_not_attached` to `accepted` so `deliver_pending_messages`
-    // replays it through the SAME pipeline. The leader_notification_log PK is already
-    // there (primitive wrote it before the unbound check), so this replay can't create
-    // a duplicate notification — exactly-once across rebind, no new send/notify rows.
-    let requeued_blocked = conn.execute(
-        "update messages
-         set status = 'accepted',
-             error = null,
-             updated_at = ?3
-         where recipient = 'leader'
-           and status = 'failed'
-           and error = 'leader_not_attached'
-           and owner_team_id = ?1",
-        params![
-            owner_team_id.as_str(),
-            claimed_pane_id.as_str(),
-            chrono::Utc::now().to_rfc3339(),
-        ],
-    )?;
-    if requeued_blocked > 0 {
-        event_log.write(
-            "leader_receiver.blocked_messages_requeued",
-            serde_json::json!({
-                "team_id": owner_team_id.as_str(),
-                "claimed_pane_id": claimed_pane_id.as_str(),
-                "count": requeued_blocked,
-            }),
-        )?;
-    }
-    if !out.is_empty() {
+    let requeued_blocked =
+        requeue_blocked_leader_messages(&conn, event_log, owner_team_id, claimed_pane_id)?;
+    if !out.is_empty() || requeued_blocked > 0 {
         let _ = retry_result_deliveries(workspace, event_log)?;
     }
     Ok(out)
 }
 
+/// 0.5.5 gate054 round-2: attach-leader (and claim-leader) requeue for leader messages
+/// that were refused with `rebind_required` while no leader pane was attached.
+///
+/// #231 C-5 semantics: same row, same message_id — flip `status` back from
+/// `failed`/`leader_not_attached` to `accepted` so `deliver_pending_messages`
+/// replays it through the SAME pipeline. The `leader_notification_log` PK is
+/// already there (primitive wrote it before the unbound check), so this replay
+/// cannot create a duplicate notification — exactly-once across rebind, no new
+/// send/notify rows and no second replay mechanism.
+pub(crate) fn requeue_blocked_leader_messages(
+    conn: &rusqlite::Connection,
+    event_log: &EventLog,
+    owner_team_id: &TeamKey,
+    claimed_pane_id: &PaneId,
+) -> Result<usize, MessagingError> {
+    let requeued = conn.execute(
+        "update messages
+         set status = 'accepted',
+             error = null,
+             updated_at = ?2
+         where recipient = 'leader'
+           and status = 'failed'
+           and error = 'leader_not_attached'
+           and owner_team_id = ?1",
+        params![owner_team_id.as_str(), chrono::Utc::now().to_rfc3339()],
+    )?;
+    if requeued > 0 {
+        event_log.write(
+            "leader_receiver.blocked_messages_requeued",
+            serde_json::json!({
+                "team_id": owner_team_id.as_str(),
+                "claimed_pane_id": claimed_pane_id.as_str(),
+                "count": requeued,
+            }),
+        )?;
+    }
+    Ok(requeued)
+}
+
 /// `requeue_delivery_exhausted_watchers`: attach-leader 成功后把已经耗尽投递
 /// 重试的 watcher 放回 notify_failed, 留给 coordinator tick 重试投递。
+///
+/// 0.5.5 gate054 round-2: also requeue direct leader messages that were refused
+/// with `rebind_required` (status=failed / error=leader_not_attached). Without
+/// this the direct `report_result` path leaves a failed row that
+/// `deliver_pending_messages` never re-picks — the new leader would never see the
+/// pending notification.
 pub fn requeue_delivery_exhausted_watchers(
     _workspace: &Path,
     store: &MessageStore,
@@ -522,6 +538,7 @@ pub fn requeue_delivery_exhausted_watchers(
         )?;
     }
     drop(stmt);
+    let _ = requeue_blocked_leader_messages(&conn, event_log, owner_team_id, claimed_pane_id)?;
     Ok(out)
 }
 

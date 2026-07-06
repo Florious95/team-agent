@@ -541,6 +541,7 @@
           "leader_topology": "managed",
           "messages": {},
           "ok": true,
+          "pending_leader_notifications": [],
           "pending_session_agent_ids": [],
           "queued_messages": [],
           "readiness": {

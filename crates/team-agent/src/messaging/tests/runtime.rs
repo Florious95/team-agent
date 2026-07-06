@@ -2938,6 +2938,164 @@ fn gate054_fallback_pane_socket_recorded_does_not_cross_to_default_server() {
 }
 
 #[test]
+fn gate054_rebind_replay_requeues_failed_leader_message_on_attach() {
+    // Round-2 real-machine shape: direct report_result → primary refused with
+    // rebind_required → row is `status=failed, error=leader_not_attached`.
+    // `attach-leader` must requeue it back to `status=accepted` so the
+    // coordinator tick's `deliver_pending_messages` replays it to the new
+    // leader pane. Same message_id — no second replay mechanism, no new
+    // watcher, exactly-once via leader_notification_log PK.
+    use crate::model::ids::TeamKey;
+    let ws = tmp_ws("gate054replay");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let team_id = "gate055r2b";
+
+    // Seed the same shape the primary-path refusal leaves behind.
+    let message_id = store
+        .create_message(
+            None,
+            "probe-worker",
+            "leader",
+            "B2_NOTIFY report_result payload",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    store
+        .mark(&message_id, "failed", Some("leader_not_attached"))
+        .unwrap();
+    // Sanity: precondition matches acceptance evidence.
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    let (status_before, error_before): (String, Option<String>) = conn
+        .query_row(
+            "select status, error from messages where message_id = ?1",
+            [&message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status_before, "failed");
+    assert_eq!(error_before.as_deref(), Some("leader_not_attached"));
+
+    // The attach-leader path calls requeue_delivery_exhausted_watchers with
+    // the newly-claimed pane. Even with NO exhausted watchers to requeue,
+    // it must flip the blocked leader row back to accepted.
+    let team = TeamKey::new(team_id);
+    let new_pane = PaneId::new("%1"); // new leader window on the private socket
+    let notices = crate::messaging::requeue_delivery_exhausted_watchers(
+        &ws, &store, &log, &team, &new_pane,
+    )
+    .unwrap();
+    assert!(
+        notices.is_empty(),
+        "no exhausted watchers seeded → no watcher notices; only the message row should have been requeued"
+    );
+
+    let (status_after, error_after): (String, Option<String>) = conn
+        .query_row(
+            "select status, error from messages where message_id = ?1",
+            [&message_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        status_after, "accepted",
+        "gate054 round-2: rebind_required leader row must flip back to 'accepted' on attach-leader"
+    );
+    assert!(
+        error_after.is_none(),
+        "gate054 round-2: error must be cleared on requeue so deliver_pending_message replays cleanly"
+    );
+
+    // Audit noise: leader_receiver.blocked_messages_requeued fired with the
+    // exact team + claimed pane + count for status/monitor observability.
+    let events = log.tail(0).unwrap();
+    let requeued = events.iter().find(|e| {
+        e.get("event").and_then(serde_json::Value::as_str)
+            == Some("leader_receiver.blocked_messages_requeued")
+    });
+    assert!(
+        requeued.is_some(),
+        "attach-leader requeue of blocked leader messages must audit; events={events:?}"
+    );
+    assert_eq!(
+        requeued
+            .and_then(|e| e.get("count"))
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        requeued
+            .and_then(|e| e.get("team_id"))
+            .and_then(serde_json::Value::as_str),
+        Some(team_id)
+    );
+}
+
+#[test]
+fn gate054_status_surfaces_pending_leader_notifications() {
+    // Round-2: user-facing visibility — status must show the blocked leader
+    // notification as pending, not just as `messages.failed=1`.
+    use crate::cli::status_port::status_scoped;
+    let ws = tmp_ws("gate054status");
+    let store = store_for(&ws);
+    let team_id = "gate055r2b";
+
+    let message_id = store
+        .create_message(
+            None,
+            "probe-worker",
+            "leader",
+            "B2_NOTIFY report_result payload",
+            None,
+            false,
+            Some(team_id),
+        )
+        .unwrap();
+    store
+        .mark(&message_id, "failed", Some("leader_not_attached"))
+        .unwrap();
+
+    // Minimal runtime state so status can render.
+    let state = serde_json::json!({
+        "session_name": format!("team-{team_id}"),
+        "active_team_key": team_id,
+        "teams": {team_id: {"team_key": team_id}},
+        "leader_receiver": {
+            "pane_id": "%1",
+            "status": "rebind_required",
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+    let payload = status_scoped(&ws, &state, Some(team_id), false, false).unwrap();
+    let pending = payload
+        .get("pending_leader_notifications")
+        .and_then(serde_json::Value::as_array)
+        .expect("status must expose pending_leader_notifications as an array");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the blocked leader message must appear in pending_leader_notifications"
+    );
+    let entry = &pending[0];
+    assert_eq!(
+        entry.get("message_id").and_then(serde_json::Value::as_str),
+        Some(message_id.as_str())
+    );
+    assert_eq!(
+        entry.get("channel").and_then(serde_json::Value::as_str),
+        Some("rebind_required")
+    );
+    assert!(entry
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|action| action.contains("attach-leader")
+            || action.contains("takeover")));
+}
+
+#[test]
 fn gate054_fallback_pane_grep_guard_no_cross_server_chain_when_socket_recorded() {
     // Structural grep: the recorded-socket branch of the fallback inject
     // chain must NOT compose the workspace or default tmux backends after
