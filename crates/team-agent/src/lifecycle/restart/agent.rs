@@ -143,10 +143,8 @@ pub(crate) fn start_agent_at_paths(
         if let Ok(spec) = load_team_spec(spec_workspace) {
             write_team_state(spec_workspace, &spec, &state)?;
         }
+        replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
         let coordinator_started = start_coordinator_for_workspace(workspace)?;
-        requeue_and_deliver_worker_target_missing_messages(
-            workspace, agent_id, &team_key, &state, transport,
-        )?;
         let target = format!("{}:{window}", session_name.as_str());
         write_start_agent_noop_event(workspace, agent_id, &target, coordinator_started)?;
         return Ok(StartAgentOutcome::Noop {
@@ -285,10 +283,8 @@ pub(crate) fn start_agent_at_paths(
         spawn_session_id,
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
+    replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
     let coordinator_started = start_coordinator_for_workspace(workspace)?;
-    requeue_and_deliver_worker_target_missing_messages(
-        workspace, agent_id, &team_key, &state, transport,
-    )?;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),
@@ -303,7 +299,7 @@ pub(crate) fn start_agent_at_paths(
     })
 }
 
-fn requeue_and_deliver_worker_target_missing_messages(
+fn replay_worker_target_missing_messages(
     workspace: &Path,
     agent_id: &AgentId,
     team_key: &str,
@@ -321,14 +317,9 @@ fn requeue_and_deliver_worker_target_missing_messages(
         Some(team_key),
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    for message_id in ids {
-        crate::messaging::delivery::deliver_pending_message(
-            workspace,
-            &store,
-            transport,
-            &message_id,
-            &event_log,
-            state,
+    if !ids.is_empty() {
+        crate::messaging::delivery::deliver_pending_messages(
+            workspace, state, transport, &event_log,
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     }

@@ -165,7 +165,7 @@ pub fn deliver_pending_message(
     };
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
-    } else if message.status == "target_resolved" {
+    } else if message.status == "target_resolved" && message.error.is_some() {
         bump_delivery_attempts(store, message_id)?
     } else {
         return Ok(DeliveryOutcome {
@@ -1643,6 +1643,7 @@ struct PendingMessage {
     task_id: Option<String>,
     owner_team_id: Option<String>,
     status: String,
+    error: Option<String>,
     delivery_attempts: u32,
 }
 
@@ -1653,7 +1654,7 @@ fn message_for_delivery(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let message = conn
         .query_row(
-            "select sender, recipient, content, task_id, owner_team_id, status, delivery_attempts from messages where message_id = ?1",
+            "select sender, recipient, content, task_id, owner_team_id, status, error, delivery_attempts from messages where message_id = ?1",
             params![message_id],
             |row| {
                 Ok(PendingMessage {
@@ -1663,7 +1664,8 @@ fn message_for_delivery(
                     task_id: row.get::<_, Option<String>>(3)?,
                     owner_team_id: row.get::<_, Option<String>>(4)?,
                     status: row.get::<_, String>(5)?,
-                    delivery_attempts: row.get::<_, i64>(6)?.max(0) as u32,
+                    error: row.get::<_, Option<String>>(6)?,
+                    delivery_attempts: row.get::<_, i64>(7)?.max(0) as u32,
                 })
             },
         )

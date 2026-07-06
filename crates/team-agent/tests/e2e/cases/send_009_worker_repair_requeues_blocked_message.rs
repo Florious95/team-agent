@@ -35,6 +35,8 @@ fn send_009_worker_repair_requeues_blocked_message() {
     let j = out.json();
     assert_json_field_eq_str(&j, "/message_id", mid);
     assert_json_field_eq_str(&j, "/message_status", "queued_pane_missing");
+    let before = message_row(&ws, mid).expect("blocked message row exists");
+    assert_eq!(before.status, "queued_pane_missing");
 
     let start = run_ta(
         &ws,
@@ -61,8 +63,16 @@ fn send_009_worker_repair_requeues_blocked_message() {
         || message_status(&ws, mid).as_deref() == Some("delivered"),
         Duration::from_secs(8),
     );
-    assert_file_contains(&ws.events_jsonl_path(), "turn_open.armed_after_delivery");
-    assert_file_contains(&ws.events_jsonl_path(), mid);
+    std::thread::sleep(Duration::from_millis(700));
+    let after = message_row(&ws, mid).expect("delivered message row exists");
+    assert_eq!(after.status, "delivered");
+    assert_eq!(
+        after.delivery_attempts,
+        before.delivery_attempts + 1,
+        "repair replay must add exactly one delivery attempt"
+    );
+    assert_eq!(event_count(&ws, "message.delivered", mid), 1);
+    assert_eq!(event_count(&ws, "turn_open.armed_after_delivery", mid), 1);
 
     let _ = run_ta(
         &ws,
@@ -70,13 +80,39 @@ fn send_009_worker_repair_requeues_blocked_message() {
     );
 }
 
+struct MessageRow {
+    status: String,
+    delivery_attempts: i64,
+}
+
 fn message_status(ws: &TestWorkspace, message_id: &str) -> Option<String> {
+    message_row(ws, message_id).map(|row| row.status)
+}
+
+fn message_row(ws: &TestWorkspace, message_id: &str) -> Option<MessageRow> {
     let db = ws.path().join(".team/runtime/team.db");
     let conn = rusqlite::Connection::open(db).ok()?;
     conn.query_row(
-        "select status from messages where message_id = ?1",
+        "select status, delivery_attempts from messages where message_id = ?1",
         [message_id],
-        |row| row.get::<_, String>(0),
+        |row| {
+            Ok(MessageRow {
+                status: row.get(0)?,
+                delivery_attempts: row.get(1)?,
+            })
+        },
     )
     .ok()
+}
+
+fn event_count(ws: &TestWorkspace, event: &str, message_id: &str) -> usize {
+    std::fs::read_to_string(ws.events_jsonl_path())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| {
+            entry.get("event").and_then(serde_json::Value::as_str) == Some(event)
+                && entry.get("message_id").and_then(serde_json::Value::as_str) == Some(message_id)
+        })
+        .count()
 }
