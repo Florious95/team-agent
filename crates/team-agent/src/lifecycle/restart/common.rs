@@ -585,10 +585,27 @@ pub(super) fn save_restart_projected_state(
     team_key: &str,
     topology_authority_agent_ids: &[&str],
 ) -> Result<(), LifecycleError> {
-    sync_restart_team_projections(state, team_key);
-    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(
+    save_restart_projected_state_with_capture_backfill_skip(
         workspace,
         state,
+        team_key,
+        &[],
+        topology_authority_agent_ids,
+    )
+}
+
+pub(super) fn save_restart_projected_state_with_capture_backfill_skip(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+    skip_capture_backfill_agent_ids: &[&str],
+    topology_authority_agent_ids: &[&str],
+) -> Result<(), LifecycleError> {
+    sync_restart_team_projections(state, team_key);
+    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+        workspace,
+        state,
+        skip_capture_backfill_agent_ids,
         topology_authority_agent_ids,
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))

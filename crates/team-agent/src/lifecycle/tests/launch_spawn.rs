@@ -35,6 +35,26 @@ fn role_doc(id: &str) -> String {
     )
 }
 
+fn codex_identity_rollout(
+    workspace: &std::path::Path,
+    file_name: &str,
+    session_id: &str,
+    embedded_agent_id: &str,
+) -> PathBuf {
+    let path = workspace.join(file_name);
+    std::fs::write(
+        &path,
+        format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\"}}}}}}\n\
+             {{\"type\":\"turn_context\",\"payload\":{{}}}}\n\
+             {{\"type\":\"response_item\",\"payload\":{{\"content\":[{{\"type\":\"input_text\",\"text\":\"You are Team Agent worker `{embedded_agent_id}` with role `fixture`.\"}}]}}}}\n",
+            workspace.to_string_lossy()
+        ),
+    )
+    .unwrap();
+    path
+}
+
 fn layout_pane(
     session: &str,
     window: &str,
@@ -1795,6 +1815,153 @@ fn restart_allow_fresh_does_not_force_fresh_other_agents_when_one_session_captur
         Some(true),
         "only the missing-session agent should carry forced_fresh: {bravo}"
     );
+}
+
+#[test]
+fn restart_allow_fresh_clears_codex_identity_mismatch_tuple_before_capture() {
+    let ws = temp_ws().join("restartcrossbindallowfresh");
+    std::fs::create_dir_all(ws.join("agents")).unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: restartcrossbindallowfresh\nobjective: Restart crossbind repair.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
+    std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
+    let alpha_session = "019f3586-6eb4-7552-8680-c833b483a289";
+    let alpha_rollout = codex_identity_rollout(&ws, "alpha-rollout.jsonl", alpha_session, "alpha");
+    let spec = crate::compiler::compile_team(&ws).expect("compile crossbind team");
+    std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "session_name": "team-restartcrossbindallowfresh",
+            "agents": {
+                "alpha": {
+                    "status": "running",
+                    "provider": "codex",
+                    "window": "alpha",
+                    "first_send_at": "2026-07-06T03:45:00+00:00",
+                    "session_id": alpha_session,
+                    "rollout_path": alpha_rollout.to_string_lossy(),
+                    "captured_at": "2026-07-06T03:45:13.596763+00:00",
+                    "captured_via": "fs_watch",
+                    "attribution_confidence": "high",
+                    "spawn_cwd": ws.to_string_lossy()
+                },
+                "bravo": {
+                    "status": "running",
+                    "provider": "codex",
+                    "window": "bravo",
+                    "first_send_at": "2026-07-06T03:45:00+00:00",
+                    "session_id": alpha_session,
+                    "rollout_path": alpha_rollout.to_string_lossy(),
+                    "captured_at": "2026-07-06T03:45:13.596763+00:00",
+                    "captured_via": "fs_watch",
+                    "attribution_confidence": "high",
+                    "spawn_cwd": ws.to_string_lossy()
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&ws);
+    let transport = OfflineTransport::new();
+
+    let result = restart_with_transport(&ws, true, None, &transport);
+
+    assert!(
+        matches!(result, Ok(RestartReport::Restarted { .. })),
+        "allow-fresh restart should repair by fresh-spawning only poisoned bravo; got {result:?}"
+    );
+    let windows = transport.spawn_window_records();
+    let records = transport.spawn_records();
+    let bravo_idx = windows
+        .iter()
+        .position(|(_, window)| window == "bravo")
+        .expect("bravo must spawn");
+    assert!(
+        !records[bravo_idx].1.iter().any(|arg| arg == "resume"),
+        "poisoned bravo must fresh-start without codex resume argv; records={records:?}"
+    );
+
+    let mut state = crate::state::persist::load_runtime_state(&ws).expect("load state");
+    let bravo = state.pointer("/agents/bravo").expect("bravo");
+    for field in [
+        "session_id",
+        "rollout_path",
+        "captured_at",
+        "captured_via",
+        "attribution_confidence",
+        "capture_state",
+    ] {
+        let value = bravo.get(field);
+        assert!(
+            value.is_none() || value == Some(&serde_json::Value::Null),
+            "allow-fresh must clear poisoned bravo {field}; got {value:?} in {bravo}"
+        );
+    }
+    if let Some(teams) = state.get("teams").and_then(serde_json::Value::as_object) {
+        for (team_key, team_state) in teams {
+            if let Some(team_bravo) = team_state.pointer("/agents/bravo") {
+                for field in [
+                    "session_id",
+                    "rollout_path",
+                    "captured_at",
+                    "captured_via",
+                    "attribution_confidence",
+                    "capture_state",
+                ] {
+                    let value = team_bravo.get(field);
+                    assert!(
+                        value.is_none() || value == Some(&serde_json::Value::Null),
+                        "allow-fresh must clear teams.{team_key}.agents.bravo {field}; got {value:?} in {team_bravo}"
+                    );
+                }
+            }
+        }
+    }
+
+    let fresh_session = "019f3587-bravo-fresh";
+    let fresh_rollout =
+        codex_identity_rollout(&ws, "bravo-fresh-rollout.jsonl", fresh_session, "bravo");
+    let mut adapter_for = |provider| crate::provider::adapter::get_adapter(provider);
+    crate::provider::session::capture::capture_missing_provider_sessions_once(
+        &mut state,
+        &mut adapter_for,
+        true,
+        0,
+    )
+    .expect("fresh bravo capture should run");
+    let bravo = state.pointer("/agents/bravo").expect("bravo after capture");
+    assert_eq!(
+        bravo.get("session_id").and_then(serde_json::Value::as_str),
+        Some(fresh_session),
+        "fresh bravo rollout should be capturable after allow-fresh clears poison; rollout={fresh_rollout:?} state={bravo}"
+    );
+    assert_eq!(
+        bravo
+            .get("rollout_path")
+            .and_then(serde_json::Value::as_str),
+        Some(fresh_rollout.to_string_lossy().as_ref())
+    );
+    let plan = crate::lifecycle::restart::classify_restart_plan_with_resume_validation(
+        Some(&ws),
+        &state,
+        false,
+    )
+    .expect("classify after fresh capture");
+    assert!(
+        plan.unresumable.is_empty(),
+        "next restart must not loop on session_identity_mismatch after fresh capture; got {:?}",
+        plan.unresumable
+    );
+    let bravo_decision = plan
+        .decisions
+        .iter()
+        .find(|decision| decision.agent_id.as_str() == "bravo")
+        .expect("bravo decision");
+    assert_eq!(bravo_decision.decision, ResumeDecision::Resume);
 }
 
 #[test]

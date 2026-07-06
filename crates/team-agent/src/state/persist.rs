@@ -234,6 +234,23 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
     save_runtime_state_with_merge_options(workspace, state, &[], None, &[], agent_ids)
 }
 
+pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+    workspace: &Path,
+    state: &Value,
+    skip_capture_backfill_team_key: &str,
+    skip_capture_backfill_agent_ids: &[&str],
+    topology_agent_ids: &[&str],
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        &[],
+        Some(skip_capture_backfill_team_key),
+        skip_capture_backfill_agent_ids,
+        topology_agent_ids,
+    )
+}
+
 pub(crate) fn save_runtime_state_with_deleted_agents(
     workspace: &Path,
     state: &Value,

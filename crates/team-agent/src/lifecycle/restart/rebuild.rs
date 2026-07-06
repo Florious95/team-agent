@@ -467,10 +467,21 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             .iter()
             .map(|agent| agent.agent_id.as_str().to_string()),
     );
-    save_restart_state_with_lifecycle_topology_authority(
+    let capture_backfill_skip_agent_ids = successful_agents
+        .iter()
+        .filter(|agent| {
+            matches!(
+                agent.restart_mode,
+                StartMode::Fresh | StartMode::FreshAfterMissingRollout
+            )
+        })
+        .map(|agent| agent.agent_id.as_str().to_string())
+        .collect::<Vec<_>>();
+    save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
         &selected.run_workspace,
         &mut state,
         &selected.team_key,
+        &capture_backfill_skip_agent_ids,
         &topology_authority_agent_ids,
     )?;
     if fatal_resume_failure {
@@ -1358,8 +1369,38 @@ fn save_restart_state_with_lifecycle_topology_authority(
     team_key: &str,
     agent_ids: &[String],
 ) -> Result<(), LifecycleError> {
-    let agent_ids = agent_ids.iter().map(String::as_str).collect::<Vec<_>>();
-    save_restart_projected_state(workspace, state, team_key, &agent_ids)
+    save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+        workspace,
+        state,
+        team_key,
+        &[],
+        agent_ids,
+    )
+}
+
+fn save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+    workspace: &Path,
+    state: &mut serde_json::Value,
+    team_key: &str,
+    skip_capture_backfill_agent_ids: &[String],
+    topology_agent_ids: &[String],
+) -> Result<(), LifecycleError> {
+    let skip_capture_backfill_agent_ids = skip_capture_backfill_agent_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let topology_agent_ids = topology_agent_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    sync_restart_team_projections(state, team_key);
+    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
+        workspace,
+        state,
+        &skip_capture_backfill_agent_ids,
+        &topology_agent_ids,
+    )
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn save_restart_session_repairs(
