@@ -2730,3 +2730,121 @@ fn e15_direct_inject_is_gated_by_deliver_failure_not_unconditional() {
         "E23: private direct inject must stay deleted; all callers use deliver_to_leader_fallback_pane"
     );
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// 0.5.4 gate054 — cross-team notify boundary.
+//
+// Triage: .team/artifacts/0.5.4-gate-crossteam-notify-triage.md
+//
+// Shape (regression):
+//   - Gate team's `leader_receiver` records `pane_id=%1`, `tmux_socket=/tmp/gate`,
+//     `status="rebind_required"` (disposable leader was killed post-restart).
+//   - The main tmux server has a live `%1` on the workspace-canonical socket.
+//   - `deliver_pending_message` MUST refuse with `channel=rebind_required` and
+//     MUST NOT probe the main/default tmux server for the same pane id.
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn gate054_rebind_required_status_refuses_leader_delivery_without_cross_server_probe() {
+    let ws = tmp_ws("gate054status");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    // Explicit endpoint socket (non-canonical for this workspace) with a
+    // stale receiver demoted to `rebind_required` after the gate's leader
+    // window was killed.
+    let state = serde_json::json!({
+        "session_name": "team-gate054",
+        "tmux_endpoint": "/tmp/gate-socket-does-not-exist",
+        "leader_receiver": {
+            "pane_id": "%1",
+            "tmux_socket": "/tmp/gate-socket-does-not-exist",
+            "status": "rebind_required"
+        },
+        "agents": {
+            "probe": {"provider": "fake", "pane_id": "%0", "window": "probe"}
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(
+            None,
+            "probe",
+            "leader",
+            "gate054 must not leak",
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+
+    // The transport we pass is the "main"/default server backend which does
+    // have a live `%1`. If the fix regresses and delivery falls back cross-
+    // server by pane id, it would inject here.
+    let default_backend = OfflineTransport::new()
+        .with_targets(vec![pane_info("%1", "team-main", "leader")]);
+
+    let out = deliver_pending_message(&ws, &store, &default_backend, &message_id, &log, &state)
+        .expect("status guard must be a business refusal, not panic");
+
+    assert!(
+        !out.ok,
+        "0.5.4 gate054: leader_receiver.status='rebind_required' must refuse delivery"
+    );
+    assert_eq!(out.channel.as_deref(), Some("rebind_required"));
+    assert_eq!(out.message_status.0, "failed");
+    assert_eq!(out.reason, Some(DeliveryRefusal::LeaderNotAttached));
+    // Cross-server invariant: even though the default backend has a live `%1`
+    // matching the recorded receiver pane id, delivery MUST NOT inject there.
+    assert!(
+        default_backend.inject_targets().is_empty(),
+        "0.5.4 gate054: leader delivery must not cross to a different tmux server by pane id; \
+         inject_targets={:?}",
+        default_backend.inject_targets()
+    );
+    let events = log.tail(0).unwrap();
+    assert!(
+        events.iter().any(|event| {
+            event.get("event").and_then(serde_json::Value::as_str)
+                == Some("leader_receiver.delivery_blocked")
+                && event.get("reason").and_then(serde_json::Value::as_str)
+                    == Some("leader_receiver_not_attached")
+                && event.get("channel").and_then(serde_json::Value::as_str)
+                    == Some("rebind_required")
+                && event.get("status").and_then(serde_json::Value::as_str)
+                    == Some("rebind_required")
+        }),
+        "0.5.4 gate054: refused status must audit as leader_receiver_not_attached / rebind_required; events={events:?}"
+    );
+}
+
+#[test]
+fn gate054_attached_status_still_delivers_when_pane_is_live() {
+    // Companion negative: prove the new status gate does NOT over-refuse when
+    // `status="attached"` and the workspace-canonical socket has the pane.
+    let ws = tmp_ws("gate054ok");
+    let store = store_for(&ws);
+    let log = EventLog::new(&ws);
+    let state = serde_json::json!({
+        "session_name": "team-gate054ok",
+        "leader_receiver": {
+            "pane_id": "%leader",
+            "status": "attached"
+        },
+        "agents": {"w1": {"provider": "fake", "pane_id": "%1"}}
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    let message_id = store
+        .create_message(None, "w1", "leader", "hi", None, false, None)
+        .unwrap();
+    let transport = OfflineTransport::new()
+        .with_targets(vec![pane_info("%leader", "team-gate054ok", "leader")]);
+
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
+        .expect("attached leader must still deliver");
+
+    assert!(
+        out.ok,
+        "0.5.4 gate054: status='attached' with a live pane must not be over-refused: {out:?}"
+    );
+    assert_eq!(out.message_status.0, "delivered");
+}
