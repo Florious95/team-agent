@@ -61,6 +61,134 @@
         assert_eq!(env.task_id, TaskId::new("manual"));
     }
 
+    fn seed_report_message(
+        ws: &std::path::Path,
+        message_id: &str,
+        owner_team_id: &str,
+        status: &str,
+        created_at: &str,
+    ) {
+        let store = MessageStore::open(ws).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        conn.execute(
+            "insert into messages(
+                message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
+                status, content, artifact_refs, created_at, updated_at, delivered_at,
+                acknowledged_at, error, delivery_attempts
+            ) values (?1, ?2, null, 'leader', 'probe-worker', null, 0,
+                ?3, 'task', '[]', ?4, ?4, case when ?3 = 'delivered' then ?4 else null end,
+                null, null, 0)",
+            rusqlite::params![message_id, owner_team_id, status, created_at],
+        )
+        .unwrap();
+    }
+
+    fn seed_report_result(
+        ws: &std::path::Path,
+        result_id: &str,
+        owner_team_id: &str,
+        task_id: &str,
+        created_at: &str,
+    ) {
+        let store = MessageStore::open(ws).unwrap();
+        let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+        let envelope = json!({
+            "schema_version": "result_envelope_v1",
+            "result_id": result_id,
+            "task_id": task_id,
+            "agent_id": "probe-worker",
+            "status": "success",
+            "summary": "seed",
+            "changes": [], "tests": [], "risks": [], "artifacts": [], "next_actions": []
+        });
+        conn.execute(
+            "insert into results(
+                result_id, owner_team_id, task_id, agent_id, envelope, status, created_at
+            ) values (?1, ?2, ?3, 'probe-worker', ?4, 'success', ?5)",
+            rusqlite::params![result_id, owner_team_id, task_id, envelope.to_string(), created_at],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn report_result_prefers_current_inflight_message_over_old_delivered_fallback() {
+        let ws = unique_ws("report-current-message");
+        seed_report_message(
+            &ws,
+            "msg_old",
+            "gate055",
+            "delivered",
+            "2026-07-06T13:24:25.000000+00:00",
+        );
+        seed_report_result(
+            &ws,
+            "res_seed",
+            "gate055",
+            "task_initial",
+            "2026-07-06T13:25:00.000000+00:00",
+        );
+        seed_report_message(
+            &ws,
+            "msg_new",
+            "gate055",
+            "target_resolved",
+            "2026-07-06T13:27:35.000000+00:00",
+        );
+
+        let tools = TeamOrchestratorTools::with_identity(
+            &ws,
+            Some(AgentId::new("probe-worker")),
+            Some(TeamKey::new("gate055")),
+        );
+        let ok = tools.report_result(
+            None, Some("S3_RESTART_TOKEN"), ResultStatus::Success,
+            None, None, None, None, None,
+            None, None,
+        ).expect("report ok");
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(
+            v.get("task_id"),
+            Some(&json!("msg_new")),
+            "current in-flight message must beat stale delivered fallback"
+        );
+    }
+
+    #[test]
+    fn report_result_does_not_backfill_old_delivered_message_after_latest_result() {
+        let ws = unique_ws("report-no-old-backfill");
+        seed_report_message(
+            &ws,
+            "msg_old",
+            "gate055",
+            "delivered",
+            "2026-07-06T13:24:25.000000+00:00",
+        );
+        seed_report_result(
+            &ws,
+            "res_latest",
+            "gate055",
+            "task_initial",
+            "2026-07-06T13:25:00.000000+00:00",
+        );
+
+        let tools = TeamOrchestratorTools::with_identity(
+            &ws,
+            Some(AgentId::new("probe-worker")),
+            Some(TeamKey::new("gate055")),
+        );
+        let ok = tools.report_result(
+            None, Some("manual follow-up"), ResultStatus::Success,
+            None, None, None, None, None,
+            None, None,
+        ).expect("report ok");
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(
+            v.get("task_id"),
+            Some(&json!("manual")),
+            "old delivered messages older than latest result must not be reused"
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // CONTROL-PLANE: request_human creates a requires_ack leader message → needs_human
     // (tools.py:342-346). sender = explicit > env > "unknown" (never leader).

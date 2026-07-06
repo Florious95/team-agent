@@ -3,6 +3,7 @@
 use std::io::Write as _;
 use std::path::Path;
 
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -274,12 +275,7 @@ fn find_latest_nonterminal_task_for(tasks: &[Value], agent_id: &str) -> Option<S
     None
 }
 
-/// Find the most recent delivered direct message to `agent_id` whose `task_id`
-/// is empty/null AND for which no result row exists yet. Used by
-/// `report_result` as a message-scoped fallback before defaulting to
-/// `"manual"`, so `collect` can correlate via the existing message-scope path
-/// (`messaging::results::is_message_scoped_result`).
-pub(crate) fn latest_uncorrelated_delivered_message_for(
+pub(crate) fn latest_reportable_message_for(
     workspace: &Path,
     agent_id: &str,
     owner_team_id: Option<&str>,
@@ -287,33 +283,147 @@ pub(crate) fn latest_uncorrelated_delivered_message_for(
     use crate::db::message_store::MessageStore;
     let store = MessageStore::open(workspace).ok()?;
     let conn = crate::db::schema::open_db(store.db_path()).ok()?;
-    let sql = match owner_team_id {
-        Some(_) => "select m.message_id from messages m \
-                     where m.recipient = ?1 and m.status = 'delivered' \
-                       and (m.task_id is null or m.task_id = '') \
-                       and m.owner_team_id = ?2 \
-                       and not exists ( \
-                         select 1 from results r \
-                         where r.task_id = m.message_id and r.agent_id = m.recipient \
-                       ) \
-                     order by m.created_at desc limit 1",
-        None => "select m.message_id from messages m \
-                     where m.recipient = ?1 and m.status = 'delivered' \
-                       and (m.task_id is null or m.task_id = '') \
-                       and not exists ( \
-                         select 1 from results r \
-                         where r.task_id = m.message_id and r.agent_id = m.recipient \
-                       ) \
-                     order by m.created_at desc limit 1",
+    current_turn_message_for(workspace, &conn, agent_id, owner_team_id)
+        .or_else(|| latest_reportable_message_from_db(&conn, agent_id, owner_team_id))
+}
+
+fn current_turn_message_for(
+    workspace: &Path,
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
+    let state = report_scope_state(workspace, owner_team_id)?;
+    current_turn_id_from_state(&state, agent_id)
+        .filter(|message_id| message_is_reportable(conn, message_id, agent_id, owner_team_id))
+}
+
+fn report_scope_state(workspace: &Path, owner_team_id: Option<&str>) -> Option<Value> {
+    let state = load_runtime_state(workspace).ok()?;
+    let Some(team) = owner_team_id.filter(|team| !team.is_empty()) else {
+        return Some(state);
     };
-    let mut stmt = conn.prepare(sql).ok()?;
-    let id: Option<String> = match owner_team_id {
-        Some(team) => stmt
-            .query_row(rusqlite::params![agent_id, team], |row| row.get::<_, String>(0))
-            .ok(),
-        None => stmt
-            .query_row(rusqlite::params![agent_id], |row| row.get::<_, String>(0))
-            .ok(),
-    };
-    id
+    let canonical = crate::state::projection::resolve_owner_team_id(&state, team)
+        .canonical_key()
+        .map(str::to_string)
+        .unwrap_or_else(|| team.to_string());
+    if let Some(projected) = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(&canonical))
+        .cloned()
+    {
+        Some(projected)
+    } else {
+        Some(state)
+    }
+}
+
+fn current_turn_id_from_state(state: &Value, agent_id: &str) -> Option<String> {
+    if let Some(turn) = state.get("coordinator").and_then(|v| v.get("turn_open")) {
+        let armed = turn.get("armed").and_then(Value::as_bool).unwrap_or(false);
+        let node_matches = turn
+            .get("node_id")
+            .and_then(Value::as_str)
+            .is_some_and(|node| node == agent_id);
+        if armed && node_matches {
+            if let Some(turn_id) = turn
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .and_then(non_empty_string)
+            {
+                return Some(turn_id.to_string());
+            }
+        }
+    }
+    state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id))
+        .and_then(|agent| agent.get("current_task_id"))
+        .and_then(Value::as_str)
+        .and_then(non_empty_string)
+        .map(ToString::to_string)
+}
+
+fn message_is_reportable(
+    conn: &rusqlite::Connection,
+    message_id: &str,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> bool {
+    conn.query_row(
+        "select 1 from messages m
+         where m.message_id = ?1
+           and m.recipient = ?2
+           and (?3 is null or m.owner_team_id = ?3)
+           and (m.task_id is null or m.task_id = '')
+           and m.status in ('delivered', 'target_resolved', 'submitted', 'injected', 'visible')
+           and (m.status = 'delivered' or m.error is null)
+           and m.created_at >= coalesce((
+             select max(r.created_at) from results r
+             where r.agent_id = m.recipient
+               and (?3 is null or r.owner_team_id = m.owner_team_id)
+           ), '0000')
+           and not exists (
+             select 1 from results r
+             where r.task_id = m.message_id and r.agent_id = m.recipient
+           )
+         limit 1",
+        params![message_id, agent_id, owner_team_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+fn latest_reportable_message_from_db(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
+    let row = conn
+        .query_row(
+            "select m.message_id, m.status, m.error from messages m
+             where m.recipient = ?1
+               and (?2 is null or m.owner_team_id = ?2)
+               and (m.task_id is null or m.task_id = '')
+               and m.created_at >= coalesce((
+                 select max(r.created_at) from results r
+                 where r.agent_id = m.recipient
+                   and (?2 is null or r.owner_team_id = m.owner_team_id)
+               ), '0000')
+               and not exists (
+                 select 1 from results r
+                 where r.task_id = m.message_id and r.agent_id = m.recipient
+               )
+             order by m.created_at desc,
+               case when m.status = 'delivered' then 0 else 1 end
+             limit 1",
+            params![agent_id, owner_team_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()?;
+    let (message_id, status, error) = row;
+    if reportable_message_status(&status, error.as_deref()) {
+        Some(message_id)
+    } else {
+        None
+    }
+}
+
+fn reportable_message_status(status: &str, error: Option<&str>) -> bool {
+    matches!(
+        status,
+        "delivered" | "target_resolved" | "submitted" | "injected" | "visible"
+    ) && (status == "delivered" || error.is_none())
 }
