@@ -50,7 +50,7 @@ pub fn attach_leader(
     if let Some(endpoint) = target.endpoint.as_ref() {
         receiver.tmux_socket = Some(endpoint.clone());
     }
-    let validation = validate_attach_target(workspace, &state, &target.info);
+    let validation = validate_attach_target(workspace, &state, &target.info, provider);
     if validation.is_err() {
         let pane_info = pane_info_value(&target.info);
         let targets_value = Value::Array(targets.iter().map(|target| pane_info_value(&target.info)).collect());
@@ -66,6 +66,7 @@ pub fn attach_leader(
             LeaseSource::Manual,
             &event_log,
         )? {
+            quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
             let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
             return Ok(LeaseResult {
                 ok: true,
@@ -98,6 +99,7 @@ pub fn attach_leader(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
         )?;
+        quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
         let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
         return Ok(LeaseResult {
             ok: true,
@@ -121,6 +123,7 @@ pub fn attach_leader(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
     )?;
+    quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
     let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
     Ok(LeaseResult {
         ok: true,
@@ -132,6 +135,51 @@ pub fn attach_leader(
         action: None,
         bound_pane_id: Some(pane_id),
     })
+}
+
+/// 0.5.9 (E6 real-machine e2e wiring): Fake-provider leader panes in the
+/// e2e harness run `/bin/cat`, which lets the TTY driver echo every
+/// injected byte AND then prints the same bytes on stdout — so pane
+/// capture ends up with two copies of every delivered token. Real Codex/
+/// Claude/Copilot binaries drive the pane through their own TUI and never
+/// echo raw input, so they don't need this. Attach-leader is the
+/// canonical binding hook for this pane, so it's the right place to
+/// disable the TTY echo bit once. Best-effort: any failure is silent
+/// (Fake-provider binding stays useful even without echo suppression).
+fn quiet_fake_leader_pane_echo(
+    provider: Provider,
+    target: &PaneInfo,
+    endpoint: Option<&str>,
+) {
+    if !matches!(provider, Provider::Fake) {
+        return;
+    }
+    // Look up the pane's tty path (e.g. /dev/ttys015) and run `stty -echo`
+    // against it — this flips the terminal driver's echo bit without
+    // asking the pane process (cat) to interpret any command.
+    let mut cmd = std::process::Command::new("tmux");
+    if let Some(endpoint) = endpoint {
+        cmd.args(["-S", endpoint]);
+    }
+    let Ok(output) = cmd
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            target.pane_id.as_str(),
+            "#{pane_tty}",
+        ])
+        .output()
+    else {
+        return;
+    };
+    let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if tty.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("stty")
+        .args(["-f", &tty, "-echo"])
+        .output();
 }
 
 /// Explicit app-server leader binding. Validates the supplied socket/thread tuple
@@ -824,9 +872,26 @@ fn validate_attach_target(
     workspace: &Path,
     state: &Value,
     target: &PaneInfo,
+    requested_provider: Provider,
 ) -> Result<(), &'static str> {
-    let Some(claim_target) = claim_target_from_pane_info(workspace, target) else {
-        return Err("leader_pane_validation_failed");
+    // 0.5.9 (E6 real-machine e2e wiring): an explicit `--provider fake`
+    // is the operator's declaration that this pane is a fake-provider
+    // stub for tests / fixtures. The normal pane-command attribution
+    // path can't recognize `/bin/cat` (or any bare shell process) as a
+    // provider, so honoring the explicit request here is the only way
+    // real-machine E6 acceptance can spin up a leader without shipping
+    // a real Codex/Claude/Copilot binary. This is a targeted escape
+    // hatch — `Provider::Fake` is not selectable from the user-facing
+    // provider list, only wired in test/fixture flows.
+    let claim_target = match claim_target_from_pane_info(workspace, target) {
+        Some(target) => Some(target),
+        None if matches!(requested_provider, Provider::Fake) => None,
+        None => return Err("leader_pane_validation_failed"),
+    };
+    let Some(claim_target) = claim_target else {
+        // Fake provider: skip session-uuid check since attribution was
+        // bypassed. Nothing else to validate.
+        return Ok(());
     };
     let recorded_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"])
         .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));
