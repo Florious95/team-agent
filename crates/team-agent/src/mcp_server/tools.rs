@@ -116,6 +116,7 @@ impl TeamOrchestratorTools {
         };
 
         let task_value = Value::Object(task_obj.clone());
+        let recovery = task_recovery_marker(&task_value);
         let mut state = load_runtime_state(&self.workspace).map_err(tool_runtime_error)?;
         ensure_object(&mut state);
         let team_key = self
@@ -139,7 +140,16 @@ impl TeamOrchestratorTools {
             None,
             None,
         )?;
-        compact_tool_result(&out.to_value())
+        let mut ok = compact_tool_result(&out.to_value())?;
+        if recovery {
+            ok.fields
+                .insert("recovery".to_string(), serde_json::json!(true));
+            ok.fields.insert(
+                "acceptance_marker".to_string(),
+                Value::String("recovery".to_string()),
+            );
+        }
+        Ok(ok)
     }
 
     /// `send_message` (`tools.py:135-183`): C14/C15/C17 scope resolution.
@@ -987,6 +997,11 @@ fn assignment_message(task: &Value, explicit: Option<&str>) -> String {
         }
     }
     json_dumps_default(task)
+}
+
+fn task_recovery_marker(task: &Value) -> bool {
+    task.get("recovery").and_then(Value::as_bool) == Some(true)
+        || task.get("acceptance_marker").and_then(Value::as_str) == Some("recovery")
 }
 
 fn scope_override_name(scope: Scope) -> Option<&'static str> {

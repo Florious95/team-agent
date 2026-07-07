@@ -18,28 +18,34 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
             Ok(true) => {}
             Ok(false) => {
                 issues.push(json!("tmux_session_missing"));
-                repairs.push(json!({
-                    "issue": "tmux_session_missing",
-                    "action": format!("restart or relaunch tmux session `{session_name}`"),
-                }));
+                repairs.push(recovery_hint(
+                    session_name,
+                    "tmux_session_missing",
+                    "team-agent restart",
+                ));
             }
             Err(error) => {
                 issues.push(json!("tmux_session_missing"));
-                repairs.push(json!({
-                    "issue": "tmux_session_missing",
-                    "action": format!("restart or relaunch tmux session `{session_name}`"),
-                    "reason": error.to_string(),
-                }));
+                let mut hint =
+                    recovery_hint(session_name, "tmux_session_missing", "team-agent restart");
+                if let Some(obj) = hint.as_object_mut() {
+                    obj.insert("reason".to_string(), Value::String(error.to_string()));
+                }
+                repairs.push(hint);
             }
         }
     }
 
     if !leader_receiver_attached(state) {
         issues.push(json!("leader_not_attached"));
-        repairs.push(json!({
-            "issue": "leader_not_attached",
-            "action": "attach or claim a leader receiver before sending work",
-        }));
+        repairs.push(recovery_hint(
+            state
+                .get("session_name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "leader_not_attached",
+            "team-agent attach-leader",
+        ));
     } else {
         // 0.4.x (CR R2 P0): leader provider health reconciliation. The
         // leader_receiver may be marked `attached` (pane addressable) but the
@@ -57,6 +63,11 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                     issues.push(json!("leader_provider_exited"));
                     repairs.push(json!({
                         "issue": "leader_provider_exited",
+                        "action_required": true,
+                        "advisory": true,
+                        "broken_class": "leader_provider_exited",
+                        "hint_action": "team-agent restart",
+                        "dedupe_key": "leader_provider_exited",
                         "action": format!(
                             "leader pane fell back to shell — provider `{provider_label}` exited; \
                              relaunch with `team-agent {provider_label}` to restart the provider"
@@ -65,10 +76,14 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                 }
                 crate::leader::LeaderProviderHealth::Unreachable => {
                     issues.push(json!("leader_provider_unreachable"));
-                    repairs.push(json!({
-                        "issue": "leader_provider_unreachable",
-                        "action": "leader pane is dead — relaunch the leader",
-                    }));
+                    repairs.push(recovery_hint(
+                        state
+                            .get("session_name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        "leader_provider_unreachable",
+                        "team-agent claim-leader",
+                    ));
                 }
                 crate::leader::LeaderProviderHealth::Alive => {}
             }
@@ -177,6 +192,20 @@ fn leader_receiver_attached(state: &Value) -> bool {
         .and_then(Value::as_str)
         .is_some_and(|pane| !pane.is_empty());
     mode_direct && status_attached && pane_present
+}
+
+fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
+    json!({
+        "issue": broken_class,
+        "action_required": true,
+        "advisory": true,
+        "broken_class": broken_class,
+        "hint_action": hint_action,
+        "dedupe_key": format!("{team}:{broken_class}"),
+        "action": format!(
+            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent quick-start; team-agent attach-leader"
+        ),
+    })
 }
 
 #[cfg(test)]
