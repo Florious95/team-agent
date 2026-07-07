@@ -601,7 +601,12 @@ fn leader_advisory_candidates(
         .and_then(|receiver| string_field(receiver, "tmux_socket"));
     let socket = match team_scoped_socket {
         Some(s) => Some(s.to_string()),
-        None => legacy_top_level_socket_hint(state).or_else(|| transport.tmux_endpoint()),
+        None => state
+            // ALLOWED-LEGACY-SINGLE-TEAM: diagnostic-only socket label for the advisory candidates; never fed back into routing.
+            .get("leader_receiver")
+            .and_then(|receiver| string_field(receiver, "tmux_socket"))
+            .map(str::to_string)
+            .or_else(|| transport.tmux_endpoint()),
     };
     let targets = match transport.list_targets() {
         Ok(targets) => targets,
@@ -902,9 +907,13 @@ fn transport_for_cli_target(
             let team_scoped_socket = team_entry(state, team)
                 .and_then(|entry| entry.get("leader_receiver"))
                 .and_then(|receiver| string_field(receiver, "tmux_socket"));
-            let socket = team_scoped_socket
-                .map(str::to_string)
-                .or_else(|| legacy_top_level_socket_hint(state));
+            let socket = team_scoped_socket.map(str::to_string).or_else(|| {
+                state
+                    // ALLOWED-LEGACY-SINGLE-TEAM: pre-teams-map compat probe endpoint; canonical taxonomy in `resolve_team_scoped_leader_receiver` still gates identity.
+                    .get("leader_receiver")
+                    .and_then(|receiver| string_field(receiver, "tmux_socket"))
+                    .map(str::to_string)
+            });
             if let Some(socket) = socket {
                 return Box::new(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket));
             }
@@ -1001,10 +1010,14 @@ fn team_entry<'a>(state: &'a Value, team: &str) -> Option<&'a Value> {
 ///
 /// Legacy single-team compat is preserved only when the state has no
 /// `teams` map at all AND the requested team equals `active_team_key`.
-/// That branch reaches for the top-level receiver via a helper (below) that
-/// deliberately does not mention `team_entry(state, team)` so the E6 grep
-/// guard (which flags `state.get("leader_receiver")` inside a
-/// team-entry-fallback window) stays clean.
+/// That branch is a documented exception to the E6 fallback grep guard;
+/// the exception is tagged inline with `ALLOWED-LEGACY-SINGLE-TEAM` so
+/// the guard admits it explicitly (see the R2 rework in
+/// `.team/artifacts/059-impl-cr-verdict.md §4`). The exception is
+/// scheduled to be removed when B1 canonical state layout lands
+/// (`.team/artifacts/next-version-staged-plan.md §5 Phase-Foundation-1`),
+/// at which point every runtime state carries a `teams` map and the
+/// legacy branch becomes unreachable dead code.
 fn resolve_team_scoped_leader_receiver<'a>(
     state: &'a Value,
     team: &str,
@@ -1014,7 +1027,8 @@ fn resolve_team_scoped_leader_receiver<'a>(
         return Ok(entry.get("leader_receiver"));
     }
     if is_legacy_single_team_active(state, team) {
-        return Ok(legacy_top_level_leader_receiver(state));
+        // ALLOWED-LEGACY-SINGLE-TEAM: pre-teams-map compat; state has no teams map AND request matches active_team_key.
+        return Ok(state.get("leader_receiver"));
     }
     Err(team_key_not_found(target_workspace, state, team))
 }
@@ -1025,22 +1039,6 @@ fn is_legacy_single_team_active(state: &Value, team: &str) -> bool {
             .get("active_team_key")
             .and_then(Value::as_str)
             .is_some_and(|k| k == team)
-}
-
-fn legacy_top_level_leader_receiver(state: &Value) -> Option<&Value> {
-    // Deliberately isolated in its own helper so the top-level receiver
-    // lookup is not adjacent to `team_entry(state, team)` — see the E6
-    // resolver-taxonomy grep guard for the rationale.
-    state.get("leader_receiver")
-}
-
-fn legacy_top_level_socket_hint(state: &Value) -> Option<String> {
-    // Diagnostic-only: `leader_advisory_candidates` uses this to label the
-    // socket a live pane was seen on when the team-scoped receiver has no
-    // recorded socket. Never fed back into routing.
-    legacy_top_level_leader_receiver(state)
-        .and_then(|receiver| string_field(receiver, "tmux_socket"))
-        .map(str::to_string)
 }
 
 fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {

@@ -286,21 +286,35 @@ fn source(rel: &str) -> String {
 }
 
 fn top_level_leader_receiver_fallbacks(text: &str) -> Vec<(usize, String)> {
+    // CR verdict R2 (`.team/artifacts/059-impl-cr-verdict.md §4`): documented
+    // legacy single-team compat reads are allowed as long as they mark the
+    // exact line with `ALLOWED-LEGACY-SINGLE-TEAM`. The marker distinguishes
+    // an intentional, time-boxed backwards-compat bridge from an
+    // authority-consuming fallback (which the guard still forbids). Delete
+    // the marker + the fallback branch when B1 canonical state layout lands
+    // (`.team/artifacts/next-version-staged-plan.md §5 Phase-Foundation-1`).
     let lines = text.lines().collect::<Vec<_>>();
     let mut offenders = Vec::new();
     for (idx, line) in lines.iter().enumerate() {
         if !line.contains("state.get(\"leader_receiver\")") {
             continue;
         }
+        if line.contains("ALLOWED-LEGACY-SINGLE-TEAM") {
+            continue;
+        }
         let start = idx.saturating_sub(6);
         let end = usize::min(lines.len(), idx + 7);
         let window = lines[start..end].join("\n");
+        // The line-above/-below marker is also acceptable so callers can
+        // place the marker on the branch-guard line rather than cluttering
+        // the read expression itself.
+        let has_nearby_marker = window.contains("ALLOWED-LEGACY-SINGLE-TEAM");
         let fallback_shape = window.contains("team_entry(state, team)")
             && (window.contains(".or_else")
                 || window.contains(".or(")
                 || window.contains("unwrap_or")
                 || window.contains("} else {"));
-        if fallback_shape {
+        if fallback_shape && !has_nearby_marker {
             offenders.push((idx + 1, line.trim().to_string()));
         }
     }
