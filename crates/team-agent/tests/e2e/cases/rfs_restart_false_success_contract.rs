@@ -421,11 +421,12 @@ fn create_dummy_session(socket: &str, session: &str, cwd: PathBuf) {
 }
 
 fn unique_socket(tag: &str) -> String {
-    format!(
-        "/Volumes/nvme/tmp/ta-0511-rfs-{}-{}",
-        tag,
-        std::process::id()
-    )
+    let root = std::env::var_os("TEAM_AGENT_TEST_TMP")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    root.join(format!("ta-0511-rfs-{}-{}", tag, std::process::id()))
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn state_socket(ws: &TestWorkspace) -> String {
