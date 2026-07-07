@@ -531,6 +531,55 @@ fn resolve_bare_agent(
     }
 }
 
+/// Phase-DX E3 (plan §4 / CR supplements A/B/C, P0 red lines #1 & #6):
+/// build advisory diagnostic candidates for a failed `--to-name leader`
+/// resolution. The candidate list is deliberately shaped to be **read by
+/// humans**, not consumed as route authority: every entry carries
+/// `advisory: true` and a `source` tag identifying where it was observed.
+///
+/// Candidate source rules:
+/// - The transport passed in is already scoped by [`transport_for_cli_target`]
+///   to the team's recorded `leader_receiver.tmux_socket` (or the workspace
+///   default when no socket was recorded), so `transport.list_targets()`
+///   enumerates only that endpoint. We do NOT scan other tmux sockets or
+///   fall back to reverse-authority tmux-session discovery.
+/// - `pane_id` fields are copied verbatim from `list_targets`. `session` is
+///   the tmux session, and `socket` records the tmux endpoint the candidate
+///   was seen on (whichever the scoped transport reports).
+///
+/// Callers must never treat any candidate as authoritative; MUST-NOT-12 stays
+/// intact — resolver refusal is still the outcome even when candidates fire.
+fn leader_advisory_candidates(
+    state: &Value,
+    team: &str,
+    transport: &dyn Transport,
+    source: &str,
+) -> Vec<Value> {
+    let socket = team_entry(state, team)
+        .and_then(|entry| entry.get("leader_receiver"))
+        .or_else(|| state.get("leader_receiver"))
+        .and_then(|receiver| string_field(receiver, "tmux_socket"))
+        .map(str::to_string)
+        .or_else(|| transport.tmux_endpoint());
+    let targets = match transport.list_targets() {
+        Ok(targets) => targets,
+        Err(_) => return Vec::new(),
+    };
+    targets
+        .into_iter()
+        .map(|pane| {
+            json!({
+                "pane_id": pane.pane_id.as_str(),
+                "session": pane.session.as_str(),
+                "window": pane.window_name.as_ref().map(|w| w.as_str()),
+                "socket": socket,
+                "source": source,
+                "advisory": json!(true),
+            })
+        })
+        .collect()
+}
+
 fn resolve_leader(
     sender_workspace: &Path,
     target_workspace: &Path,
@@ -544,7 +593,12 @@ fn resolve_leader(
     } else {
         state.get("leader_receiver")
     }
-    .ok_or_else(|| name_not_live_leader(team, None, None, None, transport.tmux_endpoint()))?;
+    .ok_or_else(|| {
+        let mut err = name_not_live_leader(team, None, None, None, transport.tmux_endpoint());
+        err.candidates =
+            leader_advisory_candidates(state, team, transport, "state_recorded_socket");
+        err
+    })?;
     if let Some((mode, transport_kind)) = receiver_transport_conflict(receiver) {
         let mut err = NamedAddressError::new(
             NamedAddressErrorKind::NameNotLive,
@@ -569,7 +623,13 @@ fn resolve_leader(
     }
     let pane_id = string_field(receiver, "pane_id")
         .filter(|pane| !pane.is_empty())
-        .ok_or_else(|| name_not_live_leader(team, None, None, None, transport.tmux_endpoint()))?;
+        .ok_or_else(|| {
+            let mut err =
+                name_not_live_leader(team, None, None, None, transport.tmux_endpoint());
+            err.candidates =
+                leader_advisory_candidates(state, team, transport, "state_recorded_socket");
+            err
+        })?;
     let session = string_field(receiver, "session_name");
     let window = string_field(receiver, "window_name");
     let socket = string_field(receiver, "tmux_socket")
@@ -599,13 +659,13 @@ fn resolve_leader(
             agent_status: None,
             warning: None,
         }),
-        0 => Err(name_not_live_leader(
-            team,
-            Some(pane_id),
-            session,
-            window,
-            socket,
-        )),
+        0 => {
+            let mut err =
+                name_not_live_leader(team, Some(pane_id), session, window, socket);
+            err.candidates =
+                leader_advisory_candidates(state, team, transport, "state_recorded_socket");
+            Err(err)
+        }
         _ => Err(name_ambiguous(
             "multiple live panes matched leader_receiver pane id",
             matches
