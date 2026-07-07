@@ -2314,12 +2314,29 @@ pub mod lifecycle_port {
         force: bool,
         team: Option<&str>,
     ) -> Result<Value, CliError> {
+        let agent_id = crate::model::ids::AgentId::new(agent);
+        match crate::lifecycle::remove_agent_flag_requirements(workspace, &agent_id, team) {
+            Ok(requirements) => {
+                if !remove_agent_missing_flags(from_spec, confirm, force, &requirements).is_empty() {
+                    return Ok(remove_agent_flag_refusal(
+                        workspace,
+                        agent,
+                        team,
+                        from_spec,
+                        confirm,
+                        force,
+                        &requirements,
+                    ));
+                }
+            }
+            Err(error) if confirm => return Ok(error_value(error)),
+            Err(_) => {}
+        }
         if !confirm {
             return Ok(
                 json!({"ok": false, "agent_id": agent, "error": "remove-agent requires --confirm"}),
             );
         }
-        let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::remove_agent(workspace, &agent_id, from_spec, force, team) {
             Ok(report @ crate::lifecycle::RemoveAgentOutcome::Removed { .. }) => Ok(json!({
                 "ok": true,
@@ -2343,7 +2360,119 @@ pub mod lifecycle_port {
                 "error": "agent is running; remove-agent requires --force",
                 "action": "rerun with --force to stop and remove the running agent",
             })),
+            Ok(crate::lifecycle::RemoveAgentOutcome::RefusedRequiredFlags { .. }) => Ok(json!({
+                "ok": false,
+                "agent_id": agent,
+                "status": "refused",
+                "reason": "remove_agent_flags_required",
+                "error": "remove-agent required flags changed; rerun the command from the latest refusal",
+            })),
             Err(e) => Ok(error_value(e)),
+        }
+    }
+
+    fn remove_agent_flag_refusal(
+        workspace: &Path,
+        agent: &str,
+        team: Option<&str>,
+        from_spec: bool,
+        confirm: bool,
+        force: bool,
+        requirements: &crate::lifecycle::RemoveAgentFlagRequirements,
+    ) -> Value {
+        let required_flags = remove_agent_required_flags(requirements);
+        let missing_flags = remove_agent_missing_flags(from_spec, confirm, force, requirements);
+        let reason = if missing_flags.len() == 1 {
+            match missing_flags[0] {
+                "--confirm" => "confirm_required",
+                "--from-spec" => "from_spec_confirm_required",
+                "--force" => "force_required",
+                _ => "remove_agent_flags_required",
+            }
+        } else {
+            "remove_agent_flags_required"
+        };
+        let command = remove_agent_command(workspace, agent, team, &required_flags);
+        let required = required_flags.join(" ");
+        json!({
+            "ok": false,
+            "agent_id": agent,
+            "status": "refused",
+            "reason": reason,
+            "error": format!("remove-agent requires {required} for this agent"),
+            "action": format!("rerun: {command}"),
+            "command": command,
+            "missing_flags": missing_flags,
+            "required_flags": required_flags,
+            "state": {
+                "from_spec_required": requirements.from_spec_required,
+                "running": requirements.force_required,
+                "has_session": requirements.has_session,
+            },
+        })
+    }
+
+    fn remove_agent_missing_flags(
+        from_spec: bool,
+        confirm: bool,
+        force: bool,
+        requirements: &crate::lifecycle::RemoveAgentFlagRequirements,
+    ) -> Vec<&'static str> {
+        remove_agent_required_flags(requirements)
+            .into_iter()
+            .filter(|flag| match *flag {
+                "--from-spec" => !from_spec,
+                "--confirm" => !confirm,
+                "--force" => !force,
+                _ => false,
+            })
+            .collect()
+    }
+
+    fn remove_agent_required_flags(
+        requirements: &crate::lifecycle::RemoveAgentFlagRequirements,
+    ) -> Vec<&'static str> {
+        let mut flags = Vec::new();
+        if requirements.from_spec_required {
+            flags.push("--from-spec");
+        }
+        flags.push("--confirm");
+        if requirements.force_required {
+            flags.push("--force");
+        }
+        flags
+    }
+
+    fn remove_agent_command(
+        workspace: &Path,
+        agent: &str,
+        team: Option<&str>,
+        required_flags: &[&str],
+    ) -> String {
+        let mut parts = vec![
+            "team-agent".to_string(),
+            "remove-agent".to_string(),
+            shell_arg(agent),
+            "--workspace".to_string(),
+            shell_arg(&workspace.to_string_lossy()),
+        ];
+        if let Some(team) = team {
+            parts.push("--team".to_string());
+            parts.push(shell_arg(team));
+        }
+        parts.extend(required_flags.iter().map(|flag| (*flag).to_string()));
+        parts.join(" ")
+    }
+
+    fn shell_arg(raw: &str) -> String {
+        if !raw.is_empty()
+            && raw
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':'))
+        {
+            raw.to_string()
+        } else {
+            format!("'{}'", raw.replace('\'', "'\\''"))
         }
     }
     /// `runtime.acknowledge_idle`(`cmd_acknowledge_idle`)。
