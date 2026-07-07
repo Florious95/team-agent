@@ -334,6 +334,11 @@ pub struct SendArgs {
     /// `target` / `targets` / `--pane`; resolves workspace/team/agent or leader
     /// name to the current live pane before using direct pane injection.
     pub to_name: Option<String>,
+    /// E7 (0.5.9 host-leader-registry-design): `--to-leader NAME` resolves
+    /// NAME through `~/.team-agent/leaders`, canonical-validates, and then
+    /// delegates to the E6 leader delivery path (live inject or offline
+    /// mailbox with `queued_until_leader_attach`).
+    pub to_leader: Option<String>,
 }
 
 /// E23 worker-side emergency fallback for `team_orchestrator.send_message`
@@ -615,6 +620,15 @@ pub struct SessionsArgs {
     pub json: bool,
     /// Stage 4: explicit `--team` scope (read-only enumeration).
     pub team: Option<String>,
+}
+
+/// E7 (0.5.9 host-leader-registry-design §4.1): `team-agent leaders`
+/// enumerates the host discovery index and classifies each entry as
+/// LIVE, STALE, or AMBIGUOUS after re-validating against canonical
+/// workspace state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadersArgs {
+    pub json: bool,
 }
 
 /// `validate [spec=team.spec.yaml] --json`(`parser.py:120`)。

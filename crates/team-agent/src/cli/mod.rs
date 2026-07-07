@@ -58,6 +58,7 @@ pub mod diagnose;
 pub mod emit;
 pub mod helpers;
 pub mod leader;
+pub mod leaders;
 pub mod named_address;
 pub mod profile;
 pub mod send;
@@ -69,6 +70,7 @@ pub use attach_app_server_leader::*;
 pub use diagnose::*;
 pub use emit::*;
 pub use leader::*;
+pub use leaders::*;
 pub use named_address::*;
 pub use profile::*;
 pub use send::*;
@@ -988,6 +990,14 @@ pub mod lifecycle_port {
         #[cfg(not(windows))]
         {
             let _ = &run_workspace;
+        }
+        // E7 unregister-after-success (host-leader-registry-design §14 step 6):
+        // Only prune the derived registry entry when the canonical shutdown
+        // succeeded and there was no dirty_state / verification degradation.
+        // Failed/degraded shutdowns leave the entry STALE so operators can
+        // decide.
+        if ok && !verification_degraded && !probe_degraded {
+            let _ = crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
         }
         Ok(response)
     }
@@ -3939,7 +3949,11 @@ pub mod leader_port {
         }
         let result = crate::leader::claim_leader(workspace, team, true)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        Ok(lease_value(result))
+        let mut value = lease_value(result);
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            register_after_binding_success(workspace, team, "takeover", &mut value);
+        }
+        Ok(value)
     }
     /// `runtime.claim_leader(...)` 的 CLI `--json` 投影(`cmd_claim_leader`;含 inbox_hint)。
     pub fn claim_leader(
@@ -3968,7 +3982,11 @@ pub mod leader_port {
         }
         let result = crate::leader::claim_leader(workspace, team, confirm)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
-        Ok(lease_value(result))
+        let mut value = lease_value(result);
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            register_after_binding_success(workspace, team, "claim-leader", &mut value);
+        }
+        Ok(value)
     }
 
     /// `runtime.attach_leader(...)` 的 CLI `--json` 投影。
@@ -3990,6 +4008,11 @@ pub mod leader_port {
                 obj.insert("team_key".to_string(), json!(team));
             }
         }
+        // E7 register-after-success: canonical lease write already
+        // finished inside `crate::leader::attach_leader`.
+        if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            register_after_binding_success(workspace, team, "attach-leader", &mut value);
+        }
         Ok(value)
     }
 
@@ -3997,6 +4020,119 @@ pub mod leader_port {
     pub fn leader_identity(workspace: &Path, team: Option<&str>) -> Result<Value, CliError> {
         crate::leader::leader_identity(workspace, team)
             .map_err(|e| CliError::Runtime(e.to_string()))
+    }
+
+    /// E7 (0.5.9 host-leader-registry-design §14 step 3): after a
+    /// canonical binding command succeeds, write a derived discovery
+    /// entry to `~/.team-agent/leaders`. Registry write failure is
+    /// **never** a binding failure — we only append `leader_registry`
+    /// status to the JSON response so operators can see the degradation.
+    ///
+    /// The receiver payload is read from the JUST-persisted runtime
+    /// state so we capture the canonical fields (pane_id, socket,
+    /// owner_epoch) after the lease writers finished.
+    fn register_after_binding_success(
+        workspace: &Path,
+        team: Option<&str>,
+        source: &str,
+        response: &mut Value,
+    ) {
+        let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
+            return;
+        };
+        let team_key = match team.filter(|t| !t.is_empty()) {
+            Some(t) => t.to_string(),
+            None => crate::state::projection::team_state_key(&state),
+        };
+        let receiver = state
+            .get("teams")
+            .and_then(|v| v.as_object())
+            .and_then(|teams| teams.get(&team_key))
+            .and_then(|t| t.get("leader_receiver"))
+            .or_else(|| state.get("leader_receiver"))
+            .cloned();
+        let Some(receiver) = receiver else {
+            return;
+        };
+        let transport_kind = receiver
+            .get("transport_kind")
+            .and_then(Value::as_str)
+            .unwrap_or("direct_tmux")
+            .to_string();
+        let owner_epoch = receiver
+            .get("owner_epoch")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                state
+                    .get("teams")
+                    .and_then(|v| v.as_object())
+                    .and_then(|teams| teams.get(&team_key))
+                    .and_then(|t| t.get("owner_epoch"))
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(0);
+        let entry = crate::leader::registry::build_entry(
+            workspace,
+            &team_key,
+            &transport_kind,
+            receiver,
+            owner_epoch,
+            source,
+            chrono::Utc::now().to_rfc3339(),
+        );
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let write_result = crate::leader::registry::write_entry_best_effort(&entry);
+        let registry_status = match &write_result {
+            Some(path) => {
+                let _ = event_log.write(
+                    crate::leader::registry::EVENT_REGISTERED,
+                    json!({
+                        "path": path.display().to_string(),
+                        "team_key": team_key,
+                        "workspace_hash": entry.workspace_hash,
+                        "source": source,
+                        "owner_epoch": entry.owner_epoch,
+                    }),
+                );
+                json!({"status": "registered", "path": path.display().to_string()})
+            }
+            None => {
+                let _ = event_log.write(
+                    crate::leader::registry::EVENT_WRITE_FAILED,
+                    json!({
+                        "team_key": team_key,
+                        "workspace_hash": entry.workspace_hash,
+                        "source": source,
+                    }),
+                );
+                json!({"status": "write_failed"})
+            }
+        };
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("leader_registry".to_string(), registry_status);
+        }
+    }
+
+    /// E7 GC hook: called from shutdown/unbind success paths.
+    pub(crate) fn unregister_after_shutdown_success(
+        workspace: &Path,
+        team: Option<&str>,
+    ) -> Option<PathBuf> {
+        let team_key = team.filter(|t| !t.is_empty()).map(str::to_string).or_else(|| {
+            crate::state::persist::load_runtime_state(workspace)
+                .ok()
+                .map(|s| crate::state::projection::team_state_key(&s))
+        })?;
+        let path = crate::leader::registry::unregister_entry(workspace, &team_key)?;
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let _ = event_log.write(
+            crate::leader::registry::EVENT_UNREGISTERED,
+            json!({
+                "path": path.display().to_string(),
+                "team_key": team_key,
+            }),
+        );
+        Some(path)
     }
 
     fn owner_bind_value(result: crate::leader::OwnerBindResult) -> Value {

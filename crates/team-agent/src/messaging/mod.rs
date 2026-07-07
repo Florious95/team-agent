@@ -83,7 +83,8 @@ pub use delivery::{
 };
 pub use helpers::fail_leader_delivery;
 pub use leader_receiver::{
-    deliver_to_leader_fallback_pane, mirror_peer_message_to_leader, send_to_leader_receiver,
+    deliver_to_leader_fallback_pane, enqueue_leader_mailbox_until_attach,
+    mirror_peer_message_to_leader, send_to_leader_receiver,
     send_to_leader_receiver_with_message_id,
 };
 pub use peers::allow_peer_talk;

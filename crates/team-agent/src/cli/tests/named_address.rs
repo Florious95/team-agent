@@ -159,6 +159,7 @@ fn named_send_args(
         message_id: None,
         pane: pane.map(str::to_string),
         to_name: to_name.map(str::to_string),
+        to_leader: None,
     }
 }
 
@@ -328,11 +329,16 @@ fn resolve_leader_name_not_live() {
         .with_targets(vec![pane("other", "codex", "%other")]);
 
     let err = resolve_name_with_transport(&ws, "alpha/leader", &transport).unwrap_err();
-    assert_eq!(err.kind, NamedAddressErrorKind::NameNotLive);
+    // 0.5.9 E6 taxonomy split: `--to-name <team>/leader` when the team
+    // exists but the leader receiver's pane is missing is now
+    // `leader_not_attached` (not the coarser `name_not_live`), so a
+    // third-party sender can be told what to do without being pushed
+    // toward `claim-leader`/`takeover` (owner-only actions).
+    assert_eq!(err.kind, NamedAddressErrorKind::LeaderNotAttached);
     let n38 = err.n38_message();
-    assert!(n38.contains("claim-leader"), "{n38}");
     assert!(n38.contains("attach-leader"), "{n38}");
-    assert!(n38.contains("takeover"), "{n38}");
+    assert!(!n38.contains("claim-leader"), "third-party copy must not suggest claim-leader: {n38}");
+    assert!(!n38.contains("takeover"), "third-party copy must not suggest takeover: {n38}");
     let _ = std::fs::remove_dir_all(&ws);
 }
 

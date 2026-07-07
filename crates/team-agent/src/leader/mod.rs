@@ -81,6 +81,7 @@ pub mod lease;
 pub mod owner_bind;
 pub mod provider_attribution;
 pub mod rediscover;
+pub mod registry;
 pub mod start;
 pub mod takeover;
 pub mod types;

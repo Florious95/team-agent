@@ -122,6 +122,14 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "doctor" => cmd_doctor(&doctor_args(args, cwd)).map(emit_result),
         "watch" => cmd_watch(&watch_args(args, cwd)).map(emit_result),
         "sessions" => cmd_sessions(&sessions_args(args, cwd)).map(emit_result),
+        // 0.5.9 E7 host-leader-registry: `leaders` is the host-level derived
+        // discovery command. It reads ~/.team-agent/leaders, validates each
+        // entry against canonical state, and reports LIVE/STALE/AMBIGUOUS
+        // status. `--to-leader NAME` on `send` uses the same registry to
+        // resolve short/qualified/hash-qualified names to a canonical
+        // (workspace, team_key) tuple and delegates to the E6 named-leader
+        // delivery path — no separate route authority.
+        "leaders" => cmd_leaders(&leaders_args(args, cwd)).map(emit_result),
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
@@ -178,6 +186,8 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "doctor",
     "watch",
     "sessions",
+    // 0.5.9 E7: host leader discovery command surface.
+    "leaders",
     "validate",
     "install-skill",
     "profile",
@@ -692,6 +702,11 @@ struct ParsedArgs {
     auth_mode: Option<String>,
     pane: Option<String>,
     to_name: Option<String>,
+    /// E7 (0.5.9 host-leader-registry-design §4.2): `send --to-leader NAME`
+    /// resolves NAME through `~/.team-agent/leaders` to a canonical target
+    /// (workspace, team_key) then delegates to the E6 leader delivery path.
+    /// Mutually exclusive with `--to-name`, TARGET, `--pane`, and `--to`.
+    to_leader: Option<String>,
     provider: Option<String>,
     socket: Option<String>,
     thread_id: Option<String>,
@@ -782,6 +797,7 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--auth-mode" => parsed.auth_mode = next_arg(args, &mut i),
             "--pane" => parsed.pane = next_arg(args, &mut i),
             "--to-name" => parsed.to_name = next_arg(args, &mut i),
+            "--to-leader" => parsed.to_leader = next_arg(args, &mut i),
             "--provider" => parsed.provider = next_arg(args, &mut i),
             "--socket" => parsed.socket = next_arg(args, &mut i),
             "--thread-id" => parsed.thread_id = next_arg(args, &mut i),
@@ -798,6 +814,9 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             }
             other if other.starts_with("--to-name=") => {
                 parsed.to_name = Some(other.trim_start_matches("--to-name=").to_string());
+            }
+            other if other.starts_with("--to-leader=") => {
+                parsed.to_leader = Some(other.trim_start_matches("--to-leader=").to_string());
             }
             other if other.starts_with("--provider=") => {
                 parsed.provider = Some(other.trim_start_matches("--provider=").to_string());
@@ -933,7 +952,11 @@ fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {
 
 fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     let parsed = parse_args(args);
-    let target = if parsed.targets.is_some() || parsed.pane.is_some() || parsed.to_name.is_some() {
+    let target = if parsed.targets.is_some()
+        || parsed.pane.is_some()
+        || parsed.to_name.is_some()
+        || parsed.to_leader.is_some()
+    {
         None
     } else {
         parsed.positionals.first().cloned()
@@ -962,6 +985,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         message_id: parsed.message_id,
         pane: parsed.pane.clone(),
         to_name: parsed.to_name.clone(),
+        to_leader: parsed.to_leader.clone(),
     })
 }
 
@@ -1349,6 +1373,11 @@ fn sessions_args(args: &[String], cwd: &Path) -> SessionsArgs {
         json: parsed.json,
         team: parsed.team,
     }
+}
+
+fn leaders_args(args: &[String], _cwd: &Path) -> LeadersArgs {
+    let parsed = parse_args(args);
+    LeadersArgs { json: parsed.json }
 }
 
 fn validate_args(args: &[String], cwd: &Path) -> ValidateArgs {

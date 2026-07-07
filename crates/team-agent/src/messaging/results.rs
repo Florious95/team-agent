@@ -263,11 +263,21 @@ fn ensure_coordinator_after_collect(
 }
 
 /// `_coordinator_should_run`(`results.py:187-188`)。
+///
+/// The top-level `state.leader_receiver` read below is a coordinator-scope
+/// legacy compat bridge (pre-teams-map single-team layout) — deliberately
+/// NOT team-scoped because this predicate answers "is a coordinator worth
+/// starting for this workspace at all?" and does not itself route any
+/// message. The `ALLOWED-LEGACY-READ` marker documents the exception and
+/// keeps grep sweeps honest; delete once B1 canonical layout lands and
+/// every state carries a `teams` map
+/// (`.team/artifacts/next-version-staged-plan.md §5 Phase-Foundation-1`).
 fn coordinator_should_run(state: &serde_json::Value) -> bool {
     let has_session = state
         .get("session_name")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|s| !s.is_empty());
+    // ALLOWED-LEGACY-READ: pre-teams-map coordinator-scope existence probe; never used for routing.
     has_session || leader_receiver_is_direct(state.get("leader_receiver"))
 }
 

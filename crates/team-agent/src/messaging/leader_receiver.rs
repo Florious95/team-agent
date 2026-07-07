@@ -541,3 +541,61 @@ fn render_fallback_pane_message(content: &str, message_id: &str, primary_error: 
          [team-agent-token:{message_id}]"
     )
 }
+
+/// E6 (0.5.9 offline-mailbox-toname-design §6.3): enqueue a leader-bound message
+/// row in the TARGET workspace `team.db` with status `queued_until_leader_attach`.
+///
+/// This is a durable "leader mailbox" write, NOT a delivery. Coordinator delivery
+/// never claims this status (§3.3), so the row will not churn or be marked
+/// `failed` while the leader is unattached. When the target owner runs
+/// `attach-leader` / `claim-leader`, the existing `requeue_blocked_leader_messages`
+/// helper flips the same row to `accepted` and the standard delivery pipeline
+/// injects it exactly once.
+///
+/// Safety boundary (§5): only the `messages` table is touched. Owner identity
+/// (`leader_receiver` / `team_owner` / `owner_epoch`) is never written by this
+/// path, and no provider/worker process is spawned.
+pub fn enqueue_leader_mailbox_until_attach(
+    target_workspace: &Path,
+    canonical_team_key: &str,
+    content: &str,
+    task_id: Option<&TaskId>,
+    sender: &str,
+    event_log: &EventLog,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let store = MessageStore::open(target_workspace)?;
+    let message_id = store.create_message(
+        task_id.map(TaskId::as_str),
+        sender,
+        "leader",
+        content,
+        None,
+        false,
+        Some(canonical_team_key),
+    )?;
+    // The default row status after `create_message` is `accepted`. Flip it to
+    // `queued_until_leader_attach` so it stays out of `claim_for_delivery`
+    // eligible set and out of `deliver_pending_messages` scan until an
+    // attach/claim explicitly requeues it (see requeue_blocked_leader_messages).
+    store.mark(&message_id, "queued_until_leader_attach", None)?;
+    event_log.write(
+        "leader_mailbox.queued_until_attach",
+        serde_json::json!({
+            "message_id": message_id,
+            "owner_team_id": canonical_team_key,
+            "sender": sender,
+            "target_workspace": target_workspace.display().to_string(),
+            "channel": "leader_mailbox",
+        }),
+    )?;
+    Ok(DeliveryOutcome {
+        ok: true,
+        status: DeliveryStatus::Queued,
+        message_status: MessageStatusShadow("queued_until_leader_attach".to_string()),
+        message_id: Some(message_id),
+        verification: None,
+        stage: None,
+        reason: None,
+        channel: Some("leader_mailbox".to_string()),
+    })
+}

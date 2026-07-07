@@ -205,6 +205,7 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         message_id: Some("phase-golden-message".to_string()),
         pane: None,
         to_name: None,
+        to_leader: None,
     });
     let collect = cmd_collect(&CollectArgs {
         workspace: workspace.clone(),

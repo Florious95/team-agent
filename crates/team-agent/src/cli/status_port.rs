@@ -710,14 +710,20 @@ use rusqlite::params;
         limit: usize,
     ) -> Result<Value, CliError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        // E6 (0.5.9 offline-mailbox §6.6): also surface `queued_until_leader_attach`
+        // rows (third-party sends into the leader mailbox) so the target owner can
+        // see them alongside the rebind-required failures. Channel wire label
+        // distinguishes the two so the operator can tell the two shapes apart.
         let sql = match owner_team_id {
             Some(_) => {
                 "select message_id, sender, status, error, created_at, delivery_attempts
                  from messages
                  where recipient = 'leader'
-                   and status = 'failed'
-                   and error = 'leader_not_attached'
                    and owner_team_id = ?1
+                   and (
+                     (status = 'failed' and error = 'leader_not_attached')
+                     or status = 'queued_until_leader_attach'
+                   )
                  order by created_at desc
                  limit ?2"
             }
@@ -725,8 +731,10 @@ use rusqlite::params;
                 "select message_id, sender, status, error, created_at, delivery_attempts
                  from messages
                  where recipient = 'leader'
-                   and status = 'failed'
-                   and error = 'leader_not_attached'
+                   and (
+                     (status = 'failed' and error = 'leader_not_attached')
+                     or status = 'queued_until_leader_attach'
+                   )
                  order by created_at desc
                  limit ?1"
             }
@@ -735,14 +743,20 @@ use rusqlite::params;
             .prepare(sql)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let map_row = |row: &rusqlite::Row<'_>| {
+            let status: String = row.get(2)?;
+            let channel = if status == "queued_until_leader_attach" {
+                "leader_mailbox"
+            } else {
+                "rebind_required"
+            };
             Ok(json!({
                 "message_id": row.get::<_, String>(0)?,
                 "sender": row.get::<_, Option<String>>(1)?,
-                "status": row.get::<_, String>(2)?,
+                "status": status,
                 "error": row.get::<_, Option<String>>(3)?,
                 "created_at": row.get::<_, Option<String>>(4)?,
                 "delivery_attempts": row.get::<_, i64>(5)?,
-                "channel": "rebind_required",
+                "channel": channel,
                 "action": "run team-agent attach-leader or team-agent takeover",
             }))
         };
