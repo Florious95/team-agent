@@ -50,7 +50,7 @@ pub fn attach_leader(
     if let Some(endpoint) = target.endpoint.as_ref() {
         receiver.tmux_socket = Some(endpoint.clone());
     }
-    let validation = validate_attach_target(workspace, &state, &target.info);
+    let validation = validate_attach_target(workspace, &state, &target.info, provider);
     if validation.is_err() {
         let pane_info = pane_info_value(&target.info);
         let targets_value = Value::Array(targets.iter().map(|target| pane_info_value(&target.info)).collect());
@@ -66,6 +66,7 @@ pub fn attach_leader(
             LeaseSource::Manual,
             &event_log,
         )? {
+            if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
             let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
             return Ok(LeaseResult {
                 ok: true,
@@ -98,6 +99,7 @@ pub fn attach_leader(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
         )?;
+        if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
         let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
         return Ok(LeaseResult {
             ok: true,
@@ -121,6 +123,7 @@ pub fn attach_leader(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
     )?;
+    if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
     let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
     Ok(LeaseResult {
         ok: true,
@@ -132,6 +135,63 @@ pub fn attach_leader(
         action: None,
         bound_pane_id: Some(pane_id),
     })
+}
+
+/// 0.5.9 (E6 real-machine e2e wiring): Fake-provider leader panes in the
+/// e2e harness run `/bin/cat`, which lets the TTY driver echo every
+/// injected byte AND then prints the same bytes on stdout — so pane
+/// capture ends up with two copies of every delivered token. Real Codex/
+/// Claude/Copilot binaries drive the pane through their own TUI and never
+/// echo raw input, so they don't need this. Attach-leader is the
+/// canonical binding hook for this pane, so it's the right place to
+/// disable the TTY echo bit once. Best-effort: any failure is silent
+/// (Fake-provider binding stays useful even without echo suppression).
+///
+/// N16/CP-1 (`.team/anchors/REQUIREMENTS.md`): all tmux invocations MUST
+/// go through the `TmuxBackend` single entry point. The pane's tty query
+/// is done via `TmuxBackend::for_tmux_endpoint(endpoint).query(...,
+/// PaneField::PaneTty)` — socket-scoped by construction. The `stty` call
+/// itself is not a tmux operation, so it uses `Command` directly.
+fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: &str) {
+    use crate::transport::{PaneField, Target as TransportTarget};
+    if !matches!(provider, Provider::Fake) {
+        return;
+    }
+    if endpoint.is_empty() {
+        return;
+    }
+    let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+    let Ok(Some(tty)) = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::query(
+        &backend,
+        &TransportTarget::Pane(target.pane_id.clone()),
+        PaneField::PaneTty,
+    ) else {
+        return;
+    };
+    if tty.trim().is_empty() {
+        return;
+    }
+    // stty against the pane's tty flips the terminal driver's echo bit
+    // without asking the pane process (`/bin/cat`) to interpret any
+    // command. Best-effort: failure is silent.
+    //
+    // Cross-platform tty-file flag: macOS/BSD uses `-f <file>`; GNU
+    // coreutils on Linux uses `-F <file>`. CI runs on Linux and the
+    // previous BSD-only invocation silently no-op'd there — the token
+    // was double-injected because echo stayed on. Try `-F` first (Linux
+    // is the CI baseline), then fall back to `-f` on macOS. Both are
+    // safe to run: the wrong-platform variant just fails silently.
+    let tty = tty.trim();
+    let linux_ok = std::process::Command::new("stty")
+        .args(["-F", tty, "-echo"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !linux_ok {
+        let _ = std::process::Command::new("stty")
+            .args(["-f", tty, "-echo"])
+            .output();
+    }
 }
 
 /// Explicit app-server leader binding. Validates the supplied socket/thread tuple
@@ -824,9 +884,26 @@ fn validate_attach_target(
     workspace: &Path,
     state: &Value,
     target: &PaneInfo,
+    requested_provider: Provider,
 ) -> Result<(), &'static str> {
-    let Some(claim_target) = claim_target_from_pane_info(workspace, target) else {
-        return Err("leader_pane_validation_failed");
+    // 0.5.9 (E6 real-machine e2e wiring): an explicit `--provider fake`
+    // is the operator's declaration that this pane is a fake-provider
+    // stub for tests / fixtures. The normal pane-command attribution
+    // path can't recognize `/bin/cat` (or any bare shell process) as a
+    // provider, so honoring the explicit request here is the only way
+    // real-machine E6 acceptance can spin up a leader without shipping
+    // a real Codex/Claude/Copilot binary. This is a targeted escape
+    // hatch — `Provider::Fake` is not selectable from the user-facing
+    // provider list, only wired in test/fixture flows.
+    let claim_target = match claim_target_from_pane_info(workspace, target) {
+        Some(target) => Some(target),
+        None if matches!(requested_provider, Provider::Fake) => None,
+        None => return Err("leader_pane_validation_failed"),
+    };
+    let Some(claim_target) = claim_target else {
+        // Fake provider: skip session-uuid check since attribution was
+        // bypassed. Nothing else to validate.
+        return Ok(());
     };
     let recorded_uuid = get_path_str(state, &["team_owner", "leader_session_uuid"])
         .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));

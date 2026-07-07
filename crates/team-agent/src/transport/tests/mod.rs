@@ -108,6 +108,7 @@
                 PaneField::PaneCurrentCommand => "sh",
                 PaneField::PaneCurrentPath => "/tmp/ws",
                 PaneField::SessionName => "team-sess",
+                PaneField::PaneTty => "/dev/ttys000",
             };
             Ok(Some(value.to_string()))
         }

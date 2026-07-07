@@ -395,6 +395,7 @@ impl Transport for RecordingTransport {
             PaneField::PaneCurrentPath => None,
             PaneField::PaneCurrentCommand => None,
             PaneField::SessionName => Some(self.session.clone()),
+            PaneField::PaneTty => None,
         })
     }
 

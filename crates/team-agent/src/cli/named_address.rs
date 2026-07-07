@@ -267,6 +267,26 @@ pub(crate) fn resolve_name_for_cli(
     Ok((resolved, transport))
 }
 
+/// E6 wiring helper (`cli::send::maybe_enqueue_offline_leader_mailbox`):
+/// re-parse a `<workspace>::<team>/leader` name and return the resolved
+/// target workspace + canonical team_key so send.rs can enqueue the
+/// mailbox without duplicating the parser. Returns `Ok(None)` for names
+/// that aren't `<team>/leader` shapes (worker sends, session:window,
+/// etc. keep their existing refusal semantics).
+pub(crate) fn parse_leader_target_workspace_and_team(
+    sender_workspace: &Path,
+    raw_name: &str,
+) -> Result<Option<(PathBuf, String)>, NamedAddressError> {
+    let parsed = parse_named_address(raw_name)?;
+    let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
+    match parsed.target {
+        ParsedTarget::TeamEntity { team, entity } if entity == "leader" => {
+            Ok(Some((target_workspace, team)))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedNamedAddress {
     workspace: Option<PathBuf>,

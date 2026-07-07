@@ -201,6 +201,11 @@ pub enum PaneField {
     PaneCurrentCommand,
     PaneCurrentPath,
     SessionName,
+    /// pane's controlling tty (e.g. `/dev/ttys015`). Consumers use it to
+    /// flip terminal driver bits like `stty -f <tty> -echo` from outside
+    /// tmux's control channel — the query itself still goes through the
+    /// backend so N16/CP-1 (single tmux entry point) stays intact.
+    PaneTty,
 }
 
 /// 后端种类(诊断/事件用)。
@@ -843,6 +848,7 @@ pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
         PaneField::PaneCurrentCommand => "#{pane_current_command}",
         PaneField::PaneCurrentPath => "#{pane_current_path}",
         PaneField::SessionName => "#{session_name}",
+        PaneField::PaneTty => "#{pane_tty}",
     };
     let mut argv = vec![
         "tmux".to_string(),
