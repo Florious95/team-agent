@@ -942,6 +942,12 @@ fn report_result_for_owner_team_inner(
         );
     }
     out.insert("notification_event_id".to_string(), serde_json::Value::Null);
+    if let Some(warnings) = report_result_array(envelope, "warnings") {
+        out.insert(
+            "warnings".to_string(),
+            serde_json::Value::Array(warnings.clone()),
+        );
+    }
     Ok(serde_json::Value::Object(out))
 }
 
@@ -1036,6 +1042,9 @@ fn format_report_result_notification(
     if let Some(tests) = format_report_result_tests(envelope) {
         lines.push(tests);
     }
+    if let Some(warnings) = format_report_result_warnings(envelope) {
+        lines.push(warnings);
+    }
     if let Some(changes) = format_report_result_changes(envelope) {
         lines.push(changes);
     }
@@ -1072,6 +1081,29 @@ fn format_report_result_tests(envelope: &serde_json::Value) -> Option<String> {
         None
     } else {
         Some(format!("Tests: {}", parts.join(", ")))
+    }
+}
+
+fn format_report_result_warnings(envelope: &serde_json::Value) -> Option<String> {
+    let parts = report_result_array(envelope, "warnings")?
+        .iter()
+        .filter_map(|warning| {
+            let code = report_field(warning, "code")?;
+            let field = report_field(warning, "field").unwrap_or("result");
+            let severity = report_field(warning, "severity").unwrap_or("warning");
+            let advisory =
+                if warning.get("advisory").and_then(serde_json::Value::as_bool) == Some(true) {
+                    " advisory"
+                } else {
+                    ""
+                };
+            Some(format!("{severity}{advisory} {field}: {code}"))
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("Verification warnings: {}", parts.join(", ")))
     }
 }
 
@@ -1203,6 +1235,14 @@ mod tests {
             "tests": [
                 {"command": "cargo test", "status": "passed"}
             ],
+            "warnings": [
+                {
+                    "code": "result_success_without_executed_tests",
+                    "field": "tests",
+                    "severity": "warning",
+                    "advisory": true
+                }
+            ],
             "risks": [
                 {"severity": "low", "description": "none known"}
             ],
@@ -1217,6 +1257,9 @@ mod tests {
             format_report_result_notification("res_1", "task-1", "worker", "success", &envelope);
         assert!(notification.contains("Task task-1 reported success from worker: done"));
         assert!(notification.contains("Tests: cargo test=passed"));
+        assert!(notification.contains(
+            "Verification warnings: warning advisory tests: result_success_without_executed_tests"
+        ));
         assert!(notification.contains("Changes: modified src/a.rs: patched delivery"));
         assert!(notification.contains("Risks: low: none known"));
         assert!(notification.contains("Artifacts: .team/artifacts/evidence.md: evidence"));

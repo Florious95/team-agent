@@ -118,6 +118,84 @@ pub fn normalize_report_envelope(env: &Value) -> NormalizedReportEnvelope {
     }
 }
 
+pub(crate) fn report_result_integrity_warnings(
+    source: &Value,
+    normalized: &NormalizedReportEnvelope,
+) -> Vec<Value> {
+    let mut warnings = source
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    match normalized.status {
+        ResultStatus::Success => {
+            if normalized.tests.is_empty()
+                || normalized
+                    .tests
+                    .iter()
+                    .all(|test| test.status == TestStatus::NotRun)
+            {
+                push_integrity_warning(
+                    &mut warnings,
+                    "result_success_without_executed_tests",
+                    "tests",
+                );
+            }
+            if change_path_missing_description(source.get("changes")) {
+                push_integrity_warning(
+                    &mut warnings,
+                    "result_change_missing_description",
+                    "changes",
+                );
+            }
+        }
+        ResultStatus::Partial | ResultStatus::Blocked => {
+            if normalized.tests.is_empty()
+                || normalized
+                    .tests
+                    .iter()
+                    .any(|test| test.status == TestStatus::NotRun)
+            {
+                push_integrity_warning(&mut warnings, "result_not_verified", "tests");
+            }
+        }
+        ResultStatus::Failed => {}
+    }
+
+    warnings
+}
+
+fn push_integrity_warning(warnings: &mut Vec<Value>, code: &str, field: &str) {
+    let exists = warnings.iter().any(|warning| {
+        warning.get("code").and_then(Value::as_str) == Some(code)
+            && warning.get("field").and_then(Value::as_str) == Some(field)
+    });
+    if !exists {
+        warnings.push(serde_json::json!({
+            "code": code,
+            "field": field,
+            "severity": "warning",
+            "advisory": true
+        }));
+    }
+}
+
+fn change_path_missing_description(value: Option<&Value>) -> bool {
+    items_from_value(value).iter().any(|item| {
+        let Some(obj) = item.as_object() else {
+            return false;
+        };
+        let has_path = ["path", "file", "filepath", "filename"]
+            .iter()
+            .any(|key| obj.get(*key).and_then(text_of_value).is_some());
+        let has_description = ["description", "summary", "detail", "details", "message"]
+            .iter()
+            .any(|key| obj.get(*key).and_then(text_of_value).is_some());
+        has_path && !has_description
+    })
+}
+
 /// `_compact_tool_result` (`normalize.py:6-64`): whitelist-key compaction of a
 /// delegate result. ok vs error use different key sets; `fanout_*` status preserves
 /// `deliveries`/`recipients`; `acknowledged_messages` → `acknowledged_count` (len).
@@ -170,6 +248,7 @@ pub fn compact_tool_result(result: &Value) -> ToolResult {
             "notification_status",
             "notification_channel",
             "notification_event_id",
+            "warnings",
         ]
     };
     for key in keys {
