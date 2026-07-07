@@ -66,7 +66,7 @@ pub fn attach_leader(
             LeaseSource::Manual,
             &event_log,
         )? {
-            quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
+            if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
             let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
             return Ok(LeaseResult {
                 ok: true,
@@ -99,7 +99,7 @@ pub fn attach_leader(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
         )?;
-        quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
+        if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
         let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
         return Ok(LeaseResult {
             ok: true,
@@ -123,7 +123,7 @@ pub fn attach_leader(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
     )?;
-    quiet_fake_leader_pane_echo(provider, &target.info, target.endpoint.as_deref());
+    if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
     let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
     Ok(LeaseResult {
         ok: true,
@@ -146,23 +146,27 @@ pub fn attach_leader(
 /// canonical binding hook for this pane, so it's the right place to
 /// disable the TTY echo bit once. Best-effort: any failure is silent
 /// (Fake-provider binding stays useful even without echo suppression).
-fn quiet_fake_leader_pane_echo(
-    provider: Provider,
-    target: &PaneInfo,
-    endpoint: Option<&str>,
-) {
+///
+/// N16/CP-1 (`.team/anchors/REQUIREMENTS.md`): all tmux invocations MUST
+/// be socket-scoped via `-S <endpoint>`. `endpoint` is required here —
+/// missing endpoint means the caller resolved the target through a
+/// non-socketed path and we must NOT fall back to the ambient tmux
+/// server. Return early so best-effort semantics stay intact without
+/// violating the guard.
+fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: &str) {
     if !matches!(provider, Provider::Fake) {
+        return;
+    }
+    if endpoint.is_empty() {
         return;
     }
     // Look up the pane's tty path (e.g. /dev/ttys015) and run `stty -echo`
     // against it — this flips the terminal driver's echo bit without
     // asking the pane process (cat) to interpret any command.
-    let mut cmd = std::process::Command::new("tmux");
-    if let Some(endpoint) = endpoint {
-        cmd.args(["-S", endpoint]);
-    }
-    let Ok(output) = cmd
+    let Ok(output) = std::process::Command::new("tmux")
         .args([
+            "-S",
+            endpoint,
             "display-message",
             "-p",
             "-t",
