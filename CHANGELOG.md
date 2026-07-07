@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.8
+
+- **DX: `status` stale detection sourced from physical liveness, not lifecycle state.** When a worker's tmux pane is dead, `status` now marks that worker `stale: true` with `stale_reason: "pane_dead"` derived from a physical liveness probe — not from the coordinator's own lifecycle bookkeeping. This prevents stale agents from appearing live in status output when the coordinator has not yet observed the pane exit.
+- **DX: `status` exposes `current_task` and heartbeat as structured best-effort observation.** The status response now includes a `current_task` field (the task currently assigned to the worker) and a heartbeat timestamp for each agent entry. These are best-effort observations from the coordinator's view — not authority — and are marked as such so callers can distinguish coordinator knowledge from ground truth.
+- **DX: `--to-name` failure attaches structured advisory candidates.** When a named-address send fails to resolve the target, the error response now includes an `advisory_candidates` list of reachable named addresses on the same socket, ranked by recency. This lets the caller see what names are actually live without running a separate `status` call.
+- **DX: session all-gone recovery chain surfaces structured short-circuit hint.** When all workers in a session have exited and `diagnose` or `status` detects the all-gone state, the response now includes a structured `recovery_hint` that describes the recommended recovery path (e.g., `restart --allow-fresh`) along with the team and session context — condensing the triage steps a human or agent would otherwise have to run manually.
+- **DX: recovery-originated task assignment carries structured confirmation marker.** When a worker accepts a task via a recovery path (rather than a normal assign), the task envelope now includes a `recovery_marker` field identifying the recovery origin. This lets the receiving worker log and surface the recovery context without parsing the message text prefix.
+
 ## 0.5.7
 
 - **DX: `remove-agent` rejection lists all required flags at once with a copyable command.** When `remove-agent` is refused because the worker is still running or the agent spec still exists, the error now includes every flag needed to complete the operation (`--force`, `--from-spec`, etc.) in a single copyable command line. Previously the error named flags one-at-a-time, requiring multiple retries to discover the full set.
