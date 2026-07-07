@@ -960,32 +960,187 @@ fn delivery_stage_wire(stage: DeliveryStage) -> &'static str {
 /// available at the CLI; the full canonical-validate loop follows in a
 /// later commit alongside the registry read implementation.
 pub fn send_to_canonical_leader_target(
-    _sender_workspace: &std::path::Path,
+    sender_workspace: &std::path::Path,
     name: &str,
-    _content: &str,
-    _sender: &str,
-    _task_id: Option<&str>,
+    content: &str,
+    sender: &str,
+    task_id: Option<&str>,
 ) -> Result<serde_json::Value, CliError> {
-    // Reserved markers embedded verbatim so consumers can grep for them
-    // even before the registry read loop lands. `delivered=false` is the
-    // honest wire value for offline mailbox — never claim delivered when
-    // the row is only `queued_until_leader_attach` / `leader_mailbox`.
-    let candidates: Vec<serde_json::Value> = Vec::new();
-    Ok(serde_json::json!({
-        "ok": false,
-        "status": "refused",
-        "reason": "leader_name_not_found",
-        "requested_name": name,
-        "resolved_via": "host_leader_registry",
-        "candidates": candidates,
-        "workspace_hash": null,
-        "stable_qualified_name": null,
-        "channel": "leader_mailbox",
-        "delivered": false,
-        "message_status": "queued_until_leader_attach",
-        "action": "run `team-agent leaders` to see registered leaders; retry with a qualified name",
-        "registry_stale": false,
-    }))
+    // Resolve NAME through the registry. Ambiguity is decided *before*
+    // canonical validation so an ambiguous short name never picks a
+    // winner — even when only one candidate happens to be live. Send
+    // uses the no-GC listing so stale entries can still refuse with
+    // `registry_stale` — the leaders CLI is the one that prunes.
+    let classified = crate::leader::registry::list_validated_no_gc();
+    let mut candidates_all: Vec<crate::leader::registry::LeaderRegistryEntry> = Vec::new();
+    for (entry, _status, _reason) in &classified {
+        let matches = entry.delivery_name == name
+            || entry.qualified_name == name
+            || entry.stable_qualified_name == name
+            || entry.aliases.iter().any(|a| a == name);
+        if matches {
+            candidates_all.push(entry.clone());
+        }
+    }
+    if candidates_all.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "status": "refused",
+            "reason": "leader_name_not_found",
+            "requested_name": name,
+            "resolved_via": "host_leader_registry",
+            "candidates": Vec::<serde_json::Value>::new(),
+            "workspace_hash": null,
+            "stable_qualified_name": null,
+            "channel": "leader_mailbox",
+            "delivered": false,
+            "message_status": "queued_until_leader_attach",
+            "action": "run `team-agent leaders` to see registered leaders; retry with a qualified name",
+            "registry_stale": false,
+        }));
+    }
+    if candidates_all.len() > 1 {
+        let cand_json: Vec<serde_json::Value> = candidates_all
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.qualified_name,
+                    "workspace": e.workspace.display().to_string(),
+                    "team_key": e.team_key,
+                    "workspace_hash": e.workspace_hash,
+                    "stable_qualified_name": e.stable_qualified_name,
+                })
+            })
+            .collect();
+        return Ok(serde_json::json!({
+            "ok": false,
+            "status": "refused",
+            "reason": "name_ambiguous",
+            "requested_name": name,
+            "resolved_via": "host_leader_registry",
+            "candidates": cand_json,
+            "channel": "leader_mailbox",
+            "delivered": false,
+            "action": "run `team-agent leaders` and retry with the qualified name",
+        }));
+    }
+    let entry = candidates_all.into_iter().next().ok_or_else(|| {
+        CliError::Runtime("internal: candidate list must have at least one entry".to_string())
+    })?;
+    // Canonical-validate the entry against target workspace state. Send
+    // through the same E6 --to-name path so live inject and mailbox both
+    // funnel through one code path.
+    let (status, reason) = crate::leader::registry::classify(&entry);
+    if status == "STALE" {
+        // Check whether the underlying team is still alive — if so we
+        // may still queue via the E6 mailbox path (leader-not-attached
+        // shape). If the workspace/team is gone we refuse `registry_stale`.
+        let state = crate::state::persist::load_runtime_state(&entry.workspace).ok();
+        let team_alive = state
+            .as_ref()
+            .and_then(|s| s.get("teams"))
+            .and_then(|v| v.as_object())
+            .and_then(|teams| teams.get(&entry.team_key))
+            .and_then(|t| t.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .map(|s| s == "alive" || s.is_empty())
+            .unwrap_or(false);
+        if !team_alive {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "status": "refused",
+                "reason": "registry_stale",
+                "requested_name": name,
+                "resolved_via": "host_leader_registry",
+                "stale_reason": reason,
+                "workspace_hash": entry.workspace_hash,
+                "stable_qualified_name": entry.stable_qualified_name,
+                "channel": "leader_mailbox",
+                "delivered": false,
+                "action": "target team is not alive; run `team-agent leaders` for current state",
+            }));
+        }
+        // Team alive but leader unattached → E6 mailbox.
+        let event_log = crate::event_log::EventLog::new(&entry.workspace);
+        let task = task_id.map(|s| crate::model::ids::TaskId::new(s.to_string()));
+        let outcome = crate::messaging::enqueue_leader_mailbox_until_attach(
+            &entry.workspace,
+            &entry.team_key,
+            content,
+            task.as_ref(),
+            sender,
+            &event_log,
+        )
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+        return Ok(serde_json::json!({
+            "ok": true,
+            "status": "queued_until_leader_attach",
+            "message_status": "queued_until_leader_attach",
+            "channel": "leader_mailbox",
+            "delivered": false,
+            "resolved_via": "host_leader_registry",
+            "requested_name": name,
+            "to_leader": entry.qualified_name,
+            "target_workspace": entry.workspace.display().to_string(),
+            "workspace_hash": entry.workspace_hash,
+            "stable_qualified_name": entry.stable_qualified_name,
+            "team_key": entry.team_key,
+            "message_id": outcome.message_id,
+        }));
+    }
+    // LIVE: canonical-validated. Delegate to the E6 --to-name path via a
+    // synthesized `<workspace>::<team_key>/leader` name so live inject +
+    // mailbox both go through one code path.
+    let to_name = format!(
+        "{}::{}/leader",
+        entry.workspace.display(),
+        entry.team_key
+    );
+    let (resolved, transport) =
+        match crate::cli::named_address::resolve_name_for_cli(sender_workspace, &to_name) {
+            Ok(r) => r,
+            Err(err) => {
+                // Named-address refusal — surface it verbatim but tag as
+                // registry-resolved so callers can trace the origin.
+                let mut body = err.to_json();
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert(
+                        "resolved_via".to_string(),
+                        serde_json::Value::String("host_leader_registry".to_string()),
+                    );
+                    obj.insert(
+                        "delivered".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
+                }
+                return Ok(body);
+            }
+        };
+    let mut value = send_to_named_pane_direct(
+        sender_workspace,
+        transport.as_ref(),
+        &resolved,
+        content,
+        sender,
+        task_id,
+        true,
+    )?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "resolved_via".to_string(),
+            serde_json::Value::String("host_leader_registry".to_string()),
+        );
+        obj.insert(
+            "to_leader".to_string(),
+            serde_json::Value::String(entry.qualified_name.clone()),
+        );
+        // Honest delivered marker. `send_to_named_pane_direct` sets `ok`
+        // to whether physical inject verified — mirror that as
+        // `delivered`.
+        let ok = obj.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        obj.insert("delivered".to_string(), serde_json::Value::Bool(ok));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
