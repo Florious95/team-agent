@@ -93,10 +93,12 @@ fn rfs_refused_dirty_topology_event_precedes_any_spawn_argv_event() {
     let refused = event_index(&events, EVENT_RESTART_REFUSED_DIRTY_TOPOLOGY).unwrap_or_else(|| {
         panic!("R2 RED: missing {EVENT_RESTART_REFUSED_DIRTY_TOPOLOGY}; events={events:?}")
     });
-    if let Some(spawn) = event_index(&events, EVENT_PROVIDER_WORKER_SPAWN_ARGV) {
+    if let Some(spawn) =
+        event_index_with_source(&events, EVENT_PROVIDER_WORKER_SPAWN_ARGV, "restart")
+    {
         assert!(
             refused < spawn,
-            "R2 RED: {EVENT_PROVIDER_WORKER_SPAWN_ARGV} must not appear before dirty-topology refusal; refused_index={refused} spawn_index={spawn} events={events:?}"
+            "R2 RED: restart-sourced {EVENT_PROVIDER_WORKER_SPAWN_ARGV} must not appear before dirty-topology refusal; refused_index={refused} restart_spawn_index={spawn} events={events:?}"
         );
     }
 }
@@ -490,4 +492,11 @@ fn event_index(events: &[Value], event_name: &str) -> Option<usize> {
     events
         .iter()
         .position(|event| event.get("event").and_then(Value::as_str) == Some(event_name))
+}
+
+fn event_index_with_source(events: &[Value], event_name: &str, source: &str) -> Option<usize> {
+    events.iter().position(|event| {
+        event.get("event").and_then(Value::as_str) == Some(event_name)
+            && event.get("source").and_then(Value::as_str) == Some(source)
+    })
 }
