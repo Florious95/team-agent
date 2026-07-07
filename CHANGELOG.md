@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.10
+
+- **Fix: `send --to-name` to a live team with unattached leader now queues to offline mailbox (real-machine wiring).** In 0.5.9 the offline mailbox path was implemented but not wired into the third-party `send --to-name` resolution path — live-team sends to an unattached leader still returned a delivery error. The wiring is now in place: when the target team is live but the leader receiver is not attached, the message is written to the offline mailbox with `delivery_status: queued_until_leader_attach` and a stable `message_id`. When the leader attaches, the mailbox is replayed exactly once.
+- **Fix: `attach-leader` accepts `--provider fake` for explicit stub-mode binding.** The `attach-leader` command now recognises `--provider fake` as a first-class option for e2e harness and test scenarios that use a fake-provider leader pane. Previously fake-provider bindings could only be triggered implicitly; the explicit flag makes harness setup deterministic.
+- **Fix: tmux pane queries in `attach-leader` routed through `TmuxBackend` API (N16/CP-1).** All tmux operations in the attach path now go through `TmuxBackend::for_tmux_endpoint`, eliminating raw `Command::new("tmux")` invocations without socket scoping.
+- **Fix: fake-provider pane TTY echo suppression prevents double-delivery.** When `attach-leader` binds a fake-provider pane running `/bin/cat`, the terminal driver's echo bit caused every injected token to appear twice in the pane capture. `attach-leader` now calls `stty -echo` on the pane's TTY device at bind time, ensuring exactly-once delivery semantics in test harnesses.
+
 ## 0.5.9
 
 - **DX: `report_result` integrity warnings for unverified success claims.** When `report_result` is called with `status: success` but the attached tests field contains no executed evidence (all entries are `not_run`, scalar values, or missing descriptions), the coordinator now accepts the call but returns a structured `warnings` array instead of treating the claim as verified. Callers can distinguish a verified success from a best-effort claim without parsing prose.
