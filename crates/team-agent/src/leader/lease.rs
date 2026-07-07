@@ -174,9 +174,24 @@ fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: 
     // stty against the pane's tty flips the terminal driver's echo bit
     // without asking the pane process (`/bin/cat`) to interpret any
     // command. Best-effort: failure is silent.
-    let _ = std::process::Command::new("stty")
-        .args(["-f", tty.trim(), "-echo"])
-        .output();
+    //
+    // Cross-platform tty-file flag: macOS/BSD uses `-f <file>`; GNU
+    // coreutils on Linux uses `-F <file>`. CI runs on Linux and the
+    // previous BSD-only invocation silently no-op'd there — the token
+    // was double-injected because echo stayed on. Try `-F` first (Linux
+    // is the CI baseline), then fall back to `-f` on macOS. Both are
+    // safe to run: the wrong-platform variant just fails silently.
+    let tty = tty.trim();
+    let linux_ok = std::process::Command::new("stty")
+        .args(["-F", tty, "-echo"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !linux_ok {
+        let _ = std::process::Command::new("stty")
+            .args(["-f", tty, "-echo"])
+            .output();
+    }
 }
 
 /// Explicit app-server leader binding. Validates the supplied socket/thread tuple
