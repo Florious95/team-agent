@@ -30,6 +30,7 @@
 
 pub mod framework;
 pub mod scripted_provider;
+pub mod support;
 
 mod cases {
     mod shut_001_clean_shutdown;
@@ -71,4 +72,6 @@ mod cases {
     mod rec_001_repair_state_basic;
     mod rec_002_doctor_checks;
     mod rec_003_diagnose_output;
+    mod rfs_restart_false_success_contract;
+    mod wleak_worker_delivery_socket_leak_contract;
 }

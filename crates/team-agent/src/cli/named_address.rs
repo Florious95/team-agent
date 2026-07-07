@@ -721,8 +721,20 @@ fn resolve_leader(
     let targets = list_targets(transport)?;
     let matches = targets
         .iter()
-        .filter(|target| target.pane_id.as_str() == pane_id)
+        .filter(|target| {
+            target.pane_id.as_str() == pane_id
+                && session.is_none_or(|expected| target.session.as_str() == expected)
+                && window.is_none_or(|expected| {
+                    target
+                        .window_name
+                        .as_ref()
+                        .is_some_and(|name| name.as_str() == expected)
+                })
+        })
         .collect::<Vec<_>>();
+    let stale_pane_seen = targets
+        .iter()
+        .any(|target| target.pane_id.as_str() == pane_id);
     match matches.len() {
         1 => Ok(ResolvedNamedAddress {
             raw_name: parsed.display_name(),
@@ -751,6 +763,9 @@ fn resolve_leader(
                 window,
                 socket,
             );
+            if stale_pane_seen {
+                err.log = format!("{} stale_tuple_mismatch=true", err.log);
+            }
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
             Err(err)

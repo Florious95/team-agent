@@ -1284,6 +1284,7 @@ pub(super) fn mark_agent_running_noop(
     agent_id: &AgentId,
     session_name: &SessionName,
     window: &str,
+    pane: Option<&crate::transport::PaneInfo>,
 ) -> Result<(), LifecycleError> {
     if !state.is_object() {
         *state = serde_json::json!({});
@@ -1322,6 +1323,17 @@ pub(super) fn mark_agent_running_noop(
     obj.insert("status".to_string(), serde_json::json!("running"));
     obj.insert("agent_id".to_string(), serde_json::json!(agent_id.as_str()));
     obj.insert("window".to_string(), serde_json::json!(window));
+    if let Some(pane) = pane {
+        obj.insert(
+            "pane_id".to_string(),
+            serde_json::json!(pane.pane_id.as_str()),
+        );
+        if let Some(pane_pid) = pane.pane_pid {
+            obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+        } else {
+            obj.remove("pane_pid");
+        }
+    }
     Ok(())
 }
 

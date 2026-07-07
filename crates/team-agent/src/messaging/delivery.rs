@@ -103,6 +103,42 @@ pub fn tmux_pane_width(transport: &dyn Transport, target: &Target) -> PaneWidthQ
     }
 }
 
+pub(crate) fn worker_target_missing_due_to_stale_binding(
+    state: &serde_json::Value,
+    recipient: &str,
+    transport: &dyn Transport,
+) -> bool {
+    let Some(agent) = state.get("agents").and_then(|agents| agents.get(recipient)) else {
+        return false;
+    };
+    let session = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let window = agent
+        .get("window")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(recipient);
+    let Some(cached_pane) = agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    let Ok(live_targets) = transport.list_targets() else {
+        return false;
+    };
+    if live_pane_for_session_window(&live_targets, session, window).is_some() {
+        return false;
+    }
+    live_targets.iter().any(|target| {
+        target.pane_id.as_str() == cached_pane
+            && stale_worker_pane_binding(target, session, window).is_some()
+    })
+}
+
 /// `_deliver_pending_message` (`delivery.py:63`):对一条消息做 tmux 注入投递 (含 trust 提示
 /// 自动应答 + turn-open arm + first_send_at 戳)。daemon-path → Result。
 pub fn deliver_pending_message(
@@ -323,7 +359,11 @@ pub fn deliver_pending_message(
             channel: Some("rebind_required".to_string()),
         });
     }
-    let target = resolve_inject_target(state, &message.recipient, transport, &live_targets);
+    let resolved = resolve_inject_target(state, &message.recipient, transport, &live_targets);
+    if let Some(stale) = resolved.stale_binding.as_ref() {
+        event_log.write("worker_pane_binding_stale", stale.as_event_payload(message_id, &message.recipient))?;
+    }
+    let target = resolved.target.clone();
     if let Some(outcome) = block_missing_worker_target(
         store,
         event_log,
@@ -467,6 +507,7 @@ pub fn deliver_pending_message(
         message_id,
         event_log,
         canonical_owner_team_id.as_deref(),
+        resolved.metadata.as_ref(),
     )?;
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
@@ -554,14 +595,13 @@ pub fn deliver_pending_message(
         let token_marker = format!("[team-agent-token:{message_id}]");
         let grace = std::time::Duration::from_millis(200);
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        let mut transcript_has_token = false;
-        loop {
-            transcript_has_token = rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
-            if transcript_has_token || std::time::Instant::now() >= deadline {
-                break;
+        let transcript_has_token = loop {
+            let found = rollout_tail_contains(&rollout_path, &token_marker, 64 * 1024);
+            if found || std::time::Instant::now() >= deadline {
+                break found;
             }
             std::thread::sleep(grace);
-        }
+        };
         if !transcript_has_token {
             // Loud but non-fatal: emit a mismatch event for diagnose/status
             // observability. Do NOT mark delivered — degrade to
@@ -606,10 +646,11 @@ pub fn deliver_pending_message(
         }
     }
     store.mark(message_id, "delivered", None)?;
-    event_log.write(
-        "message.delivered",
-        serde_json::json!({"message_id": message_id}),
-    )?;
+    let mut delivered_event = serde_json::json!({"message_id": message_id});
+    if let Some(metadata) = resolved.metadata.as_ref() {
+        append_target_metadata(&mut delivered_event, metadata);
+    }
+    event_log.write("message.delivered", delivered_event)?;
     let outcome = DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Delivered,
@@ -633,6 +674,7 @@ pub fn deliver_pending_message(
         &outcome,
         event_log,
         canonical_owner_team_id.as_deref(),
+        resolved.metadata.as_ref(),
     )?;
     Ok(outcome)
 }
@@ -1056,15 +1098,61 @@ fn app_server_rebind_action(owner_team_id: Option<&str>, receiver: &serde_json::
 /// pane. U1-A real-machine fix is deferred to v0.3.25 (writer-shape + projection +
 /// rediscover-writer triad). U1-B jitter defer at try_deliver_message:213-237 and
 /// U1-C-Tail at the startup-prompt peek site are unchanged.
+#[derive(Clone)]
+struct ResolvedInjectTarget {
+    target: Target,
+    metadata: Option<TargetMetadata>,
+    stale_binding: Option<WorkerPaneBindingStale>,
+}
+
+#[derive(Clone)]
+struct TargetMetadata {
+    tmux_endpoint: Option<String>,
+    target_session: String,
+    target_window: String,
+    target_pane_id: String,
+    target_pane_pid: Option<u32>,
+    resolved_from: &'static str,
+}
+
+#[derive(Clone)]
+struct WorkerPaneBindingStale {
+    cached_pane_id: String,
+    expected_session: String,
+    expected_window: String,
+    observed_session: String,
+    observed_window: String,
+    observed_pane_pid: Option<u32>,
+}
+
+impl WorkerPaneBindingStale {
+    fn as_event_payload(&self, message_id: &str, recipient: &str) -> serde_json::Value {
+        serde_json::json!({
+            "message_id": message_id,
+            "recipient": recipient,
+            "cached_pane_id": self.cached_pane_id,
+            "expected_session": self.expected_session,
+            "expected_window": self.expected_window,
+            "observed_session": self.observed_session,
+            "observed_window": self.observed_window,
+            "observed_pane_pid": self.observed_pane_pid,
+        })
+    }
+}
+
 fn resolve_inject_target(
     state: &serde_json::Value,
     recipient: &str,
     transport: &dyn Transport,
     live_targets: &[PaneInfo],
-) -> Target {
+) -> ResolvedInjectTarget {
     if recipient == "leader" {
         if let Some(pane_id) = leader_receiver_pane_id(state) {
-            return Target::Pane(PaneId::new(pane_id));
+            return ResolvedInjectTarget {
+                target: Target::Pane(PaneId::new(pane_id)),
+                metadata: None,
+                stale_binding: None,
+            };
         }
     }
     let agent = state.get("agents").and_then(|a| a.get(recipient));
@@ -1096,37 +1184,71 @@ fn resolve_inject_target(
         if leader_receiver_pane_binding(state).is_some_and(|leader| {
             pane_conflicts_on_same_socket(pane.as_str(), worker_socket.as_deref(), leader)
         }) {
-            return Target::SessionWindow {
-                session: SessionName::new(session),
-                window: WindowName::new(format!("{recipient}_pane_conflicts_with_leader")),
+            return ResolvedInjectTarget {
+                target: Target::SessionWindow {
+                    session: SessionName::new(session),
+                    window: WindowName::new(format!("{recipient}_pane_conflicts_with_leader")),
+                },
+                metadata: None,
+                stale_binding: None,
             };
         }
-        if live_targets
-            .iter()
-            .any(|target| target.pane_id.as_str() == pane.as_str())
-        {
-            return Target::Pane(pane.clone());
-        }
     }
+    let stale_binding = cached_pane.as_ref().and_then(|pane| {
+        live_targets
+            .iter()
+            .find(|target| target.pane_id.as_str() == pane.as_str())
+            .and_then(|target| stale_worker_pane_binding(target, session, window))
+    });
     if let Some(live_pane) = live_pane_for_session_window(live_targets, session, window) {
-        return Target::Pane(live_pane);
+        return ResolvedInjectTarget {
+            target: Target::Pane(live_pane.pane_id.clone()),
+            metadata: Some(target_metadata(
+                transport,
+                live_pane,
+                "session_window_lookup",
+            )),
+            stale_binding,
+        };
     }
     if let Some(pane) = cached_pane {
-        if live_targets.is_empty() && !cached_pane_known_dead(transport, &pane) {
-            return Target::Pane(pane);
+        if let Some(live_pane) = live_targets.iter().find(|target| {
+            target.pane_id.as_str() == pane.as_str()
+                && target.session.as_str() == session
+                && target
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == window)
+        }) {
+            return ResolvedInjectTarget {
+                target: Target::Pane(pane),
+                metadata: Some(target_metadata(transport, live_pane, "validated_cached_pane")),
+                stale_binding: None,
+            };
+        }
+        if live_targets.is_empty() {
+            return ResolvedInjectTarget {
+                target: Target::Pane(pane),
+                metadata: None,
+                stale_binding: None,
+            };
         }
     }
-    Target::SessionWindow {
-        session: SessionName::new(session),
-        window: WindowName::new(window),
+    ResolvedInjectTarget {
+        target: Target::SessionWindow {
+            session: SessionName::new(session),
+            window: WindowName::new(window),
+        },
+        metadata: None,
+        stale_binding,
     }
 }
 
-fn live_pane_for_session_window(
-    targets: &[PaneInfo],
+fn live_pane_for_session_window<'a>(
+    targets: &'a [PaneInfo],
     session: &str,
     window: &str,
-) -> Option<PaneId> {
+) -> Option<&'a PaneInfo> {
     targets
         .iter()
         .find(|target| {
@@ -1136,14 +1258,86 @@ fn live_pane_for_session_window(
                     .as_ref()
                     .is_some_and(|name| name.as_str() == window)
         })
-        .map(|target| target.pane_id.clone())
 }
 
-fn cached_pane_known_dead(transport: &dyn Transport, pane: &PaneId) -> bool {
-    if matches!(transport.has_pane(pane), Ok(Some(false))) {
-        return true;
+fn stale_worker_pane_binding(
+    observed: &PaneInfo,
+    expected_session: &str,
+    expected_window: &str,
+) -> Option<WorkerPaneBindingStale> {
+    let observed_window = observed
+        .window_name
+        .as_ref()
+        .map(|window| window.as_str())
+        .unwrap_or_default();
+    if observed.session.as_str() == expected_session && observed_window == expected_window {
+        return None;
     }
-    matches!(transport.liveness(pane), Ok(PaneLiveness::Dead))
+    Some(WorkerPaneBindingStale {
+        cached_pane_id: observed.pane_id.as_str().to_string(),
+        expected_session: expected_session.to_string(),
+        expected_window: expected_window.to_string(),
+        observed_session: observed.session.as_str().to_string(),
+        observed_window: observed_window.to_string(),
+        observed_pane_pid: observed.pane_pid,
+    })
+}
+
+fn target_metadata(
+    transport: &dyn Transport,
+    pane: &PaneInfo,
+    resolved_from: &'static str,
+) -> TargetMetadata {
+    TargetMetadata {
+        tmux_endpoint: transport.tmux_endpoint(),
+        target_session: pane.session.as_str().to_string(),
+        target_window: pane
+            .window_name
+            .as_ref()
+            .map(|window| window.as_str().to_string())
+            .unwrap_or_default(),
+        target_pane_id: pane.pane_id.as_str().to_string(),
+        target_pane_pid: pane.pane_pid,
+        resolved_from,
+    }
+}
+
+fn append_target_metadata(event: &mut serde_json::Value, metadata: &TargetMetadata) {
+    let Some(obj) = event.as_object_mut() else {
+        return;
+    };
+    obj.insert("target_kind".to_string(), serde_json::json!("pane"));
+    obj.insert(
+        "tmux_endpoint".to_string(),
+        metadata
+            .tmux_endpoint
+            .as_ref()
+            .map(|endpoint| serde_json::json!(endpoint))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "target_session".to_string(),
+        serde_json::json!(metadata.target_session),
+    );
+    obj.insert(
+        "target_window".to_string(),
+        serde_json::json!(metadata.target_window),
+    );
+    obj.insert(
+        "target_pane_id".to_string(),
+        serde_json::json!(metadata.target_pane_id),
+    );
+    obj.insert(
+        "target_pane_pid".to_string(),
+        metadata
+            .target_pane_pid
+            .map(|pid| serde_json::json!(pid))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    obj.insert(
+        "resolved_from".to_string(),
+        serde_json::json!(metadata.resolved_from),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1911,7 +2105,7 @@ pub fn record_turn_open_if_leader_to_worker(
 ) -> Result<(), MessagingError> {
     let _ = state;
     record_turn_open_if_leader_to_worker_scoped(
-        workspace, sender, recipient, delivered, event_log, None,
+        workspace, sender, recipient, delivered, event_log, None, None,
     )
 }
 
@@ -1922,6 +2116,7 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
     message_id: &str,
     event_log: &EventLog,
     owner_team_id: Option<&str>,
+    metadata: Option<&TargetMetadata>,
 ) -> Result<(), MessagingError> {
     if !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
@@ -1932,10 +2127,11 @@ fn record_current_turn_after_inject_if_leader_to_worker_scoped(
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
         arm_turn_open(latest, recipient, &message_id);
     })?;
-    event_log.write(
-        "turn_open.armed_after_inject",
-        serde_json::json!({"agent_id": recipient, "message_id": message_id}),
-    )?;
+    let mut event = serde_json::json!({"agent_id": recipient, "message_id": message_id});
+    if let Some(metadata) = metadata {
+        append_target_metadata(&mut event, metadata);
+    }
+    event_log.write("turn_open.armed_after_inject", event)?;
     Ok(())
 }
 
@@ -1946,6 +2142,7 @@ fn record_turn_open_if_leader_to_worker_scoped(
     delivered: &DeliveryOutcome,
     event_log: &EventLog,
     owner_team_id: Option<&str>,
+    metadata: Option<&TargetMetadata>,
 ) -> Result<(), MessagingError> {
     if !delivered.ok || !matches!(sender, "leader" | "Leader") || recipient == "leader" {
         return Ok(());
@@ -1955,10 +2152,12 @@ fn record_turn_open_if_leader_to_worker_scoped(
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
         arm_turn_open(latest, recipient, &delivered.message_id);
     })?;
-    event_log.write(
-        "turn_open.armed_after_delivery",
-        serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id}),
-    )?;
+    let mut event =
+        serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
+    if let Some(metadata) = metadata {
+        append_target_metadata(&mut event, metadata);
+    }
+    event_log.write("turn_open.armed_after_delivery", event)?;
     Ok(())
 }
 

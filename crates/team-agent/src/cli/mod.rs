@@ -3309,12 +3309,21 @@ pub mod lifecycle_port {
                 session_name,
                 reason,
                 error,
+                issue_ids,
             } => json!({
                 "ok": false,
                 "status": "refused_dirty_topology",
                 "reason": reason,
                 "session_name": session_name,
                 "error": error,
+                "issues": issue_ids
+                    .iter()
+                    .map(|id| json!({"id": id}))
+                    .collect::<Vec<_>>(),
+                "next_actions": [
+                    "run team-agent diagnose --json from the intended leader socket",
+                    "repair the tmux endpoint/socket split before retrying restart"
+                ],
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
         }
