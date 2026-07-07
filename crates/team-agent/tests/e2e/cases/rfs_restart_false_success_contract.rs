@@ -10,24 +10,23 @@
 //! coordinator, and diagnose agree on one canonical tmux endpoint.
 
 use crate::framework::*;
+use crate::support::source_walker::source_tree;
+use crate::support::topology_issue_ids::{
+    LEADER_PANE_ID_COLLIDES_WITH_AGENT, LEADER_RECEIVER_SOCKET_MISMATCH,
+    ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET, RECENT_COORDINATOR_SESSION_MISSING,
+    TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET, TMUX_ENDPOINT_SOCKET_CONFLICT,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// label migration需同步此处: restart/diagnose dirty-topology issue ids are
-// public JSON contract, not incidental prose.
 const STATUS_REFUSED_DIRTY_TOPOLOGY: &str = "refused_dirty_topology";
 const STATUS_RESTARTED: &str = "restarted";
 const EVENT_RESTART_REFUSED_DIRTY_TOPOLOGY: &str = "restart.refused_dirty_topology";
 const EVENT_PROVIDER_WORKER_SPAWN_ARGV: &str = "provider.worker.spawn_argv";
-const ISSUE_TMUX_ENDPOINT_SOCKET_CONFLICT: &str = "tmux_endpoint_socket_conflict";
-const ISSUE_LEADER_RECEIVER_SOCKET_MISMATCH: &str = "leader_receiver_socket_mismatch";
-const ISSUE_ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET: &str = "orphan_team_session_on_ignored_socket";
-const ISSUE_TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET: &str =
-    "team_session_missing_on_canonical_socket";
-const ISSUE_RECENT_COORDINATOR_SESSION_MISSING: &str = "recent_coordinator_session_missing";
 const REASON_REFUSED_NO_SESSION_ID: &str = "refused_no_session_id";
+const STATUS_RESUME_NOT_READY: &str = "resume_not_ready";
 
 #[test]
 fn rfs_restart_refuses_tmux_endpoint_socket_split_brain_before_ok() {
@@ -57,17 +56,17 @@ fn rfs_restart_refuses_tmux_endpoint_socket_split_brain_before_ok() {
     );
     assert_eq!(
         body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(ISSUE_TMUX_ENDPOINT_SOCKET_CONFLICT),
+        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
         "R1 RED: restart refusal /issues/0/id must name tmux_endpoint_socket_conflict; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/1/id").and_then(Value::as_str),
-        Some(ISSUE_LEADER_RECEIVER_SOCKET_MISMATCH),
+        Some(LEADER_RECEIVER_SOCKET_MISMATCH),
         "R1 RED: restart refusal /issues/1/id must name leader_receiver_socket_mismatch; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/2/id").and_then(Value::as_str),
-        Some(ISSUE_ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
+        Some(ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
         "R1 RED: restart refusal /issues/2/id must name orphan_team_session_on_ignored_socket; json={body}"
     );
     assert!(
@@ -124,27 +123,27 @@ fn rfs_diagnose_reports_endpoint_socket_conflict_and_ignored_worker_session() {
     );
     assert_eq!(
         body.pointer("/issues/0/id").and_then(Value::as_str),
-        Some(ISSUE_TMUX_ENDPOINT_SOCKET_CONFLICT),
+        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
         "R3 RED: diagnose /issues/0/id must include tmux_endpoint_socket_conflict; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/1/id").and_then(Value::as_str),
-        Some(ISSUE_LEADER_RECEIVER_SOCKET_MISMATCH),
+        Some(LEADER_RECEIVER_SOCKET_MISMATCH),
         "R3 RED: diagnose /issues/1/id must include leader_receiver_socket_mismatch; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/2/id").and_then(Value::as_str),
-        Some(ISSUE_ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
+        Some(ORPHAN_TEAM_SESSION_ON_IGNORED_SOCKET),
         "R3 RED: diagnose /issues/2/id must include orphan_team_session_on_ignored_socket; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/3/id").and_then(Value::as_str),
-        Some(ISSUE_TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET),
+        Some(TEAM_SESSION_MISSING_ON_CANONICAL_SOCKET),
         "R3 RED: diagnose /issues/3/id must include team_session_missing_on_canonical_socket; json={body}"
     );
     assert_eq!(
         body.pointer("/issues/4/id").and_then(Value::as_str),
-        Some(ISSUE_RECENT_COORDINATOR_SESSION_MISSING),
+        Some(RECENT_COORDINATOR_SESSION_MISSING),
         "R3 RED: diagnose /issues/4/id must include recent_coordinator_session_missing; json={body}"
     );
 }
@@ -164,12 +163,14 @@ fn rfs_topology_invariant_blocks_same_pane_id_only_when_socket_matches() {
 
     let out = run_ta(&ws, &["restart", ws_path, "--json"]);
     let body = out.json();
-    assert!(
-        body.to_string().contains("tmux_endpoint_socket_conflict"),
+    assert_eq!(
+        body.pointer("/issues/0/id").and_then(Value::as_str),
+        Some(TMUX_ENDPOINT_SOCKET_CONFLICT),
         "RFS RED: topology gate must reject the endpoint conflict itself. Bare pane-id collision text is insufficient and misleading when %0 exists on both sockets; json={body}"
     );
-    assert!(
-        !body.to_string().contains("LeaderPaneIdCollidesWithAgent"),
+    assert_ne!(
+        body.pointer("/issues/0/id").and_then(Value::as_str),
+        Some(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
         "RFS RED: same bare pane id on different sockets must not be reported as LeaderPaneIdCollidesWithAgent; compare transport-typed bindings instead; json={body}"
     );
 }
@@ -204,8 +205,9 @@ fn rfs_same_bare_pane_id_on_different_sockets_is_not_a_4_tuple_collision() {
 
     let out = run_ta(&ws, &["diagnose", "--workspace", ws_path, "--json"]);
     let body = out.json();
-    assert!(
-        !body.to_string().contains("LeaderPaneIdCollidesWithAgent"),
+    assert_ne!(
+        body.pointer("/issues/0/id").and_then(Value::as_str),
+        Some(LEADER_PANE_ID_COLLIDES_WITH_AGENT),
         "R5 guard: same bare %0 on different sockets is not a 4-tuple collision; diagnose must compare endpoint+session+window+pane_id, json={body}"
     );
 }
@@ -239,8 +241,9 @@ fn rfs_never_captured_no_session_worker_auto_freshes_without_allow_fresh() {
         Some(STATUS_RESTARTED),
         "RFS no-session probe: expected status=restarted for never-captured no-session seat; json={body}"
     );
-    assert!(
-        !body.to_string().contains(REASON_REFUSED_NO_SESSION_ID),
+    assert_ne!(
+        body.pointer("/reason").and_then(Value::as_str),
+        Some(REASON_REFUSED_NO_SESSION_ID),
         "RFS no-session probe: refused_no_session_id is only valid when context exists to preserve; json={body}"
     );
 }
@@ -283,8 +286,12 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
             "R7/R8 guard: no-session worker with context marker {marker} must refuse without --allow-fresh, not silently fresh; json={body}"
         );
         assert!(
-            body.to_string().contains(REASON_REFUSED_NO_SESSION_ID)
-                || body.to_string().contains("resume_not_ready"),
+            body.pointer("/reason").and_then(Value::as_str) == Some(REASON_REFUSED_NO_SESSION_ID)
+                || body.pointer("/status").and_then(Value::as_str)
+                    == Some(REASON_REFUSED_NO_SESSION_ID)
+                || body.pointer("/status").and_then(Value::as_str) == Some(STATUS_RESUME_NOT_READY)
+                || body.pointer("/issues/0/id").and_then(Value::as_str)
+                    == Some(REASON_REFUSED_NO_SESSION_ID),
             "R7/R8 guard: refusal must name missing session context for marker {marker}; json={body}"
         );
     }
@@ -292,27 +299,27 @@ fn rfs_no_session_with_any_context_marker_still_refuses_without_allow_fresh() {
 
 #[test]
 fn rfs_source_guard_forbids_cross_socket_auto_rebind_and_keeps_resume_signature() {
-    let restart = source("src/lifecycle/restart/rebuild.rs");
+    let restart_surface = source_tree(&["src/lifecycle/restart", "src/messaging"]);
     let forbidden_rebind = [
         "auto_rebind_cross_socket",
         "force_rebind_tmux_socket",
         "rewrite_leader_receiver_tmux_socket_on_restart",
     ]
     .into_iter()
-    .filter(|needle| restart.contains(needle))
+    .filter(|needle| restart_surface.contains(needle))
     .collect::<Vec<_>>();
     assert!(
         forbidden_rebind.is_empty(),
         "R10 guard: restart must not grow an auto-rebind-across-socket escape hatch; forbidden markers={forbidden_rebind:?}"
     );
 
-    let adapter = source("src/provider/adapter.rs");
-    let capture = source("src/provider/session/capture.rs");
-    let restart_common = source("src/lifecycle/restart/common.rs");
+    let resume = source_tree(&["src/provider/session/resume.rs"]);
+    let restart_common = source_tree(&["src/lifecycle/restart/common.rs"]);
     assert!(
-        adapter.contains("fn capture_session_candidates(")
-            && capture.contains("capture_session_candidates(&capture.context"),
-        "R10 guard: provider resume/capture signature must stay on candidate enumeration, not regress to one-off capture_session_id"
+        resume.contains("pub fn check(")
+            && resume.contains("provider_can_resume: bool")
+            && resume.contains("backing: Option<&ProviderBackingCheck>"),
+        "R10 guard: provider/session/resume.rs signature must stay explicit about provider_can_resume and backing validation"
     );
     assert!(
         !restart_common.contains(".capture_session_id("),
@@ -384,7 +391,7 @@ fn write_split_brain_state(ws: &TestWorkspace, old_socket: &str, new_socket: &st
 }
 
 fn create_dummy_session(socket: &str, session: &str, cwd: PathBuf) {
-    if let Some(parent) = std::path::Path::new(socket).parent() {
+    if let Some(parent) = Path::new(socket).parent() {
         fs::create_dir_all(parent).expect("create tmux socket parent");
     }
     let out = Command::new("tmux")
@@ -483,9 +490,4 @@ fn event_index(events: &[Value], event_name: &str) -> Option<usize> {
     events
         .iter()
         .position(|event| event.get("event").and_then(Value::as_str) == Some(event_name))
-}
-
-fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
-        .unwrap_or_else(|e| panic!("read source {rel}: {e}"))
 }

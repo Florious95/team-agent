@@ -9,14 +9,13 @@
 //! worker's pane just because `state.agents.a.pane_id` is stale.
 
 use crate::framework::*;
+use crate::support::source_walker::source_tree;
+use crate::support::topology_issue_ids::WORKER_PANE_BINDING_STALE;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-// label migration需同步此处: these issue/status labels are public diagnose/API
-// contract, not incidental prose.
-const ISSUE_WORKER_PANE_BINDING_STALE: &str = "worker_pane_binding_stale";
 const STATUS_QUEUED_PANE_MISSING: &str = "queued_pane_missing";
 const RESOLVED_FROM_SESSION_WINDOW_LOOKUP: &str = "session_window_lookup";
 const TARGET_KIND_PANE: &str = "pane";
@@ -49,7 +48,6 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
             "leader",
             "--message-id",
             mid,
-            "--watch-result",
             "--json",
         ],
     );
@@ -127,7 +125,6 @@ fn wleak_wrong_cached_pane_and_missing_intended_window_blocks_not_delivers() {
             "leader",
             "--message-id",
             mid,
-            "--watch-result",
             "--json",
         ],
     );
@@ -172,7 +169,6 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
             "leader",
             "--message-id",
             mid,
-            "--watch-result",
             "--json",
         ],
     );
@@ -234,19 +230,24 @@ fn wleak_unvalidated_cached_pane_never_marks_delivered() {
             "leader",
             "--message-id",
             mid,
-            "--watch-result",
             "--json",
         ],
     );
     let body = out.json();
+    assert_ne!(
+        body.pointer("/reason").and_then(Value::as_str),
+        Some("coordinator_unavailable"),
+        "W3 RED: unvalidated-pane provenance contract must reach delivery, not pass because coordinator gate rejected the send; json={body}"
+    );
     assert_eq!(
         body.pointer("/delivered").and_then(Value::as_bool),
         Some(false),
         "W3 RED: unvalidated cached pane must not surface delivered=true; json={body}"
     );
-    assert!(
-        delivered_event(&ws, mid).is_none(),
-        "W3 RED: unvalidated cached pane must not emit message.delivered"
+    let delivered_count = delivered_event_count(&ws, mid);
+    assert_eq!(
+        delivered_count, 0,
+        "W3 RED: unvalidated cached pane must not emit message.delivered target provenance; count={delivered_count}"
     );
     assert_ne!(
         message_status(&ws, mid).as_deref(),
@@ -289,7 +290,6 @@ fn wleak_cross_session_multi_pane_window_missing_fails_closed() {
             "leader",
             "--message-id",
             mid,
-            "--watch-result",
             "--json",
         ],
     );
@@ -375,8 +375,7 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
         "WLEAK RED: diagnose must fail dirty when worker cached pane belongs to another window; json={body}"
     );
     assert!(
-        body.pointer("/issues/0/id").and_then(Value::as_str)
-            == Some(ISSUE_WORKER_PANE_BINDING_STALE),
+        body.pointer("/issues/0/id").and_then(Value::as_str) == Some(WORKER_PANE_BINDING_STALE),
         "WLEAK RED: diagnose issue /issues/0/id must be worker_pane_binding_stale; json={body}"
     );
     assert!(
@@ -395,12 +394,7 @@ fn wleak_diagnose_exposes_stale_worker_pane_binding() {
 
 #[test]
 fn wleak_source_guard_does_not_cross_socket_enumerate_for_worker_delivery() {
-    let delivery = source("src/messaging/delivery.rs");
-    let resolver = source_between(
-        &delivery,
-        "fn resolve_inject_target(",
-        "fn live_pane_for_session_window(",
-    );
+    let messaging = source_tree(&["src/messaging"]);
     let forbidden = [
         "tmux_socket_roots",
         "probes_real_tmux_socket_roots",
@@ -409,17 +403,18 @@ fn wleak_source_guard_does_not_cross_socket_enumerate_for_worker_delivery() {
         "for_tmux_endpoint",
     ]
     .into_iter()
-    .filter(|needle| resolver.contains(needle))
+    .filter(|needle| messaging.contains(needle))
     .collect::<Vec<_>>();
     assert!(
         forbidden.is_empty(),
-        "W6 guard: worker delivery resolver must not enumerate/search across tmux sockets to recover a pane; forbidden markers={forbidden:?}"
+        "W6 guard: worker delivery path must not enumerate/search across tmux sockets to recover a pane; forbidden markers={forbidden:?}"
     );
 }
 
 #[test]
 fn wleak_source_guard_keeps_send_status_semantics_honest() {
-    let send = source("src/cli/send.rs");
+    let send = source_tree(&["src/cli/send.rs"]);
+    let delivery_surface = source_tree(&["src/messaging", "src/cli/send.rs"]);
     for required in [
         "\"delivery_status\"",
         "\"delivered\"",
@@ -431,8 +426,9 @@ fn wleak_source_guard_keeps_send_status_semantics_honest() {
             "W7 guard: send JSON must keep honest delivery_status/delivered semantics instead of weakening blocked stale-target sends to accepted/queued prose; missing {required}"
         );
     }
+    let stale_to_queued = format!("{WORKER_PANE_BINDING_STALE}\") => \"queued\"");
     assert!(
-        !send.contains("worker_pane_binding_stale\") => \"queued\""),
+        !delivery_surface.contains(&stale_to_queued),
         "W7 guard: stale worker pane binding must not be weakened to queued/accepted success copy"
     );
 }
@@ -672,22 +668,6 @@ fn parse_pane_snapshot_line(line: &str) -> PaneSnapshot {
     }
 }
 
-fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel))
-        .unwrap_or_else(|e| panic!("read source {rel}: {e}"))
-}
-
-fn source_between<'a>(body: &'a str, start: &str, end: &str) -> &'a str {
-    let start_idx = body
-        .find(start)
-        .unwrap_or_else(|| panic!("source start marker missing: {start}"));
-    let tail = &body[start_idx..];
-    let end_idx = tail
-        .find(end)
-        .unwrap_or_else(|| panic!("source end marker missing: {end}"));
-    &tail[..end_idx]
-}
-
 fn message_status(ws: &TestWorkspace, message_id: &str) -> Option<String> {
     let db = ws.path().join(".team/runtime/team.db");
     let conn = rusqlite::Connection::open(db).ok()?;
@@ -704,6 +684,16 @@ fn delivered_event(ws: &TestWorkspace, message_id: &str) -> Option<Value> {
         entry.get("event").and_then(Value::as_str) == Some("message.delivered")
             && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
     })
+}
+
+fn delivered_event_count(ws: &TestWorkspace, message_id: &str) -> usize {
+    read_events(ws)
+        .into_iter()
+        .filter(|entry| {
+            entry.get("event").and_then(Value::as_str) == Some("message.delivered")
+                && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
+        })
+        .count()
 }
 
 fn events_contain(ws: &TestWorkspace, event: &str) -> bool {
