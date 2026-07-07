@@ -30,6 +30,7 @@
 
 pub mod framework;
 pub mod scripted_provider;
+pub mod support;
 
 mod cases {
     mod shut_001_clean_shutdown;
