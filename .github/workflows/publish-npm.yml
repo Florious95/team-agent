@@ -39,6 +39,11 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Prepare test tmux socket root
+        run: |
+          sudo mkdir -p /Volumes/nvme/tmp
+          sudo chown "$USER" /Volumes/nvme/tmp
+
       - name: Verify package metadata
         run: |
           node <<'NODE'
