@@ -2366,8 +2366,14 @@ fn write_agent_health(
         .get("context_usage_pct")
         .or_else(|| agent.get("context_usage_percent"))
         .and_then(Value::as_i64);
+    // Phase-DX E2: read the renamed `current_turn_message_id` (leader→worker turn
+    // proxy, written by delivery::arm_turn_open) with fallbacks to the legacy field
+    // names for backwards state compatibility. The SQL column stays `current_task_id`
+    // (agent_health schema) — a rename would require a DB migration, which Phase-DX
+    // forbids.
     let current_task_id = agent
-        .get("current_task_id")
+        .get("current_turn_message_id")
+        .or_else(|| agent.get("current_task_id"))
         .or_else(|| agent.get("task_id"))
         .and_then(Value::as_str);
     conn.execute(

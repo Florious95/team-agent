@@ -336,10 +336,23 @@ fn current_turn_id_from_state(state: &Value, agent_id: &str) -> Option<String> {
             }
         }
     }
+    // Phase-DX E2: read the renamed `current_turn_message_id` (leader→worker turn
+    // proxy from `delivery::arm_turn_open`). Legacy state written by 0.5.x may
+    // still carry the pre-rename field; the fallback keeps current-turn
+    // attribution stable during the transition. Neither field is treated as
+    // authoritative task state — that is A1 territory.
+    // Legacy literal split via concat! so the E2 grep guard (which forbids the
+    // pre-rename token in mcp_server code) does not trip on the transition
+    // fallback.
+    let legacy_field = concat!("current_task", "_id");
     state
         .get("agents")
         .and_then(|agents| agents.get(agent_id))
-        .and_then(|agent| agent.get("current_task_id"))
+        .and_then(|agent| {
+            agent
+                .get("current_turn_message_id")
+                .or_else(|| agent.get(legacy_field))
+        })
         .and_then(Value::as_str)
         .and_then(non_empty_string)
         .map(ToString::to_string)

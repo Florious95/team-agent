@@ -1981,12 +1981,19 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         .and_then(|agents| agents.get_mut(recipient))
         .and_then(serde_json::Value::as_object_mut)
     {
-        agent.insert(
-            "current_task_id".to_string(),
-            message_id.as_ref().map_or(serde_json::Value::Null, |id| {
+        // Phase-DX E2 (CR P0 red line #5): the leader→worker turn message id.
+        // Renamed from a misleading legacy field name (which was never a task
+        // FSM id — task FSM is A1) to `current_turn_message_id`, matching its
+        // actual semantic. Reader compatibility lives in `coordinator/tick.rs`
+        // (whitelisted for the transition) and `mcp_server/helpers.rs`; other
+        // messaging/lifecycle/mcp_server code MUST NOT treat this as
+        // authoritative task state.
+        let field = message_id
+            .as_ref()
+            .map_or(serde_json::Value::Null, |id| {
                 serde_json::Value::String(id.clone())
-            }),
-        );
+            });
+        agent.insert("current_turn_message_id".to_string(), field);
     }
 }
 

@@ -1581,10 +1581,15 @@ fn deliver_pending_submit_unverified_is_not_saved_by_readback() {
         Some(&serde_json::json!(message_id)),
         "current-turn fact is armed immediately after physical inject succeeds"
     );
+    // Phase-DX E2 rename: the leader→worker turn message id lives under
+    // `current_turn_message_id` (the previous name misleadingly implied a task
+    // FSM id — that is A1 territory). Same value written by
+    // `delivery::arm_turn_open`; the invariant of arming-without-delivered is
+    // unchanged.
     assert_eq!(
-        updated.pointer("/agents/w1/current_task_id"),
+        updated.pointer("/agents/w1/current_turn_message_id"),
         Some(&serde_json::json!(message_id)),
-        "agent current_task_id is armed without marking the message delivered"
+        "agent current-turn message id is armed without marking the message delivered"
     );
 }
 
