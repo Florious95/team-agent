@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.7
+
+- **DX: `remove-agent` rejection lists all required flags at once with a copyable command.** When `remove-agent` is refused because the worker is still running or the agent spec still exists, the error now includes every flag needed to complete the operation (`--force`, `--from-spec`, etc.) in a single copyable command line. Previously the error named flags one-at-a-time, requiring multiple retries to discover the full set.
+- **DX: `send` default human output condensed to one line.** The default (non-`--json`) `send` output is now a single status line that reflects the actual delivery outcome. Fields that are permanently `None` for a given send shape are omitted rather than printed as `null`. The `--json` envelope is fully compatible with prior releases.
+- **DX: `send` reminder text matches actual delivery status.** The harness reminder appended after a send now describes what actually happened (delivered, blocked, queued) rather than using a generic template that could contradict the status line above it.
+
 ## 0.5.6
 
 - **Fix: `report_result` attributes to the current message turn as the primary source.** When a worker calls `report_result`, the coordinator now looks up the worker's current in-flight message turn first. If the turn is open and matches the worker's `agent_id`, the result is attributed to that message — superseding the previous fallback-first behaviour that could attribute results to a stale prior delivery. The injected result simultaneously arms the turn's `turn_open` marker so the next result call for the same worker correctly recognises a fresh turn.
