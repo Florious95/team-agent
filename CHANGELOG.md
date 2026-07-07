@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.9
+
+- **DX: `report_result` integrity warnings for unverified success claims.** When `report_result` is called with `status: success` but the attached tests field contains no executed evidence (all entries are `not_run`, scalar values, or missing descriptions), the coordinator now accepts the call but returns a structured `warnings` array instead of treating the claim as verified. Callers can distinguish a verified success from a best-effort claim without parsing prose.
+- **DX: `--to-name` failure uses a three-tier refusal taxonomy.** Resolution failures now return one of three structured error kinds: `team_key_not_found` (lists available team keys and notes if a spec name was given instead of a team key), `leader_not_attached` (distinguishes whether the caller is the owner team or a third party), or `workspace_no_state` (the target workspace has no coordinator state). Each kind carries enough context to act on without a follow-up `status` call.
+- **DX: offline mailbox — `send --to-name` queues to disk when leader is unattached.** When the named target's leader is not currently attached, the message is written to an offline mailbox (`queued_until_leader_attach`) rather than failing. When the leader attaches (via `attach-app-server-leader` or equivalent), queued messages are replayed exactly once in arrival order. The response includes `delivery_status: queued_until_leader_attach` so callers know the message is safe without polling.
+- **New command: `team-agent leaders`.** Discovers all host-leader registry entries for the current machine and classifies each as `LIVE`, `STALE`, or `AMBIGUOUS`. Useful for diagnosing multi-team or multi-workspace setups where multiple leader sockets may be registered. `--json` returns the full registry schema.
+- **New flag: `send --to-leader`.** Sends to the unique live leader on the current machine by short name, without requiring the full `--to-name workspace::team/leader` address. Refuses with a structured error if the leader is ambiguous or stale, directing the caller to use `team-agent leaders` to resolve.
+
 ## 0.5.8
 
 - **DX: `status` stale detection sourced from physical liveness, not lifecycle state.** When a worker's tmux pane is dead, `status` now marks that worker `stale: true` with `stale_reason: "pane_dead"` derived from a physical liveness probe — not from the coordinator's own lifecycle bookkeeping. This prevents stale agents from appearing live in status output when the coordinator has not yet observed the pane exit.
