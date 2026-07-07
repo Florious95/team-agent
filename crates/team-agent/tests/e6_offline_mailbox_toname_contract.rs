@@ -121,8 +121,9 @@ fn e6_resolver_taxonomy_is_split_before_reading_leader_receiver() {
         "E6 RED: named-address resolver must split wrong key / unattached leader / no-state taxonomy before leader_receiver fallback. Missing markers: {missing:?}"
     );
     assert!(
-        !named.contains(".or_else(|| state.get(\"leader_receiver\"))"),
-        "E6 RED: explicit <team>/leader key miss must not fall through to top-level leader_receiver; wrong key must be team_key_not_found"
+        top_level_leader_receiver_fallbacks(&named).is_empty(),
+        "E6 RED: explicit <team>/leader key miss must not fall through to top-level leader_receiver through or/or_else/unwrap_or_else/else fallback forms; wrong key must be team_key_not_found. Offenders: {:#?}",
+        top_level_leader_receiver_fallbacks(&named)
     );
 }
 
@@ -143,7 +144,8 @@ fn e6_offline_mailbox_uses_non_delivered_status_and_existing_requeue_funnel() {
         "queued_until_leader_attach",
         "leader_mailbox",
         "delivered",
-        "create_message_with_status",
+        "owner_team_id",
+        "recipient = 'leader'",
         "leader_mailbox.queued_until_attach",
         "requeue_blocked_leader_messages",
         "pending_leader_notifications",
@@ -160,6 +162,38 @@ fn e6_offline_mailbox_uses_non_delivered_status_and_existing_requeue_funnel() {
     assert!(
         !claim_for_delivery_statuses().contains("queued_until_leader_attach"),
         "E6 RED guard: queued_until_leader_attach rows must not be claimed by coordinator tick before attach/claim"
+    );
+}
+
+#[test]
+fn e6_mailbox_paths_do_not_spawn_provider_or_worker_processes() {
+    let offenders = provider_spawn_offenders(&[
+        "src/cli/send.rs",
+        "src/cli/named_address.rs",
+        "src/messaging/leader_receiver.rs",
+        "src/messaging/watchers.rs",
+        "src/messaging/results.rs",
+    ]);
+
+    assert!(
+        offenders.is_empty(),
+        "E6 RED guard: offline mailbox is a durable queued row only; send/named_address/leader_receiver/watchers/results must not spawn codex/claude/copilot or worker/provider processes. Offenders: {offenders:#?}"
+    );
+}
+
+#[test]
+fn e6_mailbox_does_not_create_parallel_inbox_or_message_store() {
+    let offenders = parallel_store_offenders(&[
+        "src/cli/send.rs",
+        "src/cli/named_address.rs",
+        "src/messaging/leader_receiver.rs",
+        "src/messaging/watchers.rs",
+        "src/messaging/results.rs",
+    ]);
+
+    assert!(
+        offenders.is_empty(),
+        "E6 RED guard: offline mailbox must reuse target team.db messages rows, not leader-inbox.log, .team/messages, File::create/OpenOptions/write_all, or another message store. Offenders: {offenders:#?}"
     );
 }
 
@@ -249,6 +283,63 @@ fn message_count(workspace: &Path, token: &str) -> i64 {
 
 fn source(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap_or_default()
+}
+
+fn top_level_leader_receiver_fallbacks(text: &str) -> Vec<(usize, String)> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut offenders = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if !line.contains("state.get(\"leader_receiver\")") {
+            continue;
+        }
+        let start = idx.saturating_sub(6);
+        let end = usize::min(lines.len(), idx + 7);
+        let window = lines[start..end].join("\n");
+        let fallback_shape = window.contains("team_entry(state, team)")
+            && (window.contains(".or_else")
+                || window.contains(".or(")
+                || window.contains("unwrap_or")
+                || window.contains("} else {"));
+        if fallback_shape {
+            offenders.push((idx + 1, line.trim().to_string()));
+        }
+    }
+    offenders
+}
+
+fn provider_spawn_offenders(files: &[&str]) -> Vec<(String, usize, String)> {
+    let mut offenders = Vec::new();
+    for rel in files {
+        let text = source(rel);
+        for (idx, line) in text.lines().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            if line.contains("Command::new")
+                && (lower.contains("codex") || lower.contains("claude") || lower.contains("copilot"))
+            {
+                offenders.push(((*rel).to_string(), idx + 1, line.trim().to_string()));
+            }
+        }
+    }
+    offenders
+}
+
+fn parallel_store_offenders(files: &[&str]) -> Vec<(String, usize, String)> {
+    let mut offenders = Vec::new();
+    for rel in files {
+        let text = source(rel);
+        for (idx, line) in text.lines().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            let writes_file_store = lower.contains("leader-inbox.log")
+                || lower.contains(".team/messages")
+                || line.contains("File::create")
+                || line.contains("OpenOptions")
+                || line.contains(".write_all(");
+            if writes_file_store {
+                offenders.push(((*rel).to_string(), idx + 1, line.trim().to_string()));
+            }
+        }
+    }
+    offenders
 }
 
 fn claim_for_delivery_statuses() -> String {

@@ -12,11 +12,13 @@
 
 #![allow(clippy::expect_used)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rusqlite::params;
 use serde_json::{json, Value};
 use team_agent::mcp_server::TeamOrchestratorTools;
+use team_agent::messaging;
 use team_agent::model::enums::ResultStatus;
 use team_agent::model::ids::{AgentId, TeamKey};
 
@@ -131,6 +133,71 @@ fn d1_partial_or_blocked_with_not_run_tests_is_accepted_but_marked_unverified() 
     }
 }
 
+#[test]
+fn d1_report_result_integrity_does_not_parse_model_prose_for_evidence() {
+    let offenders = prose_parse_offenders(&[
+        "src/mcp_server/normalize.rs",
+        "src/mcp_server/tools.rs",
+        "src/messaging/results.rs",
+    ]);
+
+    assert!(
+        offenders.is_empty(),
+        "D1 RED guard: report_result integrity must use structured tests[]/changes[] fields only; it must not parse summary/prose with regex/tokenization to infer evidence. Offenders: {offenders:#?}"
+    );
+}
+
+#[test]
+fn d1_collect_preserves_warning_envelope_without_verified_upgrade() {
+    let ws = temp_workspace("d1-collect");
+    seed_collect_workspace(&ws);
+    let envelope = json!({
+        "schema_version": "result_envelope_v1",
+        "result_id": "res_d1_collect_warning",
+        "task_id": "task_d1_collect",
+        "agent_id": "worker-d1",
+        "status": "success",
+        "summary": "success with warning-only evidence",
+        "changes": [],
+        "tests": [{"command": "cargo test --tests", "status": "not_run"}],
+        "warnings": [{
+            "code": "result_success_without_executed_tests",
+            "field": "tests",
+            "severity": "warning",
+            "advisory": true
+        }],
+        "risks": [],
+        "artifacts": [],
+        "next_actions": []
+    });
+
+    messaging::report_result(&ws, &envelope).expect("store warning result");
+    let out = messaging::collect(&ws, None, false).expect("collect warning result");
+    assert_eq!(
+        out.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "D1 RED setup: collect should process the warning-only result fixture; got {out}"
+    );
+
+    let (status, stored_envelope) = stored_result(&ws, "res_d1_collect_warning");
+    assert_eq!(
+        status, "collected",
+        "D1 RED setup: collect marks the result collected while preserving envelope evidence"
+    );
+    assert_warning(
+        &stored_envelope,
+        "result_success_without_executed_tests",
+        "tests",
+        "D1 RED: collect must not rewrite warning-only result evidence into verified/success-without-warning",
+    );
+    assert!(
+        stored_envelope.get("verified").is_none()
+            && stored_envelope.get("verification_status").and_then(Value::as_str) != Some("verified")
+            && stored_envelope.get("evidence_status").and_then(Value::as_str) != Some("verified"),
+        "D1 RED: collect must not upgrade warning-only evidence into verified authority; stored envelope: {stored_envelope}"
+    );
+}
+
 fn report(envelope: Value) -> Value {
     let ws = temp_workspace("d1");
     let tools = TeamOrchestratorTools::with_identity(
@@ -178,4 +245,78 @@ fn temp_workspace(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("create temp workspace");
     path
+}
+
+fn source(rel: &str) -> String {
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap_or_default()
+}
+
+fn prose_parse_offenders(files: &[&str]) -> Vec<(String, usize, String)> {
+    let risky = [
+        "Regex::new",
+        "regex::Regex",
+        ".split_whitespace(",
+        "summary.split",
+        "summary.contains(\"test",
+        "summary.contains(\"Test",
+        "summary.contains(\"change",
+        "summary.contains(\"Change",
+        "parse_tests_from_summary",
+        "parse_changes_from_summary",
+        "infer_tests_from_summary",
+        "infer_changes_from_summary",
+    ];
+    let mut offenders = Vec::new();
+    for rel in files {
+        let text = source(rel);
+        for (idx, line) in text.lines().enumerate() {
+            if risky.iter().any(|needle| line.contains(needle)) {
+                offenders.push(((*rel).to_string(), idx + 1, line.trim().to_string()));
+            }
+        }
+    }
+    offenders
+}
+
+fn seed_collect_workspace(ws: &Path) {
+    std::fs::write(ws.join("team.spec.yaml"), "version: 1\nteam:\n  name: d1\n")
+        .expect("write team.spec.yaml");
+    team_agent::state::persist::save_runtime_state(
+        ws,
+        &json!({
+            "agents": {"worker-d1": {"status": "idle"}},
+            "tasks": [{
+                "id": "task_d1_collect",
+                "title": "D1 collect warning fixture",
+                "type": "test",
+                "assignee": "worker-d1",
+                "deps": [],
+                "acceptance": ["warning envelope preserved"],
+                "status": "pending",
+                "requires_tools": [],
+                "files": [],
+                "risk": "low"
+            }],
+            "session_name": Value::Null,
+            "active_team_key": Value::Null,
+            "spec_path": ws.join("team.spec.yaml").to_string_lossy()
+        }),
+    )
+    .expect("seed collect runtime state");
+}
+
+fn stored_result(ws: &Path, result_id: &str) -> (String, Value) {
+    let store = team_agent::message_store::MessageStore::open(ws).expect("open message store");
+    let conn = team_agent::db::schema::open_db(store.db_path()).expect("open db");
+    let (status, envelope): (String, String) = conn
+        .query_row(
+            "select status, envelope from results where result_id = ?1",
+            params![result_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read stored result");
+    (
+        status,
+        serde_json::from_str(&envelope).expect("stored envelope json"),
+    )
 }

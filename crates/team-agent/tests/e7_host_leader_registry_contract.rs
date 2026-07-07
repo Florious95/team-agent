@@ -158,10 +158,74 @@ fn e7_to_leader_delegates_to_e6_mailbox_and_preserves_honest_delivery_state() {
 
 #[test]
 fn e7_send_and_registry_paths_do_not_write_identity_fields() {
-    let offenders = identity_write_offenders(&["src/cli/send.rs"]);
+    let offenders = identity_write_offenders(&[
+        "src/cli/send.rs",
+        "src/messaging/watchers.rs",
+        "src/messaging/results.rs",
+        "src/coordinator/tick.rs",
+        "src/leader/registry.rs",
+    ]);
     assert!(
         offenders.is_empty(),
-        "E7 RED guard: send --to-leader is a delivery path and must not write canonical leader_receiver/team_owner/owner_epoch; registry is only a derived discovery index. Offenders: {offenders:#?}"
+        "E7 RED guard: send/report_result/coordinator/watch/registry paths must not write canonical leader_receiver/team_owner/owner_epoch; registry is only a derived discovery index. Offenders: {offenders:#?}"
+    );
+}
+
+#[test]
+fn e7_registry_does_not_introduce_sqlite_or_global_db() {
+    let registry = source("src/leader/registry.rs");
+    let mut offenders = Vec::new();
+    for (idx, line) in registry.lines().enumerate() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("sqlite")
+            || lower.contains("rusqlite")
+            || lower.contains(".db")
+            || lower.contains("connection::open")
+        {
+            offenders.push((idx + 1, line.trim().to_string()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "E7 RED guard: host leader registry is file-per-team discovery under ~/.team-agent/leaders, not a shared SQLite/global DB. Offenders: {offenders:#?}"
+    );
+}
+
+#[test]
+fn e7_short_name_collision_refuses_instead_of_first_writer_wins() {
+    let combined = format!(
+        "{}\n{}",
+        source("src/leader/registry.rs"),
+        source("src/cli/send.rs")
+    );
+    let mut missing = Vec::new();
+    for required in ["ambiguous_names", "name_ambiguous", "candidates"] {
+        if !combined.contains(required) {
+            missing.push(required);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "E7 RED: two live registry entries with the same short name must both remain visible and send --to-leader <short> must return name_ambiguous with candidates, not pick a winner. Missing markers: {missing:?}"
+    );
+
+    let forbidden = [
+        "first_writer",
+        "first-writer",
+        "first writer wins",
+        "first match wins",
+        "first live wins",
+        "mtime",
+    ];
+    let offenders = forbidden
+        .iter()
+        .filter(|needle| combined.to_ascii_lowercase().contains(**needle))
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        offenders.is_empty(),
+        "E7 RED guard: short-name collision handling must not use first-writer/mtime priority. Forbidden markers present: {offenders:?}"
     );
 }
 
