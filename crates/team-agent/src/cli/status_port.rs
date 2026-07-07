@@ -1028,10 +1028,35 @@ use rusqlite::params;
             );
             insert_optional_string(&mut item, "last_output_at", row.get(2).map_err(|e| CliError::Runtime(e.to_string()))?);
             insert_optional_i64(&mut item, "context_usage_pct", row.get(3).map_err(|e| CliError::Runtime(e.to_string()))?);
-            insert_optional_string(&mut item, "current_task_id", row.get(4).map_err(|e| CliError::Runtime(e.to_string()))?);
+            let current_task_id: Option<String> =
+                row.get(4).map_err(|e| CliError::Runtime(e.to_string()))?;
+            let has_current_task = current_task_id.is_some();
+            insert_optional_string(&mut item, "current_task_id", current_task_id);
+            let updated_at: String =
+                row.get(5).map_err(|e| CliError::Runtime(e.to_string()))?;
+            // Phase-DX E2 (plan §4 / CR supplement A): expose the last agent_health
+            // observation timestamp as `health_updated_at` alongside the legacy
+            // `updated_at` alias. Two names for one column keep old scrapers working
+            // while surfacing the semantic (heartbeat, not row bookkeeping).
+            item.insert("updated_at".to_string(), json!(updated_at.clone()));
+            item.insert("health_updated_at".to_string(), json!(updated_at));
+            // Phase-DX E2 (CR P0 red line #6, supplements A/B): current_task is a
+            // best-effort *display* field until A1 makes task FSM authoritative.
+            // The structured source/confidence markers stop downstream code from
+            // treating agent_health.current_task_id as authority. `current_task_source`
+            // records where the display value came from (only "health" today —
+            // Phase-DX never merges state tasks into this projection); the
+            // `current_task_confidence` enum stays "best_effort" for the whole
+            // Phase-DX slice (A1 will later flip it to "authoritative" when the
+            // task FSM lands). Field is written unconditionally so consumers can
+            // switch on it even when `current_task_id` is null.
             item.insert(
-                "updated_at".to_string(),
-                json!(row.get::<_, String>(5).map_err(|e| CliError::Runtime(e.to_string()))?),
+                "current_task_source".to_string(),
+                json!(if has_current_task { "health" } else { "none" }),
+            );
+            item.insert(
+                "current_task_confidence".to_string(),
+                json!("best_effort"),
             );
             insert_optional_string(&mut item, "owner_team_id", row.get(6).map_err(|e| CliError::Runtime(e.to_string()))?);
             out.insert(agent_id, Value::Object(item));

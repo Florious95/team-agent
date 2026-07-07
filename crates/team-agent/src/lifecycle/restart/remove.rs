@@ -670,78 +670,30 @@ fn delete_agent_health(workspace: &Path, agent_id: &AgentId) -> Result<bool, Lif
     Ok(changed > 0)
 }
 
-/// golden agents.py:185 `copy.deepcopy(store.agent_health().get(agent_id))` — read the row BEFORE delete
-/// so the rollback can re-upsert it. Returns the captured health columns, or None if absent.
+// Phase-DX E2: `select_agent_health` / `restore_agent_health` / `CapturedHealth` moved to
+// `db::agent_health_capture` so the SQL column references (agent_health backup columns)
+// live in the persistence layer (whitelisted by the E2 grep guard) rather than lifecycle
+// policy code. The wrappers below preserve the existing `LifecycleError` surface.
+use crate::db::agent_health_capture::{
+    restore_agent_health as capture_restore_agent_health,
+    select_agent_health as capture_select_agent_health, CapturedHealth,
+};
+
 fn select_agent_health(
     workspace: &Path,
     agent_id: &AgentId,
 ) -> Result<Option<CapturedHealth>, LifecycleError> {
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let conn = crate::db::schema::open_db(store.db_path())
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let row = conn
-        .query_row(
-            "select owner_team_id, status, last_output_at, context_usage_pct, current_task_id \
-             from agent_health where agent_id = ?1",
-            [agent_id.as_str()],
-            |r| {
-                Ok(CapturedHealth {
-                    owner_team_id: r.get::<_, Option<String>>(0)?,
-                    status: r.get::<_, Option<String>>(1)?,
-                    last_output_at: r.get::<_, Option<String>>(2)?,
-                    context_usage_pct: r.get::<_, Option<i64>>(3)?,
-                    current_task_id: r.get::<_, Option<String>>(4)?,
-                })
-            },
-        )
-        .ok();
-    Ok(row)
+    capture_select_agent_health(workspace, agent_id)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
-/// golden agents.py:268-278 `_restore_agent_health`: re-upsert the captured row (status||"IDLE"), or
-/// delete the row when there was nothing to restore.
 fn restore_agent_health(
     workspace: &Path,
     agent_id: &AgentId,
     row: &Option<CapturedHealth>,
 ) -> Result<(), LifecycleError> {
-    let Some(row) = row else {
-        delete_agent_health(workspace, agent_id)?;
-        return Ok(());
-    };
-    let store = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let conn = crate::db::schema::open_db(store.db_path())
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let status = row.status.clone().unwrap_or_else(|| "IDLE".to_string());
-    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
-    // The restore always follows a delete of this row, so a plain insert re-materializes the captured
-    // health (golden _restore_agent_health re-upserts status||"IDLE" + the captured columns).
-    conn.execute(
-        "insert into agent_health (owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at) \
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            row.owner_team_id,
-            agent_id.as_str(),
-            status,
-            row.last_output_at,
-            row.context_usage_pct,
-            row.current_task_id,
-            now,
-        ],
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    Ok(())
-}
-
-#[derive(Clone)]
-struct CapturedHealth {
-    owner_team_id: Option<String>,
-    status: Option<String>,
-    last_output_at: Option<String>,
-    context_usage_pct: Option<i64>,
-    current_task_id: Option<String>,
+    capture_restore_agent_health(workspace, agent_id, row)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn maybe_fail_remove_after_agent_health_delete() -> Result<(), LifecycleError> {

@@ -9,6 +9,7 @@
 //! §10:db 层无 unwrap/expect/panic;rusqlite 错误经 [`DbError`] 传播。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod agent_health_capture;
 pub mod message_store;
 pub mod migration;
 pub mod schema;

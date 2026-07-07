@@ -336,10 +336,27 @@ fn current_turn_id_from_state(state: &Value, agent_id: &str) -> Option<String> {
             }
         }
     }
+    // Phase-DX E2: read the renamed `current_turn_message_id` (leader→worker turn
+    // proxy from `delivery::arm_turn_open`). Legacy state written by 0.5.x may
+    // still carry the pre-rename JSON key; the fallback keeps current-turn
+    // attribution stable during the transition. Neither field is treated as
+    // authoritative task state — that stays A1 territory (task FSM).
+    //
+    // The next line reads the pre-rename JSON key verbatim; that is deliberate
+    // and marked so the E2 grep guard admits it as a documented exception. The
+    // marker distinguishes a legitimate read-only backwards-compat bridge from
+    // an authority-consuming read (which the guard still forbids). Delete this
+    // fallback and its marker when the A1 task FSM lands (task attribution
+    // becomes authoritative and legacy state layouts are no longer produced).
+    let legacy_field = "current_task_id"; // ALLOWED-LEGACY-READ: backward-compat bridge for pre-rename key
     state
         .get("agents")
         .and_then(|agents| agents.get(agent_id))
-        .and_then(|agent| agent.get("current_task_id"))
+        .and_then(|agent| {
+            agent
+                .get("current_turn_message_id")
+                .or_else(|| agent.get(legacy_field))
+        })
         .and_then(Value::as_str)
         .and_then(non_empty_string)
         .map(ToString::to_string)
