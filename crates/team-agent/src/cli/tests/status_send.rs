@@ -451,6 +451,28 @@ use super::*;
         }
     }
 
+    fn queued_send_args_fixture(json: bool) -> SendArgs {
+        let ws = deleg_uniq_dir("send-human");
+        let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+        crate::state::persist::save_runtime_state(
+            &ws,
+            &json!({
+                "active_team_key": "current",
+                "teams": {"current": {"agents": {"w1": {"provider": "codex"}}}}
+            }),
+        )
+        .unwrap();
+        SendArgs {
+            workspace: ws,
+            target: Some("w1".into()),
+            team: None,
+            task: None,
+            watch_result: false,
+            json,
+            ..send_args_fixture()
+        }
+    }
+
     #[test]
     fn send_options_negates_no_ack_and_no_wait_and_carries_watch() {
         // golden (commands.py:172,174,176): requires_ack=not no_ack; wait_visible=not no_wait;
@@ -494,7 +516,11 @@ use super::*;
     fn cmd_send_joins_message_with_single_space() {
         // golden (commands.py:169): " ".join(["hello","world","foo"]) == "hello world foo".
         // Drive cmd_send; the joined content must reach send_message (RED until ported).
-        let r = cmd_send(&send_args_fixture()).expect("cmd_send returns CmdResult");
+        let args = SendArgs {
+            json: true,
+            ..send_args_fixture()
+        };
+        let r = cmd_send(&args).expect("cmd_send returns CmdResult");
         // The delegate's DeliveryOutcome -> Json must carry an `ok` key feeding exit-code.
         match r.output {
             CmdOutput::Json(ref v) => {
@@ -511,10 +537,91 @@ use super::*;
     }
 
     #[test]
+    fn cmd_send_default_human_output_is_one_line_without_false_delivered() {
+        let r = cmd_send(&queued_send_args_fixture(false)).expect("cmd_send returns CmdResult");
+        assert!(!r.as_json);
+        let text = emit(&r.output, r.as_json).expect("send should render human text");
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 1, "default send output must be one line: {text}");
+        assert!(
+            lines[0].contains("ok:")
+                && lines[0].contains("status:")
+                && lines[0].contains("message_id:")
+                && lines[0].contains("target:"),
+            "default send output must keep only the core fields; got {text}"
+        );
+        assert!(
+            !text.contains("delivered"),
+            "queued send output must not claim or mention delivered; got {text}"
+        );
+        for hidden in [
+            "agent_id:",
+            "sender:",
+            "message_status:",
+            "verification:",
+            "stage:",
+            "reason:",
+            "channel:",
+            "reminder:",
+        ] {
+            assert!(
+                !text.contains(hidden),
+                "default send output should hide {hidden} unless needed; got {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn cmd_send_json_shape_keeps_056_fields() {
+        let args = queued_send_args_fixture(true);
+        let r = cmd_send(&args).expect("cmd_send returns CmdResult");
+        let v = match r.output {
+            CmdOutput::Json(v) => v,
+            other => panic!("--json send must emit Json, got {other:?}"),
+        };
+        let obj = v.as_object().expect("--json send output must be object");
+        for key in [
+            "ok",
+            "status",
+            "delivery_status",
+            "delivered",
+            "target",
+            "agent_id",
+            "content_length_bytes",
+            "sender",
+            "message_id",
+            "message_status",
+            "verification",
+            "stage",
+            "reason",
+            "channel",
+            "reminder",
+        ] {
+            assert!(obj.contains_key(key), "--json send shape lost {key}: {v}");
+        }
+        assert_eq!(v.get("verification"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("stage"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("reason"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("channel"), Some(&serde_json::Value::Null));
+        assert_eq!(v.get("delivered").and_then(|d| d.as_bool()), Some(false));
+        assert!(
+            !v.get("reminder")
+                .and_then(|reminder| reminder.as_str())
+                .unwrap_or_default()
+                .contains("Message delivered."),
+            "queued JSON reminder must not contradict delivered:false: {v}"
+        );
+    }
+
+    #[test]
     fn cmd_send_watch_result_does_not_register_before_delivery() {
         // 0.5.x send contract: --watch-result may only advertise a watcher after
         // initial worker delivery is physically proven.
-        let r = cmd_send(&send_args_fixture()).expect("cmd_send returns CmdResult");
+        let args = SendArgs {
+            json: true,
+            ..send_args_fixture()
+        };
+        let r = cmd_send(&args).expect("cmd_send returns CmdResult");
         let v = match r.output {
             CmdOutput::Json(v) => v,
             other => panic!("expected Json, got {other:?}"),
