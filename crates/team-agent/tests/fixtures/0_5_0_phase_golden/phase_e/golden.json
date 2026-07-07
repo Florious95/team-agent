@@ -295,10 +295,14 @@
           "agents": {
             "w1": {
               "provider": "codex",
+              "stale": true,
+              "stale_reason": "pane_dead",
               "status": "running"
             },
             "w2": {
               "provider": "codex",
+              "stale": true,
+              "stale_reason": "pane_dead",
               "status": "running"
             }
           },
@@ -364,6 +368,8 @@
               "session_id": null,
               "spawn_cwd": "<WORKSPACE>",
               "spawned_at": "<TS>",
+              "stale": true,
+              "stale_reason": "pane_dead",
               "status": "running",
               "window": "w1"
             },
@@ -406,6 +412,8 @@
               "session_id": null,
               "spawn_cwd": "<WORKSPACE>",
               "spawned_at": "<TS>",
+              "stale": true,
+              "stale_reason": "pane_dead",
               "status": "running",
               "window": "w2"
             }

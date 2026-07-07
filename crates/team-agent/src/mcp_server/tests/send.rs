@@ -112,29 +112,43 @@ fn send_outcome_direct_renders_compact_body() {
 // ════════════════════════════════════════════════════════════════════════
 // CONTROL-PLANE: send_message worker recipient → WorkerAccepted (tools.py:135-183)
 // ════════════════════════════════════════════════════════════════════════
-#[test]
-fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
-    // A worker recipient w/ a delivered message_id → async accepted carrying the
-    // byte-stable poll hint. Identity anchored on injected env (no candidate scan).
-    // golden: a leader WITH owner_team_id on an unseeded ws would hit the C23 cross-team
-    // refusal first (worker-1 not in visible peers) -> PeerNotInScope. owner_team_id=None
-    // (legacy single-team) bypasses that, isolating the worker-recipient accepted path.
-    // The cross-team refusal has its own tests (refuse_cross_team_peer_* / send_message_cross_team_*).
-    // A-7: the accepted path needs a REAL stored message_id (tools.py:175-181 —
-    // fabricated ids are gone), so the workspace seeds a running worker-1 the
-    // delivery layer can actually queue for.
-    let ws = unique_ws("send-worker");
+fn seed_current_worker_state(tag: &str) -> std::path::PathBuf {
+    let ws = unique_ws(tag);
     crate::state::persist::save_runtime_state(
         &ws,
         &serde_json::json!({
             "session_name": "team-x",
+            "active_team_key": "current",
             "agents": {
                 "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
+            },
+            "teams": {
+                "current": {
+                    "status": "alive",
+                    "agents": {
+                        "worker-1": {"status": "running", "agent_id": "worker-1", "window": "worker-1"},
+                    },
+                },
             },
         }),
     )
     .unwrap();
-    let tools = TeamOrchestratorTools::with_identity(&ws, Some(AgentId::new("leader")), None);
+    ws
+}
+
+#[test]
+fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
+    // A worker recipient w/ a delivered message_id → async accepted carrying the
+    // byte-stable poll hint. Identity anchored on injected env (no candidate scan).
+    // A-7: the accepted path needs a REAL stored message_id (tools.py:175-181 —
+    // fabricated ids are gone), so the workspace seeds a running worker-1 the
+    // delivery layer can actually queue for.
+    let ws = seed_current_worker_state("send-worker");
+    let tools = TeamOrchestratorTools::with_identity(
+        &ws,
+        Some(AgentId::new("leader")),
+        Some(TeamKey::new("current")),
+    );
     let outcome = tools.send_message(
         &MessageTarget::Single("worker-1".to_string()),
         "do the thing",
@@ -153,6 +167,104 @@ fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
         }
         other => panic!("worker recipient must be WorkerAccepted, got {other:?}"),
     }
+}
+
+#[test]
+fn ordinary_send_assign_shape_has_no_recovery_marker() {
+    let ws = seed_current_worker_state("ordinary-no-recovery");
+    let tools = TeamOrchestratorTools::with_identity(
+        &ws,
+        Some(AgentId::new("leader")),
+        Some(TeamKey::new("current")),
+    );
+
+    let sent = tools
+        .send_message(
+            &MessageTarget::Single("worker-1".to_string()),
+            "ordinary send",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("ordinary send ok")
+        .to_value();
+    assert!(
+        !sent.as_object().unwrap().contains_key("recovery"),
+        "ordinary send must not carry recovery marker: {sent}"
+    );
+    assert!(
+        sent.get("acceptance_marker").is_none(),
+        "ordinary send must not carry acceptance marker: {sent}"
+    );
+
+    let assigned = tools
+        .assign_task(
+            &json!({"id": "ordinary-task", "assignee": "worker-1", "title": "ordinary"}),
+            None,
+        )
+        .expect("ordinary assign ok");
+    let assigned_value = serde_json::to_value(&assigned).expect("serialize ordinary assign");
+    assert!(
+        !assigned_value.as_object().unwrap().contains_key("recovery"),
+        "ordinary assign must not carry recovery marker: {assigned_value}"
+    );
+    assert!(
+        assigned_value.get("acceptance_marker").is_none(),
+        "ordinary assign must not carry acceptance marker: {assigned_value}"
+    );
+
+    let recovery_false_assigned = tools
+        .assign_task(
+            &json!({
+                "id": "ordinary-recovery-false-task",
+                "assignee": "worker-1",
+                "title": "ordinary recovery false",
+                "recovery": false,
+            }),
+            None,
+        )
+        .expect("recovery=false assign ok");
+    let recovery_false_value =
+        serde_json::to_value(&recovery_false_assigned).expect("serialize recovery=false assign");
+    assert!(
+        !recovery_false_value
+            .as_object()
+            .unwrap()
+            .contains_key("recovery"),
+        "recovery=false assign must not carry recovery marker: {recovery_false_value}"
+    );
+    assert!(
+        recovery_false_value.get("acceptance_marker").is_none(),
+        "recovery=false assign must not carry acceptance marker: {recovery_false_value}"
+    );
+}
+
+#[test]
+fn recovery_assign_shape_has_structured_marker() {
+    let ws = seed_current_worker_state("recovery-marker");
+    let tools = TeamOrchestratorTools::with_identity(
+        &ws,
+        Some(AgentId::new("leader")),
+        Some(TeamKey::new("current")),
+    );
+
+    let assigned = tools
+        .assign_task(
+            &json!({
+                "id": "recovery-task",
+                "assignee": "worker-1",
+                "title": "recover",
+                "recovery": true,
+            }),
+            None,
+        )
+        .expect("recovery assign ok");
+    assert_eq!(assigned.fields.get("recovery"), Some(&json!(true)));
+    assert_eq!(
+        assigned.fields.get("acceptance_marker"),
+        Some(&json!("recovery"))
+    );
 }
 
 #[test]

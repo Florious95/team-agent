@@ -38,7 +38,9 @@ use rusqlite::params;
             coordinator_running,
             undelivered_backlog,
         );
-        let agents = enrich_agents(state.get("agents"));
+        let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
+        let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
+        let agents = enrich_agents(state.get("agents"), tmux_present);
         let tasks = state
             .get("tasks")
             .cloned()
@@ -47,7 +49,6 @@ use rusqlite::params;
             .get("leader_receiver")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
         let is_external_leader = crate::state::projection::state_is_external_leader(state);
         let leader_topology = if is_external_leader { "external" } else { "managed" };
         let leader_attach_command = if is_external_leader {
@@ -70,7 +71,6 @@ use rusqlite::params;
                 )
             })
         };
-        let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
         let mut readiness_state = state.clone();
         if let Some(obj) = readiness_state.as_object_mut() {
             obj.insert("tmux_session_present".to_string(), serde_json::json!(tmux_present));
@@ -437,7 +437,7 @@ use rusqlite::params;
             .to_string()
     }
 
-    fn enrich_agents(agents: Option<&Value>) -> Value {
+    fn enrich_agents(agents: Option<&Value>, tmux_session_present: bool) -> Value {
         let Some(Value::Object(input)) = agents else {
             return json!({});
         };
@@ -450,6 +450,15 @@ use rusqlite::params;
                         "interacted".to_string(),
                         Value::String(interacted_marker(obj.get("first_send_at"))),
                     );
+                    if let Some(reason) =
+                        stale_reason_for_agent(&Value::Object(obj.clone()), tmux_session_present)
+                    {
+                        enriched.insert("stale".to_string(), Value::Bool(true));
+                        enriched.insert(
+                            "stale_reason".to_string(),
+                            Value::String(reason.to_string()),
+                        );
+                    }
                     out.insert(agent_id.clone(), Value::Object(enriched));
                 }
                 _ => {
@@ -458,6 +467,53 @@ use rusqlite::params;
             }
         }
         Value::Object(out)
+    }
+
+    fn stale_reason_for_agent(agent: &Value, tmux_session_present: bool) -> Option<&'static str> {
+        let pane_dead = !tmux_session_present && agent_has_pane_fact(agent);
+        let process_dead =
+            agent_process_dead(agent) || (!tmux_session_present && agent_has_process_fact(agent));
+        match (pane_dead, process_dead) {
+            (true, true) => Some("both"),
+            (false, true) => Some("process_dead"),
+            (true, false) => Some("pane_dead"),
+            (false, false) => None,
+        }
+    }
+
+    fn agent_has_pane_fact(agent: &Value) -> bool {
+        ["pane_id", "window", "window_name"].iter().any(|key| {
+            agent
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        })
+    }
+
+    fn agent_has_process_fact(agent: &Value) -> bool {
+        agent.get("pid").and_then(Value::as_i64).is_some()
+            || agent.get("process_started").and_then(Value::as_bool) == Some(true)
+            || agent.get("provider_process_dead").and_then(Value::as_bool).is_some()
+            || agent.get("process_liveness").and_then(Value::as_str).is_some()
+    }
+
+    fn agent_process_dead(agent: &Value) -> bool {
+        if agent.get("provider_process_dead").and_then(Value::as_bool) == Some(true) {
+            return true;
+        }
+        ["process_liveness", "worker_state"].iter().any(|key| {
+            agent
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(is_dead_process_state)
+        })
+    }
+
+    fn is_dead_process_state(value: &str) -> bool {
+        matches!(
+            value,
+            "dead" | "missing" | "stopped" | "exited" | "terminated"
+        )
     }
 
     fn interacted_marker(value: Option<&Value>) -> String {
@@ -846,7 +902,15 @@ use rusqlite::params;
         // 0.4.x Phase 1: add `worker_state` (canonical 5-state product
         // surface). `activity` is preserved alongside as the deprecated
         // legacy classifier output (CR R3 same-source contract).
-        for key in ["status", "provider", "worker_state", "activity", "last_output_at"] {
+        for key in [
+            "status",
+            "provider",
+            "worker_state",
+            "activity",
+            "last_output_at",
+            "stale",
+            "stale_reason",
+        ] {
             if let Some(value) = input.get(key) {
                 out.insert(key.to_string(), value.clone());
             }
