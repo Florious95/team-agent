@@ -148,41 +148,34 @@ pub fn attach_leader(
 /// (Fake-provider binding stays useful even without echo suppression).
 ///
 /// N16/CP-1 (`.team/anchors/REQUIREMENTS.md`): all tmux invocations MUST
-/// be socket-scoped via `-S <endpoint>`. `endpoint` is required here —
-/// missing endpoint means the caller resolved the target through a
-/// non-socketed path and we must NOT fall back to the ambient tmux
-/// server. Return early so best-effort semantics stay intact without
-/// violating the guard.
+/// go through the `TmuxBackend` single entry point. The pane's tty query
+/// is done via `TmuxBackend::for_tmux_endpoint(endpoint).query(...,
+/// PaneField::PaneTty)` — socket-scoped by construction. The `stty` call
+/// itself is not a tmux operation, so it uses `Command` directly.
 fn quiet_fake_leader_pane_echo(provider: Provider, target: &PaneInfo, endpoint: &str) {
+    use crate::transport::{PaneField, Target as TransportTarget};
     if !matches!(provider, Provider::Fake) {
         return;
     }
     if endpoint.is_empty() {
         return;
     }
-    // Look up the pane's tty path (e.g. /dev/ttys015) and run `stty -echo`
-    // against it — this flips the terminal driver's echo bit without
-    // asking the pane process (cat) to interpret any command.
-    let Ok(output) = std::process::Command::new("tmux")
-        .args([
-            "-S",
-            endpoint,
-            "display-message",
-            "-p",
-            "-t",
-            target.pane_id.as_str(),
-            "#{pane_tty}",
-        ])
-        .output()
-    else {
+    let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+    let Ok(Some(tty)) = <crate::tmux_backend::TmuxBackend as crate::transport::Transport>::query(
+        &backend,
+        &TransportTarget::Pane(target.pane_id.clone()),
+        PaneField::PaneTty,
+    ) else {
         return;
     };
-    let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if tty.is_empty() {
+    if tty.trim().is_empty() {
         return;
     }
+    // stty against the pane's tty flips the terminal driver's echo bit
+    // without asking the pane process (`/bin/cat`) to interpret any
+    // command. Best-effort: failure is silent.
     let _ = std::process::Command::new("stty")
-        .args(["-f", &tty, "-echo"])
+        .args(["-f", tty.trim(), "-echo"])
         .output();
 }
 
