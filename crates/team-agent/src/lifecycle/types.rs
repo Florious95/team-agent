@@ -702,6 +702,8 @@ pub enum RestartReport {
         reason: String,
         /// Human-readable error directing the user to a recovery action.
         error: String,
+        /// Stable topology issue ids surfaced by CLI/diagnose.
+        issue_ids: Vec<String>,
     },
 }
 

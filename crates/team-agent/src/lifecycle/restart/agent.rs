@@ -127,7 +127,12 @@ pub(crate) fn start_agent_at_paths(
     // state — assert_topology_invariants from Step 1 catches the
     // upstream corruption.
     let has_collision = pane_conflicts_with_leader_or_other(&state, agent_id, &raw_agent);
-    if has_collision {
+    let noop_pane = if adaptive_layout {
+        None
+    } else {
+        single_live_pane_for_window(transport, &session_name, &window)
+    };
+    if has_collision && noop_pane.is_none() {
         eprintln!(
             "team_agent::layout e51_collision_post_step2 agent_id=`{agent_id}` \
              action=forcing_fresh_spawn \
@@ -135,9 +140,17 @@ pub(crate) fn start_agent_at_paths(
               investigate upstream state corruption)"
         );
     }
-    let agent_live = agent_live && !has_collision;
+    let agent_live = agent_live && (!has_collision || noop_pane.is_some());
     if !force && agent_live {
-        mark_agent_running_noop(&mut state, agent_id, &session_name, &window)?;
+        let old_binding = pane_binding_snapshot(&raw_agent);
+        let refreshed_binding = noop_pane.as_ref().map(pane_binding_from_live);
+        mark_agent_running_noop(
+            &mut state,
+            agent_id,
+            &session_name,
+            &window,
+            noop_pane.as_ref(),
+        )?;
         let team_key = restart_projection_team_key(&state, team);
         save_restart_projected_state(workspace, &mut state, &team_key, &[agent_id.as_str()])?;
         if let Ok(spec) = load_team_spec(spec_workspace) {
@@ -146,6 +159,18 @@ pub(crate) fn start_agent_at_paths(
         replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
         let coordinator_started = start_coordinator_for_workspace(workspace)?;
         let target = format!("{}:{window}", session_name.as_str());
+        if let Some(new_binding) = refreshed_binding.as_ref() {
+            if old_binding.as_ref() != Some(new_binding) {
+                write_agent_pane_binding_refreshed_event(
+                    workspace,
+                    agent_id,
+                    &session_name,
+                    &window,
+                    old_binding.as_ref(),
+                    new_binding,
+                )?;
+            }
+        }
         write_start_agent_noop_event(workspace, agent_id, &target, coordinator_started)?;
         return Ok(StartAgentOutcome::Noop {
             env: AgentActionEnvelope {
@@ -370,6 +395,78 @@ fn verify_spawned_pane_matches_target(
             pane.as_str()
         )));
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneBindingSnapshot {
+    pane_id: String,
+    pane_pid: Option<u32>,
+}
+
+fn pane_binding_snapshot(agent: &serde_json::Value) -> Option<PaneBindingSnapshot> {
+    let pane_id = agent
+        .get("pane_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())?;
+    Some(PaneBindingSnapshot {
+        pane_id: pane_id.to_string(),
+        pane_pid: agent
+            .get("pane_pid")
+            .and_then(serde_json::Value::as_u64)
+            .map(|pid| pid as u32),
+    })
+}
+
+fn pane_binding_from_live(pane: &crate::transport::PaneInfo) -> PaneBindingSnapshot {
+    PaneBindingSnapshot {
+        pane_id: pane.pane_id.as_str().to_string(),
+        pane_pid: pane.pane_pid,
+    }
+}
+
+fn single_live_pane_for_window(
+    transport: &dyn crate::transport::Transport,
+    session: &crate::transport::SessionName,
+    window: &str,
+) -> Option<crate::transport::PaneInfo> {
+    let targets = transport.list_targets().ok()?;
+    let mut matches = targets.into_iter().filter(|target| {
+        target.session.as_str() == session.as_str()
+            && target
+                .window_name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == window)
+    });
+    let pane = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(pane)
+}
+
+fn write_agent_pane_binding_refreshed_event(
+    workspace: &Path,
+    agent_id: &AgentId,
+    session: &crate::transport::SessionName,
+    window: &str,
+    old: Option<&PaneBindingSnapshot>,
+    new: &PaneBindingSnapshot,
+) -> Result<(), LifecycleError> {
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "agent_pane_binding_refreshed",
+            serde_json::json!({
+                "agent_id": agent_id.as_str(),
+                "session": session.as_str(),
+                "window": window,
+                "old_pane_id": old.map(|binding| binding.pane_id.as_str()),
+                "old_pane_pid": old.and_then(|binding| binding.pane_pid),
+                "pane_id": new.pane_id.as_str(),
+                "pane_pid": new.pane_pid,
+            }),
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
 }
 

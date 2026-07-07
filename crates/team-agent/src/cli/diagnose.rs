@@ -6,6 +6,12 @@ use crate::transport::Transport;
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
+    for issue in crate::topology::diagnose_topology_issues(state, backend) {
+        if let Some(id) = crate::topology::issue_id(&issue) {
+            repairs.push(topology_repair_hint(id));
+        }
+        issues.push(issue);
+    }
 
     if let Some(session_name) = state
         .get("session_name")
@@ -157,6 +163,18 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
     }
 
     (Value::Array(issues), Value::Array(repairs))
+}
+
+fn topology_repair_hint(issue: &str) -> Value {
+    json!({
+        "issue": issue,
+        "action_required": true,
+        "advisory": true,
+        "broken_class": issue,
+        "hint_action": "team-agent diagnose --json",
+        "dedupe_key": issue,
+        "action": "repair the tmux topology mismatch, then rerun team-agent restart",
+    })
 }
 
 /// 0.4.x (CR R2): pull (pane_id, provider_label) from leader_receiver. Used

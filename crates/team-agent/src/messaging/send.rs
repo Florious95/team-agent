@@ -10,7 +10,7 @@ use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
 use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_message_id};
-use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
+use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError};
 
 /// 发件目标:单 target / 广播 `*` / 扇出 list (`send.py:36` `target: str|list[str]|None`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +182,9 @@ pub fn send_message(
             }
         }
     }
+    if let Some(outcome) = stale_worker_target_preflight(workspace, &state, recipient, opts)? {
+        return Ok(outcome);
+    }
     if let Some(outcome) = coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
     {
         return Ok(outcome);
@@ -229,6 +232,38 @@ pub fn send_message(
         reason: None,
         channel: None,
     })
+}
+
+fn stale_worker_target_preflight(
+    workspace: &Path,
+    state: &serde_json::Value,
+    recipient: &str,
+    opts: &SendOptions,
+) -> Result<Option<DeliveryOutcome>, MessagingError> {
+    let Ok(resolved) = crate::transport_factory::resolve_read_only_transport(
+        workspace,
+        Some(state),
+        crate::transport_factory::TransportPurpose::MessageDelivery,
+    ) else {
+        return Ok(None);
+    };
+    if !super::delivery::worker_target_missing_due_to_stale_binding(
+        state,
+        recipient,
+        resolved.backend.as_ref(),
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(DeliveryOutcome {
+        ok: false,
+        status: DeliveryStatus::Blocked,
+        message_status: MessageStatusShadow("queued_pane_missing".to_string()),
+        message_id: opts.message_id.clone(),
+        verification: Some(format!("run team-agent start-agent {recipient} --allow-fresh")),
+        stage: Some(DeliveryStage::Inject),
+        reason: Some(DeliveryRefusal::TmuxTargetMissing),
+        channel: Some("delivery_blocked".to_string()),
+    }))
 }
 
 fn task_exists(state: &serde_json::Value, task_id: &TaskId) -> bool {

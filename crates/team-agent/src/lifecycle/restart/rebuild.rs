@@ -137,6 +137,32 @@ pub fn restart_with_transport_with_session_convergence_deadline(
     })?;
     let mut state = selected.state;
     crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, None)?;
+    let topology_issue_ids = crate::topology::restart_dirty_topology_issue_ids(&state);
+    if !topology_issue_ids.is_empty() {
+        let session_name = state
+            .get("session_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        crate::event_log::EventLog::new(&selected.run_workspace)
+            .write(
+                "restart.refused_dirty_topology",
+                serde_json::json!({
+                    "session_name": session_name,
+                    "issues": topology_issue_ids.iter().map(|id| serde_json::json!({"id": id})).collect::<Vec<_>>(),
+                }),
+            )
+            .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+        return Ok(RestartReport::RefusedDirtyTopology {
+            session_name,
+            reason: topology_issue_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "dirty_topology".to_string()),
+            error: "restart refused: tmux endpoint/socket topology is inconsistent; run diagnose from the intended leader socket before restarting".to_string(),
+            issue_ids: topology_issue_ids,
+        });
+    }
     // E5 task#3 / RC-A6a + E4(leader 裁定:每次 restart 都从角色定义重建 runtime spec,覆盖):
     // 角色定义=第一真相源。角色齐 → compile_team 重建 + 保留运行期 override(session_name)+
     // 写 runtime spec。角色缺(TEAM.md/agents 不在)→ 显式拒(列缺哪些),旧 spec 原地保留不删不用。
@@ -278,6 +304,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
                      launcher session ({reason}); aborting before any tmux kill. Repair \
                      state.session_name to the worker session and re-run."
                 ),
+                issue_ids: vec![reason.clone()],
             });
         }
     }

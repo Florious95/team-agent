@@ -5,8 +5,8 @@
 //! - `.team/artifacts/worker-delivery-socket-leak-locate.md` §8 contracts 1-6.
 //! - CR red-line spirit: pane id is physical metadata, not worker identity.
 //!
-//! User-visible contract: sending to worker `a` can never land in another
-//! worker's pane just because `state.agents.a.pane_id` is stale.
+//! User-visible contract: sending to worker `a`, or to a named leader binding,
+//! can never land in another worker's pane just because a state pane id is stale.
 
 use crate::framework::*;
 use crate::support::source_walker::source_tree;
@@ -306,6 +306,72 @@ fn wleak_cross_session_multi_pane_window_missing_fails_closed() {
 }
 
 #[test]
+fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
+    let team_id = "wleak008";
+    let target_ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
+    let target_ws_path = target_ws.path().to_str().unwrap();
+    let qs = quick_start_fake(&target_ws, team_id);
+    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    let _guard = TmuxServerGuard::for_workspace(&target_ws);
+
+    let foreign_ws = TestWorkspace::new("wleak008-foreign").with_fake_spec(&["worker"]);
+    let socket = state_socket(&target_ws);
+    let foreign_session = "team-wleak008-foreign";
+    let foreign_window = "foreign-worker";
+    let foreign = create_foreign_worker_session(
+        &socket,
+        foreign_session,
+        foreign_window,
+        foreign_ws.path().to_path_buf(),
+    );
+    write_leader_receiver_tuple(
+        &target_ws,
+        team_id,
+        json!({
+            "mode": "direct_tmux",
+            "transport_kind": "direct_tmux",
+            "status": "attached",
+            "pane_id": foreign.pane_id,
+            "pane_pid": 1,
+            "session_name": "team-wleak008-dead-leader",
+            "window_name": "dead-leader",
+            "tmux_socket": socket,
+            "pane_current_path": target_ws_path,
+        }),
+    );
+
+    let token = "WLEAK_TONAME_REUSED_LEADER_TOKEN_008";
+    let to_name = format!("{target_ws_path}::{team_id}/leader");
+    let foreign_ws_path = foreign_ws.path().to_str().unwrap();
+    let out = run_ta(
+        &foreign_ws,
+        &[
+            "send",
+            "--to-name",
+            &to_name,
+            token,
+            "--workspace",
+            foreign_ws_path,
+            "--sender",
+            "third-party",
+            "--json",
+        ],
+    );
+    let body = out.json();
+    let foreign_capture = capture_pane(&target_ws, &foreign.pane_id);
+    let leaked_count = foreign_capture.matches(token).count();
+    let acceptable = named_leader_stale_or_mailbox_outcome(&target_ws, &body);
+    assert!(
+        acceptable && leaked_count == 0,
+        "WLEAK fifth-case RED: --to-name {to_name} must stale-refuse or E6-queue when \
+         state leader_receiver pane_id is live only as another workspace's worker \
+         ({foreign_session}:{foreign_window}); it must never report delivered or inject into \
+         the reused pane. acceptable={acceptable} reused_pane_token_count={leaked_count} \
+         json={body} reused_pane_capture=\n{foreign_capture}"
+    );
+}
+
+#[test]
 fn wleak_start_agent_noop_refreshes_stale_cached_pane_tuple() {
     let team_id = "wleak004";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a", "b"]);
@@ -469,6 +535,22 @@ fn write_agent_pane_tuple(ws: &TestWorkspace, agent_id: &str, pane: &PaneSnapsho
     });
 }
 
+fn write_leader_receiver_tuple(ws: &TestWorkspace, team_key: &str, receiver: Value) {
+    ws.mutate_state(|state| {
+        if let Some(root) = state.as_object_mut() {
+            root.insert("leader_receiver".to_string(), receiver.clone());
+        }
+        if let Some(team) = state
+            .get_mut("teams")
+            .and_then(Value::as_object_mut)
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(Value::as_object_mut)
+        {
+            team.insert("leader_receiver".to_string(), receiver);
+        }
+    });
+}
+
 fn pane_for_window(ws: &TestWorkspace, session: &str, window: &str) -> PaneSnapshot {
     let socket = state_socket(ws);
     let out = Command::new("tmux")
@@ -525,6 +607,37 @@ fn capture_pane(ws: &TestWorkspace, pane_id: &str) -> String {
         .output()
         .unwrap_or_else(|e| panic!("tmux capture-pane {pane_id}: {e}"));
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn create_foreign_worker_session(
+    socket: &str,
+    session: &str,
+    window: &str,
+    cwd: PathBuf,
+) -> PaneSnapshot {
+    let out = Command::new("tmux")
+        .args([
+            "-S",
+            socket,
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "-n",
+            window,
+            "-c",
+            cwd.to_str().expect("cwd utf8"),
+            "cat",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("tmux new-session {session}: {e}"));
+    assert!(
+        out.status.success(),
+        "tmux new-session failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    pane_for_explicit_socket(socket, session, window)
 }
 
 fn create_foreign_multi_pane_session(
@@ -694,6 +807,37 @@ fn delivered_event_count(ws: &TestWorkspace, message_id: &str) -> usize {
                 && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
         })
         .count()
+}
+
+fn named_leader_stale_or_mailbox_outcome(ws: &TestWorkspace, body: &Value) -> bool {
+    if body.pointer("/delivered").and_then(Value::as_bool) == Some(true)
+        || body.pointer("/delivery_status").and_then(Value::as_str) == Some("delivered")
+        || body.pointer("/status").and_then(Value::as_str) == Some("delivered")
+    {
+        return false;
+    }
+    if body.pointer("/message_status").and_then(Value::as_str) == Some("queued_until_leader_attach")
+        || body.pointer("/status").and_then(Value::as_str) == Some("queued_until_leader_attach")
+    {
+        let Some(message_id) = body.pointer("/message_id").and_then(Value::as_str) else {
+            return false;
+        };
+        return message_status(ws, message_id).as_deref() == Some("queued_until_leader_attach");
+    }
+    if body.pointer("/ok").and_then(Value::as_bool) != Some(false)
+        || body.pointer("/status").and_then(Value::as_str) != Some("refused")
+    {
+        return false;
+    }
+    let reason = body
+        .pointer("/reason")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let log = body.pointer("/log").and_then(Value::as_str).unwrap_or("");
+    reason.contains("stale")
+        || reason == "name_not_live"
+        || reason.contains("not_live")
+        || log.contains("stale")
 }
 
 fn events_contain(ws: &TestWorkspace, event: &str) -> bool {

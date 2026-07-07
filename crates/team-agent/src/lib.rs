@@ -88,6 +88,7 @@ pub mod platform;
 // 0.3.28 — unified adaptive layout manager (single source of truth for tmux
 // topology decisions). See `.team/artifacts/adaptive-layout-full-architecture-locate.md`.
 pub mod layout;
+pub mod topology;
 pub mod mcp_server;
 pub mod cli;
 pub mod packaging;
