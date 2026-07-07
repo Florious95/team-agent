@@ -38,7 +38,19 @@ fn e2_status_json_marks_current_task_as_structured_best_effort() {
 
 #[test]
 fn e2_current_task_health_reads_are_display_only() {
-    let mut offenders = Vec::new();
+    // CR verdict R1 refinement (2026-07-08 phase-dx-cr-verdict.md §3):
+    // the guard distinguishes read from write. Whitelisted files stay
+    // unconstrained (their reads are already display-layer). Everywhere
+    // else, an occurrence of `current_task_id` is either:
+    //   - a *read* explicitly marked with `ALLOWED-LEGACY-READ`
+    //     (backward-compat bridge that reads the pre-rename JSON key —
+    //     never as authority, and deleted when the A1 task FSM lands), or
+    //   - an *offender* — either a write, an authority-consuming read,
+    //     or an unmarked read.
+    //
+    // Writes are forbidden even with a marker: they cannot re-establish
+    // legacy state layouts outside the persistence/display whitelist.
+    let mut offenders: Vec<(String, usize, String)> = Vec::new();
     for (rel, text) in rs_sources("src") {
         if rel.contains("/tests/") || rel.ends_with("/tests.rs") {
             continue;
@@ -51,18 +63,42 @@ fn e2_current_task_health_reads_are_display_only() {
             || rel == "src/coordinator/tick.rs"
             || rel == "src/db/schema.rs"
             || rel == "src/db/migration.rs";
-        if !allowed
-            && (rel.contains("messaging")
-                || rel.contains("mcp_server")
-                || rel.contains("lifecycle"))
-        {
-            offenders.push(rel);
+        if allowed {
+            continue;
+        }
+        let scoped =
+            rel.contains("messaging") || rel.contains("mcp_server") || rel.contains("lifecycle");
+        if !scoped {
+            continue;
+        }
+        // Line-level scan: fail on any offending line and record file:line
+        // so the failure message tells the operator exactly which
+        // reference broke the guard.
+        for (idx, line) in text.lines().enumerate() {
+            if !line.contains("current_task_id") {
+                continue;
+            }
+            // Write patterns: producing a `current_task_id` JSON key or
+            // struct field. A local `let name = "current_task_id";` is a
+            // read source (the string is consumed by `.get(...)`), not a
+            // write, so it is exempt from the write ban and eligible for
+            // the ALLOWED-LEGACY-READ marker below.
+            let write_marker = line.contains(".insert(\"current_task_id\"")
+                || line.contains("\"current_task_id\":");
+            if write_marker {
+                offenders.push((rel.clone(), idx + 1, line.trim().to_string()));
+                continue;
+            }
+            if line.contains("ALLOWED-LEGACY-READ") {
+                continue;
+            }
+            offenders.push((rel.clone(), idx + 1, line.trim().to_string()));
         }
     }
 
     assert!(
         offenders.is_empty(),
-        "E2 RED guard: agent_health.current_task_id is Phase-DX display-only; messaging/results/collect/lifecycle must not read it as authoritative task state. Offenders: {offenders:?}"
+        "E2 RED guard: agent_health.current_task_id is Phase-DX display-only; messaging/results/collect/mcp_server/lifecycle must not read it as authority. Legit backward-compat reads must tag their line with `ALLOWED-LEGACY-READ`; writes are forbidden even with a marker. Offenders (file:line): {offenders:#?}"
     );
 }
 
