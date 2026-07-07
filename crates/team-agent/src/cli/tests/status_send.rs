@@ -448,6 +448,7 @@ use super::*;
             message_id: None,
             pane: None,
             to_name: None,
+        to_leader: None,
         }
     }
 

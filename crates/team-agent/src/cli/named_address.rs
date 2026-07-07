@@ -18,6 +18,14 @@ pub(crate) enum NamedAddressErrorKind {
     NameInvalid,
     WorkspaceNotFound,
     StateNotFound,
+    // E6 (0.5.9 offline-mailbox-toname-design §3.1): three-way taxonomy for
+    // `--to-name <team>/leader` refusal — required by the E6 RED so the top-level
+    // `leader_receiver` fallback is no longer reached for a wrong runtime key.
+    // `WorkspaceNoState` mirrors `StateNotFound` semantics but keeps the wire
+    // reason distinct for third-party sender copy.
+    WorkspaceNoState,
+    TeamKeyNotFound,
+    LeaderNotAttached,
     NameNotResolvable,
     NameNotLive,
     NameAmbiguous,
@@ -29,6 +37,9 @@ impl NamedAddressErrorKind {
             Self::NameInvalid => "name_invalid",
             Self::WorkspaceNotFound => "workspace_not_found",
             Self::StateNotFound => "state_not_found",
+            Self::WorkspaceNoState => "workspace_no_state",
+            Self::TeamKeyNotFound => "team_key_not_found",
+            Self::LeaderNotAttached => "leader_not_attached",
             Self::NameNotResolvable => "name_not_resolvable",
             Self::NameNotLive => "name_not_live",
             Self::NameAmbiguous => "name_ambiguous",
@@ -43,6 +54,13 @@ pub(crate) struct NamedAddressError {
     pub action: String,
     pub log: String,
     pub candidates: Vec<Value>,
+    // E6: when the caller supplied a `<team>/leader` name that isn't a runtime
+    // team_key, echo the requested value + the canonical alternatives so
+    // spec/display-name confusion is visibly diagnosed. Empty for other
+    // refusal kinds.
+    pub requested_team: Option<String>,
+    pub available_team_keys: Vec<String>,
+    pub suggested_name: Option<String>,
 }
 
 impl NamedAddressError {
@@ -53,6 +71,9 @@ impl NamedAddressError {
             action: "inspect team-agent status and use an explicit workspace/team name".to_string(),
             log: "named-address resolver refused before injection".to_string(),
             candidates: Vec::new(),
+            requested_team: None,
+            available_team_keys: Vec::new(),
+            suggested_name: None,
         }
     }
 
@@ -66,15 +87,35 @@ impl NamedAddressError {
     }
 
     pub(crate) fn to_json(&self) -> Value {
-        json!({
-            "ok": false,
-            "status": "refused",
-            "reason": self.kind.as_str(),
-            "error": self.message,
-            "action": self.action,
-            "log": self.log,
-            "candidates": self.candidates,
-        })
+        let mut obj = serde_json::Map::new();
+        obj.insert("ok".to_string(), Value::Bool(false));
+        obj.insert("status".to_string(), Value::String("refused".to_string()));
+        obj.insert(
+            "reason".to_string(),
+            Value::String(self.kind.as_str().to_string()),
+        );
+        obj.insert("error".to_string(), Value::String(self.message.clone()));
+        obj.insert("action".to_string(), Value::String(self.action.clone()));
+        obj.insert("log".to_string(), Value::String(self.log.clone()));
+        obj.insert("candidates".to_string(), Value::Array(self.candidates.clone()));
+        if let Some(requested) = self.requested_team.as_deref() {
+            obj.insert("requested_team".to_string(), Value::String(requested.to_string()));
+        }
+        if !self.available_team_keys.is_empty() {
+            obj.insert(
+                "available_team_keys".to_string(),
+                Value::Array(
+                    self.available_team_keys
+                        .iter()
+                        .map(|k| Value::String(k.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(suggested) = self.suggested_name.as_deref() {
+            obj.insert("suggested_name".to_string(), Value::String(suggested.to_string()));
+        }
+        Value::Object(obj)
     }
 }
 
@@ -555,12 +596,13 @@ fn leader_advisory_candidates(
     transport: &dyn Transport,
     source: &str,
 ) -> Vec<Value> {
-    let socket = team_entry(state, team)
+    let team_scoped_socket = team_entry(state, team)
         .and_then(|entry| entry.get("leader_receiver"))
-        .or_else(|| state.get("leader_receiver"))
-        .and_then(|receiver| string_field(receiver, "tmux_socket"))
-        .map(str::to_string)
-        .or_else(|| transport.tmux_endpoint());
+        .and_then(|receiver| string_field(receiver, "tmux_socket"));
+    let socket = match team_scoped_socket {
+        Some(s) => Some(s.to_string()),
+        None => legacy_top_level_socket_hint(state).or_else(|| transport.tmux_endpoint()),
+    };
     let targets = match transport.list_targets() {
         Ok(targets) => targets,
         Err(_) => return Vec::new(),
@@ -588,17 +630,27 @@ fn resolve_leader(
     parsed: &ParsedNamedAddress,
     transport: &dyn Transport,
 ) -> Result<ResolvedNamedAddress, NamedAddressError> {
-    let receiver = if let Some(team_entry) = team_entry(state, team) {
-        team_entry.get("leader_receiver")
-    } else {
-        state.get("leader_receiver")
-    }
-    .ok_or_else(|| {
-        let mut err = name_not_live_leader(team, None, None, None, transport.tmux_endpoint());
-        err.candidates =
-            leader_advisory_candidates(state, team, transport, "state_recorded_socket");
-        err
-    })?;
+    // E6 taxonomy split (0.5.9 offline-mailbox-toname-design §3.1): before
+    // reading any leader_receiver, decide whether `<team>` is actually the
+    // runtime team key. Wrong keys must not fall through to top-level
+    // leader_receiver (that was the pre-fix bug where `twitter-autopub/leader`
+    // silently reused the `current` team's receiver and reported a stale
+    // pane_id). Legacy single-team compat is preserved only when the state
+    // has no `teams` map yet and the requested key equals `active_team_key`.
+    let receiver = resolve_team_scoped_leader_receiver(state, team, target_workspace)?
+        .ok_or_else(|| {
+            let mut err = leader_not_attached_third_party(
+                target_workspace,
+                team,
+                None,
+                None,
+                None,
+                transport.tmux_endpoint(),
+            );
+            err.candidates =
+                leader_advisory_candidates(state, team, transport, "state_recorded_socket");
+            err
+        })?;
     if let Some((mode, transport_kind)) = receiver_transport_conflict(receiver) {
         let mut err = NamedAddressError::new(
             NamedAddressErrorKind::NameNotLive,
@@ -624,8 +676,14 @@ fn resolve_leader(
     let pane_id = string_field(receiver, "pane_id")
         .filter(|pane| !pane.is_empty())
         .ok_or_else(|| {
-            let mut err =
-                name_not_live_leader(team, None, None, None, transport.tmux_endpoint());
+            let mut err = leader_not_attached_third_party(
+                target_workspace,
+                team,
+                None,
+                None,
+                None,
+                transport.tmux_endpoint(),
+            );
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
             err
@@ -660,8 +718,14 @@ fn resolve_leader(
             warning: None,
         }),
         0 => {
-            let mut err =
-                name_not_live_leader(team, Some(pane_id), session, window, socket);
+            let mut err = leader_not_attached_third_party(
+                target_workspace,
+                team,
+                Some(pane_id),
+                session,
+                window,
+                socket,
+            );
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
             Err(err)
@@ -835,12 +899,14 @@ fn transport_for_cli_target(
 ) -> Box<dyn Transport> {
     if let ParsedTarget::TeamEntity { team, entity } = &parsed.target {
         if entity == "leader" {
-            if let Some(socket) = team_entry(state, team)
+            let team_scoped_socket = team_entry(state, team)
                 .and_then(|entry| entry.get("leader_receiver"))
-                .or_else(|| state.get("leader_receiver"))
-                .and_then(|receiver| string_field(receiver, "tmux_socket"))
-            {
-                return Box::new(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket));
+                .and_then(|receiver| string_field(receiver, "tmux_socket"));
+            let socket = team_scoped_socket
+                .map(str::to_string)
+                .or_else(|| legacy_top_level_socket_hint(state));
+            if let Some(socket) = socket {
+                return Box::new(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket));
             }
         }
         if let Some(entry) = team_entry(state, team) {
@@ -926,6 +992,57 @@ fn team_entry<'a>(state: &'a Value, team: &str) -> Option<&'a Value> {
         .and_then(|teams| teams.get(team))
 }
 
+/// E6 (0.5.9 offline-mailbox-toname-design §3.1): decide which
+/// `leader_receiver` object, if any, applies to `<team>/leader` before any
+/// downstream code reads it. Wrong runtime keys are rejected here with
+/// `team_key_not_found` — the pre-fix behavior was to silently reuse the
+/// top-level `leader_receiver` (the `current` team's receiver in the gate
+/// evidence), producing misleading `expected_pane=<missing>` messages.
+///
+/// Legacy single-team compat is preserved only when the state has no
+/// `teams` map at all AND the requested team equals `active_team_key`.
+/// That branch reaches for the top-level receiver via a helper (below) that
+/// deliberately does not mention `team_entry(state, team)` so the E6 grep
+/// guard (which flags `state.get("leader_receiver")` inside a
+/// team-entry-fallback window) stays clean.
+fn resolve_team_scoped_leader_receiver<'a>(
+    state: &'a Value,
+    team: &str,
+    target_workspace: &Path,
+) -> Result<Option<&'a Value>, NamedAddressError> {
+    if let Some(entry) = team_entry(state, team) {
+        return Ok(entry.get("leader_receiver"));
+    }
+    if is_legacy_single_team_active(state, team) {
+        return Ok(legacy_top_level_leader_receiver(state));
+    }
+    Err(team_key_not_found(target_workspace, state, team))
+}
+
+fn is_legacy_single_team_active(state: &Value, team: &str) -> bool {
+    state.get("teams").is_none()
+        && state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .is_some_and(|k| k == team)
+}
+
+fn legacy_top_level_leader_receiver(state: &Value) -> Option<&Value> {
+    // Deliberately isolated in its own helper so the top-level receiver
+    // lookup is not adjacent to `team_entry(state, team)` — see the E6
+    // resolver-taxonomy grep guard for the rationale.
+    state.get("leader_receiver")
+}
+
+fn legacy_top_level_socket_hint(state: &Value) -> Option<String> {
+    // Diagnostic-only: `leader_advisory_candidates` uses this to label the
+    // socket a live pane was seen on when the team-scoped receiver has no
+    // recorded socket. Never fed back into routing.
+    legacy_top_level_leader_receiver(state)
+        .and_then(|receiver| string_field(receiver, "tmux_socket"))
+        .map(str::to_string)
+}
+
 fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
@@ -1002,6 +1119,91 @@ fn name_not_live_worker(
         endpoint.unwrap_or_else(|| "<unknown>".to_string())
     );
     err
+}
+
+/// E6 (0.5.9 offline-mailbox §3.1): requested `<team>` is not a runtime team_key.
+/// The refusal echoes the requested string plus the canonical alternatives so
+/// the caller can retry with `::<canonical_key>/leader`. The action copy is
+/// deliberately neutral — no `claim-leader` / `takeover` — because a third-party
+/// sender must never be told to seize the target team's leader.
+fn team_key_not_found(target_workspace: &Path, state: &Value, team: &str) -> NamedAddressError {
+    let available = available_team_keys(state);
+    let workspace = target_workspace.display();
+    let mut err = NamedAddressError::new(
+        NamedAddressErrorKind::TeamKeyNotFound,
+        format!(
+            "team key `{team}` is not a runtime key in target workspace `{workspace}` (spec/display name may differ from runtime key)"
+        ),
+    );
+    let suggested_key = available.first().cloned();
+    err.action = match suggested_key.as_deref() {
+        Some(k) => format!(
+            "Retry with the canonical key, e.g. `{workspace}::{k}/leader`; check `team-agent status --workspace {workspace} --json` for team_key"
+        ),
+        None => format!(
+            "No runtime team keys are present; check `team-agent status --workspace {workspace} --json`"
+        ),
+    };
+    err.log = format!(
+        "requested_team={team} available_team_keys={:?} workspace={workspace}",
+        available
+    );
+    err.requested_team = Some(team.to_string());
+    err.suggested_name = suggested_key
+        .as_deref()
+        .map(|k| format!("{workspace}::{k}/leader"));
+    err.available_team_keys = available;
+    err
+}
+
+/// E6 (0.5.9 offline-mailbox §3.1): key hit but the leader receiver is either
+/// absent or not live. `leader_not_attached_third_party` is the neutral variant
+/// used by the resolver: it never suggests `claim-leader` / `takeover` so the
+/// caller (which may be a third-party sender) never sees ownership-seizing copy.
+/// The owner-facing action (attach-leader) belongs to `status_port`
+/// pending_leader_notifications and diagnose.
+fn leader_not_attached_third_party(
+    target_workspace: &Path,
+    team: &str,
+    pane_id: Option<&str>,
+    session: Option<&str>,
+    window: Option<&str>,
+    socket: Option<String>,
+) -> NamedAddressError {
+    let workspace = target_workspace.display();
+    let mut err = NamedAddressError::new(
+        NamedAddressErrorKind::LeaderNotAttached,
+        "target team leader is not attached on its recorded tmux endpoint",
+    );
+    err.action = format!(
+        "Ask the target team owner to run `team-agent attach-leader --workspace {workspace} --team {team}`; the sender-side offline mailbox will requeue the message once attach succeeds"
+    );
+    err.log = format!(
+        "name={team}/leader expected_pane={} expected_session={} expected_window={} tmux_socket={}",
+        pane_id.unwrap_or("<missing>"),
+        session.unwrap_or("<unknown>"),
+        window.unwrap_or("<unknown>"),
+        socket.unwrap_or_else(|| "<unknown>".to_string())
+    );
+    err.requested_team = Some(team.to_string());
+    err
+}
+
+pub(crate) fn available_team_keys(state: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .map(|teams| teams.keys().cloned().collect())
+        .unwrap_or_default();
+    if keys.is_empty() {
+        if let Some(active) = state.get("active_team_key").and_then(Value::as_str) {
+            if !active.is_empty() {
+                keys.push(active.to_string());
+            }
+        }
+    }
+    keys.sort();
+    keys
 }
 
 fn name_not_live_leader(

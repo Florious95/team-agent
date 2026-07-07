@@ -459,15 +459,25 @@ pub(crate) fn requeue_blocked_leader_messages(
     owner_team_id: &TeamKey,
     claimed_pane_id: &PaneId,
 ) -> Result<usize, MessagingError> {
+    // E6 (0.5.9 offline-mailbox §6.5): also requeue rows that a third-party
+    // sender left in `queued_until_leader_attach` via the leader mailbox.
+    // Same idempotent requeue funnel (row/message_id/leader_notification_log
+    // PK are all preserved) — after attach/claim the coordinator's normal
+    // `deliver_pending_messages` picks them up as `accepted` and injects
+    // exactly once. status `queued_until_leader_attach` is deliberately NOT
+    // in the `claim_for_delivery` eligible set (see message_store.rs) so it
+    // could not have churned while the leader was unattached.
     let requeued = conn.execute(
         "update messages
          set status = 'accepted',
              error = null,
              updated_at = ?2
          where recipient = 'leader'
-           and status = 'failed'
-           and error = 'leader_not_attached'
-           and owner_team_id = ?1",
+           and owner_team_id = ?1
+           and (
+             (status = 'failed' and error = 'leader_not_attached')
+             or status = 'queued_until_leader_attach'
+           )",
         params![owner_team_id.as_str(), chrono::Utc::now().to_rfc3339()],
     )?;
     if requeued > 0 {

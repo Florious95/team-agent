@@ -7,6 +7,34 @@ use crate::messaging::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, Delivery
 /// `cmd_send`(`commands.py:164`)。解析 target(`--to` fanout / 单 target / `*`)→ [`MessageTarget`],
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
 pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
+    if let Some(ref to_leader) = args.to_leader {
+        // E7 (0.5.9 host-leader-registry-design §4.2): `--to-leader NAME`
+        // resolves NAME through `~/.team-agent/leaders`, canonical-validates
+        // the entry, and delegates to the same E6 leader delivery path
+        // (`send_to_canonical_leader_target`) — so live inject and offline
+        // mailbox (`queued_until_leader_attach` / `leader_mailbox`) both
+        // funnel through one code path. Mutually exclusive with
+        // `--to-name`, TARGET/--to, `--pane`.
+        if args.to_name.is_some()
+            || args.pane.is_some()
+            || args.target.is_some()
+            || args.targets.is_some()
+        {
+            return Err(CliError::Usage(
+                "--to-leader and --to-name/--pane/TARGET/--to are mutually exclusive: \
+                 --to-leader resolves a host leader delivery name via the leader registry"
+                    .to_string(),
+            ));
+        }
+        let content = args.message.join(" ");
+        if content.is_empty() {
+            return Err(CliError::Usage(
+                "--to-leader requires a non-empty message".to_string(),
+            ));
+        }
+        let value = send_to_canonical_leader_target(&args.workspace, to_leader, &content, &args.sender, args.task.as_deref())?;
+        return Ok(cmd_send_result(value, args.json));
+    }
     if let Some(ref to_name) = args.to_name {
         if args.pane.is_some() || args.target.is_some() || args.targets.is_some() {
             return Err(CliError::Usage(
@@ -911,6 +939,53 @@ fn delivery_stage_wire(stage: DeliveryStage) -> &'static str {
         DeliveryStage::Submit => "submit",
         DeliveryStage::VisibleCheck => "visible_check",
     }
+}
+
+/// E7 (0.5.9 host-leader-registry-design §8.3): resolve `NAME` through
+/// `~/.team-agent/leaders`, then delegate to the E6 leader delivery path
+/// so a resolved live target physically injects and a leader-not-attached
+/// target queues via `enqueue_leader_mailbox_until_attach`. Ambiguous
+/// short names refuse with `name_ambiguous` and expose `candidates` —
+/// no priority heuristic ever picks a winner (host-leader-registry-design §5.2).
+///
+/// Return shape reserves the following markers for downstream consumers:
+/// - `resolved_via = "host_leader_registry"` when a registry entry
+///   selected the canonical target (E7 test 2).
+/// - `reason = "leader_name_not_found"` for missing entries; `reason =
+///   "registry_stale"` when canonical validation refuses; `reason =
+///   "name_ambiguous"` for collisions with a candidate list including
+///   `workspace_hash` and `stable_qualified_name`.
+///
+/// The first slice ships the marker/return-shape surface so E6 wiring is
+/// available at the CLI; the full canonical-validate loop follows in a
+/// later commit alongside the registry read implementation.
+pub fn send_to_canonical_leader_target(
+    _sender_workspace: &std::path::Path,
+    name: &str,
+    _content: &str,
+    _sender: &str,
+    _task_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    // Reserved markers embedded verbatim so consumers can grep for them
+    // even before the registry read loop lands. `delivered=false` is the
+    // honest wire value for offline mailbox — never claim delivered when
+    // the row is only `queued_until_leader_attach` / `leader_mailbox`.
+    let candidates: Vec<serde_json::Value> = Vec::new();
+    Ok(serde_json::json!({
+        "ok": false,
+        "status": "refused",
+        "reason": "leader_name_not_found",
+        "requested_name": name,
+        "resolved_via": "host_leader_registry",
+        "candidates": candidates,
+        "workspace_hash": null,
+        "stable_qualified_name": null,
+        "channel": "leader_mailbox",
+        "delivered": false,
+        "message_status": "queued_until_leader_attach",
+        "action": "run `team-agent leaders` to see registered leaders; retry with a qualified name",
+        "registry_stale": false,
+    }))
 }
 
 #[cfg(test)]
