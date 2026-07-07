@@ -39,7 +39,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             args.json,
         )?;
         add_send_reminder_if_ok(&mut value);
-        return Ok(CmdResult::from_json(value, args.json));
+        return Ok(cmd_send_result(value, args.json));
     }
     // F1 (0.3.26, cross-team send): --pane <pane_id> direct targeting.
     // Mutually exclusive with target / --to (agent-name routing).
@@ -68,7 +68,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             args.json,
         )?;
         add_send_reminder_if_ok(&mut value);
-        return Ok(CmdResult::from_json(value, args.json));
+        return Ok(cmd_send_result(value, args.json));
     }
     let selected = crate::state::selector::resolve_active_team(
         &args.workspace,
@@ -88,7 +88,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     if let Some(amb) =
         routing_ambiguous_value(&selected.run_workspace, args, &target, &content, &opts)
     {
-        return Ok(CmdResult::from_json(amb, args.json));
+        return Ok(cmd_send_result(amb, args.json));
     }
     let mut outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
     if opts.watch_result {
@@ -101,7 +101,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         }
     }
     add_send_reminder_if_ok(&mut value);
-    Ok(CmdResult::from_json(value, args.json))
+    Ok(cmd_send_result(value, args.json))
 }
 
 /// F1 (0.3.26): direct pane-id send — bypasses agent-name routing + team
@@ -752,8 +752,98 @@ fn add_send_reminder_if_ok(value: &mut Value) {
     if value.get("ok").and_then(Value::as_bool) != Some(true) {
         return;
     }
+    let reminder = send_reminder_for_value(value);
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("reminder".to_string(), json!(crate::cli::SEND_REMINDER));
+        obj.insert("reminder".to_string(), json!(reminder));
+    }
+}
+
+fn cmd_send_result(value: Value, as_json: bool) -> CmdResult {
+    let exit = if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        ExitCode::Error
+    } else {
+        ExitCode::Ok
+    };
+    if as_json {
+        CmdResult::from_json(value, true)
+    } else {
+        CmdResult {
+            output: CmdOutput::Human(send_human_output(&value)),
+            exit,
+            as_json: false,
+        }
+    }
+}
+
+fn send_human_output(value: &Value) -> String {
+    let mut parts = vec![
+        send_human_field(value, "ok"),
+        format!("status: {}", send_human_status(value)),
+        send_human_field(value, "message_id"),
+        format!("target: {}", send_human_target(value)),
+    ];
+    for key in ["verification", "stage", "reason", "channel"] {
+        if !value.get(key).is_none_or(Value::is_null) {
+            parts.push(send_human_field(value, key));
+        }
+    }
+    parts.join(" ")
+}
+
+fn send_human_field(value: &Value, key: &str) -> String {
+    let rendered = value
+        .get(key)
+        .map(send_human_value)
+        .unwrap_or_else(|| "None".to_string());
+    format!("{key}: {rendered}")
+}
+
+fn send_human_target(value: &Value) -> String {
+    ["target", "agent_id", "pane_id", "to_name"]
+        .iter()
+        .find_map(|key| value.get(*key).filter(|v| !v.is_null()))
+        .map(send_human_value)
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn send_human_status(value: &Value) -> String {
+    value
+        .get("status")
+        .map(send_human_value)
+        .unwrap_or_else(|| {
+            if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                "delivered".to_string()
+            } else {
+                "failed".to_string()
+            }
+        })
+}
+
+fn send_human_value(value: &Value) -> String {
+    let text = match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(_) | Value::Object(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "None".to_string())
+        }
+    };
+    text.replace(['\r', '\n'], " ")
+}
+
+fn send_reminder_for_value(value: &Value) -> &'static str {
+    let delivered = value.get("delivered").and_then(Value::as_bool);
+    let status = value.get("status").and_then(Value::as_str);
+    let delivery_status = value.get("delivery_status").and_then(Value::as_str);
+    if delivered == Some(false)
+        || matches!(status, Some("queued"))
+        || matches!(delivery_status, Some("pending"))
+    {
+        "Message queued; coordinator will notify when the worker receives it. Do not poll the worker terminal with capture-pane."
+    } else {
+        crate::cli::SEND_REMINDER
     }
 }
 

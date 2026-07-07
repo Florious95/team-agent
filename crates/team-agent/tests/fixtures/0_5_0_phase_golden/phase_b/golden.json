@@ -748,7 +748,7 @@
           "message_status": "accepted",
           "ok": true,
           "reason": null,
-          "reminder": "Message delivered. Wait for the worker to report_result. Do not poll the worker terminal with capture-pane.",
+          "reminder": "Message queued; coordinator will notify when the worker receives it. Do not poll the worker terminal with capture-pane.",
           "sender": "leader",
           "stage": null,
           "status": "queued",
