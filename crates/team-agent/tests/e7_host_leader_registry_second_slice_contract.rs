@@ -1007,6 +1007,7 @@ impl RuntimeCase {
             .args(["kill-session", "-t", &self.session_name])
             .output();
         let program = self.provider_program();
+        let cwd = self.workspace_arg();
         let output = Command::new("tmux")
             .args([
                 "new-session",
@@ -1015,6 +1016,8 @@ impl RuntimeCase {
                 &self.session_name,
                 "-n",
                 window,
+                "-c",
+                &cwd,
                 &program,
             ])
             .output()
@@ -1029,6 +1032,7 @@ impl RuntimeCase {
 
     fn start_extra_pane(&self, window: &str) -> String {
         let program = self.provider_program();
+        let cwd = self.workspace_arg();
         let output = Command::new("tmux")
             .args([
                 "new-window",
@@ -1037,6 +1041,8 @@ impl RuntimeCase {
                 &self.session_name,
                 "-n",
                 window,
+                "-c",
+                &cwd,
                 &program,
             ])
             .output()
