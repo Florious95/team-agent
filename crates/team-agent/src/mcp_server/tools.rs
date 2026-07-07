@@ -26,6 +26,7 @@ use super::helpers::{
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
+    report_result_integrity_warnings,
 };
 use super::types::{
     Scope, SendOutcome, ToolError, ToolErrorReason, ToolOk, ToolResult, VisiblePeers,
@@ -399,7 +400,13 @@ impl TeamOrchestratorTools {
             self.note_unknown_result_status(&raw);
         }
         let normalized = normalize_report_envelope(&base);
-        let env_value = normalized_envelope_value(&normalized);
+        let warnings = report_result_integrity_warnings(&base, &normalized);
+        let mut env_value = normalized_envelope_value(&normalized);
+        if !warnings.is_empty() {
+            if let Some(obj) = env_value.as_object_mut() {
+                obj.insert("warnings".to_string(), Value::Array(warnings));
+            }
+        }
         let owner_team = self.canonical_owner_team_key()?;
         messaging::report_result_for_owner_team(
             &self.workspace,
