@@ -166,6 +166,8 @@
       "source": "restart",
       "spawn_cwd": "<WORKSPACE>",
       "spawn_epoch": 1,
+      "tmux_endpoint": null,
+      "tmux_endpoint_source": "transport",
       "tmux_start_mode": "new-window",
       "ts": "<TS>"
     },

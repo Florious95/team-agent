@@ -524,7 +524,7 @@ fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> 
     if key_is_timestamp(key) {
         return json!("<TS>");
     }
-    if key.contains("endpoint") {
+    if key.contains("endpoint") && value_looks_like_endpoint_path(&text) {
         return json!("<SOCKET>");
     }
     if key_is_id(key, &text) {
@@ -555,6 +555,13 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
     out = normalize_team_agent_binary_path(&out);
     out = normalize_tmux_socket_dir(&out);
     normalize_socket_token(&out)
+}
+
+fn value_looks_like_endpoint_path(text: &str) -> bool {
+    text.starts_with('/')
+        || text.starts_with("ta-")
+        || text.contains("/tmux-")
+        || text.contains("tmux-")
 }
 
 fn normalize_team_agent_binary_path(text: &str) -> String {
