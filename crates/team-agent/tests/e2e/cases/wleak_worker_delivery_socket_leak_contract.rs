@@ -146,6 +146,126 @@ fn wleak_wrong_cached_pane_and_missing_intended_window_blocks_not_delivers() {
 }
 
 #[test]
+fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
+    let team_id = "wleak009";
+    let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
+    let ws_path = ws.path().to_str().unwrap();
+    let qs = quick_start_fake(&ws, team_id);
+    assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
+    let _guard = TmuxServerGuard::for_workspace(&ws);
+
+    let socket = state_socket(&ws);
+    let intended_session = worker_session_name(team_id);
+    kill_window(&ws, &intended_session, "a");
+    let foreign_ws = TestWorkspace::new("wleak009-foreign").with_fake_spec(&["worker"]);
+    let foreign = create_foreign_worker_session(
+        &socket,
+        "foreign-team-wleak009",
+        "foreign-worker",
+        foreign_ws.path().to_path_buf(),
+    );
+    write_agent_pane_tuple(&ws, "a", &foreign);
+
+    let token = "WLEAK_STALE_REPLAY_TOKEN_009";
+    let mid = "msg-wleak-stale-replay";
+    let out = run_ta(
+        &ws,
+        &[
+            "send",
+            "a",
+            token,
+            "--workspace",
+            ws_path,
+            "--sender",
+            "leader",
+            "--message-id",
+            mid,
+            "--json",
+        ],
+    );
+    let body = out.json();
+    assert_eq!(
+        body.pointer("/message_id").and_then(Value::as_str),
+        Some(mid),
+        "B replay RED: stale target blocker must return the accepted message id; json={body}"
+    );
+    assert_eq!(
+        body.pointer("/message_status").and_then(Value::as_str),
+        Some(STATUS_QUEUED_PANE_MISSING),
+        "B replay RED: stale target must use the repairable queued_pane_missing status; json={body}"
+    );
+    assert_eq!(
+        capture_pane(&ws, &foreign.pane_id).matches(token).count(),
+        0,
+        "B replay RED: stale target blocker must not inject into the reused foreign pane"
+    );
+
+    let before = message_row(&ws, mid).expect("B replay RED: blocked message row exists");
+    assert_eq!(before.status, STATUS_QUEUED_PANE_MISSING);
+    assert_eq!(before.error.as_deref(), Some("tmux_target_missing"));
+
+    let inbox_json = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
+    assert!(
+        inbox_json.is_success(),
+        "B replay RED: blocked row must be visible in inbox; stdout={} stderr={}",
+        inbox_json.stdout,
+        inbox_json.stderr
+    );
+    let inbox = inbox_json.json();
+    assert_eq!(
+        inbox.pointer("/messages/0/message_id").and_then(Value::as_str),
+        Some(mid),
+        "B replay RED: inbox must show the blocked message row; json={inbox}"
+    );
+    assert_eq!(
+        inbox.pointer("/messages/0/status").and_then(Value::as_str),
+        Some(STATUS_QUEUED_PANE_MISSING),
+        "B replay RED: inbox must preserve the repairable status; json={inbox}"
+    );
+
+    let start = run_ta(
+        &ws,
+        &[
+            "start-agent",
+            "a",
+            "--workspace",
+            ws_path,
+            "--allow-fresh",
+            "--no-display",
+            "--json",
+        ],
+    );
+    assert!(
+        start.is_success(),
+        "start-agent exit {}; stdout={} stderr={}",
+        start.exit_code,
+        start.stdout,
+        start.stderr
+    );
+
+    wait_for_or_panic(
+        "same stale-blocked message id delivered after worker repair",
+        || message_status(&ws, mid).as_deref() == Some("delivered"),
+        Duration::from_secs(8),
+    );
+    std::thread::sleep(Duration::from_millis(700));
+    let after = message_row(&ws, mid).expect("delivered message row exists");
+    assert_eq!(after.status, "delivered");
+    assert_eq!(
+        after.delivery_attempts,
+        before.delivery_attempts + 1,
+        "B replay RED: start-agent repair must replay the same row exactly once"
+    );
+    assert_eq!(delivered_event_count(&ws, mid), 1);
+    assert_eq!(event_count(&ws, "turn_open.armed_after_delivery", mid), 1);
+    assert_eq!(
+        capture_pane(&ws, &foreign.pane_id).matches(token).count(),
+        0,
+        "B replay RED: repaired replay must still never inject into the reused foreign pane"
+    );
+}
+
+#[test]
 fn wleak_message_delivered_event_records_physical_target_metadata() {
     let team_id = "wleak003";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
@@ -781,13 +901,29 @@ fn parse_pane_snapshot_line(line: &str) -> PaneSnapshot {
     }
 }
 
+struct MessageRow {
+    status: String,
+    error: Option<String>,
+    delivery_attempts: i64,
+}
+
 fn message_status(ws: &TestWorkspace, message_id: &str) -> Option<String> {
+    message_row(ws, message_id).map(|row| row.status)
+}
+
+fn message_row(ws: &TestWorkspace, message_id: &str) -> Option<MessageRow> {
     let db = ws.path().join(".team/runtime/team.db");
     let conn = rusqlite::Connection::open(db).ok()?;
     conn.query_row(
-        "select status from messages where message_id = ?1",
+        "select status, error, delivery_attempts from messages where message_id = ?1",
         [message_id],
-        |row| row.get(0),
+        |row| {
+            Ok(MessageRow {
+                status: row.get(0)?,
+                error: row.get(1)?,
+                delivery_attempts: row.get(2)?,
+            })
+        },
     )
     .ok()
 }
@@ -800,10 +936,14 @@ fn delivered_event(ws: &TestWorkspace, message_id: &str) -> Option<Value> {
 }
 
 fn delivered_event_count(ws: &TestWorkspace, message_id: &str) -> usize {
+    event_count(ws, "message.delivered", message_id)
+}
+
+fn event_count(ws: &TestWorkspace, event: &str, message_id: &str) -> usize {
     read_events(ws)
         .into_iter()
         .filter(|entry| {
-            entry.get("event").and_then(Value::as_str) == Some("message.delivered")
+            entry.get("event").and_then(Value::as_str) == Some(event)
                 && entry.get("message_id").and_then(Value::as_str) == Some(message_id)
         })
         .count()

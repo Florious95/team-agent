@@ -708,7 +708,7 @@ fn block_missing_worker_target(
     mark_worker_target_missing(store, event_log, message_id, recipient, None).map(Some)
 }
 
-fn mark_worker_target_missing(
+pub(crate) fn mark_worker_target_missing(
     store: &MessageStore,
     event_log: &EventLog,
     message_id: &str,
