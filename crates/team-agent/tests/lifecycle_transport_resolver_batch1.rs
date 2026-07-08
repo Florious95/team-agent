@@ -30,12 +30,44 @@ use std::path::PathBuf;
 #[test]
 fn batch1_migration_sites_present_in_source() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    // 0.5.15 restart endpoint-context exception:
+    // `lifecycle/restart/rebuild.rs` production restart intentionally no
+    // longer calls the legacy selected-state resolver. It resolves the active
+    // team once, builds transport from that same selected state, and threads
+    // that context through restart (claim-endpoint-nonconvergence addendum
+    // §5/§6). Other migration sites must still keep the Batch 1 anchor.
+    let rebuild = std::fs::read_to_string(root.join("lifecycle/restart/rebuild.rs"))
+        .unwrap_or_else(|e| panic!("cannot read lifecycle/restart/rebuild.rs: {e}"));
+    for marker in [
+        "fn resolve_restart_context",
+        "restart_with_selected_team_and_transport",
+        "lifecycle_worker_tmux_backend_selection_for_state",
+    ] {
+        assert!(
+            rebuild.contains(marker),
+            "0.5.15 restart endpoint-context exception lost marker `{marker}`: \
+             rebuild.rs must keep a single selected-state restart context instead \
+             of returning to `lifecycle_worker_tmux_backend_for_selected_state`"
+        );
+    }
+
     let sites = [
-        ("lifecycle/restart/rebuild.rs", "lifecycle_worker_tmux_backend_for_selected_state"),
-        ("lifecycle/restart/agent.rs", "lifecycle_worker_tmux_backend_for_selected_state"),
-        ("lifecycle/restart/remove.rs", "lifecycle_worker_tmux_backend_for_selected_state"),
-        ("lifecycle/launch.rs", "lifecycle_worker_tmux_backend_for_selected_state"),
-        ("cli/send.rs", "lifecycle_worker_tmux_backend_for_selected_state"),
+        (
+            "lifecycle/restart/agent.rs",
+            "lifecycle_worker_tmux_backend_for_selected_state",
+        ),
+        (
+            "lifecycle/restart/remove.rs",
+            "lifecycle_worker_tmux_backend_for_selected_state",
+        ),
+        (
+            "lifecycle/launch.rs",
+            "lifecycle_worker_tmux_backend_for_selected_state",
+        ),
+        (
+            "cli/send.rs",
+            "lifecycle_worker_tmux_backend_for_selected_state",
+        ),
     ];
     for (rel, needle) in sites {
         let body = std::fs::read_to_string(root.join(rel))

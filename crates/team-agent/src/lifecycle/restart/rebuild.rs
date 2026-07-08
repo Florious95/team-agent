@@ -23,16 +23,51 @@ pub fn restart_with_session_convergence_deadline(
     team: Option<&str>,
     session_converge_deadline_ms: Option<u64>,
 ) -> Result<RestartReport, LifecycleError> {
-    let paths = lifecycle_paths(workspace, team)?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
-    restart_with_transport_with_session_convergence_deadline(
-        workspace,
+    let context = resolve_restart_context(workspace, team)?;
+    restart_with_selected_team_and_transport(
+        context.selected,
         allow_fresh,
-        team,
-        &transport,
+        &context.transport,
         session_converge_deadline_ms,
         None,
+        Some(context.tmux_endpoint_source),
     )
+}
+
+struct ResolvedRestartContext {
+    selected: crate::state::selector::SelectedTeam,
+    transport: crate::tmux_backend::TmuxBackend,
+    tmux_endpoint_source: &'static str,
+}
+
+fn resolve_restart_context(
+    workspace: &Path,
+    team: Option<&str>,
+) -> Result<ResolvedRestartContext, LifecycleError> {
+    let resolved_ws = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    if crate::lifecycle::restart::input_has_no_local_team_context(&resolved_ws) {
+        return Err(LifecycleError::TeamSelect(format!(
+            "active team spec not found: input_workspace={} expected_runtime_dir={}",
+            workspace.display(),
+            crate::model::paths::runtime_dir(&resolved_ws).display()
+        )));
+    }
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        team,
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|e| LifecycleError::TeamSelect(e.to_string()))?;
+    let transport_selection = lifecycle_worker_tmux_backend_selection_for_state(
+        &selected.run_workspace,
+        &selected.state,
+    )?;
+    Ok(ResolvedRestartContext {
+        selected,
+        transport: transport_selection.backend,
+        tmux_endpoint_source: transport_selection.tmux_endpoint_source.as_str(),
+    })
 }
 
 /// `restart` with an injected transport (tests: recording mock; prod: real TmuxBackend). The Route-B
@@ -129,6 +164,24 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             expected.display()
         )));
     }
+    restart_with_selected_team_and_transport(
+        selected,
+        allow_fresh,
+        transport,
+        session_converge_deadline_ms,
+        readiness_deadline_ms,
+        None,
+    )
+}
+
+fn restart_with_selected_team_and_transport(
+    selected: crate::state::selector::SelectedTeam,
+    allow_fresh: bool,
+    transport: &dyn crate::transport::Transport,
+    session_converge_deadline_ms: Option<u64>,
+    readiness_deadline_ms: Option<u64>,
+    tmux_endpoint_source: Option<&str>,
+) -> Result<RestartReport, LifecycleError> {
     let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "restart",
@@ -381,6 +434,13 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             &raw_agent,
         );
         if has_endpoint_convergence_marker(&state) && is_fake_model_harness_agent(&agent) {
+            write_fake_harness_spawn_argv_event(
+                &selected.run_workspace,
+                decision,
+                &agent,
+                transport,
+                tmux_endpoint_source,
+            );
             mark_fake_harness_agent_respawned(
                 &mut state,
                 &decision.agent_id,
@@ -438,6 +498,7 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             Some(&safety),
             layout_placement.as_ref(),
             None,
+            tmux_endpoint_source,
             // Issue 2 (Round 3b gate review §6): thread the resolved
             // selected.team_key so the worker MCP env carries the right
             // owner_team_id even when top-level active_team_key is stale.
@@ -783,7 +844,14 @@ pub fn restart_with_transport_with_session_convergence_deadline(
         restart_readiness_poll_interval(),
     )?;
     let attach_commands =
-        crate::tmux_backend::attach_command_for_session(&selected.run_workspace, &session_name)
+        crate::tmux_backend::attach_command_for_transport_session(transport, &session_name)
+            .or_else(|| {
+                crate::tmux_backend::attach_command_for_runtime_state_session_or_workspace(
+                    &selected.run_workspace,
+                    Some(&state),
+                    &session_name,
+                )
+            })
             .into_iter()
             .collect::<Vec<_>>();
     let mut next_actions = Vec::new();
@@ -1717,6 +1785,29 @@ fn mark_fake_harness_agent_respawned(
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
     agent.insert("owner_team_id".to_string(), serde_json::json!(team_key));
+}
+
+fn write_fake_harness_spawn_argv_event(
+    workspace: &Path,
+    decision: &RestartedAgent,
+    agent: &serde_json::Value,
+    transport: &dyn crate::transport::Transport,
+    tmux_endpoint_source: Option<&str>,
+) {
+    let _ = crate::event_log::EventLog::new(workspace).write(
+        "provider.worker.spawn_argv",
+        serde_json::json!({
+            "agent_id": decision.agent_id.as_str(),
+            "provider": agent_provider(agent),
+            "argv": [],
+            "session_id_in_argv": null,
+            "expected_session_id": decision.session_id.as_ref().map(|s| s.as_str()),
+            "tmux_start_mode": "fake_harness",
+            "source": "restart",
+            "tmux_endpoint": transport.tmux_endpoint(),
+            "tmux_endpoint_source": tmux_endpoint_source.unwrap_or("transport"),
+        }),
+    );
 }
 
 fn restart_failed_agent(

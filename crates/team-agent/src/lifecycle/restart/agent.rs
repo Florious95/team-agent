@@ -255,6 +255,7 @@ pub(crate) fn start_agent_at_paths(
         Some(&safety),
         layout_placement.as_ref(),
         None,
+        None,
         Some(resolved_team_key.as_str()),
     )?;
     verify_spawned_pane_matches_target(
