@@ -160,7 +160,9 @@ pub fn assert_topology_invariants(state: &JsonValue, spec: &YamlValue) -> Vec<To
                         kind: TopologyViolationKind::LeaderPaneIdCollidesWithAgent,
                         detail: format!(
                             "leader_receiver.pane_id `{leader_pane}` is also bound to \
-                             agent `{agent_id}` — leader pane and agent pane must be disjoint"
+                             agent `{agent_id}` — legacy bare-pane advisory only; validate \
+                             endpoint/session/window/pane_pid tuple before using this as an \
+                             identity blocker"
                         ),
                     });
                 }
