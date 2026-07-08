@@ -4,6 +4,8 @@
 //! References:
 //! - `.team/artifacts/legacy-bare-pane-claim-deadlock-locate.md` §8 RED 1/2
 //!   and §10 deadlock exit principle.
+//! - `.team/artifacts/claim-endpoint-nonconvergence-locate.md` §10 RED 5:
+//!   repair next-actions must be restart-after-action exits.
 //!
 //! User-visible contract:
 //! - A stale legacy worker row that only matches the caller by bare `%pane_id`
@@ -12,6 +14,9 @@
 //!   guard is preserved.
 //! - `refused_dirty_topology.next_actions` must point to executable commands
 //!   that do not route the operator back into the same stale bare-pane refusal.
+//! - In an old-endpoint-dead fixture, repair next-actions must also converge
+//!   endpoint state so the next `restart` succeeds instead of repeating the
+//!   same dirty-topology refusal.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -151,6 +156,32 @@ fn red3_refused_dirty_topology_next_actions_are_executable_deadlock_exits() {
             "RED3: next_action `{text}` executed under the same dirty/stale fixture must not deadlock by returning caller_not_leader_shaped again; code={:?} output={combined}",
             output.status.code()
         );
+        if contains_rebind_command(text) {
+            let restart_after_action =
+                case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
+            let restart_after_json = json_output(
+                &restart_after_action,
+                "RED3 restart after repair next_action",
+            );
+            assert_eq!(
+                restart_after_json.get("status").and_then(Value::as_str),
+                Some("restarted"),
+                "RED3/RED5: repair next_action `{text}` must be a true deadlock exit in the old-endpoint-dead fixture; after it succeeds, restart must not repeat the same tmux_endpoint_socket_conflict/leader_receiver_socket_mismatch loop. code={:?} json={restart_after_json} stdout={} stderr={}",
+                restart_after_action.status.code(),
+                String::from_utf8_lossy(&restart_after_action.stdout),
+                String::from_utf8_lossy(&restart_after_action.stderr)
+            );
+            assert_no_dirty_topology_issue(
+                &restart_after_json,
+                "tmux_endpoint_socket_conflict",
+                "RED3/RED5: restart after repair next_action must not repeat tmux_endpoint_socket_conflict",
+            );
+            assert_no_dirty_topology_issue(
+                &restart_after_json,
+                "leader_receiver_socket_mismatch",
+                "RED3/RED5: restart after repair next_action must not repeat leader_receiver_socket_mismatch",
+            );
+        }
     }
 }
 
@@ -210,6 +241,25 @@ fn executable_team_agent_argv(text: &str) -> Option<Vec<String>> {
     Some(command.split_whitespace().map(str::to_string).collect())
 }
 
+fn assert_no_dirty_topology_issue(value: &Value, issue_id: &str, message: &str) {
+    let ids = value
+        .get("issues")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|issue| {
+            issue
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| issue.get("id").and_then(Value::as_str).map(str::to_string))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.iter().any(|id| id == issue_id),
+        "{message}; issues={ids:?}; json={value}"
+    );
+}
+
 #[derive(Clone, Copy)]
 enum PaneShape {
     StaleLegacyWorker,
@@ -224,6 +274,7 @@ struct LegacyPaneCase {
 impl LegacyPaneCase {
     fn new(tag: &str, shape: PaneShape) -> Self {
         let workspace = tmp_dir(tag);
+        std::fs::create_dir_all(workspace.join("home")).expect("create isolated home");
         let fake_bin = fake_tmux_bin(&workspace, shape);
         seed_dirty_state(&workspace, shape);
         write_minimal_team_spec(&workspace);
@@ -254,6 +305,10 @@ impl LegacyPaneCase {
             .args(args)
             .current_dir(&self.workspace)
             .env(
+                "TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK",
+                "1",
+            )
+            .env(
                 "PATH",
                 format!(
                     "{}:{}",
@@ -264,7 +319,19 @@ impl LegacyPaneCase {
             .env("TMUX_PANE", CALLER_PANE)
             .env("TEAM_AGENT_LEADER_PROVIDER", "codex")
             .env("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-deadlock-red")
+            .env("HOME", self.workspace.join("home"))
             .env("USER", "te-red");
+        for key in [
+            "TEAM_AGENT_LEADER_PANE_ID",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_ID",
+            "TEAM_AGENT_AGENT_ID",
+            "TEAM_AGENT_TEAM_ID",
+            "TEAM_AGENT_WORKSPACE",
+            "TEAM_AGENT_OWNER_TEAM_ID",
+        ] {
+            command.env_remove(key);
+        }
         command.output().expect("run team-agent test binary")
     }
 }
@@ -445,8 +512,17 @@ fn fake_tmux_bin(workspace: &Path, shape: PaneShape) -> PathBuf {
             DEAD_WORKER_PID,
         ),
     };
+    let old_endpoint_dead = matches!(shape, PaneShape::StaleLegacyWorker);
     let script = format!(
         r#"#!/bin/sh
+case " $* " in
+  *" -S {old_socket} "*)
+    if [ "{old_endpoint_dead}" = "true" ]; then
+      echo "no server running on {old_socket}" >&2
+      exit 1
+    fi
+    ;;
+esac
 case " $* " in
   *" list-panes "*)
     printf '%s' '{line}'
@@ -465,7 +541,9 @@ case " $* " in
 esac
 "#,
         line = shell_single_quoted_payload(&line),
-        pid = LIVE_LEADER_PID
+        pid = LIVE_LEADER_PID,
+        old_socket = OLD_SOCKET,
+        old_endpoint_dead = if old_endpoint_dead { "true" } else { "false" }
     );
     std::fs::write(&tmux, script).expect("write fake tmux");
     #[cfg(unix)]
