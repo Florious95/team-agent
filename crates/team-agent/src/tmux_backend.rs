@@ -36,7 +36,7 @@ use crate::transport::{
     tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
     CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
     PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitVerification, Target, Transport, TransportError,
+    SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport, TransportError,
     TurnVerification, WindowName,
 };
 
@@ -1591,6 +1591,12 @@ fn shell_quote(raw: &str) -> String {
     quoted
 }
 
+fn notify_submit_observer(observer: Option<&dyn SubmitObserver>) {
+    if let Some(observer) = observer {
+        observer.after_physical_submit();
+    }
+}
+
 impl Transport for TmuxBackend {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
@@ -1703,6 +1709,17 @@ impl Transport for TmuxBackend {
         submit: Key,
         bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
+        self.inject_with_submit_observer(target, payload, submit, bracketed, None)
+    }
+
+    fn inject_with_submit_observer(
+        &self,
+        target: &Target,
+        payload: &InjectPayload,
+        submit: Key,
+        bracketed: bool,
+        observer: Option<&dyn SubmitObserver>,
+    ) -> Result<InjectReport, TransportError> {
         let pane = pane_from_target(target);
         // U1 #7: pane readback signal for the non-pasted-prompt text path.
         let mut token_visible_for_report: Option<bool> = None;
@@ -1710,6 +1727,7 @@ impl Transport for TmuxBackend {
             InjectPayload::Empty => {
                 let argv = tmux_empty_inject_argv(&pane, submit);
                 self.run_ok(&argv)?;
+                notify_submit_observer(observer);
             }
             InjectPayload::Text(text) | InjectPayload::TextSkipConsumptionPoll(text) => {
                 let buffer = buffer_name_for_text(text);
@@ -1779,6 +1797,7 @@ impl Transport for TmuxBackend {
                 // check, KeySentAfterVisibleToken verification.
                 if !matches!(submit, Key::Enter) {
                     self.run_inject_stage(&submit_argv, InjectStage::Submit)?;
+                    notify_submit_observer(observer);
                     let total_elapsed_ms = inject_start.elapsed().as_millis() as u64;
                     return Ok(InjectReport {
                         stage_reached: InjectStage::Submit,
@@ -1808,6 +1827,7 @@ impl Transport for TmuxBackend {
                 let poll_consumption = !payload.skip_consumption_poll();
                 if !poll_consumption {
                     if self.run_inject_stage(&submit_argv, InjectStage::Submit).is_ok() {
+                        notify_submit_observer(observer);
                         consumption_attempts = 1;
                     }
                 }
@@ -1858,6 +1878,7 @@ impl Transport for TmuxBackend {
                         consumed = None;
                         break;
                     }
+                    notify_submit_observer(observer);
                     consumption_attempts = attempt + 1;
 
                     // Post-submit token readback (U1 #7 parity: check token

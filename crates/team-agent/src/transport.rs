@@ -640,6 +640,21 @@ pub trait Transport: Send + Sync {
         bracketed: bool,
     ) -> Result<InjectReport, TransportError>;
 
+    fn inject_with_submit_observer(
+        &self,
+        target: &Target,
+        payload: &InjectPayload,
+        submit: Key,
+        bracketed: bool,
+        observer: Option<&dyn SubmitObserver>,
+    ) -> Result<InjectReport, TransportError> {
+        let report = self.inject(target, payload, submit, bracketed)?;
+        if let Some(observer) = observer {
+            observer.after_physical_submit();
+        }
+        Ok(report)
+    }
+
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;
 
     fn capture(
@@ -716,6 +731,10 @@ pub trait Transport: Send + Sync {
         &self,
         session: &SessionName,
     ) -> Result<AttachOutcome, TransportError>;
+}
+
+pub trait SubmitObserver {
+    fn after_physical_submit(&self);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

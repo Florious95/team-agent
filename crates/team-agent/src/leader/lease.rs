@@ -634,10 +634,28 @@ fn claim_lease_no_incident_with_target(
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
     if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
         let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
-        let (topology_convergence, converged) =
+        let (mut topology_convergence, converged) =
             apply_endpoint_convergence(state, team_id, current_endpoint.as_deref(), pre_epoch);
         if converged {
             write_claim_state(workspace, state, scoped_team, team)?;
+            topology_convergence = verify_persisted_topology_convergence(
+                workspace,
+                team_id.as_str(),
+                topology_convergence,
+                pre_epoch,
+            )?;
+            if topology_convergence
+                .as_ref()
+                .and_then(|metadata| metadata.get("status"))
+                .and_then(Value::as_str)
+                != Some("converged")
+            {
+                return Ok(convergence_persistence_refusal(
+                    topology_convergence,
+                    pre_epoch,
+                    Some(caller_pane.clone()),
+                ));
+            }
         }
         return Ok(LeaseResult {
             ok: true,
@@ -788,9 +806,29 @@ fn claim_lease_no_incident_with_target(
     );
     let owner = make_owner(provider, &non_empty_caller_pane, &identity, next_epoch);
     write_binding_to_state(state, &receiver, &owner)?;
-    let (topology_convergence, _) =
+    let (mut topology_convergence, converged) =
         apply_endpoint_convergence(state, team_id, receiver.tmux_socket.as_deref(), next_epoch);
     write_claim_state(workspace, state, scoped_team, team)?;
+    if converged {
+        topology_convergence = verify_persisted_topology_convergence(
+            workspace,
+            team_id.as_str(),
+            topology_convergence,
+            next_epoch,
+        )?;
+        if topology_convergence
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str)
+            != Some("converged")
+        {
+            return Ok(convergence_persistence_refusal(
+                topology_convergence,
+                next_epoch,
+                Some(caller_pane.clone()),
+            ));
+        }
+    }
     let uuid_prefix = identity.leader_session_uuid.as_str().chars().take(8).collect::<String>();
     if reason == LeaseReason::PreviousOwnerPaneDead {
         event_log.write(
@@ -959,6 +997,124 @@ fn write_convergence_marker(state: &mut Value, team_id: &str, metadata: &Value) 
         .and_then(Value::as_object_mut)
     {
         team_obj.insert("topology_convergence".to_string(), metadata.clone());
+    }
+}
+
+fn verify_persisted_topology_convergence(
+    workspace: &Path,
+    team_id: &str,
+    metadata: Option<Value>,
+    owner_epoch: OwnerEpoch,
+) -> Result<Option<Value>, LeaderError> {
+    let Some(mut metadata) = metadata else {
+        return Ok(None);
+    };
+    if metadata.get("status").and_then(Value::as_str) != Some("converged") {
+        return Ok(Some(metadata));
+    }
+    let Some(new_endpoint) = metadata
+        .get("new_tmux_endpoint")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        mark_convergence_persistence_conflict(&mut metadata, team_id);
+        return Ok(Some(metadata));
+    };
+    let state = crate::state::persist::load_runtime_state(workspace)?;
+    if endpoint_convergence_persisted(&state, team_id, &new_endpoint, owner_epoch.0) {
+        mark_convergence_persisted(&mut metadata, team_id);
+    } else {
+        mark_convergence_persistence_conflict(&mut metadata, team_id);
+    }
+    Ok(Some(metadata))
+}
+
+fn endpoint_convergence_persisted(
+    state: &Value,
+    team_id: &str,
+    endpoint: &str,
+    owner_epoch: u64,
+) -> bool {
+    if !endpoint_convergence_node_matches(state, endpoint, owner_epoch) {
+        return false;
+    }
+    state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(team_id))
+        .is_some_and(|team| endpoint_convergence_node_matches(team, endpoint, owner_epoch))
+}
+
+fn endpoint_convergence_node_matches(node: &Value, endpoint: &str, owner_epoch: u64) -> bool {
+    node.get("tmux_endpoint").and_then(Value::as_str) == Some(endpoint)
+        && node.get("tmux_socket").and_then(Value::as_str) == Some(endpoint)
+        && node.get("tmux_socket_source").and_then(Value::as_str) == Some("leader_env")
+        && node
+            .get("topology_convergence")
+            .and_then(|marker| marker.get("status"))
+            .and_then(Value::as_str)
+            == Some("converged")
+        && node
+            .get("topology_convergence")
+            .and_then(|marker| marker.get("owner_epoch"))
+            .and_then(Value::as_u64)
+            == Some(owner_epoch)
+}
+
+fn mark_convergence_persisted(metadata: &mut Value, team_id: &str) {
+    let Some(obj) = metadata.as_object_mut() else {
+        return;
+    };
+    obj.insert("persisted".to_string(), json!(true));
+    obj.insert("checked_paths".to_string(), json!(convergence_checked_paths(team_id)));
+}
+
+fn mark_convergence_persistence_conflict(metadata: &mut Value, team_id: &str) {
+    let Some(obj) = metadata.as_object_mut() else {
+        return;
+    };
+    obj.insert("status".to_string(), json!("persistence_conflict"));
+    obj.insert("persisted".to_string(), json!(false));
+    obj.insert("checked_paths".to_string(), json!(convergence_checked_paths(team_id)));
+    obj.insert(
+        "action".to_string(),
+        json!("endpoint convergence was not durably persisted; retry claim-leader or takeover"),
+    );
+}
+
+fn convergence_checked_paths(team_id: &str) -> Vec<String> {
+    [
+        "/tmux_endpoint".to_string(),
+        "/tmux_socket".to_string(),
+        "/tmux_socket_source".to_string(),
+        "/topology_convergence".to_string(),
+        format!("/teams/{team_id}/tmux_endpoint"),
+        format!("/teams/{team_id}/tmux_socket"),
+        format!("/teams/{team_id}/tmux_socket_source"),
+        format!("/teams/{team_id}/topology_convergence"),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn convergence_persistence_refusal(
+    topology_convergence: Option<Value>,
+    owner_epoch: OwnerEpoch,
+    bound_pane_id: Option<PaneId>,
+) -> LeaseResult {
+    LeaseResult {
+        ok: false,
+        status: LeaseStatus::Refused,
+        receiver: None,
+        owner: None,
+        owner_epoch: Some(owner_epoch),
+        reason: Some(LeaseReason::OwnerEpochAdvanced),
+        action: Some(
+            "endpoint convergence was not durably persisted; retry claim-leader or takeover"
+                .to_string(),
+        ),
+        bound_pane_id,
+        topology_convergence,
     }
 }
 
@@ -1531,7 +1687,7 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
     // preserving helper so the canonical fields survive the compaction.
     teams.insert(
         target_key.to_string(),
-        compact_team_state_preserving_ownership(state, target_key),
+        compact_team_state_preserving_claim_fields(state, target_key),
     );
     let existing_primary_key = existing
         .get("session_name")
@@ -1584,7 +1740,7 @@ fn value_object(value: &Value) -> serde_json::Map<String, Value> {
 ///   and copy each present field into the compacted entry.
 /// - Top-level owner fields stay UNTOUCHED — Stage 3d's canonical-only
 ///   shape is preserved on disk.
-fn compact_team_state_preserving_ownership(state: &Value, target_key: &str) -> Value {
+fn compact_team_state_preserving_claim_fields(state: &Value, target_key: &str) -> Value {
     let mut entry = crate::state::projection::compact_team_state(state);
     let Some(entry_obj) = entry.as_object_mut() else {
         return entry;
@@ -1597,7 +1753,15 @@ fn compact_team_state_preserving_ownership(state: &Value, target_key: &str) -> V
     else {
         return entry;
     };
-    for key in ["team_owner", "leader_receiver", "owner_epoch"] {
+    for key in [
+        "team_owner",
+        "leader_receiver",
+        "owner_epoch",
+        "tmux_endpoint",
+        "tmux_socket",
+        "tmux_socket_source",
+        "topology_convergence",
+    ] {
         if let Some(value) = owner_obj.get(key) {
             entry_obj.insert(key.to_string(), value.clone());
         }
