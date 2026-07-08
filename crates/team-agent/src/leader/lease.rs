@@ -447,10 +447,11 @@ pub fn claim_leader(
             .list_targets()
             .unwrap_or_default(),
     );
-    let caller_target = targets
+    let caller_pane_info = targets
         .iter()
-        .find(|target| target.pane_id.as_str() == caller)
-        .and_then(|target| claim_target_from_pane_info(workspace, target));
+        .find(|target| target.pane_id.as_str() == caller);
+    let caller_target =
+        caller_pane_info.and_then(|target| claim_target_from_pane_info(workspace, target));
     let env_team = std::env::var("TEAM_AGENT_TEAM_ID")
         .ok()
         .filter(|team| !team.is_empty());
@@ -496,6 +497,7 @@ pub fn claim_leader(
         &event_log,
         &liveness,
         caller_target.as_ref(),
+        caller_pane_info,
         scoped_team.map(|_| team_id.as_str()),
     )?;
     if result.ok {
@@ -556,6 +558,7 @@ pub fn claim_lease_no_incident(
         event_log,
         liveness,
         None,
+        None,
         scoped_team,
     )
 }
@@ -586,6 +589,7 @@ fn claim_lease_no_incident_with_target(
     event_log: &crate::event_log::EventLog,
     liveness: &dyn crate::state::owner_gate::PaneLivenessProbe,
     caller_target: Option<&LeaderClaimTarget>,
+    caller_pane_info: Option<&PaneInfo>,
     scoped_team: Option<&str>,
 ) -> Result<LeaseResult, LeaderError> {
     let _ = team;
@@ -705,25 +709,53 @@ fn claim_lease_no_incident_with_target(
     // worker's tmux pane overwrites leader_receiver.pane_id with the worker's
     // pane → delivery routes worker messages to itself (loop) and the leader
     // loses its handle (the macmini "hand-handle mapping 灾难" truth source).
-    if let Some(worker_id) = registered_worker_for_pane(state, caller_pane) {
-        emit_lease_refusal(
-            event_log,
-            LeaseReason::CallerNotLeaderShaped,
+    if let Some(caller_pane_info) = caller_pane_info {
+        match crate::topology::classify_registered_worker_for_observed_pane(
             state,
-            bound_pane_id.as_deref(),
-            Some(caller_pane.as_str()),
-            team_id,
-        )?;
-        return Ok(refused(
-            LeaseReason::CallerNotLeaderShaped,
-            &format!(
-                "pane {} is registered as worker {worker_id}; \
-                 run claim-leader from the leader's own pane, not a worker pane",
-                caller_pane.as_str()
-            ),
-            None,
-            bound_pane_id.clone().map(PaneId::new),
-        ));
+            caller_pane_info,
+        ) {
+            crate::topology::WorkerPaneBindingMatch::LiveSameWorker { agent_id } => {
+                emit_lease_refusal(
+                    event_log,
+                    LeaseReason::CallerNotLeaderShaped,
+                    state,
+                    bound_pane_id.as_deref(),
+                    Some(caller_pane.as_str()),
+                    team_id,
+                )?;
+                return Ok(refused(
+                    LeaseReason::CallerNotLeaderShaped,
+                    &format!(
+                        "pane {} is registered as worker {agent_id}; \
+                         run claim-leader from the leader's own pane, not a worker pane",
+                        caller_pane.as_str()
+                    ),
+                    None,
+                    bound_pane_id.clone().map(PaneId::new),
+                ));
+            }
+            crate::topology::WorkerPaneBindingMatch::Stale { agent_id, reason } => {
+                event_log.write(
+                    "leader_receiver.worker_pane_binding_ignored",
+                    json!({
+                        "agent_id": agent_id,
+                        "pane_id": caller_pane.as_str(),
+                        "reason": reason,
+                    }),
+                )?;
+            }
+            crate::topology::WorkerPaneBindingMatch::IncompleteLegacy { agent_id } => {
+                event_log.write(
+                    "leader_receiver.worker_pane_binding_ignored",
+                    json!({
+                        "agent_id": agent_id,
+                        "pane_id": caller_pane.as_str(),
+                        "reason": "incomplete_legacy_tuple",
+                    }),
+                )?;
+            }
+            crate::topology::WorkerPaneBindingMatch::NoMatch => {}
+        }
     }
     let reason = if bound_pane_id.is_some() {
         LeaseReason::PreviousOwnerPaneDead
@@ -1133,38 +1165,6 @@ fn make_owner(
                 .unwrap_or_default(),
         ),
     }
-}
-
-/// E51 (0.3.26 P0, lease guard): scan state.agents + teams[*].agents for a worker
-/// whose pane_id matches the caller. Returns the first matching agent_id, or None
-/// if no registered worker owns this pane. The check is O(N agents) — negligible
-/// on a team-agent team which rarely exceeds ~20 workers.
-fn registered_worker_for_pane(state: &Value, caller_pane: &PaneId) -> Option<String> {
-    if let Some(agent_id) = scan_agents_for_pane(state.get("agents"), caller_pane) {
-        return Some(agent_id);
-    }
-    if let Some(teams) = state.get("teams").and_then(Value::as_object) {
-        for (_, team_state) in teams {
-            if let Some(agent_id) = scan_agents_for_pane(team_state.get("agents"), caller_pane) {
-                return Some(agent_id);
-            }
-        }
-    }
-    None
-}
-
-fn scan_agents_for_pane(agents: Option<&Value>, caller_pane: &PaneId) -> Option<String> {
-    let map = agents?.as_object()?;
-    for (agent_id, agent) in map {
-        if agent
-            .get("pane_id")
-            .and_then(Value::as_str)
-            .is_some_and(|pane| pane == caller_pane.as_str())
-        {
-            return Some(agent_id.clone());
-        }
-    }
-    None
 }
 
 /// Stage 3a (identity-boundary unified plan, architect direction 2026-06-23)

@@ -3321,8 +3321,9 @@ pub mod lifecycle_port {
                     .map(|id| json!({"id": id}))
                     .collect::<Vec<_>>(),
                 "next_actions": [
-                    "run team-agent diagnose --json from the intended leader socket",
-                    "repair the tmux endpoint/socket split before retrying restart"
+                    "team-agent diagnose --json",
+                    "team-agent claim-leader --confirm --json",
+                    "team-agent takeover --confirm --json"
                 ],
                 "reminder": crate::cli::QUICK_START_REMINDER,
             }),
