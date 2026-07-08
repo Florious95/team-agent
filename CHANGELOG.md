@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.11
+
+- **Fix: pane-identity family root cause — worker delivery, named addressing, and restart now all converge on `(endpoint, session, window, pane_id, pane_pid)` 5-tuple validation.** A bare `pane_id` was previously accepted as a delivery target without cross-checking the enclosing window and tmux socket endpoint, allowing messages to land on reused pane IDs from other sessions or sockets. All three delivery paths now reject a cached binding unless the full 5-tuple matches the live tmux state.
+- **Fix: stale pane bindings are now fail-closed.** When the topology check finds that a cached pane is missing or belongs to a different window (`queued_pane_missing` / `stale`), the delivery path refuses rather than falling through to a silent drop. The E6 offline-mailbox path accepts the message to disk so it can be retried when the correct pane re-attaches.
+- **Fix: restart refuses dirty topology before kill/spawn.** The restart path now emits a `refused_dirty_topology` lifecycle event and returns an error if the current tmux state conflicts with the stored binding (endpoint or session split-brain). The refusal happens before any `kill` or `spawn` command is issued, preventing workers from starting in an inconsistent topology.
+- **New: `diagnose` topology audit.** `team-agent diagnose --topology` (and the `--gate` variants) audits the live tmux topology against stored bindings and reports findings under six issue IDs: `stale_endpoint`, `session_mismatch`, `window_mismatch`, `pid_drift`, `pane_missing`, `socket_split_brain`. The output is machine-readable JSON for CI and operator tooling.
+
 ## 0.5.10
 
 - **Fix: `send --to-name` to a live team with unattached leader now queues to offline mailbox (real-machine wiring).** In 0.5.9 the offline mailbox path was implemented but not wired into the third-party `send --to-name` resolution path — live-team sends to an unattached leader still returned a delivery error. The wiring is now in place: when the target team is live but the leader receiver is not attached, the message is written to the offline mailbox with `delivery_status: queued_until_leader_attach` and a stable `message_id`. When the leader attaches, the mailbox is replayed exactly once.
