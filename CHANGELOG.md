@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.15
+
+- **Fix: `restart` now uses the converged endpoint for both spawn and attach commands (0.5.14 frozen bug).** After a successful `claim-leader` or `takeover` that triggered endpoint convergence, `restart` still opened workers on the old socket because spawn and attach commands were rendered from three independent state reads. A single `ResolvedRestartContext` (field: `selected`, `transport`, `tmux_endpoint_source`) is now resolved once at restart entry and threaded through the entire path, eliminating the stale-socket false-green loop.
+- **Fix: attach commands are now rendered from the same transport as spawn.** `tmux_backend::attach_command_for_transport_session` and `attach_command_for_runtime_state_session_or_workspace` are new helpers that derive the attach socket directly from the restart transport, ensuring spawn and attach always target the same tmux server.
+- **New: `spawn_argv` lifecycle event includes `tmux_endpoint` and `tmux_endpoint_source` metadata.** The `spawn_agent_window` event now carries the socket path and its provenance (`"transport"`, `"state"`, or `"workspace"`) so operators and tests can audit which endpoint a worker was spawned on.
+- **Fix: `phase_golden` normalizer now token-substitutes endpoint paths by value shape.** The `value_looks_like_endpoint_path` predicate identifies socket paths by their structure (prefix + hex segment) rather than by field name, so any new endpoint-carrying field in golden fixtures is automatically normalized to `<SOCKET>` without requiring golden updates.
+- **New: `claim_endpoint_convergence_contract` RED A–D (8/8).** Four additional restart-context tests cover: attach commands use the converged endpoint, spawn records the converged endpoint in metadata, transport and attach share the same state-selected endpoint, and legacy per-team snapshot endpoints are ignored by restart.
+- **New: `lifecycle_transport_resolver_batch1` guard (4/4).** Structural guard confirming `rebuild.rs` migrated out of the raw-call allowlist and the three single-source resolver symbols are present.
+
 ## 0.5.14
 
 - **Fix: claim/takeover success path now converges the tmux endpoint when the old leader server is dead.** When `claim-leader --confirm` or `takeover --confirm` succeeds, the topology layer now evaluates an `EndpointConvergenceDecision` and, if the old server is confirmed dead, rebinds the team's canonical socket to the new endpoint before returning. The leader emits a `leader_receiver.tmux_endpoint_converged` lifecycle event to confirm the switch. Previously the old endpoint persisted in stored state, causing every subsequent `restart` to return `refused_dirty_topology` (tmux_endpoint_socket_conflict + leader_receiver_socket_mismatch) indefinitely — a deadlock that required manual intervention.
