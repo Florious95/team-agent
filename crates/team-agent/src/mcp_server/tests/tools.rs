@@ -110,8 +110,16 @@
         .unwrap();
     }
 
+    fn seed_report_scope_state(ws: &std::path::Path, state: &Value) {
+        let cws = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
+        let rt = cws.join(".team").join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(rt.join("state.json"), serde_json::to_string_pretty(state).unwrap())
+            .unwrap();
+    }
+
     #[test]
-    fn report_result_prefers_current_inflight_message_over_old_delivered_fallback() {
+    fn report_result_prefers_current_turn_message_over_old_delivered_fallback() {
         let ws = unique_ws("report-current-message");
         seed_report_message(
             &ws,
@@ -134,6 +142,33 @@
             "target_resolved",
             "2026-07-06T13:27:35.000000+00:00",
         );
+        // 0.5.16 result-attribution-race-locate.md §4/§7.7:
+        // target_resolved alone is not physical-submit proof. Current-turn
+        // attribution comes from the state pointer armed at physical submit.
+        seed_report_scope_state(
+            &ws,
+            &json!({
+                "active_team_key": "gate055",
+                "teams": {
+                    "gate055": {
+                        "team_key": "gate055",
+                        "coordinator": {
+                            "turn_open": {
+                                "armed": true,
+                                "node_id": "probe-worker",
+                                "turn_id": "msg_new"
+                            }
+                        },
+                        "agents": {
+                            "probe-worker": {
+                                "id": "probe-worker",
+                                "current_turn_message_id": "msg_new"
+                            }
+                        }
+                    }
+                }
+            }),
+        );
 
         let tools = TeamOrchestratorTools::with_identity(
             &ws,
@@ -149,7 +184,62 @@
         assert_eq!(
             v.get("task_id"),
             Some(&json!("msg_new")),
-            "current in-flight message must beat stale delivered fallback"
+            "current-turn message must beat stale delivered fallback"
+        );
+    }
+
+    #[test]
+    fn report_result_target_resolved_without_current_turn_uses_task_fallback() {
+        let ws = unique_ws("report-target-resolved-no-current");
+        seed_report_message(
+            &ws,
+            "msg_target_only",
+            "gate055",
+            "target_resolved",
+            "2026-07-06T13:27:35.000000+00:00",
+        );
+        seed_report_scope_state(
+            &ws,
+            &json!({
+                "active_team_key": "gate055",
+                "teams": {
+                    "gate055": {
+                        "team_key": "gate055",
+                        "tasks": [
+                            {
+                                "id": "task_initial",
+                                "assignee": "probe-worker",
+                                "status": "pending"
+                            }
+                        ],
+                        "agents": {
+                            "probe-worker": {"id": "probe-worker"}
+                        }
+                    }
+                }
+            }),
+        );
+
+        let tools = TeamOrchestratorTools::with_identity(
+            &ws,
+            Some(AgentId::new("probe-worker")),
+            Some(TeamKey::new("gate055")),
+        );
+        let ok = tools.report_result(
+            None, Some("target resolved only"), ResultStatus::Success,
+            None, None, None, None, None,
+            None, None,
+        ).expect("report ok");
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_ne!(
+            v.get("task_id"),
+            Some(&json!("msg_target_only")),
+            "0.5.16 locate §4/§7.7: target_resolved is a delivery claim, not physical-submit proof"
+        );
+        assert_eq!(
+            v.get("task_id"),
+            Some(&json!("task_initial")),
+            "without a current-turn pointer, no-task report_result falls through to task fallback"
         );
     }
 

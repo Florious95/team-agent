@@ -482,6 +482,7 @@ fn apply_persist_merge_contract(
         // clobber broke Batch 6 CHECK 6 (`shutdown` couldn't route to
         // the shim pid because `state.transport.shim.pid` was gone).
         preserve_transport_shim(incoming, latest);
+        preserve_latest_endpoint_convergence_fields(incoming, latest);
     }
 
     let latest_teams = latest.get("teams").and_then(Value::as_object);
@@ -504,6 +505,7 @@ fn apply_persist_merge_contract(
                 topology_update_agent_ids,
             )?;
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
+            preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
         }
     }
     Ok(())
@@ -572,6 +574,58 @@ fn preserve_latest_ownership_fields(incoming: &mut Value, latest: &Value) {
             incoming_obj.insert(key.to_string(), value.clone());
         }
     }
+}
+
+fn preserve_latest_endpoint_convergence_fields(incoming: &mut Value, latest: &Value) {
+    if !latest_has_preferable_endpoint_convergence(incoming, latest) {
+        return;
+    }
+    let Some(incoming_obj) = incoming.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "tmux_endpoint",
+        "tmux_socket",
+        "tmux_socket_source",
+        "topology_convergence",
+    ] {
+        if let Some(value) = latest.get(key).filter(|value| json_truthy(value)) {
+            incoming_obj.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn latest_has_preferable_endpoint_convergence(incoming: &Value, latest: &Value) -> bool {
+    if latest
+        .get("topology_convergence")
+        .and_then(|marker| marker.get("status"))
+        .and_then(Value::as_str)
+        != Some("converged")
+    {
+        return false;
+    }
+    let latest_epoch = endpoint_convergence_epoch(latest).unwrap_or_else(|| ownership_epoch(latest));
+    let incoming_epoch =
+        endpoint_convergence_epoch(incoming).unwrap_or_else(|| ownership_epoch(incoming));
+    if latest_epoch < incoming_epoch {
+        return false;
+    }
+    !incoming
+        .get("topology_convergence")
+        .is_some_and(|marker| {
+            marker.get("status").and_then(Value::as_str) == Some("converged")
+                && marker
+                    .get("owner_epoch")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|epoch| epoch >= latest_epoch)
+        })
+}
+
+fn endpoint_convergence_epoch(state: &Value) -> Option<u64> {
+    state
+        .get("topology_convergence")
+        .and_then(|marker| marker.get("owner_epoch"))
+        .and_then(Value::as_u64)
 }
 
 fn latest_has_preferable_ownership(incoming: &Value, latest: &Value) -> bool {

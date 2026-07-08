@@ -1,6 +1,7 @@
 //! internal_delivery.py + delivery.py — coordinator/调度器侧 thin wrapper + 单条 tmux 注入投递
 //! + trust 有界重试 + turn-open arm (card §16/§65)。
 
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 use rusqlite::{params, OptionalExtension};
@@ -14,7 +15,7 @@ use crate::provider::wire::{
 };
 use crate::transport::{
     submit_verification_wire, InjectPayload, InjectReport, InjectVerification, Key, PaneId,
-    PaneInfo, SessionName, SubmitVerification, Target, Transport, WindowName,
+    PaneInfo, SessionName, SubmitObserver, SubmitVerification, Target, Transport, WindowName,
 };
 
 use super::helpers::{message_exists, MessageStatusShadow};
@@ -414,7 +415,22 @@ pub fn deliver_pending_message(
     } else {
         InjectPayload::Text(rendered)
     };
-    let inject_report = match transport.inject(&target, &payload, Key::Enter, true) {
+    let submit_observer = CurrentTurnSubmitObserver::new(
+        workspace,
+        &message.sender,
+        &message.recipient,
+        message_id,
+        event_log,
+        canonical_owner_team_id.as_deref(),
+        resolved.metadata.as_ref(),
+    );
+    let inject_report = match transport.inject_with_submit_observer(
+        &target,
+        &payload,
+        Key::Enter,
+        true,
+        Some(&submit_observer),
+    ) {
         Ok(report) => report,
         Err(error) => {
             let reason = format!("inject_failed:{error}");
@@ -500,15 +516,9 @@ pub fn deliver_pending_message(
             });
         }
     };
-    record_current_turn_after_inject_if_leader_to_worker_scoped(
-        workspace,
-        &message.sender,
-        &message.recipient,
-        message_id,
-        event_log,
-        canonical_owner_team_id.as_deref(),
-        resolved.metadata.as_ref(),
-    )?;
+    if let Some(error) = submit_observer.take_error() {
+        return Err(error);
+    }
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
     // Leader pane: inject success is delivery proof. Worker pane: post-submit
@@ -2107,6 +2117,65 @@ pub fn record_turn_open_if_leader_to_worker(
     record_turn_open_if_leader_to_worker_scoped(
         workspace, sender, recipient, delivered, event_log, None, None,
     )
+}
+
+struct CurrentTurnSubmitObserver<'a> {
+    workspace: &'a Path,
+    sender: &'a str,
+    recipient: &'a str,
+    message_id: &'a str,
+    event_log: &'a EventLog,
+    owner_team_id: Option<&'a str>,
+    metadata: Option<&'a TargetMetadata>,
+    fired: Cell<bool>,
+    error: RefCell<Option<MessagingError>>,
+}
+
+impl<'a> CurrentTurnSubmitObserver<'a> {
+    fn new(
+        workspace: &'a Path,
+        sender: &'a str,
+        recipient: &'a str,
+        message_id: &'a str,
+        event_log: &'a EventLog,
+        owner_team_id: Option<&'a str>,
+        metadata: Option<&'a TargetMetadata>,
+    ) -> Self {
+        Self {
+            workspace,
+            sender,
+            recipient,
+            message_id,
+            event_log,
+            owner_team_id,
+            metadata,
+            fired: Cell::new(false),
+            error: RefCell::new(None),
+        }
+    }
+
+    fn take_error(&self) -> Option<MessagingError> {
+        self.error.borrow_mut().take()
+    }
+}
+
+impl SubmitObserver for CurrentTurnSubmitObserver<'_> {
+    fn after_physical_submit(&self) {
+        if self.fired.replace(true) {
+            return;
+        }
+        if let Err(error) = record_current_turn_after_inject_if_leader_to_worker_scoped(
+            self.workspace,
+            self.sender,
+            self.recipient,
+            self.message_id,
+            self.event_log,
+            self.owner_team_id,
+            self.metadata,
+        ) {
+            *self.error.borrow_mut() = Some(error);
+        }
+    }
 }
 
 fn record_current_turn_after_inject_if_leader_to_worker_scoped(

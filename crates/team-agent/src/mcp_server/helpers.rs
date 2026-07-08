@@ -280,11 +280,30 @@ pub(crate) fn latest_reportable_message_for(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> Option<String> {
+    current_reportable_message_for(workspace, agent_id, owner_team_id)
+        .or_else(|| latest_delivered_direct_message_for(workspace, agent_id, owner_team_id))
+}
+
+pub(crate) fn current_reportable_message_for(
+    workspace: &Path,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
     use crate::db::message_store::MessageStore;
     let store = MessageStore::open(workspace).ok()?;
     let conn = crate::db::schema::open_db(store.db_path()).ok()?;
     current_turn_message_for(workspace, &conn, agent_id, owner_team_id)
-        .or_else(|| latest_reportable_message_from_db(&conn, agent_id, owner_team_id))
+}
+
+pub(crate) fn latest_delivered_direct_message_for(
+    workspace: &Path,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<String> {
+    use crate::db::message_store::MessageStore;
+    let store = MessageStore::open(workspace).ok()?;
+    let conn = crate::db::schema::open_db(store.db_path()).ok()?;
+    latest_reportable_message_from_db(&conn, agent_id, owner_team_id)
 }
 
 fn current_turn_message_for(
@@ -441,6 +460,6 @@ fn latest_reportable_message_from_db(
 fn reportable_message_status(status: &str, error: Option<&str>) -> bool {
     matches!(
         status,
-        "delivered" | "target_resolved" | "submitted" | "injected" | "visible"
+        "delivered" | "submitted" | "injected" | "visible"
     ) && (status == "delivered" || error.is_none())
 }

@@ -4167,6 +4167,8 @@ pub mod leader_port {
                 "source": source,
                 "reason": convergence.get("reason").and_then(Value::as_str).unwrap_or("old_endpoint_dead"),
                 "owner_epoch": convergence.get("owner_epoch").cloned().unwrap_or(Value::Null),
+                "persisted": convergence.get("persisted").cloned().unwrap_or(Value::Bool(false)),
+                "checked_paths": convergence.get("checked_paths").cloned().unwrap_or_else(|| json!([])),
             }),
         );
     }

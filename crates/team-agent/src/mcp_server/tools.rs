@@ -20,9 +20,10 @@ use crate::state::persist::{
 use crate::messaging::{self, MessageTarget, SendOptions};
 
 use super::helpers::{
-    delivery_outcome_value, ensure_object, enum_value, insert_array, is_worker_recipient,
-    json_dumps_default, latest_reportable_message_for, latest_task_for_assignee, non_empty_string,
-    normalized_envelope_value, object_fields, requires_ack_for_target, tool_runtime_error,
+    current_reportable_message_for, delivery_outcome_value, ensure_object, enum_value,
+    insert_array, is_worker_recipient, json_dumps_default, latest_delivered_direct_message_for,
+    latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
+    requires_ack_for_target, tool_runtime_error,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
@@ -334,18 +335,17 @@ impl TeamOrchestratorTools {
                 // Blocker-1 (prerelease 0.4.0): scoped-team task inference +
                 // message-scoped fallback, before defaulting to "manual".
                 //   1. explicit arg
-                //   2. latest nonterminal task assigned to this agent in
-                //      teams.<owner>.tasks (scoped) → top-level tasks
-                //   3. current/in-flight reportable direct message to this agent
-                //      with no task id and no result yet (message-scope
-                //      correlation — collect path: is_message_scoped_result)
-                //   4. "manual" — truly uncorrelated; collect still rejects
+                //   2. current physical direct turn for this agent
+                //   3. latest delivered direct message with no result yet
+                //   4. latest nonterminal assigned task in teams.<owner>.tasks
+                //      (scoped) → top-level tasks
+                //   5. "manual" — truly uncorrelated; collect still rejects
                 let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
                 let resolved = task_id
                     .map(ToString::to_string)
                     .or_else(|| {
                         self.agent_id.as_ref().and_then(|agent| {
-                            latest_task_for_assignee(
+                            current_reportable_message_for(
                                 &self.workspace,
                                 agent.as_str(),
                                 owner_team_id_str.as_deref(),
@@ -354,7 +354,16 @@ impl TeamOrchestratorTools {
                     })
                     .or_else(|| {
                         self.agent_id.as_ref().and_then(|agent| {
-                            latest_reportable_message_for(
+                            latest_delivered_direct_message_for(
+                                &self.workspace,
+                                agent.as_str(),
+                                owner_team_id_str.as_deref(),
+                            )
+                        })
+                    })
+                    .or_else(|| {
+                        self.agent_id.as_ref().and_then(|agent| {
+                            latest_task_for_assignee(
                                 &self.workspace,
                                 agent.as_str(),
                                 owner_team_id_str.as_deref(),
