@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.12
+
+- **Fix: stale worker pane now accepted to inbox then replayed after `start-agent` (B-case).** In 0.5.11, a blocked message to a stale worker pane was refused at the send layer — the message was never persisted, so there was nothing to replay when the correct pane re-attached. The send path now accepts the message and writes a `queued_pane_missing` row to the inbox while still refusing physical injection to the stale target. When `start-agent` subsequently refreshes the pane tuple, the same `message_id` is automatically replayed exactly once, completing the pane-identity family's replay-ability guarantee introduced in 0.5.11.
+
 ## 0.5.11
 
 - **Fix: pane-identity family root cause — worker delivery, named addressing, and restart now all converge on `(endpoint, session, window, pane_id, pane_pid)` 5-tuple validation.** A bare `pane_id` was previously accepted as a delivery target without cross-checking the enclosing window and tmux socket endpoint, allowing messages to land on reused pane IDs from other sessions or sockets. All three delivery paths now reject a cached binding unless the full 5-tuple matches the live tmux state.
