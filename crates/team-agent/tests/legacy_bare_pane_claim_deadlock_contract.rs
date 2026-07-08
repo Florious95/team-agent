@@ -305,6 +305,10 @@ impl LegacyPaneCase {
             .args(args)
             .current_dir(&self.workspace)
             .env(
+                "TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK",
+                "1",
+            )
+            .env(
                 "PATH",
                 format!(
                     "{}:{}",
