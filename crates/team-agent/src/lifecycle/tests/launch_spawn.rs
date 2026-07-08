@@ -879,6 +879,37 @@ fn e5_restart_missing_role_docs_refuses_and_preserves_old_spec() {
     );
 }
 
+#[test]
+fn e5_restart_missing_role_docs_refuses_even_after_endpoint_convergence_marker() {
+    let _harness_gate = EnvVarGuard::unset("TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK");
+    let ws = restart_ws_two_resumable_workers();
+    let prev_spec = crate::model::paths::runtime_spec_path(&ws, "restartteam");
+    std::fs::create_dir_all(prev_spec.parent().unwrap()).unwrap();
+    std::fs::write(&prev_spec, "PREVIOUS-RUNTIME-SPEC-MARKER\n").unwrap();
+
+    let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    state["topology_convergence"] = json!({
+        "status": "converged",
+        "old_tmux_endpoint": "/tmp/old",
+        "new_tmux_endpoint": "/tmp/new",
+        "reason": "old_endpoint_dead"
+    });
+    crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+    std::fs::remove_file(ws.join("TEAM.md")).unwrap();
+
+    let result = restart_with_transport(&ws, false, None, &OfflineTransport::new());
+    let text = format!("{result:?}");
+    assert!(
+        text.contains("role definitions missing"),
+        "production marker alone must not enable runtime-spec fallback; got {text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&prev_spec).unwrap(),
+        "PREVIOUS-RUNTIME-SPEC-MARKER\n",
+        "previous runtime spec must be preserved on missing role docs refusal"
+    );
+}
+
 // E5 §3 解耦(tester 场景2)— add-agent on a team whose runtime spec already exists must still
 // resolve team_dir to the USER role dir for compile_team (find TEAM.md/agents), not the runtime
 // spec dir. Regression: SelectedTeam.spec_workspace=runtime was used as team_dir → compile_team

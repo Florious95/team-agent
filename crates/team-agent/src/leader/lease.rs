@@ -941,6 +941,12 @@ fn write_endpoint_fields(state: &mut Value, team_id: &str, endpoint: &str) {
     }
 }
 
+/// Persist the user-visible endpoint convergence marker.
+///
+/// This field is written by real `claim-leader` / `takeover` success paths, so
+/// any restart-side harness bypass that keys off it must carry a second
+/// production-safety gate such as a fake-only predicate or a `TEAM_AGENT_TEST_*`
+/// env var.
 fn write_convergence_marker(state: &mut Value, team_id: &str, metadata: &Value) {
     let Some(obj) = state.as_object_mut() else {
         return;

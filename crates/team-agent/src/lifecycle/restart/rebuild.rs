@@ -2261,6 +2261,9 @@ fn load_endpoint_convergence_runtime_spec(
     team_key: &str,
     state: &serde_json::Value,
 ) -> Result<Option<YamlValue>, LifecycleError> {
+    if std::env::var_os("TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK").is_none() {
+        return Ok(None);
+    }
     if !has_endpoint_convergence_marker(state) {
         return Ok(None);
     }
