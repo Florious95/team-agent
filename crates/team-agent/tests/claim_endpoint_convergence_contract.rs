@@ -3,6 +3,8 @@
 //!
 //! References:
 //! - `.team/artifacts/claim-endpoint-nonconvergence-locate.md` §10 RED 1-4.
+//! - `.team/artifacts/claim-endpoint-nonconvergence-locate-addendum.md` §9
+//!   RED A-D.
 //! - Leader verdict for §7.2 live-old-endpoint shape: binding remains ok:true,
 //!   with `topology_convergence.status="not_converged_old_endpoint_live"`.
 //!
@@ -12,6 +14,8 @@
 //!   stale endpoint refusal when the old endpoint is dead.
 //! - If the old endpoint is still live, binding must not silently overwrite it;
 //!   the response must name that live old endpoint and leave restart refused.
+//! - After convergence, restart must use one selected endpoint context for
+//!   spawn/readiness/event metadata and user-visible attach commands.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -29,8 +33,8 @@ const CALLER_PANE: &str = "%0";
 const STALE_OWNER_PANE: &str = "%9";
 const OLD_SOCKET: &str = "/private/tmp/tmux-501/ta-old";
 const NEW_SOCKET: &str = "/private/tmp/tmux-501/ta-new";
-const TEAM_SESSION: &str = "team-video-workflow";
-const LEADER_SESSION: &str = "team-agent-leader-claude_code-workspace-convergence-probe";
+const TEAM_SESSION: &str = "team-0515-restart-context-contract-current";
+const LEADER_SESSION: &str = "team-agent-leader-0515-restart-context-red";
 const LIVE_LEADER_PID: u32 = 14663;
 const STALE_OWNER_PID: u32 = 47641;
 const OLD_LIVE_PID: u32 = 22441;
@@ -197,6 +201,108 @@ fn red4_live_old_endpoint_is_not_silently_overwritten() {
     );
 }
 
+#[test]
+#[serial(env)]
+fn red_a_restart_attach_commands_use_converged_endpoint() {
+    let case = converged_dead_old_endpoint_case("red-a-attach-uses-new");
+    let (_restart, restart_json) = run_restart_json(&case, "RED A restart after convergence");
+    assert_restarted(
+        &restart_json,
+        "RED A setup: restart must reach status=restarted before attach endpoint assertions",
+    );
+    assert_attach_commands_use_new_socket(
+        &restart_json,
+        "RED A: restart attach_commands must be rendered from the converged selected endpoint",
+    );
+}
+
+#[test]
+#[serial(env)]
+fn red_b_restart_spawns_on_converged_endpoint_and_records_spawn_metadata() {
+    let case = converged_dead_old_endpoint_case("red-b-spawn-uses-new");
+    let (_restart, restart_json) = run_restart_json(&case, "RED B restart after convergence");
+    assert_restarted(
+        &restart_json,
+        "RED B setup: restart must reach status=restarted before transport endpoint assertions",
+    );
+    assert_restart_spawn_events_name_new_endpoint(
+        &case,
+        "RED B: provider.worker.spawn_argv/source=restart must expose the endpoint used for worker transport",
+    );
+    assert_tmux_session_ops_use_only_new_endpoint(
+        &case,
+        "RED B: restart must not create or probe the team session on the old endpoint after claim convergence",
+    );
+}
+
+#[test]
+#[serial(env)]
+fn red_c_restart_transport_and_attach_share_selected_state_endpoint() {
+    let case = converged_dead_old_endpoint_case("red-c-context-single-source");
+    let (_restart, restart_json) = run_restart_json(&case, "RED C restart after convergence");
+    assert_restarted(
+        &restart_json,
+        "RED C setup: restart must reach status=restarted before selected-context assertions",
+    );
+    assert_tmux_session_ops_use_only_new_endpoint(
+        &case,
+        "RED C: production restart transport must consume selected.state.tmux_endpoint=NEW instead of workspace fallback",
+    );
+    assert_attach_commands_use_new_socket(
+        &restart_json,
+        "RED C: restart attach command endpoint must share the same selected endpoint as transport",
+    );
+}
+
+#[test]
+#[serial(env)]
+fn red_d_legacy_per_team_snapshot_endpoint_is_ignored_by_restart() {
+    let case = converged_dead_old_endpoint_case("red-d-legacy-snapshot-ignored");
+    write_legacy_per_team_snapshot_with_old_endpoint(&case);
+    case.clear_tmux_log();
+
+    let (_restart, restart_json) = run_restart_json(&case, "RED D restart with legacy snapshot");
+    assert_restarted(
+        &restart_json,
+        "RED D setup: restart must reach status=restarted before legacy snapshot assertions",
+    );
+    assert_attach_commands_use_new_socket(
+        &restart_json,
+        "RED D: legacy per-team snapshot endpoint=OLD must not affect restart attach_commands",
+    );
+    assert_restart_spawn_events_name_new_endpoint(
+        &case,
+        "RED D: legacy per-team snapshot endpoint=OLD must not affect restart spawn metadata",
+    );
+    assert_tmux_session_ops_use_only_new_endpoint(
+        &case,
+        "RED D: legacy per-team snapshot endpoint=OLD must not affect restart transport endpoint",
+    );
+}
+
+fn converged_dead_old_endpoint_case(tag: &str) -> EndpointCase {
+    let case = EndpointCase::new(tag, ReceiverShape::DifferentDeadPane, OldEndpoint::Dead);
+    assert_initial_restart_refuses_split(&case, "restart context setup");
+
+    let claim = case.run_ta(&[
+        "claim-leader",
+        "--workspace",
+        case.workspace_str(),
+        "--team",
+        TEAM,
+        "--confirm",
+        "--json",
+    ]);
+    let claim_json = json_output(&claim, "restart context claim-leader");
+    assert_binding_ok(&claim, &claim_json, "restart context claim-leader");
+    assert_state_converged(
+        &case.read_state(),
+        "restart context setup: claim-leader must converge state before restart REDs run",
+    );
+    case.clear_tmux_log();
+    case
+}
+
 fn assert_initial_restart_refuses_split(case: &EndpointCase, label: &str) {
     let restart = case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
     let restart_json = json_output(&restart, label);
@@ -214,6 +320,20 @@ fn assert_initial_restart_refuses_split(case: &EndpointCase, label: &str) {
         &restart_json,
         "leader_receiver_socket_mismatch",
         "{label}: initial restart refusal must name leader_receiver_socket_mismatch",
+    );
+}
+
+fn run_restart_json(case: &EndpointCase, label: &str) -> (Output, Value) {
+    let restart = case.run_ta(&["restart", case.workspace_str(), "--team", TEAM, "--json"]);
+    let restart_json = json_output(&restart, label);
+    (restart, restart_json)
+}
+
+fn assert_restarted(value: &Value, message: &str) {
+    assert_eq!(
+        value.get("status").and_then(Value::as_str),
+        Some("restarted"),
+        "{message}; json={value}"
     );
 }
 
@@ -316,6 +436,101 @@ fn assert_restart_succeeds(case: &EndpointCase, message: &str) {
     );
 }
 
+fn assert_attach_commands_use_new_socket(value: &Value, message: &str) {
+    let commands = attach_commands(value);
+    assert!(
+        !commands.is_empty(),
+        "{message}; RED A/C/D require restart JSON to include actionable attach_commands; json={value}"
+    );
+    assert!(
+        commands.iter().any(|command| command.contains(NEW_SOCKET)),
+        "{message}; expected at least one attach command to contain NEW_SOCKET={NEW_SOCKET}; attach_commands={commands:?}; json={value}"
+    );
+    assert!(
+        commands.iter().all(|command| !command.contains(OLD_SOCKET)),
+        "{message}; attach_commands must not mention OLD_SOCKET={OLD_SOCKET}; attach_commands={commands:?}; json={value}"
+    );
+}
+
+fn attach_commands(value: &Value) -> Vec<String> {
+    value
+        .get("attach_commands")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn assert_restart_spawn_events_name_new_endpoint(case: &EndpointCase, message: &str) {
+    let spawn_events = restart_spawn_events(case);
+    assert!(
+        !spawn_events.is_empty(),
+        "{message}; missing provider.worker.spawn_argv source=restart event; events={}",
+        events(&case.workspace)
+    );
+    for event in spawn_events {
+        assert_eq!(
+            event.get("tmux_endpoint").and_then(Value::as_str),
+            Some(NEW_SOCKET),
+            "{message}; event must carry tmux_endpoint={NEW_SOCKET} so restart endpoint provenance is observable; event={event}"
+        );
+    }
+}
+
+fn restart_spawn_events(case: &EndpointCase) -> Vec<Value> {
+    events(&case.workspace)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event.get("event").and_then(Value::as_str) == Some("provider.worker.spawn_argv")
+                && event.get("source").and_then(Value::as_str) == Some("restart")
+        })
+        .collect()
+}
+
+fn assert_tmux_session_ops_use_only_new_endpoint(case: &EndpointCase, message: &str) {
+    let log = case.tmux_log();
+    let session_ops = tmux_session_ops(&log);
+    assert!(
+        !session_ops.is_empty(),
+        "{message}; fake tmux log must show restart probing or creating TEAM_SESSION={TEAM_SESSION}; log={log:?}"
+    );
+    let wrong_endpoint_ops = session_ops
+        .iter()
+        .filter(|line| !line.starts_with(&format!("{NEW_SOCKET}\t")))
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        wrong_endpoint_ops.is_empty(),
+        "{message}; all restart team-session operations must use NEW_SOCKET={NEW_SOCKET}; wrong_endpoint_ops={wrong_endpoint_ops:?}; full_log={log:?}"
+    );
+    let old_spawn_ops = session_ops
+        .iter()
+        .filter(|line| {
+            line.starts_with(&format!("{OLD_SOCKET}\t"))
+                && (line.contains(" new-session ") || line.contains(" new-window "))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        old_spawn_ops.is_empty(),
+        "{message}; restart must not create a team session on OLD_SOCKET={OLD_SOCKET}; old_spawn_ops={old_spawn_ops:?}; full_log={log:?}"
+    );
+}
+
+fn tmux_session_ops(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|line| {
+            line.contains(TEAM_SESSION)
+                && (line.contains(" has-session ")
+                    || line.contains(" new-session ")
+                    || line.contains(" new-window "))
+        })
+        .collect()
+}
+
 fn assert_issue(value: &Value, issue_id: &str, message: &str) {
     assert!(
         issue_ids(value).iter().any(|id| id == issue_id),
@@ -389,6 +604,18 @@ impl EndpointCase {
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         serde_json::from_str(&raw)
             .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+    }
+
+    fn clear_tmux_log(&self) {
+        let _ = std::fs::remove_file(self.tmux_log_path());
+    }
+
+    fn tmux_log(&self) -> String {
+        std::fs::read_to_string(self.tmux_log_path()).unwrap_or_default()
+    }
+
+    fn tmux_log_path(&self) -> PathBuf {
+        self.workspace.join("fake-tmux.log")
     }
 
     fn run_ta(&self, args: &[&str]) -> Output {
@@ -514,6 +741,43 @@ fn seed_split_state(workspace: &Path, receiver_shape: ReceiverShape) {
     .expect("seed runtime state");
 }
 
+fn write_legacy_per_team_snapshot_with_old_endpoint(case: &EndpointCase) {
+    let mut legacy = case.read_state();
+    set_runtime_endpoint_fields(&mut legacy, OLD_SOCKET);
+    for path in [
+        case.workspace
+            .join(".team/runtime/teams")
+            .join(TEAM)
+            .join("state.json"),
+        case.workspace
+            .join(".team/runtime")
+            .join(TEAM)
+            .join("state.json"),
+    ] {
+        std::fs::create_dir_all(path.parent().expect("legacy snapshot parent"))
+            .expect("create legacy snapshot dir");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&legacy).expect("serialize legacy snapshot"),
+        )
+        .unwrap_or_else(|error| panic!("write legacy snapshot {}: {error}", path.display()));
+    }
+}
+
+fn set_runtime_endpoint_fields(state: &mut Value, endpoint: &str) {
+    if let Some(root) = state.as_object_mut() {
+        root.insert("tmux_endpoint".to_string(), json!(endpoint));
+        root.insert("tmux_socket".to_string(), json!(endpoint));
+    }
+    if let Some(team) = state
+        .pointer_mut("/teams/current")
+        .and_then(Value::as_object_mut)
+    {
+        team.insert("tmux_endpoint".to_string(), json!(endpoint));
+        team.insert("tmux_socket".to_string(), json!(endpoint));
+    }
+}
+
 fn write_minimal_team_spec(workspace: &Path) {
     let spec = format!(
         r#"version: 1
@@ -596,6 +860,7 @@ fn fake_tmux_bin(workspace: &Path, old_endpoint: OldEndpoint) -> PathBuf {
     let bin_dir = workspace.join("fake-bin");
     std::fs::create_dir_all(&bin_dir).expect("create fake bin dir");
     let tmux = bin_dir.join("tmux");
+    let log_path = workspace.join("fake-tmux.log");
     let new_line = pane_line(
         CALLER_PANE,
         LEADER_SESSION,
@@ -608,8 +873,17 @@ fn fake_tmux_bin(workspace: &Path, old_endpoint: OldEndpoint) -> PathBuf {
     let old_live = matches!(old_endpoint, OldEndpoint::Live);
     let script = format!(
         r#"#!/bin/sh
-case " $* " in
-  *" -S {old_socket} "*)
+endpoint="default"
+previous=""
+for arg in "$@"; do
+  if [ "$previous" = "-S" ]; then
+    endpoint="$arg"
+  fi
+  previous="$arg"
+done
+printf '%s\t%s\n' "$endpoint" "$*" >> '{log_path}'
+case "$endpoint" in
+  "{old_socket}")
     if [ "{old_live}" != "true" ]; then
       echo "no server running on {old_socket}" >&2
       exit 1
@@ -632,6 +906,7 @@ case " $* " in
     ;;
 esac
 "#,
+        log_path = shell_single_quoted_payload(&log_path.to_string_lossy()),
         old_socket = OLD_SOCKET,
         old_live = if old_live { "true" } else { "false" },
         old_line = shell_single_quoted_payload(&old_line),
