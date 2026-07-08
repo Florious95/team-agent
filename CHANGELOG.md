@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.14
+
+- **Fix: claim/takeover success path now converges the tmux endpoint when the old leader server is dead.** When `claim-leader --confirm` or `takeover --confirm` succeeds, the topology layer now evaluates an `EndpointConvergenceDecision` and, if the old server is confirmed dead, rebinds the team's canonical socket to the new endpoint before returning. The leader emits a `leader_receiver.tmux_endpoint_converged` lifecycle event to confirm the switch. Previously the old endpoint persisted in stored state, causing every subsequent `restart` to return `refused_dirty_topology` (tmux_endpoint_socket_conflict + leader_receiver_socket_mismatch) indefinitely — a deadlock that required manual intervention.
+- **Fix: `refused_dirty_topology` exit eliminated from claim/takeover success path.** The `tmux_endpoint_socket_conflict` and `leader_receiver_socket_mismatch` issue IDs are no longer raised after a successful claim or takeover when the old server is dead; endpoint convergence at bind-time removes the conflict before restart sees it.
+- **New: `claim_endpoint_convergence_contract` (4/4).** Four contract tests cover the convergence path: RED1 fixture setup, RED2 convergence decision emitted at claim time, RED3 subsequent restart exits cleanly, RED4 `leader_receiver.tmux_endpoint_converged` event is recorded.
+- **Fix: R1 harness bypass in legacy bare-pane claim deadlock contract.** The harness now has a second gate for legacy bare-pane fixtures that lack a convergence spec, preventing the fixture from being skipped silently when the primary spec path is absent.
+
 ## 0.5.13
 
 - **Fix: claim/takeover guards now use full 5-tuple matching (E51 — sixth pane-identity case).** The `attach-leader` claim and worker takeover paths previously compared bare `pane_id` strings when deciding whether an existing binding should block promotion. A new `WorkerPaneBindingMatch` classifier now evaluates the full `(endpoint, session, window, pane_id, pane_pid)` tuple: only an exact-match live binding blocks; stale or legacy bare-pane records are classified as `DiagnoseOnly` and do not prevent the claim from succeeding.
