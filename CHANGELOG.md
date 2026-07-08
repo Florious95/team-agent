@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.13
+
+- **Fix: claim/takeover guards now use full 5-tuple matching (E51 — sixth pane-identity case).** The `attach-leader` claim and worker takeover paths previously compared bare `pane_id` strings when deciding whether an existing binding should block promotion. A new `WorkerPaneBindingMatch` classifier now evaluates the full `(endpoint, session, window, pane_id, pane_pid)` tuple: only an exact-match live binding blocks; stale or legacy bare-pane records are classified as `DiagnoseOnly` and do not prevent the claim from succeeding.
+- **Fix: stale and legacy bare-pane records are diagnose-only, not blockers.** Bindings recorded before 5-tuple validation was introduced (legacy) and bindings whose tmux pane no longer exists (stale) are surfaced by `diagnose` under the appropriate topology issue IDs but no longer cause `attach-leader` or takeover to return `refused_dirty_topology` indefinitely. This eliminates the deadlock where a stale legacy binding prevented any future leader from attaching.
+- **Fix: `refused_dirty_topology` next-actions are now executable.** When a genuine dirty-topology refusal does occur (live split-brain), the returned `next_actions` list contains commands the operator can run immediately to resolve the conflict, rather than advisory prose.
+
 ## 0.5.12
 
 - **Fix: stale worker pane now accepted to inbox then replayed after `start-agent` (B-case).** In 0.5.11, a blocked message to a stale worker pane was refused at the send layer — the message was never persisted, so there was nothing to replay when the correct pane re-attached. The send path now accepts the message and writes a `queued_pane_missing` row to the inbox while still refusing physical injection to the stale target. When `start-agent` subsequently refreshes the pane tuple, the same `message_id` is automatically replayed exactly once, completing the pane-identity family's replay-ability guarantee introduced in 0.5.11.
