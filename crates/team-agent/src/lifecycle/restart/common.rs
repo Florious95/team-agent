@@ -26,6 +26,7 @@ pub(super) fn spawn_agent_window(
     safety: Option<&DangerousApproval>,
     layout_placement: Option<&crate::lifecycle::launch::LayoutPlacement>,
     spawn_cwd_override: Option<&Path>,
+    tmux_endpoint_source: Option<&str>,
     // Issue 2 (Round 3b gate review §6): explicit owner_team_id override.
     // When `Some`, callers (restart/rebuild.rs, restart/agent.rs) thread the
     // resolved `selected.team_key` through here so the worker's MCP env /
@@ -205,6 +206,7 @@ pub(super) fn spawn_agent_window(
         let tmux_start_mode_pre_spawn =
             predict_tmux_start_mode(layout_placement, into_existing_session);
         let spawn_epoch = state_spawn_epoch_for_agent(workspace, agent_id);
+        let tmux_endpoint = transport.tmux_endpoint();
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(
             "provider.worker.spawn_argv",
@@ -220,6 +222,8 @@ pub(super) fn spawn_agent_window(
                 "tmux_start_mode": tmux_start_mode_pre_spawn,
                 "spawn_epoch": spawn_epoch,
                 "source": "restart",
+                "tmux_endpoint": tmux_endpoint,
+                "tmux_endpoint_source": tmux_endpoint_source.unwrap_or("transport"),
             }),
         );
     }
@@ -562,6 +566,27 @@ pub(crate) fn lifecycle_worker_transport_for_selected_state(
     .with_state(state.as_ref());
     crate::transport_factory::resolve_transport(input)
         .map_err(|e| LifecycleError::TeamSelect(e.to_string()))
+}
+
+pub(super) fn lifecycle_worker_tmux_backend_selection_for_state(
+    run_workspace: &Path,
+    state: &serde_json::Value,
+) -> Result<crate::tmux_backend::RuntimeTmuxBackendSelection, LifecycleError> {
+    if let Some(kind) = state.pointer("/transport/kind").and_then(|v| v.as_str()) {
+        if kind.eq_ignore_ascii_case("conpty") {
+            return Err(LifecycleError::TeamSelect(format!(
+                "backend_kind_mismatch: state.transport.kind={kind:?} but the legacy \
+                 tmux-typed lifecycle resolver was invoked; caller must migrate to \
+                 `lifecycle_worker_transport_for_selected_state` (Phase 1d Batch 2/3)"
+            )));
+        }
+    }
+    Ok(
+        crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
+            run_workspace,
+            Some(state),
+        ),
+    )
 }
 
 pub(super) fn lifecycle_worker_tmux_backend_for_state(
