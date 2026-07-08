@@ -2187,7 +2187,7 @@ pub mod lifecycle_port {
             team,
             session_converge_deadline_ms,
         ) {
-            Ok(report) => Ok(restart_value(report)),
+            Ok(report) => Ok(restart_value(report, team)),
             Err(e) => Ok(error_value(e)),
         }
     }
@@ -2899,11 +2899,14 @@ pub mod lifecycle_port {
 
         #[test]
         fn restart_json_includes_harness_reminder() {
-            let value = restart_value(crate::lifecycle::RestartReport::RefusedResumeAtomicity {
-                unresumable: Vec::new(),
-                allow_fresh: false,
-                error: "resume refused".to_string(),
-            });
+            let value = restart_value(
+                crate::lifecycle::RestartReport::RefusedResumeAtomicity {
+                    unresumable: Vec::new(),
+                    allow_fresh: false,
+                    error: "resume refused".to_string(),
+                },
+                None,
+            );
 
             assert_eq!(
                 value.get("reminder").and_then(Value::as_str),
@@ -2912,7 +2915,7 @@ pub mod lifecycle_port {
         }
     }
 
-    fn restart_value(report: crate::lifecycle::RestartReport) -> Value {
+    fn restart_value(report: crate::lifecycle::RestartReport, team: Option<&str>) -> Value {
         match report {
             crate::lifecycle::RestartReport::Restarted {
                 session_name,
@@ -3310,23 +3313,31 @@ pub mod lifecycle_port {
                 reason,
                 error,
                 issue_ids,
-            } => json!({
-                "ok": false,
-                "status": "refused_dirty_topology",
-                "reason": reason,
-                "session_name": session_name,
-                "error": error,
-                "issues": issue_ids
-                    .iter()
-                    .map(|id| json!({"id": id}))
-                    .collect::<Vec<_>>(),
-                "next_actions": [
-                    "team-agent diagnose --json",
-                    "team-agent claim-leader --confirm --json",
-                    "team-agent takeover --confirm --json"
-                ],
-                "reminder": crate::cli::QUICK_START_REMINDER,
-            }),
+            } => {
+                let repair_team = team
+                    .filter(|team| !team.is_empty())
+                    .unwrap_or(session_name.as_str());
+                let claim =
+                    format!("team-agent claim-leader --team {repair_team} --confirm --json");
+                let takeover = format!("team-agent takeover --team {repair_team} --confirm --json");
+                json!({
+                    "ok": false,
+                    "status": "refused_dirty_topology",
+                    "reason": reason,
+                    "session_name": session_name,
+                    "error": error,
+                    "issues": issue_ids
+                        .iter()
+                        .map(|id| json!({"id": id}))
+                        .collect::<Vec<_>>(),
+                    "next_actions": [
+                        "team-agent diagnose --json",
+                        claim,
+                        takeover
+                    ],
+                    "reminder": crate::cli::QUICK_START_REMINDER,
+                })
+            }
         }
     }
 
@@ -3961,6 +3972,7 @@ pub mod leader_port {
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            emit_topology_convergence_event(workspace, team, "takeover", &value);
             register_after_binding_success(workspace, team, "takeover", &mut value);
         }
         Ok(value)
@@ -3994,6 +4006,7 @@ pub mod leader_port {
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
+            emit_topology_convergence_event(workspace, team, "claim-leader", &value);
             register_after_binding_success(workspace, team, "claim-leader", &mut value);
         }
         Ok(value)
@@ -4121,6 +4134,41 @@ pub mod leader_port {
         if let Some(obj) = response.as_object_mut() {
             obj.insert("leader_registry".to_string(), registry_status);
         }
+    }
+
+    fn emit_topology_convergence_event(
+        workspace: &Path,
+        team: Option<&str>,
+        source: &str,
+        response: &Value,
+    ) {
+        let Some(convergence) = response.get("topology_convergence") else {
+            return;
+        };
+        if convergence.get("status").and_then(Value::as_str) != Some("converged") {
+            return;
+        }
+        let team_id = team
+            .filter(|team| !team.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                crate::state::persist::load_runtime_state(workspace)
+                    .ok()
+                    .map(|state| crate::state::projection::team_state_key(&state))
+            })
+            .unwrap_or_else(|| "current".to_string());
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let _ = event_log.write(
+            "leader_receiver.tmux_endpoint_converged",
+            json!({
+                "team_id": team_id,
+                "old_tmux_endpoint": convergence.get("old_tmux_endpoint").cloned().unwrap_or(Value::Null),
+                "new_tmux_endpoint": convergence.get("new_tmux_endpoint").cloned().unwrap_or(Value::Null),
+                "source": source,
+                "reason": convergence.get("reason").and_then(Value::as_str).unwrap_or("old_endpoint_dead"),
+                "owner_epoch": convergence.get("owner_epoch").cloned().unwrap_or(Value::Null),
+            }),
+        );
     }
 
     /// E7 GC hook: called from shutdown/unbind success paths.
@@ -4252,6 +4300,9 @@ pub mod leader_port {
                 "team_owner".to_string(),
                 serde_json::to_value(owner).unwrap_or(Value::Null),
             );
+        }
+        if let Some(topology_convergence) = result.topology_convergence {
+            out.insert("topology_convergence".to_string(), topology_convergence);
         }
         Value::Object(out)
     }

@@ -408,6 +408,10 @@ pub struct LeaseResult {
     pub action: Option<String>,
     /// dry-run / refused 时携带的 bound pane。
     pub bound_pane_id: Option<PaneId>,
+    /// Explicit claim/takeover topology-repair metadata. Omitted on legacy
+    /// paths so existing lease JSON stays stable unless a convergence decision
+    /// was actually evaluated.
+    pub topology_convergence: Option<Value>,
 }
 
 /// Family A 正源 owner 绑定结果(`bind_owner_from_caller_pane` 返回 dict 的 typed 版)。

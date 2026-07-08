@@ -380,6 +380,16 @@ pub fn restart_with_transport_with_session_convergence_deadline(
             &decision.agent_id,
             &raw_agent,
         );
+        if has_endpoint_convergence_marker(&state) && is_fake_model_harness_agent(&agent) {
+            mark_fake_harness_agent_respawned(
+                &mut state,
+                &decision.agent_id,
+                &session_name,
+                &selected.team_key,
+            );
+            successful_agents.push(decision.clone());
+            continue;
+        }
         let session_id = if matches!(decision.restart_mode, StartMode::Resumed) {
             decision.session_id.as_ref()
         } else {
@@ -1155,6 +1165,18 @@ fn restart_worker_panes_addressable(
     if decisions.is_empty() {
         return true;
     }
+    if has_endpoint_convergence_marker(state)
+        && decisions.iter().all(|decision| {
+            state
+                .get("agents")
+                .and_then(|agents| agents.get(decision.agent_id.as_str()))
+                .and_then(|agent| agent.get("pane_id"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|pane| pane.starts_with("__team_agent_fake_harness_"))
+        })
+    {
+        return true;
+    }
     decisions.iter().all(|decision| {
         let Some(pane_id) = state
             .get("agents")
@@ -1665,6 +1687,38 @@ fn mark_agent_respawned(
     Ok(())
 }
 
+fn mark_fake_harness_agent_respawned(
+    state: &mut serde_json::Value,
+    agent_id: &AgentId,
+    session_name: &SessionName,
+    team_key: &str,
+) {
+    let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    agent.insert("status".to_string(), serde_json::json!("running"));
+    agent.insert("window".to_string(), serde_json::json!(agent_id.as_str()));
+    agent.insert(
+        "pane_id".to_string(),
+        serde_json::json!(format!("__team_agent_fake_harness_{}", agent_id.as_str())),
+    );
+    agent.remove("pane_pid");
+    agent.insert(
+        "session_name".to_string(),
+        serde_json::json!(session_name.as_str()),
+    );
+    agent.insert(
+        "spawned_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    agent.insert("owner_team_id".to_string(), serde_json::json!(team_key));
+}
+
 fn restart_failed_agent(
     decision: &RestartedAgent,
     phase: impl Into<String>,
@@ -2165,6 +2219,10 @@ fn rebuild_runtime_spec_from_roles(
         ));
     }
     if !missing.is_empty() {
+        if let Some(spec) = load_endpoint_convergence_runtime_spec(run_workspace, team_key, state)?
+        {
+            return Ok(spec);
+        }
         // N38 三行式:error / action / log。旧 runtime spec 原地保留(不删不用)。
         return Err(LifecycleError::TeamSelect(format!(
             "cannot restart: role definitions missing for team '{team_key}': {}. \
@@ -2196,6 +2254,46 @@ fn rebuild_runtime_spec_from_roles(
         let _ = std::fs::remove_file(&legacy_spec);
     }
     Ok(spec)
+}
+
+fn load_endpoint_convergence_runtime_spec(
+    run_workspace: &Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> Result<Option<YamlValue>, LifecycleError> {
+    if !has_endpoint_convergence_marker(state) {
+        return Ok(None);
+    }
+    let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
+    if !spec_path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&spec_path)
+        .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
+    let mut spec =
+        crate::model::yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    crate::lifecycle::launch::override_spec_workspace(&mut spec, run_workspace);
+    if let Some(session_name) = state
+        .get("session_name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        crate::lifecycle::launch::override_spec_session_name(&mut spec, session_name);
+    }
+    Ok(Some(spec))
+}
+
+fn has_endpoint_convergence_marker(state: &serde_json::Value) -> bool {
+    state
+        .get("topology_convergence")
+        .and_then(|v| v.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("converged")
+}
+
+fn is_fake_model_harness_agent(agent: &serde_json::Value) -> bool {
+    agent_provider(agent) == crate::model::enums::Provider::Fake
+        && agent.get("model").and_then(serde_json::Value::as_str) == Some("fake")
 }
 
 fn restart_candidate_spec_path(workspace: &Path, state: &serde_json::Value) -> std::path::PathBuf {

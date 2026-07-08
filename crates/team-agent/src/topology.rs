@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use serde_json::{json, Value};
 
 use crate::transport::{PaneInfo, SessionName, Transport};
@@ -28,6 +30,89 @@ pub fn restart_dirty_topology_issue_ids(state: &Value) -> Vec<String> {
 
 pub fn issue_id(issue: &Value) -> Option<&str> {
     issue.get("id").and_then(Value::as_str)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EndpointConvergenceDecision {
+    NoConflict,
+    Converge {
+        old_endpoint: String,
+        new_endpoint: String,
+    },
+    RefuseLiveOldEndpoint {
+        old_endpoint: String,
+        new_endpoint: String,
+    },
+    Unknown,
+}
+
+pub fn endpoint_convergence_decision(
+    state: &Value,
+    team_key: &str,
+    candidate_endpoint: &str,
+) -> EndpointConvergenceDecision {
+    let candidate_endpoint = candidate_endpoint.trim();
+    if candidate_endpoint.is_empty() {
+        return EndpointConvergenceDecision::Unknown;
+    }
+    if endpoint_server_alive(candidate_endpoint) != Some(true) {
+        return EndpointConvergenceDecision::Unknown;
+    }
+
+    let mut stale_endpoints = Vec::new();
+    collect_stale_endpoint(
+        state,
+        "tmux_endpoint",
+        candidate_endpoint,
+        &mut stale_endpoints,
+    );
+    collect_stale_endpoint(
+        state,
+        "tmux_socket",
+        candidate_endpoint,
+        &mut stale_endpoints,
+    );
+    if let Some(team_state) = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(team_key))
+    {
+        collect_stale_endpoint(
+            team_state,
+            "tmux_endpoint",
+            candidate_endpoint,
+            &mut stale_endpoints,
+        );
+        collect_stale_endpoint(
+            team_state,
+            "tmux_socket",
+            candidate_endpoint,
+            &mut stale_endpoints,
+        );
+    }
+    stale_endpoints.sort();
+    stale_endpoints.dedup();
+    let Some(first_old) = stale_endpoints.first().cloned() else {
+        return EndpointConvergenceDecision::NoConflict;
+    };
+
+    for old_endpoint in stale_endpoints {
+        match endpoint_server_alive(&old_endpoint) {
+            Some(true) => {
+                return EndpointConvergenceDecision::RefuseLiveOldEndpoint {
+                    old_endpoint,
+                    new_endpoint: candidate_endpoint.to_string(),
+                };
+            }
+            Some(false) => {}
+            None => return EndpointConvergenceDecision::Unknown,
+        }
+    }
+
+    EndpointConvergenceDecision::Converge {
+        old_endpoint: first_old,
+        new_endpoint: candidate_endpoint.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,6 +332,36 @@ fn session_exists_on_endpoint(endpoint: &str, session: &str) -> bool {
     crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
         .has_session(&SessionName::new(session.to_string()))
         .unwrap_or(false)
+}
+
+fn collect_stale_endpoint(
+    state: &Value,
+    key: &str,
+    candidate_endpoint: &str,
+    stale_endpoints: &mut Vec<String>,
+) {
+    let Some(endpoint) = non_empty_str(state, key) else {
+        return;
+    };
+    if !same_endpoint(endpoint, candidate_endpoint) {
+        stale_endpoints.push(endpoint.to_string());
+    }
+}
+
+fn endpoint_server_alive(endpoint: &str) -> Option<bool> {
+    let normalized = normalize_endpoint(endpoint);
+    let mut command = Command::new("tmux");
+    if normalized != "default" && !normalized.is_empty() {
+        if std::path::Path::new(&normalized).is_absolute() {
+            command.arg("-S").arg(&normalized);
+        } else {
+            command.arg("-L").arg(&normalized);
+        }
+    }
+    match command.arg("list-sessions").output() {
+        Ok(output) => Some(output.status.success()),
+        Err(_) => None,
+    }
 }
 
 fn same_endpoint(left: &str, right: &str) -> bool {
