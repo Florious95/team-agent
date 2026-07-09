@@ -4,6 +4,11 @@
 //! A provider-specific prompt handler panic must not unwind out of the user command and leave a
 //! half-initialized runtime. The command should still complete once the pane has been spawned.
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};

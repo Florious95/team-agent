@@ -1,5 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use serde_json::{json, Value};
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::{AgentId, TeamKey};

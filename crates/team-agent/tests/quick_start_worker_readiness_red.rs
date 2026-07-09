@@ -21,7 +21,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use team_agent::lifecycle::{
@@ -34,6 +33,10 @@ use team_agent::transport::{
     TurnVerification, WindowName,
 };
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+use hermetic::HermeticTestEnv;
+
 const TEAM_MD: &str =
     "---\nname: bug7\nobjective: BUG-7 worker readiness honesty contract.\nprovider: codex\n---\n\nTeam.\n";
 
@@ -44,7 +47,10 @@ const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: cl
 #[test]
 #[ignore = "real-machine: quick-start worker readiness gate"]
 fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified() {
-    let team = bug7_team_dir("t1-pending");
+    let hermetic = HermeticTestEnv::enter("quick-start-readiness-t1");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
+    let team = bug7_team_dir(&hermetic, "t1-pending");
     // Both agents spawn successfully (recording transport reports both windows live)
     // but the framework has no way to verify the worker MCP tool set actually
     // loaded — codex/claude can still reject schemas asynchronously. The report
@@ -86,7 +92,10 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
 #[test]
 #[ignore = "real-machine: quick-start worker readiness gate"]
 fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window() {
-    let team = bug7_team_dir("t2-degraded");
+    let hermetic = HermeticTestEnv::enter("quick-start-readiness-t2");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
+    let team = bug7_team_dir(&hermetic, "t2-degraded");
     // Recording transport simulates the Mac mini final capture: only the codex
     // window exists after launch; the claude window never materialized (no
     // `claude` binary on PATH, etc.). BUG-2 fix already marks `clauder` as
@@ -126,15 +135,8 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
 // `with_windows(...)` from `list_windows`, simulating the post-spawn observable.
 // ---------------------------------------------------------------------------
 
-fn bug7_team_dir(tag: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let counter = N.fetch_add(1, Ordering::Relaxed);
-    let base = std::env::temp_dir().join(format!(
-        "ta-bug7-{}-{}-{}",
-        tag,
-        std::process::id(),
-        counter
-    ));
+fn bug7_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+    let base = hermetic.workspace(tag);
     let team = base.join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("mkdir teamdir/agents");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");

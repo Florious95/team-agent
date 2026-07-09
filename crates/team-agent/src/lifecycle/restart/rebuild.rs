@@ -1404,6 +1404,11 @@ fn try_autobind_leader_after_restart(
     let team_str = team;
     match crate::leader::attach_leader(workspace, team_str, None, provider) {
         Ok(result) if result.ok => {
+            let _ = crate::leader::registry::register_binding_from_state_best_effort(
+                workspace,
+                team_str,
+                "restart-auto-attach",
+            );
             eprintln!(
                 "team_agent::restart auto_attach_leader ok pane={:?} team={:?}",
                 result.bound_pane_id.as_ref().map(|p| p.as_str()),

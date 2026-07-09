@@ -19,6 +19,9 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+#[allow(dead_code)]
+struct HermeticTestEnv;
+
 #[test]
 fn concurrent_reset_discard_session_serializes() {
     let ids = (1..=6).map(|n| format!("w{n}")).collect::<Vec<_>>();
