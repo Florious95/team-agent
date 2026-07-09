@@ -33,6 +33,7 @@ const STARTUP_PROMPT_GRACE_SECS: i64 = 120;
 const RUNTIME_APPROVAL_INITIAL_BACKOFF_SECS: i64 = 30;
 const RUNTIME_APPROVAL_MAX_BACKOFF_SECS: i64 = 300;
 const IDLE_HEALTH_CAPTURE_INTERVAL_SECS: i64 = 60;
+pub(crate) const HEARTBEAT_STATUS_PANIC: &str = "panic";
 
 // ===========================================================================
 // TickReport / TickError(§10:tick(..) -> Result<TickReport, TickError>)
@@ -1420,21 +1421,87 @@ impl TurnStateClassifier for ProviderTurnClassifier {
 /// `coordinator.coordinator_tick_iteration_count` load fine (read-compat, C-P3-3) —
 /// new versions simply stop writing it.
 fn increment_coordinator_tick_iteration_count(workspace: &WorkspacePath) {
-    let path = crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json");
-    let next = std::fs::read_to_string(&path)
+    let _ = write_coordinator_heartbeat(
+        workspace,
+        Pid::new(std::process::id()),
+        None,
+        "tick_running",
+        Some("running"),
+        None,
+        true,
+    );
+}
+
+pub(crate) fn write_coordinator_heartbeat(
+    workspace: &WorkspacePath,
+    pid: Pid,
+    boot_id: Option<&str>,
+    last_phase: &str,
+    last_tick_status: Option<&str>,
+    last_error: Option<&str>,
+    increment_count: bool,
+) -> std::io::Result<()> {
+    let path = coordinator_heartbeat_path(workspace);
+    let value = read_coordinator_heartbeat_value(&path);
+    let next_count = value
+        .get("coordinator_tick_iteration_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(u64::from(increment_count));
+    let now = chrono::Utc::now().to_rfc3339();
+    let identity = crate::coordinator::current_coordinator_binary_identity();
+    let boot_id = boot_id
+        .map(ToString::to_string)
+        .or_else(|| {
+            value
+                .get("boot_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| format!("coord_unknown_{}", pid.get()));
+    let mut next = serde_json::json!({
+        "coordinator_tick_iteration_count": next_count,
+        "pid": pid.get(),
+        "boot_id": boot_id,
+        "binary_path": identity.binary_path,
+        "binary_version": identity.binary_version,
+        "last_phase": last_phase,
+        "last_tick_status": last_tick_status,
+        "last_error": last_error,
+        "updated_at": now,
+    });
+    if last_phase == "tick_running" {
+        next["last_tick_started_at"] = serde_json::Value::String(now.clone());
+        if let Some(finished) = value.get("last_tick_finished_at").cloned() {
+            next["last_tick_finished_at"] = finished;
+        }
+    } else {
+        if let Some(started) = value.get("last_tick_started_at").cloned() {
+            next["last_tick_started_at"] = started;
+        }
+        next["last_tick_finished_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
+    }
+    write_coordinator_heartbeat_value(&path, &next)
+}
+
+fn coordinator_heartbeat_path(workspace: &WorkspacePath) -> PathBuf {
+    crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json")
+}
+
+fn read_coordinator_heartbeat_value(path: &Path) -> Value {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| {
-            value
-                .get("coordinator_tick_iteration_count")
-                .and_then(Value::as_u64)
-        })
-        .unwrap_or(0)
-        .saturating_add(1);
-    let _ = std::fs::write(
-        &path,
-        serde_json::json!({"coordinator_tick_iteration_count": next}).to_string(),
-    );
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_coordinator_heartbeat_value(path: &Path, value: &Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, value.to_string())?;
+    std::fs::rename(tmp, path)
 }
 
 fn idle_node_value(node: &crate::leader::IdleNode) -> Value {

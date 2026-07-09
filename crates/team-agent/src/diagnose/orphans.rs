@@ -32,9 +32,57 @@ struct OrphanRecord {
 struct ScanReport {
     scanned: usize,
     orphans: Vec<OrphanRecord>,
+    ignored_foreign: Vec<OrphanRecord>,
 }
 
-pub fn orphan_gate_json(fix: bool, confirm: bool) -> Result<Value, CliError> {
+#[derive(Debug, Clone)]
+pub(crate) enum OrphanScanScope {
+    CurrentWorkspace {
+        canonical_current_workspace: PathBuf,
+    },
+}
+
+impl OrphanScanScope {
+    fn current_workspace(workspace: &Path) -> Self {
+        Self::CurrentWorkspace {
+            canonical_current_workspace: canonicalize_workspace(workspace),
+        }
+    }
+}
+
+fn canonicalize_workspace(workspace: &Path) -> PathBuf {
+    std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
+}
+
+fn workspace_matches_scope(scope: &OrphanScanScope, workspace: &Path) -> bool {
+    match scope {
+        OrphanScanScope::CurrentWorkspace {
+            canonical_current_workspace,
+        } => canonicalize_workspace(workspace) == *canonical_current_workspace,
+    }
+}
+
+fn assert_current_workspace_orphan(orphan: &OrphanRecord, scope: &OrphanScanScope) -> bool {
+    orphan
+        .workspace
+        .as_deref()
+        .is_some_and(|workspace| workspace_matches_scope(scope, workspace))
+}
+
+fn foreign_workspace_record(process: ProcessRow, workspace: PathBuf) -> OrphanRecord {
+    OrphanRecord {
+        kind: "coordinator_process",
+        pid: Some(process.pid),
+        session: None,
+        tmux_socket: None,
+        workspace: Some(workspace),
+        reason: OrphanReason::WorkspaceAlive,
+        command: Some(process.command),
+        action: "none",
+    }
+}
+
+pub fn orphan_gate_json(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
     if fix && !confirm {
         return Ok(json!({
             "ok": false,
@@ -44,9 +92,10 @@ pub fn orphan_gate_json(fix: bool, confirm: bool) -> Result<Value, CliError> {
             "action": "re-run with --gate orphans --fix --confirm",
         }));
     }
-    let report = scan_orphans_bounded(false);
+    let scope = OrphanScanScope::current_workspace(workspace);
+    let report = scan_orphans_bounded(&scope, false);
     if report.orphans.is_empty() {
-        return Ok(json!({
+        return Ok(with_ignored_foreign(json!({
             "ok": true,
             "gate": "orphans",
             "status": "passed",
@@ -56,12 +105,12 @@ pub fn orphan_gate_json(fix: bool, confirm: bool) -> Result<Value, CliError> {
             "action_required": false,
             "fix": fix,
             "orphans": [],
-        }));
+        }), &report));
     }
     if fix {
-        return fix_orphans(report);
+        return fix_orphans(&scope, report);
     }
-    Ok(json!({
+    Ok(with_ignored_foreign(json!({
         "ok": false,
         "gate": "orphans",
         "status": "failed",
@@ -71,14 +120,15 @@ pub fn orphan_gate_json(fix: bool, confirm: bool) -> Result<Value, CliError> {
         "action_required": true,
         "fix": false,
         "orphans": orphan_values(&report.orphans),
-    }))
+    }), &report))
 }
 
-pub fn cleanup_orphans_json(confirm: bool) -> Result<Value, CliError> {
-    let report = scan_orphans_bounded(false);
+pub fn cleanup_orphans_json(workspace: &Path, confirm: bool) -> Result<Value, CliError> {
+    let scope = OrphanScanScope::current_workspace(workspace);
+    let report = scan_orphans_bounded(&scope, false);
     if confirm {
         if report.orphans.is_empty() {
-            return Ok(json!({
+            return Ok(with_ignored_foreign(json!({
                 "ok": true,
                 "scanned": report.scanned,
                 "orphans": [],
@@ -86,26 +136,28 @@ pub fn cleanup_orphans_json(confirm: bool) -> Result<Value, CliError> {
                 "scanned_at": chrono::Utc::now().to_rfc3339(),
                 "killed": [],
                 "failed": [],
-            }));
+            }), &report));
         }
-        return cleanup_confirmed(report);
+        return cleanup_confirmed(&scope, report);
     }
-    Ok(json!({
+    Ok(with_ignored_foreign(json!({
         "ok": true,
         "scanned": report.scanned,
         "orphans": orphan_values(&report.orphans),
         "dry_run": true,
         "scanned_at": chrono::Utc::now().to_rfc3339(),
         "action_required": "re-run with --confirm to send SIGTERM",
-    }))
+    }), &report))
 }
 
-pub fn has_orphan_residue() -> bool {
-    !scan_orphans_bounded(false).orphans.is_empty()
+pub fn has_orphan_residue(workspace: &Path) -> bool {
+    let scope = OrphanScanScope::current_workspace(workspace);
+    !scan_orphans_bounded(&scope, false).orphans.is_empty()
 }
 
-pub fn orphan_blocker_detail() -> String {
-    let report = scan_orphans_bounded(false);
+pub fn orphan_blocker_detail(workspace: &Path) -> String {
+    let scope = OrphanScanScope::current_workspace(workspace);
+    let report = scan_orphans_bounded(&scope, false);
     if report.orphans.is_empty() {
         return "no orphan coordinator residue detected".to_string();
     }
@@ -133,10 +185,10 @@ pub fn orphan_blocker_detail() -> String {
         .join("; ")
 }
 
-fn fix_orphans(report: ScanReport) -> Result<Value, CliError> {
-    let cleanup = cleanup_report(report);
-    let residual = scan_orphans(false);
-    Ok(json!({
+fn fix_orphans(scope: &OrphanScanScope, report: ScanReport) -> Result<Value, CliError> {
+    let cleanup = cleanup_report(report, scope);
+    let residual = scan_orphans(scope, false);
+    Ok(with_ignored_foreign(json!({
         "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
         "gate": "orphans",
         "status": if residual.orphans.is_empty() && cleanup.failed.is_empty() { "fixed" } else { "failed" },
@@ -148,13 +200,13 @@ fn fix_orphans(report: ScanReport) -> Result<Value, CliError> {
         "orphans": orphan_values(&residual.orphans),
         "killed": cleanup.killed,
         "failed": cleanup.failed,
-    }))
+    }), &residual))
 }
 
-fn cleanup_confirmed(report: ScanReport) -> Result<Value, CliError> {
-    let cleanup = cleanup_report(report);
-    let residual = scan_orphans(false);
-    Ok(json!({
+fn cleanup_confirmed(scope: &OrphanScanScope, report: ScanReport) -> Result<Value, CliError> {
+    let cleanup = cleanup_report(report, scope);
+    let residual = scan_orphans(scope, false);
+    Ok(with_ignored_foreign(json!({
         "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
         "scanned": cleanup.scanned,
         "orphans": orphan_values(&residual.orphans),
@@ -162,7 +214,7 @@ fn cleanup_confirmed(report: ScanReport) -> Result<Value, CliError> {
         "scanned_at": chrono::Utc::now().to_rfc3339(),
         "killed": cleanup.killed,
         "failed": cleanup.failed,
-    }))
+    }), &residual))
 }
 
 struct CleanupReport {
@@ -171,11 +223,15 @@ struct CleanupReport {
     failed: Vec<Value>,
 }
 
-fn cleanup_report(report: ScanReport) -> CleanupReport {
+fn cleanup_report(report: ScanReport, scope: &OrphanScanScope) -> CleanupReport {
     let protected = protected_pids();
     let mut killed = Vec::new();
     let mut failed = Vec::new();
     for orphan in &report.orphans {
+        if !assert_current_workspace_orphan(orphan, scope) {
+            failed.push(orphan_value(orphan, "skipped"));
+            continue;
+        }
         if let Some(pid) = orphan.pid {
             if protected.contains(&pid.get()) {
                 failed.push(orphan_value(orphan, "skipped"));
@@ -201,10 +257,11 @@ fn cleanup_report(report: ScanReport) -> CleanupReport {
     }
 }
 
-fn scan_orphans(include_unparsed: bool) -> ScanReport {
+fn scan_orphans(scope: &OrphanScanScope, include_unparsed: bool) -> ScanReport {
     let protected = protected_pids();
     let mut scanned = 0;
     let mut orphans = Vec::new();
+    let mut ignored_foreign = Vec::new();
     for process in coordinator_processes() {
         if protected.contains(&process.pid.get()) {
             continue;
@@ -225,6 +282,10 @@ fn scan_orphans(include_unparsed: bool) -> ScanReport {
             }
             continue;
         };
+        if !workspace_matches_scope(scope, &workspace) {
+            ignored_foreign.push(foreign_workspace_record(process, workspace));
+            continue;
+        }
         if let Some(reason) = classify_workspace_orphan(&workspace, process.pid) {
             orphans.push(OrphanRecord {
                 kind: "coordinator_process",
@@ -238,22 +299,26 @@ fn scan_orphans(include_unparsed: bool) -> ScanReport {
             });
         }
     }
-    for orphan in coordinator_pid_file_orphans() {
+    for orphan in coordinator_pid_file_orphans(scope) {
         scanned += 1;
         orphans.push(orphan);
     }
-    for orphan in tmux_session_orphans() {
+    for orphan in tmux_session_orphans(scope) {
         scanned += 1;
         orphans.push(orphan);
     }
-    for orphan in provider_mcp_process_orphans() {
+    for orphan in provider_mcp_process_orphans(scope) {
         scanned += 1;
         orphans.push(orphan);
     }
-    ScanReport { scanned, orphans }
+    ScanReport {
+        scanned,
+        orphans,
+        ignored_foreign,
+    }
 }
 
-fn coordinator_pid_file_orphans() -> Vec<OrphanRecord> {
+fn coordinator_pid_file_orphans(scope: &OrphanScanScope) -> Vec<OrphanRecord> {
     temp_scan_roots()
         .into_iter()
         .flat_map(|root| match std::fs::read_dir(root) {
@@ -263,6 +328,9 @@ fn coordinator_pid_file_orphans() -> Vec<OrphanRecord> {
         .filter_map(|entry| {
             let workspace = entry.path();
             if !workspace.is_dir() || ephemeral_workspace_hint(&workspace).is_none() {
+                return None;
+            }
+            if !workspace_matches_scope(scope, &workspace) {
                 return None;
             }
             let pid_path = crate::model::paths::runtime_dir(&workspace).join("coordinator.pid");
@@ -293,7 +361,7 @@ fn coordinator_pid_file_orphans() -> Vec<OrphanRecord> {
         .collect()
 }
 
-fn tmux_session_orphans() -> Vec<OrphanRecord> {
+fn tmux_session_orphans(scope: &OrphanScanScope) -> Vec<OrphanRecord> {
     tmux_socket_names()
         .into_iter()
         .flat_map(|socket| {
@@ -302,6 +370,9 @@ fn tmux_session_orphans() -> Vec<OrphanRecord> {
                 .filter_map(move |pane| {
                     let workspace = pane.workspace?;
                     if !is_orphan_marker_workspace(&workspace) {
+                        return None;
+                    }
+                    if !workspace_matches_scope(scope, &workspace) {
                         return None;
                     }
                     let reason = classify_workspace_without_pid(&workspace)?;
@@ -382,13 +453,16 @@ fn tmux_list_panes(socket: &str) -> Vec<TmuxPaneRow> {
         .collect()
 }
 
-fn provider_mcp_process_orphans() -> Vec<OrphanRecord> {
+fn provider_mcp_process_orphans(scope: &OrphanScanScope) -> Vec<OrphanRecord> {
     ps_command_rows()
         .into_iter()
         .filter(|row| is_provider_or_mcp_workspace_command(&row.command))
         .filter_map(|process| {
             let workspace = parse_workspace_arg(&process.command)?;
             if !is_orphan_marker_workspace(&workspace) {
+                return None;
+            }
+            if !workspace_matches_scope(scope, &workspace) {
                 return None;
             }
             let reason = classify_workspace_without_pid(&workspace)?;
@@ -427,15 +501,19 @@ fn read_pid_file(path: &Path) -> Option<Pid> {
     Some(Pid::new(pid))
 }
 
-fn scan_orphans_bounded(include_unparsed: bool) -> ScanReport {
+fn scan_orphans_bounded(scope: &OrphanScanScope, include_unparsed: bool) -> ScanReport {
     let deadline = Instant::now() + Duration::from_millis(800);
     let mut scanned = 0;
     let mut by_key = BTreeMap::new();
+    let mut foreign_by_key = BTreeMap::new();
     loop {
-        let report = scan_orphans(include_unparsed);
+        let report = scan_orphans(scope, include_unparsed);
         scanned = scanned.max(report.scanned);
         for orphan in report.orphans {
             by_key.insert(orphan_key(&orphan), orphan);
+        }
+        for orphan in report.ignored_foreign {
+            foreign_by_key.insert(orphan_key(&orphan), orphan);
         }
         if !by_key.is_empty() || Instant::now() >= deadline {
             break;
@@ -445,6 +523,7 @@ fn scan_orphans_bounded(include_unparsed: bool) -> ScanReport {
     ScanReport {
         scanned,
         orphans: by_key.into_values().collect(),
+        ignored_foreign: foreign_by_key.into_values().collect(),
     }
 }
 
@@ -653,10 +732,23 @@ fn orphan_values(orphans: &[OrphanRecord]) -> Vec<Value> {
         .collect()
 }
 
+fn with_ignored_foreign(mut value: Value, report: &ScanReport) -> Value {
+    if !report.ignored_foreign.is_empty() {
+        value["ignored_foreign"] = Value::Array(
+            report
+                .ignored_foreign
+                .iter()
+                .map(|orphan| orphan_value(orphan, "none"))
+                .collect(),
+        );
+    }
+    value
+}
+
 fn orphan_value(orphan: &OrphanRecord, action: &str) -> Value {
     let mut value = json!({
         "kind": orphan.kind,
-        "reason": reason_key(&orphan.reason),
+        "reason": if action == "none" { "foreign_workspace" } else { reason_key(&orphan.reason) },
         "action": action,
     });
     if let Some(pid) = orphan.pid {

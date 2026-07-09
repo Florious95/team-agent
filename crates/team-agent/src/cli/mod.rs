@@ -3820,12 +3820,12 @@ pub mod diagnose_port {
     }
 
     /// `orphan_gate(fix, confirm)`(`--gate orphans`)。CI gate。
-    pub fn orphan_gate(fix: bool, confirm: bool) -> Result<Value, CliError> {
-        crate::diagnose::orphans::orphan_gate_json(fix, confirm)
+    pub fn orphan_gate(workspace: &Path, fix: bool, confirm: bool) -> Result<Value, CliError> {
+        crate::diagnose::orphans::orphan_gate_json(workspace, fix, confirm)
     }
     /// `cleanup_orphan_coordinators(confirm)`(`--cleanup-orphans`;dry-run unless `--confirm`)。
-    pub fn cleanup_orphans(confirm: bool) -> Result<Value, CliError> {
-        crate::diagnose::orphans::cleanup_orphans_json(confirm)
+    pub fn cleanup_orphans(workspace: &Path, confirm: bool) -> Result<Value, CliError> {
+        crate::diagnose::orphans::cleanup_orphans_json(workspace, confirm)
     }
     /// `fix_schema_layout`(`--fix-schema`)/`schema_diagnosis`。
     pub fn fix_schema(workspace: &Path) -> Result<Value, CliError> {

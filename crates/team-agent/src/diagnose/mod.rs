@@ -18,10 +18,10 @@ pub fn doctor_gate_blockers(
     let _ = (fix, confirm);
     match gate {
         Some(DoctorGate::Orphans) => {
-            if orphans::has_orphan_residue() {
+            if orphans::has_orphan_residue(workspace) {
                 Ok(vec![Blocker {
                     source: BlockerSource::OrphanCoordinator,
-                    detail: orphans::orphan_blocker_detail(),
+                    detail: orphans::orphan_blocker_detail(workspace),
                 }])
             } else {
                 Ok(Vec::new())

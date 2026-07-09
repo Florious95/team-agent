@@ -8,7 +8,7 @@ use crate::model::enums::Provider;
 use crate::provider::ProviderAdapter;
 
 use super::health::{coordinator_pid_path, write_coordinator_metadata};
-use super::tick::{TickError, TickReport};
+use super::tick::{write_coordinator_heartbeat, TickError, TickReport, HEARTBEAT_STATUS_PANIC};
 use super::types::{
     ErrorLists, MetadataSource, Pid, ProviderRegistry, WorkspacePath, BACKOFF_MAX_SEC,
     DEFAULT_TICK_INTERVAL_SEC,
@@ -86,7 +86,7 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
             // event log shows the reason. This preserves the daemon
             // liveness path while making the failure explicit.
             eprintln!(
-                "coordinator: transport_factory refused ({e}); falling back to tmux workspace for daemon liveness"
+                "[coordinator] transport_factory refused ({e}); falling back to tmux workspace for daemon liveness"
             );
             let sel = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
                 args.workspace.as_path(),
@@ -140,12 +140,86 @@ fn run_daemon_with_coordinator_and_boot_tmux(
     coordinator: &Coordinator,
     tmux_metadata: Option<DaemonTmuxEndpointMetadata>,
 ) -> Result<(), DaemonError> {
+    let pid = Pid::new(std::process::id());
+    let boot_id = daemon_boot_id(pid);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_daemon_body_with_panic_marker(args, coordinator, tmux_metadata, pid, &boot_id)
+    })) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let reason = if matches!(error, DaemonError::Tick(_)) {
+                "fatal_error"
+            } else {
+                "startup_error"
+            };
+            let _ = write_coordinator_heartbeat(
+                &args.workspace,
+                pid,
+                Some(&boot_id),
+                reason,
+                Some("error"),
+                Some(&error.to_string()),
+                false,
+            );
+            let _ = write_daemon_exit(
+                &EventLog::new(args.workspace.as_path()),
+                &args.workspace,
+                pid,
+                &boot_id,
+                reason,
+                serde_json::json!({"error": error.to_string()}),
+            );
+            Err(error)
+        }
+        Err(payload) => {
+            let panic_payload = panic_payload_message(payload.as_ref());
+            let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+            let _ = write_coordinator_heartbeat(
+                &args.workspace,
+                pid,
+                Some(&boot_id),
+                "panic",
+                Some(HEARTBEAT_STATUS_PANIC),
+                Some(&panic_payload),
+                false,
+            );
+            let _ = write_daemon_exit(
+                &EventLog::new(args.workspace.as_path()),
+                &args.workspace,
+                pid,
+                &boot_id,
+                "panic",
+                serde_json::json!({
+                    "panic_payload": panic_payload.clone(),
+                    "backtrace": backtrace,
+                }),
+            );
+            Err(DaemonError::Panic(panic_payload))
+        }
+    }
+}
+
+fn run_daemon_body_with_panic_marker(
+    args: &DaemonArgs,
+    coordinator: &Coordinator,
+    tmux_metadata: Option<DaemonTmuxEndpointMetadata>,
+    pid: Pid,
+    boot_id: &str,
+) -> Result<(), DaemonError> {
     let runtime_dir = crate::model::paths::runtime_dir(args.workspace.as_path());
     std::fs::create_dir_all(&runtime_dir)?;
-    let pid = Pid::new(std::process::id());
     std::fs::write(coordinator_pid_path(&args.workspace), pid.to_string())?;
     write_coordinator_metadata(&args.workspace, pid, MetadataSource::Boot)?;
     let binary_identity = crate::coordinator::current_coordinator_binary_identity();
+    let _ = write_coordinator_heartbeat(
+        &args.workspace,
+        pid,
+        Some(boot_id),
+        "boot",
+        None,
+        None,
+        false,
+    );
 
     let event_log = EventLog::new(args.workspace.as_path());
     let mut boot_event = serde_json::json!({
@@ -204,14 +278,14 @@ fn run_daemon_with_coordinator_and_boot_tmux(
                     // Detach so the shim survives beyond this
                     // coordinator instance (F7 core invariant).
                     let _shim_pid = handle.detach();
-                    eprintln!("coordinator: shim ensured (pid={_shim_pid})");
+                    eprintln!("[coordinator] shim ensured (pid={_shim_pid})");
                 }
                 Err(e) => {
                     // Honest degradation: emit the stale-family
                     // event, coord continues without a shim. Tick
                     // loop will surface `mux_unavailable` on any
                     // transport call.
-                    eprintln!("coordinator: shim ensure failed: {e}");
+                    eprintln!("[coordinator] shim ensure failed: {e}");
                     let _ = crate::coordinator::conpty_shim::mark_transport_unavailable(
                         args.workspace.as_path(),
                         &format!("boot_ensure_failed: {e}"),
@@ -231,7 +305,28 @@ fn run_daemon_with_coordinator_and_boot_tmux(
     let initial_ppid = current_ppid();
     let mut consecutive_failures = 0_u32;
     let mut last_failure_signature: Option<String> = None;
+    install_signal_handlers();
     loop {
+        if let Some(signal) = take_signal_stop_request() {
+            let _ = write_coordinator_heartbeat(
+                &args.workspace,
+                pid,
+                Some(boot_id),
+                "signal",
+                Some("stop_requested"),
+                Some(signal),
+                false,
+            );
+            write_daemon_exit(
+                &event_log,
+                &args.workspace,
+                pid,
+                boot_id,
+                "signal",
+                serde_json::json!({"signal": signal}),
+            )?;
+            return Ok(());
+        }
         let ppid_now = current_ppid();
         if super::should_orphan_self_terminate(initial_ppid, ppid_now, &args.workspace) {
             let _ = event_log.write(
@@ -244,8 +339,31 @@ fn run_daemon_with_coordinator_and_boot_tmux(
             );
             break;
         }
+        let _ = write_coordinator_heartbeat(
+            &args.workspace,
+            pid,
+            Some(boot_id),
+            "tick_running",
+            Some("running"),
+            None,
+            false,
+        );
         match run_tick_with_panic_marker(&event_log, || coordinator.tick()) {
             Ok(report) => {
+                let status = if report.stop {
+                    "stop_requested"
+                } else {
+                    "ok"
+                };
+                let _ = write_coordinator_heartbeat(
+                    &args.workspace,
+                    pid,
+                    Some(boot_id),
+                    "tick_finished",
+                    Some(status),
+                    None,
+                    false,
+                );
                 if consecutive_failures > 0 {
                     event_log.write(
                         "coordinator.tick_recovered",
@@ -260,6 +378,20 @@ fn run_daemon_with_coordinator_and_boot_tmux(
                 sleep_seconds(tick_interval);
             }
             Err(err) => {
+                let status = if matches!(err, TickError::Panic(_)) {
+                    HEARTBEAT_STATUS_PANIC
+                } else {
+                    "error"
+                };
+                let _ = write_coordinator_heartbeat(
+                    &args.workspace,
+                    pid,
+                    Some(boot_id),
+                    "tick_finished",
+                    Some(status),
+                    Some(&err.to_string()),
+                    false,
+                );
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let next_sleep_sec = backoff_sleep_sec(tick_interval, consecutive_failures);
                 // P7-F2 (Python __main__.py:66-89): identical-signature failures emit
@@ -303,8 +435,52 @@ fn run_daemon_with_coordinator_and_boot_tmux(
             }
         }
     }
-    event_log.write("coordinator.exit", serde_json::json!({"stop": true}))?;
+    let _ = write_coordinator_heartbeat(
+        &args.workspace,
+        pid,
+        Some(boot_id),
+        "exit",
+        Some("stop_requested"),
+        None,
+        false,
+    );
+    write_daemon_exit(
+        &event_log,
+        &args.workspace,
+        pid,
+        boot_id,
+        "stop",
+        serde_json::json!({"stop": true}),
+    )?;
     Ok(())
+}
+
+fn write_daemon_exit(
+    event_log: &EventLog,
+    workspace: &WorkspacePath,
+    pid: Pid,
+    boot_id: &str,
+    reason: &str,
+    mut extra: serde_json::Value,
+) -> Result<(), crate::event_log::EventLogError> {
+    let mut event = serde_json::json!({
+        "reason": reason,
+        "pid": pid.get(),
+        "boot_id": boot_id,
+        "workspace": workspace.as_path().to_string_lossy(),
+    });
+    if let (Some(target), Some(extra_obj)) = (event.as_object_mut(), extra.as_object_mut()) {
+        target.extend(std::mem::take(extra_obj));
+    }
+    event_log.write("coordinator.exit", event).map(|_| ())
+}
+
+fn daemon_boot_id(pid: Pid) -> String {
+    format!(
+        "coord_{}_{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        pid.get()
+    )
 }
 
 fn run_tick_with_panic_marker<F>(event_log: &EventLog, tick: F) -> Result<TickReport, TickError>
@@ -388,6 +564,52 @@ pub enum DaemonError {
     EventLog(#[from] crate::event_log::EventLogError),
     #[error("tick: {0}")]
     Tick(#[from] TickError),
+    #[error("panic: {0}")]
+    Panic(String),
+}
+
+#[cfg(unix)]
+static SIGNAL_STOP_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(unix)]
+static SIGNAL_STOP_NUMBER: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn coordinator_signal_handler(signal: libc::c_int) {
+    SIGNAL_STOP_NUMBER.store(signal, std::sync::atomic::Ordering::SeqCst);
+    SIGNAL_STOP_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        let handler = coordinator_signal_handler as *const () as libc::sighandler_t;
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_signal_handlers() {}
+
+#[cfg(unix)]
+fn take_signal_stop_request() -> Option<&'static str> {
+    if !SIGNAL_STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
+    match SIGNAL_STOP_NUMBER.load(std::sync::atomic::Ordering::SeqCst) {
+        libc::SIGTERM => Some("SIGTERM"),
+        libc::SIGHUP => Some("SIGHUP"),
+        libc::SIGINT => Some("SIGINT"),
+        _ => Some("UNKNOWN"),
+    }
+}
+
+#[cfg(not(unix))]
+fn take_signal_stop_request() -> Option<&'static str> {
+    None
 }
 
 #[cfg(test)]
