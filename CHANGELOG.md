@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.19
+
+- **Fix: `diagnose` now surfaces coordinator health as first-class issues.** Three new issue IDs are emitted when the coordinator is in a degraded state: `coordinator_unavailable` (process dead or socket unreachable), `coordinator_stale_identity` (binary path or version does not match current executable — same source of truth as the rotation check), and `coordinator_schema_incompatible` (message-store schema version mismatch). Each issue carries a `repair` suggestion (`restart` or `repair-state`) so operators can act without reading source code. This closes the "diagnose green but send broken" blind spot confirmed by an external-project incident where `diagnose` reported no issues while `send` was failing due to a stale coordinator identity.
+- **Fix: `restart` compatibility flag now has semantic documentation.** The `--compat` / `bool` flag on `restart` previously had no description in `--help` or internal docs. The flag meaning (allow restart across coordinator schema versions without rotation guard) is now documented in both the CLI help text and the structured output.
+
 ## 0.5.18
 
 - **Fix: coordinator version-aware rotation.** Coordinator metadata now embeds binary identity (`current_exe` path + `PKG_VERSION` as canonical truth). On startup, if the running coordinator's identity does not match the current binary or the metadata is absent (legacy), `rotation_required` is set, the stale process tree is stopped, and the current binary is spawned in its place. Same-version coordinators that are healthy are treated as idempotent — no rotation occurs.

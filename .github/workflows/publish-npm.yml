@@ -46,7 +46,7 @@ jobs:
           const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
           const cargo = fs.readFileSync("Cargo.toml", "utf8");
           const expected = {
-            version: "0.5.18",
+            version: "0.5.19",
             license: "AGPL-3.0",
             platforms: [
               ["cli-darwin-arm64", "@team-agent/cli-darwin-arm64", "darwin", "arm64"],
