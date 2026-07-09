@@ -269,7 +269,9 @@ use super::*;
     // 530-531 stub {ok:true,fix,confirm,orphans:[]}. Fully deterministic (no subprocess). RED. ─────────
     #[test]
     fn orphan_gate_fix_without_confirm_is_refused_envelope() {
-        let v = diagnose_port::orphan_gate(/*fix=*/ true, /*confirm=*/ false).expect("orphan_gate");
+        let ws = tmp_workspace();
+        let v = diagnose_port::orphan_gate(&ws, /*fix=*/ true, /*confirm=*/ false)
+            .expect("orphan_gate");
         assert_eq!(
             v,
             json!({
@@ -292,7 +294,8 @@ use super::*;
     #[ignore = "real-machine: cleanup_orphans scans machine-wide ta-* tmux/process residue"]
     #[serial_test::file_serial(tmux)]
     fn cleanup_orphans_dryrun_golden_envelope() {
-        let v = diagnose_port::cleanup_orphans(/*confirm=*/ false).expect("cleanup_orphans");
+        let ws = tmp_workspace();
+        let v = diagnose_port::cleanup_orphans(&ws, /*confirm=*/ false).expect("cleanup_orphans");
         let obj = v.as_object().expect("cleanup dict");
         assert_eq!(v["dry_run"], json!(true), "no --confirm => dry_run:true (cleanup_orphan_coordinators)");
         assert_eq!(v["orphans"], json!([]), "golden lists orphans (empty when none)");

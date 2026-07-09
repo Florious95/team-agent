@@ -1702,9 +1702,9 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         return Ok(CmdResult::from_json(value, true));
     }
     let value = if matches!(args.gate, Some(DoctorGate::Orphans)) {
-        crate::diagnose::orphans::orphan_gate_json(args.fix, args.confirm)?
+        crate::diagnose::orphans::orphan_gate_json(&args.workspace, args.fix, args.confirm)?
     } else if args.cleanup_orphans {
-        crate::diagnose::orphans::cleanup_orphans_json(args.confirm)?
+        crate::diagnose::orphans::cleanup_orphans_json(&args.workspace, args.confirm)?
     } else if args.fix_schema {
         diagnose_port::fix_schema(&args.workspace)?
     } else {
