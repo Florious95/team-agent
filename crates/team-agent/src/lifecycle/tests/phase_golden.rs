@@ -602,6 +602,7 @@ fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> 
 
 fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
     let mut out = text.to_string();
+    out = normalize_team_agent_binary_path(&out);
     for alias in &ctx.workspace_aliases {
         out = out.replace(alias, "<WORKSPACE>");
     }
@@ -609,7 +610,6 @@ fn normalize_path_string(text: &str, ctx: &NormalizeCtx) -> String {
     for alias in &ctx.temp_aliases {
         out = out.replace(alias, "<TMP>");
     }
-    out = normalize_team_agent_binary_path(&out);
     out = normalize_tmux_socket_dir(&out);
     normalize_socket_token(&out)
 }
@@ -622,7 +622,7 @@ fn value_looks_like_endpoint_path(text: &str) -> bool {
 }
 
 fn normalize_team_agent_binary_path(text: &str) -> String {
-    let mut out = text.to_string();
+    let mut out = replace_known_team_agent_binary_paths(text);
     // 0.5.0 hermetic 教训「环境路径类 token 化」的直接延伸
     // (leader msg_6ee04cf5aee8):归一化改为结构判据,不绑路径前缀。
     // 用户 CARGO_TARGET_DIR 可以指到任意目录(默认 `<repo>/target`,
@@ -640,6 +640,30 @@ fn normalize_team_agent_binary_path(text: &str) -> String {
         out = replace_path_with_marker(out, marker, "<TEAM_AGENT_BIN>");
     }
     out
+}
+
+fn replace_known_team_agent_binary_paths(text: &str) -> String {
+    let mut out = text.to_string();
+    for alias in known_team_agent_binary_path_aliases() {
+        out = out.replace(&alias, "<TEAM_AGENT_BIN>");
+    }
+    out
+}
+
+fn known_team_agent_binary_path_aliases() -> Vec<String> {
+    let mut aliases = Vec::new();
+    if let Some(path) = option_env!("CARGO_BIN_EXE_team-agent") {
+        push_path_alias(&mut aliases, PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_team-agent") {
+        push_path_alias(&mut aliases, PathBuf::from(path));
+    }
+    if let Ok(path) = std::env::current_exe() {
+        push_path_alias(&mut aliases, path);
+    }
+    aliases.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    aliases.dedup();
+    aliases
 }
 
 /// Structural (path-prefix-independent) normalization for
@@ -750,17 +774,31 @@ fn normalize_tmux_uid_with_prefix(mut text: String, prefix: &str) -> String {
 }
 
 fn normalize_socket_token(text: &str) -> String {
-    let mut out = text.to_string();
-    while let Some(idx) = out.find("ta-") {
-        let end = out[idx..]
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .map(|offset| idx + offset)
-            .unwrap_or_else(|| out.len());
-        if end == idx + 3 {
-            break;
+    const CONTEXT: &str = "/tmux-<UID>/";
+    let mut out = String::with_capacity(text.len());
+    let mut search_from = 0;
+    while let Some(offset) = text[search_from..].find(CONTEXT) {
+        let context_start = search_from + offset;
+        let token_start = context_start + CONTEXT.len();
+        if !text[token_start..].starts_with("ta-") {
+            out.push_str(&text[search_from..token_start]);
+            search_from = token_start;
+            continue;
         }
-        out.replace_range(idx..end, "ta-<SOCKET>");
+        let end = text[token_start..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map(|offset| token_start + offset)
+            .unwrap_or_else(|| text.len());
+        if end == token_start + 3 {
+            out.push_str(&text[search_from..end]);
+            search_from = end;
+            continue;
+        }
+        out.push_str(&text[search_from..token_start]);
+        out.push_str("ta-<SOCKET>");
+        search_from = end;
     }
+    out.push_str(&text[search_from..]);
     out
 }
 
@@ -800,4 +838,65 @@ fn pretty(value: &Value) -> String {
     let mut text = serde_json::to_string_pretty(value).unwrap();
     text.push('\n');
     text
+}
+
+#[test]
+fn phase_golden_normalizer_maps_custom_cargo_target_deps_binary_before_tmp_aliasing() {
+    let ctx = NormalizeCtx {
+        workspace_aliases: Vec::new(),
+        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        pane_ids: BTreeMap::new(),
+    };
+    let input = concat!(
+        "mcp_servers.team_orchestrator.command=\"",
+        "/Volumes/nvme/tmp/ta-0517-target/debug/deps/team_agent-c924abc123",
+        "\""
+    );
+
+    assert_eq!(
+        normalize_path_string(input, &ctx),
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
+        "custom CARGO_TARGET_DIR binary paths must normalize to <TEAM_AGENT_BIN> before tmp/socket tokenization"
+    );
+}
+
+#[test]
+fn phase_golden_normalizer_maps_current_test_binary_to_team_agent_marker() {
+    let ctx = NormalizeCtx {
+        workspace_aliases: Vec::new(),
+        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        pane_ids: BTreeMap::new(),
+    };
+    let input = format!(
+        "mcp_servers.team_orchestrator.command=\"{}\"",
+        std::env::current_exe()
+            .expect("current test binary path")
+            .display()
+    );
+
+    assert_eq!(
+        normalize_path_string(&input, &ctx),
+        "mcp_servers.team_orchestrator.command=\"<TEAM_AGENT_BIN>\"",
+        "actual test argv0/current_exe path must normalize to <TEAM_AGENT_BIN>"
+    );
+}
+
+#[test]
+fn phase_golden_normalizer_does_not_treat_cargo_target_dir_as_socket_token() {
+    let ctx = NormalizeCtx {
+        workspace_aliases: Vec::new(),
+        temp_aliases: vec!["/Volumes/nvme/tmp".to_string()],
+        pane_ids: BTreeMap::new(),
+    };
+
+    assert_eq!(
+        normalize_path_string("/Volumes/nvme/tmp/ta-0517-target/build.log", &ctx),
+        "<TMP>/ta-0517-target/build.log",
+        "ta-* directory names outside tmux socket context must not be rewritten as ta-<SOCKET>"
+    );
+    assert_eq!(
+        normalize_path_string("tmux -S /tmp/tmux-501/ta-a60d10b25edd attach", &ctx),
+        "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach",
+        "real tmux socket paths still need stable socket tokenization"
+    );
 }

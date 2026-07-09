@@ -590,6 +590,7 @@ fn restart_with_selected_team_and_transport(
             &successful_agents,
             &failed_agents,
             "fail",
+            None,
         )?;
         return Ok(RestartReport::Failed {
             session_name,
@@ -606,6 +607,7 @@ fn restart_with_selected_team_and_transport(
             &successful_agents,
             &failed_agents,
             "fail",
+            None,
         )?;
         return Ok(RestartReport::Failed {
             session_name,
@@ -824,6 +826,7 @@ fn restart_with_selected_team_and_transport(
             &successful_agents,
             &failed_agents,
             "fail",
+            None,
         )?;
         return Ok(RestartReport::Failed {
             session_name,
@@ -833,7 +836,9 @@ fn restart_with_selected_team_and_transport(
         });
     }
     drop(lifecycle_lock);
-    let coordinator_started = start_coordinator_for_workspace(&selected.run_workspace)?;
+    let coordinator =
+        start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
+    let coordinator_started = coordinator.ok;
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
         &state,
@@ -862,6 +867,7 @@ fn restart_with_selected_team_and_transport(
             &successful_agents,
             &failed_agents,
             "partial",
+            Some(&coordinator),
         )?;
         // 0.3.30 Bug 1: auto-attach on partial restart too — workers that did
         // come up still need a leader_receiver pane to deliver report_result.
@@ -875,6 +881,7 @@ fn restart_with_selected_team_and_transport(
             agents: successful_agents,
             failed_agents,
             coordinator_started,
+            coordinator,
             next_actions,
             attach_commands,
         });
@@ -884,6 +891,7 @@ fn restart_with_selected_team_and_transport(
         &successful_agents,
         &failed_agents,
         "ok",
+        Some(&coordinator),
     )?;
     // 0.3.30 Bug 1: auto-attach leader from caller's TMUX_PANE if available.
     // Mirrors quick-start's seed_launched_owner_from_env behaviour: a restart
@@ -900,6 +908,7 @@ fn restart_with_selected_team_and_transport(
         session_name,
         agents: successful_agents,
         coordinator_started,
+        coordinator,
         next_actions,
         attach_commands,
     })
@@ -1953,27 +1962,32 @@ fn write_restart_completed_event(
     successful_agents: &[RestartedAgent],
     failed_agents: &[RestartFailedAgent],
     rc: &str,
+    coordinator: Option<&crate::lifecycle::CoordinatorStartSummary>,
 ) -> Result<(), LifecycleError> {
+    let mut payload = serde_json::json!({
+        "rc": rc,
+        "status": rc,
+        "successful_agents": successful_agents
+            .iter()
+            .map(|agent| agent.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        "failed_agents": failed_agents
+            .iter()
+            .map(|failure| serde_json::json!({
+                "agent_id": failure.agent_id.as_str(),
+                "phase": failure.phase,
+                "error": failure.error,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    if let (Some(object), Some(coordinator)) = (payload.as_object_mut(), coordinator) {
+        object.insert(
+            "coordinator".to_string(),
+            crate::lifecycle::coordinator_start_summary_value(coordinator),
+        );
+    }
     crate::event_log::EventLog::new(workspace)
-        .write(
-            "restart.completed",
-            serde_json::json!({
-                "rc": rc,
-                "status": rc,
-                "successful_agents": successful_agents
-                    .iter()
-                    .map(|agent| agent.agent_id.as_str())
-                    .collect::<Vec<_>>(),
-                "failed_agents": failed_agents
-                    .iter()
-                    .map(|failure| serde_json::json!({
-                        "agent_id": failure.agent_id.as_str(),
-                        "phase": failure.phase,
-                        "error": failure.error,
-                    }))
-                    .collect::<Vec<_>>(),
-            }),
-        )
+        .write("restart.completed", payload)
         .map(|_| ())
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }

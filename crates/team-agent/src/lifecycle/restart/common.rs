@@ -449,10 +449,13 @@ fn window_present_in_live(
     false
 }
 
-pub(super) fn start_coordinator_for_workspace(workspace: &Path) -> Result<bool, LifecycleError> {
+pub(super) fn start_coordinator_for_workspace(
+    workspace: &Path,
+    team_key: Option<&str>,
+) -> Result<crate::lifecycle::CoordinatorStartSummary, LifecycleError> {
     let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
-    crate::coordinator::start_coordinator(&workspace)
-        .map(|report| report.ok)
+    crate::coordinator::health::start_coordinator_with_team(&workspace, team_key)
+        .map(|report| crate::lifecycle::CoordinatorStartSummary::from_start_report(&report))
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 

@@ -107,20 +107,20 @@ pub enum TickError {
 /// returns `None` and the tick falls back to the raw state — preserving
 /// behavior for legacy single-team workspaces and tests that don't seed
 /// `teams.<key>`. Sibling teams under `state.teams.*` are NOT touched.
-fn coordinator_team_scoped_state(workspace: &std::path::Path, raw_state: &Value) -> Option<Value> {
+fn coordinator_team_scoped_state(
+    workspace: &std::path::Path,
+    raw_state: &Value,
+    daemon_team_key: Option<&str>,
+) -> Option<Value> {
+    let teams = raw_state.get("teams").and_then(Value::as_object)?;
     let active = raw_state
         .get("active_team_key")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())?;
-    let has_team_entry = raw_state
-        .get("teams")
-        .and_then(Value::as_object)
-        .map(|teams| teams.contains_key(active))
-        .unwrap_or(false);
-    if !has_team_entry {
-        return None;
-    }
-    crate::state::projection::select_runtime_state(workspace, Some(active)).ok()
+        .filter(|s| !s.is_empty());
+    let selected = daemon_team_key
+        .filter(|key| !key.is_empty() && teams.contains_key(*key))
+        .or_else(|| active.filter(|key| teams.contains_key(*key)))?;
+    crate::state::projection::select_runtime_state(workspace, Some(selected)).ok()
 }
 
 // ===========================================================================
@@ -149,6 +149,10 @@ pub struct Coordinator {
     /// transport 控制面(tmux session 存活探测等;经 trait 注入,可 mock)。
     #[allow(dead_code)]
     transport: Box<dyn crate::transport::Transport>,
+    /// Daemon CLI-selected team key. When present, tick projection uses this
+    /// instead of a stale root active_team_key.
+    #[allow(dead_code)]
+    daemon_team_key: Option<String>,
     /// bug-084 save 注入钩。`None` ⇔ 真实 `state::save_runtime_state`。
     #[allow(dead_code)]
     save_hook: Option<SaveHook>,
@@ -168,9 +172,15 @@ impl Coordinator {
             workspace,
             provider_registry,
             transport,
+            daemon_team_key: None,
             save_hook: None,
             order_recorder: None,
         }
+    }
+
+    pub(crate) fn with_team_key(mut self, team_key: Option<String>) -> Self {
+        self.daemon_team_key = team_key.filter(|key| !key.is_empty());
+        self
     }
 
     /// 测试装配:直接构出 `Coordinator`(不经 `new` 的 `unimplemented!()`),注入 mock
@@ -189,6 +199,7 @@ impl Coordinator {
             workspace,
             provider_registry,
             transport,
+            daemon_team_key: None,
             save_hook,
             order_recorder,
         }
@@ -224,8 +235,12 @@ impl Coordinator {
         // `team-prerelease-040-round3b`) and emit `coordinator.session_missing`
         // even though the right session is alive. Fall back to raw state when
         // no team scope can be derived (legacy single-team workspaces).
-        let mut state = coordinator_team_scoped_state(self.workspace.as_path(), &raw_state)
-            .unwrap_or(raw_state);
+        let mut state = coordinator_team_scoped_state(
+            self.workspace.as_path(),
+            &raw_state,
+            self.daemon_team_key.as_deref(),
+        )
+        .unwrap_or(raw_state);
         let store = crate::message_store::MessageStore::open(self.workspace.as_path())?;
         let event_log = EventLog::new(self.workspace.as_path());
         increment_coordinator_tick_iteration_count(&self.workspace);
@@ -1264,27 +1279,7 @@ impl Coordinator {
     /// `coordinator_health`(`lifecycle.py:26`)。pid + meta + schema 三合一健康。
     /// doctor / start 前置调它。`ok = running ∧ metadata_ok ∧ schema_ok`。
     pub fn health(&self) -> Result<HealthReport, TickError> {
-        let schema = self.schema_health();
-        let pid_path = coordinator_pid_path(&self.workspace);
-        let pid = read_pid_file(&pid_path);
-        let (status, running) = match pid {
-            Some(pid) if pid_is_running(pid).unwrap_or(false) => {
-                (CoordinatorHealthStatus::Running, true)
-            }
-            Some(_) => (CoordinatorHealthStatus::Stale, false),
-            None if pid_path.exists() => (CoordinatorHealthStatus::InvalidPid, false),
-            None => (CoordinatorHealthStatus::Missing, false),
-        };
-        let metadata = read_coordinator_metadata(&self.workspace);
-        let metadata_ok = pid.is_some_and(|p| coordinator_metadata_ok(metadata.as_ref(), p));
-        Ok(HealthReport {
-            ok: running && metadata_ok && schema.ok,
-            status,
-            pid,
-            metadata,
-            metadata_ok,
-            schema,
-        })
+        Ok(super::health::coordinator_health(&self.workspace))
     }
 
     /// `start_coordinator`(`lifecycle.py:49`)。幂等启动:已健康 no-op;metadata 不兼容先 stop 再起;
@@ -1292,40 +1287,7 @@ impl Coordinator {
     /// Python 是 `python -m team_agent.coordinator`,`lifecycle.py:108`)。
     /// **schema 兼容门**:三元任一不匹配 → restart_incompatible,**不可静默继续**(card §89)。
     pub fn start(&self) -> Result<StartReport, StartError> {
-        let health = self
-            .health()
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        if health.ok {
-            return Ok(StartReport {
-                ok: true,
-                pid: health.pid,
-                status: StartOutcome::AlreadyRunning,
-                log: Some(coordinator_log_path(&self.workspace)),
-                schema_error: None,
-                action: None,
-            });
-        }
-        if !health.schema.ok {
-            return Ok(StartReport {
-                ok: false,
-                pid: health.pid,
-                status: StartOutcome::SchemaIncompatible,
-                log: None,
-                schema_error: health.schema.error,
-                action: health.schema.action,
-            });
-        }
-        let pid = Pid::new(std::process::id());
-        write_coordinator_metadata(&self.workspace, pid, MetadataSource::Start)?;
-        std::fs::write(coordinator_pid_path(&self.workspace), pid.to_string())?;
-        Ok(StartReport {
-            ok: true,
-            pid: Some(pid),
-            status: StartOutcome::Started,
-            log: Some(coordinator_log_path(&self.workspace)),
-            schema_error: None,
-            action: None,
-        })
+        super::health::start_coordinator(&self.workspace)
     }
 
     /// `stop_coordinator`(`lifecycle.py:229`)。SIGTERM + 清 pid/meta。pid 非整数 → 清文件返回。
@@ -2542,6 +2504,46 @@ mod u1_tests {
         assert!(
             has_capture_failure,
             "capture_missing failure must be visible in events.jsonl; got {events}"
+        );
+    }
+
+    #[test]
+    fn daemon_team_key_projection_beats_stale_root_active_team_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "team-agent-daemon-team-key-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = serde_json::json!({
+            "active_team_key": "stale-b",
+            "session_name": "team-stale-b",
+            "teams": {
+                "fresh-a": {
+                    "active_team_key": "fresh-a",
+                    "team_key": "fresh-a",
+                    "session_name": "team-fresh-a",
+                    "agents": {}
+                },
+                "stale-b": {
+                    "active_team_key": "stale-b",
+                    "team_key": "stale-b",
+                    "session_name": "team-stale-b",
+                    "agents": {}
+                }
+            }
+        });
+        crate::state::persist::save_runtime_state(&dir, &raw).unwrap();
+
+        let selected =
+            coordinator_team_scoped_state(&dir, &raw, Some("fresh-a")).expect("selected team");
+
+        assert_eq!(
+            selected.get("session_name").and_then(Value::as_str),
+            Some("team-fresh-a")
         );
     }
 }

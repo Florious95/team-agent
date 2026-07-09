@@ -83,6 +83,52 @@ impl PlanId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinatorStartSummary {
+    pub ok: bool,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub binary_path: Option<String>,
+    pub binary_version: Option<String>,
+    pub rotation_reason: Option<String>,
+}
+
+impl CoordinatorStartSummary {
+    pub fn from_start_report(report: &crate::coordinator::StartReport) -> Self {
+        Self {
+            ok: report.ok,
+            status: coordinator_start_status_wire(report.status).to_string(),
+            pid: report.pid.map(|pid| pid.get()),
+            binary_path: report.binary_path.clone(),
+            binary_version: report.binary_version.clone(),
+            rotation_reason: report.rotation_reason.clone(),
+        }
+    }
+}
+
+fn coordinator_start_status_wire(status: crate::coordinator::StartOutcome) -> &'static str {
+    match status {
+        crate::coordinator::StartOutcome::AlreadyRunning => "already_running",
+        crate::coordinator::StartOutcome::RestartIncompatibleStopFailed => {
+            "restart_incompatible_stop_failed"
+        }
+        crate::coordinator::StartOutcome::SchemaIncompatible => "schema_incompatible",
+        crate::coordinator::StartOutcome::Started => "started",
+        crate::coordinator::StartOutcome::StartedAfterRotation => "started_after_rotation",
+    }
+}
+
+pub fn coordinator_start_summary_value(summary: &CoordinatorStartSummary) -> serde_json::Value {
+    serde_json::json!({
+        "ok": summary.ok,
+        "status": summary.status,
+        "pid": summary.pid,
+        "binary_path": summary.binary_path,
+        "binary_version": summary.binary_version,
+        "rotation_reason": summary.rotation_reason,
+    })
+}
+
 impl std::fmt::Display for PlanId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -650,6 +696,7 @@ pub enum RestartReport {
         session_name: SessionName,
         agents: Vec<RestartedAgent>,
         coordinator_started: bool,
+        coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
     },
@@ -660,6 +707,7 @@ pub enum RestartReport {
         agents: Vec<RestartedAgent>,
         failed_agents: Vec<RestartFailedAgent>,
         coordinator_started: bool,
+        coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
         attach_commands: Vec<String>,
     },

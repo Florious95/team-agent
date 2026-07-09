@@ -57,20 +57,30 @@ use super::*;
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-    // ── status #3: coordinator = coordinator_health(ws) FULL 8-key shape in golden order ─────────────
-    // GOLDEN coordinator_health: {ok,status,pid,metadata,metadata_ok,schema_ok,schema_error,schema}.
-    // RUST mod.rs:105-112 emits a 6-key subset {status,ok,pid,metadata_ok,schema_ok,schema_version}
-    // (no metadata/schema_error; flat schema_version instead of nested schema). RED on key-order. ──────
+    // ── status #3: coordinator = coordinator_health(ws) FULL shape in golden order ──────────────────
+    // 0.5.18 adds binary identity diagnostics to expose stale coordinator rotation reasons.
     #[test]
-    fn status_coordinator_is_full_health_eight_key_shape() {
+    fn status_coordinator_is_full_health_identity_shape() {
         let ws = tmp_workspace();
         let v = status_port::status(&ws, false, true).expect("status");
         let coord = v["coordinator"].as_object().expect("coordinator dict");
         let order: Vec<&str> = coord.keys().map(String::as_str).collect();
         assert_eq!(
             order,
-            vec!["ok", "status", "pid", "metadata", "metadata_ok", "schema_ok", "schema_error", "schema"],
-            "golden coordinator_health 8-key insertion order; Rust emits a 6-key subset. got {order:?}"
+            vec![
+                "ok",
+                "status",
+                "pid",
+                "metadata",
+                "metadata_ok",
+                "metadata_mismatch_reason",
+                "binary_path",
+                "binary_version",
+                "schema_ok",
+                "schema_error",
+                "schema"
+            ],
+            "golden coordinator_health insertion order with 0.5.18 identity fields; got {order:?}"
         );
         assert!(
             coord.get("schema_version").is_none(),

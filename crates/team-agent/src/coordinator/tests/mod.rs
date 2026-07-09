@@ -13,10 +13,13 @@ fn ws() -> WorkspacePath {
 }
 
 fn meta(pid: u32, proto: u32, schema: i64) -> CoordinatorMetadata {
+    let identity = current_coordinator_binary_identity();
     CoordinatorMetadata {
         pid: Pid(pid),
         protocol_version: proto,
         message_store_schema_version: schema,
+        binary_path: Some(identity.binary_path),
+        binary_version: Some(identity.binary_version),
         source: MetadataSource::Boot,
         updated_at: "2026-06-02T00:00:00+00:00".to_string(),
     }

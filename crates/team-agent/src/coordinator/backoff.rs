@@ -61,18 +61,14 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
     // seed-state trap where writing active_team_key to state ahead
     // of coord spawn made downstream launch code think "existing
     // runtime, use restart" and skip spec compile.
-    let team_key_from_state = args
-        .team_key
-        .clone()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            state
-                .as_ref()
-                .and_then(|s| s.get("active_team_key"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        });
+    let team_key_from_state = args.team_key.clone().filter(|s| !s.is_empty()).or_else(|| {
+        state
+            .as_ref()
+            .and_then(|s| s.get("active_team_key"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
     let mut factory_input = crate::transport_factory::TransportFactoryInput::new(
         args.workspace.as_path(),
         crate::transport_factory::TransportPurpose::Coordinator,
@@ -104,7 +100,8 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
                 args.workspace.clone(),
                 Box::new(RealProviderRegistry),
                 Box::new(sel.backend),
-            );
+            )
+            .with_team_key(team_key_from_state.clone());
             return run_daemon_with_coordinator_and_boot_tmux(&args, &coord, Some(metadata));
         }
     };
@@ -120,7 +117,8 @@ pub fn run_daemon(args: DaemonArgs) -> Result<(), DaemonError> {
         args.workspace.clone(),
         Box::new(RealProviderRegistry),
         resolved.backend,
-    );
+    )
+    .with_team_key(team_key_from_state.clone());
     run_daemon_with_coordinator_and_boot_tmux(&args, &coordinator, Some(tmux_metadata))
 }
 
@@ -147,11 +145,14 @@ fn run_daemon_with_coordinator_and_boot_tmux(
     let pid = Pid::new(std::process::id());
     std::fs::write(coordinator_pid_path(&args.workspace), pid.to_string())?;
     write_coordinator_metadata(&args.workspace, pid, MetadataSource::Boot)?;
+    let binary_identity = crate::coordinator::current_coordinator_binary_identity();
 
     let event_log = EventLog::new(args.workspace.as_path());
     let mut boot_event = serde_json::json!({
         "workspace": args.workspace.as_path().to_string_lossy(),
         "once": args.once,
+        "binary_path": binary_identity.binary_path,
+        "binary_version": binary_identity.binary_version,
     });
     if let Some(metadata) = tmux_metadata {
         if let Some(object) = boot_event.as_object_mut() {

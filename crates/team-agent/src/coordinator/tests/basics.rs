@@ -38,6 +38,7 @@ fn status_enums_serialize_to_exact_python_strings() {
         (serde_json::to_string(&StartOutcome::RestartIncompatibleStopFailed).unwrap(), "\"restart_incompatible_stop_failed\""),
         (serde_json::to_string(&StartOutcome::SchemaIncompatible).unwrap(), "\"schema_incompatible\""),
         (serde_json::to_string(&StartOutcome::Started).unwrap(), "\"started\""),
+        (serde_json::to_string(&StartOutcome::StartedAfterRotation).unwrap(), "\"started_after_rotation\""),
         (serde_json::to_string(&StopOutcome::Missing).unwrap(), "\"missing\""),
         (serde_json::to_string(&StopOutcome::InvalidPidRemoved).unwrap(), "\"invalid_pid_removed\""),
         (serde_json::to_string(&StopOutcome::KillFailed).unwrap(), "\"kill_failed\""),
@@ -173,6 +174,9 @@ fn coordinator_metadata_json_field_names_are_stable() {
     assert_eq!(json["pid"], 123);
     assert_eq!(json["protocol_version"], 2);
     assert_eq!(json["message_store_schema_version"], 3);
+    let identity = current_coordinator_binary_identity();
+    assert_eq!(json["binary_path"], identity.binary_path);
+    assert_eq!(json["binary_version"], identity.binary_version);
     assert_eq!(json["source"], "boot");
     assert_eq!(json["updated_at"], "2026-06-02T00:00:00+00:00");
 }
