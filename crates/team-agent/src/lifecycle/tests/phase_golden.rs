@@ -478,7 +478,6 @@ impl EnvVarGuard {
         }
         Self { key, previous }
     }
-
 }
 
 impl Drop for EnvVarGuard {
@@ -580,6 +579,9 @@ fn normalize_string(text: String, ctx: &mut NormalizeCtx, key: Option<&str>) -> 
     let key = key.unwrap_or_default();
     if key_is_timestamp(key) {
         return json!("<TS>");
+    }
+    if text == crate::packaging::Version::current().as_str() {
+        return json!("<VERSION>");
     }
     if key.contains("endpoint") && value_looks_like_endpoint_path(&text) {
         return json!("<SOCKET>");
@@ -898,5 +900,26 @@ fn phase_golden_normalizer_does_not_treat_cargo_target_dir_as_socket_token() {
         normalize_path_string("tmux -S /tmp/tmux-501/ta-a60d10b25edd attach", &ctx),
         "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach",
         "real tmux socket paths still need stable socket tokenization"
+    );
+}
+
+#[test]
+fn phase_golden_normalizer_maps_current_version_by_value_only() {
+    let mut ctx = NormalizeCtx {
+        workspace_aliases: Vec::new(),
+        temp_aliases: Vec::new(),
+        pane_ids: BTreeMap::new(),
+    };
+    let current = crate::packaging::Version::current().as_str().to_string();
+
+    assert_eq!(
+        normalize_string(current.clone(), &mut ctx, Some("arbitrary_field")),
+        json!("<VERSION>"),
+        "current binary version values must normalize without depending on field names"
+    );
+    assert_eq!(
+        normalize_string(format!("version={current}"), &mut ctx, Some("binary_version")),
+        json!(format!("version={current}")),
+        "version normalization must be exact-value based, not a broad substring or field-name rewrite"
     );
 }
