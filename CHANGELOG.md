@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.18
+
+- **Fix: coordinator version-aware rotation.** Coordinator metadata now embeds binary identity (`current_exe` path + `PKG_VERSION` as canonical truth). On startup, if the running coordinator's identity does not match the current binary or the metadata is absent (legacy), `rotation_required` is set, the stale process tree is stopped, and the current binary is spawned in its place. Same-version coordinators that are healthy are treated as idempotent — no rotation occurs.
+- **Fix: `shutdown` now uses three-branch stop strategy.** Three shutdown paths are distinguished: bare coordinator (no workers), scoped-last-live (coordinator is the last live process in the team scope), and scoped-live-sibling (coordinator with surviving sibling workers). Each path carries a `coordinator_stop_reason` field for audit and diagnostics.
+- **Fix: `restart`, `status`, and `collect` now return a structured coordinator object.** The coordinator section of these command outputs now includes `status`, `pid`, binary identity fields, and `rotation_reason`, giving operators full visibility into coordinator lifecycle state without inspecting raw process tables.
+- **Fix: `phase_golden` normalizer now correctly token-substitutes debug build binary paths under custom `CARGO_TARGET_DIR`.** The golden normalizer's bin-path token substitution previously missed paths under non-default `CARGO_TARGET_DIR` layouts. The `<TEAM_AGENT_BIN>` token now matches the actual debug binary path in all CARGO_TARGET_DIR configurations, eliminating the environment-specific phase B–F flake. (Second-effect evidence: `--lib` 1573/0 zero-exemption on this machine after 0.5.18 lands.)
+- **New: `coordinator_version_rotation_contract` (6/6).** Contracts covering: rotation triggered on binary mismatch, legacy coordinator without metadata triggers rotation, same-version healthy coordinator is idempotent, rotation stops old process tree before spawning new, post-rotation coordinator carries current identity, `coordinator_stop_reason` field is present in shutdown output.
+
 ## 0.5.17
 
 - **Fix: test isolation — `HermeticTestEnv` enforces four isolation planes (HOME / registry / socket / env).** A new `HermeticTestEnv` helper in `tests/support/hermetic.rs` provides a per-test isolated HOME directory, a private leader-registry database, an independent socket path, and a clean `TEAM_AGENT_*` environment block. A compile-time static guard prevents tests that call the real registry or real HOME from compiling without opt-in annotation, making side-effect leakage a build error rather than a flaky failure.
