@@ -695,6 +695,9 @@ pub enum RestartReport {
     Restarted {
         session_name: SessionName,
         agents: Vec<RestartedAgent>,
+        /// Compatibility field: true means the coordinator requirement is
+        /// satisfied. The structured `coordinator` summary carries started vs
+        /// already-running vs rotated detail.
         coordinator_started: bool,
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
@@ -706,6 +709,9 @@ pub enum RestartReport {
         session_name: SessionName,
         agents: Vec<RestartedAgent>,
         failed_agents: Vec<RestartFailedAgent>,
+        /// Compatibility field: true means the coordinator requirement is
+        /// satisfied. The structured `coordinator` summary carries started vs
+        /// already-running vs rotated detail.
         coordinator_started: bool,
         coordinator: CoordinatorStartSummary,
         next_actions: Vec<String>,
