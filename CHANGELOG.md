@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.17
+
+- **Fix: test isolation — `HermeticTestEnv` enforces four isolation planes (HOME / registry / socket / env).** A new `HermeticTestEnv` helper in `tests/support/hermetic.rs` provides a per-test isolated HOME directory, a private leader-registry database, an independent socket path, and a clean `TEAM_AGENT_*` environment block. A compile-time static guard prevents tests that call the real registry or real HOME from compiling without opt-in annotation, making side-effect leakage a build error rather than a flaky failure.
+- **Fix: `phase_golden` sequential-order pollution eliminated in matching environments.** With `HermeticTestEnv`, the phase B–F golden fixtures no longer share state with the host's active coordinator or with each other. In environments where all four isolation planes are satisfied, both `--lib` and `--tests` gates now pass with zero exemptions. (Note: environments with a custom `CARGO_TARGET_DIR` path not yet covered by the golden normalizer's bin-path token may still see B–F red — tracked as follow-up H5.)
+- **Fix: `restart` auto-attach now registers as the fifth restart-source entry (`source=restart-auto-attach`).** The auto-attach path after `restart` was not emitting a registry entry, causing `team-agent status` to show a gap in the attach-source timeline. The entry is recorded as best-effort (failure does not abort restart) and carries `tmux_endpoint_source` for audit.
+- **Fix: real HOME registry no longer polluted by test fixtures.** Tests that previously called `register_leader` or `claim_endpoint` against the real `~/.team-agent/registry.db` now operate against the hermetic fixture database, eliminating the class of failures where a test fixture collided with a live host session (e.g., `team-video-workflow` socket conflict).
+- **New: `test_isolation_escape_contract` (6/6).** Six contracts verify: HOME isolation, registry isolation, socket isolation, env isolation, no cross-test state leakage, and static guard prevents unannotated real-registry calls.
+
 ## 0.5.16
 
 - **Fix: `report_result` attribution now uses physical submit boundary (0.5.14/0.5.15 frozen bug — attribution race).** `current_turn` was armed at coordinator start, causing any `report_result` injected before the worker's physical submit window to steal attribution from an unrelated task. A `SubmitObserver` now arms `current_turn` only after a successful tmux Enter injection and before the validation poll, ensuring attribution is live only inside the true physical submit window. Fallback priority is: explicit `task_id` → current-turn (armed) → last-delivered → task-row lookup.
