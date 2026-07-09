@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.16
+
+- **Fix: `report_result` attribution now uses physical submit boundary (0.5.14/0.5.15 frozen bug — attribution race).** `current_turn` was armed at coordinator start, causing any `report_result` injected before the worker's physical submit window to steal attribution from an unrelated task. A `SubmitObserver` now arms `current_turn` only after a successful tmux Enter injection and before the validation poll, ensuring attribution is live only inside the true physical submit window. Fallback priority is: explicit `task_id` → current-turn (armed) → last-delivered → task-row lookup.
+- **Fix: `target_resolved` no longer acts as an attribution source.** The `message_is_reportable` predicate previously included `target_resolved` messages, allowing resolution events to steal task attribution. `target_resolved` is now filtered out by `latest_reportable_message_from_db` which requires an independent predicate excluding this event type.
+- **Fix: endpoint convergence is now persisted before the converged response is returned (0.5.14/0.5.15 frozen bug — persistence race).** `persist::preserve_latest_endpoint_convergence_fields` uses an epoch-aware monotonic guard (`owner_epoch` CAS) to prevent a stale coordinator `save` from rolling back a freshly written convergence marker. `lease::verify_persisted_topology_convergence` performs a read-back verification on both the state file and the in-memory view before returning `converged`, ensuring the caller never receives a false-converged signal.
+- **New: `endpoint_convergence_persistence_contract` (3/3).** Contracts covering: convergence is persisted before response, stale coordinator save cannot roll back convergence, restart refused-dirty-topology does not boot coordinator.
+- **New: `result_attribution_race_contract` (2/2).** Contracts covering: physical submit window `report_result` without `task_id` belongs to the direct message, `target_resolved` without physical submit does not steal a no-task report.
+
 ## 0.5.15
 
 - **Fix: `restart` now uses the converged endpoint for both spawn and attach commands (0.5.14 frozen bug).** After a successful `claim-leader` or `takeover` that triggered endpoint convergence, `restart` still opened workers on the old socket because spawn and attach commands were rendered from three independent state reads. A single `ResolvedRestartContext` (field: `selected`, `transport`, `tmux_endpoint_source`) is now resolved once at restart entry and threaded through the entire path, eliminating the stale-socket false-green loop.
