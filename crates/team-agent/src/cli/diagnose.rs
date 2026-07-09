@@ -165,6 +165,125 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
     (Value::Array(issues), Value::Array(repairs))
 }
 
+pub(crate) fn diagnose_runtime_for_workspace(
+    workspace: &std::path::Path,
+    state: &Value,
+    backend: &dyn Transport,
+) -> (Value, Value) {
+    let (mut issues, mut repairs) = diagnose_runtime(state, backend);
+    append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
+    (issues, repairs)
+}
+
+fn append_coordinator_health_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let workspace = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let health = crate::coordinator::coordinator_health(&workspace);
+    let Some(id) = coordinator_issue_id(state, &health) else {
+        return;
+    };
+    if let Some(items) = issues.as_array_mut() {
+        items.push(coordinator_issue_value(id, &health, workspace.as_path()));
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(coordinator_repair_hint(id, &health));
+    }
+}
+
+fn coordinator_issue_id(
+    state: &Value,
+    health: &crate::coordinator::HealthReport,
+) -> Option<&'static str> {
+    match health.status {
+        crate::coordinator::CoordinatorHealthStatus::Stale
+        | crate::coordinator::CoordinatorHealthStatus::InvalidPid => {
+            Some("coordinator_unavailable")
+        }
+        crate::coordinator::CoordinatorHealthStatus::Running => {
+            if !health.metadata_ok {
+                return match health.metadata_mismatch_reason.as_deref() {
+                    Some(
+                        "binary_identity_missing"
+                        | "binary_version_mismatch"
+                        | "binary_path_mismatch",
+                    ) => Some("coordinator_stale_identity"),
+                    Some(_) | None => Some("coordinator_unavailable"),
+                };
+            }
+            if !health.schema.ok {
+                Some("coordinator_schema_incompatible")
+            } else {
+                None
+            }
+        }
+        crate::coordinator::CoordinatorHealthStatus::Missing => {
+            coordinator_expected(state).then_some("coordinator_unavailable")
+        }
+    }
+}
+
+fn coordinator_issue_value(
+    id: &str,
+    health: &crate::coordinator::HealthReport,
+    workspace: &std::path::Path,
+) -> Value {
+    json!({
+        "id": id,
+        "status": coordinator_status_wire(health.status),
+        "pid": health.pid.map(|pid| pid.get()),
+        "metadata_ok": health.metadata_ok,
+        "metadata_mismatch_reason": health.metadata_mismatch_reason.clone(),
+        "binary_path": health.current_binary_identity.binary_path.clone(),
+        "binary_version": health.current_binary_identity.binary_version.clone(),
+        "schema_ok": health.schema.ok,
+        "coordinator_log": crate::coordinator::coordinator_log_path(
+            &crate::coordinator::WorkspacePath::new(workspace.to_path_buf())
+        )
+        .to_string_lossy()
+        .to_string(),
+    })
+}
+
+fn coordinator_repair_hint(id: &str, _health: &crate::coordinator::HealthReport) -> Value {
+    let hint_action = match id {
+        "coordinator_schema_incompatible" => "team-agent repair-state --schema",
+        _ => "team-agent restart",
+    };
+    json!({
+        "issue": id,
+        "action_required": true,
+        "advisory": true,
+        "broken_class": id,
+        "hint_action": hint_action,
+        "dedupe_key": id,
+        "action": format!("{hint_action} # diagnose only reports coordinator health; it does not start, stop, or rotate the coordinator"),
+    })
+}
+
+fn coordinator_expected(state: &Value) -> bool {
+    state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .is_some_and(|session| !session.is_empty())
+        || state
+            .get("agents")
+            .and_then(Value::as_object)
+            .is_some_and(|agents| !agents.is_empty())
+}
+
+fn coordinator_status_wire(status: crate::coordinator::CoordinatorHealthStatus) -> &'static str {
+    match status {
+        crate::coordinator::CoordinatorHealthStatus::Missing => "missing",
+        crate::coordinator::CoordinatorHealthStatus::InvalidPid => "invalid_pid",
+        crate::coordinator::CoordinatorHealthStatus::Running => "running",
+        crate::coordinator::CoordinatorHealthStatus::Stale => "stale",
+    }
+}
+
 fn topology_repair_hint(issue: &str) -> Value {
     json!({
         "issue": issue,
@@ -244,6 +363,72 @@ mod tests {
         );
         std::fs::write(&path, text).expect("write rollout");
         path
+    }
+
+    fn coordinator_health_fixture(
+        status: crate::coordinator::CoordinatorHealthStatus,
+        metadata_mismatch_reason: Option<&str>,
+        schema_ok: bool,
+    ) -> crate::coordinator::HealthReport {
+        crate::coordinator::HealthReport {
+            ok: matches!(status, crate::coordinator::CoordinatorHealthStatus::Running)
+                && metadata_mismatch_reason.is_none()
+                && schema_ok,
+            status,
+            pid: Some(crate::coordinator::Pid::new(std::process::id())),
+            metadata: None,
+            metadata_ok: metadata_mismatch_reason.is_none(),
+            metadata_mismatch_reason: metadata_mismatch_reason.map(ToString::to_string),
+            current_binary_identity: crate::coordinator::CoordinatorBinaryIdentity {
+                binary_path: "/current/team-agent".to_string(),
+                binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            schema: crate::coordinator::SchemaHealth {
+                ok: schema_ok,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
+                error: None,
+                action: None,
+            },
+        }
+    }
+
+    #[test]
+    fn coordinator_issue_id_maps_stale_pid_to_unavailable() {
+        let health = coordinator_health_fixture(
+            crate::coordinator::CoordinatorHealthStatus::Stale,
+            None,
+            true,
+        );
+        assert_eq!(
+            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
+            Some("coordinator_unavailable")
+        );
+    }
+
+    #[test]
+    fn coordinator_issue_id_maps_binary_identity_to_stale_identity() {
+        let health = coordinator_health_fixture(
+            crate::coordinator::CoordinatorHealthStatus::Running,
+            Some("binary_version_mismatch"),
+            true,
+        );
+        assert_eq!(
+            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
+            Some("coordinator_stale_identity")
+        );
+    }
+
+    #[test]
+    fn coordinator_issue_id_maps_schema_failure_to_schema_incompatible() {
+        let health = coordinator_health_fixture(
+            crate::coordinator::CoordinatorHealthStatus::Running,
+            None,
+            false,
+        );
+        assert_eq!(
+            coordinator_issue_id(&json!({"session_name": "team-fixture"}), &health),
+            Some("coordinator_schema_incompatible")
+        );
     }
 
     #[test]

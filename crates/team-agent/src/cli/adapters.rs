@@ -732,7 +732,8 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
                 &selected.run_workspace,
             )),
         };
-    let (issues, suggested_repairs) = diagnose_runtime(&state, backend.as_ref());
+    let (issues, suggested_repairs) =
+        diagnose_runtime_for_workspace(&selected.run_workspace, &state, backend.as_ref());
     let ok = issues.as_array().is_some_and(Vec::is_empty);
     Ok(CmdResult::from_json(
         json!({
