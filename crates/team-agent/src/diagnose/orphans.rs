@@ -9,7 +9,9 @@ use crate::cli::CliError;
 use crate::coordinator::health::{
     coordinator_metadata_ok, pid_is_running, read_coordinator_metadata, terminate_pid_tree,
 };
-use crate::coordinator::types::{OrphanReason, Pid, WorkspacePath};
+use crate::coordinator::types::{
+    CoordinatorMetadata, OrphanReason, Pid, WorkspacePath, PROTOCOL_VERSION,
+};
 // Phase 1d Batch 6: `TmuxBackend` import removed — all sites now use
 // `transport_factory::tmux_socket_name_transport` for grep-visibility.
 use crate::transport::{SessionName, Transport};
@@ -477,8 +479,7 @@ fn ps_command_rows() -> Vec<ProcessRow> {
         Command::new("ps").args(["-axww", "-o", "pid=,command="]),
         "ps_table",
         None,
-    )
-    {
+    ) {
         Ok(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
@@ -490,9 +491,7 @@ fn ps_command_rows() -> Vec<ProcessRow> {
 
 fn parse_ps_command_line(line: &str) -> Option<ProcessRow> {
     let line = line.trim_start();
-    let split = line
-        .find(char::is_whitespace)
-        .unwrap_or(line.len());
+    let split = line.find(char::is_whitespace).unwrap_or(line.len());
     let pid = line.get(..split)?.trim().parse::<u32>().ok()?;
     let command = line.get(split..)?.trim().to_string();
     Some(ProcessRow {
@@ -568,13 +567,22 @@ fn classify_workspace_orphan(workspace: &Path, pid: Pid) -> Option<OrphanReason>
     }
     let workspace_path = WorkspacePath::new(workspace.to_path_buf());
     let metadata = read_coordinator_metadata(&workspace_path);
-    if metadata.is_some() && !coordinator_metadata_ok(metadata.as_ref(), pid) {
+    if coordinator_process_metadata_mismatch(metadata.as_ref(), pid) {
         return Some(OrphanReason::MetadataMismatch);
     }
     if pid_is_running(pid).ok() == Some(false) {
         return Some(OrphanReason::PidNotRunning);
     }
     None
+}
+
+fn coordinator_process_metadata_mismatch(metadata: Option<&CoordinatorMetadata>, pid: Pid) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    metadata.pid != pid
+        || metadata.protocol_version != PROTOCOL_VERSION
+        || metadata.message_store_schema_version != crate::db::schema::SCHEMA_VERSION
 }
 
 fn classify_workspace_without_pid(workspace: &Path) -> Option<OrphanReason> {
@@ -592,10 +600,7 @@ fn classify_workspace_without_pid(workspace: &Path) -> Option<OrphanReason> {
 
 fn ephemeral_workspace_hint(workspace: &Path) -> Option<String> {
     let text = workspace.to_string_lossy();
-    let patterns = [
-        "ta_doctor_comms_orphans-",
-        "team-agent-watcher-dedupe",
-    ];
+    let patterns = ["ta_doctor_comms_orphans-", "team-agent-watcher-dedupe"];
     patterns
         .iter()
         .find(|pattern| text.contains(**pattern))
@@ -626,8 +631,7 @@ fn ps_parent_map() -> BTreeMap<u32, u32> {
         Command::new("ps").args(["-axo", "pid=,ppid="]),
         "ps_parent",
         None,
-    )
-    {
+    ) {
         Ok(output) if output.status.success() => output,
         _ => return BTreeMap::new(),
     };
@@ -730,6 +734,24 @@ mod tests {
         assert_eq!(
             parse_workspace_arg(command),
             Some(PathBuf::from("/tmp/My Agent"))
+        );
+    }
+
+    #[test]
+    fn process_orphan_metadata_ignores_binary_identity_rotation() {
+        let metadata = CoordinatorMetadata {
+            pid: Pid::new(123),
+            protocol_version: PROTOCOL_VERSION,
+            message_store_schema_version: crate::db::schema::SCHEMA_VERSION,
+            binary_path: Some("/old/team-agent".to_string()),
+            binary_version: Some("0.5.17".to_string()),
+            source: crate::coordinator::MetadataSource::Boot,
+            updated_at: "2026-07-09T00:00:00+00:00".to_string(),
+        };
+
+        assert!(
+            !coordinator_process_metadata_mismatch(Some(&metadata), Pid::new(123)),
+            "binary identity drift is a rotation signal, not orphan cleanup proof"
         );
     }
 }

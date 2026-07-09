@@ -242,7 +242,7 @@ fn r2_lifecycle_lock_exists_precondition() {
     assert_public_operation(&rebuild, "restart");
     let drop_idx = rebuild.find("drop(lifecycle_lock);").unwrap();
     let coordinator_idx = rebuild
-        .find("start_coordinator_for_workspace(&selected.run_workspace)")
+        .find("start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))")
         .unwrap();
     let readiness_idx = rebuild.find("wait_restart_readiness_or_timeout(").unwrap();
     assert!(

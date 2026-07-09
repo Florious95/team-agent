@@ -301,12 +301,19 @@ fn start_report_value(report: &crate::coordinator::StartReport) -> serde_json::V
         }
         crate::coordinator::StartOutcome::SchemaIncompatible => "schema_incompatible",
         crate::coordinator::StartOutcome::Started => "started",
+        crate::coordinator::StartOutcome::StartedAfterRotation => "started_after_rotation",
     };
     let mut value = serde_json::json!({
         "ok": report.ok,
         "pid": report.pid.map(|p| p.get()),
         "status": status,
+        "binary_path": report.binary_path.clone(),
+        "binary_version": report.binary_version.clone(),
+        "rotation_reason": report.rotation_reason.clone(),
     });
+    if let Some(previous_pid) = report.previous_pid {
+        value["previous_pid"] = serde_json::json!(previous_pid.get());
+    }
     if let Some(log) = &report.log {
         value["log"] = serde_json::json!(log.to_string_lossy().to_string());
     }

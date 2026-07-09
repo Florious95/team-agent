@@ -13,7 +13,8 @@ use thiserror::Error;
 use crate::message_store::MessageStore;
 
 use super::types::{
-    CoordinatorHealthStatus, CoordinatorMetadata, HealthReport, MetadataSource, Pid, SchemaError,
+    CoordinatorBinaryIdentity, CoordinatorHealthStatus, CoordinatorMetadata,
+    CoordinatorMetadataMismatchReason, HealthReport, MetadataSource, Pid, SchemaError,
     SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome, StopReport,
     WatchCursor, WorkspacePath, PROTOCOL_VERSION, ROTATION_MARKER,
 };
@@ -27,6 +28,7 @@ use super::types::{
 /// `coordinator_health`(`lifecycle.py:38-46`):`running ∧ metadata_ok ∧ schema_ok` → typed report.
 pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
     let schema = message_store_schema_health(workspace);
+    let current_binary_identity = current_coordinator_binary_identity();
     let pid_path = coordinator_pid_path(workspace);
     let pid = read_pid_file(&pid_path);
     let status = match pid {
@@ -38,7 +40,14 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
         None => CoordinatorHealthStatus::Missing,
     };
     let metadata = read_coordinator_metadata(workspace);
-    let metadata_ok = pid.is_some_and(|p| coordinator_metadata_ok(metadata.as_ref(), p));
+    let metadata_mismatch = pid
+        .map(|p| coordinator_metadata_mismatch_reason_with_identity(
+            metadata.as_ref(),
+            p,
+            &current_binary_identity,
+        ))
+        .unwrap_or(Some(CoordinatorMetadataMismatchReason::MetadataMissing));
+    let metadata_ok = metadata_mismatch.is_none();
     let running = matches!(status, CoordinatorHealthStatus::Running);
     HealthReport {
         ok: running && metadata_ok && schema.ok,
@@ -46,6 +55,8 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
         pid,
         metadata,
         metadata_ok,
+        metadata_mismatch_reason: metadata_mismatch.map(|reason| reason.as_str().to_string()),
+        current_binary_identity,
         schema,
     }
 }
@@ -69,11 +80,16 @@ pub fn start_coordinator_with_team(
     team_key: Option<&str>,
 ) -> Result<StartReport, StartError> {
     let health = coordinator_health(workspace);
+    let identity = health.current_binary_identity.clone();
     if health.ok {
         return Ok(StartReport {
             ok: true,
             pid: health.pid,
             status: StartOutcome::AlreadyRunning,
+            previous_pid: None,
+            binary_path: Some(identity.binary_path),
+            binary_version: Some(identity.binary_version),
+            rotation_reason: None,
             log: Some(coordinator_log_path(workspace)),
             schema_error: None,
             action: None,
@@ -84,12 +100,54 @@ pub fn start_coordinator_with_team(
             ok: false,
             pid: health.pid,
             status: StartOutcome::SchemaIncompatible,
+            previous_pid: None,
+            binary_path: Some(identity.binary_path),
+            binary_version: Some(identity.binary_version),
+            rotation_reason: health.metadata_mismatch_reason,
             log: None,
             schema_error: health.schema.error,
             action: health.schema.action,
         });
     }
-    if health.pid.is_some() && !health.metadata_ok && health.metadata.is_some() {
+    let rotation_reason = if matches!(health.status, CoordinatorHealthStatus::Running)
+        && !health.metadata_ok
+    {
+        health.metadata_mismatch_reason.clone()
+    } else {
+        None
+    };
+    if matches!(health.status, CoordinatorHealthStatus::Running) && !health.metadata_ok {
+        crate::event_log::EventLog::new(workspace.as_path()).write(
+            "coordinator.rotation_required",
+            serde_json::json!({
+                "old_pid": health.pid.map(|pid| pid.get()),
+                "reason": rotation_reason.clone(),
+                "old_binary_path": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_path.clone()),
+                "old_binary_version": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_version.clone()),
+                "current_binary_path": identity.binary_path.clone(),
+                "current_binary_version": identity.binary_version.clone(),
+            }),
+        )?;
+        if health.pid.map(|pid| pid.get()) == Some(std::process::id()) {
+            return Ok(StartReport {
+                ok: false,
+                pid: health.pid,
+                status: StartOutcome::RestartIncompatibleStopFailed,
+                previous_pid: health.pid,
+                binary_path: Some(identity.binary_path),
+                binary_version: Some(identity.binary_version),
+                rotation_reason,
+                log: None,
+                schema_error: None,
+                action: Some("refusing to rotate coordinator metadata that points at the caller process".to_string()),
+            });
+        }
         match stop_coordinator(workspace) {
             Ok(stop) if stop.ok => {}
             Ok(_) | Err(_) => {
@@ -97,6 +155,10 @@ pub fn start_coordinator_with_team(
                     ok: false,
                     pid: health.pid,
                     status: StartOutcome::RestartIncompatibleStopFailed,
+                    previous_pid: health.pid,
+                    binary_path: Some(identity.binary_path),
+                    binary_version: Some(identity.binary_version),
+                    rotation_reason,
                     log: None,
                     schema_error: None,
                     action: None,
@@ -131,10 +193,19 @@ pub fn start_coordinator_with_team(
     let pid = Pid::new(child.id());
     std::fs::write(coordinator_pid_path(workspace), pid.to_string())?;
     write_coordinator_metadata(workspace, pid, MetadataSource::Start)?;
+    let status = if rotation_reason.is_some() {
+        StartOutcome::StartedAfterRotation
+    } else {
+        StartOutcome::Started
+    };
     Ok(StartReport {
         ok: true,
         pid: Some(pid),
-        status: StartOutcome::Started,
+        status,
+        previous_pid: health.pid,
+        binary_path: Some(identity.binary_path),
+        binary_version: Some(identity.binary_version),
+        rotation_reason,
         log: Some(log_path),
         schema_error: None,
         action: None,
@@ -203,6 +274,15 @@ pub fn stop_coordinator(workspace: &WorkspacePath) -> Result<StopReport, StopErr
         return Ok(StopReport {
             ok: true,
             status: StopOutcome::Missing,
+            pid: Some(pid),
+        });
+    }
+    if pid.get() == std::process::id() {
+        remove_file_if_exists(&pid_path)?;
+        remove_file_if_exists(&coordinator_meta_path(workspace))?;
+        return Ok(StopReport {
+            ok: true,
+            status: StopOutcome::Stopped,
             pid: Some(pid),
         });
     }
@@ -499,15 +579,63 @@ pub fn read_coordinator_metadata(workspace: &WorkspacePath) -> Option<Coordinato
     serde_json::from_str(&text).ok()
 }
 
-/// `coordinator_metadata_ok`(`metadata.py:37-43`):三元全等
-/// `meta.pid == pid ∧ meta.protocol_version == PROTOCOL_VERSION ∧
-/// meta.message_store_schema_version == SCHEMA_VERSION`。任一不符 → false(不静默继续旧 schema)。
+pub fn current_coordinator_binary_identity() -> CoordinatorBinaryIdentity {
+    let binary_path = std::env::current_exe()
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    CoordinatorBinaryIdentity {
+        binary_path,
+        binary_version: crate::packaging::Version::current().as_str().to_string(),
+    }
+}
+
+/// `coordinator_metadata_ok` now includes daemon binary identity in addition
+/// to the original pid/protocol/schema tuple.
 pub fn coordinator_metadata_ok(metadata: Option<&CoordinatorMetadata>, pid: Pid) -> bool {
-    metadata.is_some_and(|m| {
-        m.pid == pid
-            && m.protocol_version == PROTOCOL_VERSION
-            && m.message_store_schema_version == crate::db::schema::SCHEMA_VERSION
-    })
+    coordinator_metadata_mismatch_reason(metadata, pid).is_none()
+}
+
+pub fn coordinator_metadata_mismatch_reason(
+    metadata: Option<&CoordinatorMetadata>,
+    pid: Pid,
+) -> Option<CoordinatorMetadataMismatchReason> {
+    let identity = current_coordinator_binary_identity();
+    coordinator_metadata_mismatch_reason_with_identity(metadata, pid, &identity)
+}
+
+fn coordinator_metadata_mismatch_reason_with_identity(
+    metadata: Option<&CoordinatorMetadata>,
+    pid: Pid,
+    identity: &CoordinatorBinaryIdentity,
+) -> Option<CoordinatorMetadataMismatchReason> {
+    let Some(metadata) = metadata else {
+        return Some(CoordinatorMetadataMismatchReason::MetadataMissing);
+    };
+    if metadata.pid != pid {
+        return Some(CoordinatorMetadataMismatchReason::PidMismatch);
+    }
+    if metadata.protocol_version != PROTOCOL_VERSION {
+        return Some(CoordinatorMetadataMismatchReason::ProtocolVersionMismatch);
+    }
+    if metadata.message_store_schema_version != crate::db::schema::SCHEMA_VERSION {
+        return Some(CoordinatorMetadataMismatchReason::MessageStoreSchemaVersionMismatch);
+    }
+    let Some(binary_version) = metadata.binary_version.as_deref().filter(|value| !value.is_empty())
+    else {
+        return Some(CoordinatorMetadataMismatchReason::BinaryIdentityMissing);
+    };
+    let Some(binary_path) = metadata.binary_path.as_deref().filter(|value| !value.is_empty())
+    else {
+        return Some(CoordinatorMetadataMismatchReason::BinaryIdentityMissing);
+    };
+    if binary_version != identity.binary_version {
+        return Some(CoordinatorMetadataMismatchReason::BinaryVersionMismatch);
+    }
+    if binary_path != identity.binary_path {
+        return Some(CoordinatorMetadataMismatchReason::BinaryPathMismatch);
+    }
+    None
 }
 
 /// `write_coordinator_metadata`(`metadata.py:46-61`)。写 `coordinator.json`(pretty indent=2),
@@ -525,6 +653,8 @@ pub fn write_coordinator_metadata(
         pid,
         protocol_version: PROTOCOL_VERSION,
         message_store_schema_version: crate::db::schema::SCHEMA_VERSION,
+        binary_path: Some(current_coordinator_binary_identity().binary_path),
+        binary_version: Some(crate::packaging::Version::current().as_str().to_string()),
         source,
         updated_at: chrono::Utc::now().to_rfc3339(),
     };

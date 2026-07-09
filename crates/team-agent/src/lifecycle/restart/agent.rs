@@ -157,7 +157,8 @@ pub(crate) fn start_agent_at_paths(
             write_team_state(spec_workspace, &spec, &state)?;
         }
         replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
-        let coordinator_started = start_coordinator_for_workspace(workspace)?;
+        let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
+        let coordinator_started = coordinator.ok;
         let target = format!("{}:{window}", session_name.as_str());
         if let Some(new_binding) = refreshed_binding.as_ref() {
             if old_binding.as_ref() != Some(new_binding) {
@@ -310,7 +311,8 @@ pub(crate) fn start_agent_at_paths(
         tmux_start_mode_for_spawn(&spawn, into_existing_session),
     )?;
     replay_worker_target_missing_messages(workspace, agent_id, &team_key, &state, transport)?;
-    let coordinator_started = start_coordinator_for_workspace(workspace)?;
+    let coordinator = start_coordinator_for_workspace(workspace, Some(&team_key))?;
+    let coordinator_started = coordinator.ok;
     Ok(StartAgentOutcome::Running {
         env: AgentActionEnvelope {
             agent_id: agent_id.clone(),

@@ -821,7 +821,11 @@ pub mod lifecycle_port {
         let mut coordinator_timeout = false;
         let mut coordinator_post_stop = CoordinatorStopObservation::NotNeeded;
         let mut coordinator_pid_for_report = None;
-        let stopped = if team.is_none() {
+        let coordinator_stop_reason =
+            coordinator_stop_reason_for_shutdown(&run_workspace, team, &state)?;
+        let should_stop_coordinator =
+            matches!(coordinator_stop_reason, "bare_shutdown" | "scoped_last_live_team");
+        let stopped = if should_stop_coordinator {
             let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
             let coordinator_pid_before_stop = crate::coordinator::coordinator_health(&wp).pid;
             coordinator_pid_for_report = coordinator_pid_before_stop.map(|pid| pid.get());
@@ -929,6 +933,7 @@ pub mod lifecycle_port {
                     "killed_sessions": killed_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     "spared_sessions": spared_sessions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
                     "coordinator_status": coordinator_status,
+                    "coordinator_stop_reason": coordinator_stop_reason,
                     "status": status,
                     "phase": phase,
                     "verification_degraded": verification_degraded,
@@ -971,9 +976,11 @@ pub mod lifecycle_port {
                 "owned_files": owned_file_residuals,
             },
             "error": kill_error,
+            "coordinator_stop_reason": coordinator_stop_reason,
             "coordinator": {
                 "status": coordinator_status,
                 "pid": coordinator_pid,
+                "stop_reason": coordinator_stop_reason,
             },
         });
         #[cfg(windows)]
@@ -2921,6 +2928,7 @@ pub mod lifecycle_port {
                 session_name,
                 agents,
                 coordinator_started,
+                coordinator,
                 next_actions,
                 attach_commands,
             } => json!({
@@ -2929,6 +2937,7 @@ pub mod lifecycle_port {
                 "session_name": session_name.as_str(),
                 "agents": agents.iter().map(|a| a.agent_id.as_str()).collect::<Vec<_>>(),
                 "coordinator_started": coordinator_started,
+                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
                 "reminder": crate::cli::QUICK_START_REMINDER,
@@ -2938,6 +2947,7 @@ pub mod lifecycle_port {
                 agents,
                 failed_agents,
                 coordinator_started,
+                coordinator,
                 next_actions,
                 attach_commands,
             } => json!({
@@ -2964,6 +2974,7 @@ pub mod lifecycle_port {
                     ),
                 })).collect::<Vec<_>>(),
                 "coordinator_started": coordinator_started,
+                "coordinator": crate::lifecycle::coordinator_start_summary_value(&coordinator),
                 "next_actions": next_actions,
                 "attach_commands": attach_commands,
                 "reminder": crate::cli::QUICK_START_REMINDER,
@@ -3367,6 +3378,35 @@ pub mod lifecycle_port {
             if let Some(obj) = agent.as_object_mut() {
                 obj.insert("status".to_string(), json!("stopped"));
             }
+        }
+    }
+
+    fn coordinator_stop_reason_for_shutdown(
+        workspace: &Path,
+        team: Option<&str>,
+        selected_state: &Value,
+    ) -> Result<&'static str, CliError> {
+        let Some(requested_team) = team.filter(|team| !team.is_empty()) else {
+            return Ok("bare_shutdown");
+        };
+        let stopped_key = selected_state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .unwrap_or(requested_team);
+        let raw = crate::state::persist::load_runtime_state(workspace)?;
+        let live_sibling = raw
+            .get("teams")
+            .and_then(Value::as_object)
+            .is_some_and(|teams| {
+                teams
+                    .iter()
+                    .any(|(key, team)| key.as_str() != stopped_key && team_has_running_agent(team))
+            });
+        if live_sibling {
+            Ok("scoped_live_sibling_present")
+        } else {
+            Ok("scoped_last_live_team")
         }
     }
 
@@ -3915,10 +3955,15 @@ pub mod diagnose_port {
                 "pid": m.pid.get(),
                 "protocol_version": m.protocol_version,
                 "message_store_schema_version": m.message_store_schema_version,
+                "binary_path": m.binary_path,
+                "binary_version": m.binary_version,
                 "source": m.source,
                 "updated_at": m.updated_at,
             })),
             "metadata_ok": health.metadata_ok,
+            "metadata_mismatch_reason": health.metadata_mismatch_reason,
+            "binary_path": health.current_binary_identity.binary_path,
+            "binary_version": health.current_binary_identity.binary_version,
             "schema_ok": health.schema.ok,
             "schema_error": health.schema.error.map(|e| format!("{e:?}")),
             "schema": {

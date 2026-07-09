@@ -237,7 +237,8 @@
       "ts": "<TS>"
     },
     {
-      "coordinator_status": "not_stopped",
+      "coordinator_status": "stopped",
+      "coordinator_stop_reason": "scoped_last_live_team",
       "event": "lifecycle.shutdown",
       "keep_logs": true,
       "killed_sessions": [
@@ -424,13 +425,18 @@
           "all_resumable_have_session": true,
           "all_spawned": false,
           "coordinator": {
+            "binary_path": "<TEAM_AGENT_BIN>",
+            "binary_version": "0.5.17",
             "metadata": {
+              "binary_path": "<TEAM_AGENT_BIN>",
+              "binary_version": "0.5.17",
               "message_store_schema_version": 3,
               "pid": 0,
               "protocol_version": 2,
               "source": "boot",
               "updated_at": "<TS>"
             },
+            "metadata_mismatch_reason": null,
             "metadata_ok": true,
             "ok": true,
             "pid": 0,
@@ -809,9 +815,11 @@
       "exit_code": 0,
       "output": {
         "coordinator": {
-          "pid": null,
-          "status": "not_stopped"
+          "pid": 0,
+          "status": "stopped",
+          "stop_reason": "scoped_last_live_team"
         },
+        "coordinator_stop_reason": "scoped_last_live_team",
         "error": null,
         "keep_logs": true,
         "killed_sessions": [

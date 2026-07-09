@@ -112,6 +112,8 @@ pub enum StartOutcome {
     SchemaIncompatible,
     /// 正常 spawn(`lifecycle.py:121`)。
     Started,
+    /// 当前 CLI 发现 live daemon 的 binary identity 过期,stop 后重新 spawn。
+    StartedAfterRotation,
 }
 
 /// `stop_coordinator` 结果 status(`lifecycle.py:232,238,243,247`)。
@@ -170,9 +172,48 @@ pub struct CoordinatorMetadata {
     pub pid: Pid,
     pub protocol_version: u32,
     pub message_store_schema_version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_version: Option<String>,
     pub source: MetadataSource,
     /// ISO8601(`datetime.now(timezone.utc).isoformat()`,`metadata.py:56`)。
     pub updated_at: String,
+}
+
+/// Current coordinator daemon binary identity. Version comes from the compiled
+/// package; path comes from the currently executing CLI binary, not PATH.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinatorBinaryIdentity {
+    pub binary_path: String,
+    pub binary_version: String,
+}
+
+/// Stable machine-readable reason for coordinator metadata rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorMetadataMismatchReason {
+    MetadataMissing,
+    PidMismatch,
+    ProtocolVersionMismatch,
+    MessageStoreSchemaVersionMismatch,
+    BinaryIdentityMissing,
+    BinaryVersionMismatch,
+    BinaryPathMismatch,
+}
+
+impl CoordinatorMetadataMismatchReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MetadataMissing => "metadata_missing",
+            Self::PidMismatch => "pid_mismatch",
+            Self::ProtocolVersionMismatch => "protocol_version_mismatch",
+            Self::MessageStoreSchemaVersionMismatch => "message_store_schema_version_mismatch",
+            Self::BinaryIdentityMissing => "binary_identity_missing",
+            Self::BinaryVersionMismatch => "binary_version_mismatch",
+            Self::BinaryPathMismatch => "binary_path_mismatch",
+        }
+    }
 }
 
 // ===========================================================================
@@ -244,6 +285,8 @@ pub struct HealthReport {
     pub metadata: Option<CoordinatorMetadata>,
     /// 三元全等(`coordinator_metadata_ok`,`metadata.py:37-43`)。
     pub metadata_ok: bool,
+    pub metadata_mismatch_reason: Option<String>,
+    pub current_binary_identity: CoordinatorBinaryIdentity,
     pub schema: SchemaHealth,
 }
 
@@ -253,6 +296,10 @@ pub struct StartReport {
     pub ok: bool,
     pub pid: Option<Pid>,
     pub status: StartOutcome,
+    pub previous_pid: Option<Pid>,
+    pub binary_path: Option<String>,
+    pub binary_version: Option<String>,
+    pub rotation_reason: Option<String>,
     /// coordinator.log 路径(成功路径,`lifecycle.py:54/121`)。
     pub log: Option<PathBuf>,
     /// schema_incompatible 时的修复 hint / 失败原因。
