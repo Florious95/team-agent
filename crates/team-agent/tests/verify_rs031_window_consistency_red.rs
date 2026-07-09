@@ -12,7 +12,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -32,6 +31,10 @@ use team_agent::transport::{
     TurnVerification, WindowName,
 };
 
+#[path = "support/hermetic.rs"]
+mod hermetic;
+use hermetic::HermeticTestEnv;
+
 const TEAM_MD: &str =
     "---\nname: verify031\nobjective: Verify mixed provider windows.\nprovider: codex\n---\n\nTeam.\n";
 
@@ -39,11 +42,11 @@ const CODEX_ROLE: &str = "---\nname: codexer\nrole: Codex Worker\nprovider: code
 
 const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: claude\nmodel: claude-sonnet-4-6\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nClaude worker.\n";
 
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 #[test]
+#[serial(env)]
 fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
-    let team = mixed_provider_team_dir("mcp-owner-scope");
+    let hermetic = HermeticTestEnv::enter("rs031-mcp-owner-scope");
+    let team = mixed_provider_team_dir(&hermetic, "mcp-owner-scope");
     let transport =
         RecordingTransport::new().with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
     let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
@@ -87,17 +90,10 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
 #[test]
 #[serial(env)]
 fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_across_tmux_sockets() {
-    let _env = EnvGuard::set(&[
-        ("TMUX", Some("/tmp/default-tmux-socket,123,0")),
-        ("TMUX_PANE", Some("%0")),
-        ("TEAM_AGENT_LEADER_PANE_ID", None),
-        ("TEAM_AGENT_LEADER_SESSION_UUID", None),
-        ("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None),
-        ("TEAM_AGENT_LEADER_PROVIDER", None),
-        ("TEAM_AGENT_ID", None),
-        ("TEAM_AGENT_TEAM_ID", None),
-    ]);
-    let team = codex_only_team_dir("external-pane-collision");
+    let hermetic = HermeticTestEnv::enter("rs031-external-pane-collision");
+    let _tmux = hermetic.with_env("TMUX", "/tmp/default-tmux-socket,123,0");
+    let _pane = hermetic.with_env("TMUX_PANE", "%0");
+    let team = codex_only_team_dir(&hermetic, "external-pane-collision");
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
     let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick-start should reach worker spawn path"));
@@ -152,8 +148,10 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
 }
 
 #[test]
+#[serial(env)]
 fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch() {
-    let team = mixed_provider_team_dir("state-window");
+    let hermetic = HermeticTestEnv::enter("rs031-state-window");
+    let team = mixed_provider_team_dir(&hermetic, "state-window");
     let spec = team_agent::compiler::compile_team(&team).expect("compile mixed provider team");
     let spec_path = team.join("team.spec.yaml");
     std::fs::write(&spec_path, team_agent::model::yaml::dumps(&spec)).expect("write spec");
@@ -199,10 +197,20 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
 }
 
 #[test]
+#[serial(env)]
 fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window() {
-    let workspace = temp_ws("leader-window");
+    let hermetic = HermeticTestEnv::enter("rs031-leader-window");
+    hermetic.scrub_tmux();
+    hermetic.assert_no_real_tmux();
+    assert!(
+        std::env::var_os("TEAM_AGENT_WORKSPACE").is_none(),
+        "HermeticTestEnv must scrub hostile TEAM_AGENT_WORKSPACE before BUG4 canary delivery"
+    );
+    let workspace = hermetic.workspace("leader-window");
+    hermetic.assert_path_under_root(&workspace);
     let state = json!({
         "session_name": "team-verify031",
+        "active_team_key": "teamdir",
         "leader_receiver": {
             "mode": "direct_tmux",
             "status": "attached",
@@ -222,16 +230,43 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
                 "provider": "codex",
                 "window": "codexer"
             }
+        },
+        "teams": {
+            "teamdir": {
+                "session_name": "team-verify031",
+                "leader_receiver": {
+                    "mode": "direct_tmux",
+                    "status": "attached",
+                    "provider": "codex",
+                    "pane_id": "%0",
+                    "owner_epoch": 1
+                },
+                "team_owner": {
+                    "pane_id": "%0",
+                    "provider": "codex",
+                    "owner_epoch": 1
+                },
+                "agents": {
+                    "codexer": {
+                        "status": "running",
+                        "provider": "codex",
+                        "window": "codexer"
+                    }
+                }
+            }
         }
     });
     save_runtime_state(&workspace, &state).expect("seed runtime state");
 
     let store = MessageStore::open(&workspace).expect("open message store");
+    hermetic.assert_store_under_root(&store);
     let message_id = store
         .create_message(None, "codexer", "leader", "BUG4 worker to leader canary", None, false, Some("teamdir"))
         .expect("create accepted leader-bound message");
     let event_log = EventLog::new(&workspace);
-    let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
+    let transport = RecordingTransport::new()
+        .with_windows(vec![WindowName::new("codexer")])
+        .with_targets(vec![pane_info("%0", "external-leader-socket", "leader")]);
 
     let outcome = deliver_pending_message(&workspace, &store, &transport, &message_id, &event_log, &state)
         .expect("delivery should use the recorded transport");
@@ -252,7 +287,8 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
 #[ignore = "real-machine: needs real tmux/coordinator/binary"]
 #[file_serial(tmux)]
 fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default_socket() {
-    let workspace = temp_ws("leader-default-socket-e2e");
+    let hermetic = HermeticTestEnv::enter("rs031-leader-default-socket-e2e");
+    let workspace = hermetic.workspace("leader-default-socket-e2e");
     let leader_pane = PaneId::new("%default-leader");
     let product_worker_pane = PaneId::new("%product-worker");
     let product_session = SessionName::new("team-bug4-product");
@@ -329,6 +365,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
     .expect("seed runtime state");
 
     let store = MessageStore::open(&workspace).expect("open message store");
+    hermetic.assert_store_under_root(&store);
     let message_id = store
         .create_message(
             None,
@@ -367,7 +404,8 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
 }
 
 fn assert_bound_reachable_leader_send_message_delivers(binding: &str, discovery: &str, claimed_via: &str) {
-    let workspace = temp_ws(&format!("fresh-leader-single-authority-{binding}"));
+    let hermetic = HermeticTestEnv::enter(&format!("rs031-fresh-leader-single-authority-{binding}"));
+    let workspace = hermetic.workspace(&format!("fresh-leader-single-authority-{binding}"));
     let leader_pane = PaneId::new("%claimed-leader");
     let worker_pane = PaneId::new("%worker");
     let state = json!({
@@ -456,12 +494,14 @@ fn assert_bound_reachable_leader_send_message_delivers(binding: &str, discovery:
 }
 
 #[test]
+#[serial(env)]
 fn bound_reachable_leader_from_claim_or_attach_is_delivered_by_single_authority() {
     assert_bound_reachable_leader_send_message_delivers("claim", "claim_leader", "claim-leader");
     assert_bound_reachable_leader_send_message_delivers("attach", "attach_leader", "attach-leader");
 }
 
 #[test]
+#[serial(env)]
 fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autodelivery() {
     for (label, state, transport) in [
         (
@@ -493,7 +533,10 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
             RecordingTransport::new().with_liveness(vec![("%missing-leader".to_string(), PaneLiveness::Dead)]),
         ),
     ] {
-        let workspace = temp_ws(label);
+        let hermetic = HermeticTestEnv::enter(&format!("rs031-{label}"));
+        hermetic.scrub_tmux();
+        hermetic.assert_no_real_tmux();
+        let workspace = hermetic.workspace(label);
         save_runtime_state(&workspace, &state).expect("seed runtime state");
         let event_log = EventLog::new(&workspace);
         let mut opts = SendOptions::default();
@@ -601,8 +644,8 @@ fn send_to_leader_receiver_entrypoint_has_no_private_attached_precheck() {
     }
 }
 
-fn mixed_provider_team_dir(tag: &str) -> PathBuf {
-    let team = temp_ws(tag).join("teamdir");
+fn mixed_provider_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+    let team = hermetic.workspace(tag).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("create agents dir");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
     std::fs::write(team.join("agents").join("clauder.md"), CLAUDE_ROLE).expect("write clauder role");
@@ -635,17 +678,6 @@ fn pane_info(pane_id: &str, session: &str, window: &str) -> PaneInfo {
         pane_pid: None,
         leader_env: BTreeMap::new(),
     }
-}
-
-fn temp_ws(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ta-verify-rs031-window-red-{tag}-{}-{}",
-        std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp workspace");
-    std::fs::canonicalize(dir).expect("canonical temp workspace")
 }
 
 #[derive(Clone, Default)]
@@ -809,8 +841,8 @@ impl Transport for RecordingTransport {
     }
 }
 
-fn codex_only_team_dir(tag: &str) -> PathBuf {
-    let team = temp_ws(tag).join("teamdir");
+fn codex_only_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
+    let team = hermetic.workspace(tag).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("create agents dir");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
     std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codex role");
@@ -821,35 +853,6 @@ fn ready_launch(report: QuickStartReport) -> team_agent::lifecycle::LaunchReport
     match report {
         QuickStartReport::Ready { launch, .. } => *launch,
         other => panic!("fixture expected quick-start ready report, got {other:?}"),
-    }
-}
-
-struct EnvGuard {
-    previous: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn set(values: &[(&'static str, Option<&str>)]) -> Self {
-        let mut previous = Vec::new();
-        for (key, value) in values {
-            previous.push((*key, std::env::var(key).ok()));
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.previous.drain(..).rev() {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
     }
 }
 

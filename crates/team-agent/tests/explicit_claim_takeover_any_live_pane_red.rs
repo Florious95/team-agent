@@ -6,30 +6,37 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Output;
 
 use serde_json::{json, Value};
 
-const CALLER_PANE: &str = "%9";
+#[path = "support/hermetic.rs"]
+mod hermetic;
+use hermetic::HermeticTestEnv;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_team-agent")
-}
+const CALLER_PANE: &str = "%9";
 
 #[test]
 fn claim_leader_and_takeover_accept_live_node_caller_pane() {
-    let ws = tmp_dir("any-live-pane");
+    let real_registry = HermeticTestEnv::real_home_registry_snapshot();
+    let hermetic = HermeticTestEnv::enter("explicit-claim-takeover");
+    let ws = hermetic.workspace("any-live-pane");
     seed_runtime_state(&ws);
     let fake_tmux = fake_tmux_bin(&ws);
-    let _env = EnvGuard::set([
-        ("PATH", format!("{}:{}", fake_tmux.display(), std::env::var("PATH").unwrap_or_default())),
-        ("TMUX_PANE", CALLER_PANE.to_string()),
-        ("TEAM_AGENT_LEADER_PROVIDER", "codex".to_string()),
-        ("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-a".to_string()),
-    ]);
+    let _path = hermetic.with_env(
+        "PATH",
+        &format!(
+            "{}:{}",
+            fake_tmux.display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    );
+    let _pane = hermetic.with_env("TMUX_PANE", CALLER_PANE);
+    let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
+    let _machine = hermetic.with_env("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-a");
 
-    let claim = run(
+    let claim = hermetic.run_cli(
+        &ws,
         &[
             "claim-leader",
             "--workspace",
@@ -39,7 +46,6 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
             "--confirm",
             "--json",
         ],
-        &ws,
     );
     let mut failures = Vec::new();
     if let Some(failure) = cli_success_failure(
@@ -48,8 +54,10 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
     ) {
         failures.push(failure);
     }
+    assert_single_registry_source(&hermetic, "claim-leader");
 
-    let takeover = run(
+    let takeover = hermetic.run_cli(
+        &ws,
         &[
             "takeover",
             "--workspace",
@@ -59,7 +67,6 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
             "--confirm",
             "--json",
         ],
-        &ws,
     );
     if let Some(failure) = cli_success_failure(
         &takeover,
@@ -67,11 +74,28 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
     ) {
         failures.push(failure);
     }
+    assert_single_registry_source(&hermetic, "takeover");
+    hermetic.assert_real_registry_unchanged(real_registry);
 
     assert!(
         failures.is_empty(),
         "explicit claim/takeover live-pane contract failed:\n{}",
         failures.join("\n\n")
+    );
+}
+
+fn assert_single_registry_source(hermetic: &HermeticTestEnv, source: &str) {
+    let entries = hermetic.registry_entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "expected exactly one registry entry under hermetic HOME; entries={entries:?}"
+    );
+    assert_eq!(
+        entries[0].1.get("source").and_then(Value::as_str),
+        Some(source),
+        "expected hermetic registry entry source={source}; entry={}",
+        entries[0].1
     );
 }
 
@@ -164,57 +188,4 @@ esac
         std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     bin_dir
-}
-
-fn run(args: &[&str], cwd: &Path) -> Output {
-    Command::new(bin())
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .unwrap()
-}
-
-fn tmp_dir(tag: &str) -> PathBuf {
-    static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "ta-rs-bug3-{tag}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(dir).unwrap()
-}
-
-struct EnvGuard {
-    previous: Vec<(&'static str, Option<String>)>,
-}
-
-impl EnvGuard {
-    fn set(values: [(&'static str, String); 4]) -> Self {
-        let previous = values
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(key).ok()))
-            .collect::<Vec<_>>();
-        for (key, value) in values {
-            unsafe {
-                std::env::set_var(key, value);
-            }
-        }
-        Self { previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.previous.drain(..).rev() {
-            unsafe {
-                if let Some(value) = value {
-                    std::env::set_var(key, value);
-                } else {
-                    std::env::remove_var(key);
-                }
-            }
-        }
-    }
 }

@@ -9,22 +9,89 @@ use crate::transport::WindowName;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
-const CALLER_IDENTITY_ENVS: &[&str] = &[
-    "TMUX",
-    "TMUX_PANE",
-    "TEAM_AGENT_LEADER_PANE_ID",
-    "TEAM_AGENT_LEADER_SESSION_UUID",
-    "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
-    "TEAM_AGENT_LEADER_PROVIDER",
-    "TEAM_AGENT_MACHINE_FINGERPRINT",
-    "TEAM_AGENT_WORKSPACE",
-    "TEAM_AGENT_TEAM_ID",
-    "TEAM_AGENT_OWNER_TEAM_ID",
-    "TEAM_AGENT_ACTIVE_TEAM",
-    "TEAM_AGENT_ID",
-];
+
+static HERMETIC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct HermeticTestEnv {
+    root: PathBuf,
+    previous: Vec<(&'static str, Option<String>)>,
+}
+
+impl HermeticTestEnv {
+    fn enter(tag: &str) -> Self {
+        let base = std::env::var_os("TEAM_AGENT_TEST_TMP")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&base).expect("create hermetic test tmp root");
+        let root = base.join(format!(
+            "ta-phase-golden-{tag}-{}-{}",
+            std::process::id(),
+            HERMETIC_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("home/.team-agent/leaders"))
+            .expect("create phase golden hermetic root");
+        let root = std::fs::canonicalize(root).expect("canonicalize phase golden hermetic root");
+        let home = root.join("home");
+        let mut previous = Vec::new();
+        for key in std::iter::once("HOME").chain(hermetic_caller_envs().iter().copied()) {
+            previous.push((key, std::env::var(key).ok()));
+        }
+        unsafe {
+            std::env::set_var("HOME", &home);
+            for key in hermetic_caller_envs() {
+                std::env::remove_var(key);
+            }
+        }
+        Self { root, previous }
+    }
+
+    fn workspace(&self, tag: &str) -> PathBuf {
+        let path = self.root.join(format!(
+            "workspace-{tag}-{}",
+            HERMETIC_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create phase golden workspace");
+        std::fs::canonicalize(path).expect("canonicalize phase golden workspace")
+    }
+}
+
+impl Drop for HermeticTestEnv {
+    fn drop(&mut self) {
+        for (key, value) in self.previous.drain(..).rev() {
+            unsafe {
+                if let Some(value) = value {
+                    std::env::set_var(key, value);
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+        }
+        if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+fn hermetic_caller_envs() -> &'static [&'static str] {
+    &[
+        "TMUX",
+        "TMUX_PANE",
+        "TEAM_AGENT_LEADER_PANE_ID",
+        "TEAM_AGENT_LEADER_SESSION_UUID",
+        "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+        "TEAM_AGENT_LEADER_PROVIDER",
+        "TEAM_AGENT_MACHINE_FINGERPRINT",
+        "TEAM_AGENT_WORKSPACE",
+        "TEAM_AGENT_TEAM_ID",
+        "TEAM_AGENT_OWNER_TEAM_ID",
+        "TEAM_AGENT_ACTIVE_TEAM",
+        "TEAM_AGENT_ID",
+    ]
+}
 
 #[test]
 #[serial_test::serial(env)]
@@ -154,12 +221,9 @@ struct PhaseGolden {
 }
 
 fn run_phase_golden(spec: PhaseGolden) -> Value {
+    let hermetic = HermeticTestEnv::enter(spec.phase);
     let _permission_mode = EnvVarGuard::set(ANCESTRY_ENV, "[]");
-    let _caller_identity = CALLER_IDENTITY_ENVS
-        .iter()
-        .map(|key| EnvVarGuard::unset(key))
-        .collect::<Vec<_>>();
-    let team = two_worker_team_dir();
+    let team = two_worker_team_dir(&hermetic);
     let workspace = team.parent().expect("workspace").to_path_buf();
     seed_healthy_coordinator(&workspace);
     let launch_transport = codex_ready_transport();
@@ -298,8 +362,8 @@ fn phase_b_reset_discard_session(
     }
 }
 
-fn two_worker_team_dir() -> PathBuf {
-    let team = temp_ws().join("teamdir");
+fn two_worker_team_dir(hermetic: &HermeticTestEnv) -> PathBuf {
+    let team = hermetic.workspace("team").join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
         team.join("TEAM.md"),
@@ -415,13 +479,6 @@ impl EnvVarGuard {
         Self { key, previous }
     }
 
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var(key).ok();
-        unsafe {
-            std::env::remove_var(key);
-        }
-        Self { key, previous }
-    }
 }
 
 impl Drop for EnvVarGuard {

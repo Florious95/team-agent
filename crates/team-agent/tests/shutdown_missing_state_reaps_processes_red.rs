@@ -6,6 +6,11 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};

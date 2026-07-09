@@ -3,6 +3,9 @@ use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
 use serial_test::serial;
 
+#[allow(dead_code)]
+struct HermeticTestEnv;
+
 const QS_TEAM_MD: &str =
     "---\nname: quickteam\nobjective: Quick start.\nprovider: codex\n---\n\nQuick-start team.\n";
 pub(super) const QS_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";

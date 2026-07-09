@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::transport::Transport;
@@ -98,6 +99,26 @@ pub const AMBIGUOUS_NAMES_FIELD: &str = "ambiguous_names";
 /// a fully-qualified form.
 pub const REASON_AMBIGUOUS: &str = "name_ambiguous";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryWriteOutcome {
+    pub status: &'static str,
+    pub path: Option<PathBuf>,
+    pub team_key: String,
+    pub workspace_hash: String,
+    pub source: String,
+    pub owner_epoch: u64,
+}
+
+impl RegistryWriteOutcome {
+    #[must_use]
+    pub fn response_json(&self) -> Value {
+        match &self.path {
+            Some(path) => json!({"status": self.status, "path": path.display().to_string()}),
+            None => json!({"status": self.status}),
+        }
+    }
+}
+
 /// Absolute path to `~/.team-agent/leaders`. Returns `None` when the
 /// caller has no HOME (e.g. some CI shells) — callers should treat this as
 /// "no registry" rather than an error, since registry is derived.
@@ -168,6 +189,89 @@ pub fn build_entry(
         source: source.to_string(),
         status: "attached".to_string(),
     }
+}
+
+/// After a canonical leader binding succeeds, write the derived host
+/// discovery entry from the just-persisted state. Registry failure is
+/// non-fatal: callers get a write_failed outcome and the binding remains
+/// successful.
+pub fn register_binding_from_state_best_effort(
+    workspace: &Path,
+    team: Option<&str>,
+    source: &str,
+) -> Option<RegistryWriteOutcome> {
+    let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
+        return None;
+    };
+    let team_key = match team.filter(|team| !team.is_empty()) {
+        Some(team) => team.to_string(),
+        None => crate::state::projection::team_state_key(&state),
+    };
+    let receiver = state
+        .get("teams")
+        .and_then(|value| value.as_object())
+        .and_then(|teams| teams.get(&team_key))
+        .and_then(|team| team.get("leader_receiver"))
+        .or_else(|| state.get("leader_receiver"))
+        .cloned()?;
+    let transport_kind = receiver
+        .get("transport_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("direct_tmux")
+        .to_string();
+    let owner_epoch = receiver
+        .get("owner_epoch")
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            state
+                .get("teams")
+                .and_then(|value| value.as_object())
+                .and_then(|teams| teams.get(&team_key))
+                .and_then(|team| team.get("owner_epoch"))
+                .and_then(Value::as_u64)
+        })
+        .unwrap_or(0);
+    let entry = build_entry(
+        workspace,
+        &team_key,
+        &transport_kind,
+        receiver,
+        owner_epoch,
+        source,
+        chrono::Utc::now().to_rfc3339(),
+    );
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let write_result = write_entry_best_effort(&entry);
+    let status = if let Some(path) = &write_result {
+        let _ = event_log.write(
+            EVENT_REGISTERED,
+            json!({
+                "path": path.display().to_string(),
+                "team_key": team_key,
+                "workspace_hash": entry.workspace_hash,
+                "source": source,
+            }),
+        );
+        "registered"
+    } else {
+        let _ = event_log.write(
+            EVENT_WRITE_FAILED,
+            json!({
+                "team_key": team_key,
+                "workspace_hash": entry.workspace_hash,
+                "source": source,
+            }),
+        );
+        "write_failed"
+    };
+    Some(RegistryWriteOutcome {
+        status,
+        path: write_result,
+        team_key,
+        workspace_hash: entry.workspace_hash,
+        source: source.to_string(),
+        owner_epoch: entry.owner_epoch,
+    })
 }
 
 fn entry_filename(entry: &LeaderRegistryEntry) -> String {

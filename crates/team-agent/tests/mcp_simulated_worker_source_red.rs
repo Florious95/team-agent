@@ -3,6 +3,11 @@
 #[path = "support/mcp_sim_harness.rs"]
 mod mcp_sim_harness;
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+#[allow(dead_code)]
+fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
+
 use std::collections::BTreeSet;
 
 use mcp_sim_harness::{McpSimHarness, McpToolCall};

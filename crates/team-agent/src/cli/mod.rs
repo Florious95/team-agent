@@ -4060,79 +4060,15 @@ pub mod leader_port {
         source: &str,
         response: &mut Value,
     ) {
-        let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
-            return;
-        };
-        let team_key = match team.filter(|t| !t.is_empty()) {
-            Some(t) => t.to_string(),
-            None => crate::state::projection::team_state_key(&state),
-        };
-        let receiver = state
-            .get("teams")
-            .and_then(|v| v.as_object())
-            .and_then(|teams| teams.get(&team_key))
-            .and_then(|t| t.get("leader_receiver"))
-            .or_else(|| state.get("leader_receiver"))
-            .cloned();
-        let Some(receiver) = receiver else {
-            return;
-        };
-        let transport_kind = receiver
-            .get("transport_kind")
-            .and_then(Value::as_str)
-            .unwrap_or("direct_tmux")
-            .to_string();
-        let owner_epoch = receiver
-            .get("owner_epoch")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                state
-                    .get("teams")
-                    .and_then(|v| v.as_object())
-                    .and_then(|teams| teams.get(&team_key))
-                    .and_then(|t| t.get("owner_epoch"))
-                    .and_then(Value::as_u64)
-            })
-            .unwrap_or(0);
-        let entry = crate::leader::registry::build_entry(
+        let Some(outcome) = crate::leader::registry::register_binding_from_state_best_effort(
             workspace,
-            &team_key,
-            &transport_kind,
-            receiver,
-            owner_epoch,
+            team,
             source,
-            chrono::Utc::now().to_rfc3339(),
-        );
-        let event_log = crate::event_log::EventLog::new(workspace);
-        let write_result = crate::leader::registry::write_entry_best_effort(&entry);
-        let registry_status = match &write_result {
-            Some(path) => {
-                let _ = event_log.write(
-                    crate::leader::registry::EVENT_REGISTERED,
-                    json!({
-                        "path": path.display().to_string(),
-                        "team_key": team_key,
-                        "workspace_hash": entry.workspace_hash,
-                        "source": source,
-                        "owner_epoch": entry.owner_epoch,
-                    }),
-                );
-                json!({"status": "registered", "path": path.display().to_string()})
-            }
-            None => {
-                let _ = event_log.write(
-                    crate::leader::registry::EVENT_WRITE_FAILED,
-                    json!({
-                        "team_key": team_key,
-                        "workspace_hash": entry.workspace_hash,
-                        "source": source,
-                    }),
-                );
-                json!({"status": "write_failed"})
-            }
+        ) else {
+            return;
         };
         if let Some(obj) = response.as_object_mut() {
-            obj.insert("leader_registry".to_string(), registry_status);
+            obj.insert("leader_registry".to_string(), outcome.response_json());
         }
     }
 
