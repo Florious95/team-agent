@@ -823,8 +823,10 @@ pub mod lifecycle_port {
         let mut coordinator_pid_for_report = None;
         let coordinator_stop_reason =
             coordinator_stop_reason_for_shutdown(&run_workspace, team, &state)?;
-        let should_stop_coordinator =
-            matches!(coordinator_stop_reason, "bare_shutdown" | "scoped_last_live_team");
+        let should_stop_coordinator = matches!(
+            coordinator_stop_reason,
+            "bare_shutdown" | "scoped_last_live_team"
+        );
         let stopped = if should_stop_coordinator {
             let wp = crate::coordinator::WorkspacePath::new(run_workspace.clone());
             let coordinator_pid_before_stop = crate::coordinator::coordinator_health(&wp).pid;
@@ -867,14 +869,29 @@ pub mod lifecycle_port {
             && session_residuals.is_empty()
             && process_residuals.is_empty()
             && owned_file_residuals.is_empty();
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.2):
+        // shutdown 只把 agent.status 打成 "stopped" 会让 team 自身留在
+        // `status:null` 的"看起来还活着"形态,进而卡活队写入的 SaveConflict。
+        // 只有 session_killed=true(无 kill error / 无 session/process/file
+        // residual / 无 verification degrade)才把匹配 team 的 status 打成
+        // "shutdown";degraded/false-green shutdown 保留 null,由 diagnose
+        // 走 dirty state 排查通道。
         mark_agents_stopped(&mut state);
+        let team_shutdown_status = "shutdown";
         deadline.check("save_state")?;
         if team.is_some() {
+            if session_killed && !verification_degraded {
+                mark_active_team_shutdown(&mut state, team_shutdown_status);
+            }
             crate::state::projection::save_team_scoped_state(&run_workspace, &state)?;
             promote_live_sibling_after_scoped_shutdown(&run_workspace, &state)?;
         } else {
-            let _changed_keys =
-                mark_matching_session_teams_stopped(&mut state, session_name.as_ref());
+            let _changed_keys = mark_matching_session_teams_stopped(
+                &mut state,
+                session_name.as_ref(),
+                session_killed && !verification_degraded,
+                team_shutdown_status,
+            );
             crate::state::persist::save_runtime_state(&run_workspace, &state)?;
         }
         let coordinator_status = if coordinator_timeout {
@@ -1004,7 +1021,8 @@ pub mod lifecycle_port {
         // Failed/degraded shutdowns leave the entry STALE so operators can
         // decide.
         if ok && !verification_degraded && !probe_degraded {
-            let _ = crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
+            let _ =
+                crate::cli::leader_port::unregister_after_shutdown_success(&run_workspace, team);
         }
         Ok(response)
     }
@@ -2334,7 +2352,8 @@ pub mod lifecycle_port {
         let agent_id = crate::model::ids::AgentId::new(agent);
         match crate::lifecycle::remove_agent_flag_requirements(workspace, &agent_id, team) {
             Ok(requirements) => {
-                if !remove_agent_missing_flags(from_spec, confirm, force, &requirements).is_empty() {
+                if !remove_agent_missing_flags(from_spec, confirm, force, &requirements).is_empty()
+                {
                     return Ok(remove_agent_flag_refusal(
                         workspace,
                         agent,
@@ -3413,6 +3432,8 @@ pub mod lifecycle_port {
     fn mark_matching_session_teams_stopped(
         state: &mut Value,
         session_name: Option<&crate::transport::SessionName>,
+        stamp_team_shutdown: bool,
+        team_shutdown_status: &str,
     ) -> Vec<String> {
         let Some(session_name) = session_name.map(crate::transport::SessionName::as_str) else {
             return Vec::new();
@@ -3428,10 +3449,37 @@ pub mod lifecycle_port {
                 .is_some_and(|session| session == session_name);
             if matches {
                 mark_agents_stopped(team);
+                // 0.5.26 (§7.2): 只在 session_killed && !verification_degraded
+                // 时把 team 自身标成 shutdown,degraded 保留 null 让 diagnose
+                // 走 dirty state。
+                if stamp_team_shutdown {
+                    if let Some(team_obj) = team.as_object_mut() {
+                        team_obj.insert("status".to_string(), json!(team_shutdown_status));
+                    }
+                }
                 out.push(key.clone());
             }
         }
         out
+    }
+
+    /// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.2):
+    /// scoped shutdown 只有一队,`state.active_team_key` 指向被关的那队。
+    /// 只在 session_killed && !verification_degraded 时被调用。
+    fn mark_active_team_shutdown(state: &mut Value, status: &str) {
+        let Some(active_key) = state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) else {
+            return;
+        };
+        if let Some(team_obj) = teams.get_mut(&active_key).and_then(Value::as_object_mut) {
+            team_obj.insert("status".to_string(), json!(status));
+        }
     }
 
     fn promote_live_sibling_after_scoped_shutdown(
@@ -4120,9 +4168,7 @@ pub mod leader_port {
         response: &mut Value,
     ) {
         let Some(outcome) = crate::leader::registry::register_binding_from_state_best_effort(
-            workspace,
-            team,
-            source,
+            workspace, team, source,
         ) else {
             return;
         };
@@ -4173,11 +4219,14 @@ pub mod leader_port {
         workspace: &Path,
         team: Option<&str>,
     ) -> Option<PathBuf> {
-        let team_key = team.filter(|t| !t.is_empty()).map(str::to_string).or_else(|| {
-            crate::state::persist::load_runtime_state(workspace)
-                .ok()
-                .map(|s| crate::state::projection::team_state_key(&s))
-        })?;
+        let team_key = team
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                crate::state::persist::load_runtime_state(workspace)
+                    .ok()
+                    .map(|s| crate::state::projection::team_state_key(&s))
+            })?;
         let path = crate::leader::registry::unregister_entry(workspace, &team_key)?;
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(

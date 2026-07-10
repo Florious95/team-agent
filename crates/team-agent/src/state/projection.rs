@@ -237,8 +237,15 @@ pub fn merge_workspace_team_state(existing: &Value, launched: &Value) -> Value {
     Value::Object(merged)
 }
 
-/// `team_state_candidates`(`state.py:131`):唯一候选源 = `state.teams` 中 `status=="alive"`
-/// (大小写不敏感;缺 status/空 视为 alive)。保留 teams 插入序。
+/// `team_state_candidates`(`state.py:131`):唯一候选源 = `state.teams` 中
+/// `status=="alive"`(大小写不敏感;缺 status/空 视为 alive,但 0.5.26 起
+/// legacy shutdown 残留「无 status + 全体 agents 处于终态」不再算 alive)。
+/// 保留 teams 插入序。
+///
+/// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+/// shutdown 只标 agent stopped 不动 team status,retained state 让 selector
+/// 把死队当活队,进而卡活队写入的 SaveConflict。谓词收敛到
+/// [`team_is_alive_candidate`],这里只做遍历。
 pub fn team_state_candidates(state: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     let teams = match state.get("teams") {
@@ -246,24 +253,75 @@ pub fn team_state_candidates(state: &Value) -> Map<String, Value> {
         _ => return out,
     };
     for (key, value) in teams {
-        if !value.is_object() {
-            continue;
-        }
-        if value.get("archived_at").is_some_and(|v| !v.is_null()) {
-            continue;
-        }
-        // `str(value.get("status") or "alive").lower()` —— None/空串 → "alive"。
-        let status = value
-            .get("status")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("alive");
-        if !status.eq_ignore_ascii_case("alive") {
+        if !team_is_alive_candidate(value) {
             continue;
         }
         out.insert(key.clone(), value.clone());
     }
     out
+}
+
+/// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1): 唯一 alive
+/// 谓词。规则:
+/// - 非 object → 排除;
+/// - `archived_at` 非空 → 排除;
+/// - 显式 `status` → 只有 case-insensitive `alive` 才算活;
+/// - `status` 缺失/空 + `agents` 有条目且全体处于终态 → legacy shutdown
+///   residue,排除;
+/// - `status` 缺失/空 + 无 agent 或至少一个非终态 agent → 保持兼容 alive。
+pub(crate) fn team_is_alive_candidate(team: &Value) -> bool {
+    if !team.is_object() {
+        return false;
+    }
+    if team.get("archived_at").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    let status_raw = team
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let Some(status) = status_raw {
+        return status.eq_ignore_ascii_case("alive");
+    }
+    if all_present_agents_terminal(team) && !team_has_live_leader_binding(team) {
+        return false;
+    }
+    true
+}
+
+/// 0.5.26: legacy team 缺 `status` 时,若挂着 `leader_receiver`/`team_owner`
+/// 视为仍活的绑定面(0515 endpoint-convergence 家族:worker stopped 但 receiver
+/// attached,restart 预检要能看到 leader_receiver 以派 `leader_receiver_socket_mismatch`)。
+fn team_has_live_leader_binding(team: &Value) -> bool {
+    let is_non_null_object = |key: &str| {
+        team.get(key)
+            .filter(|v| !v.is_null())
+            .and_then(Value::as_object)
+            .is_some_and(|m| !m.is_empty())
+    };
+    is_non_null_object("leader_receiver") || is_non_null_object("team_owner")
+}
+
+fn all_present_agents_terminal(team: &Value) -> bool {
+    let Some(agents) = team.get("agents").and_then(Value::as_object) else {
+        return false;
+    };
+    if agents.is_empty() {
+        return false;
+    }
+    agents.values().all(|agent| {
+        agent
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(agent_status_is_terminal)
+    })
+}
+
+pub(crate) fn agent_status_is_terminal(status: &str) -> bool {
+    matches!(
+        status.to_ascii_lowercase().as_str(),
+        "stopped" | "removed" | "dead" | "terminated" | "failed"
+    )
 }
 
 /// `format_team_candidates`(`state.py:148`):候选摘要串(key 排序;agents 排序逗号连,空→`-`)。
@@ -432,6 +490,19 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         if alive.contains_key(team) {
             return Ok(project_top_level_view(&state, team));
         }
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+        // 显式 `--team X` 命中 `state.teams` 里的键(即使被标 shutdown/终态)
+        // 仍应投影出来,支持「shutdown 后再 restart --team X」多队场景
+        // (E2E-REST-014 家族)。走 project_top_level_view 保证顶层 agents
+        // 与 teams[key].agents 收敛(E2E-REST-002 依赖 projection clobber
+        // 顶层注入的 session_id)。
+        if state
+            .get("teams")
+            .and_then(Value::as_object)
+            .is_some_and(|teams| teams.contains_key(team))
+        {
+            return Ok(project_top_level_view(&state, team));
+        }
         let matches: Vec<&String> = alive
             .iter()
             .filter(|(key, value)| team_selector_matches(team, key, value))
@@ -466,6 +537,19 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         return Ok(project_top_level_view(&state, &only));
     }
     if alive.is_empty() {
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+        // 全体被标 shutdown(bare restart 场景),`active_team_key` 若命中
+        // `state.teams` 则仍投影,让 `project_top_level_view` 用 nested
+        // `teams[key].agents` 覆盖历史顶层注入(E2E-REST-002 前置)。
+        if let Some(active_key) = state.get("active_team_key").and_then(Value::as_str) {
+            if state
+                .get("teams")
+                .and_then(Value::as_object)
+                .is_some_and(|teams| teams.contains_key(active_key))
+            {
+                return Ok(project_top_level_view(&state, active_key));
+            }
+        }
         return Ok(state);
     }
     Err(StateError::TeamSelect(
@@ -897,11 +981,19 @@ mod tests {
 
     #[test]
     fn candidates_alive_filter_and_order() {
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+        // 空 bootstrap team(无 agents)在 status 缺失时保 alive 兼容;
+        // 但「status 缺失 + 全体 agent stopped」是 legacy shutdown residue,
+        // 必须被剔除,防止 shutdown --keep-logs 的死队卡活队写入。
         let s = json!({"teams": {
             "alive1": {"status": "alive", "session_name": "sa"},
             "dead1": {"status": "shutdown"},
             "nostatus": {"session_name": "sn"},
             "ALIVE_CASE": {"status": "ALIVE"},
+            "legacy_shutdown_all_stopped": {
+                "session_name": "team-supermarket-suite",
+                "agents": {"adminweb": {"status": "stopped"}}
+            },
         }});
         let cands = team_state_candidates(&s);
         let keys: Vec<&String> = cands.keys().collect();

@@ -203,7 +203,13 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "coordinator",
 ];
 
-const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start", "purge-agent"];
+// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.6):
+// `purge-agent` was previously listed in help but had no dispatch arm,
+// so it read as a supported recovery command while actually failing with
+// "invalid choice". The dispatch registration remains out of scope for
+// 0.5.26 (destructive semantics deserve their own CR); keep the help
+// consistent with the dispatch table so it is no longer advertised.
+const SPEC_ONLY_HELP_COMMANDS: &[&str] = &["start"];
 // Command grammar, not provider identity parsing: these are top-level CLI
 // passthrough verbs for starting a leader under a provider executable.
 const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot"];
@@ -272,7 +278,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
-        Some("purge-agent") => "usage: team-agent purge-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--json]".to_string(),
+        // 0.5.26 (§7.6): removed from help; dispatch was never wired.
         Some("stuck-list") => "usage: team-agent stuck-list [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("stuck-cancel") => "usage: team-agent stuck-cancel AGENT [--workspace WORKSPACE] [--alert-type stuck|idle_fallback|cross_worker_deadlock|all] [--json]".to_string(),
         Some("acknowledge-idle") => "usage: team-agent acknowledge-idle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -875,7 +881,8 @@ fn quick_start_args(args: &[String], cwd: &Path) -> Result<QuickStartArgs, CliEr
         return Err(CliError::Usage(
             "quick-start no longer accepts --fresh. Reset semantics moved to \
              `team-agent restart --allow-fresh`, which requires explicit user \
-             confirmation.".to_string(),
+             confirmation."
+                .to_string(),
         ));
     }
     let parsed = parse_args(args);
@@ -1307,11 +1314,7 @@ fn stuck_list_args(args: &[String], cwd: &Path) -> StuckListArgs {
 fn stuck_cancel_args(args: &[String], cwd: &Path) -> Result<StuckCancelArgs, CliError> {
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
-    refuse_if_multi_alive_team_missing_scope(
-        "stuck-cancel",
-        &workspace,
-        parsed.team.as_deref(),
-    )?;
+    refuse_if_multi_alive_team_missing_scope("stuck-cancel", &workspace, parsed.team.as_deref())?;
     Ok(StuckCancelArgs {
         agent: required_pos(&parsed, 0, "agent")?,
         workspace,
@@ -1827,10 +1830,20 @@ mod tests {
             ("sessions", &["--workspace", "--team", "--json"][..]),
             (
                 "repair-state",
-                &["--task", "--status", "--assignee", "--workspace", "--team", "--json"][..],
+                &[
+                    "--task",
+                    "--status",
+                    "--assignee",
+                    "--workspace",
+                    "--team",
+                    "--json",
+                ][..],
             ),
             ("diagnose", &["--workspace", "--team", "--json"][..]),
-            ("wait-ready", &["--workspace", "--team", "--timeout", "--json"][..]),
+            (
+                "wait-ready",
+                &["--workspace", "--team", "--timeout", "--json"][..],
+            ),
             (
                 "peek",
                 &[
@@ -2059,11 +2072,7 @@ mod tests {
     fn stuck_cancel_args_builder_refuses_on_multi_alive_team() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
-        let argv = cli_argv(&[
-            "worker_a",
-            "--workspace",
-            &ws.to_string_lossy(),
-        ]);
+        let argv = cli_argv(&["worker_a", "--workspace", &ws.to_string_lossy()]);
         let err = stuck_cancel_args(&argv, &ws).expect_err("must refuse");
         assert!(
             err.to_string().contains("multiple alive teams"),
@@ -2156,11 +2165,7 @@ mod tests {
         // not advertised or carried in QuickStartArgs, but scripts that
         // still pass it get a clear redirect to restart --allow-fresh.
         let ws = tmp_workspace();
-        let argv = cli_argv(&[
-            "--workspace",
-            &ws.to_string_lossy(),
-            "--fresh",
-        ]);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy(), "--fresh"]);
         let err = quick_start_args(&argv, &ws).expect_err("must refuse --fresh");
         let message = err.to_string();
         assert!(
@@ -2177,10 +2182,7 @@ mod tests {
     fn quick_start_without_fresh_flag_still_builds_args() {
         // Without --fresh, args build normally (the initial-creation path).
         let ws = tmp_workspace();
-        let argv = cli_argv(&[
-            "--workspace",
-            &ws.to_string_lossy(),
-        ]);
+        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
         let args = quick_start_args(&argv, &ws).expect("must build");
         assert_eq!(args.workspace, ws);
         // No `fresh` field anymore — the struct must compile and round-trip

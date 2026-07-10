@@ -3994,8 +3994,19 @@ fn rollback_add_agent_atomic(
     } else {
         let _ = std::fs::remove_file(spec_path);
     }
+    // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.4):
+    // rollback must tombstone the newly-added agent so the persist merge
+    // does not re-attach a `roster_stub` from the latest on disk. Without
+    // the tombstone the half-added `agents.standards` / `teams.<key>.agents.standards`
+    // survives the restore-from-pre_state pass and the retry sees
+    // "agent id already exists".
+    let deleted = [agent_id.as_str()];
     if let Some(state) = pre_runtime_state {
-        let _ = crate::state::persist::save_runtime_state(run_workspace, state);
+        let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
+            run_workspace,
+            state,
+            &deleted,
+        );
     } else {
         // No prior runtime state — drop just the agent we added (load → strip → save).
         if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
@@ -4005,7 +4016,24 @@ fn rollback_add_agent_atomic(
             {
                 agents.remove(agent_id.as_str());
             }
-            let _ = crate::state::persist::save_runtime_state(run_workspace, &state);
+            if let Some(teams) = state
+                .get_mut("teams")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                for team in teams.values_mut() {
+                    if let Some(agents) = team
+                        .get_mut("agents")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        agents.remove(agent_id.as_str());
+                    }
+                }
+            }
+            let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
+                run_workspace,
+                &state,
+                &deleted,
+            );
         }
     }
 }
