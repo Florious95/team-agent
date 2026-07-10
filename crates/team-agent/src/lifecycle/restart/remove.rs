@@ -186,17 +186,12 @@ fn remove_agent_at_paths(
     );
     match result {
         Ok(success) => {
-            // golden agents.py:135: _save_team_runtime_snapshot runs OUTSIDE the try/except, and
-            // snapshot.py:19-21 returns None (no error) when session_name is falsy. Mirror that here:
-            // only snapshot when session_name is present, and never let it roll the committed removal back.
-            if success
-                .removed_state
-                .get("session_name")
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty())
-            {
-                let _ = crate::lifecycle::helpers::save_team_runtime_snapshot(workspace, &success.removed_state)?;
-            }
+            // Foundation-0 F0-2: the historical dual-write to the legacy
+            // per-session snapshot has been retired
+            // (`.team/artifacts/foundation-0-slice-design.md` §§4-5).
+            // Root/projection is the sole runtime authority; the
+            // snapshot writer stayed in `lifecycle::helpers` only for
+            // diagnostic/migration/test callers.
             write_remove_complete_event(
                 paths.run_workspace,
                 agent_id,

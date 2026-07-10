@@ -10,13 +10,16 @@ use super::*;
     /// (bound-pane liveness + caller eligibility) deterministically with no tmux.
     #[test]
     #[serial_test::serial(env)]
-    fn claim_lease_no_incident_vacant_acquire_advances_epoch_and_dual_writes() {
+    // Foundation-0 F0-2 conversion: `claim_lease_no_incident` used to
+    // dual-write the legacy per-session snapshot; that is retired
+    // (`.team/artifacts/foundation-0-slice-design.md` §§4-5). Canonical
+    // teams.<team_key> now carries the sole authoritative owner tuple.
+    fn claim_lease_no_incident_vacant_acquire_advances_epoch_and_writes_canonical_only() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _e = EnvGuard::apply(&[("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE", None)]);
         let ws = p2_temp_ws("claim_vacant");
         let team_id = TeamKey::new("current");
         let caller = PaneId::new("%5");
-        // empty (vacant) state with a session so dual-state writes both files.
         let mut state = serde_json::json!({"session_name": "team-agent-x"});
         let event_log = crate::event_log::EventLog::new(&ws);
         let live = seeded_liveness(&["%5"]);
@@ -35,45 +38,25 @@ use super::*;
         let receiver = r.receiver.as_ref().expect("claimed → receiver");
         assert_eq!(receiver.pane_id, caller);
         assert_eq!(receiver.discovery, Some(Discovery::ClaimLeader));
-        // Stage 3d (identity-boundary unified plan, architect direction
-        // 2026-06-23): canonical owner now lives at teams.<team_key>; the
-        // top-level dual-write was dropped. Read through the ownership
-        // repository which preserves the legacy precedence for callers
-        // that still consult top-level on migration states.
         let ws_path = crate::state::persist::runtime_state_path(&ws);
         let ws_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&ws_path).unwrap()).unwrap();
-        // The canonical team_key is what `team_state_key(state)` derives
-        // (here: state's session_name "team-agent-x" since no explicit
-        // team_key/team_dir/spec_path was seeded). The test's `team_id`
-        // parameter is the LOOKUP key but `claim_lease_no_incident` uses
-        // the state-derived key for canonical writes. Stage 5 will unify
-        // these via TeamRuntimePaths.
         let canonical_key = crate::state::projection::team_state_key(&ws_state);
         let ws_owner =
             crate::state::ownership::read_owner_value(&ws_state, &canonical_key)
                 .expect("Stage 3d: vacant acquire writes canonical owner");
         assert_eq!(ws_owner["pane_id"], serde_json::json!("%5"));
         assert_eq!(ws_owner["owner_epoch"], serde_json::json!(1));
-        // team_id parameter is currently unused by the canonical write
-        // (architect Stage 5 will close this gap); silence the warning.
         let _ = &team_id;
+        // F0-2: canonical claim path must NOT side-effect the legacy
+        // per-session snapshot any more.
         let snap_path = crate::model::paths::runtime_dir(&ws)
             .join("teams").join("team-agent-x").join("state.json");
-        let snap: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&snap_path).unwrap()).unwrap();
-        // Snapshot is per-session; team_state_key on the snapshot derives
-        // from its session_name. Read top-level first (legacy snapshot
-        // layout), fall back to derived team key.
-        let snap_owner = snap
-            .get("team_owner")
-            .or_else(|| {
-                let key = crate::state::projection::team_state_key(&snap);
-                snap.get("teams").and_then(|t| t.get(key)).and_then(|e| e.get("team_owner"))
-            })
-            .expect("dual-state snapshot owner");
-        assert_eq!(snap_owner["pane_id"], serde_json::json!("%5"), "dual-state snapshot owner");
-        assert_eq!(snap_owner["owner_epoch"], serde_json::json!(1));
+        assert!(
+            !snap_path.exists(),
+            "F0-2: vacant claim must not write a legacy per-session snapshot; found {}",
+            snap_path.display(),
+        );
     }
 
     // RED — DEAD-OWNER RECOVER: bound pane %1 absent from live set, caller %5

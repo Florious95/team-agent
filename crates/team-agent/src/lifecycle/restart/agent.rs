@@ -915,12 +915,9 @@ pub(super) fn stop_agent_at_paths(
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:96-99: snapshot (side-effect), then state_file = write_team_state path.
-    // snapshot.py:19-21 returns None silently when session_name is falsy — mirror that no-op here so
-    // a workspace whose persisted state lacks session_name proceeds to write team_state and return ok
-    // (do NOT swallow OTHER snapshot errors). The stop/reset/remove-force paths all inherit this guard.
-    if session_name_present(&state) {
-        crate::lifecycle::helpers::save_team_runtime_snapshot(workspace, &state)?;
-    }
+    // Foundation-0 F0-2: legacy per-session snapshot dual-write retired
+    // (`.team/artifacts/foundation-0-slice-design.md` §§4-5). Root state
+    // remains the only save target on the stop path.
     let state_file = write_team_state(spec_workspace, &spec, &state)?;
     write_stop_complete_event(workspace, agent_id, &target_str, stopped)?;
     Ok(StopAgentReport {

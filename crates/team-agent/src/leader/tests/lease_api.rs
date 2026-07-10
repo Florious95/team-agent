@@ -112,7 +112,15 @@ use super::*;
     // 强化:带 session_name 时必须落 BOTH —— workspace state.json + team/<session> snapshot,
     // 两份 team_owner.pane_id / owner_epoch 必须一致(永不分叉)。空 body Ok(()) 会被这里抓。
     #[test]
-    fn write_lease_dual_state_persists_both_locations_without_divergence() {
+    // Foundation-0 F0-2 conversion of the C17 dual-write invariant test:
+    // legacy per-session snapshot dual-write has been retired
+    // (`.team/artifacts/foundation-0-slice-design.md` §§4-5). The lease
+    // helper now persists ONLY the canonical root state; a legacy
+    // snapshot is diagnostic-only and never re-appears as a side effect
+    // of `write_lease_dual_state`. This test enforces exactly that:
+    // canonical root gets the owner tuple, and the legacy per-session
+    // path stays absent unless a diagnostic path explicitly writes it.
+    fn write_lease_dual_state_persists_canonical_root_only_no_legacy_side_effect() {
         let ws = std::env::temp_dir().join(format!("ta_rs_dual_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
         let state = serde_json::json!({
@@ -121,32 +129,33 @@ use super::*;
             "leader_receiver": {"pane_id": "%1", "owner_epoch": 2},
         });
         write_lease_dual_state(&ws, &state).unwrap();
-        // (1) workspace state.json(<ws>/.team/runtime/state.json)被写,team_owner.pane_id==%1。
+        // Canonical root state.json IS written; F0-2 keeps this as the
+        // single product authority.
         let ws_path = crate::state::persist::runtime_state_path(&ws);
         let ws_state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&ws_path).expect("workspace state.json 必须存在")).unwrap();
         assert_eq!(ws_state["team_owner"]["pane_id"], serde_json::json!("%1"));
         assert_eq!(ws_state["team_owner"]["owner_epoch"], serde_json::json!(2));
-        // (2) team-level snapshot(<ws>/.team/runtime/teams/<session>/state.json)被写。
-        let snap_path = crate::model::paths::runtime_dir(&ws)
-            .join("teams")
-            .join("team-sess")
-            .join("state.json");
-        let snap_state: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&snap_path).expect("team snapshot state.json 必须存在")).unwrap();
-        // (3) 两份永不分叉:owner pane_id / owner_epoch 必须相等(C17 核心不变量)。
-        assert_eq!(
-            ws_state["team_owner"]["pane_id"], snap_state["team_owner"]["pane_id"],
-            "workspace 与 team snapshot 的 owner pane 不得分叉"
-        );
-        assert_eq!(
-            ws_state["team_owner"]["owner_epoch"], snap_state["team_owner"]["owner_epoch"],
-            "workspace 与 team snapshot 的 owner_epoch 不得分叉"
+        // Legacy per-session snapshot MUST NOT be a side effect of the
+        // lease save path any more — this is the RED2 authority-write
+        // guard shape at the unit-test layer.
+        let legacy_snap = crate::lifecycle::helpers::team_snapshot_path(&ws, "team-sess");
+        assert!(
+            !legacy_snap.exists(),
+            "F0-2: write_lease_dual_state must not write the legacy per-session snapshot; found {}",
+            legacy_snap.display(),
         );
     }
 
     #[test]
     fn lease_divergence_reads_restart_snapshot_for_special_session_names() {
+        // Foundation-0 F0-2 conversion: `write_lease_dual_state` no longer
+        // side-effects a legacy snapshot; the divergence detector is a
+        // diagnostic reader that fires only when a diagnostic writer
+        // (e.g. `lifecycle::save_team_runtime_snapshot`) has produced
+        // the sidecar. Sequence exercised here: canonical root save →
+        // diagnostic snapshot save with a different pane → divergence
+        // reader observes the drift.
         let ws = std::env::temp_dir().join(format!("ta_rs_dual_special_{}", std::process::id()));
         std::fs::create_dir_all(&ws).unwrap();
         let state = serde_json::json!({
@@ -160,17 +169,21 @@ use super::*;
             .join("teams")
             .join("team:proj-中文")
             .join("state.json");
+        // F0-2: canonical save must not create either the restart-safe
+        // or the raw legacy snapshot as a side effect.
         assert!(
-            safe_path.exists(),
-            "lease snapshot must use the restart-safe path: {}",
+            !safe_path.exists(),
+            "F0-2: canonical write_lease_dual_state must not create the restart-safe legacy snapshot: {}",
             safe_path.display()
         );
         assert!(
             !raw_path.exists(),
-            "new lease writes must not create the legacy raw session path: {}",
+            "F0-2: canonical write_lease_dual_state must not create the raw legacy snapshot: {}",
             raw_path.display()
         );
 
+        // Diagnostic write path with a divergent pane so we can exercise
+        // the divergence reader below.
         let restart_state = serde_json::json!({
             "session_name": "team:proj-中文",
             "team_owner": {"pane_id": "%9", "owner_epoch": 2, "leader_session_uuid": "uuuu"},
@@ -180,13 +193,18 @@ use super::*;
         assert_eq!(restart_path, safe_path);
         assert!(
             restart_path.exists(),
-            "restart snapshot must be written to a real file: {}",
+            "diagnostic snapshot must be written to a real file: {}",
             restart_path.display()
         );
 
+        // F0-2 RED1 diagnostic marker is present on the on-disk file.
+        let snap_state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&restart_path).unwrap()).unwrap();
+        assert_eq!(snap_state["_not_authoritative"], serde_json::json!(true));
+
         let d = detect_dual_state_divergence(&ws, &state)
             .unwrap()
-            .expect("divergence detector must read the restart-written snapshot");
+            .expect("divergence detector must read the diagnostic snapshot");
         assert_eq!(d["workspace_owner_pane"], serde_json::json!("%1"));
         assert_eq!(d["team_owner_pane"], serde_json::json!("%9"));
         assert_eq!(d["workspace_receiver_pane"], serde_json::json!("%1"));

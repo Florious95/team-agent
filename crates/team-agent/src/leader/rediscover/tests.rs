@@ -135,7 +135,12 @@ fn try_readopt_writes_owner_receiver_dual_state_and_events() {
     assert_eq!(owner_view["claimed_via"], json!("attach-leader"));
     assert_eq!(owner_view["owner_epoch"], json!(4));
     assert_eq!(receiver_view["discovery"], json!("attach_readopt"));
-    assert!(crate::model::paths::runtime_dir(&ws)
+    // Foundation-0 F0-2: the try_readopt success path no longer side-
+    // effects a legacy per-session snapshot; canonical teams.<key> is
+    // the sole authority. The legacy sidecar stays absent unless a
+    // diagnostic writer explicitly created it
+    // (`.team/artifacts/foundation-0-slice-design.md` §§4-5).
+    assert!(!crate::model::paths::runtime_dir(&ws)
         .join("teams")
         .join("sess")
         .join("state.json")
