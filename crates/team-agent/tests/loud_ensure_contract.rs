@@ -277,6 +277,10 @@ impl LoudEnsureFixture {
         command
             .args(args)
             .env("HOME", self._env.home())
+            .env(
+                "TEAM_AGENT_TEST_HARNESS_BINARY_PATH_MATCH",
+                cli_binary_path(),
+            )
             .current_dir(&self.root);
         for key in hermetic_guard::CALLER_IDENTITY_ENVS {
             command.env_remove(key);
