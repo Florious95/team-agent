@@ -50,6 +50,7 @@ pub(crate) fn reset_agent(
             })),
         });
     }
+    emit_newer_daemon_preserved_if_present(workspace)?;
     let lifecycle_workspace = lifecycle_workspace(workspace, owner_team, true)?;
     match crate::lifecycle::reset_agent(
         &lifecycle_workspace,
@@ -97,6 +98,7 @@ pub(crate) fn fork_agent(
     as_agent_id: &str,
     label: Option<&str>,
 ) -> ToolResult {
+    emit_newer_daemon_preserved_if_present(workspace)?;
     let lifecycle_workspace = lifecycle_workspace(workspace, owner_team, false)?;
     // operations.py:315 — the label becomes the forked agent's role.
     let report = crate::lifecycle::launch::fork_agent(
@@ -126,6 +128,41 @@ fn reset_refusal_reason(reason: ResetRefusal) -> Value {
     match reason {
         ResetRefusal::DiscardSessionRequired => Value::String("discard_session_required".to_string()),
     }
+}
+
+fn emit_newer_daemon_preserved_if_present(workspace: &Path) -> Result<(), super::super::ToolError> {
+    let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let health = crate::coordinator::coordinator_health(&workspace_path);
+    if !(health.service_available
+        && !health.binary_identity_ok
+        && matches!(
+            health.binary_identity_relation,
+            crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
+        ))
+    {
+        return Ok(());
+    }
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            "coordinator.newer_daemon_preserved",
+            serde_json::json!({
+                "pid": health.pid.map(|pid| pid.get()),
+                "binary_identity_relation": health.binary_identity_relation.as_str(),
+                "reason": "daemon_newer_than_caller",
+                "daemon_binary_path": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_path.clone()),
+                "daemon_binary_version": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_version.clone()),
+                "caller_binary_path": health.current_binary_identity.binary_path,
+                "caller_binary_version": health.current_binary_identity.binary_version,
+            }),
+        )
+        .map(|_| ())
+        .map_err(tool_runtime_error)
 }
 
 fn lifecycle_workspace(

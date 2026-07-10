@@ -319,6 +319,30 @@ fn coordinator_unavailable_outcome(
     if health.ok || matches!(health.status, CoordinatorHealthStatus::Missing) {
         return Ok(None);
     }
+    if health.service_available {
+        event_log.write(
+            "send.coordinator_binary_identity_drift_ignored",
+            serde_json::json!({
+                "recipient": recipient,
+                "sender": opts.sender,
+                "coordinator_status": health.status,
+                "coordinator_pid": health.pid.map(|pid| pid.get()),
+                "message_queued": true,
+                "binary_identity_relation": health.binary_identity_relation.as_str(),
+                "daemon_binary_path": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_path.clone()),
+                "daemon_binary_version": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_version.clone()),
+                "caller_binary_path": health.current_binary_identity.binary_path,
+                "caller_binary_version": health.current_binary_identity.binary_version,
+            }),
+        )?;
+        return Ok(None);
+    }
     let warning = format!(
         "coordinator is not running; message was not queued for {recipient}. Run `team-agent diagnose` or restart the team before sending again."
     );
@@ -329,6 +353,7 @@ fn coordinator_unavailable_outcome(
             "sender": opts.sender,
             "coordinator_status": health.status,
             "coordinator_pid": health.pid.map(|pid| pid.get()),
+            "metadata_mismatch_reason": health.metadata_mismatch_reason,
             "message_queued": false,
             "warning": warning,
             "coordinator_log": crate::coordinator::coordinator_log_path(&coordinator_workspace)

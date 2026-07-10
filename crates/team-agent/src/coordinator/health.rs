@@ -13,10 +13,10 @@ use thiserror::Error;
 use crate::message_store::MessageStore;
 
 use super::types::{
-    CoordinatorBinaryIdentity, CoordinatorHealthStatus, CoordinatorMetadata,
-    CoordinatorMetadataMismatchReason, HealthReport, MetadataSource, Pid, SchemaError,
-    SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome, StopReport,
-    WatchCursor, WorkspacePath, PROTOCOL_VERSION, ROTATION_MARKER,
+    CoordinatorBinaryIdentity, CoordinatorBinaryIdentityRelation, CoordinatorHealthStatus,
+    CoordinatorMetadata, CoordinatorMetadataMismatchReason, HealthReport, MetadataSource, Pid,
+    SchemaError, SchemaHealth, StartError, StartOutcome, StartReport, StopError, StopOutcome,
+    StopReport, WatchCursor, WorkspacePath, PROTOCOL_VERSION, ROTATION_MARKER,
 };
 
 // ===========================================================================
@@ -40,21 +40,30 @@ pub fn coordinator_health(workspace: &WorkspacePath) -> HealthReport {
         None => CoordinatorHealthStatus::Missing,
     };
     let metadata = read_coordinator_metadata(workspace);
-    let metadata_mismatch = pid
-        .map(|p| coordinator_metadata_mismatch_reason_with_identity(
-            metadata.as_ref(),
-            p,
-            &current_binary_identity,
-        ))
+    let wire_metadata_mismatch = pid
+        .map(|p| coordinator_wire_metadata_mismatch_reason(metadata.as_ref(), p))
         .unwrap_or(Some(CoordinatorMetadataMismatchReason::MetadataMissing));
-    let metadata_ok = metadata_mismatch.is_none();
-    let running = matches!(status, CoordinatorHealthStatus::Running);
+    let binary_identity_mismatch =
+        coordinator_binary_identity_mismatch_reason(metadata.as_ref(), &current_binary_identity);
+    let wire_metadata_ok = wire_metadata_mismatch.is_none();
+    let binary_identity_ok = binary_identity_mismatch.is_none();
+    let metadata_mismatch = wire_metadata_mismatch.or(binary_identity_mismatch);
+    let metadata_ok = wire_metadata_ok && binary_identity_ok;
+    let process_running = matches!(status, CoordinatorHealthStatus::Running);
+    let binary_identity_relation =
+        coordinator_binary_identity_relation(metadata.as_ref(), &current_binary_identity);
+    let service_available = process_running && wire_metadata_ok && schema.ok;
     HealthReport {
-        ok: running && metadata_ok && schema.ok,
+        ok: process_running && metadata_ok && schema.ok,
         status,
         pid,
         metadata,
         metadata_ok,
+        process_running,
+        wire_metadata_ok,
+        binary_identity_ok,
+        binary_identity_relation,
+        service_available,
         metadata_mismatch_reason: metadata_mismatch.map(|reason| reason.as_str().to_string()),
         current_binary_identity,
         schema,
@@ -107,6 +116,62 @@ pub fn start_coordinator_with_team(
             log: None,
             schema_error: health.schema.error,
             action: health.schema.action,
+        });
+    }
+    if matches!(health.status, CoordinatorHealthStatus::Running) && !health.wire_metadata_ok {
+        return Ok(StartReport {
+            ok: false,
+            pid: health.pid,
+            status: StartOutcome::RestartIncompatibleStopFailed,
+            previous_pid: health.pid,
+            binary_path: Some(identity.binary_path),
+            binary_version: Some(identity.binary_version),
+            rotation_reason: health.metadata_mismatch_reason,
+            log: None,
+            schema_error: None,
+            action: Some(
+                "refusing to rotate a coordinator with incompatible protocol or schema metadata"
+                    .to_string(),
+            ),
+        });
+    }
+    if matches!(health.status, CoordinatorHealthStatus::Running)
+        && health.wire_metadata_ok
+        && !health.binary_identity_ok
+        && matches!(
+            health.binary_identity_relation,
+            CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
+        )
+    {
+        crate::event_log::EventLog::new(workspace.as_path()).write(
+            "coordinator.newer_daemon_preserved",
+            serde_json::json!({
+                "pid": health.pid.map(|pid| pid.get()),
+                "binary_identity_relation": health.binary_identity_relation.as_str(),
+                "reason": "daemon_newer_than_caller",
+                "daemon_binary_path": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_path.clone()),
+                "daemon_binary_version": health
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.binary_version.clone()),
+                "caller_binary_path": identity.binary_path.clone(),
+                "caller_binary_version": identity.binary_version.clone(),
+            }),
+        )?;
+        return Ok(StartReport {
+            ok: true,
+            pid: health.pid,
+            status: StartOutcome::AlreadyRunning,
+            previous_pid: None,
+            binary_path: Some(identity.binary_path),
+            binary_version: Some(identity.binary_version),
+            rotation_reason: Some("daemon_newer_than_caller".to_string()),
+            log: Some(coordinator_log_path(workspace)),
+            schema_error: None,
+            action: None,
         });
     }
     let rotation_reason = if matches!(health.status, CoordinatorHealthStatus::Running)
@@ -580,6 +645,13 @@ pub fn read_coordinator_metadata(workspace: &WorkspacePath) -> Option<Coordinato
 }
 
 pub fn current_coordinator_binary_identity() -> CoordinatorBinaryIdentity {
+    if let Ok(raw) = std::env::var("TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY") {
+        if let Ok(identity) = serde_json::from_str::<CoordinatorBinaryIdentity>(&raw) {
+            if !identity.binary_path.is_empty() && !identity.binary_version.is_empty() {
+                return identity;
+            }
+        }
+    }
     let binary_path = std::env::current_exe()
         .map(|path| path.canonicalize().unwrap_or(path))
         .map(|path| path.to_string_lossy().into_owned())
@@ -609,6 +681,14 @@ fn coordinator_metadata_mismatch_reason_with_identity(
     pid: Pid,
     identity: &CoordinatorBinaryIdentity,
 ) -> Option<CoordinatorMetadataMismatchReason> {
+    coordinator_wire_metadata_mismatch_reason(metadata, pid)
+        .or_else(|| coordinator_binary_identity_mismatch_reason(metadata, identity))
+}
+
+fn coordinator_wire_metadata_mismatch_reason(
+    metadata: Option<&CoordinatorMetadata>,
+    pid: Pid,
+) -> Option<CoordinatorMetadataMismatchReason> {
     let Some(metadata) = metadata else {
         return Some(CoordinatorMetadataMismatchReason::MetadataMissing);
     };
@@ -621,6 +701,16 @@ fn coordinator_metadata_mismatch_reason_with_identity(
     if metadata.message_store_schema_version != crate::db::schema::SCHEMA_VERSION {
         return Some(CoordinatorMetadataMismatchReason::MessageStoreSchemaVersionMismatch);
     }
+    None
+}
+
+fn coordinator_binary_identity_mismatch_reason(
+    metadata: Option<&CoordinatorMetadata>,
+    identity: &CoordinatorBinaryIdentity,
+) -> Option<CoordinatorMetadataMismatchReason> {
+    let Some(metadata) = metadata else {
+        return Some(CoordinatorMetadataMismatchReason::MetadataMissing);
+    };
     let Some(binary_version) = metadata.binary_version.as_deref().filter(|value| !value.is_empty())
     else {
         return Some(CoordinatorMetadataMismatchReason::BinaryIdentityMissing);
@@ -636,6 +726,60 @@ fn coordinator_metadata_mismatch_reason_with_identity(
         return Some(CoordinatorMetadataMismatchReason::BinaryPathMismatch);
     }
     None
+}
+
+fn coordinator_binary_identity_relation(
+    metadata: Option<&CoordinatorMetadata>,
+    identity: &CoordinatorBinaryIdentity,
+) -> CoordinatorBinaryIdentityRelation {
+    let Some(metadata) = metadata else {
+        return CoordinatorBinaryIdentityRelation::Unknown;
+    };
+    let Some(daemon_version) = metadata
+        .binary_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return CoordinatorBinaryIdentityRelation::Unknown;
+    };
+    match compare_version_strings(daemon_version, &identity.binary_version) {
+        Some(std::cmp::Ordering::Greater) => {
+            return CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller;
+        }
+        Some(std::cmp::Ordering::Less) => {
+            return CoordinatorBinaryIdentityRelation::CallerNewerThanDaemon;
+        }
+        Some(std::cmp::Ordering::Equal) => {}
+        None => return CoordinatorBinaryIdentityRelation::Unknown,
+    }
+    let Some(daemon_path) = metadata
+        .binary_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return CoordinatorBinaryIdentityRelation::Unknown;
+    };
+    if binary_path_matches_current_identity(daemon_path, &identity.binary_path) {
+        CoordinatorBinaryIdentityRelation::Same
+    } else {
+        CoordinatorBinaryIdentityRelation::SameVersionPathMismatch
+    }
+}
+
+fn compare_version_strings(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left = parse_numeric_version(left)?;
+    let right = parse_numeric_version(right)?;
+    Some(left.cmp(&right))
+}
+
+fn parse_numeric_version(value: &str) -> Option<Vec<u64>> {
+    if value.is_empty() {
+        return None;
+    }
+    value
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
 }
 
 fn binary_path_matches_current_identity(metadata_path: &str, identity_path: &str) -> bool {

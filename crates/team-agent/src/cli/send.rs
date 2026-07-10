@@ -239,6 +239,14 @@ fn loud_ensure_coordinator(
     if previous.ok {
         return Ok(None);
     }
+    if previous.service_available
+        && matches!(
+            previous.binary_identity_relation,
+            crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
+        )
+    {
+        return Ok(None);
+    }
     let previous_status = coordinator_health_status_wire(previous.status).to_string();
     let start = crate::coordinator::start_coordinator_with_team(
         &workspace,

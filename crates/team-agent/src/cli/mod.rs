@@ -3947,7 +3947,9 @@ pub mod diagnose_port {
     }
 
     fn coordinator_health_value(health: crate::coordinator::HealthReport) -> Value {
-        json!({
+        let expose_binary_drift = health.service_available && !health.metadata_ok;
+        let binary_identity_relation = health.binary_identity_relation.as_str();
+        let mut value = json!({
             "ok": health.ok,
             "status": coordinator_status_wire(health.status),
             "pid": health.pid.map(|p| p.get()),
@@ -3969,7 +3971,19 @@ pub mod diagnose_port {
             "schema": {
                 "message_store_schema_version": health.schema.schema_version,
             },
-        })
+        });
+        if expose_binary_drift {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("wire_metadata_ok".to_string(), Value::Bool(true));
+                obj.insert("binary_identity_ok".to_string(), Value::Bool(false));
+                obj.insert(
+                    "binary_identity_relation".to_string(),
+                    Value::String(binary_identity_relation.to_string()),
+                );
+                obj.insert("service_available".to_string(), Value::Bool(true));
+            }
+        }
+        value
     }
 
     fn coordinator_status_wire(
