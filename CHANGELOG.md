@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.22
+
+- **Fix: coordinator-dependent mutating commands now loudly ensure a live coordinator (`loud ensure`).** When `send` encounters a coordinator in `Missing` or `Stale` state (binary identity mismatch), it automatically spawns or rotates the coordinator before delivering the message. The response and lifecycle events declare the action loudly: `coordinator_auto_restarted` flag, previous coordinator state, new coordinator identity, and a `coordinator.ensure_restarted` event are all emitted so operators can audit the transition. If the coordinator cannot be brought up, the command remains fail-closed — no silent delivery against a dead coordinator.
+- **Read-only commands are unchanged:** commands that do not mutate team state continue to report a dead coordinator without spawning, preserving the existing behavior.
+- **Dirty topology and other guards remain higher priority than `loud ensure`:** the ensure path is bypassed when the topology guard would refuse the operation, so safety rails are not weakened.
+- **Upgrade experience improvement:** after a CLI upgrade, users no longer need to manually run `team-agent restart` to rotate the coordinator to the new binary. The first mutating command (e.g. `send`) automatically ensures the coordinator is on the current binary.
+- **New: `loud_ensure_contract` (5/5).** Contracts cover: mutating send ensures missing coordinator, mutating send rotates stale coordinator, read-only commands report dead coordinator without spawning, loud ensure does not bypass dirty topology refusal, explicit restart semantics remain unchanged.
+
 ## 0.5.21
 
 > **Note:** 0.5.20 contains a coordinator shutdown timeout defect (daemon sleep not interrupted on SIGTERM). Users on 0.5.20 are advised to upgrade directly to 0.5.21.
