@@ -451,6 +451,10 @@ fn apply_persist_merge_contract(
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
+        // 0.5.26 (§7.3): top-level projection uses the incoming root state's
+        // implicit "alive" shape (top-level agents are always the active team).
+        // Passing `None` for team lifecycle keeps historical behavior when the
+        // active team is not lifecycle-marked.
         merge_agent_projection(
             "agents",
             incoming.get_mut("agents"),
@@ -459,6 +463,7 @@ fn apply_persist_merge_contract(
             skip_top_level_capture_backfill,
             skip_capture_backfill_agent_ids,
             topology_update_agent_ids,
+            None,
         )?;
         // Stage 3c (identity-boundary unified plan, architect direction
         // 2026-06-23): top-level owner copy-back removed. Pre-3c this
@@ -495,6 +500,19 @@ fn apply_persist_merge_contract(
                 continue;
             };
             let projection = format!("teams.{team}.agents");
+            // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
+            // decide the containing team's aliveness from BOTH sides — a shutdown
+            // that stamped the incoming as non-alive would otherwise leak the
+            // stale latest into the conflict path. `false` on either side kills
+            // the live-topology protection so a dead sibling's stale pane can't
+            // block a live sibling's write.
+            let team_alive = Some(
+                crate::state::projection::team_is_alive_candidate(latest_entry)
+                    && incoming_entry
+                        .as_object()
+                        .map(|_| crate::state::projection::team_is_alive_candidate(incoming_entry))
+                        .unwrap_or(true),
+            );
             merge_agent_projection(
                 &projection,
                 incoming_entry.get_mut("agents"),
@@ -503,6 +521,7 @@ fn apply_persist_merge_contract(
                 should_skip_capture_backfill(Some(team), skip_capture_backfill_team_key),
                 skip_capture_backfill_agent_ids,
                 topology_update_agent_ids,
+                team_alive,
             )?;
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
             preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
@@ -528,11 +547,7 @@ fn apply_persist_merge_contract(
 fn preserve_transport_shim(incoming: &mut Value, latest: &Value) {
     // The shim block only matters when `latest` has one AND
     // `incoming` doesn't (or `incoming.transport` doesn't exist).
-    let Some(latest_shim) = latest
-        .get("transport")
-        .and_then(|t| t.get("shim"))
-        .cloned()
-    else {
+    let Some(latest_shim) = latest.get("transport").and_then(|t| t.get("shim")).cloned() else {
         return;
     };
     let Some(incoming_obj) = incoming.as_object_mut() else {
@@ -604,21 +619,20 @@ fn latest_has_preferable_endpoint_convergence(incoming: &Value, latest: &Value) 
     {
         return false;
     }
-    let latest_epoch = endpoint_convergence_epoch(latest).unwrap_or_else(|| ownership_epoch(latest));
+    let latest_epoch =
+        endpoint_convergence_epoch(latest).unwrap_or_else(|| ownership_epoch(latest));
     let incoming_epoch =
         endpoint_convergence_epoch(incoming).unwrap_or_else(|| ownership_epoch(incoming));
     if latest_epoch < incoming_epoch {
         return false;
     }
-    !incoming
-        .get("topology_convergence")
-        .is_some_and(|marker| {
-            marker.get("status").and_then(Value::as_str) == Some("converged")
-                && marker
-                    .get("owner_epoch")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|epoch| epoch >= latest_epoch)
-        })
+    !incoming.get("topology_convergence").is_some_and(|marker| {
+        marker.get("status").and_then(Value::as_str) == Some("converged")
+            && marker
+                .get("owner_epoch")
+                .and_then(Value::as_u64)
+                .is_some_and(|epoch| epoch >= latest_epoch)
+    })
 }
 
 fn endpoint_convergence_epoch(state: &Value) -> Option<u64> {
@@ -666,6 +680,7 @@ fn ownership_attached(state: &Value) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_agent_projection(
     projection: &str,
     incoming_agents: Option<&mut Value>,
@@ -674,6 +689,14 @@ fn merge_agent_projection(
     skip_capture_backfill: bool,
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
     topology_update_agent_ids: &BTreeSet<String>,
+    // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
+    // whether the containing team is a live protection target.
+    // - `None`: top-level projection — historical behavior, protect on truthy topology.
+    // - `Some(true)`: per-team merge for a canonical-alive team — protect.
+    // - `Some(false)`: per-team merge for a shutdown/legacy-stopped team —
+    //   the merge must NOT protect stale topology so a live sibling's write
+    //   can go through.
+    team_alive: Option<bool>,
 ) -> Result<(), StateError> {
     let Some(incoming_agents) = incoming_agents else {
         return Ok(());
@@ -695,7 +718,9 @@ fn merge_agent_projection(
                 if topology_update_agent_ids.contains(agent_id) {
                     continue;
                 }
-                if !tombstoned_for_projection && latest_has_live_topology(latest_agent) {
+                if !tombstoned_for_projection
+                    && latest_has_protected_live_topology(latest_agent, team_alive)
+                {
                     return Err(save_conflict(
                         projection,
                         agent_id,
@@ -708,7 +733,7 @@ fn merge_agent_projection(
             }
             serde_json::map::Entry::Occupied(mut existing) => {
                 if !tombstoned_for_projection && !topology_update_agent_ids.contains(agent_id) {
-                    let fields = topology_conflict_fields(existing.get(), latest_agent);
+                    let fields = topology_conflict_fields(existing.get(), latest_agent, team_alive);
                     if !fields.is_empty() {
                         return Err(save_conflict(projection, agent_id, fields));
                     }
@@ -729,7 +754,23 @@ fn save_conflict(projection: &str, agent_id: &str, fields: Vec<&'static str>) ->
     ))
 }
 
-fn latest_has_live_topology(agent: &Value) -> bool {
+/// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
+/// 谓词收敛。原 `latest_has_live_topology` 只看 topology 字段真值,现改为:
+/// - 若上层告知 `team_alive=Some(false)` → 死队,永不 protect;
+/// - 若 latest 的 agent.status 是终态(stopped/dead/…)→ 永不 protect;
+/// - 否则维持原判据(topology 字段真值 → protect)。
+///
+/// 保守设计:top-level 传 `None` 时行为与 0.5.25 前完全一致(仅看 topology
+/// 真值),避免影响 F0-1/F0-2/E6 已通契约。
+fn latest_has_protected_live_topology(agent: &Value, team_alive: Option<bool>) -> bool {
+    if team_alive == Some(false) {
+        return false;
+    }
+    if let Some(status) = agent.get("status").and_then(Value::as_str) {
+        if crate::state::projection::agent_status_is_terminal(status) {
+            return false;
+        }
+    }
     LIVE_TOPOLOGY_FIELDS
         .iter()
         .any(|field| agent.get(field).is_some_and(json_truthy))
@@ -743,7 +784,16 @@ fn live_topology_fields(agent: &Value) -> Vec<&'static str> {
         .collect()
 }
 
-fn topology_conflict_fields(incoming_agent: &Value, latest_agent: &Value) -> Vec<&'static str> {
+fn topology_conflict_fields(
+    incoming_agent: &Value,
+    latest_agent: &Value,
+    team_alive: Option<bool>,
+) -> Vec<&'static str> {
+    // 0.5.26 (§7.3): 若被守卫的 team 已死 / agent 处终态,不再报 topology
+    // 冲突,允许活队 sibling write 通过。
+    if !latest_has_protected_live_topology(latest_agent, team_alive) {
+        return Vec::new();
+    }
     let latest_live = live_topology_fields(latest_agent);
     if latest_live.is_empty() {
         return Vec::new();
