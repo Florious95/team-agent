@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.24
+
+- **Fix: `report_result` attribution fallback is now bounded (Foundation-0 F0-1).** A newer, non-reportable direct-message turn blocks the old-task fallback path. Previously, if a newer turn arrived between task delivery and `report_result`, the attribution could fall back to an older task even though the newer turn had no reportable task. The fallback now stops at the newest non-reportable direct turn and emits a structured `attribution_bounded_warning` so operators can observe when bounding occurs. New contract: `a0_current_turn_attribution_contract` (5/5).
+- **Fix: legacy per-session snapshot retired as an authority source (Foundation-0 F0-2).** The authority save path no longer writes to the legacy per-session snapshot location. Any legacy snapshot that still exists on disk is preserved but tagged with `_not_authoritative` metadata, and all read paths that previously used it as an authority source now treat it as diagnostic-only. This eliminates the class of stale-route bugs where an old snapshot overrode a live authority state. New contract: `b0_legacy_snapshot_nonauthority_contract` (3/3).
+- **Doc: coordinator health conditional fields default to healthy when absent (0.5.23 wire doc debt).** The coordinator health wire format documents that fields introduced in 0.5.23 (`service_available`, `newer_daemon_preserved`) are absent when the corresponding condition is not triggered — callers must treat absence as the healthy/default state, not as an error.
+
 ## 0.5.23
 
 - **Fix: coordinator health now uses two independent predicates: `service_available` and binary identity.** `service_available` checks that the coordinator process is alive, the wire protocol version is compatible, and the schema version is compatible — these are the conditions required to serve an MCP client. Binary identity (binary path + `PKG_VERSION`) is checked separately and governs rotation. A compatible newer coordinator daemon that passes `service_available` is now allowed to stay live and serve older-version MCP clients, fixing the worker→worker cross-version delivery rejection that occurred when a newer coordinator was incorrectly rotated out by an older caller.
