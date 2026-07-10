@@ -642,23 +642,32 @@ fn binary_path_matches_current_identity(metadata_path: &str, identity_path: &str
     if metadata_path == identity_path {
         return true;
     }
-    integration_test_cli_binary_path()
-        .as_deref()
-        .is_some_and(|path| metadata_path == path)
+    test_harness_binary_path_matches(metadata_path)
 }
 
-fn integration_test_cli_binary_path() -> Option<String> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            let deps_dir = path.parent()?;
-            if deps_dir.file_name()? != "deps" {
-                return None;
-            }
-            Some(deps_dir.parent()?.join("team-agent"))
-        })
-        .and_then(|path| path.canonicalize().ok().or(Some(path)))
-        .map(|path| path.to_string_lossy().into_owned())
+/// Test harness escape hatch for integration tests whose process identity is the
+/// test binary while fixture metadata intentionally points at the built CLI.
+/// Production must not infer this from path shape; callers must set the
+/// `TEAM_AGENT_TEST_HARNESS_BINARY_PATH_MATCH` env explicitly to either the
+/// expected binary path or the target directory containing `team-agent`.
+fn test_harness_binary_path_matches(metadata_path: &str) -> bool {
+    let Ok(path) = std::env::var("TEAM_AGENT_TEST_HARNESS_BINARY_PATH_MATCH") else {
+        return false;
+    };
+    let path = PathBuf::from(path);
+    path_matches(metadata_path, &path)
+        || path_matches(metadata_path, &path.join("team-agent"))
+        || path
+            .parent()
+            .is_some_and(|parent| path_matches(metadata_path, &parent.join("team-agent")))
+}
+
+fn path_matches(metadata_path: &str, path: &Path) -> bool {
+    path.to_string_lossy() == metadata_path
+        || path
+            .canonicalize()
+            .ok()
+            .is_some_and(|path| path.to_string_lossy() == metadata_path)
 }
 
 /// `write_coordinator_metadata`(`metadata.py:46-61`)。写 `coordinator.json`(pretty indent=2),

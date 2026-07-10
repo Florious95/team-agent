@@ -231,7 +231,7 @@ struct LoudEnsureResult {
 fn loud_ensure_coordinator(
     selected: &crate::state::selector::SelectedTeam,
 ) -> Result<Option<LoudEnsureResult>, CliError> {
-    if current_process_is_cargo_test_binary() {
+    if in_process_unit_test() {
         return Ok(None);
     }
     let workspace = crate::coordinator::WorkspacePath::new(selected.run_workspace.clone());
@@ -279,21 +279,12 @@ fn loud_ensure_coordinator(
 }
 
 #[cfg(test)]
-fn current_process_is_cargo_test_binary() -> bool {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            let deps_dir = path.parent()?;
-            if deps_dir.file_name()? != "deps" {
-                return None;
-            }
-            Some(())
-        })
-        .is_some()
+fn in_process_unit_test() -> bool {
+    true
 }
 
 #[cfg(not(test))]
-fn current_process_is_cargo_test_binary() -> bool {
+fn in_process_unit_test() -> bool {
     false
 }
 
