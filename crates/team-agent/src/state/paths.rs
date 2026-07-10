@@ -5,7 +5,7 @@
 //! paths or behaviour. It introduces a shared vocabulary that Stage 2 (owner
 //! repository), Stage 5 (per-team runtime state), and Stage 6 (per-team
 //! coordinator) will all consume, so that no later stage has to hand-build
-//! `.team/runtime/<team_key>/...` paths or guess the canonical team_key from
+//! `.team/runtime/teams/<team_key>/...` paths or guess the canonical team_key from
 //! a display name.
 //!
 //! Canonical rules:
@@ -15,10 +15,10 @@
 //! - For the foundation slice, `TeamScope::new(team_key)` accepts whatever
 //!   the caller already resolved (state/selector + state/persist already do
 //!   this work). Slug/hash promotion to global uniqueness lands in Stage 5.
-//! - `TeamRuntimePaths` is the SINGLE place where the
-//!   `.team/runtime/<team_key>/` layout is constructed. Anywhere downstream
-//!   code today hand-joins `runtime_dir(ws).join(team_key).join(...)` it
-//!   should migrate to call a method on `TeamRuntimePaths` in a later stage.
+//! - `TeamRuntimePaths` is the SINGLE place where the future B3
+//!   `.team/runtime/teams/<team_key>/` layout is constructed. Anywhere
+//!   downstream code today hand-joins runtime team paths should migrate to
+//!   call a method on `TeamRuntimePaths` in a later stage.
 //!
 //! Single-team behaviour: unchanged. The foundation does not move data, does
 //! not introduce new files, and is invoked by zero existing call sites yet.
@@ -72,15 +72,15 @@ impl TeamScope {
     }
 }
 
-/// Single source of `.team/runtime/<team_key>/...` path construction.
+/// Single source of future B3 `.team/runtime/teams/<team_key>/...` path construction.
 ///
 /// Stage 2 (owner repository), Stage 5 (per-team state), Stage 6 (per-team
 /// coordinator), and Stage 7 (per-team tmux socket) will all migrate from
 /// hand-built paths to `TeamRuntimePaths`. Today nothing reads from these
 /// methods yet — the foundation just owns the layout decision so when later
-/// stages start writing `.team/runtime/<team_key>/state.json` (Stage 5) or
-/// `.team/runtime/<team_key>/coordinator.pid` (Stage 6), there is exactly
-/// one place to change the layout.
+/// stages start writing `.team/runtime/teams/<team_key>/state.json` (Stage 5)
+/// or `.team/runtime/teams/<team_key>/coordinator.pid` (Stage 6), there is
+/// exactly one place to change the layout.
 #[derive(Debug, Clone)]
 pub struct TeamRuntimePaths {
     workspace: PathBuf,
@@ -110,34 +110,36 @@ impl TeamRuntimePaths {
         &self.team_key
     }
 
-    /// `.team/runtime/<team_key>/` — the team's runtime directory. Today this
-    /// already exists (runtime_spec lives under it). Stage 5 will start
-    /// writing `state.json` here too.
+    /// `.team/runtime/teams/<team_key>/` — the team's future B3 runtime
+    /// directory. It is not used as product authority until the B3 migration;
+    /// current callers must keep using `runtime_state_path`.
     pub fn team_dir(&self) -> PathBuf {
-        runtime_dir(&self.workspace).join(&self.team_key)
+        runtime_dir(&self.workspace)
+            .join("teams")
+            .join(&self.team_key)
     }
 
-    /// `.team/runtime/<team_key>/team.spec.yaml` — runtime spec. Mirrors the
-    /// existing `runtime_spec_path` helper; provided here so downstream
-    /// callers don't need to import two layout APIs.
+    /// Transitional runtime spec path. Mirrors the existing
+    /// `runtime_spec_path` helper while specs remain at
+    /// `.team/runtime/<team_key>/team.spec.yaml`.
     pub fn spec_path(&self) -> PathBuf {
         runtime_spec_path(&self.workspace, &self.team_key)
     }
 
-    /// `.team/runtime/<team_key>/state.json` — the canonical per-team state
-    /// path that Stage 5 will start writing. Not used by Stage 0 product
-    /// code; callers must continue using `runtime_state_path` until Stage 5
+    /// `.team/runtime/teams/<team_key>/state.json` — the canonical per-team
+    /// state path that B3 will start writing. Not used by current product
+    /// code; callers must continue using `runtime_state_path` until B3
     /// migrates the truth source.
     pub fn state_path(&self) -> PathBuf {
         self.team_dir().join("state.json")
     }
 
-    /// `.team/runtime/<team_key>/coordinator.pid` — Stage 6 sidecar location.
+    /// `.team/runtime/teams/<team_key>/coordinator.pid` — future sidecar location.
     pub fn coordinator_pid_path(&self) -> PathBuf {
         self.team_dir().join("coordinator.pid")
     }
 
-    /// `.team/runtime/<team_key>/coordinator.log` — Stage 6 sidecar location.
+    /// `.team/runtime/teams/<team_key>/coordinator.log` — future sidecar location.
     pub fn coordinator_log_path(&self) -> PathBuf {
         self.team_dir().join("coordinator.log")
     }
@@ -240,23 +242,20 @@ mod tests {
     }
 
     #[test]
-    fn team_runtime_paths_layout_matches_existing_runtime_dir_layout() {
+    fn team_runtime_paths_layout_preannounces_b3_state_dir() {
         let paths = TeamRuntimePaths::new(PathBuf::from("/ws/proj"), "alpha");
-        assert_eq!(
-            paths.team_dir(),
-            PathBuf::from("/ws/proj/.team/runtime/alpha")
-        );
+        let b3_team_dir = PathBuf::from("/ws/proj/.team/runtime")
+            .join("teams")
+            .join("alpha");
+        assert_eq!(paths.team_dir(), b3_team_dir);
         assert_eq!(
             paths.spec_path(),
             PathBuf::from("/ws/proj/.team/runtime/alpha/team.spec.yaml")
         );
-        assert_eq!(
-            paths.state_path(),
-            PathBuf::from("/ws/proj/.team/runtime/alpha/state.json")
-        );
+        assert_eq!(paths.state_path(), b3_team_dir.join("state.json"));
         assert_eq!(
             paths.coordinator_pid_path(),
-            PathBuf::from("/ws/proj/.team/runtime/alpha/coordinator.pid")
+            b3_team_dir.join("coordinator.pid")
         );
     }
 
