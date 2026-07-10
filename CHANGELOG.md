@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.23
+
+- **Fix: coordinator health now uses two independent predicates: `service_available` and binary identity.** `service_available` checks that the coordinator process is alive, the wire protocol version is compatible, and the schema version is compatible — these are the conditions required to serve an MCP client. Binary identity (binary path + `PKG_VERSION`) is checked separately and governs rotation. A compatible newer coordinator daemon that passes `service_available` is now allowed to stay live and serve older-version MCP clients, fixing the worker→worker cross-version delivery rejection that occurred when a newer coordinator was incorrectly rotated out by an older caller.
+- **Fix: `start_coordinator` direction guard — only same-version or newer callers may rotate the coordinator; older callers preserve a compatible newer daemon.** When `start_coordinator` is called by a caller whose binary version is older than the running coordinator, it writes a `newer_daemon_preserved` diagnostic event and returns without downgrading the coordinator. This eliminates the version ping-pong risk where alternating old and new callers could repeatedly rotate the coordinator.
+- **Fix: binary drift at enqueue time writes a diagnostic event.** When a message is enqueued against a coordinator with a binary identity mismatch, a structured diagnostic event is recorded, giving operators visibility into drift without requiring a manual `diagnose` run.
+- **Binary protocol and schema incompatibility remain hard fail-closed.** Only binary drift is relaxed to allow compatible service; wire protocol mismatches and schema version mismatches still fail immediately without delivery.
+- **New: `coordinator_service_compat_contract` (5/5).** Contracts cover: newer daemon is service-compatible for same-protocol MCP send, older caller does not downgrade a newer daemon, newer caller still rotates an older daemon, MCP lifecycle reset cannot rotate a newer daemon down, protocol mismatch fails closed without side effects.
+- **Updated: `loud_ensure_contract` (6/6).** New contract: old caller must not rotate a newer compatible coordinator (guard).
+
 ## 0.5.22
 
 - **Fix: coordinator-dependent mutating commands now loudly ensure a live coordinator (`loud ensure`).** When `send` encounters a coordinator in `Missing` or `Stale` state (binary identity mismatch), it automatically spawns or rotates the coordinator before delivering the message. The response and lifecycle events declare the action loudly: `coordinator_auto_restarted` flag, previous coordinator state, new coordinator identity, and a `coordinator.ensure_restarted` event are all emitted so operators can audit the transition. If the coordinator cannot be brought up, the command remains fail-closed — no silent delivery against a dead coordinator.
