@@ -3,8 +3,10 @@
 //! References:
 //! - `.team/artifacts/coordinator-lifecycle-hardening-locate.md` §5.3.
 //! - `.team/artifacts/foundation-0-slice-design.md` §8.
+//! - `.team/artifacts/mcp-crossversion-daemon-locate.md` §8 directionality addendum.
 //! - R1/R2: coordinator-dependent mutating `send` must loudly ensure a
-//!   missing/stale-identity daemon when it can start the current runtime.
+//!   missing/stale-identity daemon when the caller is same/newer and can start
+//!   the current runtime.
 //! - R3: read-only `diagnose` / `status` / `doctor` must report coordinator
 //!   health without spawning or rotating a daemon.
 //! - R4: loud ensure must not bypass dirty-topology refusal.
@@ -33,6 +35,8 @@ use team_agent::state::persist::{runtime_state_path, save_runtime_state};
 const TEAM: &str = "loud-ensure-team";
 const WORKER: &str = "worker-1";
 const STALE_PID: u32 = 99_999_991;
+const CALLER_IDENTITY_ENV: &str = "TEAM_AGENT_TEST_CALLER_BINARY_IDENTITY";
+const OLD_CALLER_VERSION: &str = "0.5.21";
 
 #[test]
 #[serial(env)]
@@ -59,7 +63,7 @@ fn r1_mutating_send_loudly_ensures_missing_active_coordinator() {
 
 #[test]
 #[serial(env)]
-fn r2_mutating_send_loudly_rotates_stale_identity_coordinator() {
+fn r2_current_caller_mutating_send_loudly_rotates_older_identity_coordinator() {
     let mut fixture = LoudEnsureFixture::active("r2-stale-identity");
     let previous_pid = fixture.spawn_stale_identity_process();
 
@@ -94,6 +98,45 @@ fn r2_mutating_send_loudly_rotates_stale_identity_coordinator() {
     assert!(
         coordinator_health(&fixture.workspace).ok,
         "R2 RED: rotated coordinator must be healthy after send; body={body}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn r2_old_caller_must_not_rotate_newer_compatible_coordinator_guard() {
+    let mut fixture = LoudEnsureFixture::active("r2-old-caller-new-daemon");
+    let daemon_pid = fixture.spawn_daemon_identity_process(&current_version());
+
+    let body = fixture.send_worker_json_as_caller("R2_OLD_CALLER_NEW_DAEMON", OLD_CALLER_VERSION);
+
+    assert!(
+        body.get("coordinator_auto_restarted").is_none(),
+        "R2 direction guard: old caller seeing a newer compatible daemon must not loud-ensure/rotate it; body={body}"
+    );
+    assert_eq!(
+        fixture.coordinator_pid_file(),
+        Some(daemon_pid),
+        "R2 direction guard: old caller must preserve newer daemon pid; body={body} events={:?}",
+        EventLog::new(&fixture.root).tail(100).expect("tail events")
+    );
+    assert!(
+        fixture.pid_alive(daemon_pid),
+        "R2 direction guard: newer daemon process must remain alive; body={body}"
+    );
+    assert!(
+        !fixture.has_event("coordinator.ensure_restarted")
+            && !fixture.has_event("coordinator.rotation_required"),
+        "R2 direction guard: old caller must not enter rotation/ensure path; events={:?}",
+        EventLog::new(&fixture.root).tail(100).expect("tail events")
+    );
+    assert!(
+        fixture.has_event("send.coordinator_binary_identity_drift_ignored")
+            || body
+                .pointer("/coordinator_binary_relation")
+                .and_then(Value::as_str)
+                == Some("daemon_newer_than_caller"),
+        "R2 direction guard: binary drift must be explicit as daemon_newer_than_caller, not silent; body={body} events={:?}",
+        EventLog::new(&fixture.root).tail(100).expect("tail events")
     );
 }
 
@@ -228,56 +271,76 @@ impl LoudEnsureFixture {
     }
 
     fn send_worker_json(&self, token: &str) -> Value {
-        let output = self.run_ta(&[
-            "send",
-            WORKER,
-            token,
-            "--workspace",
-            self.root.to_str().expect("workspace utf8"),
-            "--team",
-            TEAM,
-            "--json",
-        ]);
+        self.send_worker_json_with_caller(token, None)
+    }
+
+    fn send_worker_json_as_caller(&self, token: &str, caller_version: &str) -> Value {
+        self.send_worker_json_with_caller(token, Some(caller_version))
+    }
+
+    fn send_worker_json_with_caller(&self, token: &str, caller_version: Option<&str>) -> Value {
+        let output = self.run_ta(
+            &[
+                "send",
+                WORKER,
+                token,
+                "--workspace",
+                self.root.to_str().expect("workspace utf8"),
+                "--team",
+                TEAM,
+                "--json",
+            ],
+            caller_version,
+        );
         parse_json_stdout("send", output)
     }
 
     fn diagnose_json(&self) -> Value {
         parse_json_stdout(
             "diagnose",
-            self.run_ta(&[
-                "diagnose",
-                "--workspace",
-                self.root.to_str().expect("workspace utf8"),
-                "--json",
-            ]),
+            self.run_ta(
+                &[
+                    "diagnose",
+                    "--workspace",
+                    self.root.to_str().expect("workspace utf8"),
+                    "--json",
+                ],
+                None,
+            ),
         )
     }
 
     fn status_json(&self) -> Value {
         parse_json_stdout(
             "status",
-            self.run_ta(&[
-                "status",
-                "--workspace",
-                self.root.to_str().expect("workspace utf8"),
-                "--json",
-            ]),
+            self.run_ta(
+                &[
+                    "status",
+                    "--workspace",
+                    self.root.to_str().expect("workspace utf8"),
+                    "--json",
+                ],
+                None,
+            ),
         )
     }
 
     fn doctor_json(&self) -> Value {
         parse_json_stdout(
             "doctor",
-            self.run_ta(&[
-                "doctor",
-                "--workspace",
-                self.root.to_str().expect("workspace utf8"),
-                "--json",
-            ]),
+            self.run_ta(
+                &[
+                    "doctor",
+                    "--workspace",
+                    self.root.to_str().expect("workspace utf8"),
+                    "--json",
+                ],
+                None,
+            ),
         )
     }
 
-    fn run_ta(&self, args: &[&str]) -> Output {
+    fn run_ta(&self, args: &[&str], caller_version: Option<&str>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command
             .args(args)
@@ -287,6 +350,16 @@ impl LoudEnsureFixture {
                 cli_binary_path(),
             )
             .current_dir(&self.root);
+        if let Some(version) = caller_version {
+            command.env(
+                CALLER_IDENTITY_ENV,
+                serde_json::json!({
+                    "binary_path": cli_binary_path(),
+                    "binary_version": version
+                })
+                .to_string(),
+            );
+        }
         for key in hermetic_guard::CALLER_IDENTITY_ENVS {
             command.env_remove(key);
         }
@@ -311,6 +384,10 @@ impl LoudEnsureFixture {
     }
 
     fn spawn_stale_identity_process(&mut self) -> u32 {
+        self.spawn_daemon_identity_process("0.5.20")
+    }
+
+    fn spawn_daemon_identity_process(&mut self, binary_version: &str) -> u32 {
         let child = Command::new("sleep")
             .arg("60")
             .spawn()
@@ -323,13 +400,28 @@ impl LoudEnsureFixture {
                 "protocol_version": PROTOCOL_VERSION,
                 "message_store_schema_version": team_agent::db::schema::SCHEMA_VERSION,
                 "binary_path": cli_binary_path(),
-                "binary_version": "0.5.20",
+                "binary_version": binary_version,
                 "source": "boot",
                 "updated_at": "2026-07-10T00:00:00Z"
             }),
         );
         self.fixture_children.push(child);
         pid
+    }
+
+    fn coordinator_pid_file(&self) -> Option<u32> {
+        std::fs::read_to_string(coordinator_pid_path(&self.workspace))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+    }
+
+    fn pid_alive(&self, pid: u32) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     fn has_event(&self, event_name: &str) -> bool {
