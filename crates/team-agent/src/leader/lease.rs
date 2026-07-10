@@ -1780,10 +1780,13 @@ pub fn detect_dual_state_divergence( // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diag
         .or_else(|| get_path_u64(state, &["leader_receiver", "owner_epoch"]));
     let team_epoch = get_path_u64(&snap, &["team_owner", "owner_epoch"])
         .or_else(|| get_path_u64(&snap, &["leader_receiver", "owner_epoch"]));
+    let workspace_agent_bindings = agent_binding_summary(state);
+    let team_agent_bindings = agent_binding_summary(&snap);
     let diverged = workspace_owner_pane != team_owner_pane
         || workspace_owner_uuid != team_owner_uuid
         || workspace_receiver_pane != team_receiver_pane
-        || workspace_epoch != team_epoch;
+        || workspace_epoch != team_epoch
+        || workspace_agent_bindings != team_agent_bindings;
     if !diverged {
         return Ok(None);
     }
@@ -1796,8 +1799,36 @@ pub fn detect_dual_state_divergence( // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diag
         "team_receiver_pane": team_receiver_pane,
         "workspace_owner_epoch": workspace_epoch,
         "team_owner_epoch": team_epoch,
+        "workspace_agent_bindings": workspace_agent_bindings,
+        "team_agent_bindings": team_agent_bindings,
         "_legacy_snapshot_stale": true,
     })))
+}
+
+fn agent_binding_summary(state: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let Some(agents) = state.get("agents").and_then(Value::as_object) else {
+        return Value::Object(out);
+    };
+    for (agent_id, agent) in agents {
+        let mut binding = serde_json::Map::new();
+        for key in [
+            "pane_id",
+            "pane_pid",
+            "tmux_endpoint",
+            "tmux_socket",
+            "window",
+            "window_name",
+        ] {
+            if let Some(value) = agent.get(key) {
+                binding.insert(key.to_string(), value.clone());
+            }
+        }
+        if !binding.is_empty() {
+            out.insert(agent_id.clone(), Value::Object(binding));
+        }
+    }
+    Value::Object(out)
 }
 
 fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf { // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only path resolver.

@@ -697,6 +697,7 @@ fn report_result_for_owner_team_inner(
             "task_id".to_string(),
             serde_json::Value::String(task_id.to_string()),
         );
+        copy_report_attribution_fields(envelope, &mut out);
         out.insert(
             "agent_id".to_string(),
             serde_json::Value::String(agent_id.to_string()),
@@ -927,6 +928,7 @@ fn report_result_for_owner_team_inner(
         "task_id".to_string(),
         serde_json::Value::String(task_id.to_string()),
     );
+    copy_report_attribution_fields(envelope, &mut out);
     out.insert(
         "agent_id".to_string(),
         serde_json::Value::String(agent_id.to_string()),
@@ -966,6 +968,21 @@ fn report_result_for_owner_team_inner(
         );
     }
     Ok(serde_json::Value::Object(out))
+}
+
+fn copy_report_attribution_fields(
+    envelope: &serde_json::Value,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    for key in [
+        "attributed_message_id",
+        "attribution_scope",
+        "task_id_source",
+    ] {
+        if let Some(value) = envelope.get(key) {
+            out.insert(key.to_string(), value.clone());
+        }
+    }
 }
 
 fn fallback_primary_error_text(cli_primary_error: Option<&str>, observed: String) -> String {

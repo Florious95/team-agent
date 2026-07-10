@@ -20,10 +20,10 @@ use crate::state::persist::{
 use crate::messaging::{self, MessageTarget, SendOptions};
 
 use super::helpers::{
-    delivery_outcome_value, direct_message_attribution_for, ensure_object, enum_value,
-    insert_array, is_worker_recipient, json_dumps_default, latest_task_for_assignee,
-    non_empty_string, normalized_envelope_value, object_fields, requires_ack_for_target,
-    tool_runtime_error, DirectMessageAttribution,
+    current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
+    ensure_object, enum_value, insert_array, is_worker_recipient, json_dumps_default,
+    latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
+    requires_ack_for_target, tool_runtime_error, DirectMessageAttribution,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
@@ -341,45 +341,76 @@ impl TeamOrchestratorTools {
                 //      only when no newer failed/refused/blocked direct turn blocks fallback
                 //   5. "manual" — truly uncorrelated; collect still rejects
                 let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
+                let mut attributed_message_id = None;
+                let mut attribution_scope = None;
+                let mut task_id_source = None;
                 let resolved = if let Some(task_id) = task_id {
                     task_id.to_string()
                 } else if let Some(agent) = self.agent_id.as_ref() {
-                    match direct_message_attribution_for(
+                    if let Some(message_id) = current_reportable_message_for(
                         &self.workspace,
                         agent.as_str(),
                         owner_team_id_str.as_deref(),
                     ) {
-                        DirectMessageAttribution::Reportable(message_id) => message_id,
-                        DirectMessageAttribution::BlockedByNewer {
-                            message_id,
-                            status,
-                            error,
-                        } => {
-                            push_report_warning(
-                                obj,
-                                serde_json::json!({
-                                    "code": "result_attribution_blocked_by_newer_direct_message",
-                                    "field": "task_id",
-                                    "severity": "warning",
-                                    "advisory": true,
-                                    "message_id": message_id,
-                                    "message_status": status,
-                                    "message_error": error,
-                                }),
-                            );
-                            "manual".to_string()
-                        }
-                        DirectMessageAttribution::None => latest_task_for_assignee(
+                        attributed_message_id = Some(message_id.clone());
+                        attribution_scope = Some("message");
+                        task_id_source = Some("current_turn_message");
+                        message_id
+                    } else {
+                        match direct_message_attribution_for(
                             &self.workspace,
                             agent.as_str(),
                             owner_team_id_str.as_deref(),
-                        )
-                        .unwrap_or_else(|| "manual".to_string()),
+                        ) {
+                            DirectMessageAttribution::Reportable(message_id) => {
+                                attributed_message_id = Some(message_id.clone());
+                                attribution_scope = Some("message");
+                                task_id_source = Some("direct_message");
+                                message_id
+                            }
+                            DirectMessageAttribution::BlockedByNewer {
+                                message_id,
+                                status,
+                                error,
+                            } => {
+                                push_report_warning(
+                                    obj,
+                                    serde_json::json!({
+                                        "code": "result_attribution_blocked_by_newer_direct_message",
+                                        "field": "task_id",
+                                        "severity": "warning",
+                                        "advisory": true,
+                                        "message_id": message_id,
+                                        "message_status": status,
+                                        "message_error": error,
+                                    }),
+                                );
+                                "manual".to_string()
+                            }
+                            DirectMessageAttribution::None => latest_task_for_assignee(
+                                &self.workspace,
+                                agent.as_str(),
+                                owner_team_id_str.as_deref(),
+                            )
+                            .unwrap_or_else(|| "manual".to_string()),
+                        }
                     }
                 } else {
                     "manual".to_string()
                 };
                 obj.insert("task_id".to_string(), Value::String(resolved));
+                if let Some(message_id) = attributed_message_id {
+                    obj.entry("attributed_message_id")
+                        .or_insert(Value::String(message_id));
+                }
+                if let Some(scope) = attribution_scope {
+                    obj.entry("attribution_scope")
+                        .or_insert(Value::String(scope.to_string()));
+                }
+                if let Some(source) = task_id_source {
+                    obj.entry("task_id_source")
+                        .or_insert(Value::String(source.to_string()));
+                }
             }
             if !obj.contains_key("agent_id") {
                 let resolved = agent_id
@@ -419,6 +450,7 @@ impl TeamOrchestratorTools {
         let normalized = normalize_report_envelope(&base);
         let warnings = report_result_integrity_warnings(&base, &normalized);
         let mut env_value = normalized_envelope_value(&normalized);
+        copy_report_attribution_fields(&base, &mut env_value);
         if !warnings.is_empty() {
             if let Some(obj) = env_value.as_object_mut() {
                 obj.insert("warnings".to_string(), Value::Array(warnings));
@@ -982,6 +1014,24 @@ fn merge_object_fields(existing: &mut Value, incoming: &Value) {
     };
     for (key, value) in incoming_obj {
         existing_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn copy_report_attribution_fields(source: &Value, target: &mut Value) {
+    let Some(src) = source.as_object() else {
+        return;
+    };
+    let Some(dst) = target.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "attributed_message_id",
+        "attribution_scope",
+        "task_id_source",
+    ] {
+        if let Some(value) = src.get(key) {
+            dst.entry(key.to_string()).or_insert(value.clone());
+        }
     }
 }
 

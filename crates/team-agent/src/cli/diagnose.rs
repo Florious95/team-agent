@@ -171,8 +171,21 @@ pub(crate) fn diagnose_runtime_for_workspace(
     backend: &dyn Transport,
 ) -> (Value, Value) {
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
+    append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
+}
+
+fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issues: &mut Value) {
+    let Ok(Some(details)) = crate::leader::detect_dual_state_divergence(workspace, state) else {
+        return;
+    };
+    if let Some(items) = issues.as_array_mut() {
+        items.push(json!({
+            "id": "legacy_snapshot_stale",
+            "details": details,
+        }));
+    }
 }
 
 fn append_coordinator_health_issue(
