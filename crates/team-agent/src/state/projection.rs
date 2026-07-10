@@ -283,10 +283,23 @@ pub(crate) fn team_is_alive_candidate(team: &Value) -> bool {
     if let Some(status) = status_raw {
         return status.eq_ignore_ascii_case("alive");
     }
-    if all_present_agents_terminal(team) {
+    if all_present_agents_terminal(team) && !team_has_live_leader_binding(team) {
         return false;
     }
     true
+}
+
+/// 0.5.26: legacy team 缺 `status` 时,若挂着 `leader_receiver`/`team_owner`
+/// 视为仍活的绑定面(0515 endpoint-convergence 家族:worker stopped 但 receiver
+/// attached,restart 预检要能看到 leader_receiver 以派 `leader_receiver_socket_mismatch`)。
+fn team_has_live_leader_binding(team: &Value) -> bool {
+    let is_non_null_object = |key: &str| {
+        team.get(key)
+            .filter(|v| !v.is_null())
+            .and_then(Value::as_object)
+            .is_some_and(|m| !m.is_empty())
+    };
+    is_non_null_object("leader_receiver") || is_non_null_object("team_owner")
 }
 
 fn all_present_agents_terminal(team: &Value) -> bool {
@@ -477,6 +490,19 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         if alive.contains_key(team) {
             return Ok(project_top_level_view(&state, team));
         }
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+        // 显式 `--team X` 命中 `state.teams` 里的键(即使被标 shutdown/终态)
+        // 仍应投影出来,支持「shutdown 后再 restart --team X」多队场景
+        // (E2E-REST-014 家族)。走 project_top_level_view 保证顶层 agents
+        // 与 teams[key].agents 收敛(E2E-REST-002 依赖 projection clobber
+        // 顶层注入的 session_id)。
+        if state
+            .get("teams")
+            .and_then(Value::as_object)
+            .is_some_and(|teams| teams.contains_key(team))
+        {
+            return Ok(project_top_level_view(&state, team));
+        }
         let matches: Vec<&String> = alive
             .iter()
             .filter(|(key, value)| team_selector_matches(team, key, value))
@@ -511,6 +537,19 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         return Ok(project_top_level_view(&state, &only));
     }
     if alive.is_empty() {
+        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
+        // 全体被标 shutdown(bare restart 场景),`active_team_key` 若命中
+        // `state.teams` 则仍投影,让 `project_top_level_view` 用 nested
+        // `teams[key].agents` 覆盖历史顶层注入(E2E-REST-002 前置)。
+        if let Some(active_key) = state.get("active_team_key").and_then(Value::as_str) {
+            if state
+                .get("teams")
+                .and_then(Value::as_object)
+                .is_some_and(|teams| teams.contains_key(active_key))
+            {
+                return Ok(project_top_level_view(&state, active_key));
+            }
+        }
         return Ok(state);
     }
     Err(StateError::TeamSelect(
