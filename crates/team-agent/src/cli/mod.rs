@@ -3463,9 +3463,16 @@ pub mod lifecycle_port {
         out
     }
 
-    /// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.2):
-    /// scoped shutdown 只有一队,`state.active_team_key` 指向被关的那队。
+    /// 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.2) /
+    /// 0.5.27 (`.team/artifacts/0526-supermarket-shutdown-status-real-fail-locate.md` §5.1):
+    /// scoped shutdown 只有一队,`state.active_team_key` 指向被关的那队;
     /// 只在 session_killed && !verification_degraded 时被调用。
+    ///
+    /// 同时 stamp 顶层 `state["status"]` 与 `teams[active_key]["status"]`:
+    /// scoped 关队走 `save_team_scoped_state`,反写盘的源是 `compact(top-level)`
+    /// (见 `state/persist.rs::save_team_scoped_state` +
+    /// `projection::compact_team_state`),只标 nested 会被顶层视图 clobber 丢盘。
+    /// 保留 nested 写入以维持同 tick 内的 in-memory 一致(其他 read-back 立即看到)。
     fn mark_active_team_shutdown(state: &mut Value, status: &str) {
         let Some(active_key) = state
             .get("active_team_key")
@@ -3474,6 +3481,9 @@ pub mod lifecycle_port {
         else {
             return;
         };
+        if let Some(obj) = state.as_object_mut() {
+            obj.insert("status".to_string(), json!(status));
+        }
         let Some(teams) = state.get_mut("teams").and_then(Value::as_object_mut) else {
             return;
         };
