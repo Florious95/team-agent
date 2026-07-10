@@ -193,6 +193,7 @@ fn r5_explicit_restart_start_report_semantics_remain_structured_guard() {
 
 struct LoudEnsureFixture {
     _env: hermetic_guard::HermeticTestEnv,
+    _binary_match_env: hermetic_guard::EnvOverride,
     root: PathBuf,
     workspace: WorkspacePath,
     fixture_children: Vec<Child>,
@@ -209,6 +210,9 @@ impl LoudEnsureFixture {
 
     fn with_state(tag: &str, state: fn(&Path) -> Value) -> Self {
         let env = hermetic_guard::HermeticTestEnv::enter(tag);
+        let binary_match = cli_binary_path();
+        let binary_match_env =
+            env.with_env("TEAM_AGENT_TEST_HARNESS_BINARY_PATH_MATCH", &binary_match);
         let root = env.workspace(tag);
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&root))
             .expect("create runtime dir");
@@ -216,6 +220,7 @@ impl LoudEnsureFixture {
         save_runtime_state(&root, &state(&root)).expect("save runtime state");
         Self {
             _env: env,
+            _binary_match_env: binary_match_env,
             workspace: WorkspacePath::new(root.clone()),
             root,
             fixture_children: Vec::new(),
