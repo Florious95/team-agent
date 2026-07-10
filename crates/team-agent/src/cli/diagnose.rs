@@ -205,6 +205,14 @@ fn coordinator_issue_id(
         }
         crate::coordinator::CoordinatorHealthStatus::Running => {
             if !health.metadata_ok {
+                if health.service_available
+                    && matches!(
+                        health.binary_identity_relation,
+                        crate::coordinator::CoordinatorBinaryIdentityRelation::DaemonNewerThanCaller
+                    )
+                {
+                    return None;
+                }
                 return match health.metadata_mismatch_reason.as_deref() {
                     Some(
                         "binary_identity_missing"
@@ -237,6 +245,11 @@ fn coordinator_issue_value(
         "pid": health.pid.map(|pid| pid.get()),
         "metadata_ok": health.metadata_ok,
         "metadata_mismatch_reason": health.metadata_mismatch_reason.clone(),
+        "process_running": health.process_running,
+        "wire_metadata_ok": health.wire_metadata_ok,
+        "binary_identity_ok": health.binary_identity_ok,
+        "binary_identity_relation": health.binary_identity_relation.as_str(),
+        "service_available": health.service_available,
         "binary_path": health.current_binary_identity.binary_path.clone(),
         "binary_version": health.current_binary_identity.binary_version.clone(),
         "schema_ok": health.schema.ok,
@@ -378,6 +391,15 @@ mod tests {
             pid: Some(crate::coordinator::Pid::new(std::process::id())),
             metadata: None,
             metadata_ok: metadata_mismatch_reason.is_none(),
+            process_running: matches!(status, crate::coordinator::CoordinatorHealthStatus::Running),
+            wire_metadata_ok: metadata_mismatch_reason.is_none(),
+            binary_identity_ok: metadata_mismatch_reason.is_none(),
+            binary_identity_relation: crate::coordinator::CoordinatorBinaryIdentityRelation::Same,
+            service_available: matches!(
+                status,
+                crate::coordinator::CoordinatorHealthStatus::Running
+            ) && metadata_mismatch_reason.is_none()
+                && schema_ok,
             metadata_mismatch_reason: metadata_mismatch_reason.map(ToString::to_string),
             current_binary_identity: crate::coordinator::CoordinatorBinaryIdentity {
                 binary_path: "/current/team-agent".to_string(),

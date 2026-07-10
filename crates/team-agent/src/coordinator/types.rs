@@ -189,6 +189,29 @@ pub struct CoordinatorBinaryIdentity {
     pub binary_version: String,
 }
 
+/// Caller-relative daemon binary identity relation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorBinaryIdentityRelation {
+    Same,
+    CallerNewerThanDaemon,
+    DaemonNewerThanCaller,
+    SameVersionPathMismatch,
+    Unknown,
+}
+
+impl CoordinatorBinaryIdentityRelation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Same => "same",
+            Self::CallerNewerThanDaemon => "caller_newer_than_daemon",
+            Self::DaemonNewerThanCaller => "daemon_newer_than_caller",
+            Self::SameVersionPathMismatch => "same_version_path_mismatch",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Stable machine-readable reason for coordinator metadata rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -285,6 +308,13 @@ pub struct HealthReport {
     pub metadata: Option<CoordinatorMetadata>,
     /// 三元全等(`coordinator_metadata_ok`,`metadata.py:37-43`)。
     pub metadata_ok: bool,
+    pub process_running: bool,
+    /// pid/protocol/schema match; excludes daemon binary identity.
+    pub wire_metadata_ok: bool,
+    pub binary_identity_ok: bool,
+    pub binary_identity_relation: CoordinatorBinaryIdentityRelation,
+    /// A live daemon that can process this workspace's queue.
+    pub service_available: bool,
     pub metadata_mismatch_reason: Option<String>,
     pub current_binary_identity: CoordinatorBinaryIdentity,
     pub schema: SchemaHealth,
