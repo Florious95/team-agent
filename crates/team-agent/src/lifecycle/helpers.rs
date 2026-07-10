@@ -6,8 +6,24 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// `save_team_runtime_snapshot(workspace, state)`(`restart/snapshot.py:42`,**bug-084**)。
-/// `os.replace` 原子写;`EACCES/EPERM/EBUSY` 退避重试,**绝不 unwrap**。
+/// `save_team_runtime_snapshot(workspace, state)` — Foundation-0 F0-2:
+/// this is now a **diagnostic-only** legacy per-session snapshot writer.
+/// Root/projection `.team/runtime/state.json` is the sole product
+/// authority; the file this writes carries `_not_authoritative:true`
+/// and pointers back to the canonical path so no reader can mistake it
+/// for the real runtime state. See
+/// `.team/artifacts/foundation-0-slice-design.md` §§4-5 F0-2.
+///
+/// Product save paths (attach/claim/start-agent/restart/stop/remove)
+/// must NOT call this — the RED2 grep guard enforces that. Retained
+/// callers are diagnostic/migration/test paths only.
+///
+/// Preserves the legacy path shape (`.team/runtime/teams/<session>/state.json`)
+/// so 0.5.x operators inspecting the file see the diagnostic marker
+/// rather than being surprised by a missing file. The B3 canonical
+/// team-key layout will live under a different path
+/// (`teams/<team_key>/...`), so this file also cannot be mistaken for
+/// the future canonical shape.
 pub fn save_team_runtime_snapshot(
     workspace: &Path,
     state: &serde_json::Value,
@@ -16,17 +32,34 @@ pub fn save_team_runtime_snapshot(
         .get("session_name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| LifecycleError::StatePersist("session_name is required".to_string()))?;
-    // golden restart/snapshot.py:46-47 — team_runtime_snapshot_dir = runtime_dir(workspace)/teams/<safe>,
-    // and paths.py:25-26 runtime_dir = workspace/.team/runtime. Use the crate path helper so the snapshot
-    // lands at <ws>/.team/runtime/teams/<safe>, matching golden AND the rest of the crate (not the
-    // ".team"-less <ws>/runtime/teams that the original port wrote).
     let path = team_snapshot_path(workspace, session_name);
     let dir = path
         .parent()
         .ok_or_else(|| LifecycleError::StatePersist("snapshot path has no parent".to_string()))?;
     fs::create_dir_all(&dir).map_err(|e| persist_err("create snapshot dir", &e))?;
+    let canonical_path = crate::state::persist::runtime_state_path(workspace);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    // F0-2 RED1: annotate the snapshot payload with diagnostic-only
+    // metadata so any reader can immediately see it is derived, not
+    // authoritative. `_canonical_state_path` points at the real
+    // runtime authority; `_derived_from` names the code path that
+    // produced this file; `_generated_at` records freshness so stale
+    // snapshots are easy to identify.
+    let mut annotated = state.clone();
+    if let Some(obj) = annotated.as_object_mut() {
+        obj.insert("_not_authoritative".to_string(), serde_json::json!(true));
+        obj.insert(
+            "_canonical_state_path".to_string(),
+            serde_json::json!(canonical_path.to_string_lossy()),
+        );
+        obj.insert(
+            "_derived_from".to_string(),
+            serde_json::json!("lifecycle::save_team_runtime_snapshot"),
+        );
+        obj.insert("_generated_at".to_string(), serde_json::json!(generated_at));
+    }
     let tmp = dir.join("state.json.tmp");
-    let data = serde_json::to_vec_pretty(state)
+    let data = serde_json::to_vec_pretty(&annotated)
         .map_err(|e| LifecycleError::StatePersist(format!("serialize snapshot: {e}")))?;
     fs::write(&tmp, data).map_err(|e| persist_err("write snapshot temp", &e))?;
     fs::rename(&tmp, &path).map_err(|e| persist_err("replace snapshot", &e))?;

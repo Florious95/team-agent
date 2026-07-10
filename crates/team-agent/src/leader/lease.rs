@@ -1615,33 +1615,14 @@ fn state_owner(state: &Value) -> Option<TeamOwner> {
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
-/// `_write_lease_dual_state`(card §85 C17;`__init__.py:588`)。同一锁内写 workspace state.json
-/// + team/<session> snapshot,两份永不分叉。**CROSS-LANE**:snapshot 写经 step 13 restart。
+/// `_write_lease_dual_state` — Foundation-0 F0-2: the historical dual
+/// write to the legacy per-session snapshot has been retired
+/// (`.team/artifacts/foundation-0-slice-design.md` §§4-5). This helper
+/// now persists ONLY the canonical root state; retaining the public
+/// name for 0.5.x call-site stability. The B0 legacy snapshot is
+/// diagnostic-only via `lifecycle::save_team_runtime_snapshot`.
 pub fn write_lease_dual_state(workspace: &Path, state: &Value) -> Result<(), LeaderError> {
     crate::state::persist::save_runtime_state(workspace, state)?;
-    if let Some(session_name) = state.get("session_name").and_then(Value::as_str) {
-        write_team_snapshot_atomic(workspace, session_name, state)?;
-    }
-    Ok(())
-}
-
-fn write_team_snapshot_atomic(
-    workspace: &Path,
-    session_name: &str,
-    state: &Value,
-) -> Result<(), LeaderError> {
-    let snap_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name);
-    let parent = snap_path
-        .parent()
-        .ok_or_else(|| LeaderError::Validation("team snapshot path has no parent".to_string()))?;
-    std::fs::create_dir_all(parent)?;
-    let tmp = parent.join(format!("state.json.tmp-{}", std::process::id()));
-    let data = serde_json::to_vec_pretty(state)?;
-    std::fs::write(&tmp, data)?;
-    if let Err(error) = std::fs::rename(&tmp, &snap_path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(error.into());
-    }
     Ok(())
 }
 
@@ -1769,17 +1750,22 @@ fn compact_team_state_preserving_claim_fields(state: &Value, target_key: &str) -
     entry
 }
 
-/// `_detect_dual_state_divergence`(card §85 C18;`__init__.py:556`)。workspace-level 与
-/// team-level snapshot 在 owner_uuid/receiver_pane_id/owner_epoch 上是否分叉 → `Some(详情)`。
-/// **CROSS-LANE**:snapshot 读经 step 13 restart。
-pub fn detect_dual_state_divergence(
+/// Foundation-0 F0-2: reader for legacy per-session snapshot vs
+/// canonical root state. Diagnostic-only after the dual-write retirement
+/// (`.team/artifacts/foundation-0-slice-design.md` §§4-5); product
+/// authority code never consults this — it exists so `status`/`diagnose`
+/// can surface `legacy_snapshot_stale` when the on-disk sidecar has
+/// drifted. Every touch of the legacy path constants below is marked
+/// `B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ` so the RED3 grep guard admits
+/// them as documented exceptions.
+pub fn detect_dual_state_divergence( // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only entry point; no product save/route consumer.
     workspace: &Path,
     state: &Value,
 ) -> Result<Option<Value>, LeaderError> {
     let Some(session_name) = state.get("session_name").and_then(Value::as_str) else {
         return Ok(None);
     };
-    let snap_path = readable_team_snapshot_path(workspace, session_name);
+    let snap_path = readable_team_snapshot_path(workspace, session_name); // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic legacy-shape path lookup.
     if !snap_path.exists() {
         return Ok(None);
     }
@@ -1810,16 +1796,19 @@ pub fn detect_dual_state_divergence(
         "team_receiver_pane": team_receiver_pane,
         "workspace_owner_epoch": workspace_epoch,
         "team_owner_epoch": team_epoch,
+        "_legacy_snapshot_stale": true,
     })))
 }
 
-fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf {
-    let safe_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name);
+fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf { // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only path resolver.
+    let safe_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name); // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: reuses helpers safe legacy path.
     if safe_path.exists() {
         return safe_path;
     }
+    // Raw legacy `runtime/teams` fallback for pre-safe-shape snapshots. // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ
+    let legacy_dir = "teams"; // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ
     crate::model::paths::runtime_dir(workspace)
-        .join("teams")
+        .join(legacy_dir)
         .join(session_name)
         .join("state.json")
 }
