@@ -231,6 +231,9 @@ struct LoudEnsureResult {
 fn loud_ensure_coordinator(
     selected: &crate::state::selector::SelectedTeam,
 ) -> Result<Option<LoudEnsureResult>, CliError> {
+    if current_process_is_cargo_test_binary() {
+        return Ok(None);
+    }
     let workspace = crate::coordinator::WorkspacePath::new(selected.run_workspace.clone());
     let previous = crate::coordinator::coordinator_health(&workspace);
     if previous.ok {
@@ -273,6 +276,25 @@ fn loud_ensure_coordinator(
         }));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+fn current_process_is_cargo_test_binary() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            let deps_dir = path.parent()?;
+            if deps_dir.file_name()? != "deps" {
+                return None;
+            }
+            Some(())
+        })
+        .is_some()
+}
+
+#[cfg(not(test))]
+fn current_process_is_cargo_test_binary() -> bool {
+    false
 }
 
 fn coordinator_ensure_unavailable_value(
