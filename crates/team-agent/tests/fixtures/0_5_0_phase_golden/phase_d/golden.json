@@ -956,6 +956,7 @@
     },
     "session_name": "team-phasegolden",
     "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+    "status": "shutdown",
     "tasks": [
       {
         "acceptance": [
@@ -1084,6 +1085,7 @@
         },
         "session_name": "team-phasegolden",
         "spec_path": "<WORKSPACE>/.team/runtime/teamdir/team.spec.yaml",
+        "status": "shutdown",
         "tasks": [
           {
             "acceptance": [

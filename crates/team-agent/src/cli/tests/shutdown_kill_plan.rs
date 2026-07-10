@@ -332,6 +332,129 @@ fn scoped_shutdown_keeps_owned_endpoint_when_sibling_session_remains() {
 }
 
 #[test]
+fn scoped_clean_shutdown_persists_team_shutdown_status_after_disk_roundtrip() {
+    let ws = tmp_shutdown_workspace("scoped-clean-status-roundtrip");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "schema_version": 1,
+            "active_team_key": "current",
+            "team_key": "current",
+            "session_name": "team-current",
+            "team_dir": ws.display().to_string(),
+            "workspace": ws.display().to_string(),
+            "agents": {
+                "adminweb": {
+                    "agent_id": "adminweb",
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "adminweb"
+                }
+            },
+            "teams": {
+                "current": {
+                    "team_key": "current",
+                    "session_name": "team-current",
+                    "team_dir": ws.display().to_string(),
+                    "workspace": ws.display().to_string(),
+                    "agents": {
+                        "adminweb": {
+                            "agent_id": "adminweb",
+                            "status": "running",
+                            "provider": "fake",
+                            "window": "adminweb"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        Some("current"),
+        &CleanShutdownTransport::new(),
+    )
+    .expect("shutdown should complete");
+
+    assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
+    assert_eq!(out["session_killed"], json!(true), "shutdown report: {out}");
+    assert_eq!(out["verification_degraded"], json!(false), "shutdown report: {out}");
+    let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        saved.pointer("/teams/current/status").and_then(serde_json::Value::as_str),
+        Some("shutdown"),
+        "0.5.27 RED: clean scoped shutdown returned session_killed=true and not degraded, \
+         so disk state must persist teams.current.status=shutdown. The compact projected \
+         save path must not drop the tombstone; saved={saved}"
+    );
+    assert_eq!(
+        saved
+            .pointer("/teams/current/agents/adminweb/status")
+            .and_then(serde_json::Value::as_str),
+        Some("stopped"),
+        "0.5.27 RED: clean shutdown must also persist stopped agents under the retained team; saved={saved}"
+    );
+}
+
+#[test]
+fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
+    let ws = tmp_shutdown_workspace("scoped-degraded-no-status");
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "schema_version": 1,
+            "active_team_key": "current",
+            "team_key": "current",
+            "session_name": "team-current",
+            "agents": {
+                "adminweb": {
+                    "agent_id": "adminweb",
+                    "status": "running",
+                    "provider": "fake",
+                    "window": "adminweb"
+                }
+            },
+            "teams": {
+                "current": {
+                    "team_key": "current",
+                    "session_name": "team-current",
+                    "agents": {
+                        "adminweb": {
+                            "agent_id": "adminweb",
+                            "status": "running",
+                            "provider": "fake",
+                            "window": "adminweb"
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    let out = crate::cli::lifecycle_port::shutdown_with_transport(
+        &ws,
+        true,
+        Some("current"),
+        &CleanShutdownTransport::new().with_probe_timeout("ps_table"),
+    )
+    .expect("shutdown should complete");
+
+    assert_eq!(out["session_killed"], json!(true), "shutdown report: {out}");
+    assert_eq!(out["verification_degraded"], json!(true), "shutdown report: {out}");
+    let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_ne!(
+        saved.pointer("/teams/current/status").and_then(serde_json::Value::as_str),
+        Some("shutdown"),
+        "degraded shutdown must remain dirty/diagnostic and must not stamp \
+         teams.current.status=shutdown; saved={saved}"
+    );
+}
+
+#[test]
 fn repeated_owned_endpoint_shutdowns_leave_no_socket_file_growth() {
     let ws = tmp_shutdown_workspace("owned-loop-no-growth");
     let sockets = (0..20)
