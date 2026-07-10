@@ -39,7 +39,7 @@ const CURRENT_SESSION: &str = "team-supermarket-suite";
 const RESEARCH_SESSION: &str = "team-supermarket-research";
 
 #[test]
-fn shutdown_session_killed_stamps_team_non_alive_and_degraded_does_not() {
+fn explicit_shutdown_status_is_non_alive_selector_guard() {
     let state = json!({"teams": {
         CURRENT: {"status": "shutdown", "session_name": CURRENT_SESSION, "agents": {"adminweb": agent("adminweb", "stopped", true)}},
         RESEARCH: {"status": "alive", "session_name": RESEARCH_SESSION, "agents": {"researcher": agent("researcher", "running", true)}}
@@ -49,15 +49,9 @@ fn shutdown_session_killed_stamps_team_non_alive_and_degraded_does_not() {
         vec![RESEARCH],
         "RED1 guard: explicit shutdown team status must be non-alive; state={state}"
     );
-
-    let cli = read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/mod.rs"));
-    let body = source_section(&cli, "let session_killed =", "let coordinator_status =");
-    assert!(
-        body.contains("session_killed")
-            && body.contains("status")
-            && body.contains("\"shutdown\""),
-        "RED1: shutdown must stamp the matching teams.<key>.status as shutdown only from the session_killed=true path; degraded/false-green shutdown must not mark the team non-alive. shutdown body:\n{body}"
-    );
+    // 0.5.27 locate showed the former source-text scan here was a false green:
+    // it never executed scoped shutdown nor reloaded disk state. The behavioral
+    // shutdown roundtrip contract lives in `src/cli/tests/shutdown_kill_plan.rs`.
 }
 
 #[test]
@@ -474,15 +468,4 @@ fn output_text(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
-}
-
-fn source_section<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
-    let s = text.find(start).unwrap_or(0);
-    let e = text[s..].find(end).map(|n| s + n).unwrap_or(text.len());
-    &text[s..e]
-}
-
-fn read_to_string(path: impl AsRef<Path>) -> String {
-    std::fs::read_to_string(path.as_ref())
-        .unwrap_or_else(|error| panic!("read {}: {error}", path.as_ref().display()))
 }
