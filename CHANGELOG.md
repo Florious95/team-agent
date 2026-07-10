@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.21
+
+> **Note:** 0.5.20 contains a coordinator shutdown timeout defect (daemon sleep not interrupted on SIGTERM). Users on 0.5.20 are advised to upgrade directly to 0.5.21.
+
+- **Fix: coordinator shutdown no longer times out waiting for the daemon sleep to expire.** The coordinator daemon loop previously slept in a single uninterruptible sleep call, causing `shutdown` to block for up to the full tick interval (default 30 s) before the coordinator acknowledged the stop signal. The daemon sleep is now split into ≤100 ms slices, each checking the shutdown flag, so the coordinator responds to SIGTERM within one slice. The `coordinator.exit` event continues to record `reason=signal` for audit, unchanged.
+
+*(Includes all fixes from 0.5.20: coordinator heartbeat sidecar, `doctor --gate orphans` workspace scoping.)*
+
 ## 0.5.20
 
 - **Fix: coordinator tick now emits a persistent heartbeat sidecar (`coordinator_tick.json`).** Each tick writes an extended identity snapshot — `pid`, `boot_id`, binary path, `phase`, and tick start/end timestamps — to a sidecar file beside the coordinator socket. On exit, the coordinator appends a `coordinator.exit` event carrying `reason` (`startup_error` / `panic` / `signal` / `stop`). For SIGKILL-class deaths (where the exit handler cannot run), the heartbeat window boundaries are used to bound the estimated time of death, enabling post-mortem forensics on silent coordinator exits (the external-project silent-death incident that drove this change).
