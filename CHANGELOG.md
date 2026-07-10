@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.25
+
+- **Fix: team runtime state path now uses B3 team-key layout, not legacy runtime-root layout (Foundation-0 F0-3).** The path preview surfaced in `status`, `diagnose`, and MCP tool responses previously showed the old per-session snapshot root. The path is now computed from the canonical B3 team-key layout (`~/.team-agent/teams/<team-key>/`) so callers see the correct authority path without reading legacy locations. New contract: `b0_reader_hideone_audit_contract` (5/5), covering that product readers never consume a legacy snapshot without a diagnostic marker, and that stale snapshots cannot influence delivery target resolution, restart preflight, or readiness diagnosis.
+- **Fix: alpha migration gate — Foundation-0 observability surface (Foundation-0 F0-4).** The alpha migration gate now surfaces structured observability: `a0_transition_response_names_message_identity_distinctly_from_task_identity` ensures the response fields that name a message and name a task remain distinct, preventing attribution collapse during the Foundation-0 migration window. Legacy 0.5.x workspaces load without destructive B1 conversion. Stale legacy snapshots are marked or reported and never consumed by product readers. New contract: `f0_alpha_migration_gate_contract` (4/4).
+
 ## 0.5.24
 
 - **Fix: `report_result` attribution fallback is now bounded (Foundation-0 F0-1).** A newer, non-reportable direct-message turn blocks the old-task fallback path. Previously, if a newer turn arrived between task delivery and `report_result`, the attribution could fall back to an older task even though the newer turn had no reportable task. The fallback now stops at the newest non-reportable direct turn and emits a structured `attribution_bounded_warning` so operators can observe when bounding occurs. New contract: `a0_current_turn_attribution_contract` (5/5).
