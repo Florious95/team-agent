@@ -552,7 +552,19 @@ fn sleep_seconds(seconds: f64) {
     if seconds <= 0.0 {
         return;
     }
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+    loop {
+        #[cfg(unix)]
+        if SIGNAL_STOP_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(100)));
+    }
 }
 
 /// 子进程退出错误(daemon bin 顶层用 anyhow,但 lib 入口仍给 typed)。
@@ -659,6 +671,24 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|backtrace| !backtrace.is_empty()),
             "panic marker must carry a backtrace; event={panic_event}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_stop_request_interrupts_daemon_sleep_without_consuming_signal() {
+        SIGNAL_STOP_NUMBER.store(libc::SIGTERM, std::sync::atomic::Ordering::SeqCst);
+        SIGNAL_STOP_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let started = std::time::Instant::now();
+        sleep_seconds(1.0);
+        let elapsed = started.elapsed();
+        let signal = take_signal_stop_request();
+
+        assert_eq!(signal, Some("SIGTERM"));
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "daemon sleep must wake promptly after SIGTERM stop flag; elapsed={elapsed:?}"
         );
     }
 }
