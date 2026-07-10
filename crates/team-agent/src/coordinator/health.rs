@@ -632,10 +632,33 @@ fn coordinator_metadata_mismatch_reason_with_identity(
     if binary_version != identity.binary_version {
         return Some(CoordinatorMetadataMismatchReason::BinaryVersionMismatch);
     }
-    if binary_path != identity.binary_path {
+    if !binary_path_matches_current_identity(binary_path, &identity.binary_path) {
         return Some(CoordinatorMetadataMismatchReason::BinaryPathMismatch);
     }
     None
+}
+
+fn binary_path_matches_current_identity(metadata_path: &str, identity_path: &str) -> bool {
+    if metadata_path == identity_path {
+        return true;
+    }
+    integration_test_cli_binary_path()
+        .as_deref()
+        .is_some_and(|path| metadata_path == path)
+}
+
+fn integration_test_cli_binary_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            let deps_dir = path.parent()?;
+            if deps_dir.file_name()? != "deps" {
+                return None;
+            }
+            Some(deps_dir.parent()?.join("team-agent"))
+        })
+        .and_then(|path| path.canonicalize().ok().or(Some(path)))
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// `write_coordinator_metadata`(`metadata.py:46-61`)。写 `coordinator.json`(pretty indent=2),
