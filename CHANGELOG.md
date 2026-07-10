@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.26
+
+- **Fix: `alive` predicate narrowed to exclude stale topology conflicts (supermarket case).** The `alive` check previously returned `true` for teams with a stopped coordinator but a running sibling worker whose state file still referenced the old coordinator socket. This caused save conflicts when `add-agent` or `shutdown` tried to write team state while a dead sibling's stale topology was still considered live. The predicate now requires both the coordinator and all referenced workers to be running under a consistent topology. A stopped coordinator stamps the team as non-alive regardless of sibling worker state.
+- **Fix: explicit-team fallback for `purge-agent` and `add-agent` downstream failures.** When `add-agent` fails downstream (e.g., worker spawn error), the spec and state rollback now uses the explicit team key from the request rather than re-deriving it from the potentially-partially-written state, ensuring retry is clean. `purge-agent` help and dispatch are now consistent in how they handle the explicit-team argument.
+- **New: `stale_team_saveconflict_contract` (6/6).** Contracts cover: dead sibling stale topology does not block live team save but running sibling still conflicts, shutdown session killed stamps team non-alive, legacy all-stopped team is not alive but empty bootstrap remains alive, repair-state does not treat stopped current as alive ambiguity, add-agent downstream failure rolls back spec and state cleanly, purge-agent help and dispatch are consistent.
+
 ## 0.5.25
 
 - **Fix: team runtime state path now uses B3 team-key layout, not legacy runtime-root layout (Foundation-0 F0-3).** The path preview surfaced in `status`, `diagnose`, and MCP tool responses previously showed the old per-session snapshot root. The path is now computed from the canonical B3 team-key layout (`~/.team-agent/teams/<team-key>/`) so callers see the correct authority path without reading legacy locations. New contract: `b0_reader_hideone_audit_contract` (5/5), covering that product readers never consume a legacy snapshot without a diagnostic marker, and that stale snapshots cannot influence delivery target resolution, restart preflight, or readiness diagnosis.
