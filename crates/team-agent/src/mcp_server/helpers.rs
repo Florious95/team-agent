@@ -280,8 +280,10 @@ pub(crate) fn latest_reportable_message_for(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> Option<String> {
-    current_reportable_message_for(workspace, agent_id, owner_team_id)
-        .or_else(|| latest_delivered_direct_message_for(workspace, agent_id, owner_team_id))
+    match direct_message_attribution_for(workspace, agent_id, owner_team_id) {
+        DirectMessageAttribution::Reportable(message_id) => Some(message_id),
+        DirectMessageAttribution::BlockedByNewer { .. } | DirectMessageAttribution::None => None,
+    }
 }
 
 pub(crate) fn current_reportable_message_for(
@@ -304,6 +306,49 @@ pub(crate) fn latest_delivered_direct_message_for(
     let store = MessageStore::open(workspace).ok()?;
     let conn = crate::db::schema::open_db(store.db_path()).ok()?;
     latest_reportable_message_from_db(&conn, agent_id, owner_team_id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DirectMessageAttribution {
+    Reportable(String),
+    BlockedByNewer {
+        message_id: String,
+        status: String,
+        error: Option<String>,
+    },
+    None,
+}
+
+pub(crate) fn direct_message_attribution_for(
+    workspace: &Path,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> DirectMessageAttribution {
+    use crate::db::message_store::MessageStore;
+    let Ok(store) = MessageStore::open(workspace) else {
+        return DirectMessageAttribution::None;
+    };
+    let Ok(conn) = crate::db::schema::open_db(store.db_path()) else {
+        return DirectMessageAttribution::None;
+    };
+    if let Some(message_id) = current_turn_message_for(workspace, &conn, agent_id, owner_team_id) {
+        return DirectMessageAttribution::Reportable(message_id);
+    }
+    match latest_direct_message_from_db(&conn, agent_id, owner_team_id) {
+        Some(candidate)
+            if reportable_message_status(&candidate.status, candidate.error.as_deref()) =>
+        {
+            DirectMessageAttribution::Reportable(candidate.message_id)
+        }
+        Some(candidate) if blocks_historical_fallback(&candidate.status) => {
+            DirectMessageAttribution::BlockedByNewer {
+                message_id: candidate.message_id,
+                status: candidate.status,
+                error: candidate.error,
+            }
+        }
+        Some(_) | None => DirectMessageAttribution::None,
+    }
 }
 
 fn current_turn_message_for(
@@ -419,9 +464,27 @@ fn latest_reportable_message_from_db(
     agent_id: &str,
     owner_team_id: Option<&str>,
 ) -> Option<String> {
-    let row = conn
-        .query_row(
-            "select m.message_id, m.status, m.error from messages m
+    let candidate = latest_direct_message_from_db(conn, agent_id, owner_team_id)?;
+    if reportable_message_status(&candidate.status, candidate.error.as_deref()) {
+        Some(candidate.message_id)
+    } else {
+        None
+    }
+}
+
+struct DirectMessageCandidate {
+    message_id: String,
+    status: String,
+    error: Option<String>,
+}
+
+fn latest_direct_message_from_db(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    owner_team_id: Option<&str>,
+) -> Option<DirectMessageCandidate> {
+    conn.query_row(
+        "select m.message_id, m.status, m.error from messages m
              where m.recipient = ?1
                and (?2 is null or m.owner_team_id = ?2)
                and (m.task_id is null or m.task_id = '')
@@ -437,29 +500,25 @@ fn latest_reportable_message_from_db(
              order by m.created_at desc,
                case when m.status = 'delivered' then 0 else 1 end
              limit 1",
-            params![agent_id, owner_team_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .ok()
-        .flatten()?;
-    let (message_id, status, error) = row;
-    if reportable_message_status(&status, error.as_deref()) {
-        Some(message_id)
-    } else {
-        None
-    }
+        params![agent_id, owner_team_id],
+        |row| {
+            Ok(DirectMessageCandidate {
+                message_id: row.get::<_, String>(0)?,
+                status: row.get::<_, String>(1)?,
+                error: row.get::<_, Option<String>>(2)?,
+            })
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 fn reportable_message_status(status: &str, error: Option<&str>) -> bool {
-    matches!(
-        status,
-        "delivered" | "submitted" | "injected" | "visible"
-    ) && (status == "delivered" || error.is_none())
+    matches!(status, "delivered" | "submitted" | "injected" | "visible")
+        && (status == "delivered" || error.is_none())
+}
+
+fn blocks_historical_fallback(status: &str) -> bool {
+    matches!(status, "failed" | "refused" | "blocked")
 }

@@ -20,10 +20,10 @@ use crate::state::persist::{
 use crate::messaging::{self, MessageTarget, SendOptions};
 
 use super::helpers::{
-    current_reportable_message_for, delivery_outcome_value, ensure_object, enum_value,
-    insert_array, is_worker_recipient, json_dumps_default, latest_delivered_direct_message_for,
-    latest_task_for_assignee, non_empty_string, normalized_envelope_value, object_fields,
-    requires_ack_for_target, tool_runtime_error,
+    delivery_outcome_value, direct_message_attribution_for, ensure_object, enum_value,
+    insert_array, is_worker_recipient, json_dumps_default, latest_task_for_assignee,
+    non_empty_string, normalized_envelope_value, object_fields, requires_ack_for_target,
+    tool_runtime_error, DirectMessageAttribution,
 };
 use super::normalize::{
     compact_tool_result, normalize_report_envelope, normalize_result_status_observed,
@@ -336,41 +336,49 @@ impl TeamOrchestratorTools {
                 // message-scoped fallback, before defaulting to "manual".
                 //   1. explicit arg
                 //   2. current physical direct turn for this agent
-                //   3. latest delivered direct message with no result yet
-                //   4. latest nonterminal assigned task in teams.<owner>.tasks
-                //      (scoped) → top-level tasks
+                //   3. bounded latest reportable direct message with no result yet
+                //   4. latest nonterminal assigned task in teams.<owner>.tasks,
+                //      only when no newer failed/refused/blocked direct turn blocks fallback
                 //   5. "manual" — truly uncorrelated; collect still rejects
                 let owner_team_id_str = self.owner_team_id.as_ref().map(|t| t.as_str().to_string());
-                let resolved = task_id
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        self.agent_id.as_ref().and_then(|agent| {
-                            current_reportable_message_for(
-                                &self.workspace,
-                                agent.as_str(),
-                                owner_team_id_str.as_deref(),
-                            )
-                        })
-                    })
-                    .or_else(|| {
-                        self.agent_id.as_ref().and_then(|agent| {
-                            latest_delivered_direct_message_for(
-                                &self.workspace,
-                                agent.as_str(),
-                                owner_team_id_str.as_deref(),
-                            )
-                        })
-                    })
-                    .or_else(|| {
-                        self.agent_id.as_ref().and_then(|agent| {
-                            latest_task_for_assignee(
-                                &self.workspace,
-                                agent.as_str(),
-                                owner_team_id_str.as_deref(),
-                            )
-                        })
-                    })
-                    .unwrap_or_else(|| "manual".to_string());
+                let resolved = if let Some(task_id) = task_id {
+                    task_id.to_string()
+                } else if let Some(agent) = self.agent_id.as_ref() {
+                    match direct_message_attribution_for(
+                        &self.workspace,
+                        agent.as_str(),
+                        owner_team_id_str.as_deref(),
+                    ) {
+                        DirectMessageAttribution::Reportable(message_id) => message_id,
+                        DirectMessageAttribution::BlockedByNewer {
+                            message_id,
+                            status,
+                            error,
+                        } => {
+                            push_report_warning(
+                                obj,
+                                serde_json::json!({
+                                    "code": "result_attribution_blocked_by_newer_direct_message",
+                                    "field": "task_id",
+                                    "severity": "warning",
+                                    "advisory": true,
+                                    "message_id": message_id,
+                                    "message_status": status,
+                                    "message_error": error,
+                                }),
+                            );
+                            "manual".to_string()
+                        }
+                        DirectMessageAttribution::None => latest_task_for_assignee(
+                            &self.workspace,
+                            agent.as_str(),
+                            owner_team_id_str.as_deref(),
+                        )
+                        .unwrap_or_else(|| "manual".to_string()),
+                    }
+                } else {
+                    "manual".to_string()
+                };
                 obj.insert("task_id".to_string(), Value::String(resolved));
             }
             if !obj.contains_key("agent_id") {
@@ -974,6 +982,29 @@ fn merge_object_fields(existing: &mut Value, incoming: &Value) {
     };
     for (key, value) in incoming_obj {
         existing_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn push_report_warning(obj: &mut serde_json::Map<String, Value>, warning: Value) {
+    let Some(code) = warning.get("code").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(field) = warning.get("field").and_then(Value::as_str) else {
+        return;
+    };
+    match obj.get_mut("warnings") {
+        Some(Value::Array(warnings)) => {
+            let exists = warnings.iter().any(|existing| {
+                existing.get("code").and_then(Value::as_str) == Some(code)
+                    && existing.get("field").and_then(Value::as_str) == Some(field)
+            });
+            if !exists {
+                warnings.push(warning);
+            }
+        }
+        _ => {
+            obj.insert("warnings".to_string(), Value::Array(vec![warning]));
+        }
     }
 }
 
