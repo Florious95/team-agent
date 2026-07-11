@@ -183,6 +183,40 @@ fn r6_static_guard_rejects_dangerous_tests_without_hermetic_boundary() {
         .any(|offender| offender.path == "synthetic_missing_hermetic.rs"),
         "R6 setup: synthetic MessageStore/CARGO_BIN_EXE test without HermeticTestEnv must be rejected"
     );
+    let manual_cli_isolation = r#"
+        use std::process::Command;
+        fn run_cli() {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+            command
+                .env("HOME", "/tmp/hermetic-home")
+                .current_dir("/tmp/hermetic-workspace");
+            let _ = std::env::var_os("TEAM_AGENT_TEST_TMP");
+            for key in [
+                "TMUX",
+                "TMUX_PANE",
+                "TEAM_AGENT_LEADER_PANE_ID",
+                "TEAM_AGENT_LEADER_SESSION_UUID",
+                "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+                "TEAM_AGENT_LEADER_PROVIDER",
+                "TEAM_AGENT_MACHINE_FINGERPRINT",
+                "TEAM_AGENT_WORKSPACE",
+                "TEAM_AGENT_TEAM_ID",
+                "TEAM_AGENT_OWNER_TEAM_ID",
+                "TEAM_AGENT_ACTIVE_TEAM",
+                "TEAM_AGENT_ID",
+            ] {
+                command.env_remove(key);
+            }
+        }
+    "#;
+    assert!(
+        static_guard_offenders([(
+            "synthetic_manual_cli_isolation.rs".to_string(),
+            manual_cli_isolation.to_string()
+        )])
+        .is_empty(),
+        "R6 setup: CLI contracts that manually isolate HOME/current_dir and scrub TMUX/TEAM_AGENT_* envs should satisfy the equivalent isolation marker"
+    );
 
     let files = dangerous_test_files();
     let offenders = static_guard_offenders(files);
@@ -227,13 +261,37 @@ fn static_guard_offenders(
                 && source.contains("HOME")
                 && source.contains("TMUX")
                 && source.contains("TEAM_AGENT_WORKSPACE");
-            if has_hermetic || has_real_machine_isolation {
+            if has_hermetic || has_real_machine_isolation || has_manual_cli_env_isolation(&source) {
                 None
             } else {
                 Some(StaticOffender { path, signals })
             }
         })
         .collect()
+}
+
+fn has_manual_cli_env_isolation(source: &str) -> bool {
+    [
+        "CARGO_BIN_EXE_team-agent",
+        "TEAM_AGENT_TEST_TMP",
+        ".env(\"HOME\"",
+        ".current_dir(",
+        "command.env_remove(key)",
+        "\"TMUX\"",
+        "\"TMUX_PANE\"",
+        "\"TEAM_AGENT_LEADER_PANE_ID\"",
+        "\"TEAM_AGENT_LEADER_SESSION_UUID\"",
+        "\"TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE\"",
+        "\"TEAM_AGENT_LEADER_PROVIDER\"",
+        "\"TEAM_AGENT_MACHINE_FINGERPRINT\"",
+        "\"TEAM_AGENT_WORKSPACE\"",
+        "\"TEAM_AGENT_TEAM_ID\"",
+        "\"TEAM_AGENT_OWNER_TEAM_ID\"",
+        "\"TEAM_AGENT_ACTIVE_TEAM\"",
+        "\"TEAM_AGENT_ID\"",
+    ]
+    .into_iter()
+    .all(|needle| source.contains(needle))
 }
 
 fn dangerous_signals(source: &str) -> Vec<&'static str> {

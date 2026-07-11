@@ -1,6 +1,7 @@
 //! cli · emit — `emit`(--json vs 人读 dict 逐键)+ 顶层 `run` 调度(parser.py `main`)+
 //! 人读标量/集合渲染(`human_value` / `json_dumps_like`)。
 
+use super::spec::{command_spec, CommandKind, CommandTier, ALL_DISPATCH_KINDS, COMMAND_SPECS};
 use super::*;
 use std::io::Write as _;
 
@@ -77,6 +78,19 @@ fn emit_result(r: CmdResult) -> ExitCode {
 }
 
 fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliError> {
+    let Some(spec) = command_spec(command) else {
+        return Ok(emit_unknown_subcommand_usage(command));
+    };
+    match spec.kind {
+        CommandKind::Dispatch(_) => {}
+        CommandKind::SpecOnlyAlias { .. } => {
+            eprintln!("{}", command_help(Some(command)));
+            return Ok(ExitCode::Usage);
+        }
+        CommandKind::LeaderPassthrough { .. } => {
+            return Ok(emit_unknown_subcommand_usage(command));
+        }
+    }
     match command {
         "init" => cmd_init(&init_args(args, cwd)).map(emit_result),
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
@@ -216,6 +230,10 @@ const LEADER_PASSTHROUGH_COMMANDS: &[&str] = &["codex", "claude", "copilot"];
 
 fn is_leader_passthrough_command(command: &str) -> bool {
     LEADER_PASSTHROUGH_COMMANDS.contains(&command)
+        && matches!(
+            command_spec(command).map(|spec| spec.kind),
+            Some(CommandKind::LeaderPassthrough { .. })
+        )
 }
 
 fn emit_missing_subcommand_usage() -> ExitCode {
@@ -228,7 +246,60 @@ fn emit_missing_subcommand_usage() -> ExitCode {
 /// Used by the `--help` short-circuit gate so unknown commands keep falling through
 /// to the argparse invalid-choice path.
 fn is_known_subcommand(command: &str) -> bool {
-    DISPATCH_COMMANDS.contains(&command) || SPEC_ONLY_HELP_COMMANDS.contains(&command)
+    command_spec(command).is_some_and(|spec| spec.command_help)
+}
+
+fn default_help() -> String {
+    let mut out = String::from("usage: team-agent <command> [options]\n");
+    append_help_section(
+        &mut out,
+        "Core",
+        &["quick-start", "send", "status", "collect"],
+    );
+    append_help_section(
+        &mut out,
+        "Lifecycle",
+        &[
+            "restart",
+            "shutdown",
+            "add-agent",
+            "start-agent",
+            "stop-agent",
+            "reset-agent",
+        ],
+    );
+    append_help_section(&mut out, "Diagnose", &["diagnose"]);
+    append_help_section(
+        &mut out,
+        "Guided recovery",
+        &["claim-leader", "takeover", "attach-leader"],
+    );
+    out.push_str("\nProvider launchers:\n  team-agent codex|claude|copilot ...\n");
+    out.push_str("\nRun `team-agent <command> --help` for command flags.");
+    out
+}
+
+fn append_help_section(out: &mut String, title: &str, names: &[&str]) {
+    out.push('\n');
+    out.push_str(title);
+    out.push_str(":\n");
+    for name in names {
+        if let Some(spec) = command_spec(name).filter(|spec| spec.default_help) {
+            out.push_str(&format!("  {:<13} {}\n", spec.name, spec.summary));
+        }
+    }
+}
+
+fn compat_hidden_help(command: &str, usage: &str) -> String {
+    let Some(spec) = command_spec(command) else {
+        return usage.to_string();
+    };
+    if spec.tier != CommandTier::CompatHidden {
+        return usage.to_string();
+    }
+    let sunset = spec.sunset.unwrap_or("C2");
+    let action = spec.action.unwrap_or("use a supported command");
+    format!("{usage}\n\nstatus: hidden compatibility command\nsunset: {sunset}\naction: {action}")
 }
 
 /// Test-only public accessor for `command_help` — allows integration
@@ -250,28 +321,20 @@ pub fn __test_quick_start_args(
 
 fn command_help(command: Option<&str>) -> String {
     match command {
-        None => {
-            let mut commands = LEADER_PASSTHROUGH_COMMANDS.to_vec();
-            commands.extend_from_slice(DISPATCH_COMMANDS);
-            commands.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
-            format!(
-                "usage: team-agent <command> [options]\n\nCommands: {}\n\nRun `team-agent <command> --help` for command flags.",
-                commands.join(", ")
-            )
-        }
-        Some("init") => "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]".to_string(),
+        None => default_help(),
+        Some("init") => compat_hidden_help("init", "usage: team-agent init [--workspace WORKSPACE] [--force] [--json]"),
         Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).".to_string(),
-        Some("start") => "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]".to_string(),
+        Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\nMVP: name-based cross-workspace addressing assumes trusted local caller; no auth gate.".to_string(),
-        Some("fallback-send-leader") => "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use.".to_string(),
-        Some("fallback-report-result") => "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use.".to_string(),
+        Some("fallback-send-leader") => compat_hidden_help("fallback-send-leader", "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use."),
+        Some("fallback-report-result") => compat_hidden_help("fallback-report-result", "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use."),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
-        Some("stop") => "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
+        Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
         Some("shutdown") => "usage: team-agent shutdown [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]".to_string(),
         Some("restart") => "usage: team-agent restart [WORKSPACE] [--team TEAM] [--allow-fresh] [--session-converge-deadline SECONDS] [--json]".to_string(),
-        Some("restart-agent") => "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
+        Some("restart-agent") => compat_hidden_help("restart-agent", "usage: team-agent restart-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]"),
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
         Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
@@ -322,9 +385,10 @@ fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
 
 /// 在已知子命令里找与 `input` 最接近的一个(Levenshtein ≤ 阈值)。无足够接近者 → None。
 fn nearest_subcommand(input: &str) -> Option<&'static str> {
-    let mut candidates: Vec<&'static str> = LEADER_PASSTHROUGH_COMMANDS.to_vec();
-    candidates.extend_from_slice(DISPATCH_COMMANDS);
-    candidates.extend_from_slice(SPEC_ONLY_HELP_COMMANDS);
+    let candidates = COMMAND_SPECS
+        .iter()
+        .filter(|spec| spec.suggestion_index)
+        .map(|spec| spec.name);
     // 阈值随长度放宽,但短词收紧,避免 'x' 误配任何东西。
     let max_distance = match input.chars().count() {
         0..=3 => 1,
@@ -332,7 +396,6 @@ fn nearest_subcommand(input: &str) -> Option<&'static str> {
         _ => 3,
     };
     candidates
-        .into_iter()
         .map(|c| (c, levenshtein(input, c)))
         .filter(|(_, d)| *d <= max_distance)
         .min_by_key(|(_, d)| *d)
@@ -1630,67 +1693,156 @@ mod tests {
         items.iter().map(|s| (*s).to_string()).collect()
     }
 
-    fn source_dispatch_commands() -> Vec<&'static str> {
-        let source = include_str!("emit.rs");
-        let after_start = source.split_once("fn dispatch(").unwrap().1;
-        let dispatch_source = after_start.split_once("const DISPATCH_COMMANDS").unwrap().0;
-        let mut commands = Vec::new();
-        for line in dispatch_source.lines() {
-            let line = line.trim_start();
-            let Some(rest) = line.strip_prefix('"') else {
-                continue;
-            };
-            let Some((command, after_command)) = rest.split_once('"') else {
-                continue;
-            };
-            let after_command = after_command.trim_start();
-            if (after_command.starts_with("=>") || after_command.starts_with("if "))
-                && !commands.contains(&command)
-            {
-                commands.push(command);
-            }
-        }
-        commands
+    fn visible_help_commands(help: &str) -> Vec<String> {
+        help.lines()
+            .filter_map(|line| {
+                let trimmed = line.strip_prefix("  ")?;
+                if trimmed.starts_with("team-agent ") {
+                    return None;
+                }
+                let command = trimmed.split_whitespace().next()?;
+                command
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+                    .then(|| command.to_string())
+            })
+            .collect()
     }
 
     #[test]
-    fn t0_help_catalog_tracks_dispatch_commands() {
-        let source_commands = source_dispatch_commands();
-        for command in &source_commands {
+    fn command_specs_have_unique_names_and_valid_aliases() {
+        let mut names = std::collections::BTreeSet::new();
+        for spec in COMMAND_SPECS {
             assert!(
-                DISPATCH_COMMANDS.contains(command),
-                "dispatch command `{command}` is missing from DISPATCH_COMMANDS"
+                names.insert(spec.name),
+                "duplicate command spec `{}`",
+                spec.name
             );
         }
-        for command in DISPATCH_COMMANDS {
-            assert!(
-                source_commands.contains(command),
-                "DISPATCH_COMMANDS contains `{command}` but dispatch has no matching arm"
-            );
+        for spec in COMMAND_SPECS {
+            if let Some(alias_of) = spec.alias_of {
+                assert!(
+                    names.contains(alias_of),
+                    "`{}` aliases missing command `{alias_of}`",
+                    spec.name
+                );
+            }
         }
+    }
 
+    #[test]
+    fn all_dispatch_kinds_have_exactly_one_spec() {
+        for kind in ALL_DISPATCH_KINDS {
+            let count = COMMAND_SPECS
+                .iter()
+                .filter(|spec| spec.kind == CommandKind::Dispatch(*kind))
+                .count();
+            assert_eq!(
+                count, 1,
+                "dispatch kind `{kind:?}` must appear in exactly one CommandSpec"
+            );
+        }
+    }
+
+    #[test]
+    fn known_command_gate_uses_specs() {
+        for spec in COMMAND_SPECS.iter().filter(|spec| spec.command_help) {
+            assert!(
+                is_known_subcommand(spec.name),
+                "`{}` must be accepted by the known-command help gate",
+                spec.name
+            );
+        }
+        assert!(!is_known_subcommand("missing-c1-command"));
+    }
+
+    #[test]
+    fn default_help_lists_only_default_help_specs() {
         let top_help = command_help(None);
-        for command in DISPATCH_COMMANDS {
+        let visible = visible_help_commands(&top_help);
+        for command in &visible {
+            let spec = command_spec(command).expect("visible command must have a spec");
             assert!(
-                top_help.contains(command),
-                "top-level --help is missing dispatch command `{command}`"
-            );
-            let command_help = command_help(Some(command));
-            assert!(
-                command_help.contains("usage: team-agent") && command_help.contains(command),
-                "`team-agent {command} --help` must show command-specific usage, got {command_help:?}"
+                spec.default_help,
+                "`{command}` appears in default help without default_help=true"
             );
         }
-        for command in SPEC_ONLY_HELP_COMMANDS {
+        for spec in COMMAND_SPECS.iter().filter(|spec| spec.default_help) {
             assert!(
-                top_help.contains(command),
-                "top-level --help is missing spec-only help command `{command}`"
+                visible.iter().any(|command| command == spec.name),
+                "`{}` has default_help=true but is missing from top-level help",
+                spec.name
             );
         }
+        assert!(
+            visible.len() <= 15,
+            "default visible command count must stay <= 15, got {visible:?}"
+        );
         assert!(
             top_help.contains("copilot"),
             "top-level leader passthrough help must list copilot"
         );
+    }
+
+    #[test]
+    fn hidden_commands_not_in_default_help() {
+        let top_help = command_help(None);
+        let visible = visible_help_commands(&top_help);
+        for command in [
+            "fallback-send-leader",
+            "fallback-report-result",
+            "repair-state",
+            "settle",
+            "validate-result",
+            "leaders",
+            "doctor",
+            "e2e",
+            "peek",
+            "coordinator",
+        ] {
+            assert!(
+                !visible.iter().any(|visible| visible == command),
+                "`{command}` must stay hidden from default help"
+            );
+        }
+    }
+
+    #[test]
+    fn compat_hidden_help_has_sunset_action() {
+        for command in [
+            "fallback-send-leader",
+            "fallback-report-result",
+            "stop",
+            "restart-agent",
+            "start",
+            "init",
+        ] {
+            let help = command_help(Some(command)).to_lowercase();
+            assert!(help.contains("status: hidden compatibility command"));
+            assert!(help.contains("sunset: c2"));
+            assert!(help.contains("action:"));
+        }
+    }
+
+    #[test]
+    fn observation_a_commands_have_terminal_tiers() {
+        for (command, tier) in [
+            ("allow-peer-talk", CommandTier::Secondary),
+            ("approvals", CommandTier::Secondary),
+            ("profile", CommandTier::Secondary),
+            ("install-skill", CommandTier::Secondary),
+            ("init", CommandTier::CompatHidden),
+        ] {
+            assert_eq!(command_spec(command).map(|spec| spec.tier), Some(tier));
+        }
+    }
+
+    #[test]
+    fn suggestion_index_excludes_hidden_commands() {
+        assert_eq!(nearest_subcommand("statu"), Some("status"));
+        assert_eq!(nearest_subcommand("leader"), None);
+        assert_eq!(nearest_subcommand("fallback-send-leade"), None);
+        assert_eq!(nearest_subcommand("coordinato"), None);
     }
 
     #[test]

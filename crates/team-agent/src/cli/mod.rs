@@ -62,6 +62,7 @@ pub mod leaders;
 pub mod named_address;
 pub mod profile;
 pub mod send;
+pub(crate) mod spec;
 pub mod status;
 pub mod types;
 
