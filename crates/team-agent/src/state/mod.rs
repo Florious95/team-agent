@@ -26,6 +26,7 @@ pub mod ownership;
 pub mod paths;
 pub mod persist;
 pub mod projection;
+pub mod repository;
 pub mod selector;
 
 use serde_json::Value;
