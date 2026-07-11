@@ -354,19 +354,23 @@ impl CliCase {
             .current_dir(&self.workspace)
             .env("HOME", &self.home)
             .env("TEAM_AGENT_TEST_TMP", test_tmp_root())
-            .env("TMPDIR", test_tmp_root())
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("TEAM_AGENT_LEADER_PANE_ID")
-            .env_remove("TEAM_AGENT_LEADER_SESSION_UUID")
-            .env_remove("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE")
-            .env_remove("TEAM_AGENT_LEADER_PROVIDER")
-            .env_remove("TEAM_AGENT_MACHINE_FINGERPRINT")
-            .env_remove("TEAM_AGENT_WORKSPACE")
-            .env_remove("TEAM_AGENT_TEAM_ID")
-            .env_remove("TEAM_AGENT_OWNER_TEAM_ID")
-            .env_remove("TEAM_AGENT_ACTIVE_TEAM")
-            .env_remove("TEAM_AGENT_ID");
+            .env("TMPDIR", test_tmp_root());
+        for key in [
+            "TMUX",
+            "TMUX_PANE",
+            "TEAM_AGENT_LEADER_PANE_ID",
+            "TEAM_AGENT_LEADER_SESSION_UUID",
+            "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+            "TEAM_AGENT_LEADER_PROVIDER",
+            "TEAM_AGENT_MACHINE_FINGERPRINT",
+            "TEAM_AGENT_WORKSPACE",
+            "TEAM_AGENT_TEAM_ID",
+            "TEAM_AGENT_OWNER_TEAM_ID",
+            "TEAM_AGENT_ACTIVE_TEAM",
+            "TEAM_AGENT_ID",
+        ] {
+            command.env_remove(key);
+        }
         let output = command.output().expect("run team-agent");
         eprintln!(
             "$ team-agent {}\nexit={}\nstdout={}\nstderr={}",
