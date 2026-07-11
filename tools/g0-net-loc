@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+base="${1:-origin/main}"
+head="${2:-HEAD}"
+
+shortstat="$(git diff --shortstat "${base}...${head}" 2>/dev/null || git diff --shortstat "$base" "$head")"
+if [[ -z "$shortstat" ]]; then
+  shortstat="0 files changed, 0 insertions(+), 0 deletions(-)"
+fi
+
+insertions="$(printf '%s\n' "$shortstat" | sed -nE 's/.* ([0-9]+) insertions?\(\+\).*/\1/p')"
+deletions="$(printf '%s\n' "$shortstat" | sed -nE 's/.* ([0-9]+) deletions?\(-\).*/\1/p')"
+insertions="${insertions:-0}"
+deletions="${deletions:-0}"
+net=$((insertions - deletions))
+
+echo "G0_METRIC net_loc base=$base head=$head insertions=$insertions deletions=$deletions net=$net"
+echo "G0_SHORTSTAT $shortstat"
