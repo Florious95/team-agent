@@ -105,7 +105,30 @@ fn parse_visible_commands(help: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|command| !command.is_empty())
         .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .chain(parse_sectioned_visible_commands(help))
         .collect()
+}
+
+fn parse_sectioned_visible_commands(help: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in help.lines() {
+        let Some(trimmed) = line.strip_prefix("  ") else {
+            continue;
+        };
+        if trimmed.starts_with("team-agent ") {
+            continue;
+        }
+        let command = trimmed.split_whitespace().next().unwrap_or_default();
+        if command
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        {
+            commands.push(command.to_string());
+        }
+    }
+    commands
 }
 
 fn repo_root() -> PathBuf {

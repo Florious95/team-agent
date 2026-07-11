@@ -32,7 +32,13 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
                 "--to-leader requires a non-empty message".to_string(),
             ));
         }
-        let value = send_to_canonical_leader_target(&args.workspace, to_leader, &content, &args.sender, args.task.as_deref())?;
+        let value = send_to_canonical_leader_target(
+            &args.workspace,
+            to_leader,
+            &content,
+            &args.sender,
+            args.task.as_deref(),
+        )?;
         return Ok(cmd_send_result(value, args.json));
     }
     if let Some(ref to_name) = args.to_name {
@@ -1055,10 +1061,10 @@ fn maybe_enqueue_offline_leader_mailbox(
     // Owner-scope refusal: sender workspace == target workspace. Keep
     // the actionable attach hint (owner sees status/diagnose copy that
     // points at `attach-leader`).
-    let sender_canonical = std::fs::canonicalize(sender_workspace)
-        .unwrap_or_else(|_| sender_workspace.to_path_buf());
-    let target_canonical = std::fs::canonicalize(&target_workspace)
-        .unwrap_or_else(|_| target_workspace.clone());
+    let sender_canonical =
+        std::fs::canonicalize(sender_workspace).unwrap_or_else(|_| sender_workspace.to_path_buf());
+    let target_canonical =
+        std::fs::canonicalize(&target_workspace).unwrap_or_else(|_| target_workspace.clone());
     if sender_canonical == target_canonical {
         return Ok(None);
     }
@@ -1084,10 +1090,7 @@ fn maybe_enqueue_offline_leader_mailbox(
         &event_log,
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let message_id = outcome
-        .message_id
-        .clone()
-        .unwrap_or_else(|| "".to_string());
+    let message_id = outcome.message_id.clone().unwrap_or_else(|| "".to_string());
     Ok(Some(json!({
         "ok": true,
         "status": "queued_until_leader_attach",
@@ -1342,7 +1345,7 @@ pub fn send_to_canonical_leader_target(
             "channel": "leader_mailbox",
             "delivered": false,
             "message_status": "queued_until_leader_attach",
-            "action": "run `team-agent leaders` to see registered leaders; retry with a qualified name",
+            "action": "run `team-agent leaders` to see registered leaders; inspect queued leader messages with `team-agent inbox`; retry with a qualified name",
             "registry_stale": false,
         }));
     }
@@ -1438,11 +1441,7 @@ pub fn send_to_canonical_leader_target(
     // LIVE: canonical-validated. Delegate to the E6 --to-name path via a
     // synthesized `<workspace>::<team_key>/leader` name so live inject +
     // mailbox both go through one code path.
-    let to_name = format!(
-        "{}::{}/leader",
-        entry.workspace.display(),
-        entry.team_key
-    );
+    let to_name = format!("{}::{}/leader", entry.workspace.display(), entry.team_key);
     let (resolved, transport) =
         match crate::cli::named_address::resolve_name_for_cli(sender_workspace, &to_name) {
             Ok(r) => r,
@@ -1455,10 +1454,7 @@ pub fn send_to_canonical_leader_target(
                         "resolved_via".to_string(),
                         serde_json::Value::String("host_leader_registry".to_string()),
                     );
-                    obj.insert(
-                        "delivered".to_string(),
-                        serde_json::Value::Bool(false),
-                    );
+                    obj.insert("delivered".to_string(), serde_json::Value::Bool(false));
                 }
                 return Ok(body);
             }
@@ -1484,7 +1480,10 @@ pub fn send_to_canonical_leader_target(
         // Honest delivered marker. `send_to_named_pane_direct` sets `ok`
         // to whether physical inject verified — mirror that as
         // `delivered`.
-        let ok = obj.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let ok = obj
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         obj.insert("delivered".to_string(), serde_json::Value::Bool(ok));
     }
     Ok(value)

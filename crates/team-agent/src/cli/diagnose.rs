@@ -366,7 +366,7 @@ fn recovery_hint(team: &str, broken_class: &str, hint_action: &str) -> Value {
         "hint_action": hint_action,
         "dedupe_key": format!("{team}:{broken_class}"),
         "action": format!(
-            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent quick-start; team-agent attach-leader"
+            "{hint_action} # alternatives: team-agent restart; team-agent claim-leader; team-agent takeover; team-agent quick-start; team-agent attach-leader"
         ),
     })
 }
