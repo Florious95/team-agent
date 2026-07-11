@@ -2354,6 +2354,11 @@ fn rebuild_runtime_spec_from_roles(
     {
         crate::lifecycle::launch::override_spec_session_name(&mut spec, session_name);
     }
+    // 0.5.30 (`.team/artifacts/add-agent-restart-saveconflict-locate.md` §4/§11):
+    // 把 add-agent 记录的 dynamic_role_file 合并回 restart 重建 spec —— 单一真相 =
+    // 静态 team_dir/agents/*.md + state 记录的 dynamic role source。缺文件 fail-closed
+    // 三行式,不静默 prune 已 live 的 helper(persist SaveConflict 保护继续生效)。
+    merge_state_dynamic_role_files(&mut spec, run_workspace, &team_dir, team_key, state)?;
     // 写 runtime spec(覆盖,原子 tmp+rename;Bug2)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
     crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
@@ -2364,6 +2369,86 @@ fn rebuild_runtime_spec_from_roles(
         let _ = std::fs::remove_file(&legacy_spec);
     }
     Ok(spec)
+}
+
+/// 0.5.30 (`add-agent-restart-saveconflict-locate.md` §4/§11): 把 add-agent
+/// 写入 `state.agents.<id>.dynamic_role_file` 的动态 role 文档合并回 restart
+/// 重建 spec。规则:
+/// - path 为空 / 缺失字段 → 跳过(纯静态 team_dir agent);
+/// - path 存在但文件 missing → fail-closed 三行式错误(不 prune live helper);
+/// - path 有效 → 编译成 CompiledRole,校验 compiled.id 等于 agent_id;
+/// - 复用 launch::inject_agent_into_spec 去重注入(名字已在 spec → 跳过)。
+fn merge_state_dynamic_role_files(
+    spec: &mut YamlValue,
+    run_workspace: &Path,
+    team_dir: &Path,
+    team_key: &str,
+    state: &serde_json::Value,
+) -> Result<(), LifecycleError> {
+    let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    if agents.is_empty() {
+        return Ok(());
+    }
+    let team_meta = crate::compiler::read_front_matter(&team_dir.join("TEAM.md"))
+        .map(|(meta, _)| meta)
+        .unwrap_or(YamlValue::Null);
+    let workspace_s = spec
+        .get("team")
+        .and_then(|team| team.get("workspace"))
+        .and_then(YamlValue::as_str)
+        .unwrap_or_else(|| team_dir.to_str().unwrap_or_default())
+        .to_string();
+    let mut dynamic_ids: Vec<(String, String)> = agents
+        .iter()
+        .filter_map(|(agent_id, agent)| {
+            agent
+                .get("dynamic_role_file")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|raw| (agent_id.clone(), raw.to_string()))
+        })
+        .collect();
+    dynamic_ids.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (agent_id, raw_path) in dynamic_ids {
+        let role_path = {
+            let candidate = std::path::PathBuf::from(&raw_path);
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                run_workspace.join(&candidate)
+            }
+        };
+        if !role_path.exists() {
+            // N38 三行式:error / action / log。不 prune live helper。
+            return Err(LifecycleError::TeamSelect(format!(
+                "cannot restart: dynamic role file missing for agent '{agent_id}' in team \
+                 '{team_key}': {}. \
+                 action: restore the dynamic role file at that path, or run team-agent \
+                 remove-agent {agent_id} --force to drop the dynamic worker before restart. \
+                 log: workspace={}",
+                role_path.display(),
+                run_workspace.display(),
+            )));
+        }
+        let compiled = crate::compiler::compile_role_agent(&role_path, &team_meta, &workspace_s)
+            .map_err(|e| LifecycleError::Compile(e.to_string()))?;
+        if compiled.id != agent_id {
+            return Err(LifecycleError::Compile(format!(
+                "dynamic role file for agent '{agent_id}' declares name '{}' at {}; \
+                 restart cannot rename a live worker. \
+                 action: fix the role file's front-matter name to match agent_id, or run \
+                 team-agent remove-agent {agent_id} --force before restart. \
+                 log: workspace={}",
+                compiled.id,
+                role_path.display(),
+                run_workspace.display(),
+            )));
+        }
+        crate::lifecycle::launch::inject_agent_into_spec(spec, compiled.agent, &compiled.id)?;
+    }
+    Ok(())
 }
 
 fn load_endpoint_convergence_runtime_spec(

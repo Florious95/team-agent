@@ -4130,7 +4130,12 @@ fn upsert_agent_state_from_role(
 
 /// E5 Bug1:把 add-agent 就地编译出的 agent 条目注入 base team spec(`agents` 列表 +
 /// `routing.rules` 加 `route-<id>`),复刻 [`compile_team`] 的路由规则形态。不落任何文件。
-fn inject_agent_into_spec(
+///
+/// 0.5.30 (`.team/artifacts/add-agent-restart-saveconflict-locate.md` §5.2):
+/// `pub(crate)` 让 restart/rebuild.rs::rebuild_runtime_spec_from_roles 复用
+/// 同一去重注入逻辑,把 add-agent 记录的 dynamic_role_file 合并回 restart
+/// 重建 spec,防止 live helper 被 prune 后触发 SaveConflict。行为不变。
+pub(crate) fn inject_agent_into_spec(
     spec: &mut Value,
     agent: Value,
     agent_id: &str,
