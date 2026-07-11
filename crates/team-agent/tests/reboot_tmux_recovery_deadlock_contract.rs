@@ -140,9 +140,25 @@ fn claim_uses_observed_target_endpoint_not_state_or_tmux_env() {
         case.tmux_log()
     );
     assert_eq!(
-        state.pointer("/leader_receiver/tmux_socket").and_then(Value::as_str),
+        state.pointer("/tmux_endpoint").and_then(Value::as_str),
         Some(observed.as_str()),
-        "RED4: persisted leader_receiver.tmux_socket must be the observed target endpoint. observed={observed} state={state}"
+        "RED4: persisted root tmux_endpoint must converge to the observed target endpoint. observed={observed} state={state}"
+    );
+    assert_eq!(
+        state.pointer("/topology_convergence/new_tmux_endpoint").and_then(Value::as_str),
+        Some(observed.as_str()),
+        "RED4: persisted root topology_convergence.new_tmux_endpoint must record the observed target endpoint. observed={observed} state={state}"
+    );
+    assert_eq!(
+        state
+            .pointer("/teams/current/leader_receiver/tmux_socket")
+            .and_then(Value::as_str),
+        Some(observed.as_str()),
+        "RED4: persisted canonical nested leader_receiver.tmux_socket must be the observed target endpoint. observed={observed} state={state}"
+    );
+    assert!(
+        state.pointer("/leader_receiver").is_none(),
+        "RED4: Stage3 canonical-only save must not reintroduce raw root leader_receiver. observed={observed} state={state}"
     );
     assert_ne!(
         observed, OLD_SOCKET,
