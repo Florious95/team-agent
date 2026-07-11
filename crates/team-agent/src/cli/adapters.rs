@@ -295,13 +295,33 @@ pub fn cmd_status_for_team(args: &StatusArgs, team: Option<&str>) -> Result<CmdR
         )?;
         return Ok(CmdResult::from_json(value, true));
     }
-    Ok(CmdResult::human(append_reminder(
-        status_port::format_status_scoped(
+    let mut text = status_port::format_status_scoped(
+        &selected.run_workspace,
+        &selected.state,
+        Some(&selected.team_key),
+        args.agent.as_deref(),
+    )?;
+    if args.detail {
+        let value = status_port::status_scoped(
             &selected.run_workspace,
             &selected.state,
             Some(&selected.team_key),
-            args.agent.as_deref(),
-        )?,
+            false,
+            true,
+        )?;
+        if let Some(hint) = value
+            .pointer("/runtime/hint")
+            .and_then(serde_json::Value::as_str)
+            .filter(|hint| !hint.is_empty())
+        {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(hint);
+        }
+    }
+    Ok(CmdResult::human(append_reminder(
+        text,
         crate::cli::STATUS_REMINDER,
     )))
 }

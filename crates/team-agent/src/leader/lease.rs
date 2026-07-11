@@ -443,7 +443,8 @@ pub fn claim_leader(
     let targets = claim_leader_targets(workspace, &raw_state);
     let caller_candidate = targets
         .iter()
-        .find(|target| target.info.pane_id.as_str() == caller);
+        .filter(|target| target.info.pane_id.as_str() == caller)
+        .min_by_key(|target| target.source.priority());
     let caller_pane_info = caller_candidate.map(|target| &target.info);
     let caller_target = caller_candidate.and_then(|target| {
         claim_target_from_pane_info(workspace, &target.info).map(|mut claim_target| {
@@ -1220,10 +1221,45 @@ struct LeaderClaimTarget {
 struct ClaimLeaderTargetCandidate {
     info: PaneInfo,
     endpoint: Option<String>,
+    source: ClaimLeaderTargetSource,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimLeaderTargetSource {
+    StateRecorded,
+    Workspace,
+    CurrentTmux,
+    Default,
+}
+
+impl ClaimLeaderTargetSource {
+    fn priority(self) -> u8 {
+        match self {
+            Self::StateRecorded => 0,
+            Self::Workspace => 1,
+            Self::CurrentTmux => 2,
+            Self::Default => 3,
+        }
+    }
 }
 
 fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTargetCandidate> {
     let mut targets = Vec::new();
+    if let Some(endpoint) = crate::tmux_backend::socket_name_from_tmux_env() {
+        let backend = tmux_backend_for_endpoint(&endpoint);
+        let resolved_endpoint = backend.tmux_endpoint();
+        targets.extend(
+            backend
+                .list_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|info| ClaimLeaderTargetCandidate {
+                    info,
+                    endpoint: resolved_endpoint.clone(),
+                    source: ClaimLeaderTargetSource::CurrentTmux,
+                }),
+        );
+    }
     for endpoint in state_recorded_tmux_endpoints(state) {
         let backend = tmux_backend_for_endpoint(&endpoint);
         let resolved_endpoint = backend.tmux_endpoint();
@@ -1235,6 +1271,7 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
                 .map(|info| ClaimLeaderTargetCandidate {
                     info,
                     endpoint: resolved_endpoint.clone(),
+                    source: ClaimLeaderTargetSource::StateRecorded,
                 }),
         );
     }
@@ -1248,6 +1285,7 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
             .map(|info| ClaimLeaderTargetCandidate {
                 info,
                 endpoint: workspace_endpoint.clone(),
+                source: ClaimLeaderTargetSource::Workspace,
             }),
     );
     let default_backend = crate::transport_factory::tmux_default_transport();
@@ -1260,6 +1298,7 @@ fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTarge
             .map(|info| ClaimLeaderTargetCandidate {
                 info,
                 endpoint: default_endpoint.clone(),
+                source: ClaimLeaderTargetSource::Default,
             }),
     );
     targets

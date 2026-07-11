@@ -433,7 +433,9 @@ fn restart_with_selected_team_and_transport(
             &decision.agent_id,
             &raw_agent,
         );
-        if has_endpoint_convergence_marker(&state) && is_fake_model_harness_agent(&agent) {
+        if endpoint_convergence_fake_harness_enabled(&state)
+            && is_fake_model_harness_agent(&agent)
+        {
             write_fake_harness_spawn_argv_event(
                 &selected.run_workspace,
                 decision,
@@ -1242,7 +1244,7 @@ fn restart_worker_panes_addressable(
     if decisions.is_empty() {
         return true;
     }
-    if has_endpoint_convergence_marker(state)
+    if endpoint_convergence_fake_harness_enabled(state)
         && decisions.iter().all(|decision| {
             state
                 .get("agents")
@@ -2487,6 +2489,11 @@ fn has_endpoint_convergence_marker(state: &serde_json::Value) -> bool {
         .and_then(|v| v.get("status"))
         .and_then(serde_json::Value::as_str)
         == Some("converged")
+}
+
+fn endpoint_convergence_fake_harness_enabled(state: &serde_json::Value) -> bool {
+    has_endpoint_convergence_marker(state)
+        && std::env::var_os("TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK").is_some()
 }
 
 fn is_fake_model_harness_agent(agent: &serde_json::Value) -> bool {
