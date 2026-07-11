@@ -672,9 +672,16 @@ pub(super) fn sync_restart_team_projections(state: &mut serde_json::Value, team_
     else {
         return;
     };
+    // 0.5.28 (`.team/artifacts/0527-realfail-layer2-leader-locate.md` §3):
+    // 显式 team_key = 操作目标,始终允许覆盖 / 新建(该 helper 的正当职责)。
+    // active/derived/"current" 三种别名兜底 = alias-identity 家族第三例,只有
+    // 「盘上已有该 alias 条目」且「其身份与 compact 不冲突」时才允许写,
+    // 避免 0.5.26 起死 sibling 保留时被活队 compact 硬克隆。禁止 alias 新建条目。
     let mut keys = Vec::new();
+    let mut explicit = false;
     if !team_key.is_empty() {
         keys.push(team_key.to_string());
+        explicit = true;
     }
     if let Some(active_key) = active_key {
         keys.push(active_key);
@@ -688,8 +695,41 @@ pub(super) fn sync_restart_team_projections(state: &mut serde_json::Value, team_
     keys.sort();
     keys.dedup();
     for key in keys {
-        teams.insert(key, compact.clone());
+        let is_operation_target = explicit && key == team_key;
+        if is_operation_target {
+            teams.insert(key, compact.clone());
+            continue;
+        }
+        let Some(existing) = teams.get(&key) else {
+            // 别名条目不存在:不新建,避免把 hack alias 变成真队。
+            continue;
+        };
+        if json_team_identity_matches(existing, &compact) {
+            teams.insert(key, compact.clone());
+        }
     }
+}
+
+/// 0.5.28: 别名同步身份门。比较 existing 条目与 compact(即将写入)四个身份字段:
+/// `team_key`/`session_name`/`team_dir`/`spec_path`。legacy 缺字段容忍(两侧任一
+/// 缺则该字段不参与判定);已有字段必须相等,冲突即拒绝覆盖。
+fn json_team_identity_matches(existing: &serde_json::Value, compact: &serde_json::Value) -> bool {
+    const FIELDS: &[&str] = &["team_key", "session_name", "team_dir", "spec_path"];
+    for field in FIELDS {
+        let lhs = existing
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty());
+        let rhs = compact
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty());
+        match (lhs, rhs) {
+            (Some(a), Some(b)) if a != b => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 pub(super) fn state_session_name(state: &serde_json::Value) -> SessionName {
