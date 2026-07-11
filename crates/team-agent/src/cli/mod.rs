@@ -4076,21 +4076,33 @@ pub mod leader_port {
                 "action": "rerun with --confirm to claim ownership of this team",
             }));
         }
+        let state = crate::state::persist::load_runtime_state(workspace)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let Some(team_id) = resolve_owner_team_id(&state, team) else {
+            return Ok(json!({
+                "ok": false,
+                "status": "refused",
+                "reason": "team_target_unresolved",
+                "team": team.unwrap_or(""),
+                "hint": "specify an active team id",
+            }));
+        };
+        let requested_team = team;
+        let explicit_team = requested_team.filter(|team| !team.is_empty());
+        let resolved_team = explicit_team.map(|_| team_id.as_str().to_string());
         if !positive_caller_pane_env_present() {
-            let state = crate::state::persist::load_runtime_state(workspace)
-                .map_err(|e| CliError::Runtime(e.to_string()))?;
-            let team_id = resolve_owner_team_id(&state, team)
-                .unwrap_or_else(|| TeamKey::new(crate::state::projection::team_state_key(&state)));
             let bind = crate::leader::bind_owner_from_caller_pane(workspace, &team_id, None)
                 .map_err(|e| CliError::Runtime(e.to_string()))?;
             return Ok(owner_bind_value(bind));
         }
+        let team = resolved_team.as_deref();
         let result = crate::leader::claim_leader(workspace, team, true)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
+        insert_resolved_team(&mut value, requested_team, resolved_team.as_deref());
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            emit_topology_convergence_event(workspace, team, "takeover", &value);
-            register_after_binding_success(workspace, team, "takeover", &mut value);
+            emit_topology_convergence_event(workspace, resolved_team.as_deref(), "takeover", &value);
+            register_after_binding_success(workspace, resolved_team.as_deref(), "takeover", &mut value);
         }
         Ok(value)
     }
@@ -4119,12 +4131,15 @@ pub mod leader_port {
             }
             return Ok(owner_bind_value(bind));
         }
-        let result = crate::leader::claim_leader(workspace, team, confirm)
+        let explicit_team = team.filter(|team| !team.is_empty());
+        let resolved_team = explicit_team.map(|_| team_id.as_str().to_string());
+        let result = crate::leader::claim_leader(workspace, resolved_team.as_deref(), confirm)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
+        insert_resolved_team(&mut value, team, resolved_team.as_deref());
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            emit_topology_convergence_event(workspace, team, "claim-leader", &value);
-            register_after_binding_success(workspace, team, "claim-leader", &mut value);
+            emit_topology_convergence_event(workspace, resolved_team.as_deref(), "claim-leader", &value);
+            register_after_binding_success(workspace, resolved_team.as_deref(), "claim-leader", &mut value);
         }
         Ok(value)
     }
@@ -4275,22 +4290,32 @@ pub mod leader_port {
     fn resolve_owner_team_id(state: &Value, team: Option<&str>) -> Option<TeamKey> {
         match team.filter(|t| !t.is_empty()) {
             Some(team_id) => {
-                let current = crate::state::projection::team_state_key(state);
-                if current == team_id
-                    || state
-                        .get("teams")
-                        .and_then(|teams| teams.get(team_id))
-                        .is_some()
-                {
-                    Some(TeamKey::new(team_id))
-                } else {
-                    None
+                match crate::state::projection::resolve_owner_team_id(state, team_id) {
+                    crate::state::projection::OwnerTeamResolution::Canonical(key)
+                    | crate::state::projection::OwnerTeamResolution::LegacyAlias {
+                        canonical: key,
+                        ..
+                    } => Some(TeamKey::new(key)),
+                    crate::state::projection::OwnerTeamResolution::Unresolved { .. }
+                    | crate::state::projection::OwnerTeamResolution::Ambiguous { .. } => None,
                 }
             }
             None => Some(TeamKey::new(crate::state::projection::team_state_key(
                 state,
             ))),
         }
+    }
+
+    fn insert_resolved_team(value: &mut Value, requested: Option<&str>, resolved: Option<&str>) {
+        let (Some(requested), Some(resolved)) = (requested.filter(|team| !team.is_empty()), resolved)
+        else {
+            return;
+        };
+        let Some(obj) = value.as_object_mut() else {
+            return;
+        };
+        obj.insert("requested_team".to_string(), json!(requested));
+        obj.insert("resolved_team".to_string(), json!(resolved));
     }
 
     fn positive_caller_pane_env_present() -> bool {

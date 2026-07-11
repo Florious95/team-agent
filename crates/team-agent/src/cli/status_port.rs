@@ -34,12 +34,13 @@ use rusqlite::params;
         // backlog>0 才挂 down-hint(anti-nag)。auto-recovery 不做(user 已裁)。
         let coordinator_running = coordinator_status_running(&health);
         let undelivered_backlog = count_undelivered_backlog(&conn, owner_team_id)?;
+        let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
+        let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
         let runtime_block = build_runtime_status_block(
             coordinator_running,
             undelivered_backlog,
+            !tmux_present,
         );
-        let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
-        let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
         let agents = enrich_agents(state.get("agents"), tmux_present);
         let tasks = state
             .get("tasks")
@@ -458,6 +459,9 @@ use rusqlite::params;
                             "stale_reason".to_string(),
                             Value::String(reason.to_string()),
                         );
+                        if !tmux_session_present {
+                            downgrade_stale_agent(&mut enriched);
+                        }
                     }
                     out.insert(agent_id.clone(), Value::Object(enriched));
                 }
@@ -467,6 +471,25 @@ use rusqlite::params;
             }
         }
         Value::Object(out)
+    }
+
+    fn downgrade_stale_agent(agent: &mut Map<String, Value>) {
+        let raw = agent
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(raw.as_str(), "running" | "busy" | "working" | "idle") {
+            agent.insert("status".to_string(), Value::String("stopped".to_string()));
+        }
+        let worker_state = agent
+            .get("worker_state")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if matches!(worker_state.as_str(), "RUNNING" | "BUSY" | "PROBABLY_IDLE") {
+            agent.insert("worker_state".to_string(), Value::String("DEAD".to_string()));
+        }
     }
 
     fn stale_reason_for_agent(agent: &Value, tmux_session_present: bool) -> Option<&'static str> {
@@ -1093,14 +1116,23 @@ use rusqlite::params;
     /// B-5 / 036b N38 — status 出口的 runtime 块:把 coordinator_health 与
     /// undelivered backlog 合体暴露。down-hint 只在【coordinator 不在跑 ∧ 有 backlog】
     /// 两条件同时满足才挂(anti-nag);健康状态下不挂提示。auto-recovery 不做。
-    fn build_runtime_status_block(coordinator_running: bool, undelivered: i64) -> Value {
+    fn build_runtime_status_block(
+        coordinator_running: bool,
+        undelivered: i64,
+        tmux_session_missing: bool,
+    ) -> Value {
         let mut runtime = serde_json::Map::new();
         runtime.insert(
             "coordinator".to_string(),
             json!({"ok": coordinator_running}),
         );
         runtime.insert("undelivered".to_string(), json!(undelivered));
-        if !coordinator_running && undelivered > 0 {
+        if tmux_session_missing {
+            runtime.insert(
+                "hint".to_string(),
+                json!("tmux session missing — run team-agent restart"),
+            );
+        } else if !coordinator_running && undelivered > 0 {
             runtime.insert(
                 "hint".to_string(),
                 json!(format!(

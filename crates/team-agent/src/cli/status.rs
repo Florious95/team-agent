@@ -32,6 +32,17 @@ pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
         return counts;
     };
     for (agent_id, agent) in agent_map {
+        if let Some(bucket) = stale_agent_bucket(agent) {
+            match bucket {
+                SummaryBucket::Stopped => counts.stopped += 1,
+                SummaryBucket::Unknown => counts.unknown += 1,
+                SummaryBucket::Running
+                | SummaryBucket::Busy
+                | SummaryBucket::Idle
+                | SummaryBucket::Failed => {}
+            }
+            continue;
+        }
         let raw = agent
             .get("status")
             .and_then(Value::as_str)
@@ -51,6 +62,21 @@ pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
         }
     }
     counts
+}
+
+fn stale_agent_bucket(agent: &Value) -> Option<SummaryBucket> {
+    if agent.get("stale").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    if agent
+        .get("stale_reason")
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        Some(SummaryBucket::Stopped)
+    } else {
+        Some(SummaryBucket::Unknown)
+    }
 }
 
 /// `_interaction_counts`(`commands.py:292-306`):遍历 agents 的 `interacted` 字段。
@@ -165,6 +191,9 @@ fn csv_agent_status(
     agent: &Value,
     health: Option<&serde_json::Map<String, Value>>,
 ) -> &'static str {
+    if stale_agent_bucket(agent).is_some() {
+        return "错误";
+    }
     let raw = agent
         .get("status")
         .and_then(Value::as_str)

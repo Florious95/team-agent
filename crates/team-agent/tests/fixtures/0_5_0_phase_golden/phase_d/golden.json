@@ -300,13 +300,13 @@
               "provider": "codex",
               "stale": true,
               "stale_reason": "pane_dead",
-              "status": "running"
+              "status": "stopped"
             },
             "w2": {
               "provider": "codex",
               "stale": true,
               "stale_reason": "pane_dead",
-              "status": "running"
+              "status": "stopped"
             }
           },
           "leader_attach_command": "tmux -S <TMP>/tmux-<UID>/ta-<SOCKET> attach -t team-phasegolden:leader",
@@ -373,7 +373,7 @@
               "spawned_at": "<TS>",
               "stale": true,
               "stale_reason": "pane_dead",
-              "status": "running",
+              "status": "stopped",
               "window": "w1"
             },
             "w2": {
@@ -417,7 +417,7 @@
               "spawned_at": "<TS>",
               "stale": true,
               "stale_reason": "pane_dead",
-              "status": "running",
+              "status": "stopped",
               "window": "w2"
             }
           },
@@ -587,6 +587,7 @@
             "coordinator": {
               "ok": true
             },
+            "hint": "tmux session missing — run team-agent restart",
             "undelivered": 0
           },
           "session_capture_complete": true,

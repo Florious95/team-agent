@@ -24,6 +24,7 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -236,11 +237,13 @@ AND there is accepted backlog (N38 explicable, no auto-recovery); status={text}"
 fn b5_status_no_hint_when_coordinator_healthy() {
     let _g = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_ws("b5-healthy");
+    let live_session = LiveTmuxSession::start(&ws, "team-b5h");
+    let socket = live_session.socket.display().to_string();
     save_runtime_state(
         &ws,
         &json!({"session_name": "team-b5h", "active_team_key": "team-b5h", "agents": {
             "w1": {"status": "running", "provider": "codex", "agent_id": "w1", "window": "w1"}
-        }}),
+        }, "tmux_endpoint": socket, "tmux_socket": socket}),
     )
     .unwrap();
     seed_healthy_coordinator(&ws);
@@ -437,6 +440,59 @@ fn tmp_ws(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::canonicalize(dir).unwrap()
+}
+
+struct LiveTmuxSession {
+    socket: PathBuf,
+    session: String,
+}
+
+impl LiveTmuxSession {
+    fn start(_workspace: &Path, session: &str) -> Self {
+        static SOCKET_N: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::var_os("TEAM_AGENT_TEST_TMP")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join(format!(
+            "ta-b5-{}-{}.sock",
+            std::process::id(),
+            SOCKET_N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let socket_str = socket.to_str().expect("socket path utf8");
+        let out = Command::new("tmux")
+            .args([
+                "-S",
+                socket_str,
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-n",
+                "leader",
+                "sleep 60",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("tmux new-session {session}: {e}"));
+        assert!(
+            out.status.success(),
+            "tmux new-session failed; stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Self { socket, session: session.to_string() }
+    }
+}
+
+impl Drop for LiveTmuxSession {
+    fn drop(&mut self) {
+        if let Some(socket) = self.socket.to_str() {
+            let _ = Command::new("tmux")
+                .args(["-S", socket, "kill-session", "-t", &self.session])
+                .status();
+            let _ = std::fs::remove_file(socket);
+        }
+    }
 }
 
 fn assert_attach_commands_or_socket_hint(
