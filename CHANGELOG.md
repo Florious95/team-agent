@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.31
+
+- **Fix: reboot recovery follow-up — complete topology rebuild and lease handoff (0531).** Completes the reboot recovery path introduced in 0.5.29: the adapter layer now surfaces the rebuilt topology to the lease subsystem, ensuring the leader lease is re-acquired against the new pane IDs after recovery. Previously, recovery rebuilt the internal topology but did not propagate it to the adapter, leaving the lease pointing at stale pane handles and causing `send` and `restart` to fail after the first successful `status`. Also fixes `rebuild.rs` to handle the case where the restart target's pane has been reassigned in the new tmux session. New contract: `reboot_recovery_followup_0531_contract` (4 cases).
+
 ## 0.5.29
 
 - **Fix: P1 — recover from stale tmux topology after reboot (0529).** When the system reboots while a team is active, the tmux topology (pane IDs, session names) becomes stale. The recovery path now detects this condition and rebuilds the topology from the coordinator's persisted state, unblocking `status`, `send`, and `restart` commands that previously deadlocked waiting for pane acknowledgment from a dead tmux session. New contract: `reboot_tmux_recovery_deadlock_contract` (8 cases).
