@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.27
+
+- **Fix: shutdown now stamps projected top-level team as terminated (supermarket case root-cause).** When `shutdown` kills a session, it now stamps the projected top-level team (the team whose coordinator owns the session) as non-alive in state, preventing stale topology conflicts on the next `add-agent` or `start`. Previously the team entry remained alive after the coordinator process was killed, causing save conflicts when sibling workers' stale state files referenced the now-dead socket. The stamp is written before the kill signal is sent, ensuring consistency even if the coordinator does not exit cleanly.
+- **Fix: `lsof --cwd` timeout in shutdown is diagnostic-only, not a partial-shutdown signal.** If the `lsof` invocation used to enumerate cwd-holding processes times out, shutdown now records a diagnostic event and continues rather than treating the timeout as evidence of a partial shutdown. Previously a slow `lsof` could abort the shutdown sequence prematurely.
+- **New: `shutdown_kill_plan` contract (guard + RED tier).** Contracts cover: shutdown stamps projected top-level team non-alive before kill, lsof-cwd timeout is diagnostic not a shutdown partial, shutdown kill plan records the projected team key, guard contract rejects shutdown that skips the stamp step.
+
 ## 0.5.26
 
 - **Fix: `alive` predicate narrowed to exclude stale topology conflicts (supermarket case).** The `alive` check previously returned `true` for teams with a stopped coordinator but a running sibling worker whose state file still referenced the old coordinator socket. This caused save conflicts when `add-agent` or `shutdown` tried to write team state while a dead sibling's stale topology was still considered live. The predicate now requires both the coordinator and all referenced workers to be running under a consistent topology. A stopped coordinator stamps the team as non-alive regardless of sibling worker state.
