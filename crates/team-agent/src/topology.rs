@@ -38,10 +38,12 @@ pub enum EndpointConvergenceDecision {
     Converge {
         old_endpoint: String,
         new_endpoint: String,
+        reason: &'static str,
     },
     RefuseLiveOldEndpoint {
         old_endpoint: String,
         new_endpoint: String,
+        reason: &'static str,
     },
     Unknown,
 }
@@ -96,13 +98,23 @@ pub fn endpoint_convergence_decision(
         return EndpointConvergenceDecision::NoConflict;
     };
 
+    let mut converge_reason = "old_endpoint_dead";
     for old_endpoint in stale_endpoints {
         match endpoint_server_alive(&old_endpoint) {
             Some(true) => {
-                return EndpointConvergenceDecision::RefuseLiveOldEndpoint {
-                    old_endpoint,
-                    new_endpoint: candidate_endpoint.to_string(),
-                };
+                match old_endpoint_team_liveness(state, team_key, &old_endpoint) {
+                    OldEndpointTeamLiveness::TeamLive { reason } => {
+                        return EndpointConvergenceDecision::RefuseLiveOldEndpoint {
+                            old_endpoint,
+                            new_endpoint: candidate_endpoint.to_string(),
+                            reason,
+                        };
+                    }
+                    OldEndpointTeamLiveness::TeamAbsent { reason } => {
+                        converge_reason = reason;
+                    }
+                    OldEndpointTeamLiveness::Unknown => return EndpointConvergenceDecision::Unknown,
+                }
             }
             Some(false) => {}
             None => return EndpointConvergenceDecision::Unknown,
@@ -112,7 +124,116 @@ pub fn endpoint_convergence_decision(
     EndpointConvergenceDecision::Converge {
         old_endpoint: first_old,
         new_endpoint: candidate_endpoint.to_string(),
+        reason: converge_reason,
     }
+}
+
+enum OldEndpointTeamLiveness {
+    TeamLive { reason: &'static str },
+    TeamAbsent { reason: &'static str },
+    Unknown,
+}
+
+fn old_endpoint_team_liveness(
+    state: &Value,
+    team_key: &str,
+    old_endpoint: &str,
+) -> OldEndpointTeamLiveness {
+    let team_state = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(team_key))
+        .unwrap_or(state);
+    let session = non_empty_str(team_state, "session_name")
+        .or_else(|| non_empty_str(state, "session_name"))
+        .unwrap_or_default();
+    if !session.is_empty() {
+        match session_exists_on_endpoint_checked(old_endpoint, session) {
+            Some(true) => {
+                return OldEndpointTeamLiveness::TeamLive {
+                    reason: "old_team_session_live",
+                };
+            }
+            Some(false) => {}
+            None => return OldEndpointTeamLiveness::Unknown,
+        }
+    }
+    match old_endpoint_has_live_team_tuple(state, team_key, old_endpoint) {
+        Some(true) => OldEndpointTeamLiveness::TeamLive {
+            reason: "old_team_tuple_live",
+        },
+        Some(false) => OldEndpointTeamLiveness::TeamAbsent {
+            reason: "old_team_session_absent_on_live_endpoint",
+        },
+        None => OldEndpointTeamLiveness::Unknown,
+    }
+}
+
+fn old_endpoint_has_live_team_tuple(
+    state: &Value,
+    team_key: &str,
+    old_endpoint: &str,
+) -> Option<bool> {
+    let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(old_endpoint);
+    let targets = backend.list_targets().ok()?;
+    let team_state = state
+        .get("teams")
+        .and_then(Value::as_object)
+        .and_then(|teams| teams.get(team_key));
+    for observed in &targets {
+        if matches!(
+            classify_registered_worker_for_observed_pane(team_state.unwrap_or(state), observed),
+            WorkerPaneBindingMatch::LiveSameWorker { .. }
+        ) || leader_receiver_tuple_matches(team_state.unwrap_or(state), observed)
+        {
+            return Some(true);
+        }
+        if team_state.is_some() {
+            continue;
+        }
+        if let Some(teams) = state.get("teams").and_then(Value::as_object) {
+            if teams.values().any(|entry| {
+                matches!(
+                    classify_registered_worker_for_observed_pane(entry, observed),
+                    WorkerPaneBindingMatch::LiveSameWorker { .. }
+                ) || leader_receiver_tuple_matches(entry, observed)
+            }) {
+                return Some(true);
+            }
+        }
+    }
+    Some(false)
+}
+
+fn leader_receiver_tuple_matches(state: &Value, observed: &PaneInfo) -> bool {
+    let Some(receiver) = state.get("leader_receiver") else {
+        return false;
+    };
+    let Some(cached_pane_id) = non_empty_str(receiver, "pane_id") else {
+        return false;
+    };
+    if cached_pane_id != observed.pane_id.as_str() {
+        return false;
+    }
+    let expected_session = non_empty_str(receiver, "session_name")
+        .or_else(|| non_empty_str(state, "session_name"))
+        .unwrap_or_default();
+    if !expected_session.is_empty() && observed.session.as_str() != expected_session {
+        return false;
+    }
+    if let Some(expected_window) = non_empty_str(receiver, "window_name") {
+        if observed.window_name.as_ref().map(|w| w.as_str()) != Some(expected_window) {
+            return false;
+        }
+    }
+    if let (Some(expected_pid), Some(observed_pid)) =
+        (agent_pane_pid(receiver), observed.pane_pid)
+    {
+        if expected_pid != observed_pid {
+            return false;
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,9 +450,13 @@ fn agent_pane_pid(agent: &Value) -> Option<u32> {
 }
 
 fn session_exists_on_endpoint(endpoint: &str, session: &str) -> bool {
+    session_exists_on_endpoint_checked(endpoint, session).unwrap_or(false)
+}
+
+fn session_exists_on_endpoint_checked(endpoint: &str, session: &str) -> Option<bool> {
     crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
         .has_session(&SessionName::new(session.to_string()))
-        .unwrap_or(false)
+        .ok()
 }
 
 fn collect_stale_endpoint(

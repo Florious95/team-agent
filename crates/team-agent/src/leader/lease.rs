@@ -440,21 +440,17 @@ pub fn claim_leader(
         .unwrap_or_default();
     let raw_state = crate::state::persist::load_runtime_state(workspace)?;
     let event_log = crate::event_log::EventLog::new(workspace);
-    // Phase 1d Batch 6: factory tmux channel helpers for grep-visibility.
-    // Tmux-only leader-claim path (caller pane enumeration).
-    let mut targets = crate::transport_factory::tmux_workspace_transport(workspace)
-        .list_targets()
-        .unwrap_or_default();
-    targets.extend(
-        crate::transport_factory::tmux_default_transport()
-            .list_targets()
-            .unwrap_or_default(),
-    );
-    let caller_pane_info = targets
+    let targets = claim_leader_targets(workspace, &raw_state);
+    let caller_candidate = targets
         .iter()
-        .find(|target| target.pane_id.as_str() == caller);
-    let caller_target =
-        caller_pane_info.and_then(|target| claim_target_from_pane_info(workspace, target));
+        .find(|target| target.info.pane_id.as_str() == caller);
+    let caller_pane_info = caller_candidate.map(|target| &target.info);
+    let caller_target = caller_candidate.and_then(|target| {
+        claim_target_from_pane_info(workspace, &target.info).map(|mut claim_target| {
+            claim_target.endpoint = target.endpoint.clone();
+            claim_target
+        })
+    });
     let env_team = std::env::var("TEAM_AGENT_TEAM_ID")
         .ok()
         .filter(|team| !team.is_empty());
@@ -489,7 +485,7 @@ pub fn claim_leader(
     } else {
         raw_state
     };
-    let liveness = AnyPaneLiveness::from_targets(&targets);
+    let liveness = AnyPaneLiveness::from_claim_targets(&targets);
     let result = claim_lease_no_incident_with_target(
         workspace,
         &mut state,
@@ -634,8 +630,23 @@ fn claim_lease_no_incident_with_target(
     let bound_endpoint_matches_caller = bound_endpoint_matches_current_process(state);
     if bound_pane_id.as_deref() == Some(caller_pane.as_str()) && bound_endpoint_matches_caller {
         let current_endpoint = crate::tmux_backend::socket_name_from_tmux_env();
+        let observed_endpoint = caller_target.and_then(|target| target.endpoint.as_deref());
+        let convergence_candidate = observed_endpoint.or(current_endpoint.as_deref());
+        let candidate_source = if observed_endpoint.is_some() {
+            Some("observed_target_endpoint")
+        } else if current_endpoint.is_some() {
+            Some("fallback_tmux_env")
+        } else {
+            None
+        };
         let (mut topology_convergence, converged) =
-            apply_endpoint_convergence(state, team_id, current_endpoint.as_deref(), pre_epoch);
+            apply_endpoint_convergence(
+                state,
+                team_id,
+                convergence_candidate,
+                candidate_source,
+                pre_epoch,
+            );
         if converged {
             write_claim_state(workspace, state, scoped_team, team)?;
             topology_convergence = verify_persisted_topology_convergence(
@@ -796,7 +807,8 @@ fn claim_lease_no_incident_with_target(
     }
     let next_epoch = OwnerEpoch(pre_epoch.0.saturating_add(1));
     let provider = caller_target.map_or_else(|| prior_provider(state), |target| target.provider);
-    let receiver = make_receiver(
+    let observed_endpoint = caller_target.and_then(|target| target.endpoint.clone());
+    let mut receiver = make_receiver(
         provider,
         &non_empty_caller_pane,
         &identity.leader_session_uuid,
@@ -804,10 +816,26 @@ fn claim_lease_no_incident_with_target(
         Discovery::ClaimLeader,
         caller_target.and_then(|target| target.pane_info.clone()),
     );
+    if let Some(endpoint) = observed_endpoint.as_ref() {
+        receiver.tmux_socket = Some(endpoint.clone());
+    }
     let owner = make_owner(provider, &non_empty_caller_pane, &identity, next_epoch);
     write_binding_to_state(state, &receiver, &owner)?;
+    let candidate_source = if observed_endpoint.is_some() {
+        Some("observed_target_endpoint")
+    } else if receiver.tmux_socket.is_some() {
+        Some("fallback_tmux_env")
+    } else {
+        None
+    };
     let (mut topology_convergence, converged) =
-        apply_endpoint_convergence(state, team_id, receiver.tmux_socket.as_deref(), next_epoch);
+        apply_endpoint_convergence(
+            state,
+            team_id,
+            receiver.tmux_socket.as_deref(),
+            candidate_source,
+            next_epoch,
+        );
     write_claim_state(workspace, state, scoped_team, team)?;
     if converged {
         topology_convergence = verify_persisted_topology_convergence(
@@ -884,13 +912,17 @@ fn apply_endpoint_convergence(
     state: &mut Value,
     team_id: &TeamKey,
     candidate_endpoint: Option<&str>,
+    candidate_source: Option<&'static str>,
     owner_epoch: OwnerEpoch,
 ) -> (Option<Value>, bool) {
-    let Some(candidate_endpoint) = candidate_endpoint
+    let explicit_candidate = candidate_endpoint
         .filter(|endpoint| !endpoint.is_empty())
-        .map(str::to_string)
-        .or_else(|| state_tmux_socket_candidate(state, team_id.as_str()))
-    else {
+        .map(str::to_string);
+    let (candidate_endpoint, candidate_source) = if let Some(endpoint) = explicit_candidate {
+        (endpoint, candidate_source.unwrap_or("candidate"))
+    } else if let Some(endpoint) = state_tmux_socket_candidate(state, team_id.as_str()) {
+        (endpoint, "fallback_state")
+    } else {
         return (None, false);
     };
     match crate::topology::endpoint_convergence_decision(
@@ -903,6 +935,7 @@ fn apply_endpoint_convergence(
             Some(json!({
                 "status": "unknown",
                 "new_tmux_endpoint": candidate_endpoint,
+                "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
             })),
             false,
@@ -910,14 +943,17 @@ fn apply_endpoint_convergence(
         crate::topology::EndpointConvergenceDecision::RefuseLiveOldEndpoint {
             old_endpoint,
             new_endpoint,
+            reason,
         } => (
             Some(json!({
                 "status": "not_converged_old_endpoint_live",
                 "old_tmux_endpoint": old_endpoint,
                 "new_tmux_endpoint": new_endpoint,
+                "reason": reason,
+                "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
                 "action": format!(
-                    "old tmux endpoint {old_endpoint} is still live; run team-agent diagnose --json and clean that endpoint before retrying restart"
+                    "old tmux endpoint {old_endpoint} still has this team's session or pane tuple; run team-agent diagnose --json before retrying restart"
                 ),
             })),
             false,
@@ -925,12 +961,14 @@ fn apply_endpoint_convergence(
         crate::topology::EndpointConvergenceDecision::Converge {
             old_endpoint,
             new_endpoint,
+            reason,
         } => {
             let metadata = json!({
                 "status": "converged",
                 "old_tmux_endpoint": old_endpoint,
                 "new_tmux_endpoint": new_endpoint,
-                "reason": "old_endpoint_dead",
+                "reason": reason,
+                "candidate_source": candidate_source,
                 "owner_epoch": owner_epoch.0,
             });
             write_endpoint_fields(state, team_id.as_str(), &new_endpoint);
@@ -1175,6 +1213,56 @@ struct LeaderClaimTarget {
     leader_session_uuid: Option<crate::model::ids::LeaderSessionUuid>,
     team_id: Option<String>,
     pane_info: Option<PaneInfo>,
+    endpoint: Option<String>,
+}
+
+#[derive(Clone)]
+struct ClaimLeaderTargetCandidate {
+    info: PaneInfo,
+    endpoint: Option<String>,
+}
+
+fn claim_leader_targets(workspace: &Path, state: &Value) -> Vec<ClaimLeaderTargetCandidate> {
+    let mut targets = Vec::new();
+    for endpoint in state_recorded_tmux_endpoints(state) {
+        let backend = tmux_backend_for_endpoint(&endpoint);
+        let resolved_endpoint = backend.tmux_endpoint();
+        targets.extend(
+            backend
+                .list_targets()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|info| ClaimLeaderTargetCandidate {
+                    info,
+                    endpoint: resolved_endpoint.clone(),
+                }),
+        );
+    }
+    let workspace_backend = crate::transport_factory::tmux_workspace_transport(workspace);
+    let workspace_endpoint = workspace_backend.tmux_endpoint();
+    targets.extend(
+        workspace_backend
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| ClaimLeaderTargetCandidate {
+                info,
+                endpoint: workspace_endpoint.clone(),
+            }),
+    );
+    let default_backend = crate::transport_factory::tmux_default_transport();
+    let default_endpoint = default_backend.tmux_endpoint();
+    targets.extend(
+        default_backend
+            .list_targets()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|info| ClaimLeaderTargetCandidate {
+                info,
+                endpoint: default_endpoint.clone(),
+            }),
+    );
+    targets
 }
 
 fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<LeaderClaimTarget> {
@@ -1191,6 +1279,7 @@ fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<Le
         leader_session_uuid: target_leader_session_uuid(target),
         team_id: target.leader_env.get("TEAM_AGENT_TEAM_ID").filter(|raw| !raw.is_empty()).cloned(),
         pane_info: Some(target.clone()),
+        endpoint: None,
     })
 }
 
@@ -1290,11 +1379,11 @@ struct AnyPaneLiveness {
 }
 
 impl AnyPaneLiveness {
-    fn from_targets(targets: &[PaneInfo]) -> Self {
+    fn from_claim_targets(targets: &[ClaimLeaderTargetCandidate]) -> Self {
         Self {
             live_panes: targets
                 .iter()
-                .map(|target| target.pane_id.as_str().to_string())
+                .map(|target| target.info.pane_id.as_str().to_string())
                 .collect(),
         }
     }
@@ -1677,10 +1766,16 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
         .map(|_| crate::state::projection::team_state_key(&existing));
     let existing_active_key = existing.get("active_team_key").and_then(Value::as_str);
     let updates_active_team = existing_active_key == Some(target_key);
+    let writes_endpoint_convergence = state
+        .get("topology_convergence")
+        .and_then(|marker| marker.get("status"))
+        .and_then(Value::as_str)
+        == Some("converged");
     let mut merged = if existing_primary_key
         .as_deref()
         .is_none_or(|key| key == target_key)
         || updates_active_team
+        || writes_endpoint_convergence
     {
         value_object(state)
     } else {
@@ -1697,7 +1792,12 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
     // / coordinator tick / promote sibling. `had_existing_teams` /
     // primary/active key computations are retained as dead writes only
     // via _ binding — they no longer gate any owner promote.
-    let _ = (had_existing_teams, existing_primary_key, existing_active_key);
+    let _ = (
+        had_existing_teams,
+        existing_primary_key,
+        existing_active_key,
+        writes_endpoint_convergence,
+    );
     merged.insert("teams".to_string(), Value::Object(teams));
     crate::state::persist::save_runtime_state(workspace, &Value::Object(merged))?;
     Ok(())
