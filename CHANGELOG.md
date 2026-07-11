@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.28
+
+- **Fix: restart now gates on projection alias identity (supermarket case layer-2 root fix).** When `restart` resolves the target agent, it now validates that the projected alias resolves to the same canonical identity as the currently-registered entry, preventing a stale alias from silently routing a restart to the wrong agent. Previously, a projection alias that had drifted from the canonical agent identity could cause restart to revive a different (sibling or predecessor) agent without surfacing an error, leaving the team in an inconsistent state.
+- **New: `stale_team_projection_alias_contract` (3/3).** Contracts cover: stale projection alias does not route restart to wrong agent, alias identity gate rejects mismatched projection, canonical-alias round-trip is stable after coordinator restart.
+
 ## 0.5.27
 
 - **Fix: shutdown now stamps projected top-level team as terminated (supermarket case root-cause).** When `shutdown` kills a session, it now stamps the projected top-level team (the team whose coordinator owns the session) as non-alive in state, preventing stale topology conflicts on the next `add-agent` or `start`. Previously the team entry remained alive after the coordinator process was killed, causing save conflicts when sibling workers' stale state files referenced the now-dead socket. The stamp is written before the kill signal is sent, ensuring consistency even if the coordinator does not exit cleanly.
