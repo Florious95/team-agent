@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.29
+
+- **Fix: P1 — recover from stale tmux topology after reboot (0529).** When the system reboots while a team is active, the tmux topology (pane IDs, session names) becomes stale. The recovery path now detects this condition and rebuilds the topology from the coordinator's persisted state, unblocking `status`, `send`, and `restart` commands that previously deadlocked waiting for pane acknowledgment from a dead tmux session. New contract: `reboot_tmux_recovery_deadlock_contract` (8 cases).
+- **Fix: P2 — restart merges add-agent dynamic role source, prevents SaveConflict (0530).** When `restart` revives a worker that was originally started with `add-agent`, it now merges the dynamic role source (role file path / inline role) from the original add-agent invocation. Previously, restart reconstructed the worker spec from static team spec only, omitting the dynamic role, which caused a SaveConflict when the restarted worker's spec diverged from the persisted team state. New contract: `add_agent_restart_saveconflict_contract` (4 cases).
+
 ## 0.5.28
 
 - **Fix: restart now gates on projection alias identity (supermarket case layer-2 root fix).** When `restart` resolves the target agent, it now validates that the projected alias resolves to the same canonical identity as the currently-registered entry, preventing a stale alias from silently routing a restart to the wrong agent. Previously, a projection alias that had drifted from the canonical agent identity could cause restart to revive a different (sibling or predecessor) agent without surfacing an error, leaving the team in an inconsistent state.
