@@ -1129,11 +1129,13 @@ fn set_mtime_before_spawned_at(path: &Path) {
 }
 
 fn set_mtime_after_spawned_at(path: &Path) {
-    set_mtime(path, "202607121201.00");
+    set_mtime(path, "202607121200.01");
 }
 
 fn set_mtime(path: &Path, stamp: &str) {
     let status = Command::new("touch")
+        // Keep these fixtures aligned with spawned_at's explicit +00:00 timestamp.
+        .env("TZ", "UTC")
         .args(["-t", stamp])
         .arg(path)
         .status()
