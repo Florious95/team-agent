@@ -24,12 +24,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
+use team_agent::db::schema::open_db;
+use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 
 const TEAM: &str = "current";
 const WORKER: &str = "worker";
+const RENDERER_WORKER: &str = "helper";
 const TEAM_SESSION: &str = "team-current";
 const LEADER_SESSION: &str = "team-agent-leader-claude_code-ws-nonce";
 const LEADER_PANE: &str = "%42";
@@ -116,6 +120,78 @@ fn different_pane_does_not_silently_steal_managed_leader_binding() {
     );
     assert_worker_session_not_polluted(&state, "RED3");
     assert_stage3_root_owner_absent(&state, "RED3");
+}
+
+#[test]
+#[serial(env)]
+fn status_human_and_summary_render_canonical_unknown_over_legacy_working_health() {
+    let case = ReentryCase::new("status-unknown-renderer");
+    case.seed_status_unknown_renderer_state();
+    case.seed_agent_health(RENDERER_WORKER, "WORKING");
+
+    let workspace = case.workspace_str();
+    let human = case.run_ta(
+        &[
+            "status",
+            "--workspace",
+            &workspace,
+            "--team",
+            TEAM,
+            "--detail",
+        ],
+        LEADER_PANE,
+        None,
+    );
+    let human_text = output_text(&human);
+    assert!(
+        human.status.success(),
+        "R4 setup: status --detail must render the fixture; output={human_text}; state={}",
+        case.read_state()
+    );
+    let human_stdout = String::from_utf8_lossy(&human.stdout);
+    let mut failures = Vec::new();
+    if !human_stdout.contains("helper,未知") {
+        failures.push(format!(
+            "human status must render helper,未知 when canonical worker_state=UNKNOWN/activity=uncertain; output={human_text}"
+        ));
+    }
+    if human_stdout.contains("helper,工作") || human_stdout.contains("helper,空闲") {
+        failures.push(format!(
+            "human status must not render helper,工作 or helper,空闲 from legacy agent_health=WORKING; output={human_text}"
+        ));
+    }
+
+    let summary = case.run_ta(
+        &[
+            "status",
+            "--workspace",
+            &workspace,
+            "--team",
+            TEAM,
+            "--summary",
+        ],
+        LEADER_PANE,
+        None,
+    );
+    let summary_text = output_text(&summary);
+    assert!(
+        summary.status.success(),
+        "R4 setup: status --summary must render the fixture; output={summary_text}; state={}",
+        case.read_state()
+    );
+    if !String::from_utf8_lossy(&summary.stdout)
+        .contains("agents: 1 — running=0 busy=0 idle=0 stopped=0 failed=0 unknown=1")
+    {
+        failures.push(format!(
+            "summary must count the conflict fixture as unknown=1 busy=0 idle=0; output={summary_text}"
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "R4: status renderer must prefer canonical UNKNOWN/uncertain over legacy working health.\n{}\nstate={}",
+        failures.join("\n"),
+        case.read_state()
+    );
 }
 
 struct ReentryCase {
@@ -229,10 +305,93 @@ impl ReentryCase {
         save_runtime_state(&self.workspace, &state).expect("seed runtime state");
     }
 
+    fn seed_status_unknown_renderer_state(&self) {
+        let agent = json!({
+            "agent_id": RENDERER_WORKER,
+            "id": RENDERER_WORKER,
+            "provider": "fake",
+            "model": "fake",
+            "window": RENDERER_WORKER,
+            "status": "running",
+            "worker_state": "UNKNOWN",
+            "activity": {
+                "status": "uncertain",
+                "confidence": 0.6,
+                "rationale": "fake_ready_structural"
+            },
+            "pane_id": "%9",
+            "pane_pid": 53_509,
+            "owner_team_id": TEAM,
+            "spawn_cwd": self.workspace_str(),
+            "spawned_at": "2026-07-13T00:00:00Z"
+        });
+        let state = json!({
+            "active_team_key": TEAM,
+            "team_key": TEAM,
+            "session_name": TEAM_SESSION,
+            "team_dir": self.workspace_str(),
+            "spec_path": self.workspace.join("team.spec.yaml").to_string_lossy(),
+            "tmux_endpoint": TMUX_SOCKET,
+            "tmux_socket": TMUX_SOCKET,
+            "leader": { "id": "leader", "provider": "fake" },
+            "agents": {
+                RENDERER_WORKER: agent
+            },
+            "teams": {
+                TEAM: {
+                    "active_team_key": TEAM,
+                    "team_key": TEAM,
+                    "session_name": TEAM_SESSION,
+                    "team_dir": self.workspace_str(),
+                    "spec_path": self.workspace.join("team.spec.yaml").to_string_lossy(),
+                    "tmux_endpoint": TMUX_SOCKET,
+                    "tmux_socket": TMUX_SOCKET,
+                    "leader": { "id": "leader", "provider": "fake" },
+                    "agents": {
+                        RENDERER_WORKER: agent
+                    },
+                    "owner_epoch": OWNER_EPOCH
+                }
+            }
+        });
+        fs::write(
+            self.workspace.join("team.spec.yaml"),
+            format!(
+                "version: 1\nteam:\n  id: {TEAM}\n  name: {TEAM}\n  session_name: {TEAM_SESSION}\n  workspace: \"{}\"\nleader:\n  provider: fake\nagents:\n  - id: {RENDERER_WORKER}\n    provider: fake\n    model: fake\n    role: Helper\n    window: {RENDERER_WORKER}\ntasks: []\n",
+                self.workspace.display()
+            ),
+        )
+        .expect("write renderer team spec");
+        save_runtime_state(&self.workspace, &state).expect("seed renderer runtime state");
+    }
+
+    fn seed_agent_health(&self, agent_id: &str, status: &str) {
+        let store = MessageStore::open(&self.workspace).expect("open message store");
+        let conn = open_db(store.db_path()).expect("open team db");
+        conn.execute(
+            "insert or replace into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                TEAM,
+                agent_id,
+                status,
+                "2026-07-13T00:00:00Z",
+                42_i64,
+                Option::<String>::None,
+                "2026-07-13T00:00:00Z"
+            ],
+        )
+        .expect("seed agent_health");
+    }
+
     fn run_leader_provider(&self, pane: &str, uuid_override: Option<&str>) -> Output {
+        self.run_ta(&["claude", "--json"], pane, uuid_override)
+    }
+
+    fn run_ta(&self, args: &[&str], pane: &str, uuid_override: Option<&str>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command
-            .args(["claude", "--json"])
+            .args(args)
             .current_dir(&self.workspace)
             .env("HOME", self._env.home())
             .env("TEAM_AGENT_TEST_TMP", self._env.root())
