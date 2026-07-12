@@ -1830,11 +1830,21 @@ fn parse_rfc3339_utc(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
-/// return true when the rollout file's modification time is not newer than
-/// the agent's current `spawned_at`. Used by `jsonl_activity_for_agent` to
-/// refuse classifying a pre-spawn transcript tail into fresh-cohort activity.
-/// Missing `spawned_at`, missing mtime, or unparseable timestamp → false
-/// (do not block classification; the caller keeps the pre-0.5.32 behavior).
+/// return true when the rollout file's modification time is strictly older
+/// than the agent's current `spawned_at`. Used by `jsonl_activity_for_agent`
+/// to refuse classifying a pre-spawn transcript tail into fresh-cohort
+/// activity. Missing `spawned_at`, missing mtime, or unparseable timestamp
+/// → false (do not block classification; the caller keeps the pre-0.5.32
+/// behavior).
+///
+/// 0.5.33 boundary tightening (leader 派单 msg_42dbad7f2938 / earlier cr
+/// batch older-or-equal 预警): use strict `<` not `<=`. Fast machines can
+/// produce a fresh post-spawn rollout whose mtime shares the second-resolution
+/// `spawned_at`; treating "equal" as pre-spawn would wrongly reject the
+/// first post-spawn transcript record. Genuinely pre-spawn transcripts have
+/// mtime strictly before `spawned_at` and remain rejected. The equal case
+/// falls back to the classifier + pane fallback, which is the ambiguous-
+/// but-safe path.
 fn jsonl_older_than_spawn_boundary(agent: &Value, metadata: &std::fs::Metadata) -> bool {
     let Some(spawned_at) = agent
         .get("spawned_at")
@@ -1851,7 +1861,7 @@ fn jsonl_older_than_spawn_boundary(agent: &Value, metadata: &std::fs::Metadata) 
     };
     let mtime_utc =
         chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + mtime_since_epoch);
-    mtime_utc <= spawned_at
+    mtime_utc < spawned_at
 }
 
 fn matching_capture_pane_info(
