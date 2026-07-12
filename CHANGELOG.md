@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.35
+
+- **Fix: managed-leader Ctrl+C reentry (user-reported).** When a managed leader pane received Ctrl+C and restarted, the coordinator would not recognize it as the same logical leader, causing a new unmanaged binding and orphaning the prior team session. Added a thin detection gate (different_pane check + LEADER_SESSION_PREFIX + socket match) that routes matching restarts through ManagedReentry instead of fresh binding.
+- **Fix: status renderer UNKNOWN canonical precedence (R1 renderer layer).** The HTML/summary renderer used legacy worker_state as the primary signal for UNKNOWN, occasionally overriding the canonical classification. Canonical unknown (worker_state==UNKNOWN || activity.status==Uncertain) now takes early-return precedence over legacy health fallback.
+- New contract: managed_leader_provider_reentry_contract (4 cases).
+
 ## 0.5.34
 
 - **Fix: fake READY is structural-non-busy, not idle (0534).** The fake READY marker used by fake_worker.rs was being classified as an idle prompt (has_idle_prompt=true), causing worker_state=PROBABLY_IDLE and agent_health=IDLE post-restart. This violated the unknown-never-idle discipline: READY is the fake worker's boot heartbeat, not proof of an idle shell. Fixed by introducing a distinct has_fake_ready_structural flag that returns Uncertain (not Idle), preserving latest_pane_signal_is_structural=Some(_) so the 0532b freshness gate still suppresses false-busy last_output_at. New contract cases: R1 READY-not-idle assertion + fake WORKING still BUSY guard + real idle prompt still IDLE guard.
