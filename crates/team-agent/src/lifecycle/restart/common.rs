@@ -1601,6 +1601,33 @@ pub(super) fn state_spawn_epoch_for_agent(workspace: &Path, agent_id: &AgentId) 
         .unwrap_or(0)
 }
 
+/// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+/// clear the per-agent turn/activity observation set on a successful new
+/// worker process cohort. Called from `mark_agent_started` /
+/// `mark_agent_respawned` / `mark_fake_harness_agent_respawned`; NOT from
+/// `mark_agent_running_noop` (no new process was created there).
+///
+/// Removes only observation fields — never lifecycle/topology fields. After
+/// clearing, absence is UNKNOWN, not synthesized idle (T7 unknown-never-idle
+/// discipline); the next post-spawn tick may repopulate from JSONL freshness
+/// gate + pane fallback.
+pub(super) fn clear_agent_runtime_activity_observation(
+    agent: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    for field in [
+        "activity",
+        "worker_state",
+        "last_output_at",
+        "last_output_hash",
+        "current_turn_message_id",
+        "current_task_id", // ALLOWED-LEGACY-READ (Phase-DX E2): cleanup removal of legacy display-only key on new spawn cohort; helper does not read the value.
+        "task_id",
+        "coordinator_idle_capture_next_at",
+    ] {
+        agent.remove(field);
+    }
+}
+
 #[cfg(test)]
 mod e36_transcript_backing_tests {
     use super::*;

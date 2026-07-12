@@ -433,8 +433,7 @@ fn restart_with_selected_team_and_transport(
             &decision.agent_id,
             &raw_agent,
         );
-        if endpoint_convergence_fake_harness_enabled(&state)
-            && is_fake_model_harness_agent(&agent)
+        if endpoint_convergence_fake_harness_enabled(&state) && is_fake_model_harness_agent(&agent)
         {
             write_fake_harness_spawn_argv_event(
                 &selected.run_workspace,
@@ -448,6 +447,13 @@ fn restart_with_selected_team_and_transport(
                 &decision.agent_id,
                 &session_name,
                 &selected.team_key,
+            );
+            // 0.5.32: fake harness respawn shares the same spawn cohort
+            // boundary — clear the matching `agent_health` observation.
+            let _ = crate::db::agent_health_capture::clear_agent_health_observation(
+                &selected.run_workspace,
+                &selected.team_key,
+                &decision.agent_id,
             );
             successful_agents.push(decision.clone());
             continue;
@@ -556,6 +562,15 @@ fn restart_with_selected_team_and_transport(
         {
             persist_effective_approval_policy_for_restart(agent, &safety);
         }
+        // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+        // pair the state-side activity clear with a DB `agent_health` clear so
+        // status --json's health projection does not surface the pre-restart
+        // WORKING row. Best-effort: DB failure must not fail the restart loop.
+        let _ = crate::db::agent_health_capture::clear_agent_health_observation(
+            &selected.run_workspace,
+            &selected.team_key,
+            &decision.agent_id,
+        );
     }
     // END_B5_RESTART_ISOLATION_LOOP
     let mut topology_authority_agent_ids = successful_agents
@@ -1630,6 +1645,12 @@ fn mark_agent_respawned(
             agent_id
         )));
     };
+    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+    // multi-worker restart respawn is a new process cohort; clear the
+    // per-agent turn/activity observation set before overwriting lifecycle
+    // fields so stale `activity=working` / `worker_state=BUSY` do not
+    // survive into the fresh cohort.
+    clear_agent_runtime_activity_observation(agent);
     agent.insert("status".to_string(), serde_json::json!("running"));
     agent.insert(
         "window".to_string(),
@@ -1785,6 +1806,10 @@ fn mark_fake_harness_agent_respawned(
     else {
         return;
     };
+    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+    // fake harness respawn is also a new process cohort — RED fixtures must
+    // not preserve stale activity observations across restart.
+    clear_agent_runtime_activity_observation(agent);
     agent.insert("status".to_string(), serde_json::json!("running"));
     agent.insert("window".to_string(), serde_json::json!(agent_id.as_str()));
     agent.insert(

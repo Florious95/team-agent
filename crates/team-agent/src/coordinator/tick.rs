@@ -1807,6 +1807,31 @@ fn parse_rfc3339_utc(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         .map(|value| value.with_timezone(&chrono::Utc))
 }
 
+/// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+/// return true when the rollout file's modification time is not newer than
+/// the agent's current `spawned_at`. Used by `jsonl_activity_for_agent` to
+/// refuse classifying a pre-spawn transcript tail into fresh-cohort activity.
+/// Missing `spawned_at`, missing mtime, or unparseable timestamp → false
+/// (do not block classification; the caller keeps the pre-0.5.32 behavior).
+fn jsonl_older_than_spawn_boundary(agent: &Value, metadata: &std::fs::Metadata) -> bool {
+    let Some(spawned_at) = agent
+        .get("spawned_at")
+        .and_then(Value::as_str)
+        .and_then(parse_rfc3339_utc)
+    else {
+        return false;
+    };
+    let Ok(mtime) = metadata.modified() else {
+        return false;
+    };
+    let Ok(mtime_since_epoch) = mtime.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    let mtime_utc =
+        chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + mtime_since_epoch);
+    mtime_utc <= spawned_at
+}
+
 fn matching_capture_pane_info(
     agent: &Value,
     session: &crate::transport::SessionName,
@@ -1902,6 +1927,16 @@ fn jsonl_activity_for_agent(agent: &Value) -> Option<crate::messaging::AgentActi
     let metadata = std::fs::metadata(&rollout_path).ok()?;
     let size = metadata.len();
     let mtime_ns = crate::coordinator::steps::abnormal::metadata_mtime_ns(&metadata)?;
+    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+    // freshness gate — a rollout file whose last modification is older than
+    // the agent's current `spawned_at` cannot describe post-spawn behavior.
+    // Refusing to classify (return None) here keeps stale pre-restart
+    // Working tails from re-poisoning a fresh cohort's activity/worker_state;
+    // pane fallback in the caller is still free to produce a fresh
+    // classification when a live pane observation exists.
+    if jsonl_older_than_spawn_boundary(agent, &metadata) {
+        return None;
+    }
     if let Ok(cache) = jsonl_activity_cache().lock() {
         if let Some(entry) = cache.get(&rollout_path) {
             if entry.size == size && entry.mtime_ns == mtime_ns {

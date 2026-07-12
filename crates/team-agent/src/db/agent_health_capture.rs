@@ -94,3 +94,27 @@ fn delete_agent_health(workspace: &Path, agent_id: &AgentId) -> Result<(), crate
     )?;
     Ok(())
 }
+
+/// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+/// clear the `(owner_team_id, agent_id)` health observation row on a new
+/// worker process cohort boundary. Distinct from `delete_agent_health` (used
+/// by remove-agent rollback): this narrow helper keyed on both owner_team_id
+/// and agent_id so a sibling team with the same agent_id keeps its own row.
+/// Silently no-ops when the row is absent.
+pub fn clear_agent_health_observation(
+    workspace: &Path,
+    owner_team_id: &str,
+    agent_id: &AgentId,
+) -> Result<(), crate::db::DbError> {
+    if owner_team_id.is_empty() {
+        return Ok(());
+    }
+    let store = crate::message_store::MessageStore::open(workspace)
+        .map_err(|e| crate::db::DbError::Schema(e.to_string()))?;
+    let conn = crate::db::schema::open_db(store.db_path())?;
+    conn.execute(
+        "delete from agent_health where owner_team_id = ?1 and agent_id = ?2",
+        rusqlite::params![owner_team_id, agent_id.as_str()],
+    )?;
+    Ok(())
+}
