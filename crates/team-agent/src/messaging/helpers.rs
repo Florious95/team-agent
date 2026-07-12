@@ -168,6 +168,19 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
         if line.contains('❯') || line.contains('›') {
             has_idle_prompt = true;
         }
+        // 0.5.32 follow-up (`0532-r1-real-fail-triage.md` §6/§7):
+        // fake provider owns explicit READY/WORKING markers (fake_worker.rs:47/59).
+        // Recognize them here as STRUCTURAL bottom-region signals so restart's
+        // first-capture READY does not fall through to `recent_provider_output`
+        // false busy. Scope: literal `TEAM_AGENT_FAKE_READY`/`TEAM_AGENT_FAKE_WORKING`
+        // tokens only — do NOT infer that arbitrary "ready" prose from real
+        // providers means idle.
+        if line.contains("TEAM_AGENT_FAKE_READY") {
+            has_idle_prompt = true;
+        }
+        if line.contains("TEAM_AGENT_FAKE_WORKING") {
+            has_live_working_indicator = true;
+        }
         // codex live spinner shapes (provider/adapter.rs:875-876 markers):
         // braille spinner, `• Working (`, `Thinking`; claude `✶`/`✢`/`✻`
         // and Claude Code tool-progress verbs. We look for STRUCTURAL
