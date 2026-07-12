@@ -8,7 +8,8 @@
 //! User-visible contract:
 //! - A new worker process cohort clears old activity/health/current-task facts.
 //! - JSONL activity is fresh only if the transcript is newer than `spawned_at`.
-//! - Unknown after clearing is not idle; fake READY is not busy; fresh post-spawn activity still works.
+//! - Unknown after clearing is not idle; fake READY is unknown/non-idle/non-busy;
+//!   fresh post-spawn activity still works.
 //! - A caller observed on the current `$TMUX` endpoint is not a fallback source.
 //!
 //! Real-machine R1 shape:
@@ -16,8 +17,9 @@
 //!   and an old current task id.
 //! - `shutdown --keep-logs` followed by `restart` creates a fresh worker cohort.
 //! - `status --json --detail` and human status must not re-surface the old task,
-//!   must not classify the fake worker startup READY line as busy, and must not
-//!   write `activity.rationale="recent_provider_output"` solely from startup output.
+//!   must not classify the fake worker startup READY line as busy or idle, and
+//!   must not write `activity.rationale="recent_provider_output"` solely from
+//!   startup output.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -138,8 +140,15 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
     let health = case.agent_health_row();
     assert!(
         health.as_ref().and_then(|row| row.status.as_deref()) != Some("WORKING")
+            && health.as_ref().and_then(|row| row.status.as_deref()) != Some("IDLE")
             && health.as_ref().and_then(|row| row.current_task_id.as_deref()) != Some(OLD_MESSAGE_ID),
-        "R1: matching agent_health observation must be cleared on the same spawn boundary; health={health:?}; status_json={status_json}"
+        "R1: matching agent_health observation must be cleared on the same spawn boundary and must not turn fake READY into idle; health={health:?}; status_json={status_json}"
+    );
+    assert_ready_is_not_idle(
+        worker,
+        health.as_ref(),
+        "R1 CLI restart",
+        &case.read_state(),
     );
     let counts = agent_summary_counts(
         status_json.get("agents").unwrap_or(&Value::Null),
@@ -153,6 +162,20 @@ fn restart_clears_stale_working_activity_and_health_after_shutdown_keep_logs() {
         worker.get("status").and_then(Value::as_str),
         Some("running"),
         "R1: clearing stale activity must not make the freshly restarted fake worker stopped; worker={worker}; restart={restart_json}"
+    );
+
+    let human = case.run_ta(&[
+        "status",
+        "--workspace",
+        case.workspace_str(),
+        "--team",
+        TEAM,
+        "--detail",
+    ]);
+    let human_text = output_text(&human);
+    assert!(
+        !human_text.contains("空闲"),
+        "R1: human status must not render fake READY as idle after restart; output={human_text}; status_json={status_json}"
     );
 }
 
@@ -245,6 +268,44 @@ fn fake_ready_startup_capture_does_not_recreate_busy_after_restart_clear() {
         "R1 READY capture: fake worker startup READY is a structural non-busy marker, not recent_provider_output",
         &state,
     );
+    assert_ready_is_not_idle(
+        worker,
+        health.as_ref(),
+        "R1 READY capture: fake worker startup READY is liveness/startup-only, not idle evidence",
+        &state,
+    );
+}
+
+#[test]
+#[serial(env)]
+fn fake_working_startup_capture_still_classifies_busy() {
+    let case = TickCase::new("r1-fake-working");
+    case.seed_tick_state(fresh_respawned_worker("fake"));
+
+    case.coordinator(PrecisionTransport::with_capture_text(
+        "TEAM_AGENT_FAKE_WORKING agent=helper\n",
+    ))
+    .tick()
+    .expect("coordinator tick");
+    let state = case.read_state();
+    let worker = &state["agents"][WORKER];
+    let health = case.agent_health_row();
+
+    assert_eq!(
+        worker.pointer("/activity/status").and_then(Value::as_str),
+        Some("working"),
+        "R1 guard: fake WORKING marker must remain a structural busy signal; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("BUSY"),
+        "R1 guard: fake WORKING marker must still map to worker_state=BUSY; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        health.as_ref().and_then(|row| row.status.as_deref()),
+        Some("WORKING"),
+        "R1 guard: fake WORKING marker must still update agent_health.WORKING; health={health:?}; state={state}"
+    );
 }
 
 #[test]
@@ -274,6 +335,36 @@ fn non_structural_startup_capture_stays_unknown_not_busy_or_idle() {
             Some("PROBABLY_IDLE" | "IDLE" | "idle" | "probably_idle")
         ),
         "R1 startup banner guard: generic no-signal output is UNKNOWN/empty, not synthesized idle; worker={worker}; state={state}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn real_provider_idle_prompt_still_classifies_idle() {
+    let case = TickCase::new("r1-real-idle-prompt");
+    case.seed_tick_state(fresh_respawned_worker("codex"));
+
+    case.coordinator(PrecisionTransport::with_capture_text("OpenAI Codex\n❯ \n"))
+        .tick()
+        .expect("coordinator tick");
+    let state = case.read_state();
+    let worker = &state["agents"][WORKER];
+    let health = case.agent_health_row();
+
+    assert_eq!(
+        worker.pointer("/activity/status").and_then(Value::as_str),
+        Some("idle"),
+        "R1 guard: real provider idle prompt must still classify as idle; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("PROBABLY_IDLE"),
+        "R1 guard: real provider idle prompt must still map to worker_state=PROBABLY_IDLE; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        health.as_ref().and_then(|row| row.status.as_deref()),
+        Some("IDLE"),
+        "R1 guard: real provider idle prompt must still update agent_health.IDLE; health={health:?}; state={state}"
     );
 }
 
@@ -1112,6 +1203,55 @@ fn assert_not_busy_from_pane_startup(
             && health.and_then(|row| row.current_task_id.as_deref()).is_none(),
         "{context}: fresh startup capture must not invent or retain current task identity; worker={worker}; health={health:?}; state={state}"
     );
+}
+
+fn assert_ready_is_not_idle(
+    worker: &Value,
+    health: Option<&HealthRow>,
+    context: &str,
+    state: &Value,
+) {
+    assert_ne!(
+        worker.pointer("/activity/status").and_then(Value::as_str),
+        Some("idle"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        worker
+            .pointer("/activity/rationale")
+            .and_then(Value::as_str),
+        Some("idle_prompt"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("PROBABLY_IDLE"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        health.and_then(|row| row.status.as_deref()),
+        Some("IDLE"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+
+    if let Some(status) = worker.pointer("/activity/status").and_then(Value::as_str) {
+        assert_eq!(
+            status, "uncertain",
+            "{context}: fake READY may write uncertain or no activity, but not a decisive state; worker={worker}; health={health:?}; state={state}"
+        );
+    }
+    if let Some(worker_state) = worker.get("worker_state").and_then(Value::as_str) {
+        assert_eq!(
+            worker_state, "UNKNOWN",
+            "{context}: fake READY may write UNKNOWN or no worker_state, but not idle/busy; worker={worker}; health={health:?}; state={state}"
+        );
+    }
+    if let Some(status) = health.and_then(|row| row.status.as_deref()) {
+        assert_eq!(
+            status, "UNKNOWN",
+            "{context}: fake READY may write UNKNOWN or no agent_health row, but not idle/busy; worker={worker}; health={health:?}; state={state}"
+        );
+    }
 }
 
 fn role_doc() -> String {
