@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.34
+
+- **Fix: fake READY is structural-non-busy, not idle (0534).** The fake READY marker used by fake_worker.rs was being classified as an idle prompt (has_idle_prompt=true), causing worker_state=PROBABLY_IDLE and agent_health=IDLE post-restart. This violated the unknown-never-idle discipline: READY is the fake worker's boot heartbeat, not proof of an idle shell. Fixed by introducing a distinct has_fake_ready_structural flag that returns Uncertain (not Idle), preserving latest_pane_signal_is_structural=Some(_) so the 0532b freshness gate still suppresses false-busy last_output_at. New contract cases: R1 READY-not-idle assertion + fake WORKING still BUSY guard + real idle prompt still IDLE guard.
+
 ## 0.5.33
 
 - **Fix: tighten jsonl freshness boundary + fix fixture mtime (0532b).** The freshness classifier used a non-strict less-than-or-equal boundary when comparing transcript mtime against spawned_at, causing a transcript written at exactly spawned_at to be classified as "working" instead of "uncertain". Changed to strict less-than so only transcripts written strictly before spawn are treated as stale. Also corrected the contract fixture to set mtime to spawned_at+1s (strict post-spawn) to match the intended semantic.
