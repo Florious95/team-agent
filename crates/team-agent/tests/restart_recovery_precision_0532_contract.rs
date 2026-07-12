@@ -8,8 +8,16 @@
 //! User-visible contract:
 //! - A new worker process cohort clears old activity/health/current-task facts.
 //! - JSONL activity is fresh only if the transcript is newer than `spawned_at`.
-//! - Unknown after clearing is not idle; fresh post-spawn activity still works.
+//! - Unknown after clearing is not idle; fake READY is not busy; fresh post-spawn activity still works.
 //! - A caller observed on the current `$TMUX` endpoint is not a fallback source.
+//!
+//! Real-machine R1 shape:
+//! - A fake team starts with stale `working` / `BUSY` / `agent_health.WORKING`
+//!   and an old current task id.
+//! - `shutdown --keep-logs` followed by `restart` creates a fresh worker cohort.
+//! - `status --json --detail` and human status must not re-surface the old task,
+//!   must not classify the fake worker startup READY line as busy, and must not
+//!   write `activity.rationale="recent_provider_output"` solely from startup output.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -213,6 +221,91 @@ fn cleared_activity_stays_unknown_not_idle_until_post_spawn_evidence_exists() {
             Some("PROBABLY_IDLE" | "IDLE" | "idle" | "probably_idle")
         ),
         "R3 guard: absence of post-spawn evidence is UNKNOWN/empty, not synthesized idle; worker={worker}; state={state}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn fake_ready_startup_capture_does_not_recreate_busy_after_restart_clear() {
+    let case = TickCase::new("r1-ready-capture");
+    case.seed_tick_state(fresh_respawned_worker("fake"));
+
+    case.coordinator(PrecisionTransport::with_capture_text(
+        "TEAM_AGENT_FAKE_READY agent=helper\n",
+    ))
+    .tick()
+    .expect("coordinator tick");
+    let state = case.read_state();
+    let worker = &state["agents"][WORKER];
+    let health = case.agent_health_row();
+
+    assert_not_busy_from_pane_startup(
+        worker,
+        health.as_ref(),
+        "R1 READY capture: fake worker startup READY is a structural non-busy marker, not recent_provider_output",
+        &state,
+    );
+}
+
+#[test]
+#[serial(env)]
+fn non_structural_startup_capture_stays_unknown_not_busy_or_idle() {
+    let case = TickCase::new("r1-startup-banner");
+    case.seed_tick_state(fresh_respawned_worker("codex"));
+
+    case.coordinator(PrecisionTransport::with_capture_text(
+        "provider startup banner\n",
+    ))
+    .tick()
+    .expect("coordinator tick");
+    let state = case.read_state();
+    let worker = &state["agents"][WORKER];
+    let health = case.agent_health_row();
+
+    assert_not_busy_from_pane_startup(
+        worker,
+        health.as_ref(),
+        "R1 startup banner: non-structural first capture must stay unknown, not recent_provider_output",
+        &state,
+    );
+    assert!(
+        !matches!(
+            worker.get("worker_state").and_then(Value::as_str),
+            Some("PROBABLY_IDLE" | "IDLE" | "idle" | "probably_idle")
+        ),
+        "R1 startup banner guard: generic no-signal output is UNKNOWN/empty, not synthesized idle; worker={worker}; state={state}"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn structural_working_capture_still_classifies_busy() {
+    let case = TickCase::new("r1-structural-working");
+    case.seed_tick_state(fresh_respawned_worker("codex"));
+
+    case.coordinator(PrecisionTransport::with_capture_text(
+        "tool output\n• Working (5s · esc to interrupt)\n",
+    ))
+    .tick()
+    .expect("coordinator tick");
+    let state = case.read_state();
+    let worker = &state["agents"][WORKER];
+    let health = case.agent_health_row();
+
+    assert_eq!(
+        worker.pointer("/activity/status").and_then(Value::as_str),
+        Some("working"),
+        "R1 guard: structural pane Working signal must still classify as working; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("BUSY"),
+        "R1 guard: structural pane Working signal must still map to worker_state=BUSY; worker={worker}; state={state}"
+    );
+    assert_eq!(
+        health.as_ref().and_then(|row| row.status.as_deref()),
+        Some("WORKING"),
+        "R1 guard: structural pane Working signal must still update agent_health.WORKING; health={health:?}; state={state}"
     );
 }
 
@@ -723,6 +816,22 @@ impl TickCase {
     fn read_state(&self) -> Value {
         load_runtime_state(&self.workspace).expect("read runtime state")
     }
+
+    fn agent_health_row(&self) -> Option<HealthRow> {
+        let store = MessageStore::open(&self.workspace).expect("open message store");
+        let conn = open_db(store.db_path()).expect("open team db");
+        conn.query_row(
+            "select status, current_task_id from agent_health where owner_team_id = ?1 and agent_id = ?2",
+            params![TEAM, WORKER],
+            |row| {
+                Ok(HealthRow {
+                    status: row.get(0)?,
+                    current_task_id: row.get(1)?,
+                })
+            },
+        )
+        .ok()
+    }
 }
 
 struct RealAdapterRegistry;
@@ -749,6 +858,12 @@ impl PrecisionTransport {
     fn empty_capture() -> Self {
         Self {
             capture_text: String::new(),
+        }
+    }
+
+    fn with_capture_text(text: &str) -> Self {
+        Self {
+            capture_text: text.to_string(),
         }
     }
 }
@@ -943,6 +1058,60 @@ fn running_worker() -> Value {
         "spawned_at": "2026-07-12T10:00:00Z",
         "spawn_cwd": ""
     })
+}
+
+fn fresh_respawned_worker(provider: &str) -> Value {
+    json!({
+        "id": WORKER,
+        "name": WORKER,
+        "provider": provider,
+        "model": provider,
+        "window": WORKER,
+        "status": "running",
+        "pane_id": WORKER_PANE,
+        "pane_pid": WORKER_PID,
+        "pid": WORKER_PID,
+        "process_started": true,
+        "session_id": "0532-fresh-session",
+        "spawned_at": "2026-07-12T12:00:00+00:00",
+        "spawn_cwd": ""
+    })
+}
+
+fn assert_not_busy_from_pane_startup(
+    worker: &Value,
+    health: Option<&HealthRow>,
+    context: &str,
+    state: &Value,
+) {
+    assert_ne!(
+        worker.pointer("/activity/status").and_then(Value::as_str),
+        Some("working"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        worker.get("worker_state").and_then(Value::as_str),
+        Some("BUSY"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        worker
+            .pointer("/activity/rationale")
+            .and_then(Value::as_str),
+        Some("recent_provider_output"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert_ne!(
+        health.and_then(|row| row.status.as_deref()),
+        Some("WORKING"),
+        "{context}; worker={worker}; health={health:?}; state={state}"
+    );
+    assert!(
+        worker.get("current_task_id").is_none()
+            && worker.get("current_turn_message_id").is_none()
+            && health.and_then(|row| row.current_task_id.as_deref()).is_none(),
+        "{context}: fresh startup capture must not invent or retain current task identity; worker={worker}; health={health:?}; state={state}"
+    );
 }
 
 fn role_doc() -> String {
