@@ -313,3 +313,4 @@ mod daemon;
 mod energy;
 mod main_preserved;
 mod a0_lostupdate;
+mod api_error_recovery;
