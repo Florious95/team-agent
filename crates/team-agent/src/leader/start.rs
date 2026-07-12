@@ -223,7 +223,22 @@ pub fn execute_leader_plan(
         && !std::io::stdin().is_terminal()
         && insert_detach_flag(&mut argv);
     if plan.mode == LeaderStartMode::ExecProvider && !plan.is_external_leader {
-        persist_exec_provider_leader_binding(plan, workspace)?;
+        // 0.5.35 (`.team/artifacts/managed-leader-provider-reentry-locate.md`
+        // §5/§6): three-way classify BEFORE persist. Same physical pane =
+        // provider process replacement (refresh only). Different pane with
+        // an existing canonical binding = no canonical rewrite (claim /
+        // takeover is the recovery path, §7). Unbound = first-time write.
+        match classify_exec_provider_binding(workspace, plan)? {
+            ExecProviderBinding::ManagedReentry => {
+                refresh_managed_leader_provider_binding(plan, workspace)?;
+            }
+            ExecProviderBinding::DifferentPaneAlreadyBound => {
+                // No canonical state write. Provider still runs below.
+            }
+            ExecProviderBinding::Unbound => {
+                persist_exec_provider_leader_binding(plan, workspace)?;
+            }
+        }
     } else if plan.is_external_leader {
         persist_external_leader_topology_marker(plan, workspace)?;
     }
@@ -900,6 +915,184 @@ fn persist_exec_provider_leader_binding(
         .with_team_owner(owner)
         .with_owner_epoch(owner_epoch);
     crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
+    crate::state::persist::save_runtime_state(workspace, &state)?;
+    Ok(())
+}
+
+/// 0.5.35 (`.team/artifacts/managed-leader-provider-reentry-locate.md` §5/§6):
+/// three-way classification of an in-tmux ExecProvider invocation. Physical-
+/// channel-first — never consults `pane_current_command` or gates on
+/// `leader_session_uuid` equality (§6 forbids uuid-mismatch hard refusal).
+enum ExecProviderBinding {
+    ManagedReentry,
+    DifferentPaneAlreadyBound,
+    Unbound,
+}
+
+fn classify_exec_provider_binding(
+    workspace: &Path,
+    plan: &LeaderStartPlan,
+) -> Result<ExecProviderBinding, LeaderError> {
+    let Some(pane) = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(ExecProviderBinding::Unbound);
+    };
+    let state = match crate::state::persist::load_runtime_state(workspace) {
+        Ok(state) => state,
+        Err(_) => return Ok(ExecProviderBinding::Unbound),
+    };
+    let team_key = plan
+        .identity
+        .as_ref()
+        .map(|identity| identity.team_id.as_str().to_string())
+        .or_else(|| {
+            state
+                .get("active_team_key")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    let Some(team_key) = team_key else {
+        return Ok(ExecProviderBinding::Unbound);
+    };
+    let Some(receiver) = state
+        .pointer(&format!("/teams/{team_key}/leader_receiver"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(ExecProviderBinding::Unbound);
+    };
+    let receiver_pane = receiver
+        .get("pane_id")
+        .or_else(|| receiver.get("pane"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if receiver_pane.is_empty() {
+        return Ok(ExecProviderBinding::Unbound);
+    }
+    if receiver_pane != pane {
+        return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
+    }
+    let pane_id = PaneId::new(pane.clone());
+    let target = current_tmux_pane_info(&pane_id);
+    let leader_prefixed_session = target
+        .as_ref()
+        .map(|t| t.session.as_str().starts_with(LEADER_SESSION_PREFIX))
+        .unwrap_or(false);
+    if !leader_prefixed_session {
+        return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
+    }
+    let recorded_socket = receiver
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
+    if let Some(recorded_socket) = recorded_socket {
+        let caller_socket = crate::tmux_backend::socket_name_from_tmux_env();
+        if caller_socket.as_deref() != Some(recorded_socket) {
+            return Ok(ExecProviderBinding::DifferentPaneAlreadyBound);
+        }
+    }
+    Ok(ExecProviderBinding::ManagedReentry)
+}
+
+/// 0.5.35: same-pane provider re-entry refresh path. Preserves canonical
+/// team runtime identity (`session_name`/`team_dir`/`spec_path`/`agents`/
+/// `tasks`) and epoch non-regressively; updates only diagnostic receiver
+/// fields. Stage 3 strip preserved (root `team_owner`/`leader_receiver`/
+/// `owner_epoch` are NOT reintroduced — writes go through
+/// `state::ownership::write_owner` into the canonical teams.<key> slot).
+fn refresh_managed_leader_provider_binding(
+    plan: &LeaderStartPlan,
+    workspace: &Path,
+) -> Result<(), LeaderError> {
+    let identity = plan
+        .identity
+        .as_ref()
+        .ok_or_else(|| LeaderError::Start("managed leader re-entry identity missing".to_string()))?;
+    let pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| LeaderError::Start("managed leader re-entry pane missing".to_string()))?;
+    let pane_id = PaneId::new(pane.clone());
+    let target = current_tmux_pane_info(&pane_id);
+    let mut state = crate::state::persist::load_runtime_state(workspace)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let team_key = identity.team_id.as_str();
+    let existing_receiver = state
+        .pointer(&format!("/teams/{team_key}/leader_receiver"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let existing_owner = crate::state::ownership::read_owner_value(&state, team_key)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let existing_epoch = state
+        .pointer(&format!("/teams/{team_key}/owner_epoch"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| existing_owner.get("owner_epoch").and_then(serde_json::Value::as_u64))
+        .or_else(|| existing_receiver.get("owner_epoch").and_then(serde_json::Value::as_u64))
+        .unwrap_or(0);
+    let now = chrono::Utc::now().to_rfc3339();
+    let provider = serde_json::to_value(plan.provider)?;
+    let mut receiver = match existing_receiver.as_object() {
+        Some(map) => serde_json::Value::Object(map.clone()),
+        None => serde_json::json!({}),
+    };
+    if let Some(obj) = receiver.as_object_mut() {
+        obj.insert("mode".to_string(), serde_json::json!("direct_tmux"));
+        obj.insert("status".to_string(), serde_json::json!("attached"));
+        obj.insert("provider".to_string(), provider.clone());
+        obj.insert("pane_id".to_string(), serde_json::json!(pane));
+        obj.insert("pane".to_string(), serde_json::json!(pane));
+        obj.insert("attached_at".to_string(), serde_json::json!(now.clone()));
+        obj.insert("discovery".to_string(), serde_json::json!("managed_leader"));
+        obj.insert("owner_epoch".to_string(), serde_json::json!(existing_epoch));
+        obj.entry("leader_session_uuid".to_string())
+            .or_insert_with(|| serde_json::json!(identity.leader_session_uuid.as_str()));
+        if let Some(target) = target.as_ref() {
+            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+            if let Some(window_name) = target.window_name.as_ref() {
+                obj.insert("window_name".to_string(), serde_json::json!(window_name.as_str()));
+            }
+            if let Some(pane_pid) = target.pane_pid {
+                obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
+            }
+        }
+    }
+    let mut owner = match existing_owner.as_object() {
+        Some(map) => serde_json::Value::Object(map.clone()),
+        None => serde_json::json!({}),
+    };
+    if let Some(obj) = owner.as_object_mut() {
+        obj.insert("pane_id".to_string(), serde_json::json!(pane));
+        obj.insert("provider".to_string(), provider);
+        obj.insert("owner_epoch".to_string(), serde_json::json!(existing_epoch));
+        obj.entry("machine_fingerprint".to_string())
+            .or_insert_with(|| serde_json::json!(identity.machine_fingerprint.as_str()));
+        obj.entry("leader_session_uuid".to_string())
+            .or_insert_with(|| serde_json::json!(identity.leader_session_uuid.as_str()));
+        obj.entry("claimed_via".to_string())
+            .or_insert_with(|| serde_json::json!("claim-leader"));
+        obj.entry("os_user".to_string())
+            .or_insert_with(|| serde_json::json!(identity.os_user.as_str()));
+    }
+    if let Some(obj) = state.as_object_mut() {
+        obj.insert("active_team_key".to_string(), serde_json::json!(team_key));
+        obj.insert(
+            "leader_client".to_string(),
+            serde_json::json!({
+                "diagnostic_only": true,
+                "attach_mode": "exec-provider",
+                "tmux": std::env::var("TMUX").ok(),
+                "reentry": true,
+            }),
+        );
+    }
+    let record = crate::state::ownership::OwnershipWrite::new()
+        .with_leader_receiver(receiver)
+        .with_team_owner(owner)
+        .with_owner_epoch(existing_epoch);
+    crate::state::ownership::write_owner(&mut state, team_key, record);
     crate::state::persist::save_runtime_state(workspace, &state)?;
     Ok(())
 }

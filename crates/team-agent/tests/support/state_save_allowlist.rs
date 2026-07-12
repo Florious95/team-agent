@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 70;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 71;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -139,6 +139,19 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "LeaderStartBinding",
         "s1a_legacy_external",
         946
+    ),
+    // 0.5.35 (`.team/artifacts/managed-leader-provider-reentry-locate.md`
+    // §5/§6): same-pane provider re-entry refresh writes canonical receiver
+    // metadata via ownership::write_owner + save_runtime_state, matching
+    // the LeaderStartBinding intent family (external ExecProvider
+    // classification split).
+    allow!(
+        "leader/start.rs",
+        "refresh_managed_leader_provider_binding",
+        "save_runtime_state",
+        "LeaderStartBinding",
+        "s1a_legacy_external",
+        1096
     ),
     allow!(
         "lifecycle/launch.rs",

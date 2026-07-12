@@ -52,6 +52,14 @@ pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
             .and_then(|v| v.get("status"))
             .and_then(Value::as_str)
             .unwrap_or("");
+        // 0.5.35 R4 (`.team/artifacts/managed-leader-provider-reentry-locate.md`):
+        // canonical `worker_state=UNKNOWN` / `activity.status=uncertain`
+        // beats legacy `agent_health.status=WORKING` so the five-line
+        // summary stops counting a runtime-honestly-UNKNOWN agent as busy.
+        if canonical_worker_state_is_unknown(agent) {
+            counts.unknown += 1;
+            continue;
+        }
         match classify_agent_bucket(raw, hstatus) {
             SummaryBucket::Running => counts.running += 1,
             SummaryBucket::Busy => counts.busy += 1,
@@ -62,6 +70,22 @@ pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
         }
     }
     counts
+}
+
+/// 0.5.35 R4: return true when the runtime classifier has written a
+/// canonical non-decisive observation onto the agent row. Used by
+/// `agent_summary_counts` and `csv_agent_status` so the "UNKNOWN-first"
+/// signal beats legacy `agent_health.status`.
+fn canonical_worker_state_is_unknown(agent: &Value) -> bool {
+    let worker_state_unknown = agent
+        .get("worker_state")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("UNKNOWN"));
+    let activity_uncertain = agent
+        .pointer("/activity/status")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("uncertain"));
+    worker_state_unknown || activity_uncertain
 }
 
 fn stale_agent_bucket(agent: &Value) -> Option<SummaryBucket> {
@@ -223,6 +247,10 @@ fn csv_agent_status(
             .is_some();
     if matches!(raw.as_str(), "running" | "busy" | "working") && !pane_present {
         return "错误";
+    }
+    // 0.5.35 R4: canonical UNKNOWN beats legacy WORKING in human CSV too.
+    if canonical_worker_state_is_unknown(agent) {
+        return "未知";
     }
     if raw == "idle" || hstatus == "idle" {
         return "空闲";
