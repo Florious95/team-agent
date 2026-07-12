@@ -764,9 +764,31 @@ impl Coordinator {
             // refreshed BEFORE classification (the classifier sees the updated value).
             // A non-empty but UNCHANGED capture must not dirty the state every tick
             // (P3 umbrella: steady second tick is a zero state write).
+            //
+            // 0.5.32 follow-up (`.team/artifacts/0532-r1-real-fail-triage.md` §6):
+            // fresh-cohort startup-output guard. After the restart clear helper wipes
+            // `activity`/`worker_state`/`last_output_at`/`last_output_hash`, the first
+            // non-empty pane capture (fake worker's READY line, provider startup
+            // banner) is trivially different from the missing digest. If we let it
+            // set `last_output_at=now`, classify_agent_activity falls through to
+            // `recent_provider_output => Working` even though no structural signal
+            // exists — that's the R1 real-machine false busy.
+            //
+            // Narrow gate: fresh cohort (no activity/worker_state/last_output_at
+            // /last_output_hash/current turn/task fields), no work obligation
+            // arming a real send, and no structural prompt/working signal in the
+            // capture → still update `last_output_hash` (dedup) but do NOT write
+            // `last_output_at`. The classifier then returns Uncertain=UNKNOWN,
+            // which is the honest post-clear observation. Preserves recent_provider_output
+            // for non-startup normal output (later capture has prior last_output_at
+            // or last_output_hash, so `fresh_cohort` false → gate skipped).
+            let fresh_cohort = agent_is_fresh_cohort(agent);
+            let has_structural_signal = latest_pane_signal_is_structural(&captured.text);
             let output_advanced =
                 !captured.text.is_empty() && scrollback_digest_advanced(agent, &captured.text);
-            if output_advanced {
+            let suppress_last_output_at =
+                output_advanced && fresh_cohort && !has_work_obligation && !has_structural_signal;
+            if output_advanced && !suppress_last_output_at {
                 if let Some(agent_obj) = agent.as_object_mut() {
                     agent_obj.insert(
                         "last_output_at".to_string(),
@@ -1808,11 +1830,21 @@ fn parse_rfc3339_utc(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
-/// return true when the rollout file's modification time is not newer than
-/// the agent's current `spawned_at`. Used by `jsonl_activity_for_agent` to
-/// refuse classifying a pre-spawn transcript tail into fresh-cohort activity.
-/// Missing `spawned_at`, missing mtime, or unparseable timestamp → false
-/// (do not block classification; the caller keeps the pre-0.5.32 behavior).
+/// return true when the rollout file's modification time is strictly older
+/// than the agent's current `spawned_at`. Used by `jsonl_activity_for_agent`
+/// to refuse classifying a pre-spawn transcript tail into fresh-cohort
+/// activity. Missing `spawned_at`, missing mtime, or unparseable timestamp
+/// → false (do not block classification; the caller keeps the pre-0.5.32
+/// behavior).
+///
+/// 0.5.33 boundary tightening (leader 派单 msg_42dbad7f2938 / earlier cr
+/// batch older-or-equal 预警): use strict `<` not `<=`. Fast machines can
+/// produce a fresh post-spawn rollout whose mtime shares the second-resolution
+/// `spawned_at`; treating "equal" as pre-spawn would wrongly reject the
+/// first post-spawn transcript record. Genuinely pre-spawn transcripts have
+/// mtime strictly before `spawned_at` and remain rejected. The equal case
+/// falls back to the classifier + pane fallback, which is the ambiguous-
+/// but-safe path.
 fn jsonl_older_than_spawn_boundary(agent: &Value, metadata: &std::fs::Metadata) -> bool {
     let Some(spawned_at) = agent
         .get("spawned_at")
@@ -1829,7 +1861,7 @@ fn jsonl_older_than_spawn_boundary(agent: &Value, metadata: &std::fs::Metadata) 
     };
     let mtime_utc =
         chrono::DateTime::<chrono::Utc>::from(std::time::UNIX_EPOCH + mtime_since_epoch);
-    mtime_utc <= spawned_at
+    mtime_utc < spawned_at
 }
 
 fn matching_capture_pane_info(
@@ -2244,6 +2276,48 @@ fn clear_awaiting_human_confirm(agent: &mut Value) {
     if let Some(agent_obj) = agent.as_object_mut() {
         agent_obj.remove("awaiting_human_confirm");
     }
+}
+
+/// 0.5.32 follow-up (`.team/artifacts/0532-r1-real-fail-triage.md` §6/§7):
+/// "fresh cohort" = the state a restart / start-agent clear helper leaves
+/// behind, before any post-spawn tick has repopulated observations.
+/// Requires `spawned_at` present so the gate fires only for real
+/// restart/start cohorts; coordinator-only fixtures without a spawn
+/// boundary keep pre-0.5.32 pane fallback behavior (spine2 sync_health
+/// tests seed bare provider/window/pane_id and expect `last_output_at`
+/// to be recorded on the first delta).
+fn agent_is_fresh_cohort(agent: &Value) -> bool {
+    let spawned_at_present = agent
+        .get("spawned_at")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if !spawned_at_present {
+        return false;
+    }
+    const CLEARED_FIELDS: &[&str] = &[
+        "activity",
+        "worker_state",
+        "last_output_at",
+        "last_output_hash",
+        "current_turn_message_id",
+        "current_task_id",
+        "task_id",
+    ];
+    CLEARED_FIELDS.iter().all(|field| {
+        agent
+            .get(*field)
+            .map(|value| value.is_null())
+            .unwrap_or(true)
+    })
+}
+
+/// 0.5.32 follow-up: is there a structural pane signal in `text`?
+/// True when `latest_prompt_signal` recognizes anything (idle prompt char,
+/// working spinner/keyword, or fake READY/WORKING marker). When true, the
+/// classifier will produce a definite non-`recent_provider_output` activity
+/// on its own, so the freshness gate must not suppress `last_output_at`.
+fn latest_pane_signal_is_structural(text: &str) -> bool {
+    crate::messaging::helpers::latest_prompt_signal(text).is_some()
 }
 
 /// Python approvals/status.py:68-72 — sha256 the scrollback, compare to the stored
