@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.33
+
+- **Fix: tighten jsonl freshness boundary + fix fixture mtime (0532b).** The freshness classifier used a non-strict less-than-or-equal boundary when comparing transcript mtime against spawned_at, causing a transcript written at exactly spawned_at to be classified as "working" instead of "uncertain". Changed to strict less-than so only transcripts written strictly before spawn are treated as stale. Also corrected the contract fixture to set mtime to spawned_at+1s (strict post-spawn) to match the intended semantic.
+
 ## 0.5.32
 
 - **Fix: restart recovery precision — clear per-agent activity on new cohort (0532).** When a restart creates a new cohort, per-agent activity records from the previous cohort were not cleared, causing the coordinator's tick loop to misattribute stale activity to the new agent. This produced false-positive "agent is healthy" readings immediately after restart (the new agent had not yet sent any activity), masking delayed-start failures and preventing the recovery watchdog from triggering. Per-agent activity is now explicitly zeroed at cohort promotion.
