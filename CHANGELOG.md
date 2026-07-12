@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.32
+
+- **Fix: restart recovery precision — clear per-agent activity on new cohort (0532).** When a restart creates a new cohort, per-agent activity records from the previous cohort were not cleared, causing the coordinator's tick loop to misattribute stale activity to the new agent. This produced false-positive "agent is healthy" readings immediately after restart (the new agent had not yet sent any activity), masking delayed-start failures and preventing the recovery watchdog from triggering. Per-agent activity is now explicitly zeroed at cohort promotion.
+- **Chore: C2 command deletion — internalized repair surfaces removed (net -1117 lines).** The `repair-state`, `doctor --repair`, and related diagnostic-repair command surfaces have been deleted from the CLI. Their functionality is now internalized: the coordinator self-heals on startup and the `alive` predicate prevents unsafe saves. Externally-triggered repair is no longer needed. New contract: `c2_command_internalization_deletion_contract` (8 cases).
+
 ## 0.5.31
 
 - **Fix: reboot recovery follow-up — complete topology rebuild and lease handoff (0531).** Completes the reboot recovery path introduced in 0.5.29: the adapter layer now surfaces the rebuilt topology to the lease subsystem, ensuring the leader lease is re-acquired against the new pane IDs after recovery. Previously, recovery rebuilt the internal topology but did not propagate it to the adapter, leaving the lease pointing at stale pane handles and causing `send` and `restart` to fail after the first successful `status`. Also fixes `rebuild.rs` to handle the case where the restart target's pane has been reassigned in the new tmux session. New contract: `reboot_recovery_followup_0531_contract` (4 cases).
