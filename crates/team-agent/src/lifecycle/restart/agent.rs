@@ -795,6 +795,71 @@ pub fn stop_agent_with_transport(
     )
 }
 
+/// 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md` §7.3/§7.4):
+/// api_error recovery entry point. Runs post-atomic_save from coordinator
+/// tick to replace the stuck provider process on a retryable outage. It
+/// resolves lifecycle paths, force-stops the live pane if the worker is
+/// still alive (so `start_agent_at_paths(force=true)` cannot be a Noop —
+/// see R3 contract), then starts the agent with `allow_fresh=false` to
+/// preserve session context. Returns a small, typed outcome so the
+/// caller only needs the delta for event emission; the underlying
+/// lifecycle helpers own their state saves.
+pub(crate) fn start_agent_at_paths_for_recovery(
+    workspace: &Path,
+    agent_id: &AgentId,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+) -> Result<
+    crate::coordinator::steps::abnormal::RecoveryLifecycleOutcome,
+    crate::coordinator::steps::abnormal::RecoveryError,
+> {
+    use crate::coordinator::steps::abnormal::{RecoveryError, RecoveryLifecycleOutcome};
+    let paths = match lifecycle_paths(workspace, team) {
+        Ok(paths) => paths,
+        Err(_) if team.is_none() => LifecyclePaths {
+            run_workspace: workspace.to_path_buf(),
+            spec_workspace: workspace.to_path_buf(),
+        },
+        Err(error) => return Err(RecoveryError::Lifecycle(error.to_string())),
+    };
+    // Best-effort stop: if the live pane still exists we tear it down so the
+    // subsequent start creates a fresh provider process instead of a Noop.
+    // Stop errors are absorbed into the start attempt result — the important
+    // invariant is that a successful start returns Running, never Noop.
+    let _ = stop_agent_with_transport(
+        &paths.run_workspace,
+        agent_id,
+        team,
+        transport,
+    );
+    let start_result = start_agent_with_transport(
+        &paths.run_workspace,
+        agent_id,
+        /* force */ true,
+        /* open_display */ false,
+        /* allow_fresh */ false,
+        team,
+        transport,
+    );
+    match start_result {
+        Ok(StartAgentOutcome::Running {
+            start_mode,
+            target,
+            env,
+            ..
+        }) => Ok(RecoveryLifecycleOutcome {
+            start_mode: format!("{:?}", start_mode),
+            target,
+            coordinator_started: env.coordinator_started,
+        }),
+        Ok(StartAgentOutcome::Noop { .. }) => Err(RecoveryError::NoopBlocked),
+        Ok(StartAgentOutcome::Paused { .. }) => Err(RecoveryError::Lifecycle(
+            "agent is paused; recovery skipped".to_string(),
+        )),
+        Err(error) => Err(RecoveryError::Lifecycle(error.to_string())),
+    }
+}
+
 pub(super) fn stop_agent_at_paths(
     workspace: &Path,
     spec_workspace: &Path,

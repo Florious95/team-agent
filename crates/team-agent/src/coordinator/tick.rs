@@ -437,6 +437,19 @@ impl Coordinator {
             ));
         }
 
+        // 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md` §7.3):
+        // post-save recovery step. Reloads fresh state, consumes due
+        // recovery intents that were WRITTEN during the pre-save detector
+        // step, and drives the lifecycle helper. Runs OUTSIDE the pre-save
+        // window so nested lifecycle saves cannot be clobbered by this
+        // tick's final in-memory save (R6 boundary guard).
+        self.record_step("attempt_api_error_recoveries");
+        crate::coordinator::steps::abnormal::attempt_due_recoveries(
+            self.workspace.as_path(),
+            &event_log,
+            self.transport.as_ref(),
+        );
+
         self.record_step("collect_results");
         collections.results =
             collect_results(crate::messaging::collect_results_and_notify_watchers(

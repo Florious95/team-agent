@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 71;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 72;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -99,6 +99,18 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "CoordinatorTick",
         "s1b_migrate_first",
         427
+    ),
+    // 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md`
+    // §7.3): post-save recovery step writes the recovery intent result
+    // (attempts, status, last_error, blocked_reason) via a dedicated
+    // intent so future S1b migration can route it independently.
+    allow!(
+        "coordinator/steps/abnormal.rs",
+        "write_recovery_intent_result",
+        "save_runtime_state",
+        "CoordinatorApiErrorRecovery",
+        "s1a_legacy_external",
+        1921
     ),
     allow!(
         "leader/lease.rs",

@@ -91,6 +91,13 @@ fn tick_side_effect_order_is_the_fixed_sequence() {
         "detect_drift",
         "detect_api_errors",
         "atomic_save",
+        // 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md` §7.3):
+        // post-save recovery step reloads fresh state, consumes due
+        // recovery intents written pre-save, and drives the lifecycle
+        // helper. Sits between atomic_save and collect_results by design
+        // so nested lifecycle saves cannot be clobbered by tick's final
+        // in-memory save.
+        "attempt_api_error_recoveries",
         "collect_results",
         "prune_dedupe_log",
     ];
