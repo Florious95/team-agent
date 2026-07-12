@@ -400,7 +400,7 @@ pub enum PackagingError {
     /// step 3 schema/migration 转调错误。
     #[error("schema: {0}")]
     Db(#[from] DbError),
-    /// step 5 state(repair-state / team-running 判定)转调错误。
+    /// step 5 state(team-running 判定)转调错误。
     #[error("state: {0}")]
     State(String),
     /// model 校验/解析转调(版本解析等)。

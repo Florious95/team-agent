@@ -5,10 +5,9 @@
 //! - Leader supplement: send failure or pending output must guide users to
 //!   `inbox` because `inbox` is secondary but operationally important.
 //!
-//! User story: default help is a small user-facing command surface; hidden and
-//! compatibility commands remain exact-invocation compatible, and recovery
-//! failures guide users to discoverable repair paths instead of hidden fallback
-//! commands.
+//! User story: default help is a small user-facing command surface; surviving
+//! compatibility aliases remain exact-invocation compatible, and recovery
+//! failures guide users to discoverable repair paths.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -73,8 +72,6 @@ const HIDDEN_FROM_DEFAULT_HELP: &[&str] = &[
 ];
 
 const COMPAT_HIDDEN_COMMANDS: &[(&str, &[&str])] = &[
-    ("fallback-send-leader", &["send", "diagnose"]),
-    ("fallback-report-result", &["collect", "report_result"]),
     ("stop", &["shutdown"]),
     ("restart-agent", &["reset-agent"]),
     ("start", &["quick-start", "restart"]),

@@ -1319,7 +1319,7 @@ impl Coordinator {
     }
 
     /// `message_store_schema_health`(`lifecycle.py:197`)。DB 列兼容门:区分 pre-init 必需列缺失
-    /// (拒启)vs migratable 列缺失(可迁移)。`advanced repair-state --schema` 用其 action hint。
+    /// (拒启)vs migratable 列缺失(可迁移)。`doctor --fix-schema` 用其 action hint。
     pub fn schema_health(&self) -> SchemaHealth {
         // A-8: the gate must inspect the REAL team.db (Python lifecycle.py:197+
         // message_store_schema_health); a hardcoded ok:true left the card §89

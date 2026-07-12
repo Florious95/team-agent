@@ -96,12 +96,6 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "quick-start" => cmd_quick_start(&quick_start_args(args, cwd)?).map(emit_result),
         "compile" => cmd_compile(&compile_args(args, cwd)?).map(emit_result),
         "send" => cmd_send(&send_args(args, cwd)?).map(emit_result),
-        "fallback-send-leader" => {
-            cmd_fallback_send_leader(&fallback_send_leader_args(args, cwd)?).map(emit_result)
-        }
-        "fallback-report-result" => {
-            cmd_fallback_report_result(&fallback_report_result_args(args, cwd)?).map(emit_result)
-        }
         "allow-peer-talk" => {
             cmd_allow_peer_talk(&allow_peer_talk_args(args, cwd)?).map(emit_result)
         }
@@ -147,17 +141,10 @@ fn dispatch(command: &str, args: &[String], cwd: &Path) -> Result<ExitCode, CliE
         "validate" => cmd_validate(&validate_args(args, cwd)).map(emit_result),
         "install-skill" => cmd_install_skill(&install_skill_args(args)?).map(emit_result),
         "profile" => cmd_profile(&profile_args(args, cwd)?).map(emit_result),
-        "validate-result" if has_arg(args, "--result") => {
-            eprintln!("team-agent: error: unrecognized arguments: --result");
-            Ok(ExitCode::Usage)
-        }
-        "validate-result" => cmd_validate_result(&validate_result_args(args)?).map(emit_result),
         "collect" => {
             cmd_collect_for_team(&collect_args(args, cwd)?, parse_args(args).team.as_deref())
                 .map(emit_result)
         }
-        "settle" => cmd_settle(&settle_args(args, cwd)).map(emit_result),
-        "repair-state" => cmd_repair_state(&repair_state_args(args, cwd)?).map(emit_result),
         "diagnose" => cmd_diagnose(&diagnose_args(args, cwd)).map(emit_result),
         "preflight" => cmd_preflight(&preflight_args(args, cwd)).map(emit_result),
         "wait-ready" => cmd_wait_ready(&wait_ready_args(args, cwd)).map(emit_result),
@@ -173,8 +160,6 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "quick-start",
     "compile",
     "send",
-    "fallback-send-leader",
-    "fallback-report-result",
     "allow-peer-talk",
     "status",
     "stop",
@@ -205,10 +190,7 @@ const DISPATCH_COMMANDS: &[&str] = &[
     "validate",
     "install-skill",
     "profile",
-    "validate-result",
     "collect",
-    "settle",
-    "repair-state",
     "diagnose",
     "preflight",
     "wait-ready",
@@ -327,8 +309,6 @@ fn command_help(command: Option<&str>) -> String {
         Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
         Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\nMVP: name-based cross-workspace addressing assumes trusted local caller; no auth gate.".to_string(),
-        Some("fallback-send-leader") => compat_hidden_help("fallback-send-leader", "usage: team-agent fallback-send-leader --workspace WORKSPACE --team TEAM --sender AGENT --message-id ID --content TEXT --primary-error ERROR [--task TASK] [--json]\n\nEmergency one-shot fallback only after a leader-bound MCP send transport failure; restart-agent after use."),
-        Some("fallback-report-result") => compat_hidden_help("fallback-report-result", "usage: team-agent fallback-report-result --workspace WORKSPACE --team TEAM --agent-id AGENT --task-id TASK --result-json JSON --primary-error ERROR [--json]\n\nEmergency one-shot fallback only after a report_result MCP transport failure; persists the result DB row, then restart-agent after use."),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
@@ -358,10 +338,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("validate") => "usage: team-agent validate [SPEC] [--json]".to_string(),
         Some("install-skill") => "usage: team-agent install-skill (--source DIR | --uninstall) [--target codex|claude|copilot|all] [--dest DIR] [--dry-run] [--json]".to_string(),
         Some("profile") => "usage: team-agent profile COMMAND NAME [--workspace WORKSPACE] [--team TEAM] [--auth-mode MODE] [--json]".to_string(),
-        Some("validate-result") => "usage: team-agent validate-result [ENVELOPE] [--file FILE|--result JSON] [--json]".to_string(),
         Some("collect") => "usage: team-agent collect [--workspace WORKSPACE] [--team TEAM] [--result-file FILE] [--json]".to_string(),
-        Some("settle") => "usage: team-agent settle [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("repair-state") => "usage: team-agent repair-state --task TASK --status STATUS [SUMMARY] [--assignee AGENT] [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("diagnose") => "usage: team-agent diagnose [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
         Some("preflight") => "usage: team-agent preflight [TEAMDIR] [--json]".to_string(),
         Some("wait-ready") => "usage: team-agent wait-ready [--workspace WORKSPACE] [--team TEAM] [--timeout SECONDS] [--json]".to_string(),
@@ -1059,60 +1036,6 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
     })
 }
 
-fn fallback_send_leader_args(
-    args: &[String],
-    cwd: &Path,
-) -> Result<FallbackSendLeaderArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(FallbackSendLeaderArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        sender: parsed
-            .sender
-            .or(parsed.agent_id)
-            .ok_or_else(|| CliError::Usage("missing --sender <agent>".to_string()))?,
-        task: parsed.task.or(parsed.task_id),
-        message_id: parsed
-            .message_id
-            .ok_or_else(|| CliError::Usage("missing --message-id <id>".to_string()))?,
-        content: parsed
-            .content
-            .or_else(|| (!parsed.positionals.is_empty()).then(|| parsed.positionals.join(" ")))
-            .ok_or_else(|| CliError::Usage("missing --content <text>".to_string()))?,
-        primary_error: parsed
-            .primary_error
-            .ok_or_else(|| CliError::Usage("missing --primary-error <error>".to_string()))?,
-        json: parsed.json,
-    })
-}
-
-fn fallback_report_result_args(
-    args: &[String],
-    cwd: &Path,
-) -> Result<FallbackReportResultArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(FallbackReportResultArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team,
-        agent_id: parsed
-            .agent_id
-            .or(parsed.sender)
-            .ok_or_else(|| CliError::Usage("missing --agent-id <agent>".to_string()))?,
-        task_id: parsed
-            .task_id
-            .or(parsed.task)
-            .ok_or_else(|| CliError::Usage("missing --task-id <task>".to_string()))?,
-        result_json: parsed
-            .result_json
-            .or_else(|| parsed.result)
-            .ok_or_else(|| CliError::Usage("missing --result-json <json>".to_string()))?,
-        primary_error: parsed
-            .primary_error
-            .ok_or_else(|| CliError::Usage("missing --primary-error <error>".to_string()))?,
-        json: parsed.json,
-    })
-}
-
 /// Stage 4 of identity-boundary unified plan (architect direction
 /// 2026-06-24, .team/artifacts/identity-boundary-unified-plan.md §2 Stage
 /// 4): destructive command ambiguity gate. When the workspace has 2+
@@ -1471,16 +1394,6 @@ fn profile_args(args: &[String], cwd: &Path) -> Result<ProfileArgs, CliError> {
     })
 }
 
-fn validate_result_args(args: &[String]) -> Result<ValidateResultArgs, CliError> {
-    let parsed = parse_args(args);
-    Ok(ValidateResultArgs {
-        envelope: parsed.positionals.first().cloned(),
-        file: parsed.file,
-        result: parsed.result,
-        json: parsed.json,
-    })
-}
-
 fn collect_args(args: &[String], cwd: &Path) -> Result<CollectArgs, CliError> {
     let parsed = parse_args(args);
     let workspace = workspace(&parsed, cwd);
@@ -1488,34 +1401,6 @@ fn collect_args(args: &[String], cwd: &Path) -> Result<CollectArgs, CliError> {
     Ok(CollectArgs {
         workspace,
         result_file: parsed.result_file,
-        json: parsed.json,
-        team: parsed.team,
-    })
-}
-
-fn settle_args(args: &[String], cwd: &Path) -> SettleArgs {
-    let parsed = parse_args(args);
-    SettleArgs {
-        workspace: workspace(&parsed, cwd),
-        team: parsed.team.clone(),
-        json: parsed.json,
-    }
-}
-
-fn repair_state_args(args: &[String], cwd: &Path) -> Result<RepairStateArgs, CliError> {
-    let parsed = parse_args(args);
-    let workspace = workspace(&parsed, cwd);
-    refuse_if_multi_alive_team_missing_scope("repair-state", &workspace, parsed.team.as_deref())?;
-    Ok(RepairStateArgs {
-        workspace,
-        task_id: parsed
-            .task
-            .ok_or_else(|| CliError::Usage("missing --task".to_string()))?,
-        assignee: parsed.assignee,
-        status: parsed
-            .status_value
-            .ok_or_else(|| CliError::Usage("missing --status".to_string()))?,
-        summary: option_value(args, "--summary").or_else(|| parsed.positionals.first().cloned()),
         json: parsed.json,
         team: parsed.team,
     })
@@ -1789,11 +1674,6 @@ mod tests {
         let top_help = command_help(None);
         let visible = visible_help_commands(&top_help);
         for command in [
-            "fallback-send-leader",
-            "fallback-report-result",
-            "repair-state",
-            "settle",
-            "validate-result",
             "leaders",
             "doctor",
             "e2e",
@@ -1809,14 +1689,7 @@ mod tests {
 
     #[test]
     fn compat_hidden_help_has_sunset_action() {
-        for command in [
-            "fallback-send-leader",
-            "fallback-report-result",
-            "stop",
-            "restart-agent",
-            "start",
-            "init",
-        ] {
+        for command in ["stop", "restart-agent", "start", "init"] {
             let help = command_help(Some(command)).to_lowercase();
             assert!(help.contains("status: hidden compatibility command"));
             assert!(help.contains("sunset: c2"));
@@ -1980,17 +1853,6 @@ mod tests {
                 &["--workspace", "--team", "--limit", "--since", "--json"][..],
             ),
             ("sessions", &["--workspace", "--team", "--json"][..]),
-            (
-                "repair-state",
-                &[
-                    "--task",
-                    "--status",
-                    "--assignee",
-                    "--workspace",
-                    "--team",
-                    "--json",
-                ][..],
-            ),
             ("diagnose", &["--workspace", "--team", "--json"][..]),
             (
                 "wait-ready",
@@ -2203,7 +2065,7 @@ mod tests {
     fn refuse_helper_refuses_when_multi_alive_team_and_no_explicit_team() {
         let ws = tmp_workspace();
         seed_two_alive_teams_in(&ws);
-        let err = refuse_if_multi_alive_team_missing_scope("repair-state", &ws, None)
+        let err = refuse_if_multi_alive_team_missing_scope("collect", &ws, None)
             .expect_err("multi-alive-team must refuse without --team");
         let message = err.to_string();
         assert!(
@@ -2215,7 +2077,7 @@ mod tests {
             "refusal must list candidate teams; got: {message}"
         );
         assert!(
-            message.contains("repair-state"),
+            message.contains("collect"),
             "refusal must name the command for diagnostic clarity; got: {message}"
         );
     }
@@ -2241,22 +2103,6 @@ mod tests {
         assert!(
             err.to_string().contains("multiple alive teams"),
             "collect args builder must surface the refusal; got: {err}"
-        );
-    }
-
-    #[test]
-    fn repair_state_args_builder_refuses_on_multi_alive_team_before_task_validation() {
-        let ws = tmp_workspace();
-        seed_two_alive_teams_in(&ws);
-        // The ambiguity gate must fire BEFORE `--task` / `--status` validation
-        // so the operator sees the multi-team confusion before any other
-        // usage error.
-        let argv = cli_argv(&["--workspace", &ws.to_string_lossy()]);
-        let err = repair_state_args(&argv, &ws).expect_err("must refuse");
-        let message = err.to_string();
-        assert!(
-            message.contains("multiple alive teams"),
-            "ambiguity gate must precede --task/--status validation; got: {message}"
         );
     }
 

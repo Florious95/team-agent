@@ -276,7 +276,7 @@ fn coordinator_issue_value(
 
 fn coordinator_repair_hint(id: &str, _health: &crate::coordinator::HealthReport) -> Value {
     let hint_action = match id {
-        "coordinator_schema_incompatible" => "team-agent repair-state --schema",
+        "coordinator_schema_incompatible" => "team-agent doctor --fix-schema --json",
         _ => "team-agent restart",
     };
     json!({

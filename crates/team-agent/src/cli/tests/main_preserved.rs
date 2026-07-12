@@ -597,27 +597,6 @@ fn seed_team_spec(ws: &std::path::Path) {
         );
     }
     #[test]
-    fn validate_result_file_good_and_inline_garbage_are_distinct() {
-        let ws = tmp_workspace();
-        let envelope_path = ws.join("result.json");
-        std::fs::write(&envelope_path, valid_result_envelope().to_string()).unwrap();
-        let good = run(
-            &cli_argv(&["validate-result", "--file", &envelope_path.to_string_lossy(), "--json"]),
-            &ws,
-        );
-        assert_eq!(
-            good,
-            ExitCode::Ok,
-            "Python cmd_validate_result accepts --file and returns {{ok:true,task_id,agent_id,status}} for a valid envelope"
-        );
-        let garbage = run(&cli_argv(&["validate-result", "{garbage", "--json"]), &ws);
-        assert_eq!(
-            garbage,
-            ExitCode::Error,
-            "garbage JSON must be invalid, not indistinguishable from the good-envelope path"
-        );
-    }
-    #[test]
     fn collect_uncollected_result_marks_db_and_outputs_result() {
         let ws = tmp_workspace();
         seed_collect_state(&ws);
@@ -783,43 +762,4 @@ fn seed_team_spec(ws: &std::path::Path) {
                     && e["ttl_seconds"] == json!(1800)),
             "acknowledge-idle must emit coordinator.idle_acknowledged"
         );
-    }
-    #[test]
-    fn repair_state_done_persists_after_status_and_summary() {
-        let ws = tmp_workspace();
-        seed_collect_state(&ws);
-        let out = json_output(
-            cmd_repair_state(&RepairStateArgs {
-                workspace: ws.clone(),
-                task_id: "task_impl".to_string(),
-                assignee: None,
-                status: "done".to_string(),
-                summary: Some("manual repair accepted".to_string()),
-                json: true,
-                team: None,
-            })
-            .expect("repair-state should not fail on a valid runtime state"),
-        );
-        assert_eq!(out["ok"], json!(true));
-        assert_eq!(
-            out["after"]["status"],
-            json!("done"),
-            "repair-state --status done must return after.status=done; ok:true with null after fields is a false success"
-        );
-        assert_eq!(out["after"]["assignee"], json!("fake_impl"));
-        assert_eq!(out["after"]["last_result_summary"], json!("manual repair accepted"));
-        let state = read_state(&ws);
-        let task = state["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|task| task["id"] == json!("task_impl"))
-            .unwrap();
-        assert_eq!(
-            task["status"],
-            json!("done"),
-            "repair-state --status done must persist the task status, not only emit a success envelope"
-        );
-        assert_eq!(task["last_result_summary"], json!("manual repair accepted"));
-        let _ = std::fs::remove_dir_all(&ws);
     }

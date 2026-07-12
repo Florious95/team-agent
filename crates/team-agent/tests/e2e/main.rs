@@ -69,7 +69,6 @@ mod cases {
     mod dirty_004_stale_session_id_missing_backing;
     mod dirty_005_cross_team_binding_pollution;
     mod dirty_006_message_stuck_in_accepted;
-    mod rec_001_repair_state_basic;
     mod rec_002_doctor_checks;
     mod rec_003_diagnose_output;
     mod rfs_restart_false_success_contract;

@@ -158,49 +158,6 @@ fn add_agent_downstream_failure_rolls_back_spec_and_state_so_retry_is_clean() {
 
 #[test]
 #[serial(env)]
-fn repair_state_does_not_treat_stopped_current_as_alive_ambiguity() {
-    let case = Case::new("repair-state");
-    case.write_team_docs();
-    case.write_runtime_spec();
-    case.write_state(case.root_with_current(Value::Null, "stopped", true));
-
-    let out = case.run([
-        "repair-state",
-        "--workspace",
-        case.ws(),
-        "--task",
-        "T",
-        "--status",
-        "blocked",
-        "--json",
-    ]);
-    let text = output_text(&out);
-    assert!(
-        out.status.success(),
-        "RED5: bare repair-state must operate on the only live research team and not refuse because stopped current is still counted alive; output={text}"
-    );
-    assert!(
-        !text.contains("multiple alive teams"),
-        "RED5: stale stopped current + live research must not produce multi-alive refusal; output={text}"
-    );
-
-    let missing = case.run([
-        "repair-state",
-        "--workspace",
-        case.ws(),
-        "--team",
-        CURRENT,
-        "--json",
-    ]);
-    let missing_text = output_text(&missing);
-    assert!(
-        missing_text.contains("missing --task") && missing_text.to_ascii_lowercase().contains("task"),
-        "RED5: explicit current repair-state may remain task-only, but its error/help must make that clear; output={missing_text}"
-    );
-}
-
-#[test]
-#[serial(env)]
 fn purge_agent_help_and_dispatch_are_consistent() {
     let case = Case::new("purge-agent");
     let help = output_text(&case.run(["--help"]));
