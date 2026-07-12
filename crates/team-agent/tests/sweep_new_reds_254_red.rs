@@ -22,9 +22,8 @@ use mcp_sim_harness::McpSimHarness;
 use rusqlite::params;
 use serde_json::{json, Value};
 use team_agent::cli::{
-    cmd_diagnose, cmd_doctor, cmd_init, cmd_preflight, cmd_repair_state, cmd_settle, cmd_validate,
-    cmd_wait_ready, CmdOutput, DiagnoseArgs, DoctorArgs, ExitCode, InitArgs, PreflightArgs,
-    RepairStateArgs, SettleArgs, ValidateArgs, WaitReadyArgs,
+    cmd_diagnose, cmd_doctor, cmd_init, cmd_preflight, cmd_validate, cmd_wait_ready, CmdOutput,
+    DiagnoseArgs, DoctorArgs, ExitCode, InitArgs, PreflightArgs, ValidateArgs, WaitReadyArgs,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::ids::AgentId;
@@ -64,67 +63,6 @@ fn diagnose_live_fake_team_uses_active_team_projection() {
             .as_array()
             .is_some_and(|issues| issues.iter().any(|issue| issue.as_str() == Some("leader_not_attached"))),
         "selected team has an attached leader_receiver; raw top-level leader_not_attached is a false positive; out={out}"
-    );
-}
-
-#[test]
-fn repair_state_runtime_workspace_uses_selected_spec_path() {
-    let root = tmp_dir("repair-selected-spec");
-    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
-    seed_selected_team_state(&root, "teamA", &team, true);
-
-    let result = cmd_repair_state(&RepairStateArgs {
-        workspace: root.clone(),
-        task_id: "task_1".to_string(),
-        assignee: Some("worker_a".to_string()),
-        status: "done".to_string(),
-        summary: Some("patched by repair".to_string()),
-        json: true,
-        team: None,
-    });
-    assert!(
-        result.is_ok(),
-        "repair-state --workspace <runtime> must select teams[active].spec_path and write the selected team_state.md; result={result:?}"
-    );
-    let out = json_result(result.unwrap());
-    assert_eq!(out["ok"], json!(true), "repair-state JSON must be ok=true; out={out}");
-    let state = load_runtime_state(&root).expect("state after repair");
-    assert_eq!(
-        state["teams"]["teamA"]["tasks"][0]["status"],
-        json!("done"),
-        "repair-state must update the selected team task projection, not raw top-level tasks; state={state}"
-    );
-    let state_file = out["state_file"].as_str().unwrap_or_default();
-    assert!(
-        state_file.contains("/teamA/") && Path::new(state_file).exists(),
-        "repair-state must write through the selected spec/team dir path; out={out}"
-    );
-}
-
-#[test]
-fn settle_runtime_workspace_collects_selected_team() {
-    let root = tmp_dir("settle-selected-team");
-    let team = write_team_dir(&root, "teamA", &[("worker_a", "Fake worker")]);
-    seed_selected_team_state(&root, "teamA", &team, true);
-    insert_result(&root, "res_teamA", "task_1", "worker_a", "teamA", "success");
-
-    let out = json_result(
-        cmd_settle(&SettleArgs {
-        team: None,
-            workspace: root.clone(),
-            json: true,
-        })
-        .expect("settle should return JSON"),
-    );
-    assert_eq!(out["ok"], json!(true), "settle must succeed for a selected runtime team; out={out}");
-    let collected = out["collect"]["collected"].as_array().cloned().unwrap_or_default();
-    assert!(
-        collected.iter().any(|row| row["result_id"] == json!("res_teamA")),
-        "settle --workspace <runtime> must collect results scoped to active_team_key; out={out}"
-    );
-    assert!(
-        out["details_log"].as_str().is_some_and(|path| path.contains(".team/logs/settle-")),
-        "settle details log belongs under the runtime workspace, while content is selected-team scoped; out={out}"
     );
 }
 

@@ -853,7 +853,7 @@ pub(crate) fn message_store_schema_health(workspace: &WorkspacePath) -> SchemaHe
             error: Some(SchemaError::InitFailed {
                 message: e.to_string(),
             }),
-            action: Some("run team-agent repair-state --schema".to_string()),
+            action: Some("run team-agent doctor --fix-schema --json".to_string()),
         },
     }
 }

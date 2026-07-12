@@ -49,7 +49,7 @@ pub enum CliError {
     /// I/O(cli-error 落盘、inbox 游标读写)。bug-084:写路径降级,不裸 panic。
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    /// JSON 解析(`validate-result` 读 envelope)。
+    /// JSON 解析。
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 }
@@ -341,33 +341,6 @@ pub struct SendArgs {
     pub to_leader: Option<String>,
 }
 
-/// E23 worker-side emergency fallback for `team_orchestrator.send_message`
-/// transport failures. This is not a general control-plane send path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FallbackSendLeaderArgs {
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub sender: String,
-    pub task: Option<String>,
-    pub message_id: String,
-    pub content: String,
-    pub primary_error: String,
-    pub json: bool,
-}
-
-/// E23 worker-side emergency fallback for `team_orchestrator.report_result`
-/// transport failures. It must still persist through the results DB.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FallbackReportResultArgs {
-    pub workspace: PathBuf,
-    pub team: Option<String>,
-    pub agent_id: String,
-    pub task_id: String,
-    pub result_json: String,
-    pub primary_error: String,
-    pub json: bool,
-}
-
 /// `allow-peer-talk`(`parser.py`): allow direct peer communication between two agents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllowPeerTalkArgs {
@@ -649,15 +622,6 @@ pub struct ProfileArgs {
     pub json: bool,
 }
 
-/// `validate-result`(`parser.py:312`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidateResultArgs {
-    pub envelope: Option<String>,
-    pub file: Option<PathBuf>,
-    pub result: Option<String>,
-    pub json: bool,
-}
-
 /// `collect`(`parser.py:292`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectArgs {
@@ -667,33 +631,6 @@ pub struct CollectArgs {
     /// Stage 4: explicit `--team` scope. Destructive (consumes result
     /// envelopes); CLI dispatch refuses bare invocation in a
     /// multi-alive-team workspace.
-    pub team: Option<String>,
-}
-
-/// `settle`(`parser.py:177`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettleArgs {
-    pub workspace: PathBuf,
-    /// Bug #6 (prerelease 0.4.0 gate review): explicit team scope. When
-    /// `Some`, settle scopes collect/status/team-state to this team via
-    /// `resolve_active_team(workspace, Some(team), ...)`. When `None`,
-    /// the selector falls back to top-level `active_team_key` (legacy).
-    pub team: Option<String>,
-    pub json: bool,
-}
-
-/// `repair-state`(`parser.py:303`)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepairStateArgs {
-    pub workspace: PathBuf,
-    pub task_id: String,
-    pub assignee: Option<String>,
-    pub status: String,
-    pub summary: Option<String>,
-    pub json: bool,
-    /// Stage 4: explicit `--team` scope. Destructive (rewrites task state);
-    /// CLI dispatch refuses bare invocation in a multi-alive-team
-    /// workspace.
     pub team: Option<String>,
 }
 

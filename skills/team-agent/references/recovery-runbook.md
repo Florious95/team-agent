@@ -44,7 +44,7 @@ Fresh/reset red line:
 | Leader pane exists but messages say `leader_not_attached`, `rebind_required`, `team_owner_mismatch`, or leader 被抢 | Leader ownership or receiver binding drift | §2 L3 Claim Or Rebind Leader |
 | A live team must be recovered without losing worker context | Resume/restart path needed | §3 L2 Restart With Resume First |
 | Shutdown/restart cleanup status is ambiguous | Need residue-based truth, not a single `ok` field | §4 L1/L2 Cleanup Verification |
-| MCP tool call fails with `Transport closed` while the worker still has the payload | Provider-owned MCP stdio child died | §5 Superseded/Pending E23 Fallback Boundary |
+| MCP tool call fails with `Transport closed` while the worker still has the payload | Provider-owned MCP stdio child died | §5 MCP Transport-Dead Payload Handoff |
 
 ## 1. L1 Read-Only Triage
 
@@ -239,30 +239,15 @@ Python 0.2.11 compatibility note:
 
 - Python cleanup notes may mention direct tmux commands. They are not listed here as RS recovery prescriptions.
 
-## 5. Superseded/Pending E23 Fallback Boundary
+## 5. MCP Transport-Dead Payload Handoff
 
-[contextual: preserved] [level: L1] E23 fallback is the only narrow worker-scope exception to the normal tool boundary. It is for a current payload already in hand after a leader-bound MCP delivery failure.
+[contextual: preserved] [level: L1] If the worker already has a leader-bound payload in hand and the MCP transport dies before the normal `send` or `report_result` path can accept it, preserve the payload in a file handoff artifact and ask for leader/user recovery through the visible channel that still works.
 
-Current status:
-
-- Product implementation exists in the E23 branch for `fallback-send-leader` and `fallback-report-result`.
-- Local RS verification has covered CLI help and focused E23 tests.
-- This reference does not yet promote the fallback CLI to a general external prescription because the new documentation gate requires current-release RS validation in the Mac mini environment.
-
-Until that validation is added:
-
-- Workers should write a file handoff artifact for the current payload and ask for leader/user recovery.
-- Leaders should prefer restart/resume of the affected worker after the current payload is preserved.
-
-Do not use E23 fallback as a general message path. It does not permit arbitrary worker execution of L2/L3 recovery operations.
-
-RS verification record:
-
-- Local only at the time of this reference update: E23 focused tests and CLI help on the merged E23 documentation branch. Mac mini current-release validation is still required before adding exact fallback commands here.
+After restart/resume, use the normal MCP tool path again. Do not treat file handoff as a general message path or as permission to run arbitrary L2/L3 recovery operations.
 
 Python 0.2.11 compatibility note:
 
-- Python MCP stdio EOF had no durable reconnect. File handoff was the practical fallback. RS E23 adds product support, but this entry remains gated until real-machine validation is complete.
+- Python MCP stdio EOF had no durable reconnect. File handoff was the practical fallback.
 
 ## Held Out Of This Reference
 

@@ -5,7 +5,7 @@
 //! - RED1: stale coordinator pid must surface as a diagnose issue and restart hint.
 //! - RED2: healthy same-version coordinator must not produce coordinator issues.
 //! - RED3: live coordinator with stale binary identity must surface the mismatch.
-//! - RED4: incompatible message-store schema must surface a repair-state hint.
+//! - RED4: incompatible message-store schema must surface a doctor --fix-schema hint.
 //! - Non-goal: `diagnose` stays read-only; it must not mutate pid/meta/state/db/events
 //!   or start/stop/rotate the coordinator.
 
@@ -152,9 +152,9 @@ fn diagnose_reports_schema_incompatible_as_repair_state_hint() {
     assert!(
         repair(&out, "coordinator_schema_incompatible").is_some_and(|value| {
             value.get("hint_action").and_then(Value::as_str)
-                == Some("team-agent repair-state --schema")
+                == Some("team-agent doctor --fix-schema --json")
         }),
-        "RED4: schema incompatible must suggest hint_action=team-agent repair-state --schema; out={out}"
+        "RED4: schema incompatible must suggest hint_action=team-agent doctor --fix-schema --json; out={out}"
     );
     fixture.assert_runtime_files_unchanged(before, "RED4 schema-incompatible diagnose");
 }
@@ -187,7 +187,7 @@ impl DiagnoseFixture {
             let _ = team_agent::message_store::MessageStore::open(&root).expect("create schema");
         }
         save_runtime_state(&root, &state(&root)).expect("save state");
-        let _ = load_runtime_state(&root).expect("settle runtime state migrations before snapshot");
+        let _ = load_runtime_state(&root).expect("apply runtime state migrations before snapshot");
         Self {
             _env: env,
             workspace: WorkspacePath::new(root.clone()),

@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 71;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 70;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -28,14 +28,6 @@ macro_rules! allow {
 }
 
 pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
-    allow!(
-        "cli/adapters.rs",
-        "cmd_repair_state",
-        "save_team_scoped_state",
-        "TaskRepair",
-        "deletion_candidate",
-        675
-    ),
     allow!(
         "cli/adapters.rs",
         "seed_fake_e2e_state",

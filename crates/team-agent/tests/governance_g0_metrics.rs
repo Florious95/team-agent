@@ -1,12 +1,11 @@
-//! G0 governance metrics, report-only.
+//! G0 governance metrics.
 //!
 //! References:
 //! - `.team/artifacts/tech-debt-audit-and-roadmap.md` §4 Phase G0.
 //! - `.team/artifacts/tech-debt-audit-and-roadmap.md` §7 acceptance matrix.
 //!
-//! These checks intentionally do not hard-fail on threshold breaches. The
-//! roadmap switches them to hard-fail only after the C1 three-signature gate
-//! and real-machine acceptance are both green.
+//! The visible command count is a hard gate after C1 acceptance. Direct state
+//! save enumeration remains diagnostic beside the S1a repository contract.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -17,7 +16,7 @@ use std::process::Command;
 const VISIBLE_COMMAND_TARGET: usize = 15;
 
 #[test]
-fn visible_command_count_is_report_only_g0_metric() {
+fn visible_command_count_stays_within_g0_limit() {
     let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .arg("--help")
         .output()
@@ -31,29 +30,23 @@ fn visible_command_count_is_report_only_g0_metric() {
 
     let help = String::from_utf8_lossy(&output.stdout);
     let commands = parse_visible_commands(&help);
-    let status = if commands.len() > VISIBLE_COMMAND_TARGET {
-        "warning"
-    } else {
-        "ok"
-    };
-
     println!(
-        "G0_METRIC visible_command_count current={} target_threshold={} status={status}",
+        "G0_METRIC visible_command_count current={} target_threshold={} status=ok",
         commands.len(),
         VISIBLE_COMMAND_TARGET
     );
     println!("G0_VISIBLE_COMMANDS {}", commands.join(","));
-    if commands.len() > VISIBLE_COMMAND_TARGET {
-        println!(
-            "G0_WARNING visible_command_count_over_target current={} target_threshold={} report_only=true",
-            commands.len(),
-            VISIBLE_COMMAND_TARGET
-        );
-    }
+    assert!(
+        commands.len() <= VISIBLE_COMMAND_TARGET,
+        "G0 visible command count exceeded target: current={} target={} commands={:?}",
+        commands.len(),
+        VISIBLE_COMMAND_TARGET,
+        commands
+    );
 }
 
 #[test]
-fn direct_state_save_calls_are_report_only_g0_metric() {
+fn direct_state_save_calls_are_diagnostic_g0_metric() {
     let repo = repo_root();
     let mut callsites = Vec::new();
     collect_state_save_calls(&repo.join("crates/team-agent/src"), &mut callsites)
@@ -61,7 +54,7 @@ fn direct_state_save_calls_are_report_only_g0_metric() {
     callsites.sort();
 
     println!(
-        "G0_METRIC direct_state_save_callsite_count current={} report_only=true",
+        "G0_METRIC direct_state_save_callsite_count current={} diagnostic=true",
         callsites.len()
     );
     for callsite in &callsites {

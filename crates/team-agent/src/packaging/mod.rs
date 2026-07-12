@@ -75,7 +75,7 @@ use crate::model::enums::Provider;
 // ── REUSE — step 4 event_log(install/upgrade/repair 审计事件;原子替换的 rebuild/rollback 标记)──
 use crate::event_log::EventLog;
 
-// ── REUSE — step 5 state(uninstall「有 team 在跑勿删」判定经 state 投影;repair-state 转调)──
+// ── REUSE — step 5 state(uninstall「有 team 在跑勿删」判定经 state 投影)──
 // `state` 操作 state.json = serde_json::Value;此处仅在 fn 签名内经全限定路径引用,避免未用顶层 import。
 
 #[cfg(test)]

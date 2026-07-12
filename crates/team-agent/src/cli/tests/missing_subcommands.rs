@@ -38,9 +38,9 @@ impl Drop for WorkspaceCleanup {
 }
 
     // =========================================================================
-    // WAVE-2 NON-SUB CHECKPOINT — 9 MISSING CLI subcommands (ABSENT from cli/emit.rs dispatch).
-    // emit.rs:53-78 `dispatch` has NO arm for: sessions, peek, collect, e2e, diagnose, repair-state,
-    // validate-result, preflight, wait-ready -> they fall to `_ => Ok(ExitCode::Error)`. These REDs
+    // WAVE-2 NON-SUB CHECKPOINT — missing CLI subcommands (ABSENT from cli/emit.rs dispatch).
+    // emit.rs `dispatch` has NO arm for sessions, peek, collect, e2e, diagnose,
+    // preflight, wait-ready -> they fall to `_ => Ok(ExitCode::Error)`. These REDs
     // assert the dispatch ROUTES each subcommand: `run([sub,...]) == ExitCode::Ok` for a golden
     // EXIT-0 scenario (today unrouted -> ExitCode::Error -> RED; green once the porter adds the
     // dispatch arm + handler). Golden exit codes + JSON shapes probed via `python3 -m team_agent <sub>`.
@@ -63,7 +63,7 @@ impl Drop for WorkspaceCleanup {
 
     /// The exact golden fake spec (cli/e2e.py `_fake_spec`, dumped via simple_yaml) with the literal
     /// `/WS` placeholder substituted to the real workspace — the minimal VALID team.spec.yaml that
-    /// `collect`/`repair-state` (load_spec) accept. (load_spec rejects partial specs: requires
+    /// `collect` accepts. (load_spec rejects partial specs: requires
     /// communication/context/leader/routing/runtime/tasks.)
     const FAKE_SPEC_YAML: &str = r#"version: 1
 team:
@@ -214,22 +214,6 @@ tasks:
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-    // ── validate-result ── golden parser.py:312 `cmd_validate_result` (commands.py:206). A FULL valid
-    // result_envelope_v1 -> {"agent_id":"a1","ok":true,"status":"success","task_id":"t1"} EXIT 0.
-    // RED: unrouted -> Error. (A partial envelope golden-exits 1 — that would be false-green, so the
-    // RED uses the complete envelope that golden accepts.)
-    #[test]
-    fn dispatch_routes_validate_result_valid_envelope() {
-        let envelope = r#"{"schema_version":"result_envelope_v1","task_id":"t1","agent_id":"a1","status":"success","summary":"done","artifacts":[],"changes":[],"tests":[],"risks":[],"next_actions":[]}"#;
-        let code = run(&cli_argv(&["validate-result", envelope, "--json"]), std::path::Path::new("."));
-        assert_eq!(
-            code,
-            ExitCode::Ok,
-            "`validate-result <valid envelope> --json` must ROUTE to cmd_validate_result (parser.py:312) \
-             and exit 0 with {{agent_id,ok,status,task_id}}; today -> unknown-subcommand Error"
-        );
-    }
-
     // ── collect ── golden parser.py:292 `cmd_collect` -> runtime.collect(ws). With a valid
     // team.spec.yaml present and nothing to collect -> EXIT 0, golden:
     //   {"collected":[],"collected_results":[],"coordinator":{"ok":false,"status":"not_required"},
@@ -263,40 +247,6 @@ tasks:
              {{collected,collected_results,coordinator,delivered_messages,invalid_results,ok,results,state_file}}; \
              today -> unknown-subcommand Error"
         );
-    }
-
-    // ── repair-state ── golden parser.py:303 `cmd_repair_state` -> runtime.repair_state (quick_start.py:285).
-    // `--task <id>` required; `--status` must be in TASK_STATUSES{blocked,cancelled,done,failed,
-    // needs_retry,pending,ready,running}. With a seeded task + --status done -> EXIT 0:
-    //   {"after":{...},"before":{...},"ok":true,"state_file":"<ws>/team_state.md","task_id":"fake_impl"}
-    // RED: unrouted -> Error.
-    #[test]
-    fn dispatch_routes_repair_state_with_task() {
-        let ws = tmp_workspace();
-        seed_team_spec(&ws);
-        std::fs::write(
-            ws.join(".team").join("runtime").join("state.json"),
-            serde_json::to_vec(&json!({
-                "leader": {"id": "leader"},
-                "tasks": [{"id": "fake_impl", "title": "impl", "status": "open", "assignee": "fake_impl", "type": "implementation"}],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let code = run(
-            &cli_argv(&[
-                "repair-state", "--workspace", &ws.to_string_lossy(),
-                "--task", "fake_impl", "--status", "done", "--summary", "ok", "--json",
-            ]),
-            &ws,
-        );
-        assert_eq!(
-            code,
-            ExitCode::Ok,
-            "`repair-state --task <id> --status done` must ROUTE to cmd_repair_state (parser.py:303) and \
-             exit 0 {{after,before,ok,state_file,task_id}}; today -> unknown-subcommand Error"
-        );
-        let _ = std::fs::remove_dir_all(&ws);
     }
 
     // ── diagnose ── golden parser.py:298 `cmd_diagnose` -> runtime.diagnose(ws) (diagnose/health.py:19).
