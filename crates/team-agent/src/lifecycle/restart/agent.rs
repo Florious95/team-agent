@@ -284,6 +284,14 @@ pub(crate) fn start_agent_at_paths(
     // after spawn" race with coordinator and no double source of truth.
     crate::lifecycle::launch::annotate_runtime_tmux_endpoint(&mut state, transport, workspace);
     let team_key = restart_projection_team_key(&state, team);
+    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+    // clear the matching `agent_health` observation on the new spawn cohort
+    // so five-line status summary and status --json do not surface a stale
+    // WORKING row from the pre-shutdown process. Best-effort: DB failure
+    // must not fail the start-agent path.
+    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
+        workspace, &team_key, agent_id,
+    );
     let skip_capture_backfill = if matches!(
         start_mode,
         StartMode::Fresh | StartMode::FreshAfterMissingRollout
@@ -977,6 +985,12 @@ fn mark_agent_started(
             agent_id
         )));
     };
+    // 0.5.32 (`.team/artifacts/restart-resumed-stale-activity-locate.md` §5):
+    // a successful new process cohort invalidates the per-agent
+    // turn/activity observation set. Do this before overwriting the
+    // lifecycle/topology fields so absence == UNKNOWN until the next
+    // coordinator tick or pane fallback produces a post-spawn observation.
+    clear_agent_runtime_activity_observation(agent);
     // S1-CAPTURE-001 (0.4.8, CR M3 provider-agnostic): on a Fresh /
     // FreshAfterMissingRollout start, the prior session's authoritative
     // capture tuple MUST be cleared before persist_command_plan_state
