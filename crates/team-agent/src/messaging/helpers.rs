@@ -163,20 +163,27 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
     }
     let mut has_idle_prompt = false;
     let mut has_live_working_indicator = false;
+    let mut has_fake_ready_structural = false;
     for line in &active_region {
         let lower = line.to_ascii_lowercase();
         if line.contains('❯') || line.contains('›') {
             has_idle_prompt = true;
         }
-        // 0.5.32 follow-up (`0532-r1-real-fail-triage.md` §6/§7):
+        // 0.5.34 (`0532-r1-real-fail-triage.md` §6/§7 + te msg_94957b9c55b0):
         // fake provider owns explicit READY/WORKING markers (fake_worker.rs:47/59).
-        // Recognize them here as STRUCTURAL bottom-region signals so restart's
-        // first-capture READY does not fall through to `recent_provider_output`
-        // false busy. Scope: literal `TEAM_AGENT_FAKE_READY`/`TEAM_AGENT_FAKE_WORKING`
-        // tokens only — do NOT infer that arbitrary "ready" prose from real
-        // providers means idle.
+        // - READY is a STRUCTURAL non-busy signal that suppresses the
+        //   `recent_provider_output` false-busy on first post-restart capture,
+        //   but must NOT resolve to Idle (unknown-never-idle discipline —
+        //   post-restart READY is the fake worker's boot heartbeat, not proof
+        //   of an idle prompt). Route it through Uncertain with a distinct
+        //   rationale so callers can trace the source.
+        // - WORKING is a structural busy signal (parity with the codex
+        //   `• Working (` composer indicator).
+        // Scope: literal `TEAM_AGENT_FAKE_*` tokens only — do NOT infer that
+        // arbitrary "ready" prose from real providers means either idle or
+        // non-busy.
         if line.contains("TEAM_AGENT_FAKE_READY") {
-            has_idle_prompt = true;
+            has_fake_ready_structural = true;
         }
         if line.contains("TEAM_AGENT_FAKE_WORKING") {
             has_live_working_indicator = true;
@@ -207,6 +214,17 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
     }
     if has_idle_prompt {
         return Some(idle_activity());
+    }
+    // 0.5.34: fake READY is structural but not decisive. Return Uncertain
+    // so the classifier short-circuits (avoiding recent_provider_output
+    // false-busy) without asserting idle. `latest_pane_signal_is_structural`
+    // in coordinator/tick.rs treats `Some(_)` as structural.
+    if has_fake_ready_structural {
+        return Some(AgentActivity {
+            status: ActivityStatus::Uncertain,
+            confidence: 0.6,
+            rationale: "fake_ready_structural".to_string(),
+        });
     }
     // No structural signal in the bottom region → caller (activity.rs:184)
     // gets None and treats as no-decisive-signal → Uncertain (IRON LAW).
