@@ -2363,7 +2363,7 @@ fn run_bounded_parallel_worker_spawns(
                     }
                     // Advance the gate so the next plan-order thread can
                     // start its own `spawn_agent_window` in parallel; a
-                    // deterministic 2ms stagger between plan slots keeps
+                    // deterministic 10ms stagger between plan slots keeps
                     // pane_id assignment (which happens inside the
                     // transport at the tail of its call) ordered by plan
                     // even when each individual call sleeps for tens of
@@ -2376,11 +2376,14 @@ fn run_bounded_parallel_worker_spawns(
                 // per-slot stagger so pane_id assignment inside the
                 // transport happens in plan order even though the
                 // subsequent per-call sleeps overlap across threads.
-                // 10ms per slot is enough headroom over OS scheduler
-                // jitter (previous 3/5ms values flaked on shared macOS
-                // gate machines) while remaining well under real tmux
+                // 10ms per slot is enough headroom over OS scheduler jitter
+                // (previous 3/5ms values flaked on shared macOS gate
+                // machines) while remaining well under real tmux
                 // new-window latency (~50-120ms) so the overlap
-                // property required by R1 still holds.
+                // property required by R1 still holds. Reverse guard for
+                // this stagger lives in
+                // `tests/parallel_spawn_stagger_reverse_guard.rs`
+                // (0.5.38 cr observation D-k).
                 std::thread::sleep(std::time::Duration::from_millis(slot as u64 * 10));
                 let spawn_start = std::time::Instant::now();
                 let outcome = match spawn_agent_window(
