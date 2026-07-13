@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.38
+
+- **Feature: startup latency instrumentation + bounded parallel worker spawn (Step 1+2).** Added per-worker spawn timing telemetry emitted to events.jsonl (worker.spawn_timing with queued_at, spawn_start_at, spawn_end_at, elapsed_ms). Fresh/FreshAfterMissingRollout restarts now spawn workers concurrently via a bounded Condvar submission gate (max 4 in-flight), reducing wall-clock startup time from O(N) serial to O(⌈N/4⌉) parallel. Resumed restarts remain serial (session_disappeared semantic requires deterministic ordering). New contract: startup_latency_contract (856 lines, golden fixture regen for 5 existing fixtures).
+
 ## 0.5.37
 
 - **Fix: recovery terminal idempotency — skip dispatch and clear stale due-time (R5 restart storm).** Terminal recovery intents (succeeded/blocked/exhausted) were re-dispatching on every tick because the due-time filter did not exclude them and the dispatch path did not clear next_retry_at. Fixed by: (1) clearing stale terminal next_retry_at at the top of attempt_due_recoveries before collecting; (2) restricting collect_due_recovery_agents to scheduled/running status only; (3) removing next_retry_at on write_recovery_intent_result for terminal transitions. New contract cases: r8 terminal idempotency (positive) + r8 non-terminal still dispatches (negative guard).
