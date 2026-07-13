@@ -589,6 +589,44 @@ pub trait Transport: Send + Sync {
         self.spawn_into(session, window, argv, cwd, env)
     }
 
+    /// 0.5.39 Slice 2 (tmux-server-death-locate §7 Slice 2): worker spawn
+    /// variant that reuses the leader-wrapper mechanism so worker provider
+    /// exit does not collapse the pane into `[exited]` (which under
+    /// upstream tmux 3.6a private-server bugs can cascade into server
+    /// death). When the provider exits, the worker pane returns to an
+    /// interactive shell with an explicit worker exit marker — matching
+    /// manual `tmux new-window` then `<provider>` behaviour. Default falls
+    /// back to plain `spawn_first_with_env_unset` for backends that have
+    /// no shell layer (test-only `OfflineTransport`).
+    fn spawn_first_with_worker_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = provider_label;
+        self.spawn_first_with_env_unset(session, window, argv, cwd, env, env_unset)
+    }
+
+    /// 同 [`Transport::spawn_first_with_worker_shell_wrapper`],对应 `spawn_into`。
+    fn spawn_into_with_worker_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let _ = provider_label;
+        self.spawn_into_with_env_unset(session, window, argv, cwd, env, env_unset)
+    }
+
     /// 0.4.x (CR C-2): leader-specific spawn variant. Instead of `exec <cmd>`
     /// (which makes the provider the pane's primary process and turns the
     /// pane into `[exited]` when the provider exits), build a shell line

@@ -59,19 +59,35 @@ fn scan_file(manifest: &Path, path: &Path, violations: &mut Vec<Violation>) {
     let text = std::fs::read_to_string(path).expect("read source file");
     let lines: Vec<&str> = text.lines().collect();
     for (idx, line) in lines.iter().enumerate() {
-        if !line.contains("Command::new(\"tmux\")") {
+        // Direct raw invocation: `Command::new("tmux").arg(...)`.
+        if line.contains("Command::new(\"tmux\")") {
+            let window = lines[idx..lines.len().min(idx + 14)].join("\n");
+            if is_allowed_probe(&window) || is_socketed_raw_call(&window) {
+                continue;
+            }
+            if let Some(op) = tmux_server_op(&window) {
+                violations.push(Violation {
+                    file: rel.clone(),
+                    line: idx + 1,
+                    op,
+                });
+            }
             continue;
         }
-        let window = lines[idx..lines.len().min(idx + 14)].join("\n");
-        if is_allowed_probe(&window) || is_socketed_raw_call(&window) {
-            continue;
-        }
-        if let Some(op) = tmux_server_op(&window) {
-            violations.push(Violation {
-                file: rel.clone(),
-                line: idx + 1,
-                op,
-            });
+        // 0.5.39 Slice 1 (tmux-server-death-locate §4.6 coverage note):
+        // helper-indirection gap — a file-local `run_tmux(&[...])` that
+        // forwards to `Command::new("tmux")` skirts the direct-invocation
+        // scan above because the raw call sits in a helper. Catch it by
+        // scanning for `run_tmux(&[` (or `run_tmux(& [`) with a
+        // destructive op inline on the same line.
+        if line.contains("run_tmux(&[") || line.contains("run_tmux(& [") {
+            if let Some(op) = tmux_server_op(line) {
+                violations.push(Violation {
+                    file: rel.clone(),
+                    line: idx + 1,
+                    op,
+                });
+            }
         }
     }
 }
