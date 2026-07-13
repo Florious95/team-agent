@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.36
+
+- **Fix: API error recovery — bounded retry, backpressure, copyable state (supermarket P2).** The coordinator now detects repeated API errors (429/5xx) via the abnormal exit watcher and enters a bounded retry/backpressure mode: exponential back-off with a configurable retry budget, a canary-first strategy for 429s, and explicit noop paths when recovery is not applicable. Recovery intent is persisted atomically post-save (outside the pre-save window) and never synthesizes hidden provider turns or SDK calls.
+- New contract: api_error_recovery (8 cases covering R4 backpressure, R5 budget exhaustion, R6 pre-save isolation, R7 no-SDK invariant).
+
 ## 0.5.35
 
 - **Fix: managed-leader Ctrl+C reentry (user-reported).** When a managed leader pane received Ctrl+C and restarted, the coordinator would not recognize it as the same logical leader, causing a new unmanaged binding and orphaning the prior team session. Added a thin detection gate (different_pane check + LEADER_SESSION_PREFIX + socket match) that routes matching restarts through ManagedReentry instead of fresh binding.
