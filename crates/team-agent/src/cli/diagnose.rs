@@ -3,6 +3,22 @@ use super::*;
 use crate::provider::wire::{command_name, parse_provider, provider_wire};
 use crate::transport::Transport;
 
+/// 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): classify a tmux
+/// transport error string into a diagnose issue id. When the underlying
+/// tmux subprocess stderr contains `server exited unexpectedly`, the
+/// tmux server itself crashed (upstream tmux 3.6a control-mode +
+/// broadcast attach/detach jitter is one known trigger) — the physical
+/// layer that disappeared is the whole server, not just this team's
+/// session. Otherwise, callers keep the legacy `tmux_session_missing`
+/// classification.
+pub(crate) fn classify_tmux_server_error(error_text: &str) -> &'static str {
+    if error_text.contains("server exited unexpectedly") {
+        "tmux_server_crashed"
+    } else {
+        "tmux_session_missing"
+    }
+}
+
 pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value, Value) {
     let mut issues = Vec::new();
     let mut repairs = Vec::new();
@@ -31,11 +47,20 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                 ));
             }
             Err(error) => {
-                issues.push(json!("tmux_session_missing"));
+                // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B):
+                // when the transport error stderr matches "server exited
+                // unexpectedly", the physical layer that disappeared is
+                // the tmux server itself — not just this team's session.
+                // Surface `tmux_server_crashed` so the user's next
+                // action is a coordinator/host-level recovery, not a
+                // per-agent `restart <agent>`.
+                let error_str = error.to_string();
+                let issue_id = classify_tmux_server_error(&error_str);
+                issues.push(json!(issue_id));
                 let mut hint =
-                    recovery_hint(session_name, "tmux_session_missing", "team-agent restart");
+                    recovery_hint(session_name, issue_id, "team-agent diagnose");
                 if let Some(obj) = hint.as_object_mut() {
-                    obj.insert("reason".to_string(), Value::String(error.to_string()));
+                    obj.insert("reason".to_string(), Value::String(error_str));
                 }
                 repairs.push(hint);
             }

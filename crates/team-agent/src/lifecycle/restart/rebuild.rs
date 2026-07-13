@@ -2049,11 +2049,25 @@ fn restart_failure_phase(
     phase: &'static str,
     error: &str,
 ) -> &'static str {
+    // 0.5.39 Slice 1 (tmux-server-death-locate §11.1 B): promote
+    // spawn/readiness errors whose stderr contains "server exited
+    // unexpectedly" to `tmux_server_crashed`, so downstream event
+    // classification and diagnose next_actions ("team-agent diagnose")
+    // don't misattribute a whole-server death to a per-agent provider
+    // failure. Restart itself does not recover from server crashes in
+    // 0.5.39 (§11.1 C is Slice 3, later car); it just classifies clearly.
+    if is_tmux_server_crashed(error) {
+        return "tmux_server_crashed";
+    }
     if is_resume_integrity_failure(decision, phase, error) {
         "resume"
     } else {
         phase
     }
+}
+
+fn is_tmux_server_crashed(error: &str) -> bool {
+    error.contains("server exited unexpectedly")
 }
 
 fn is_resume_integrity_failure(decision: &RestartedAgent, phase: &str, error: &str) -> bool {

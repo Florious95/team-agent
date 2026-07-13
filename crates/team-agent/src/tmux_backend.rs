@@ -1509,6 +1509,149 @@ pub fn leader_provider_exit_marker(provider_label: &str) -> String {
     )
 }
 
+/// 0.5.39 Slice 1 (tmux-server-death-locate §7 Slice 1): ambient-tmux
+/// leader-pane probe. Kept inside `tmux_backend` because it is
+/// definitionally ambient — its job is to discover *which* session/pane
+/// the leader process is currently inside via $TMUX/$TMUX_PANE +
+/// `tmux display-message`. Everywhere else in the codebase, tmux ops
+/// must go through a socket-scoped `TmuxBackend` (that constraint is
+/// enforced by `n16_tmux_socket_invariant_red.rs` +
+/// `tmux_server_death_0539_contract.rs::display_cleanup_...`); this
+/// helper is the single controlled exception.
+///
+/// Returns `(session_name, Some(pane_id))` when the ambient tmux
+/// responds, or `None` if `$TMUX` is unset / `display-message` fails.
+pub fn probe_ambient_leader_pane_info() -> Option<(String, Option<String>)> {
+    let pane = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    if let Some(pane) = pane.as_deref() {
+        commands.push(vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.to_string(),
+            "-F".to_string(),
+            "#{session_name}\t#{pane_id}".to_string(),
+        ]);
+        commands.push(vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            pane.to_string(),
+            "-F".to_string(),
+            "#{session_name}".to_string(),
+        ]);
+    }
+    if std::env::var("TMUX").is_ok_and(|value| !value.is_empty()) {
+        commands.push(vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-F".to_string(),
+            "#{session_name}\t#{pane_id}".to_string(),
+        ]);
+        commands.push(vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-F".to_string(),
+            "#{session_name}".to_string(),
+        ]);
+    }
+    for command in commands {
+        let output = match std::process::Command::new("tmux").args(&command).output() {
+            Ok(output) if output.status.success() => output,
+            _ => continue,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = stdout.lines().find(|line| !line.trim().is_empty()) else {
+            continue;
+        };
+        let line = line.trim();
+        let parts: Vec<&str> = line.split('\t').collect();
+        let parsed = match parts.as_slice() {
+            [session, pane_str, ..] if !session.is_empty() && !session.starts_with('%') => Some((
+                (*session).to_string(),
+                (!pane_str.is_empty()).then(|| (*pane_str).to_string()),
+            )),
+            [pane_str, session, ..] if pane_str.starts_with('%') && !session.is_empty() => {
+                Some(((*session).to_string(), Some((*pane_str).to_string())))
+            }
+            [session] if !session.is_empty() && !session.starts_with('%') => {
+                Some(((*session).to_string(), None))
+            }
+            _ => None,
+        };
+        if parsed.is_some() {
+            return parsed;
+        }
+    }
+    None
+}
+
+/// 0.5.39 Slice 2 (tmux-server-death-locate §11.2): single-source worker
+/// exit marker prefix. Same envelope shape as `LEADER_PROVIDER_EXIT_MARKER_*`
+/// but distinct so status/classifier code can tell "leader pane fell back
+/// to shell" from "worker pane fell back to shell". Format:
+/// `"[team-agent worker] {provider_label} exited with {rc}"`.
+pub const WORKER_PROVIDER_EXIT_MARKER_PREFIX: &str = "[team-agent worker]";
+pub const WORKER_PROVIDER_EXIT_MARKER_SUFFIX: &str = "exited with";
+
+/// 0.5.39 Slice 2: build the worker exit marker text for `provider_label`.
+/// Used by both the worker shell wrapper (printf source) and future
+/// status/classifier code (capture substring) so they cannot drift.
+pub fn worker_provider_exit_marker(provider_label: &str) -> String {
+    format!(
+        "{WORKER_PROVIDER_EXIT_MARKER_PREFIX} {provider_label} {WORKER_PROVIDER_EXIT_MARKER_SUFFIX}"
+    )
+}
+
+/// 0.5.39 Slice 2 (tmux-server-death-locate §7 Slice 2): worker shell
+/// wrapper. Same shape as `leader_shell_wrapper_command` — provider runs
+/// as a CHILD of a long-lived shell so provider exit does NOT collapse the
+/// worker pane (which under upstream tmux 3.6a private-server bugs can
+/// cascade into whole-server death). When the provider exits, the worker
+/// pane returns to an interactive shell with an explicit worker exit
+/// marker, matching manual `tmux new-window` then `<provider>` behaviour.
+pub fn worker_shell_wrapper_command(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    env_unset: &[String],
+    provider_label: &str,
+) -> String {
+    let unset_set: std::collections::BTreeSet<&str> =
+        env_unset.iter().map(String::as_str).collect();
+    let mut parts = Vec::new();
+    parts.push("cd".to_string());
+    parts.push(shell_quote(&cwd.to_string_lossy()));
+    parts.push("&&".to_string());
+    for key in env_unset {
+        parts.push("unset".to_string());
+        parts.push(key.clone());
+        parts.push("&&".to_string());
+    }
+    for (key, value) in env {
+        if unset_set.contains(key.as_str()) {
+            continue;
+        }
+        parts.push(format!("{key}={}", shell_quote(value)));
+    }
+    parts.extend(argv.iter().map(|arg| shell_quote(arg)));
+    parts.push(";".to_string());
+    parts.push("rc=$?;".to_string());
+    parts.push("printf".to_string());
+    parts.push(shell_quote(&format!(
+        "\n{} %s\n",
+        worker_provider_exit_marker(provider_label)
+    )));
+    parts.push("\"$rc\";".to_string());
+    parts.push("exec".to_string());
+    parts.push("\"${SHELL:-/bin/zsh}\"".to_string());
+    parts.push("-l".to_string());
+    parts.join(" ")
+}
+
 /// 0.4.x (CR C-2): leader shell wrapper — provider runs as a CHILD of a
 /// long-lived shell, not as the pane's primary process. When the provider
 /// exits, the pane returns to an interactive shell with an explicit exit
@@ -1668,6 +1811,38 @@ impl Transport for TmuxBackend {
         env_unset: &[String],
     ) -> Result<SpawnResult, TransportError> {
         self.spawn_split(session, window, argv, cwd, env, env_unset)
+    }
+
+    /// 0.5.39 Slice 2: TmuxBackend override of the worker-shell-wrapper
+    /// variant. Same mechanism as the leader wrapper (child provider under
+    /// long-lived shell), but the marker text is distinct so downstream
+    /// classifiers can tell leader vs worker provider exit apart.
+    fn spawn_first_with_worker_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let command = worker_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
+        self.spawn_with_command(session, window, &command, true)
+    }
+
+    fn spawn_into_with_worker_shell_wrapper(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+        provider_label: &str,
+    ) -> Result<SpawnResult, TransportError> {
+        let command = worker_shell_wrapper_command(argv, cwd, env, env_unset, provider_label);
+        self.spawn_with_command(session, window, &command, false)
     }
 
     /// 0.4.x (CR C-2): TmuxBackend override of the leader-shell-wrapper

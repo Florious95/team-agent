@@ -228,25 +228,35 @@ pub(super) fn spawn_agent_window(
         );
     }
 
+    // 0.5.39 Slice 2 (tmux-server-death-locate §7 Slice 2): route the
+    // primary worker spawn through the worker shell wrapper so provider
+    // exit leaves the pane at an interactive shell with an explicit exit
+    // marker instead of collapsing the pane into `[exited]`. This mirrors
+    // the leader wrapper's manual-tmux equivalence. The split path stays
+    // on plain spawn_split — split panes are display overlays, not the
+    // primary worker process.
+    let provider_label = crate::provider::wire::command_name(provider);
     let result = if let Some(placement) = layout_placement {
         if placement.starts_window {
             if into_existing_session {
-                transport.spawn_into_with_env_unset(
+                transport.spawn_into_with_worker_shell_wrapper(
                     session_name,
                     &window,
                     &plan.argv,
                     spawn_cwd,
                     &env,
                     &env_unset,
+                    provider_label,
                 )
             } else {
-                transport.spawn_first_with_env_unset(
+                transport.spawn_first_with_worker_shell_wrapper(
                     session_name,
                     &window,
                     &plan.argv,
                     spawn_cwd,
                     &env,
                     &env_unset,
+                    provider_label,
                 )
             }
         } else if !window_present_in_live(transport, session_name, &window)
@@ -264,13 +274,14 @@ pub(super) fn spawn_agent_window(
             // hijack the developer worker's pane. Downgrade to spawn_into
             // (new window named after agent_id) — canonical per-agent
             // fallback the existing 7 workers use.
-            transport.spawn_into_with_env_unset(
+            transport.spawn_into_with_worker_shell_wrapper(
                 session_name,
                 &WindowName::new(agent_id.as_str()),
                 &plan.argv,
                 spawn_cwd,
                 &env,
                 &env_unset,
+                provider_label,
             )
         } else {
             // 0.3.28 Step 8: spawn_split must only fire from the display
@@ -286,22 +297,24 @@ pub(super) fn spawn_agent_window(
             )
         }
     } else if into_existing_session {
-        transport.spawn_into_with_env_unset(
+        transport.spawn_into_with_worker_shell_wrapper(
             session_name,
             &window,
             &plan.argv,
             spawn_cwd,
             &env,
             &env_unset,
+            provider_label,
         )
     } else {
-        transport.spawn_first_with_env_unset(
+        transport.spawn_first_with_worker_shell_wrapper(
             session_name,
             &window,
             &plan.argv,
             spawn_cwd,
             &env,
             &env_unset,
+            provider_label,
         )
     };
     let spawn = result.map_err(|e| LifecycleError::Transport(e.to_string()))?;

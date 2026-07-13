@@ -1,10 +1,19 @@
 //! lifecycle::display —— 能力门 / 后端解析 / 开关 / rebind 后重建。
+//!
+//! 0.5.39 Slice 1 (tmux-server-death-locate §7 Slice 1): all tmux
+//! session/window/pane operations here MUST go through the workspace's
+//! scoped `TmuxBackend` — raw `Command::new("tmux")` / ambient
+//! `run_tmux(...)` helpers in this file inherit ambient `$TMUX` and can
+//! kill sessions on the wrong socket. Ambient leader-pane env probes
+//! (`display-message` reading $TMUX to discover which session invoked
+//! us) live in `tmux_backend::probe_ambient_leader_pane_info` — that
+//! probe is definitionally ambient (its whole job is "which session am I
+//! in") and stays outside this module.
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
-use crate::transport::{PaneId, SessionName, WindowName};
+use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use super::*;
 
@@ -239,6 +248,12 @@ fn close_adaptive_displays(
             orphans_cleaned: Vec::new(),
         });
     };
+    // 0.5.39 Slice 1: build workspace-scoped tmux transport once and
+    // route every destructive tmux op below through it (no ambient
+    // $TMUX). The kill_* Transport methods carry the workspace socket
+    // (`tmux -L <socket>`) so display cleanup cannot cross-kill a session
+    // on the user's default tmux server.
+    let transport = crate::transport_factory::tmux_workspace_transport(workspace);
     let mut closed = Vec::new();
     let mut orphans_cleaned = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
@@ -258,13 +273,13 @@ fn close_adaptive_displays(
         }
         for target in display_identifiers(display, agent, agent_id, session_name, &state) {
             if seen.insert(target.clone()) {
-                kill_display_target(&target);
+                kill_display_target(&transport, &target);
                 closed.push(target);
             }
         }
     }
     if let Some(leader_session) = adaptive_leader_session(&state) {
-        for target in close_adaptive_windows(leader_session.as_str(), session_name.as_str()) {
+        for target in close_adaptive_windows(&transport, leader_session.as_str(), session_name.as_str()) {
             orphans_cleaned.push(target.clone());
             if seen.insert(target.clone()) {
                 closed.push(target);
@@ -351,13 +366,6 @@ struct LeaderTmuxInfo {
     pane: Option<String>,
 }
 
-#[derive(Debug)]
-struct TmuxOutput {
-    ok: bool,
-    stdout: String,
-    stderr: String,
-}
-
 fn in_wsl() -> bool {
     std::env::var("WSL_DISTRO_NAME").is_ok_and(|value| !value.is_empty())
         || std::env::var("WSL_INTEROP").is_ok_and(|value| !value.is_empty())
@@ -369,52 +377,11 @@ fn running_inside_tmux() -> bool {
 }
 
 fn current_leader_tmux_info() -> Option<LeaderTmuxInfo> {
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|value| !value.is_empty());
-    let mut commands = Vec::new();
-    if let Some(pane) = pane.as_deref() {
-        commands.push(vec![
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-            "-F".to_string(),
-            "#{session_name}\t#{pane_id}".to_string(),
-        ]);
-        commands.push(vec![
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-t".to_string(),
-            pane.to_string(),
-            "-F".to_string(),
-            "#{session_name}".to_string(),
-        ]);
-    }
-    if std::env::var("TMUX").is_ok_and(|value| !value.is_empty()) {
-        commands.push(vec![
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-F".to_string(),
-            "#{session_name}\t#{pane_id}".to_string(),
-        ]);
-        commands.push(vec![
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-F".to_string(),
-            "#{session_name}".to_string(),
-        ]);
-    }
-    for command in commands {
-        let args = command.iter().map(String::as_str).collect::<Vec<_>>();
-        if let Some(parsed) = run_tmux(&args)
-            .ok()
-            .and_then(|out| parse_tmux_info(&out.stdout))
-        {
-            return Some(parsed);
-        }
-    }
-    None
+    // 0.5.39 Slice 1: ambient probe lives in `tmux_backend` — the single
+    // controlled exception to the "all tmux ops through socket-scoped
+    // transport" rule (its whole job is "which session am I in?").
+    crate::tmux_backend::probe_ambient_leader_pane_info()
+        .map(|(session, pane)| LeaderTmuxInfo { session, pane })
 }
 
 fn env_leader_tmux_info() -> Option<LeaderTmuxInfo> {
@@ -428,44 +395,29 @@ fn env_leader_tmux_info() -> Option<LeaderTmuxInfo> {
     Some(LeaderTmuxInfo { session, pane })
 }
 
-fn parse_tmux_info(stdout: &str) -> Option<LeaderTmuxInfo> {
-    let line = stdout.lines().find(|line| !line.trim().is_empty())?.trim();
-    let parts = line.split('\t').collect::<Vec<_>>();
-    match parts.as_slice() {
-        [session, pane, ..] if !session.is_empty() && !session.starts_with('%') => {
-            Some(LeaderTmuxInfo {
-                session: (*session).to_string(),
-                pane: (!pane.is_empty()).then(|| (*pane).to_string()),
-            })
-        }
-        [pane, session, ..] if pane.starts_with('%') && !session.is_empty() => {
-            Some(LeaderTmuxInfo {
-                session: (*session).to_string(),
-                pane: Some((*pane).to_string()),
-            })
-        }
-        [session] if !session.is_empty() && !session.starts_with('%') => Some(LeaderTmuxInfo {
-            session: (*session).to_string(),
-            pane: None,
-        }),
-        _ => None,
-    }
-}
-
-fn close_adaptive_windows(leader_session: &str, session_name: &str) -> Vec<String> {
+fn close_adaptive_windows(
+    transport: &dyn Transport,
+    leader_session: &str,
+    session_name: &str,
+) -> Vec<String> {
     let prefix = format!("team-agent:{session_name}:overview");
-    let Ok(output) = run_tmux(&["list-windows", "-t", leader_session, "-F", "#{window_name}"])
-    else {
+    // 0.5.39 Slice 1: `Transport::list_windows` uses the workspace socket
+    // — if `leader_session` doesn't exist on that socket, list_windows
+    // returns Err/empty and we bail without touching another server.
+    let Ok(windows) = transport.list_windows(&SessionName::new(leader_session.to_string())) else {
         return Vec::new();
     };
-    output
-        .stdout
-        .lines()
-        .filter_map(|line| {
-            let window = line.trim();
+    windows
+        .into_iter()
+        .filter_map(|window| {
+            let window = window.as_str().to_string();
             if window == prefix || window.starts_with(&format!("{prefix}-")) {
-                let target = format!("{leader_session}:{window}");
-                kill_adaptive_window(&target).then_some(target)
+                let target_string = format!("{leader_session}:{window}");
+                let target = Target::SessionWindow {
+                    session: SessionName::new(leader_session.to_string()),
+                    window: WindowName::new(window),
+                };
+                transport.kill_window(&target).ok().map(|_| target_string)
             } else {
                 None
             }
@@ -473,18 +425,23 @@ fn close_adaptive_windows(leader_session: &str, session_name: &str) -> Vec<Strin
         .collect()
 }
 
-fn kill_adaptive_window(target: &str) -> bool {
-    run_tmux(&["kill-window", "-t", target]).is_ok()
-}
-
-fn kill_display_target(target: &str) {
-    if target.contains(':') {
-        let _ = run_tmux(&["kill-window", "-t", target]);
+fn kill_display_target(transport: &dyn Transport, target: &str) {
+    // 0.5.39 Slice 1: only kill window/pane — never fall back to
+    // kill-session on an ambiguous string shape. Locate §7 Slice 1:
+    // "Remove the string-shape `kill-session` fallback unless target is a
+    // proven display-only session." The old code parsed any bare
+    // non-`%`/non-`:` target as a session and issued `kill-session`,
+    // which is exactly the unbounded blast radius we're closing.
+    if let Some((session, window)) = target.split_once(':') {
+        let _ = transport.kill_window(&Target::SessionWindow {
+            session: SessionName::new(session.to_string()),
+            window: WindowName::new(window.to_string()),
+        });
     } else if target.starts_with('%') {
-        let _ = run_tmux(&["kill-pane", "-t", target]);
-    } else {
-        let _ = run_tmux(&["kill-session", "-t", target]);
+        let _ = transport.kill_pane(&PaneId::new(target.to_string()));
     }
+    // Bare session-name form is intentionally a no-op: display cleanup
+    // must not kill a whole session on shape guesswork.
 }
 
 fn adaptive_leader_session(state: &serde_json::Value) -> Option<String> {
@@ -525,23 +482,3 @@ fn string_field(display: &serde_json::Map<String, serde_json::Value>, key: &str)
         .map(str::to_string)
 }
 
-fn run_tmux(args: &[&str]) -> Result<TmuxOutput, LifecycleError> {
-    let output = Command::new("tmux")
-        .args(args)
-        .output()
-        .map_err(|e| LifecycleError::StatePersist(format!("tmux {}: {e}", args.join(" "))))?;
-    let result = TmuxOutput {
-        ok: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    };
-    if result.ok {
-        Ok(result)
-    } else {
-        Err(LifecycleError::StatePersist(format!(
-            "tmux {}: {}",
-            args.join(" "),
-            result.stderr.trim()
-        )))
-    }
-}
