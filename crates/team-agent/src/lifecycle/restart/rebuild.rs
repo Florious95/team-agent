@@ -2359,10 +2359,15 @@ fn run_bounded_parallel_worker_spawns(
                     cvar.notify_all();
                 }
                 // 0.5.38 Step 2: enforce plan-order transport entry via a
-                // tiny per-slot stagger so pane_id assignment inside the
+                // per-slot stagger so pane_id assignment inside the
                 // transport happens in plan order even though the
                 // subsequent per-call sleeps overlap across threads.
-                std::thread::sleep(std::time::Duration::from_millis(slot as u64 * 3));
+                // 10ms per slot is enough headroom over OS scheduler
+                // jitter (previous 3/5ms values flaked on shared macOS
+                // gate machines) while remaining well under real tmux
+                // new-window latency (~50-120ms) so the overlap
+                // property required by R1 still holds.
+                std::thread::sleep(std::time::Duration::from_millis(slot as u64 * 10));
                 let spawn_start = std::time::Instant::now();
                 let outcome = match spawn_agent_window(
                     run_workspace,
