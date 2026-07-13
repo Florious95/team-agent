@@ -1,6 +1,12 @@
 {
   "events_jsonl": [
     {
+      "elapsed_ms": 0,
+      "event": "launch.phase",
+      "phase": "compile_spec",
+      "ts": "<TS>"
+    },
+    {
       "ancestry_binary_name": null,
       "dangerous_auto_approve": false,
       "dangerous_auto_approve_flag": null,
@@ -10,6 +16,12 @@
       "event": "launch.permissions_resolved",
       "ts": "<TS>",
       "worker_capability_above_leader": false
+    },
+    {
+      "elapsed_ms": 0,
+      "event": "launch.phase",
+      "phase": "spawn_all",
+      "ts": "<TS>"
     },
     {
       "agent_id": "w1",
@@ -97,6 +109,52 @@
       "spawn_cwd": "<WORKSPACE>",
       "spawn_epoch": 1,
       "spawned_at": "<TS>",
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w1",
+      "command_plan_ms": 0,
+      "elapsed_ms": 0,
+      "event": "worker.spawn_timing",
+      "pane_verify_ms": 0,
+      "provider": "codex",
+      "restart_mode": "Fresh",
+      "source": "launch",
+      "startup_prompt_handler_ms": 0,
+      "tmux_start_mode": "new-window",
+      "transport_spawn_ms": 0,
+      "ts": "<TS>"
+    },
+    {
+      "agent_id": "w2",
+      "command_plan_ms": 0,
+      "elapsed_ms": 0,
+      "event": "worker.spawn_timing",
+      "pane_verify_ms": 0,
+      "provider": "codex",
+      "restart_mode": "Fresh",
+      "source": "launch",
+      "startup_prompt_handler_ms": 0,
+      "tmux_start_mode": "new-window",
+      "transport_spawn_ms": 0,
+      "ts": "<TS>"
+    },
+    {
+      "elapsed_ms": 0,
+      "event": "launch.phase",
+      "phase": "coordinator_start",
+      "ts": "<TS>"
+    },
+    {
+      "elapsed_ms": 0,
+      "event": "launch.phase",
+      "phase": "readiness_wait",
+      "ts": "<TS>"
+    },
+    {
+      "elapsed_ms": 0,
+      "event": "launch.phase",
+      "phase": "completed",
       "ts": "<TS>"
     },
     {
@@ -451,6 +509,12 @@
           "is_external_leader": false,
           "last_events": [
             {
+              "elapsed_ms": 0,
+              "event": "launch.phase",
+              "phase": "compile_spec",
+              "ts": "<TS>"
+            },
+            {
               "ancestry_binary_name": null,
               "dangerous_auto_approve": false,
               "dangerous_auto_approve_flag": null,
@@ -460,6 +524,12 @@
               "event": "launch.permissions_resolved",
               "ts": "<TS>",
               "worker_capability_above_leader": false
+            },
+            {
+              "elapsed_ms": 0,
+              "event": "launch.phase",
+              "phase": "spawn_all",
+              "ts": "<TS>"
             },
             {
               "agent_id": "w1",
@@ -547,6 +617,52 @@
               "spawn_cwd": "<WORKSPACE>",
               "spawn_epoch": 1,
               "spawned_at": "<TS>",
+              "ts": "<TS>"
+            },
+            {
+              "agent_id": "w1",
+              "command_plan_ms": 0,
+              "elapsed_ms": 0,
+              "event": "worker.spawn_timing",
+              "pane_verify_ms": 0,
+              "provider": "codex",
+              "restart_mode": "Fresh",
+              "source": "launch",
+              "startup_prompt_handler_ms": 0,
+              "tmux_start_mode": "new-window",
+              "transport_spawn_ms": 0,
+              "ts": "<TS>"
+            },
+            {
+              "agent_id": "w2",
+              "command_plan_ms": 0,
+              "elapsed_ms": 0,
+              "event": "worker.spawn_timing",
+              "pane_verify_ms": 0,
+              "provider": "codex",
+              "restart_mode": "Fresh",
+              "source": "launch",
+              "startup_prompt_handler_ms": 0,
+              "tmux_start_mode": "new-window",
+              "transport_spawn_ms": 0,
+              "ts": "<TS>"
+            },
+            {
+              "elapsed_ms": 0,
+              "event": "launch.phase",
+              "phase": "coordinator_start",
+              "ts": "<TS>"
+            },
+            {
+              "elapsed_ms": 0,
+              "event": "launch.phase",
+              "phase": "readiness_wait",
+              "ts": "<TS>"
+            },
+            {
+              "elapsed_ms": 0,
+              "event": "launch.phase",
+              "phase": "completed",
               "ts": "<TS>"
             }
           ],

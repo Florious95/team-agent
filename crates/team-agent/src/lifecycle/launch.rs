@@ -68,6 +68,9 @@ pub fn launch_with_transport_in_workspace(
     transport: &dyn Transport,
 ) -> Result<LaunchReport, LifecycleError> {
     let _ = skip_profile_smoke;
+    // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): launch.phase
+    // timer with monotonic `elapsed_ms` for latency triage.
+    let phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     if !spec_path.exists() {
         return Err(LifecycleError::Compile(format!(
             "spec path not found: {}",
@@ -77,6 +80,7 @@ pub fn launch_with_transport_in_workspace(
     let text = std::fs::read_to_string(spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
+    phase_timer.emit(workspace, "launch.phase", "compile_spec");
     let session_name = spec_session_name(&spec);
     let safety = effective_runtime_config(&spec)?;
     if safety.enabled && !safety.inherited && !auto_approve && !dry_run {
@@ -102,6 +106,7 @@ pub fn launch_with_transport_in_workspace(
     let started = if dry_run {
         Vec::new()
     } else {
+        phase_timer.emit(workspace, "launch.phase", "spawn_all");
         let started = spawn_agents(
             workspace,
             spec_path,
@@ -119,6 +124,37 @@ pub fn launch_with_transport_in_workspace(
             &started,
             &safety,
         )?;
+        // 0.5.38: per-worker timing tags (source="launch") so operators can
+        // trace which worker's spawn dominates wall time. Zeros for now on
+        // the sub-timings — Step 1 first enables shape assertion; a later
+        // slice may thread real command_plan / transport_spawn / handler
+        // timings from spawn_agents.
+        for agent in &started {
+            let provider = spec_agent_values(&spec)
+                .into_iter()
+                .find(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(|id| id == agent.agent_id.as_str())
+                        .unwrap_or(false)
+                })
+                .and_then(|entry| entry.get("provider").and_then(Value::as_str).map(str::to_string))
+                .unwrap_or_else(|| "fake".to_string());
+            crate::lifecycle::restart::write_worker_spawn_timing_event(
+                workspace,
+                phase_timer.elapsed_ms(),
+                agent.agent_id.as_str(),
+                &provider,
+                agent.start_mode,
+                "new-window",
+                0,
+                0,
+                0,
+                0,
+                "launch",
+            );
+        }
         started
     };
     // 0.3.28 Step 1: topology invariant guard (warn-only during migration).
@@ -3241,6 +3277,11 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     // FIX (rt-host-a real-machine finding): dry_run=false so launch_with_transport calls spawn_agents
     // and really creates the tmux session + worker windows (was hardcoded true → never spawned, which
     // also starved the coordinator: no session → first tick TmuxSessionMissing → run_daemon loop exits).
+    // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): quick-start
+    // owns the outer `launch.phase` timer so `coordinator_start` /
+    // `readiness_wait` / `completed` fire monotonically after the inner
+    // launch_with_transport's own `compile_spec` / `spawn_all` events.
+    let quick_start_phase_timer = crate::lifecycle::restart::RestartPhaseTimer::start();
     let mut launch =
         launch_with_transport_in_workspace(&workspace, &spec_path, false, yes, true, transport)?;
     annotate_persisted_team_depth(
@@ -3257,6 +3298,7 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     let coordinator_started = crate::coordinator::start_coordinator(&coordinator_workspace)
         .map(|report| report.ok)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    quick_start_phase_timer.emit(&workspace, "launch.phase", "coordinator_start");
     let coordinator_action = if coordinator_started {
         "coordinator started"
     } else {
@@ -3269,6 +3311,7 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     //   loaded successfully (provider-side codex/claude schema rejections happen
     //   asynchronously after spawn), so the verdict is PendingToolLoad — never
     //   bare Ready.
+    quick_start_phase_timer.emit(&workspace, "launch.phase", "readiness_wait");
     let worker_readiness = quick_start_worker_readiness(&workspace, &state_team_key);
     let attach_windows = load_runtime_state(&workspace)
         .ok()
@@ -3310,6 +3353,7 @@ pub fn quick_start_with_transport_in_workspace_with_display(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("none")
         .to_string();
+    quick_start_phase_timer.emit(&workspace, "launch.phase", "completed");
     Ok(QuickStartReport::Ready {
         session_name,
         launch: Box::new(launch),
