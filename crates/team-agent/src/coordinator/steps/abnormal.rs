@@ -1703,6 +1703,13 @@ pub(crate) fn attempt_due_recoveries(
     let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
         return;
     };
+    // 0.5.37 (`architect res_b8a6d40f3765`, R8): clear stale `next_retry_at`
+    // on terminal intents (succeeded/blocked/exhausted) BEFORE dispatching.
+    // Without this, a terminal record whose past `next_retry_at` survives
+    // a coordinator restart could get re-dispatched on the next tick,
+    // producing a spurious `recovery_started` event for an intent whose
+    // lifecycle already completed.
+    clear_stale_terminal_next_retry_at(workspace);
     let due_agents = collect_due_recovery_agents(&state);
     for agent_id in due_agents {
         run_single_recovery(workspace, event_log, transport, &agent_id);
@@ -1723,7 +1730,12 @@ fn collect_due_recovery_agents(state: &Value) -> Vec<String> {
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if !matches!(status, "scheduled") {
+        // 0.5.37 R8: dispatch only for non-terminal states. `succeeded`,
+        // `blocked`, `exhausted`, `backpressured` are terminal / awaiting
+        // manual action — a lifecycle dispatch here would be double-fire
+        // or wasted work. `scheduled` / `running` remain dispatchable so
+        // an interrupted tick can resume.
+        if !matches!(status, "scheduled" | "running") {
             continue;
         }
         let Some(next_retry_at) = intent
@@ -1739,6 +1751,44 @@ fn collect_due_recovery_agents(state: &Value) -> Vec<String> {
         }
     }
     due
+}
+
+/// 0.5.37 (`architect res_b8a6d40f3765`, R8): terminal recovery states
+/// (`succeeded`, `blocked`, `exhausted`) must not carry a stale
+/// `next_retry_at`. Load state, scrub the key on any terminal entry, and
+/// only persist when at least one row changed so we don't dirty the tick's
+/// atomic_save contract for idle workspaces.
+fn clear_stale_terminal_next_retry_at(workspace: &Path) {
+    let Ok(mut state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let mut mutated = false;
+    if let Some(agents) = recovery_intent_agents(&mut state) {
+        for (_agent_id, entry) in agents.iter_mut() {
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            let status = obj
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if !matches!(status.as_str(), "succeeded" | "blocked" | "exhausted") {
+                continue;
+            }
+            let had_stale = obj
+                .get("next_retry_at")
+                .filter(|v| !v.is_null())
+                .is_some();
+            if had_stale {
+                obj.remove("next_retry_at");
+                mutated = true;
+            }
+        }
+    }
+    if mutated {
+        let _ = crate::state::persist::save_runtime_state(workspace, &state);
+    }
 }
 
 fn run_single_recovery(
@@ -1915,6 +1965,12 @@ fn write_recovery_intent_result(workspace: &Path, agent_id: &str, update: Recove
                 None => {
                     obj.remove("blocked_reason");
                 }
+            }
+            // 0.5.37 R8: transitioning into a terminal state clears the
+            // stale `next_retry_at`; a future retry earns a fresh due
+            // time when it re-enters `scheduled` through the detector.
+            if matches!(update.status, "succeeded" | "blocked" | "exhausted") {
+                obj.remove("next_retry_at");
             }
         }
     }

@@ -257,6 +257,50 @@ fn r7_recovery_never_synthesizes_hidden_provider_turn_or_sdk_call() {
     );
 }
 
+#[test]
+fn r8_terminal_recovery_intents_are_idempotent_and_clear_due_time() {
+    for status in ["succeeded", "blocked", "exhausted"] {
+        let case = RecoveryCase::new(&format!("r8-terminal-{status}"));
+        case.seed_agents(&[("fe-admin", 429, "rate_limit", "baseline-429")]);
+        case.seed_due_recovery_with_status("fe-admin", status);
+
+        run_due_recoveries(&case);
+
+        let events = case.events();
+        assert!(
+            find_event(&events, "worker.abnormal_exit.recovery_started").is_none(),
+            "R8: terminal status `{status}` with stale next_retry_at must be skipped before lifecycle dispatch; events={events:?}"
+        );
+        let state = case.state();
+        let recovery = state
+            .pointer("/coordinator/abnormal_api_error_recovery/agents/fe-admin")
+            .expect("R8: terminal recovery entry remains auditable");
+        assert_eq!(recovery["status"], serde_json::json!(status));
+        assert!(
+            recovery.get("next_retry_at").is_none()
+                || recovery.get("next_retry_at") == Some(&serde_json::Value::Null),
+            "R8: terminal status `{status}` must clear stale next_retry_at so future ticks cannot reuse it; recovery={recovery}"
+        );
+    }
+}
+
+#[test]
+fn r8_non_terminal_due_intents_still_dispatch() {
+    for status in ["scheduled", "running"] {
+        let case = RecoveryCase::new(&format!("r8-nonterminal-{status}"));
+        case.seed_agents(&[("fe-admin", 429, "rate_limit", "baseline-429")]);
+        case.seed_due_recovery_with_status("fe-admin", status);
+
+        run_due_recoveries(&case);
+
+        let events = case.events();
+        assert!(
+            find_event(&events, "worker.abnormal_exit.recovery_started").is_some(),
+            "R8: non-terminal status `{status}` with due next_retry_at must still dispatch recovery; events={events:?}"
+        );
+    }
+}
+
 struct RecoveryCase {
     root: std::path::PathBuf,
 }
@@ -328,11 +372,15 @@ impl RecoveryCase {
     }
 
     fn seed_due_recovery(&self, agent: &str) {
+        self.seed_due_recovery_with_status(agent, "scheduled");
+    }
+
+    fn seed_due_recovery_with_status(&self, agent: &str, status: &str) {
         let mut state = self.state();
         state["coordinator"]["abnormal_api_error_recovery"]["agents"][agent] = serde_json::json!({
             "error_key": format!("worker.abnormal_exit.error:{agent}:rollout:api_error:seed"),
             "cohort_key": "research:claude_code:api_error:429:rate_limit",
-            "status": "scheduled",
+            "status": status,
             "attempts": 0,
             "max_attempts": 2,
             "next_retry_at": "2000-01-01T00:00:00Z",
@@ -477,4 +525,12 @@ fn detect_abnormal_body() -> String {
         .map(|offset| start + offset)
         .expect("derive after detect_abnormal_exits");
     source[start..end].to_string()
+}
+
+fn run_due_recoveries(case: &RecoveryCase) {
+    crate::coordinator::steps::abnormal::attempt_due_recoveries(
+        &case.root,
+        &crate::event_log::EventLog::new(&case.root),
+        &MockTransport::new(true),
+    );
 }
