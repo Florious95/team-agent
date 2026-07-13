@@ -168,6 +168,14 @@ pub enum StateWriteIntent<'a> {
     CoordinatorConptyShim {
         team_key: Option<&'a str>,
     },
+    /// 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md` §7.3):
+    /// post-save recovery step writes back the recovery intent outcome
+    /// (attempts / status / last_error / blocked_reason). Distinct intent
+    /// so future S1b migration can route it deliberately.
+    CoordinatorApiErrorRecovery {
+        team_key: Option<&'a str>,
+        agent_id: &'a str,
+    },
     McpAssignTask {
         team_key: Option<&'a str>,
         task_id: &'a str,
@@ -311,6 +319,13 @@ fn route_direct(
         // CoordinatorConptyShim -> root save
         // (coordinator/conpty_shim.rs:426/674).
         StateWriteIntent::CoordinatorConptyShim { .. } => helper_write_root(workspace, state),
+        // 0.5.36 CoordinatorApiErrorRecovery -> root save. The recovery
+        // intent lives under `coordinator.abnormal_api_error_recovery`, a
+        // root-scoped bookkeeping namespace that must survive across team
+        // boundaries; use the same helper family as CoordinatorConptyShim.
+        StateWriteIntent::CoordinatorApiErrorRecovery { .. } => {
+            helper_write_root(workspace, state)
+        }
         // McpAssignTask uses the reapply variant today; direct save routes
         // to the root helper for parity.
         StateWriteIntent::McpAssignTask { .. } => helper_write_root(workspace, state),

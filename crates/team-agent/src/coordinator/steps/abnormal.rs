@@ -167,7 +167,43 @@ pub(crate) fn detect_abnormal_exits(
         {
             continue;
         }
-        let content = format_abnormal_exit_message(&team, &agent, &fact, &liveness, size);
+        // 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md`
+        // §7.1/§7.6/§7.5): classify, update backpressure, record recovery
+        // intent (retryable only), then compose the policy-aware tail. This
+        // is INTENT WRITE only — actual lifecycle work happens post-save
+        // via `attempt_due_recoveries` (§7.3, R6 guard).
+        let manual_command = recovery_manual_command(
+            agent.agent_id.as_str(),
+            workspace,
+            team.as_str(),
+        );
+        let error_observation_key_string = error_observation_key.clone().unwrap_or_default();
+        let (recovery_class, recovery_schedule, recovery_cohort_key, recovery_backpressure_until) =
+            process_api_error_recovery_intent(
+                state,
+                event_log,
+                &team,
+                &agent,
+                &fact,
+                &manual_command,
+                error_observation_key_string.as_str(),
+            )?;
+        let recovery_tail = recovery_notification_tail(
+            recovery_class,
+            recovery_schedule.as_ref(),
+            recovery_backpressure_until,
+            &recovery_cohort_key,
+            &fact,
+            &manual_command,
+        );
+        let content = format_abnormal_exit_message(
+            &team,
+            &agent,
+            &fact,
+            &liveness,
+            size,
+            &recovery_tail,
+        );
         let outcome = crate::messaging::send_to_leader_receiver(
             workspace,
             state,
@@ -1091,6 +1127,7 @@ fn format_abnormal_exit_message(
     fact: &crate::provider::FaultFact,
     liveness: &ProcessCheck,
     size: u64,
+    recovery_tail: &str,
 ) -> String {
     let turn_id = fact.turn_id.as_ref().map(|id| id.as_str()).unwrap_or("-");
     format!(
@@ -1104,13 +1141,784 @@ turn_id: {turn_id}\n\
 transcript: {path}\n\
 last_offset: {size}\n\
 pid_status: {pid_status}\n\n\
-No automatic restart was performed.",
+{recovery_tail}",
         node = agent.agent_id.as_str(),
         provider = provider_wire(agent.provider),
         signature = fact.signature.as_str(),
         path = agent.rollout_path_display.as_str(),
         pid_status = liveness.detail.as_str(),
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md` §7-§8):
+// api_error recovery classifier + policy + state I/O + notification tail.
+// Recovery EXECUTION lives post-atomic_save in `attempt_due_recoveries`
+// below; `detect_abnormal_exits` only RECORDS intent (§7.3, R6 guard).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// 0.5.36 §7.1 classifier. Retryable = transient provider outage; recovery
+/// may be scheduled. NonRetryable = configuration / auth issue; guide only.
+/// Unknown = neither confirmed retryable nor known-bad; guide only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiErrorRecoveryClass {
+    Retryable,
+    NonRetryable,
+    Unknown,
+}
+
+impl ApiErrorRecoveryClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Retryable => "retryable",
+            Self::NonRetryable => "non_retryable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 0.5.36 §7.1: rules keyed on status/error text.
+pub(crate) fn classify_api_error_recovery(
+    signature: &str,
+    api_error_status: Option<i64>,
+    error: Option<&str>,
+) -> ApiErrorRecoveryClass {
+    if signature != "api_error" {
+        return ApiErrorRecoveryClass::Unknown;
+    }
+    if let Some(status) = api_error_status {
+        return match status {
+            408 | 429 => ApiErrorRecoveryClass::Retryable,
+            s if (500..600).contains(&s) => ApiErrorRecoveryClass::Retryable,
+            400 | 401 | 403 | 404 => ApiErrorRecoveryClass::NonRetryable,
+            _ => classify_error_text(error),
+        };
+    }
+    classify_error_text(error)
+}
+
+fn classify_error_text(error: Option<&str>) -> ApiErrorRecoveryClass {
+    match error {
+        Some(text) => {
+            let lower = text.to_ascii_lowercase();
+            if ["rate_limit", "overloaded", "timeout"]
+                .iter()
+                .any(|needle| lower.contains(needle))
+            {
+                ApiErrorRecoveryClass::Retryable
+            } else if [
+                "model_not_found",
+                "auth",
+                "invalid_request",
+                "not_found_error",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+            {
+                ApiErrorRecoveryClass::NonRetryable
+            } else {
+                ApiErrorRecoveryClass::Unknown
+            }
+        }
+        None => ApiErrorRecoveryClass::Unknown,
+    }
+}
+
+// 0.5.36 §7.2 defaults — code constants; a later config slice may expose
+// them without a new CLI flag.
+pub(crate) const RECOVERY_MAX_ATTEMPTS: u64 = 2;
+pub(crate) const RECOVERY_BACKOFF_SECS: [i64; 2] = [30, 120];
+pub(crate) const BACKPRESSURE_THRESHOLD: usize = 3;
+pub(crate) const BACKPRESSURE_WINDOW_SECS: i64 = 120;
+pub(crate) const BACKPRESSURE_COOLDOWN_SECS: i64 = 300;
+
+fn now_utc() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
+fn cohort_key_for(team: &str, provider: &str, fact: &crate::provider::FaultFact) -> String {
+    let status = fact
+        .api_error_status
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let error = fact.error.as_deref().unwrap_or("-");
+    format!(
+        "{team}:{provider}:{signature}:{status}:{error}",
+        signature = fact.signature.as_str()
+    )
+}
+
+/// 0.5.36 §7.2 manual command line. shell-single-quoted workspace so paths
+/// with spaces survive copy/paste (§7.5).
+fn recovery_manual_command(agent_id: &str, workspace: &Path, team: &str) -> String {
+    let workspace_str = workspace.to_string_lossy();
+    let shell_workspace = workspace_str.replace('\'', "'\\''");
+    format!(
+        "team-agent start-agent {agent_id} --workspace '{shell_workspace}' --team {team} --force --json"
+    )
+}
+
+fn recovery_intent_root<'a>(
+    state: &'a mut Value,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    coordinator_child_object(state, "abnormal_api_error_recovery")
+}
+
+fn recovery_intent_agents<'a>(
+    state: &'a mut Value,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    let root = recovery_intent_root(state)?;
+    let agents = root
+        .entry("agents".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !agents.is_object() {
+        *agents = serde_json::json!({});
+    }
+    agents.as_object_mut()
+}
+
+fn recovery_backpressure<'a>(
+    state: &'a mut Value,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    let root = recovery_intent_root(state)?;
+    let bp = root
+        .entry("backpressure".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !bp.is_object() {
+        *bp = serde_json::json!({});
+    }
+    bp.as_object_mut()
+}
+
+/// 0.5.36 §7.6: increment the cohort counter, prune stale events outside the
+/// sliding window, and return the current active-cooldown state (if any) so
+/// the caller can decide canary vs deferral. Only fresh retryable errors get
+/// here — non-retryable/unknown never touch backpressure.
+fn record_backpressure_event(
+    state: &mut Value,
+    team: &str,
+    provider: &str,
+    fact: &crate::provider::FaultFact,
+    agent_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> BackpressureDecision {
+    let cohort = cohort_key_for(team, provider, fact);
+    let now_str = now.to_rfc3339();
+    let window = chrono::Duration::seconds(BACKPRESSURE_WINDOW_SECS);
+    let cooldown = chrono::Duration::seconds(BACKPRESSURE_COOLDOWN_SECS);
+    let Some(bp) = recovery_backpressure(state) else {
+        return BackpressureDecision {
+            cooldown_until: None,
+            just_activated: false,
+            cohort_key: cohort,
+        };
+    };
+    let entry = bp
+        .entry(cohort.clone())
+        .or_insert_with(|| serde_json::json!({}));
+    let obj = match entry.as_object_mut() {
+        Some(obj) => obj,
+        None => {
+            *entry = serde_json::json!({});
+            entry.as_object_mut().expect("just replaced with object")
+        }
+    };
+    let window_started = obj
+        .get("window_started_at")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let reset_window = window_started
+        .map(|start| now.signed_duration_since(start) > window)
+        .unwrap_or(true);
+    if reset_window {
+        obj.insert("window_started_at".to_string(), serde_json::json!(now_str));
+        obj.insert("count".to_string(), serde_json::json!(0u64));
+        obj.insert("agents".to_string(), serde_json::json!(Vec::<String>::new()));
+    }
+    obj.insert("last_seen_at".to_string(), serde_json::json!(now_str));
+    let count = obj
+        .get("count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    obj.insert("count".to_string(), serde_json::json!(count));
+    let agents_arr = obj
+        .entry("agents".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(list) = agents_arr.as_array_mut() {
+        if !list.iter().any(|v| v.as_str() == Some(agent_id)) {
+            list.push(serde_json::json!(agent_id));
+        }
+    }
+    let previously_active = obj
+        .get("cooldown_until")
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc) > now)
+        .unwrap_or(false);
+    let mut just_activated = false;
+    let mut cooldown_until: Option<chrono::DateTime<chrono::Utc>> = None;
+    if previously_active {
+        cooldown_until = obj
+            .get("cooldown_until")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+    } else if (count as usize) >= BACKPRESSURE_THRESHOLD {
+        let until = now + cooldown;
+        obj.insert("cooldown_until".to_string(), serde_json::json!(until.to_rfc3339()));
+        obj.insert("status".to_string(), serde_json::json!("active"));
+        cooldown_until = Some(until);
+        just_activated = true;
+    }
+    BackpressureDecision {
+        cooldown_until,
+        just_activated,
+        cohort_key: cohort,
+    }
+}
+
+struct BackpressureDecision {
+    cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
+    just_activated: bool,
+    cohort_key: String,
+}
+
+/// 0.5.36 §7.2: reserve or update the per-agent recovery intent. Returns the
+/// scheduled `next_retry_at` for the notification/event.
+fn schedule_recovery_intent(
+    state: &mut Value,
+    agent_id: &str,
+    cohort_key: &str,
+    error_key: &str,
+    manual_command: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<RecoveryIntentSchedule> {
+    let Some(agents) = recovery_intent_agents(state) else {
+        return None;
+    };
+    let existing = agents.get(agent_id).cloned();
+    let attempts = existing
+        .as_ref()
+        .and_then(|v| v.get("attempts").and_then(Value::as_u64))
+        .unwrap_or(0);
+    if attempts >= RECOVERY_MAX_ATTEMPTS {
+        return None;
+    }
+    let backoff = RECOVERY_BACKOFF_SECS
+        .get(attempts as usize)
+        .copied()
+        .unwrap_or(*RECOVERY_BACKOFF_SECS.last().unwrap_or(&120));
+    let mut next_retry = now + chrono::Duration::seconds(backoff);
+    let mut backpressured = false;
+    if let Some(until) = cooldown_until {
+        if until > next_retry {
+            next_retry = until;
+            backpressured = true;
+        }
+    }
+    let status = if backpressured {
+        "backpressured"
+    } else {
+        "scheduled"
+    };
+    let payload = serde_json::json!({
+        "error_key": error_key,
+        "cohort_key": cohort_key,
+        "status": status,
+        "attempts": attempts,
+        "max_attempts": RECOVERY_MAX_ATTEMPTS,
+        "next_retry_at": next_retry.to_rfc3339(),
+        "last_attempt_at": Value::Null,
+        "last_error": Value::Null,
+        "backoff_seconds": backoff,
+        "manual_command": manual_command,
+    });
+    agents.insert(agent_id.to_string(), payload);
+    Some(RecoveryIntentSchedule {
+        next_retry_at: next_retry.to_rfc3339(),
+        attempt: attempts,
+        backoff_seconds: backoff,
+        backpressured,
+    })
+}
+
+struct RecoveryIntentSchedule {
+    next_retry_at: String,
+    attempt: u64,
+    backoff_seconds: i64,
+    backpressured: bool,
+}
+
+/// 0.5.36 §7.6: returns true when any agent already holds a `scheduled`
+/// recovery intent for the given cohort.
+fn has_active_canary_in_cohort(state: &Value, cohort_key: &str) -> bool {
+    let Some(agents) = state
+        .pointer("/coordinator/abnormal_api_error_recovery/agents")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    agents.values().any(|entry| {
+        entry.get("status").and_then(Value::as_str) == Some("scheduled")
+            && entry.get("cohort_key").and_then(Value::as_str) == Some(cohort_key)
+    })
+}
+
+fn recovery_intent_status(state: &Value, agent_id: &str) -> Option<String> {
+    state
+        .pointer(&format!(
+            "/coordinator/abnormal_api_error_recovery/agents/{agent_id}/status"
+        ))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn recovery_intent_field(state: &Value, agent_id: &str, field: &str) -> Option<Value> {
+    state
+        .pointer(&format!(
+            "/coordinator/abnormal_api_error_recovery/agents/{agent_id}/{field}"
+        ))
+        .cloned()
+}
+
+/// 0.5.36 §7.5 policy-aware notification tail.
+fn recovery_notification_tail(
+    class: ApiErrorRecoveryClass,
+    schedule: Option<&RecoveryIntentSchedule>,
+    backpressure_until: Option<chrono::DateTime<chrono::Utc>>,
+    cohort_key: &str,
+    fact: &crate::provider::FaultFact,
+    manual_command: &str,
+) -> String {
+    let manual_line = format!("manual_recovery: {manual_command}");
+    let backpressure_line = match backpressure_until {
+        Some(until) => {
+            let status = fact
+                .api_error_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".to_string());
+            format!(
+                "backpressure: active cohort={cohort_key} status={status} until={until}",
+                until = until.to_rfc3339()
+            )
+        }
+        None => "backpressure: inactive".to_string(),
+    };
+    let auto_line = match class {
+        ApiErrorRecoveryClass::Retryable => match schedule {
+            Some(sched) if sched.backpressured => format!(
+                "auto_recovery: delayed by provider backpressure until {}",
+                sched.next_retry_at
+            ),
+            Some(sched) => format!(
+                "auto_recovery: scheduled attempt {attempt}/{max} in {backoff}s (due {due})",
+                attempt = sched.attempt + 1,
+                max = RECOVERY_MAX_ATTEMPTS,
+                backoff = sched.backoff_seconds,
+                due = sched.next_retry_at,
+            ),
+            None => "auto_recovery: not scheduled (recovery_exhausted); use manual command below"
+                .to_string(),
+        },
+        ApiErrorRecoveryClass::NonRetryable => {
+            let error = fact.error.as_deref().unwrap_or("non_retryable");
+            format!("auto_recovery: not scheduled (non_retryable_api_error: {error})")
+        }
+        ApiErrorRecoveryClass::Unknown => {
+            "auto_recovery: not scheduled (unknown_api_error_class)".to_string()
+        }
+    };
+    format!("{auto_line}\n{manual_line}\n{backpressure_line}")
+}
+
+/// 0.5.36 §7 orchestration for a single fresh abnormal notification. Runs
+/// inside `detect_abnormal_exits`; only classifies + records intent +
+/// emits recovery-family events. Returns the classifier verdict, the
+/// scheduled intent (if any), the cohort key, and the active backpressure
+/// window (if any) so the caller can build the notification tail.
+///
+/// R6 guard: this function must not call any lifecycle helpers. Actual
+/// lifecycle work runs post-atomic_save in `attempt_due_recoveries`.
+fn process_api_error_recovery_intent(
+    state: &mut Value,
+    event_log: &EventLog,
+    team: &str,
+    agent: &AbnormalWatchAgent,
+    fact: &crate::provider::FaultFact,
+    manual_command: &str,
+    error_key: &str,
+) -> Result<
+    (
+        ApiErrorRecoveryClass,
+        Option<RecoveryIntentSchedule>,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ),
+    TickError,
+> {
+    let class = classify_api_error_recovery(
+        fact.signature.as_str(),
+        fact.api_error_status,
+        fact.error.as_deref(),
+    );
+    let provider_str = provider_wire(agent.provider);
+    let cohort_key = cohort_key_for(team, provider_str, fact);
+    if !matches!(class, ApiErrorRecoveryClass::Retryable) {
+        return Ok((class, None, cohort_key, None));
+    }
+    let now = now_utc();
+    let cohort_hint = cohort_key_for(team, provider_str, fact);
+    let canary_active = has_active_canary_in_cohort(state, &cohort_hint);
+    let mut bp_decision = record_backpressure_event(
+        state,
+        team,
+        provider_str,
+        fact,
+        agent.agent_id.as_str(),
+        now,
+    );
+    // 0.5.36 §7.6: "at most one canary". If another agent in the same
+    // cohort already holds a scheduled intent, defer the new arrival to
+    // the cohort cooldown (or a synthetic short cooldown if none yet).
+    if canary_active {
+        let synthetic = bp_decision.cooldown_until.unwrap_or_else(|| {
+            now + chrono::Duration::seconds(BACKPRESSURE_COOLDOWN_SECS)
+        });
+        bp_decision.cooldown_until = Some(synthetic);
+    }
+    if bp_decision.just_activated {
+        let bp_agents = state
+            .pointer(&format!(
+                "/coordinator/abnormal_api_error_recovery/backpressure/{}/agents",
+                bp_decision.cohort_key
+            ))
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let cooldown_until_str = bp_decision
+            .cooldown_until
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        event_log.write(
+            "worker.abnormal_exit.backpressure_started",
+            serde_json::json!({
+                "team_id": team,
+                "provider": provider_str,
+                "signature": fact.signature.as_str(),
+                "apiErrorStatus": fact.api_error_status,
+                "error": fact.error.as_deref(),
+                "cohort_key": bp_decision.cohort_key,
+                "threshold": BACKPRESSURE_THRESHOLD,
+                "window_seconds": BACKPRESSURE_WINDOW_SECS,
+                "cooldown_until": cooldown_until_str,
+                "agents": bp_agents,
+            }),
+        )?;
+    }
+    let schedule = schedule_recovery_intent(
+        state,
+        agent.agent_id.as_str(),
+        &bp_decision.cohort_key,
+        error_key,
+        manual_command,
+        now,
+        bp_decision.cooldown_until,
+    );
+    if let Some(sched) = schedule.as_ref() {
+        if sched.backpressured {
+            // Backpressured workers are not scheduled for the canary window;
+            // emit a distinct `backpressure_active` event so the leader
+            // notification tail can trace which cohort deferred which agent.
+            event_log.write(
+                "worker.abnormal_exit.backpressure_active",
+                serde_json::json!({
+                    "team_id": team,
+                    "agent_id": agent.agent_id.as_str(),
+                    "cohort_key": bp_decision.cohort_key,
+                    "cooldown_until": bp_decision
+                        .cooldown_until
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default(),
+                    "action": "deferred_recovery",
+                    "manual_command": manual_command,
+                }),
+            )?;
+        } else {
+            event_log.write(
+                "worker.abnormal_exit.recovery_scheduled",
+                serde_json::json!({
+                    "team_id": team,
+                    "agent_id": agent.agent_id.as_str(),
+                    "provider": provider_str,
+                    "signature": fact.signature.as_str(),
+                    "apiErrorStatus": fact.api_error_status,
+                    "error": fact.error.as_deref(),
+                    "attempt": sched.attempt,
+                    "max_attempts": RECOVERY_MAX_ATTEMPTS,
+                    "due_at": sched.next_retry_at,
+                    "backoff_seconds": sched.backoff_seconds,
+                    "error_key": error_key,
+                    "cohort_key": bp_decision.cohort_key,
+                    "backpressured": false,
+                    "manual_command": manual_command,
+                }),
+            )?;
+        }
+    } else {
+        // schedule_recovery_intent returns None ONLY when max_attempts hit.
+        event_log.write(
+            "worker.abnormal_exit.recovery_exhausted",
+            serde_json::json!({
+                "team_id": team,
+                "agent_id": agent.agent_id.as_str(),
+                "attempts": RECOVERY_MAX_ATTEMPTS,
+                "last_error": fact.error.as_deref(),
+                "manual_command": manual_command,
+            }),
+        )?;
+    }
+    Ok((class, schedule, bp_decision.cohort_key, bp_decision.cooldown_until))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// 0.5.36 §7.3 recovery execution — runs post-atomic_save, reloads fresh
+// state, consumes due intents, invokes the lifecycle `start_agent_at_paths`
+// with force=true (stop-before-start semantics for live panes, so noop is
+// impossible), and writes the outcome back to state via the lifecycle
+// path (which owns its own save).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// 0.5.36 §7.3: process all due recovery intents. Called from tick.rs
+/// AFTER atomic_save has flushed the detector-written intent. Reloads a
+/// fresh state each call so the caller's stale in-memory state cannot
+/// clobber lifecycle writes. Best-effort: recovery failure produces
+/// events + updated intent, never a tick failure.
+pub(crate) fn attempt_due_recoveries(
+    workspace: &Path,
+    event_log: &EventLog,
+    transport: &dyn crate::transport::Transport,
+) {
+    let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let due_agents = collect_due_recovery_agents(&state);
+    for agent_id in due_agents {
+        run_single_recovery(workspace, event_log, transport, &agent_id);
+    }
+}
+
+fn collect_due_recovery_agents(state: &Value) -> Vec<String> {
+    let now = now_utc();
+    let Some(agents) = state
+        .pointer("/coordinator/abnormal_api_error_recovery/agents")
+        .and_then(Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let mut due = Vec::new();
+    for (agent_id, intent) in agents {
+        let status = intent
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !matches!(status, "scheduled") {
+            continue;
+        }
+        let Some(next_retry_at) = intent
+            .get("next_retry_at")
+            .and_then(Value::as_str)
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+        else {
+            continue;
+        };
+        if next_retry_at <= now {
+            due.push(agent_id.clone());
+        }
+    }
+    due
+}
+
+fn run_single_recovery(
+    workspace: &Path,
+    event_log: &EventLog,
+    transport: &dyn crate::transport::Transport,
+    agent_id: &str,
+) {
+    // Read the current intent so we can bump attempts / write result fields
+    // through the shared writer (`write_recovery_intent_field`); the actual
+    // lifecycle helper below owns its own state save.
+    let Ok(state_before) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    let team_key = crate::state::projection::team_state_key(&state_before);
+    let attempt = state_before
+        .pointer(&format!(
+            "/coordinator/abnormal_api_error_recovery/agents/{agent_id}/attempts"
+        ))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let manual_command = state_before
+        .pointer(&format!(
+            "/coordinator/abnormal_api_error_recovery/agents/{agent_id}/manual_command"
+        ))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| recovery_manual_command(agent_id, workspace, team_key.as_str()));
+    let _ = event_log.write(
+        "worker.abnormal_exit.recovery_started",
+        serde_json::json!({
+            "team_id": team_key.as_str(),
+            "agent_id": agent_id,
+            "attempt": attempt,
+            "mode": "start_agent_force",
+            "allow_fresh": false,
+        }),
+    );
+    let agent_id_typed = crate::model::ids::AgentId::new(agent_id.to_string());
+    let outcome = crate::lifecycle::restart::start_agent_at_paths_for_recovery(
+        workspace,
+        &agent_id_typed,
+        Some(team_key.as_str()),
+        transport,
+    );
+    let now = now_utc();
+    match outcome {
+        Ok(recovery_outcome) => {
+            let _ = event_log.write(
+                "worker.abnormal_exit.recovery_succeeded",
+                serde_json::json!({
+                    "team_id": team_key.as_str(),
+                    "agent_id": agent_id,
+                    "start_mode": recovery_outcome.start_mode,
+                    "target": recovery_outcome.target,
+                    "coordinator_started": recovery_outcome.coordinator_started,
+                }),
+            );
+            write_recovery_intent_result(
+                workspace,
+                agent_id,
+                RecoveryIntentUpdate {
+                    status: "succeeded",
+                    attempts: attempt + 1,
+                    last_attempt_at: now.to_rfc3339(),
+                    last_error: None,
+                    blocked_reason: None,
+                },
+            );
+        }
+        Err(RecoveryError::NoopBlocked) => {
+            let _ = event_log.write(
+                "worker.abnormal_exit.recovery_blocked",
+                serde_json::json!({
+                    "team_id": team_key.as_str(),
+                    "agent_id": agent_id,
+                    "reason": "noop_not_recovery",
+                    "manual_command": manual_command,
+                }),
+            );
+            write_recovery_intent_result(
+                workspace,
+                agent_id,
+                RecoveryIntentUpdate {
+                    status: "blocked",
+                    attempts: attempt + 1,
+                    last_attempt_at: now.to_rfc3339(),
+                    last_error: None,
+                    blocked_reason: Some("noop_not_recovery"),
+                },
+            );
+        }
+        Err(RecoveryError::Lifecycle(reason)) => {
+            let _ = event_log.write(
+                "worker.abnormal_exit.recovery_blocked",
+                serde_json::json!({
+                    "team_id": team_key.as_str(),
+                    "agent_id": agent_id,
+                    "reason": "lifecycle_error",
+                    "detail": reason,
+                    "manual_command": manual_command,
+                }),
+            );
+            write_recovery_intent_result(
+                workspace,
+                agent_id,
+                RecoveryIntentUpdate {
+                    status: "blocked",
+                    attempts: attempt + 1,
+                    last_attempt_at: now.to_rfc3339(),
+                    last_error: Some(reason),
+                    blocked_reason: Some("lifecycle_error"),
+                },
+            );
+        }
+    }
+}
+
+pub(crate) enum RecoveryError {
+    NoopBlocked,
+    Lifecycle(String),
+}
+
+/// 0.5.36 §7.3 typed outcome returned from
+/// `lifecycle::restart::start_agent_at_paths_for_recovery` to the post-save
+/// step. Small on purpose — just the fields the `recovery_succeeded` event
+/// needs.
+pub(crate) struct RecoveryLifecycleOutcome {
+    pub start_mode: String,
+    pub target: String,
+    pub coordinator_started: bool,
+}
+
+struct RecoveryIntentUpdate {
+    status: &'static str,
+    attempts: u64,
+    last_attempt_at: String,
+    last_error: Option<String>,
+    blocked_reason: Option<&'static str>,
+}
+
+fn write_recovery_intent_result(workspace: &Path, agent_id: &str, update: RecoveryIntentUpdate) {
+    let Ok(mut state) = crate::state::persist::load_runtime_state(workspace) else {
+        return;
+    };
+    if let Some(agents) = recovery_intent_agents(&mut state) {
+        let entry = agents
+            .entry(agent_id.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !entry.is_object() {
+            *entry = serde_json::json!({});
+        }
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("status".to_string(), serde_json::json!(update.status));
+            obj.insert("attempts".to_string(), serde_json::json!(update.attempts));
+            obj.insert(
+                "last_attempt_at".to_string(),
+                serde_json::json!(update.last_attempt_at),
+            );
+            obj.insert(
+                "last_error".to_string(),
+                match update.last_error.as_ref() {
+                    Some(text) => serde_json::json!(text),
+                    None => Value::Null,
+                },
+            );
+            match update.blocked_reason {
+                Some(reason) => {
+                    obj.insert(
+                        "blocked_reason".to_string(),
+                        serde_json::json!(reason),
+                    );
+                }
+                None => {
+                    obj.remove("blocked_reason");
+                }
+            }
+        }
+    }
+    let _ = crate::state::persist::save_runtime_state(workspace, &state);
 }
 
 #[cfg(test)]
