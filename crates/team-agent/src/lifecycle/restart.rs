@@ -50,6 +50,12 @@ pub(crate) use common::session_identity_probe_for_agent;
 pub(crate) use common::lifecycle_worker_tmux_backend_for_selected_state;
 pub use orchestrator::{halt_plan, plan_status};
 pub(crate) use rebuild::restart_with_transport_with_session_convergence_deadline;
+// 0.5.38 (`.team/artifacts/startup-latency-locate.md` §5): expose the phase
+// timer + worker timing writer so `lifecycle::launch::launch_with_transport_in_workspace`
+// can emit the same instrumentation event family with `source="launch"`.
+pub(crate) use rebuild::{
+    provider_wire_from_state, write_worker_spawn_timing_event, RestartPhaseTimer,
+};
 pub use rebuild::{
     restart, restart_candidates, restart_with_session_convergence_deadline, restart_with_transport,
     restart_with_transport_with_readiness_deadline, select_restart_state,

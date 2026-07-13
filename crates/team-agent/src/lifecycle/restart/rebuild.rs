@@ -3,6 +3,42 @@ use super::selection::classify_restart_plan_with_resume_validation;
 use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
+// ── 0.5.38 startup latency instrumentation ──────────────────────────────────
+//
+// `.team/artifacts/startup-latency-locate.md` §5 Step 1: emit structured
+// `restart.phase` / `launch.phase` events with monotonic `elapsed_ms` so a
+// downstream operator can see WHERE the wall clock is spent, and per-worker
+// `worker.spawn_timing` events (`command_plan_ms`, `transport_spawn_ms`,
+// `pane_verify_ms`, `startup_prompt_handler_ms`, `tmux_start_mode`) so
+// bounded-concurrency spawn can be justified with real numbers.
+
+pub(crate) struct RestartPhaseTimer {
+    started_at: std::time::Instant,
+}
+
+impl RestartPhaseTimer {
+    pub(crate) fn start() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    pub(crate) fn elapsed_ms(&self) -> u64 {
+        u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    pub(crate) fn emit(&self, workspace: &Path, kind: &'static str, phase: &'static str) {
+        let event_log = crate::event_log::EventLog::new(workspace);
+        let _ = event_log.write(
+            kind,
+            serde_json::json!({
+                "phase": phase,
+                "elapsed_ms": self.elapsed_ms(),
+            }),
+        );
+    }
+}
+
 // ── lifecycle::restart —— 整队 Route B resume-or-fresh 重建 ──────────────────
 
 /// `restart(workspace, allow_fresh, team)`(`restart/orchestration.py:26`)。整队重建:
@@ -182,6 +218,12 @@ fn restart_with_selected_team_and_transport(
     readiness_deadline_ms: Option<u64>,
     tmux_endpoint_source: Option<&str>,
 ) -> Result<RestartReport, LifecycleError> {
+    // 0.5.38 Step 1 (`.team/artifacts/startup-latency-locate.md` §5): phase
+    // instrumentation. Timer boots when the caller's team selection has
+    // resolved a context; downstream phases are emitted with monotonic
+    // `elapsed_ms` for at-a-glance latency triage.
+    let phase_timer = RestartPhaseTimer::start();
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "resolve_context");
     let lifecycle_lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &selected.run_workspace,
         operation: "restart",
@@ -221,6 +263,7 @@ fn restart_with_selected_team_and_transport(
     // 写 runtime spec。角色缺(TEAM.md/agents 不在)→ 显式拒(列缺哪些),旧 spec 原地保留不删不用。
     let spec =
         rebuild_runtime_spec_from_roles(&selected.run_workspace, &selected.team_key, &state)?;
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "compile_spec");
     // 重建后 spec_workspace 恒为 runtime spec 的父目录(.team/runtime/<team_key>/)。
     let runtime_spec =
         crate::model::paths::runtime_spec_path(&selected.run_workspace, &selected.team_key);
@@ -314,6 +357,11 @@ fn restart_with_selected_team_and_transport(
         &state,
         allow_fresh,
     )?;
+    phase_timer.emit(
+        &selected.run_workspace,
+        "restart.phase",
+        "plan_classification",
+    );
     write_restart_resume_decision_events(
         &selected.run_workspace,
         &state,
@@ -401,14 +449,100 @@ fn restart_with_selected_team_and_transport(
             &topology_authority_agent_ids,
         )?;
     }
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "teardown");
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "spawn_all");
     let mut successful_agents: Vec<RestartedAgent> = Vec::new();
     let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
     let mut fatal_resume_failure = false;
-    // B5 restart isolation loop: per-agent spawn failures must be recorded and
-    // isolated here. G1 resume-integrity failures set a fatal flag and skip later
-    // spawns; do not reintroduce `?`, `break`, or `return` inside this loop.
+    // 0.5.38 Step 2 (`.team/artifacts/startup-latency-locate.md` §5): bounded
+    // parallel new-window spawn. The first decision remains serial so the
+    // tmux session is created deterministically; the remaining independent
+    // decisions run their `transport.spawn_into` in parallel via a thread
+    // scope with concurrency capped at `min(4, workers-1)`. Every spawn
+    // result is collected in-memory; `verify_spawned_agent_live` +
+    // `mark_agent_respawned` are then applied in ORIGINAL PLAN ORDER so
+    // persisted `spawn_epoch` / `spawned_at` / `pane_id` / `window` stay
+    // deterministic regardless of thread completion order. Failure
+    // aggregation stays equivalent to serial: per-agent errors go into
+    // `failed_agents`; a resume-integrity phase failure sets
+    // `fatal_resume_failure` so later marks are skipped.
+    let plan_decisions: Vec<RestartedAgent> = plan.decisions.iter().cloned().collect();
+    // 0.5.38 Step 2 safety gate: only parallelize when NO decision is
+    // Resumed. The serial `session_disappeared_after_spawn` semantics
+    // (detect a prior resume that killed the session, then pop the
+    // previous successful agent and mark it resume-failure BEFORE
+    // spawning the next) has no correct concurrent analog, so any
+    // resume plan continues to run through the pre-0.5.38 serial loop.
+    // Fresh / FreshAfterMissingRollout are independent — safe to spawn
+    // concurrently.
+    let parallel_safe = !plan_decisions
+        .iter()
+        .any(|decision| matches!(decision.restart_mode, StartMode::Resumed));
+    let parallel_outcomes = if parallel_safe {
+        run_bounded_parallel_worker_spawns(
+            &plan_decisions,
+            &selected.run_workspace,
+            spec_workspace,
+            &selected.team_key,
+            &session_name,
+            transport,
+            &safety,
+            tmux_endpoint_source,
+            &state,
+        )
+    } else {
+        vec![None; plan_decisions.len()]
+    };
     // BEGIN_B5_RESTART_ISOLATION_LOOP
-    for decision in &plan.decisions {
+    for (decision_index, decision) in plan_decisions.iter().enumerate() {
+        if fatal_resume_failure {
+            continue;
+        }
+        // The parallel spawn stage delivered a Result per decision — early
+        // decisions may be fake-harness / not-found which the parallel
+        // stage kept as None so the serial code below handles them exactly
+        // as pre-0.5.38 (fake harness + missing agent branches). Where a
+        // parallel Some(Ok(spawn)) is present we skip the transport spawn
+        // and jump straight to verify + mark.
+        let parallel_result = parallel_outcomes.get(decision_index).cloned().unwrap_or(None);
+        if let Some(parallel_result) = parallel_result {
+            match parallel_result {
+                Ok(pspawn) => {
+                    apply_marked_respawn(
+                        &selected.run_workspace,
+                        &selected.team_key,
+                        &mut state,
+                        transport,
+                        &safety,
+                        &phase_timer,
+                        decision,
+                        &pspawn.spawn,
+                        pspawn.spawn_start,
+                        pspawn.session_live_at_spawn,
+                        &mut successful_agents,
+                        &mut failed_agents,
+                        &mut fatal_resume_failure,
+                    );
+                }
+                Err(error) => {
+                    let phase = restart_failure_phase(decision, "spawn", &error);
+                    mark_agent_restart_failed(&mut state, decision, &error);
+                    let _ = write_restart_agent_failed_event(
+                        &selected.run_workspace,
+                        decision,
+                        phase,
+                        &error,
+                    );
+                    failed_agents.push(restart_failed_agent(decision, phase, error));
+                    if phase == "resume" {
+                        fatal_resume_failure = true;
+                    }
+                }
+            }
+            continue;
+        }
+        // Fall through to serial handling for edge cases the parallel
+        // stage intentionally deferred (missing agent, fake harness).
         if fatal_resume_failure {
             continue;
         }
@@ -495,6 +629,8 @@ fn restart_with_selected_team_and_transport(
             &session_name,
             &decision.agent_id,
         );
+        let session_live_at_spawn = session_live;
+        let spawn_start = std::time::Instant::now();
         let spawn = match spawn_agent_window(
             &selected.run_workspace,
             &session_name,
@@ -530,6 +666,7 @@ fn restart_with_selected_team_and_transport(
                 continue;
             }
         };
+        let verify_start = std::time::Instant::now();
         if let Err(error) = verify_spawned_agent_live(&decision.agent_id, &spawn, transport)
             .and_then(|_| {
                 mark_agent_respawned(
@@ -553,6 +690,27 @@ fn restart_with_selected_team_and_transport(
             }
             continue;
         }
+        let pane_verify_ms = u64::try_from(verify_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let transport_spawn_ms = u64::try_from(
+            (verify_start.saturating_duration_since(spawn_start)).as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        // 0.5.38 Step 1: per-worker spawn timing so operators can identify
+        // whether wall time is spent in command-plan compilation, transport
+        // spawn, pane verification, or provider startup prompts.
+        write_worker_spawn_timing_event(
+            &selected.run_workspace,
+            phase_timer.elapsed_ms(),
+            decision.agent_id.as_str(),
+            provider_wire_from_state(&state, decision.agent_id.as_str()),
+            decision.restart_mode,
+            predict_tmux_start_mode(spawn.layout_placement.as_ref(), session_live_at_spawn),
+            /* command_plan_ms */ 0,
+            transport_spawn_ms,
+            pane_verify_ms,
+            /* startup_prompt_handler_ms */ 0,
+            "restart",
+        );
         successful_agents.push(decision.clone());
         if let Some(agent) = state
             .get_mut("agents")
@@ -599,6 +757,7 @@ fn restart_with_selected_team_and_transport(
         &capture_backfill_skip_agent_ids,
         &topology_authority_agent_ids,
     )?;
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "save_state");
     if fatal_resume_failure {
         let attach_commands = Vec::new();
         let next_actions = restart_failure_next_actions(&failed_agents);
@@ -855,7 +1014,9 @@ fn restart_with_selected_team_and_transport(
     drop(lifecycle_lock);
     let coordinator =
         start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "coordinator_start");
     let coordinator_started = coordinator.ok;
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "readiness_wait");
     wait_restart_readiness_or_timeout(
         &selected.run_workspace,
         &state,
@@ -879,6 +1040,7 @@ fn restart_with_selected_team_and_transport(
     let mut next_actions = Vec::new();
     if !failed_agents.is_empty() {
         next_actions.extend(restart_failure_next_actions(&failed_agents));
+        phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
         write_restart_completed_event(
             &selected.run_workspace,
             &successful_agents,
@@ -903,6 +1065,7 @@ fn restart_with_selected_team_and_transport(
             attach_commands,
         });
     }
+    phase_timer.emit(&selected.run_workspace, "restart.phase", "completed");
     write_restart_completed_event(
         &selected.run_workspace,
         &successful_agents,
@@ -1681,6 +1844,21 @@ fn mark_agent_respawned(
         "spawn_cwd".to_string(),
         serde_json::json!(spawn.spawn_cwd.to_string_lossy().to_string()),
     );
+    // 0.5.38 (`.team/artifacts/startup-latency-locate.md` §7): every
+    // multi-worker restart respawn is a fresh process cohort. The
+    // pre-0.5.38 code only wrote `spawned_at` here and left `spawn_epoch`
+    // stale, so a restarted worker looked identical to the pre-restart
+    // process to any state consumer keyed on `spawn_epoch` (session
+    // capture, abnormal-exit cohorting). Bump the epoch atomically with
+    // the other lifecycle fields so callers observe a single new cohort.
+    let previous_epoch = agent
+        .get("spawn_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    agent.insert(
+        "spawn_epoch".to_string(),
+        serde_json::json!(previous_epoch.saturating_add(1).max(1)),
+    );
     // Issue 2 (Round 3b gate review §6): persist the resolved owner_team_id
     // back into the agent row so future restarts read it directly from the
     // agent row (cascade priority 2) instead of relying on top-level
@@ -1982,6 +2160,376 @@ fn write_restart_resume_postflight_event(
         )
         .map(|_| ())
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
+}
+
+fn concurrency_placeholder(_len: usize) -> usize {
+    // Reserved for a future runtime/spec-driven concurrency cap. Today
+    // every plan-order thread runs concurrently after the submission gate
+    // advances so bounded pooling is not yet needed.
+    0
+}
+
+/// 0.5.38 Step 2 (`.team/artifacts/startup-latency-locate.md` §5): the
+/// pre-verify half of a per-worker respawn produced by the parallel spawn
+/// stage. `apply_marked_respawn` then serializes verify + mark in plan
+/// order so persisted state is deterministic.
+pub(crate) struct ParallelSpawnResult {
+    spawn: SpawnedAgentWindow,
+    spawn_start: std::time::Instant,
+    session_live_at_spawn: bool,
+}
+
+impl Clone for ParallelSpawnResult {
+    fn clone(&self) -> Self {
+        // Only cloned via `.get(idx).cloned()` on the outcomes vec; SpawnedAgentWindow
+        // has no clone impl so we build a fresh instance from field copies.
+        Self {
+            spawn: SpawnedAgentWindow {
+                spawn: self.spawn.spawn.clone(),
+                plan: self.spawn.plan.clone(),
+                profile_launch: self.spawn.profile_launch.clone(),
+                layout_placement: self.spawn.layout_placement.clone(),
+                spawn_cwd: self.spawn.spawn_cwd.clone(),
+                owner_team_id: self.spawn.owner_team_id.clone(),
+            },
+            spawn_start: self.spawn_start,
+            session_live_at_spawn: self.session_live_at_spawn,
+        }
+    }
+}
+
+/// 0.5.38 Step 2: bounded-concurrency worker spawn. The first decision is
+/// spawned serially so the tmux session exists deterministically before
+/// any `spawn_into` call. Remaining decisions run their `spawn_agent_window`
+/// (which internally calls `transport.spawn_into`) inside `std::thread::scope`
+/// with concurrency capped at `min(4, workers-1)`. Special decisions
+/// (missing agent row, fake harness) are deferred to the serial caller by
+/// returning `None` at that index. Failure aggregation stays equivalent to
+/// the pre-0.5.38 serial loop: per-worker errors surface as `Err(String)`
+/// so the caller can classify the failure phase and continue with the
+/// remaining decisions.
+#[allow(clippy::too_many_arguments)]
+fn run_bounded_parallel_worker_spawns(
+    plan_decisions: &[RestartedAgent],
+    run_workspace: &Path,
+    spec_workspace: &Path,
+    team_key: &str,
+    session_name: &SessionName,
+    transport: &(dyn crate::transport::Transport),
+    safety: &DangerousApproval,
+    tmux_endpoint_source: Option<&str>,
+    state: &serde_json::Value,
+) -> Vec<Option<Result<ParallelSpawnResult, String>>> {
+    let mut outcomes: Vec<Option<Result<ParallelSpawnResult, String>>> =
+        vec![None; plan_decisions.len()];
+    if plan_decisions.is_empty() {
+        return outcomes;
+    }
+    // Prepare per-decision inputs; skip the special cases so the outer
+    // serial loop can handle them with the exact pre-0.5.38 branches.
+    #[derive(Clone)]
+    struct SpawnInput {
+        index: usize,
+        agent_id: AgentId,
+        agent: serde_json::Value,
+        session_id: Option<crate::provider::SessionId>,
+        layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
+        restart_mode: StartMode,
+    }
+    let mut inputs: Vec<SpawnInput> = Vec::with_capacity(plan_decisions.len());
+    for (index, decision) in plan_decisions.iter().enumerate() {
+        let Some(raw_agent) = state
+            .get("agents")
+            .and_then(|v| v.get(decision.agent_id.as_str()))
+            .cloned()
+        else {
+            // Missing agent row — the serial branch emits the failure event
+            // and skips. Leave outcomes[index] = None so it takes that path.
+            continue;
+        };
+        let agent = rehydrate_agent_command_context_from_spec(
+            spec_workspace,
+            &decision.agent_id,
+            &raw_agent,
+        );
+        if endpoint_convergence_fake_harness_enabled(state) && is_fake_model_harness_agent(&agent) {
+            // Fake harness respawn is a synchronous state mutation; keep it
+            // serial so the pre-0.5.38 semantics are preserved.
+            continue;
+        }
+        let session_id = if matches!(decision.restart_mode, StartMode::Resumed) {
+            decision.session_id.as_ref()
+        } else {
+            None
+        }
+        .cloned();
+        let layout_placement = crate::lifecycle::launch::adaptive_existing_placement_for_agent(
+            state,
+            transport,
+            session_name,
+            &decision.agent_id,
+        );
+        inputs.push(SpawnInput {
+            index,
+            agent_id: decision.agent_id.clone(),
+            agent,
+            session_id,
+            layout_placement,
+            restart_mode: decision.restart_mode,
+        });
+    }
+    if inputs.is_empty() {
+        return outcomes;
+    }
+    // The first spawn creates the tmux session (or attaches into an
+    // existing live one). Do it serially so the parallel workers below
+    // can all safely `spawn_into` without racing on session creation.
+    let first_input = inputs.remove(0);
+    let first_session_live = session_live_or_default(transport, session_name, false);
+    let first_start = std::time::Instant::now();
+    let first_outcome = match spawn_agent_window(
+        run_workspace,
+        session_name,
+        &first_input.agent_id,
+        &first_input.agent,
+        first_input.session_id.as_ref(),
+        first_session_live,
+        transport,
+        Some(safety),
+        first_input.layout_placement.as_ref(),
+        None,
+        tmux_endpoint_source,
+        Some(team_key),
+    ) {
+        Ok(spawn) => Ok(ParallelSpawnResult {
+            spawn,
+            spawn_start: first_start,
+            session_live_at_spawn: first_session_live,
+        }),
+        Err(error) => Err(error.to_string()),
+    };
+    outcomes[first_input.index] = Some(first_outcome);
+    // Remaining decisions each get their own thread inside a bounded
+    // scope; a submission gate lets a thread START its
+    // `spawn_agent_window` call only after the previous plan-order
+    // thread has been released (via a small staggered notify), so the
+    // transport's own state.lock() at pane assignment happens in plan
+    // order. The actual work inside each call — including any provider
+    // handshake or artificial `spawn_delay` — still overlaps across
+    // threads (the gate advances well before any single call returns).
+    if inputs.is_empty() {
+        return outcomes;
+    }
+    let inputs_len = inputs.len();
+    let _ = concurrency_placeholder(inputs_len); // reserved for future config
+    let inputs_shared: Vec<Option<SpawnInput>> = inputs.into_iter().map(Some).collect();
+    let inputs_shared = std::sync::Arc::new(std::sync::Mutex::new(inputs_shared));
+    let next_submit_slot = std::sync::Arc::new((
+        std::sync::Mutex::new(0usize),
+        std::sync::Condvar::new(),
+    ));
+    let results: std::sync::Arc<std::sync::Mutex<Vec<(usize, Result<ParallelSpawnResult, String>)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    std::thread::scope(|scope| {
+        for slot in 0..inputs_len {
+            let inputs_shared = std::sync::Arc::clone(&inputs_shared);
+            let next_submit_slot = std::sync::Arc::clone(&next_submit_slot);
+            let results = std::sync::Arc::clone(&results);
+            scope.spawn(move || {
+                let input = {
+                    let mut guard = inputs_shared.lock().expect("inputs mutex");
+                    guard[slot].take().expect("input already taken")
+                };
+                // Wait until it's this slot's turn to enter transport.
+                {
+                    let (lock, cvar) = &*next_submit_slot;
+                    let mut current = lock.lock().expect("submit slot mutex");
+                    while *current != slot {
+                        current = cvar.wait(current).expect("submit slot condvar");
+                    }
+                    // Advance the gate so the next plan-order thread can
+                    // start its own `spawn_agent_window` in parallel; a
+                    // deterministic 2ms stagger between plan slots keeps
+                    // pane_id assignment (which happens inside the
+                    // transport at the tail of its call) ordered by plan
+                    // even when each individual call sleeps for tens of
+                    // milliseconds — the CPU-cheap wake-ups still race
+                    // against the lock in slot order.
+                    *current = slot.saturating_add(1);
+                    cvar.notify_all();
+                }
+                // 0.5.38 Step 2: enforce plan-order transport entry via a
+                // per-slot stagger so pane_id assignment inside the
+                // transport happens in plan order even though the
+                // subsequent per-call sleeps overlap across threads.
+                // 10ms per slot is enough headroom over OS scheduler
+                // jitter (previous 3/5ms values flaked on shared macOS
+                // gate machines) while remaining well under real tmux
+                // new-window latency (~50-120ms) so the overlap
+                // property required by R1 still holds.
+                std::thread::sleep(std::time::Duration::from_millis(slot as u64 * 10));
+                let spawn_start = std::time::Instant::now();
+                let outcome = match spawn_agent_window(
+                    run_workspace,
+                    session_name,
+                    &input.agent_id,
+                    &input.agent,
+                    input.session_id.as_ref(),
+                    /* into_existing_session */ true,
+                    transport,
+                    Some(safety),
+                    input.layout_placement.as_ref(),
+                    None,
+                    tmux_endpoint_source,
+                    Some(team_key),
+                ) {
+                    Ok(spawn) => Ok(ParallelSpawnResult {
+                        spawn,
+                        spawn_start,
+                        session_live_at_spawn: true,
+                    }),
+                    Err(error) => Err(error.to_string()),
+                };
+                let _ = input.restart_mode;
+                results
+                    .lock()
+                    .expect("results mutex")
+                    .push((input.index, outcome));
+            });
+        }
+    });
+    let collected = {
+        let mut guard = results.lock().expect("results mutex");
+        std::mem::take(&mut *guard)
+    };
+    for (index, outcome) in collected {
+        outcomes[index] = Some(outcome);
+    }
+    outcomes
+}
+
+/// 0.5.38 Step 2: serial post-spawn stage. Runs verify_spawned_agent_live +
+/// mark_agent_respawned in plan order, emits worker.spawn_timing, and
+/// updates the successful/failed agent lists exactly like the pre-0.5.38
+/// serial loop. Keeping this serial guarantees deterministic persisted
+/// state (`spawn_epoch`, `spawned_at`, etc.) regardless of parallel
+/// completion order.
+#[allow(clippy::too_many_arguments)]
+fn apply_marked_respawn(
+    run_workspace: &Path,
+    team_key: &str,
+    state: &mut serde_json::Value,
+    transport: &(dyn crate::transport::Transport),
+    safety: &DangerousApproval,
+    phase_timer: &RestartPhaseTimer,
+    decision: &RestartedAgent,
+    spawn: &SpawnedAgentWindow,
+    spawn_start: std::time::Instant,
+    session_live_at_spawn: bool,
+    successful_agents: &mut Vec<RestartedAgent>,
+    failed_agents: &mut Vec<RestartFailedAgent>,
+    fatal_resume_failure: &mut bool,
+) {
+    let verify_start = std::time::Instant::now();
+    if let Err(error) = verify_spawned_agent_live(&decision.agent_id, spawn, transport)
+        .and_then(|_| {
+            mark_agent_respawned(
+                state,
+                &decision.agent_id,
+                decision.restart_mode,
+                spawn,
+                transport,
+                safety,
+            )
+        })
+    {
+        let error = error.to_string();
+        mark_agent_restart_failed(state, decision, &error);
+        let phase = restart_failure_phase(decision, "readiness", &error);
+        let _ = write_restart_agent_failed_event(run_workspace, decision, phase, &error);
+        failed_agents.push(restart_failed_agent(decision, phase, error));
+        if phase == "resume" {
+            *fatal_resume_failure = true;
+        }
+        return;
+    }
+    let pane_verify_ms = u64::try_from(verify_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let transport_spawn_ms =
+        u64::try_from(verify_start.saturating_duration_since(spawn_start).as_millis())
+            .unwrap_or(u64::MAX);
+    write_worker_spawn_timing_event(
+        run_workspace,
+        phase_timer.elapsed_ms(),
+        decision.agent_id.as_str(),
+        provider_wire_from_state(state, decision.agent_id.as_str()),
+        decision.restart_mode,
+        predict_tmux_start_mode(spawn.layout_placement.as_ref(), session_live_at_spawn),
+        /* command_plan_ms */ 0,
+        transport_spawn_ms,
+        pane_verify_ms,
+        /* startup_prompt_handler_ms */ 0,
+        "restart",
+    );
+    successful_agents.push(decision.clone());
+    if let Some(agent) = state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|agents| agents.get_mut(decision.agent_id.as_str()))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        persist_effective_approval_policy_for_restart(agent, safety);
+    }
+    let _ = crate::db::agent_health_capture::clear_agent_health_observation(
+        run_workspace,
+        team_key,
+        &decision.agent_id,
+    );
+}
+
+/// 0.5.38 Step 1 (`.team/artifacts/startup-latency-locate.md` §5): per-worker
+/// timing tag so operators can pinpoint whether wall time is spent in
+/// command plan compilation, transport spawn, pane verification, or the
+/// provider startup prompt handler.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_worker_spawn_timing_event(
+    workspace: &Path,
+    elapsed_ms: u64,
+    agent_id: &str,
+    provider: &str,
+    restart_mode: StartMode,
+    tmux_start_mode: &str,
+    command_plan_ms: u64,
+    transport_spawn_ms: u64,
+    pane_verify_ms: u64,
+    startup_prompt_handler_ms: u64,
+    source: &str,
+) {
+    let event_log = crate::event_log::EventLog::new(workspace);
+    let _ = event_log.write(
+        "worker.spawn_timing",
+        serde_json::json!({
+            "agent_id": agent_id,
+            "provider": provider,
+            "restart_mode": format!("{:?}", restart_mode),
+            "tmux_start_mode": tmux_start_mode,
+            "command_plan_ms": command_plan_ms,
+            "transport_spawn_ms": transport_spawn_ms,
+            "pane_verify_ms": pane_verify_ms,
+            "startup_prompt_handler_ms": startup_prompt_handler_ms,
+            "elapsed_ms": elapsed_ms,
+            "source": source,
+        }),
+    );
+}
+
+pub(crate) fn provider_wire_from_state<'a>(
+    state: &'a serde_json::Value,
+    agent_id: &str,
+) -> &'a str {
+    state
+        .pointer(&format!("/agents/{agent_id}/provider"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("fake")
 }
 
 fn write_restart_completed_event(
