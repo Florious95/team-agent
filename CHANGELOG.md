@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.39
+
+- **Fix: tmux blast-radius containment — private socket + wrapper lifecycle (P0 Slice1+Slice2+§11.1B).** Workers now spawn inside a private tmux socket (`tmux -L ta-<epoch>`) so that `kill-server` affects only the team-agent session tree, not the user's ambient tmux server. Added a wrapper lifecycle layer (Slice2) covering all daemon worker spawn sites (first/into/adaptive), ensuring pane death is detected when the wrapper exits. Thin Slice1 removes the legacy `kill-session` shape-fallback. B-classifier upgraded to pure-observation: `classify_tmux_server_error` emits diagnosis only, no recovery actions. D-k/D-l backlog items consumed (stagger reverse-guard contract + stale comment). New contracts: tmux_server_death_0539_contract + parallel_spawn_stagger_reverse_guard.
+
 ## 0.5.38
 
 - **Feature: startup latency instrumentation + bounded parallel worker spawn (Step 1+2).** Added per-worker spawn timing telemetry emitted to events.jsonl (worker.spawn_timing with queued_at, spawn_start_at, spawn_end_at, elapsed_ms). Fresh/FreshAfterMissingRollout restarts now spawn workers concurrently via a bounded Condvar submission gate (max 4 in-flight), reducing wall-clock startup time from O(N) serial to O(⌈N/4⌉) parallel. Resumed restarts remain serial (session_disappeared semantic requires deterministic ordering). New contract: startup_latency_contract (856 lines, golden fixture regen for 5 existing fixtures).
