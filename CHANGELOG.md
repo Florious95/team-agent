@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.37
+
+- **Fix: recovery terminal idempotency — skip dispatch and clear stale due-time (R5 restart storm).** Terminal recovery intents (succeeded/blocked/exhausted) were re-dispatching on every tick because the due-time filter did not exclude them and the dispatch path did not clear next_retry_at. Fixed by: (1) clearing stale terminal next_retry_at at the top of attempt_due_recoveries before collecting; (2) restricting collect_due_recovery_agents to scheduled/running status only; (3) removing next_retry_at on write_recovery_intent_result for terminal transitions. New contract cases: r8 terminal idempotency (positive) + r8 non-terminal still dispatches (negative guard).
+
 ## 0.5.36
 
 - **Fix: API error recovery — bounded retry, backpressure, copyable state (supermarket P2).** The coordinator now detects repeated API errors (429/5xx) via the abnormal exit watcher and enters a bounded retry/backpressure mode: exponential back-off with a configurable retry budget, a canary-first strategy for 429s, and explicit noop paths when recovery is not applicable. Recovery intent is persisted atomically post-save (outside the pre-save window) and never synthesizes hidden provider turns or SDK calls.
