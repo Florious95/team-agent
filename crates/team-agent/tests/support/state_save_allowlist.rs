@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 72;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 73;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -111,6 +111,19 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "CoordinatorApiErrorRecovery",
         "s1a_legacy_external",
         1921
+    ),
+    // 0.5.37 (`architect res_b8a6d40f3765`, R8): pre-dispatch scrub of
+    // stale `next_retry_at` on terminal recovery intents so a coordinator
+    // restart cannot re-fire lifecycle on a completed intent. Reuses the
+    // `CoordinatorApiErrorRecovery` intent — same recovery bookkeeping
+    // namespace, distinct callsite.
+    allow!(
+        "coordinator/steps/abnormal.rs",
+        "clear_stale_terminal_next_retry_at",
+        "save_runtime_state",
+        "CoordinatorApiErrorRecovery",
+        "s1a_legacy_external",
+        1790
     ),
     allow!(
         "leader/lease.rs",
