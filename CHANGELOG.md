@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.40
+
+- **Fix: build-before-destroy Slice3 — deferred teardown + snapshot rollback (P0 Slice3).** When a restart is requested while an existing team is live, the coordinator now builds the new session first (deferred mode) before tearing down the old one. A dirty-topology gate refuses the build if the old session is in an ambiguous state. On failure mid-build, the coordinator rolls back from a pre-build snapshot (double-write to state.agents + teams.<key>.agents using canonical team_key). If the new tmux server crashes mid-flight (session_disappeared), the coordinator stops rather than cascading a pop. The old teardown path (session_disappeared_after_spawn) is preserved byte-identical for non-deferred restarts. New contract: restart_build_before_destroy_0540_contract.
+
 ## 0.5.39
 
 - **Fix: tmux blast-radius containment — private socket + wrapper lifecycle (P0 Slice1+Slice2+§11.1B).** Workers now spawn inside a private tmux socket (`tmux -L ta-<epoch>`) so that `kill-server` affects only the team-agent session tree, not the user's ambient tmux server. Added a wrapper lifecycle layer (Slice2) covering all daemon worker spawn sites (first/into/adaptive), ensuring pane death is detected when the wrapper exits. Thin Slice1 removes the legacy `kill-session` shape-fallback. B-classifier upgraded to pure-observation: `classify_tmux_server_error` emits diagnosis only, no recovery actions. D-k/D-l backlog items consumed (stagger reverse-guard contract + stale comment). New contracts: tmux_server_death_0539_contract + parallel_spawn_stagger_reverse_guard.
