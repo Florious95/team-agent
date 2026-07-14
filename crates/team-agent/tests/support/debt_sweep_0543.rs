@@ -294,11 +294,26 @@ fn assert_failure_contains(output: &Output, needle: &str, label: &str) {
 }
 
 fn short_test_socket(tag: &str) -> PathBuf {
-    PathBuf::from("/private/tmp").join(format!("ta43-{tag}-{}-{}.sock", std::process::id(), next()))
+    short_test_base().join(format!("ta43-{tag}-{}-{}.sock", std::process::id(), next()))
 }
 
 fn short_test_root(tag: &str) -> PathBuf {
-    PathBuf::from("/private/tmp").join(format!("ta43-{tag}-{}-{}", std::process::id(), next()))
+    short_test_base().join(format!("ta43-{tag}-{}-{}", std::process::id(), next()))
+}
+
+fn short_test_base() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        PathBuf::from("/private/tmp")
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        PathBuf::from("/tmp")
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir()
+    }
 }
 
 fn unique(tag: &str) -> String {
