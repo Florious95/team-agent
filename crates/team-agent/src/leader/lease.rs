@@ -2010,8 +2010,7 @@ fn compact_team_state_preserving_claim_fields(state: &Value, target_key: &str) -
 /// drifted. Every touch of the legacy path constants below is marked
 /// `B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ` so the RED3 grep guard admits
 /// them as documented exceptions.
-pub fn detect_dual_state_divergence(
-    // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only entry point; no product save/route consumer.
+pub fn detect_dual_state_divergence( // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only entry point; no product save/route consumer.
     workspace: &Path,
     state: &Value,
 ) -> Result<Option<Value>, LeaderError> {
@@ -2084,8 +2083,7 @@ fn agent_binding_summary(state: &Value) -> Value {
     Value::Object(out)
 }
 
-fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf {
-    // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only path resolver.
+fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf { // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only path resolver.
     let safe_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name); // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: reuses helpers safe legacy path.
     if safe_path.exists() {
         return safe_path;

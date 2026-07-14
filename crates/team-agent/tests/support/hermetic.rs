@@ -38,14 +38,23 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// path is still >=100 bytes (fail-closed vs. fail-open silent long
 /// path).
 pub fn short_tmux_socket(tag: &str) -> PathBuf {
-    // Short root: on Unix systems /private/tmp exists and is 12
-    // characters. That leaves ~90 bytes for basename which is plenty
-    // for tag+pid+counter+hash. Root is intentionally NOT the
-    // hermetic HOME workspace because sockets must survive across
-    // `HermeticTestEnv` Drops when the test needs to hand-off. Sockets
-    // are cleaned by the owning fixture's Drop (see
-    // `TestWorkspace::cleanup_owned_tmux` / `TmuxServer::drop`).
-    let root = PathBuf::from("/private/tmp");
+    // Short root: macOS uses /private/tmp (12 chars); other Unix
+    // (incl. Linux CI) uses /tmp (4 chars). Both leave ~90+ bytes
+    // for basename — plenty for tag+pid+counter+hash. Root is
+    // intentionally NOT the hermetic HOME workspace because sockets
+    // must survive across `HermeticTestEnv` Drops when the test needs
+    // to hand-off. Sockets are cleaned by the owning fixture's Drop
+    // (see `TestWorkspace::cleanup_owned_tmux` / `TmuxServer::drop`).
+    // Mirrors te's `short_test_base` in `support/debt_sweep_0543.rs`
+    // (4b13e9f portable-fixtures patch): macOS→/private/tmp,
+    // other Unix→/tmp, non-Unix→temp_dir.
+    let root = if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else if cfg!(unix) {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
     // Truncate the tag to 24 bytes; append 4-hex-char hash of the
     // original tag so distinct long tags remain distinct.
     let short_tag: String = tag.chars().take(24).collect();
