@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.42
+
+- **Chore: S1b writer cluster migration — CoordinatorTick + ClaimLeader → StateRepository (governance phase 5).** Migrates the CoordinatorTick and ClaimLeader write paths to route through StateRepository, reducing external direct-write points from 44 to 41 (BASELINE 73→70). All three migration points are byte-identical to prior direct calls; no helper, save_hook, or load/retry/cache semantics changed. Completes the five-phase governance arc (G0→S1a→C1→C2→S1b). Ledger contract: governance_writer_cluster_count=70 (5/5 cases).
+
 ## 0.5.41
 
 - **Fix: fault invisibility — RuntimeFreshness + worker wrapper detection + host_boot heartbeat + stale diagnose (S1-S5).** Adds a RuntimeFreshness signal derived from host boot time (linux /proc/uptime, macOS sysctl kern.boottime) emitted in every heartbeat payload. The status renderer gains a stale-issue diagnose path triggered by three independent conditions: host_boot_mismatch (coordinator from prior boot), worker_provider_exited (wrapper exit detected), and coordinator_unavailable (no positive evidence, not already UNKNOWN). Worker liveness now uses an eight-level positive-evidence sequence with marker-based detection preceding legacy pane_pid checks; marker absence → Unverifiable rather than alive. Canonical UNKNOWN takes precedence over coordinator_unavailable to avoid double-stacking with the 0.5.35 R4 guard. Consumes D-m backlog item (0.5.39). New contract: fault_invisibility_0541_contract.
