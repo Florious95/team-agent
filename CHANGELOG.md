@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.41
+
+- **Fix: fault invisibility — RuntimeFreshness + worker wrapper detection + host_boot heartbeat + stale diagnose (S1-S5).** Adds a RuntimeFreshness signal derived from host boot time (linux /proc/uptime, macOS sysctl kern.boottime) emitted in every heartbeat payload. The status renderer gains a stale-issue diagnose path triggered by three independent conditions: host_boot_mismatch (coordinator from prior boot), worker_provider_exited (wrapper exit detected), and coordinator_unavailable (no positive evidence, not already UNKNOWN). Worker liveness now uses an eight-level positive-evidence sequence with marker-based detection preceding legacy pane_pid checks; marker absence → Unverifiable rather than alive. Canonical UNKNOWN takes precedence over coordinator_unavailable to avoid double-stacking with the 0.5.35 R4 guard. Consumes D-m backlog item (0.5.39). New contract: fault_invisibility_0541_contract.
+
 ## 0.5.40
 
 - **Fix: build-before-destroy Slice3 — deferred teardown + snapshot rollback (P0 Slice3).** When a restart is requested while an existing team is live, the coordinator now builds the new session first (deferred mode) before tearing down the old one. A dirty-topology gate refuses the build if the old session is in an ambiguous state. On failure mid-build, the coordinator rolls back from a pre-build snapshot (double-write to state.agents + teams.<key>.agents using canonical team_key). If the new tmux server crashes mid-flight (session_disappeared), the coordinator stops rather than cascading a pop. The old teardown path (session_disappeared_after_spawn) is preserved byte-identical for non-deferred restarts. New contract: restart_build_before_destroy_0540_contract.
