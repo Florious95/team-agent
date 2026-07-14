@@ -82,7 +82,10 @@ pub fn process_abnormal_records(
             .unwrap_or("unknown")
             .to_string();
         let signature_lower = signature.to_lowercase();
-        let turn_id = record.get("turn_id").and_then(Value::as_str).map(TurnId::new);
+        let turn_id = record
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .map(TurnId::new);
         let bucket = match &turn_id {
             Some(id) => id.as_str().to_string(),
             None => stable_fingerprint(record),
@@ -95,13 +98,14 @@ pub fn process_abnormal_records(
         if lists.whitelist.iter().any(|needle| raw.contains(needle)) {
             continue;
         }
-        let decision = if lists.blacklist.iter().any(|needle| {
-            raw.contains(needle) || signature_lower.contains(&needle.to_lowercase())
-        }) {
-            AbnormalDecision::NotifyBlacklist
-        } else {
-            AbnormalDecision::NotifyDefault
-        };
+        let decision =
+            if lists.blacklist.iter().any(|needle| {
+                raw.contains(needle) || signature_lower.contains(&needle.to_lowercase())
+            }) {
+                AbnormalDecision::NotifyBlacklist
+            } else {
+                AbnormalDecision::NotifyDefault
+            };
         let kind = record.get("kind").and_then(Value::as_str);
         notifications.push(AbnormalNotification {
             signature,
@@ -141,7 +145,13 @@ pub fn detect_whole_team_gone(
         return whole_team_report(true, WholeTeamGoneClass::CleanShutdown, false, false, false);
     }
     if snapshot.restart_in_progress {
-        return whole_team_report(true, WholeTeamGoneClass::RestartInProgress, false, false, false);
+        return whole_team_report(
+            true,
+            WholeTeamGoneClass::RestartInProgress,
+            false,
+            false,
+            false,
+        );
     }
     let marker_written = marker_store.set_marker(
         "whole_team_gone",
@@ -158,7 +168,9 @@ pub fn detect_whole_team_gone(
 
 fn stable_fingerprint(value: &Value) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string()).hash(&mut hasher);
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| value.to_string())
+        .hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 

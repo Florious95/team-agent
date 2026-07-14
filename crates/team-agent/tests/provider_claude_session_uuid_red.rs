@@ -14,7 +14,12 @@ fn claude_fresh_launch_session_id_is_rfc4122_uuid_not_session_prefix() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
         let argv = adapter
-            .build_command(AuthMode::Subscription, None, None, Some("claude-sonnet-4-6"))
+            .build_command(
+                AuthMode::Subscription,
+                None,
+                None,
+                Some("claude-sonnet-4-6"),
+            )
             .expect("Claude fresh launch command should build");
         let session_id = session_id_after_flag(&argv);
 
@@ -62,7 +67,9 @@ fn session_id_after_flag(argv: &[String]) -> &str {
     argv.get(index + 1)
         .map(String::as_str)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| panic!("Claude argv must provide a non-empty value after --session-id; argv={argv:?}"))
+        .unwrap_or_else(|| {
+            panic!("Claude argv must provide a non-empty value after --session-id; argv={argv:?}")
+        })
 }
 
 fn is_rfc4122_uuid(value: &str) -> bool {
@@ -83,8 +90,10 @@ fn is_rfc4122_uuid(value: &str) -> bool {
             return false;
         }
     }
-    matches!(bytes[14], b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8')
-        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+    matches!(
+        bytes[14],
+        b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8'
+    ) && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
 fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {

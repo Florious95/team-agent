@@ -148,7 +148,10 @@ impl MissingStateCase {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        panic!("coordinator did not write pid file at {}", pid_path.display());
+        panic!(
+            "coordinator did not write pid file at {}",
+            pid_path.display()
+        );
     }
 }
 

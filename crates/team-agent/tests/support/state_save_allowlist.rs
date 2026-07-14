@@ -108,14 +108,19 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
     // stale `next_retry_at` on terminal recovery intents so a coordinator
     // restart cannot re-fire lifecycle on a completed intent. Reuses the
     // `CoordinatorApiErrorRecovery` intent — same recovery bookkeeping
-    // namespace, distinct callsite.
+    // namespace, distinct callsite. 0.5.43 D-j (debt-sweep §5):
+    // `clear_stale_terminal_next_retry_at` was refactored into a pure
+    // `(&mut Value) -> bool` scrub with no I/O; the callsite that now
+    // owns the terminal save is `attempt_due_recoveries` (single
+    // fresh load, scrub, save if changed, then collect due). Row
+    // moves; intent classification and phase unchanged.
     allow!(
         "coordinator/steps/abnormal.rs",
-        "clear_stale_terminal_next_retry_at",
+        "attempt_due_recoveries",
         "save_runtime_state",
         "CoordinatorApiErrorRecovery",
         "s1a_legacy_external",
-        1790
+        1856
     ),
     allow!(
         "leader/start.rs",

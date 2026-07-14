@@ -18,7 +18,10 @@ fn tick_never_panics_returns_ok_tickreport_on_clean_state() {
     let report = report.expect("tick must not Err on clean state");
     assert!(report.ok, "clean tick is ok=true");
     assert!(!report.stop, "clean tick does not stop the main loop");
-    assert_eq!(report.reason, None, "clean tick has no degraded/stop reason");
+    assert_eq!(
+        report.reason, None,
+        "clean tick has no degraded/stop reason"
+    );
     assert_eq!(report.persisted, Some(true), "clean tick persisted state");
 }
 
@@ -29,15 +32,23 @@ fn tick_save_failure_returns_degraded_not_panic_not_err() {
     // returned as Ok — NOT a panic, NOT an Err (the main loop must NOT catch+backoff this).
     let (coord, _calls) = coord_for_test(true, Some(failing_save_hook()), None);
     let report = coord.tick();
-    let report = report.expect("save failure is a DEGRADED Ok, NOT an Err (main loop must not backoff)");
+    let report =
+        report.expect("save failure is a DEGRADED Ok, NOT an Err (main loop must not backoff)");
     assert!(!report.ok, "bug-084: degraded => ok=false");
     assert_eq!(
         report.reason,
         Some(TickStopReason::PersistenceDegraded),
         "bug-084: reason=persistence_degraded"
     );
-    assert_eq!(report.persisted, Some(false), "bug-084: persisted=Some(false)");
-    assert!(!report.stop, "bug-084: stop=false (degrade, do NOT exit main loop)");
+    assert_eq!(
+        report.persisted,
+        Some(false),
+        "bug-084: persisted=Some(false)"
+    );
+    assert!(
+        !report.stop,
+        "bug-084: stop=false (degrade, do NOT exit main loop)"
+    );
 }
 
 #[test]
@@ -49,9 +60,14 @@ fn tick_tmux_session_missing_returns_stop_true() {
     // p2_tick_skips_tmux_gate_when_session_name_absent.)
     let (coord, _calls) =
         coord_for_test_with_session(/*session_present=*/ false, "team-missing");
-    let report = coord.tick().expect("session-missing is a typed report, not an Err");
+    let report = coord
+        .tick()
+        .expect("session-missing is a typed report, not an Err");
     assert!(!report.ok, "session missing => ok=false");
-    assert!(report.stop, "session missing => stop=true (break main loop)");
+    assert!(
+        report.stop,
+        "session missing => stop=true (break main loop)"
+    );
     assert_eq!(
         report.reason,
         Some(TickStopReason::TmuxSessionMissing),
@@ -68,8 +84,7 @@ fn tick_side_effect_order_is_the_fixed_sequence() {
     //   detect_deadlocks -> detect_compaction -> detect_drift -> detect_api_errors ->
     //   ATOMIC_save (bug-084 wrap) -> collect_results -> prune_dedupe_log.
     // The porter must push each step name into the injected recorder at its call site.
-    let recorder: OrderRecorder =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorder: OrderRecorder = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let (coord, _calls) = coord_for_test(true, None, Some(std::sync::Arc::clone(&recorder)));
     let _ = coord.tick().expect("tick ok");
     let order = recorder.lock().unwrap().clone();
@@ -101,11 +116,17 @@ fn tick_side_effect_order_is_the_fixed_sequence() {
         "collect_results",
         "prune_dedupe_log",
     ];
-    assert_eq!(order, expected, "tick side-effect ORDER must match the fixed sequence");
+    assert_eq!(
+        order, expected,
+        "tick side-effect ORDER must match the fixed sequence"
+    );
     // ATOMIC save is the LAST mutation before read-only collect/prune (bug-084 wrap point).
     let save_idx = order.iter().position(|s| *s == "atomic_save").unwrap();
     let collect_idx = order.iter().position(|s| *s == "collect_results").unwrap();
-    assert!(save_idx < collect_idx, "save precedes collect (bug-084 wrap is the last mutation)");
+    assert!(
+        save_idx < collect_idx,
+        "save precedes collect (bug-084 wrap is the last mutation)"
+    );
 }
 
 #[test]
@@ -132,7 +153,11 @@ fn health_ok_is_conjunction_of_running_metadata_ok_and_schema_ok() {
     let (coord, _calls) = coord_for_test(true, None, None);
     let h = coord.health().expect("health is a typed report");
     assert!(!h.ok, "no pid file => not running => ok=false");
-    assert_eq!(h.status, CoordinatorHealthStatus::Missing, "no pid => status=missing");
+    assert_eq!(
+        h.status,
+        CoordinatorHealthStatus::Missing,
+        "no pid => status=missing"
+    );
     assert!(!h.metadata_ok, "no metadata => metadata_ok=false");
 }
 
@@ -193,7 +218,10 @@ fn read_coordinator_metadata_missing_file_is_none() {
 fn p2_tick_skips_tmux_gate_when_session_name_absent() {
     let (coord, _calls) = coord_for_test(false, None, None);
     let report = coord.tick().unwrap();
-    assert!(!report.stop, "missing/null session_name must skip the gate, not stop the daemon");
+    assert!(
+        !report.stop,
+        "missing/null session_name must skip the gate, not stop the daemon"
+    );
     assert_ne!(report.reason, Some(TickStopReason::TmuxSessionMissing));
 }
 
@@ -223,8 +251,14 @@ fn p2_render_result_received_truncates_summary_to_80_chars() {
     let long = "x".repeat(200);
     let e = serde_json::json!({"event":"result_received","agent_id":"w1","summary": long});
     let line = render_event_line(&e).expect("renders");
-    assert!(line.contains(&"x".repeat(80)), "first 80 summary chars are kept");
-    assert!(!line.contains(&"x".repeat(81)), "summary must be truncated to 80 chars");
+    assert!(
+        line.contains(&"x".repeat(80)),
+        "first 80 summary chars are kept"
+    );
+    assert!(
+        !line.contains(&"x".repeat(81)),
+        "summary must be truncated to 80 chars"
+    );
 }
 
 // P1 — idle_takeover.unknown_persistent must carry the auth_mode field (null when absent)
@@ -252,7 +286,8 @@ fn p2_unknown_persistent_event_serializes_auth_mode_key() {
 #[test]
 fn p2_abnormal_matches_lowercased_signature_too() {
     let reg = MockRegistry::new(&[], &["timeout"]);
-    let records = vec![serde_json::json!({"raw":"nothing here","signature":"TimeoutError","kind":"error"})];
+    let records =
+        vec![serde_json::json!({"raw":"nothing here","signature":"TimeoutError","kind":"error"})];
     let out = process_abnormal_records(
         &records,
         &reg,

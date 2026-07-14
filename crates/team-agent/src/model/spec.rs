@@ -36,10 +36,26 @@ const RESULT_REQUIRED: &[&str] = &[
 
 /// `RESULT_COLLECTION_SCHEMAS`(`spec.py:93-99`),有序:(field, required, allowed)。
 const RESULT_COLLECTIONS: &[(&str, &[&str], &[&str])] = &[
-    ("changes", &["path", "kind", "description"], &["path", "kind", "description"]),
-    ("tests", &["command", "status"], &["command", "status", "detail"]),
-    ("risks", &["severity", "description"], &["severity", "description"]),
-    ("artifacts", &["path", "description"], &["path", "description"]),
+    (
+        "changes",
+        &["path", "kind", "description"],
+        &["path", "kind", "description"],
+    ),
+    (
+        "tests",
+        &["command", "status"],
+        &["command", "status", "detail"],
+    ),
+    (
+        "risks",
+        &["severity", "description"],
+        &["severity", "description"],
+    ),
+    (
+        "artifacts",
+        &["path", "description"],
+        &["path", "description"],
+    ),
     ("next_actions", &["description"], &["description"]),
 ];
 
@@ -61,7 +77,13 @@ pub fn validate_result_envelope(envelope: &Value) -> Result<(), ModelError> {
 }
 
 /// `spec._check_keys`:非 object → "must be an object";否则 missing(排序)+ unknown(排序)。
-fn check_keys(obj: &Value, path: &str, required: &[&str], allowed: &[&str], errors: &mut Vec<String>) {
+fn check_keys(
+    obj: &Value,
+    path: &str,
+    required: &[&str],
+    allowed: &[&str],
+    errors: &mut Vec<String>,
+) {
     let Some(map) = obj.as_object() else {
         errors.push(format!("{path}: must be an object"));
         return;
@@ -146,7 +168,11 @@ fn result_schema_errors(envelope: &Value) -> Vec<String> {
                     &["passed", "failed", "not_run", "skipped"],
                     "invalid test status",
                 )),
-                "risks" => Some(("severity", &["low", "medium", "high"], "invalid risk severity")),
+                "risks" => Some((
+                    "severity",
+                    &["low", "medium", "high"],
+                    "invalid risk severity",
+                )),
                 _ => None,
             };
             if let Some((key, valid, msg)) = enum_field {
@@ -174,14 +200,35 @@ fn result_schema_errors(envelope: &Value) -> Vec<String> {
 // 对齐 Python `spec.validate_spec`(golden 由真相源双跑锁死)。
 
 const ROOT_KEYS: &[&str] = &[
-    "version", "team", "leader", "agents", "routing", "communication", "runtime", "context", "tasks",
+    "version",
+    "team",
+    "leader",
+    "agents",
+    "routing",
+    "communication",
+    "runtime",
+    "context",
+    "tasks",
 ];
 const AUTH_MODES: &[&str] = &["subscription", "official_api", "compatible_api"];
 const VALID_DISPLAY_BACKENDS: &[&str] = &[
-    "none", "tmux_attach", "iterm", "ghostty", "ghostty_window", "ghostty_workspace", "adaptive",
+    "none",
+    "tmux_attach",
+    "iterm",
+    "ghostty",
+    "ghostty_window",
+    "ghostty_workspace",
+    "adaptive",
 ];
 const TASK_STATUS_STRS: &[&str] = &[
-    "pending", "ready", "running", "blocked", "needs_retry", "done", "failed", "cancelled",
+    "pending",
+    "ready",
+    "running",
+    "blocked",
+    "needs_retry",
+    "done",
+    "failed",
+    "cancelled",
 ];
 
 /// `spec.validate_spec`:basic schema + semantic 校验。失败 → `ModelError::Validation`,
@@ -192,7 +239,11 @@ pub fn validate_spec(spec: &Yaml, base_dir: &Path) -> Result<(), ModelError> {
     if errors.is_empty() {
         return Ok(());
     }
-    let joined = errors.iter().map(|m| format!("- {m}")).collect::<Vec<_>>().join("\n");
+    let joined = errors
+        .iter()
+        .map(|m| format!("- {m}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     Err(ModelError::Validation(format!(
         "team.spec.yaml validation failed:\n{joined}"
     )))
@@ -210,7 +261,13 @@ fn is_map_some(v: Option<&Yaml>) -> bool {
 }
 
 /// `spec._check_keys` 的 yaml::Value 版。
-fn check_keys_y(obj: Option<&Yaml>, path: &str, required: &[&str], allowed: &[&str], errors: &mut Vec<String>) {
+fn check_keys_y(
+    obj: Option<&Yaml>,
+    path: &str,
+    required: &[&str],
+    allowed: &[&str],
+    errors: &mut Vec<String>,
+) {
     let Some(map) = obj.and_then(Yaml::as_map) else {
         errors.push(format!("{path}: must be an object"));
         return;
@@ -251,7 +308,13 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
     // 0.4.x provider effort MVP step 3: provider_effort is allowed but not required.
     let team_required = &["name", "mode", "objective", "workspace"];
     let team_allowed = &["name", "mode", "objective", "workspace", "provider_effort"];
-    check_keys_y(spec.get("team"), "/team", team_required, team_allowed, &mut e);
+    check_keys_y(
+        spec.get("team"),
+        "/team",
+        team_required,
+        team_allowed,
+        &mut e,
+    );
     if let Some(team) = spec.get("team") {
         if let Some(raw) = team.get("provider_effort").and_then(Yaml::as_str) {
             if crate::model::enums::ProviderEffort::parse(raw).is_none() {
@@ -261,13 +324,26 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
             }
         }
     }
-    let mode = spec.get("team").and_then(|t| t.get("mode")).and_then(Yaml::as_str);
+    let mode = spec
+        .get("team")
+        .and_then(|t| t.get("mode"))
+        .and_then(Yaml::as_str);
     if !matches!(mode, Some("supervisor_worker" | "swarm_limited")) {
         e.push("/team/mode: invalid mode".to_string());
     }
     let leader_keys = &["id", "role", "provider", "model", "tools", "context_policy"];
-    check_keys_y(spec.get("leader"), "/leader", leader_keys, leader_keys, &mut e);
-    let cp_keys = &["keep_user_thread", "receive_worker_outputs", "max_worker_result_tokens"];
+    check_keys_y(
+        spec.get("leader"),
+        "/leader",
+        leader_keys,
+        leader_keys,
+        &mut e,
+    );
+    let cp_keys = &[
+        "keep_user_thread",
+        "receive_worker_outputs",
+        "max_worker_result_tokens",
+    ];
     check_keys_y(
         spec.get("leader").and_then(|l| l.get("context_policy")),
         "/leader/context_policy",
@@ -300,13 +376,35 @@ fn basic_schema_errors(spec: &Yaml) -> Vec<String> {
 
 fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
     let req = &[
-        "id", "role", "provider", "model", "working_directory", "system_prompt", "tools",
-        "permission_mode", "preferred_for", "avoid_for", "output_contract",
+        "id",
+        "role",
+        "provider",
+        "model",
+        "working_directory",
+        "system_prompt",
+        "tools",
+        "permission_mode",
+        "preferred_for",
+        "avoid_for",
+        "output_contract",
     ];
     let allowed = &[
-        "id", "role", "provider", "model", "working_directory", "system_prompt", "tools",
-        "permission_mode", "preferred_for", "avoid_for", "output_contract", "paused", "auth_mode",
-        "profile", "credential_ref", "forked_from",
+        "id",
+        "role",
+        "provider",
+        "model",
+        "working_directory",
+        "system_prompt",
+        "tools",
+        "permission_mode",
+        "preferred_for",
+        "avoid_for",
+        "output_contract",
+        "paused",
+        "auth_mode",
+        "profile",
+        "credential_ref",
+        "forked_from",
         // 0.4.x provider effort MVP step 3: per-agent effort override (resolved at compile).
         "effort",
     ];
@@ -333,18 +431,47 @@ fn check_agent(agent: &Yaml, path: &str, errors: &mut Vec<String>) {
             Some(_) => {}
         }
     }
-    check_keys_y(agent.get("system_prompt"), &format!("{path}/system_prompt"), &["inline", "file"], &["inline", "file"], errors);
+    check_keys_y(
+        agent.get("system_prompt"),
+        &format!("{path}/system_prompt"),
+        &["inline", "file"],
+        &["inline", "file"],
+        errors,
+    );
     check_list_y(agent.get("tools"), &format!("{path}/tools"), errors);
-    check_list_y(agent.get("preferred_for"), &format!("{path}/preferred_for"), errors);
+    check_list_y(
+        agent.get("preferred_for"),
+        &format!("{path}/preferred_for"),
+        errors,
+    );
     check_list_y(agent.get("avoid_for"), &format!("{path}/avoid_for"), errors);
-    check_keys_y(agent.get("output_contract"), &format!("{path}/output_contract"), &["format", "required_fields"], &["format", "required_fields"], errors);
-    if agent.get("output_contract").and_then(|o| o.get("format")).and_then(Yaml::as_str) != Some("result_envelope_v1") {
-        errors.push(format!("{path}/output_contract/format: must be result_envelope_v1"));
+    check_keys_y(
+        agent.get("output_contract"),
+        &format!("{path}/output_contract"),
+        &["format", "required_fields"],
+        &["format", "required_fields"],
+        errors,
+    );
+    if agent
+        .get("output_contract")
+        .and_then(|o| o.get("format"))
+        .and_then(Yaml::as_str)
+        != Some("result_envelope_v1")
+    {
+        errors.push(format!(
+            "{path}/output_contract/format: must be result_envelope_v1"
+        ));
     }
 }
 
 fn check_routing(routing: Option<&Yaml>, errors: &mut Vec<String>) {
-    check_keys_y(routing, "/routing", &["default_assignee", "rules"], &["default_assignee", "rules"], errors);
+    check_keys_y(
+        routing,
+        "/routing",
+        &["default_assignee", "rules"],
+        &["default_assignee", "rules"],
+        errors,
+    );
     if !is_map_some(routing) {
         return;
     }
@@ -353,8 +480,15 @@ fn check_routing(routing: Option<&Yaml>, errors: &mut Vec<String>) {
         return;
     };
     for (idx, rule) in rules.iter().enumerate() {
-        check_keys_y(Some(rule), &format!("/routing/rules/{idx}"), &["id", "assign_to", "priority"], &["id", "when", "match", "assign_to", "priority"], errors);
-        let has_clause = rule.get("when").is_some_and(Yaml::is_truthy) || rule.get("match").is_some_and(Yaml::is_truthy);
+        check_keys_y(
+            Some(rule),
+            &format!("/routing/rules/{idx}"),
+            &["id", "assign_to", "priority"],
+            &["id", "when", "match", "assign_to", "priority"],
+            errors,
+        );
+        let has_clause = rule.get("when").is_some_and(Yaml::is_truthy)
+            || rule.get("match").is_some_and(Yaml::is_truthy);
         if rule.is_map() && !has_clause {
             errors.push(format!("/routing/rules/{idx}: must include when or match"));
         }
@@ -362,27 +496,64 @@ fn check_routing(routing: Option<&Yaml>, errors: &mut Vec<String>) {
 }
 
 fn check_communication(comm: Option<&Yaml>, errors: &mut Vec<String>) {
-    let req = &["protocol", "topology", "worker_to_worker", "ack_timeout_sec", "result_format", "message_store"];
+    let req = &[
+        "protocol",
+        "topology",
+        "worker_to_worker",
+        "ack_timeout_sec",
+        "result_format",
+        "message_store",
+    ];
     check_keys_y(comm, "/communication", req, req, errors);
     if !is_map_some(comm) {
         return;
     }
-    if !matches!(comm.and_then(|c| c.get("protocol")).and_then(Yaml::as_str), Some("mcp_inbox" | "file_bus")) {
+    if !matches!(
+        comm.and_then(|c| c.get("protocol")).and_then(Yaml::as_str),
+        Some("mcp_inbox" | "file_bus")
+    ) {
         errors.push("/communication/protocol: invalid protocol".to_string());
     }
-    if comm.and_then(|c| c.get("result_format")).and_then(Yaml::as_str) != Some("result_envelope_v1") {
+    if comm
+        .and_then(|c| c.get("result_format"))
+        .and_then(Yaml::as_str)
+        != Some("result_envelope_v1")
+    {
         errors.push("/communication/result_format: must be result_envelope_v1".to_string());
     }
-    check_keys_y(comm.and_then(|c| c.get("message_store")), "/communication/message_store", &["sqlite", "mirror_files"], &["sqlite", "mirror_files"], errors);
+    check_keys_y(
+        comm.and_then(|c| c.get("message_store")),
+        "/communication/message_store",
+        &["sqlite", "mirror_files"],
+        &["sqlite", "mirror_files"],
+        errors,
+    );
 }
 
 fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
-    let req = &["backend", "session_name", "auto_launch", "require_user_approval_before_launch", "max_active_agents", "startup_order"];
+    let req = &[
+        "backend",
+        "session_name",
+        "auto_launch",
+        "require_user_approval_before_launch",
+        "max_active_agents",
+        "startup_order",
+    ];
     let allowed = &[
-        "backend", "session_name", "auto_launch", "require_user_approval_before_launch",
-        "max_active_agents", "startup_order", "display_backend", "dangerous_auto_approve",
-        "auto_attach_leader", "fast", "tick_interval_sec", "push_min_interval_sec",
-        "stuck_timeout_sec", "auto_trust_own_workspace",
+        "backend",
+        "session_name",
+        "auto_launch",
+        "require_user_approval_before_launch",
+        "max_active_agents",
+        "startup_order",
+        "display_backend",
+        "dangerous_auto_approve",
+        "auto_attach_leader",
+        "fast",
+        "tick_interval_sec",
+        "push_min_interval_sec",
+        "stuck_timeout_sec",
+        "auto_trust_own_workspace",
     ];
     check_keys_y(runtime, "/runtime", req, allowed, errors);
     if !is_map_some(runtime) {
@@ -393,7 +564,10 @@ fn check_runtime(runtime: Option<&Yaml>, errors: &mut Vec<String>) {
         errors.push("/runtime/backend: invalid backend".to_string());
     }
     if let Some(db) = get("display_backend") {
-        if !db.as_str().is_some_and(|s| VALID_DISPLAY_BACKENDS.contains(&s)) {
+        if !db
+            .as_str()
+            .is_some_and(|s| VALID_DISPLAY_BACKENDS.contains(&s))
+        {
             errors.push("/runtime/display_backend: invalid display backend".to_string());
         }
     }
@@ -410,23 +584,56 @@ fn check_context(context: Option<&Yaml>, errors: &mut Vec<String>) {
     let req = &["state_file", "artifact_dir", "log_dir", "summarization"];
     check_keys_y(context, "/context", req, req, errors);
     if is_map_some(context) {
-        check_keys_y(context.and_then(|c| c.get("summarization")), "/context/summarization", &["worker_full_logs", "state_update"], &["worker_full_logs", "state_update"], errors);
+        check_keys_y(
+            context.and_then(|c| c.get("summarization")),
+            "/context/summarization",
+            &["worker_full_logs", "state_update"],
+            &["worker_full_logs", "state_update"],
+            errors,
+        );
     }
 }
 
 fn check_task(task: &Yaml, path: &str, errors: &mut Vec<String>) {
-    let req = &["id", "title", "type", "assignee", "deps", "acceptance", "status"];
+    let req = &[
+        "id",
+        "title",
+        "type",
+        "assignee",
+        "deps",
+        "acceptance",
+        "status",
+    ];
     let allowed = &[
-        "id", "title", "type", "assignee", "deps", "acceptance", "status", "description",
-        "requires_tools", "files", "risk", "retry_limit", "human_confirmation",
+        "id",
+        "title",
+        "type",
+        "assignee",
+        "deps",
+        "acceptance",
+        "status",
+        "description",
+        "requires_tools",
+        "files",
+        "risk",
+        "retry_limit",
+        "human_confirmation",
     ];
     check_keys_y(Some(task), path, req, allowed, errors);
     if !task.is_map() {
         return;
     }
     check_list_y(task.get("deps"), &format!("{path}/deps"), errors);
-    check_list_y(task.get("acceptance"), &format!("{path}/acceptance"), errors);
-    if !task.get("status").and_then(Yaml::as_str).is_some_and(|s| TASK_STATUS_STRS.contains(&s)) {
+    check_list_y(
+        task.get("acceptance"),
+        &format!("{path}/acceptance"),
+        errors,
+    );
+    if !task
+        .get("status")
+        .and_then(Yaml::as_str)
+        .is_some_and(|s| TASK_STATUS_STRS.contains(&s))
+    {
         errors.push(format!("{path}/status: invalid task status"));
     }
 }
@@ -441,7 +648,10 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
     // duplicate agent id(集合含 None 复刻 Python `{a.get("id") ...}`)。
     // SMOKE-1 N38 失败可解释性:不仅报"有重复",还点出**哪个 id 重复**(可能多个),
     // 给 operator 直接定位线索;locate.md §"Smallest likely code touch" item 3。
-    let id_set: HashSet<Option<&str>> = map_agents.iter().map(|a| a.get("id").and_then(Yaml::as_str)).collect();
+    let id_set: HashSet<Option<&str>> = map_agents
+        .iter()
+        .map(|a| a.get("id").and_then(Yaml::as_str))
+        .collect();
     if id_set.len() != map_agents.len() {
         let mut seen: HashSet<&str> = HashSet::new();
         let mut duplicates: Vec<&str> = Vec::new();
@@ -466,7 +676,10 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
         }
     }
     // all_ids:present 的 agent id + leader id(若 truthy)。
-    let mut all_ids: HashSet<&str> = map_agents.iter().filter_map(|a| a.get("id").and_then(Yaml::as_str)).collect();
+    let mut all_ids: HashSet<&str> = map_agents
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Yaml::as_str))
+        .collect();
     if let Some(lid) = leader.and_then(|l| l.get("id")).and_then(Yaml::as_str) {
         if !lid.is_empty() {
             all_ids.insert(lid);
@@ -478,7 +691,10 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
         .and_then(Yaml::as_str)
         .is_some_and(|p| parse_canonical_provider(p).is_some())
     {
-        e.push(format!("/leader/provider: unknown provider {}", py_repr(leader_provider)));
+        e.push(format!(
+            "/leader/provider: unknown provider {}",
+            py_repr(leader_provider)
+        ));
     }
 
     for (idx, agent) in agents.iter().enumerate() {
@@ -487,60 +703,123 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
             .and_then(Yaml::as_str)
             .is_some_and(|p| parse_canonical_provider(p).is_some())
         {
-            e.push(format!("/agents/{idx}/provider: unknown provider {}", py_repr(provider)));
+            e.push(format!(
+                "/agents/{idx}/provider: unknown provider {}",
+                py_repr(provider)
+            ));
         }
         if let Some(auth) = agent.get("auth_mode") {
-            if !matches!(auth, Yaml::Null) && !auth.as_str().is_some_and(|a| AUTH_MODES.contains(&a)) {
-                e.push(format!("/agents/{idx}/auth_mode: unknown auth_mode {}", py_repr(Some(auth))));
+            if !matches!(auth, Yaml::Null)
+                && !auth.as_str().is_some_and(|a| AUTH_MODES.contains(&a))
+            {
+                e.push(format!(
+                    "/agents/{idx}/auth_mode: unknown auth_mode {}",
+                    py_repr(Some(auth))
+                ));
             }
         }
-        if let Some(f) = agent.get("system_prompt").and_then(|sp| sp.get("file")).filter(|p| p.is_truthy()).and_then(Yaml::as_str) {
+        if let Some(f) = agent
+            .get("system_prompt")
+            .and_then(|sp| sp.get("file"))
+            .filter(|p| p.is_truthy())
+            .and_then(Yaml::as_str)
+        {
             let candidate = Path::new(f);
-            let full = if candidate.is_absolute() { candidate.to_path_buf() } else { base_dir.join(candidate) };
+            let full = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                base_dir.join(candidate)
+            };
             if !full.exists() {
-                e.push(format!("/agents/{idx}/system_prompt/file: file not found: {}", full.display()));
+                e.push(format!(
+                    "/agents/{idx}/system_prompt/file: file not found: {}",
+                    full.display()
+                ));
             }
         }
-        let tools: Vec<&str> = agent.get("tools").and_then(Yaml::as_list).unwrap_or(&[]).iter().filter_map(Yaml::as_str).collect();
+        let tools: Vec<&str> = agent
+            .get("tools")
+            .and_then(Yaml::as_list)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(Yaml::as_str)
+            .collect();
         for tool in permissions::expand_tool_strings(tools) {
             if !permissions::is_canonical_tool(&tool) {
-                e.push(format!("/agents/{idx}/tools: unknown tool {}", py_repr_str(&tool)));
+                e.push(format!(
+                    "/agents/{idx}/tools: unknown tool {}",
+                    py_repr_str(&tool)
+                ));
             }
         }
     }
 
-    let leader_tools: Vec<&str> = leader.and_then(|l| l.get("tools")).and_then(Yaml::as_list).unwrap_or(&[]).iter().filter_map(Yaml::as_str).collect();
+    let leader_tools: Vec<&str> = leader
+        .and_then(|l| l.get("tools"))
+        .and_then(Yaml::as_list)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(Yaml::as_str)
+        .collect();
     for tool in permissions::expand_tool_strings(leader_tools) {
         if !permissions::is_canonical_tool(&tool) {
-            e.push(format!("/leader/tools: unknown tool {}", py_repr_str(&tool)));
+            e.push(format!(
+                "/leader/tools: unknown tool {}",
+                py_repr_str(&tool)
+            ));
         }
     }
 
     let routing = spec.get("routing");
-    if let Some(da) = routing.and_then(|r| r.get("default_assignee")).and_then(Yaml::as_str) {
+    if let Some(da) = routing
+        .and_then(|r| r.get("default_assignee"))
+        .and_then(Yaml::as_str)
+    {
         if !da.is_empty() && !all_ids.contains(da) {
-            e.push(format!("/routing/default_assignee: unknown agent {}", py_repr_str(da)));
+            e.push(format!(
+                "/routing/default_assignee: unknown agent {}",
+                py_repr_str(da)
+            ));
         }
     }
-    let rules = routing.and_then(|r| r.get("rules")).and_then(Yaml::as_list).unwrap_or(&[]);
+    let rules = routing
+        .and_then(|r| r.get("rules"))
+        .and_then(Yaml::as_list)
+        .unwrap_or(&[]);
     for (idx, rule) in rules.iter().enumerate() {
         let target = rule.get("assign_to");
-        if !target.and_then(Yaml::as_str).is_some_and(|t| all_ids.contains(t)) {
-            e.push(format!("/routing/rules/{idx}/assign_to: unknown agent {}", py_repr(target)));
+        if !target
+            .and_then(Yaml::as_str)
+            .is_some_and(|t| all_ids.contains(t))
+        {
+            e.push(format!(
+                "/routing/rules/{idx}/assign_to: unknown agent {}",
+                py_repr(target)
+            ));
         }
     }
 
     let tasks: &[Yaml] = spec.get("tasks").and_then(Yaml::as_list).unwrap_or(&[]);
-    let task_ids: HashSet<&str> = tasks.iter().filter(|t| t.is_map()).filter_map(|t| t.get("id").and_then(Yaml::as_str)).collect();
+    let task_ids: HashSet<&str> = tasks
+        .iter()
+        .filter(|t| t.is_map())
+        .filter_map(|t| t.get("id").and_then(Yaml::as_str))
+        .collect();
     for (idx, task) in tasks.iter().enumerate() {
         if let Some(a) = task.get("assignee").and_then(Yaml::as_str) {
             if !a.is_empty() && !all_ids.contains(a) {
-                e.push(format!("/tasks/{idx}/assignee: unknown agent {}", py_repr_str(a)));
+                e.push(format!(
+                    "/tasks/{idx}/assignee: unknown agent {}",
+                    py_repr_str(a)
+                ));
             }
         }
         for dep in task.get("deps").and_then(Yaml::as_list).unwrap_or(&[]) {
             if !dep.as_str().is_some_and(|d| task_ids.contains(d)) {
-                e.push(format!("/tasks/{idx}/deps: unknown dependency {}", py_repr(Some(dep))));
+                e.push(format!(
+                    "/tasks/{idx}/deps: unknown dependency {}",
+                    py_repr(Some(dep))
+                ));
             }
         }
     }
@@ -549,14 +828,27 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
     let nodes: Vec<TaskNode> = tasks
         .iter()
         .filter_map(|t| {
-            let id = t.get("id").and_then(Yaml::as_str).filter(|s| !s.is_empty())?;
-            let deps: Vec<TaskId> = t.get("deps").and_then(Yaml::as_list).unwrap_or(&[]).iter().filter_map(|d| d.as_str().map(TaskId::from)).collect();
+            let id = t
+                .get("id")
+                .and_then(Yaml::as_str)
+                .filter(|s| !s.is_empty())?;
+            let deps: Vec<TaskId> = t
+                .get("deps")
+                .and_then(Yaml::as_list)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|d| d.as_str().map(TaskId::from))
+                .collect();
             Some(TaskNode::new(TaskId::from(id), deps, TaskStatus::Pending))
         })
         .collect();
     let cycle = find_dependency_cycle(&nodes);
     if !cycle.is_empty() {
-        let chain = cycle.iter().map(TaskId::as_str).collect::<Vec<_>>().join(" -> ");
+        let chain = cycle
+            .iter()
+            .map(TaskId::as_str)
+            .collect::<Vec<_>>()
+            .join(" -> ");
         e.push(format!("/tasks: dependency cycle detected: {chain}"));
     }
     e
@@ -564,7 +856,11 @@ fn semantic_errors(spec: &Yaml, base_dir: &Path) -> Vec<String> {
 
 /// Python `repr()` of a string(选引号 + 转义),用于 `unknown X 'name'`。
 fn py_repr_str(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::new();
     out.push(quote);
     for c in s.chars() {

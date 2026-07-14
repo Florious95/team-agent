@@ -48,7 +48,11 @@ fn shutdown_real_tmux_list_targets_populates_pane_pid() {
         .spawn_first(
             &session,
             &WindowName::new("w1"),
-            &["/bin/sh".into(), "-lc".into(), "while true; do sleep 60; done".into()],
+            &[
+                "/bin/sh".into(),
+                "-lc".into(),
+                "while true; do sleep 60; done".into(),
+            ],
             &case.workspace,
             &BTreeMap::new(),
         )
@@ -118,7 +122,10 @@ fn shutdown_session_killed_requires_post_reap_has_session_false() {
     let case = DefaultSocketSessionCase::new("session-still-live");
     let workspace = tmp_dir("session-still-live");
     let _cleanup = WorkspaceCleanup(workspace.clone());
-    let session = SessionName::new(format!("team-t248-session-still-live-{}", std::process::id()));
+    let session = SessionName::new(format!(
+        "team-t248-session-still-live-{}",
+        std::process::id()
+    ));
     case.spawn(&session, &workspace);
     seed_state(&workspace, session.as_str());
 
@@ -164,7 +171,9 @@ struct DefaultSocketSessionCase {
 
 impl DefaultSocketSessionCase {
     fn new(_tag: &str) -> Self {
-        Self { backend: TmuxBackend::new() }
+        Self {
+            backend: TmuxBackend::new(),
+        }
     }
 
     fn spawn(&self, session: &SessionName, workspace: &Path) {
@@ -172,7 +181,11 @@ impl DefaultSocketSessionCase {
             .spawn_first(
                 session,
                 &WindowName::new("w1"),
-                &["/bin/sh".into(), "-lc".into(), "while true; do sleep 60; done".into()],
+                &[
+                    "/bin/sh".into(),
+                    "-lc".into(),
+                    "while true; do sleep 60; done".into(),
+                ],
                 workspace,
                 &BTreeMap::new(),
             )
@@ -196,7 +209,9 @@ impl Drop for DefaultSocketSessionCase {
                     .lines()
                     .filter(|name| name.starts_with("team-t248-session-still-live-"))
                     .for_each(|name| {
-                        let _ = Command::new("tmux").args(["kill-session", "-t", name]).status();
+                        let _ = Command::new("tmux")
+                            .args(["kill-session", "-t", name])
+                            .status();
                     });
             });
     }
@@ -244,12 +259,18 @@ impl ManagedChild {
         std::fs::set_permissions(&script, perms).unwrap();
 
         let mut command = Command::new(&script);
-        command.current_dir(workspace).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .current_dir(workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(unix)]
         {
             command.process_group(0);
         }
-        let child = command.spawn().expect("spawn provider-like escaped pgid process");
+        let child = command
+            .spawn()
+            .expect("spawn provider-like escaped pgid process");
         wait_until_live(child.id());
         Self { child }
     }

@@ -21,9 +21,9 @@ use team_agent::lifecycle::{launch_with_transport, restart_with_transport};
 use team_agent::provider::{get_adapter, AuthMode, Provider};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
@@ -278,11 +278,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),

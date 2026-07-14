@@ -70,11 +70,9 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     let after_meta = rest.get(close..).ok_or_else(|| {
         ModelError::Validation(format!("{}: unterminated front matter", path.display()))
     })?;
-    let after_marker = after_meta
-        .strip_prefix("\n---")
-        .ok_or_else(|| {
-            ModelError::Validation(format!("{}: unterminated front matter", path.display()))
-        })?;
+    let after_marker = after_meta.strip_prefix("\n---").ok_or_else(|| {
+        ModelError::Validation(format!("{}: unterminated front matter", path.display()))
+    })?;
     let meta = if raw_meta.trim().is_empty() {
         Value::Map(Vec::new())
     } else {
@@ -89,7 +87,9 @@ pub fn read_front_matter(path: &Path) -> Result<(Value, String), ModelError> {
     Ok((meta, after_marker.trim_start_matches('\n').to_string()))
 }
 
-pub fn ignored_owner_team_id_from_team_md(team_dir: &Path) -> Result<Option<IgnoredTeamField>, ModelError> {
+pub fn ignored_owner_team_id_from_team_md(
+    team_dir: &Path,
+) -> Result<Option<IgnoredTeamField>, ModelError> {
     let team_md = team_dir.join("TEAM.md");
     if !team_md.exists() {
         return Ok(None);
@@ -138,8 +138,8 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
         for entry in fs::read_dir(&agents_dir)
             .map_err(|e| ModelError::Runtime(format!("{}: {e}", agents_dir.display())))?
         {
-            let entry = entry
-                .map_err(|e| ModelError::Runtime(format!("{}: {e}", agents_dir.display())))?;
+            let entry =
+                entry.map_err(|e| ModelError::Runtime(format!("{}: {e}", agents_dir.display())))?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
                 role_paths.push(path);
@@ -156,7 +156,8 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
 
     let workspace = paths::team_workspace(team_dir)?;
     let workspace_s = workspace.display().to_string();
-    let team_name = string_field(&team_meta, "name").unwrap_or_else(|| team_dir_parent_name(team_dir));
+    let team_name =
+        string_field(&team_meta, "name").unwrap_or_else(|| team_dir_parent_name(team_dir));
     let objective = string_field(&team_meta, "objective")
         .or_else(|| non_empty_trimmed(&team_body))
         .unwrap_or_else(|| "Team Agent document-driven team.".to_string());
@@ -180,7 +181,10 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
         .map(|id| {
             map(vec![
                 ("id", Value::Str(format!("route-{id}"))),
-                ("match", map(vec![("assignee", list_str(vec![id.as_str()]))])),
+                (
+                    "match",
+                    map(vec![("assignee", list_str(vec![id.as_str()]))]),
+                ),
                 ("assign_to", Value::Str(id.clone())),
                 ("priority", Value::Int(10)),
             ])
@@ -250,9 +254,15 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
             map(vec![
                 ("protocol", Value::Str("mcp_inbox".to_string())),
                 ("topology", Value::Str("leader_centered".to_string())),
-                ("worker_to_worker", bool_field(&team_meta, "worker_to_worker", true)),
+                (
+                    "worker_to_worker",
+                    bool_field(&team_meta, "worker_to_worker", true),
+                ),
                 ("ack_timeout_sec", Value::Int(60)),
-                ("result_format", Value::Str("result_envelope_v1".to_string())),
+                (
+                    "result_format",
+                    Value::Str("result_envelope_v1".to_string()),
+                ),
                 (
                     "message_store",
                     map(vec![
@@ -273,19 +283,34 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
                             .unwrap_or_else(|| "adaptive".to_string()),
                     ),
                 ),
-                ("session_name", Value::Str(session_name(&team_meta, &team_name))),
+                (
+                    "session_name",
+                    Value::Str(session_name(&team_meta, &team_name)),
+                ),
                 ("auto_launch", Value::Bool(true)),
                 ("require_user_approval_before_launch", Value::Bool(true)),
-                ("max_active_agents", Value::Int(max_active_agents(agent_ids.len()))),
+                (
+                    "max_active_agents",
+                    Value::Int(max_active_agents(agent_ids.len())),
+                ),
                 ("startup_order", list_str(agent_ids)),
                 (
                     "dangerous_auto_approve",
                     bool_field(&team_meta, "dangerous_auto_approve", false),
                 ),
                 ("fast", bool_field(&team_meta, "fast", false)),
-                ("tick_interval_sec", int_field(&team_meta, "tick_interval_sec", 2)),
-                ("push_min_interval_sec", int_field(&team_meta, "push_min_interval_sec", 60)),
-                ("stuck_timeout_sec", int_field(&team_meta, "stuck_timeout_sec", 300)),
+                (
+                    "tick_interval_sec",
+                    int_field(&team_meta, "tick_interval_sec", 2),
+                ),
+                (
+                    "push_min_interval_sec",
+                    int_field(&team_meta, "push_min_interval_sec", 60),
+                ),
+                (
+                    "stuck_timeout_sec",
+                    int_field(&team_meta, "stuck_timeout_sec", 300),
+                ),
             ]),
         ),
         (
@@ -310,11 +335,17 @@ pub fn compile_team(team_dir: &Path) -> Result<Value, ModelError> {
             "tasks",
             Value::List(vec![map(vec![
                 ("id", Value::Str("task_initial".to_string())),
-                ("title", Value::Str("Initial document-driven team task".to_string())),
+                (
+                    "title",
+                    Value::Str("Initial document-driven team task".to_string()),
+                ),
                 ("type", Value::Str("implementation".to_string())),
                 ("assignee", Value::Str(default_assignee)),
                 ("deps", Value::List(Vec::new())),
-                ("acceptance", list_str(vec!["Worker reports valid result_envelope_v1"])),
+                (
+                    "acceptance",
+                    list_str(vec!["Worker reports valid result_envelope_v1"]),
+                ),
                 ("status", Value::Str("pending".to_string())),
                 ("requires_tools", list_str(vec!["mcp_team"])),
                 ("files", Value::List(Vec::new())),
@@ -451,7 +482,9 @@ where
 }
 
 fn string_field(meta: &Value, key: &str) -> Option<String> {
-    meta.get(key).and_then(Value::as_str).map(ToString::to_string)
+    meta.get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn required_string(meta: &Value, path: &Path, key: &str) -> Result<String, ModelError> {
@@ -524,8 +557,8 @@ fn resolve_model(role_meta: &Value, team_meta: &Value, provider: &str) -> Value 
     if let Some(model) = string_field(role_meta, "model") {
         return Value::Str(model);
     }
-    if let Some(model) = provider_model(team_meta, provider)
-        .or_else(|| string_field(team_meta, "default_model"))
+    if let Some(model) =
+        provider_model(team_meta, provider).or_else(|| string_field(team_meta, "default_model"))
     {
         return Value::Str(model);
     }

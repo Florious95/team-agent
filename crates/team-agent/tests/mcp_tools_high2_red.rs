@@ -37,7 +37,10 @@ fn update_state_appends_note_saves_state_and_writes_file() {
 
     let state_file = value["state_file"].as_str().expect("state_file returned");
     assert_eq!(value["ok"], json!(true));
-    assert!(std::path::Path::new(state_file).exists(), "team_state.md must be written");
+    assert!(
+        std::path::Path::new(state_file).exists(),
+        "team_state.md must be written"
+    );
     let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(state["notes"], json!(["old note", "new note"]));
     let text = std::fs::read_to_string(state_file).unwrap();
@@ -72,7 +75,11 @@ fn report_result_fills_golden_defaults_before_delegate() {
     let store = team_agent::message_store::MessageStore::open(&ws).unwrap();
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
     let envelope: String = conn
-        .query_row("select envelope from results where task_id = 'manual'", [], |row| row.get(0))
+        .query_row(
+            "select envelope from results where task_id = 'manual'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     let stored: Value = serde_json::from_str(&envelope).unwrap();
     assert_eq!(stored["summary"], json!("completed"));

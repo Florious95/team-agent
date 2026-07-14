@@ -11,14 +11,12 @@ use crate::db::migration::schema_diagnosis_workspace;
 /// **§84**:只调 step 3/11/12 的 trait 入口,注入 mock 时 provider 调用计数 = 0;绝不触发 prompt/token。
 pub fn doctor(opts: &DoctorOptions) -> Result<DoctorStatus, PackagingError> {
     if opts.fix && opts.gate.is_none() {
-        return Err(PackagingError::InvalidOptions("--fix requires --gate".to_string()));
+        return Err(PackagingError::InvalidOptions(
+            "--fix requires --gate".to_string(),
+        ));
     }
-    let gate_blockers = crate::diagnose::doctor_gate_blockers(
-        &opts.workspace,
-        opts.gate,
-        opts.fix,
-        opts.confirm,
-    )?;
+    let gate_blockers =
+        crate::diagnose::doctor_gate_blockers(&opts.workspace, opts.gate, opts.fix, opts.confirm)?;
     if !gate_blockers.is_empty() {
         return Ok(DoctorStatus::HasBlockers {
             blockers: gate_blockers,

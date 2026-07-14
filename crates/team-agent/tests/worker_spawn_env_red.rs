@@ -25,9 +25,9 @@ use team_agent::lifecycle::{
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 const RUNTIME_TEAM_KEY: &str = "teamdir";
@@ -158,7 +158,10 @@ fn spawn_env_contract_failures(surface: &str, command_line: &str, agent_id: &str
             "{surface}: provider executable must remain the command name `codex`; command_line={command_line:?}"
         ));
     }
-    if command_line.split_whitespace().any(|part| part.ends_with("/codex")) {
+    if command_line
+        .split_whitespace()
+        .any(|part| part.ends_with("/codex"))
+    {
         failures.push(format!(
             "{surface}: provider executable must not be hard-coded as an absolute codex path; command_line={command_line:?}"
         ));
@@ -175,8 +178,11 @@ fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
     )
     .unwrap();
     for (name, role) in agents {
-        std::fs::write(team.join("agents").join(format!("{name}.md")), role_doc(name, role))
-            .unwrap();
+        std::fs::write(
+            team.join("agents").join(format!("{name}.md")),
+            role_doc(name, role),
+        )
+        .unwrap();
     }
     let spec = team_agent::compiler::compile_team(&team).unwrap();
     std::fs::write(
@@ -438,11 +444,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),

@@ -1,5 +1,5 @@
-use super::*;
 use super::spine::{message_status, DeliveringTransport};
+use super::*;
 
 // ═════════════════════════════════════════════════════════════════════════
 // P0 REGRESSION (root cause pinned) — a per-agent capture/health-check FAILURE must not abort the
@@ -31,20 +31,42 @@ struct CaptureFailsDeliverTransport {
 }
 impl CaptureFailsDeliverTransport {
     fn new() -> Self {
-        Self { inner: DeliveringTransport::new() }
+        Self {
+            inner: DeliveringTransport::new(),
+        }
     }
 }
 impl Transport for CaptureFailsDeliverTransport {
     fn kind(&self) -> BackendKind {
         self.inner.kind()
     }
-    fn spawn_first(&self, s: &SessionName, w: &WindowName, a: &[String], c: &std::path::Path, e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &std::path::Path,
+        e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.inner.spawn_first(s, w, a, c, e)
     }
-    fn spawn_into(&self, s: &SessionName, w: &WindowName, a: &[String], c: &std::path::Path, e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &std::path::Path,
+        e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.inner.spawn_into(s, w, a, c, e)
     }
-    fn inject(&self, t: &Target, p: &InjectPayload, submit: Key, bracketed: bool) -> Result<InjectReport, TransportError> {
+    fn inject(
+        &self,
+        t: &Target,
+        p: &InjectPayload,
+        submit: Key,
+        bracketed: bool,
+    ) -> Result<InjectReport, TransportError> {
         self.inner.inject(t, p, submit, bracketed)
     }
     fn send_keys(&self, t: &Target, k: &[Key]) -> Result<(), TransportError> {
@@ -52,7 +74,9 @@ impl Transport for CaptureFailsDeliverTransport {
     }
     fn capture(&self, _t: &Target, _r: CaptureRange) -> Result<CapturedText, TransportError> {
         // the agent's window is gone — capture fails (tmux can't find the target).
-        Err(TransportError::TargetNotFound { target: "window gone (stopped agent)".to_string() })
+        Err(TransportError::TargetNotFound {
+            target: "window gone (stopped agent)".to_string(),
+        })
     }
     fn query(&self, t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         self.inner.query(t, f)
@@ -69,7 +93,12 @@ impl Transport for CaptureFailsDeliverTransport {
     fn list_windows(&self, s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         self.inner.list_windows(s)
     }
-    fn set_session_env(&self, s: &SessionName, k: &str, v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        s: &SessionName,
+        k: &str,
+        v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         self.inner.set_session_env(s, k, v)
     }
     fn kill_session(&self, s: &SessionName) -> Result<(), TransportError> {
@@ -87,7 +116,10 @@ fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
     let dir = std::env::temp_dir().join(format!(
         "team-agent-coord-stopreg-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     // w1 STOPPED (window gone -> capture fails), w2 ACTIVE — w2 keeps the tmux session alive.
@@ -104,14 +136,32 @@ fn tick_swallows_capture_failure_and_still_delivers_to_other_agent() {
     .unwrap();
     let store = MessageStore::open(&dir).unwrap();
     let mid = store
-        .create_message(Some("task-1"), "leader", "w2", "after stop", None, true, None)
+        .create_message(
+            Some("task-1"),
+            "leader",
+            "w2",
+            "after stop",
+            None,
+            true,
+            None,
+        )
         .unwrap();
     drop(store);
-    assert_eq!(message_status(&dir, &mid), "accepted", "precondition: a fresh message is 'accepted'");
+    assert_eq!(
+        message_status(&dir, &mid),
+        "accepted",
+        "precondition: a fresh message is 'accepted'"
+    );
     let ws = WorkspacePath::new(dir.clone());
     let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
     // capture() ERRORS (window gone) but inject delivers + session present.
-    let coord = Coordinator::for_test(ws, reg, Box::new(CaptureFailsDeliverTransport::new()), None, None);
+    let coord = Coordinator::for_test(
+        ws,
+        reg,
+        Box::new(CaptureFailsDeliverTransport::new()),
+        None,
+        None,
+    );
     let result = coord.tick();
     // (a) a per-agent capture failure must NOT abort the whole tick.
     assert!(

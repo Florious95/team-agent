@@ -53,7 +53,10 @@ fn skill_front_matter_roundtrip() {
 
 #[test]
 fn block_scalar_basic() {
-    roundtrip_eq("msg: |\n  line one\n  line two\n", "msg: |\n  line one\n  line two\n");
+    roundtrip_eq(
+        "msg: |\n  line one\n  line two\n",
+        "msg: |\n  line one\n  line two\n",
+    );
 }
 
 #[test]
@@ -86,12 +89,18 @@ fn int_plus_and_underscore() {
 
 #[test]
 fn non_ints_stay_strings() {
-    roundtrip_eq("a: 1.5\nb: 0x1f\nc: 1e3\nd: _1\n", "a: \"1.5\"\nb: \"0x1f\"\nc: \"1e3\"\nd: \"_1\"\n");
+    roundtrip_eq(
+        "a: 1.5\nb: 0x1f\nc: 1e3\nd: _1\n",
+        "a: \"1.5\"\nb: \"0x1f\"\nc: \"1e3\"\nd: \"_1\"\n",
+    );
 }
 
 #[test]
 fn bools_and_nulls() {
-    roundtrip_eq("a: true\nb: False\nc: NULL\nd: ~\n", "a: true\nb: false\nc: null\nd: null\n");
+    roundtrip_eq(
+        "a: true\nb: False\nc: NULL\nd: ~\n",
+        "a: true\nb: false\nc: null\nd: null\n",
+    );
 }
 
 #[test]
@@ -119,7 +128,10 @@ fn list_of_maps() {
 
 #[test]
 fn scalar_list_mixed() {
-    roundtrip_eq("a:\n  - 1\n  - two\n  - true\n", "a:\n  - 1\n  - \"two\"\n  - true\n");
+    roundtrip_eq(
+        "a:\n  - 1\n  - two\n  - true\n",
+        "a:\n  - 1\n  - \"two\"\n  - true\n",
+    );
 }
 
 #[test]
@@ -130,7 +142,10 @@ fn empty_value_is_null() {
 #[test]
 fn inline_comment_not_stripped() {
     // 整行注释被跳过;行内 `#` 不被当注释,留在值里。
-    roundtrip_eq("# top\na: 1  # inline?\nb: 2\n", "a: \"1  # inline?\"\nb: 2\n");
+    roundtrip_eq(
+        "# top\na: 1  # inline?\nb: 2\n",
+        "a: \"1  # inline?\"\nb: 2\n",
+    );
 }
 
 #[test]
@@ -213,7 +228,10 @@ fn dump_mixed_list() {
         Value::Map(Vec::new()),
         Value::List(Vec::new()),
     ]);
-    assert_eq!(dumps(&v), "- 1\n- \"two\"\n-\n  - 3\n  - 4\n- k: \"v\"\n- {}\n-\n");
+    assert_eq!(
+        dumps(&v),
+        "- 1\n- \"two\"\n-\n  - 3\n  - 4\n- k: \"v\"\n- {}\n-\n"
+    );
 }
 
 #[test]

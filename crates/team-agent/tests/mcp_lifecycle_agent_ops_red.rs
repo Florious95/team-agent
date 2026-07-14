@@ -23,7 +23,12 @@ fn mcp_stop_agent_stops_real_lifecycle_state_and_tmux_window() {
         call.body,
         call.raw
     );
-    assert_eq!(call.body["ok"], json!(true), "stop_agent should be ok only after lifecycle side effects; body={}", call.body);
+    assert_eq!(
+        call.body["ok"],
+        json!(true),
+        "stop_agent should be ok only after lifecycle side effects; body={}",
+        call.body
+    );
     assert!(
         call.body.get("state_file").is_some() || call.body.get("stopped").is_some(),
         "stop_agent return must expose lifecycle evidence such as state_file/stopped, not a canned ok:true envelope; body={}",
@@ -141,8 +146,14 @@ fn selected_agent_status<'a>(state: &'a Value, team: &str, agent: &str) -> Optio
     selected_agent_value(state, team, agent, "status").and_then(Value::as_str)
 }
 
-fn selected_agent_value<'a>(state: &'a Value, team: &str, agent: &str, key: &str) -> Option<&'a Value> {
-    state.pointer(&format!("/teams/{team}/agents/{agent}/{key}"))
+fn selected_agent_value<'a>(
+    state: &'a Value,
+    team: &str,
+    agent: &str,
+    key: &str,
+) -> Option<&'a Value> {
+    state
+        .pointer(&format!("/teams/{team}/agents/{agent}/{key}"))
         .or_else(|| state.pointer(&format!("/agents/{agent}/{key}")))
 }
 
@@ -157,14 +168,20 @@ fn seed_worker_session(workspace: &std::path::Path, team: &str, agent: &str, ses
         .and_then(Value::as_object_mut)
     {
         obj.insert("session_id".to_string(), json!(session_id));
-        obj.insert("rollout_path".to_string(), json!(workspace.join("rollout.jsonl").to_string_lossy()));
+        obj.insert(
+            "rollout_path".to_string(),
+            json!(workspace.join("rollout.jsonl").to_string_lossy()),
+        );
     }
     if let Some(obj) = state
         .pointer_mut(&format!("/agents/{agent}"))
         .and_then(Value::as_object_mut)
     {
         obj.insert("session_id".to_string(), json!(session_id));
-        obj.insert("rollout_path".to_string(), json!(workspace.join("rollout.jsonl").to_string_lossy()));
+        obj.insert(
+            "rollout_path".to_string(),
+            json!(workspace.join("rollout.jsonl").to_string_lossy()),
+        );
     }
     save_runtime_state(workspace, &state).unwrap();
 }

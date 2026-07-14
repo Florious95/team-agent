@@ -21,18 +21,40 @@ impl Transport for CountingCaptureTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached")
     }
-    fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached")
     }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        self.injects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
+        self.injects
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
-            submit_verification: crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            submit_verification:
+                crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
             submit_diagnostics: None,
@@ -42,7 +64,10 @@ impl Transport for CountingCaptureTransport {
         Ok(())
     }
     fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: self.scrollback.clone(), range })
+        Ok(CapturedText {
+            text: self.scrollback.clone(),
+            range,
+        })
     }
     fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
@@ -59,7 +84,12 @@ impl Transport for CountingCaptureTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
@@ -76,17 +106,30 @@ impl Transport for CountingCaptureTransport {
 fn slice2b_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("ta-rs-2b-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let dir = std::env::temp_dir().join(format!(
+        "ta-rs-2b-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
 
 /// Build a coordinator over a workspace seeded with `state` (verbatim) + a counting transport.
-fn takeover_coord(state: serde_json::Value) -> (Coordinator, std::path::PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+fn takeover_coord(
+    state: serde_json::Value,
+) -> (
+    Coordinator,
+    std::path::PathBuf,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
     let dir = slice2b_dir();
     crate::state::persist::save_runtime_state(&dir, &state).unwrap();
     let injects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let transport = CountingCaptureTransport { scrollback: String::new(), injects: std::sync::Arc::clone(&injects) };
+    let transport = CountingCaptureTransport {
+        scrollback: String::new(),
+        injects: std::sync::Arc::clone(&injects),
+    };
     let ws = WorkspacePath::new(dir.clone());
     let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
     let coord = Coordinator::for_test(ws, reg, Box::new(transport), None, None);
@@ -94,7 +137,13 @@ fn takeover_coord(state: serde_json::Value) -> (Coordinator, std::path::PathBuf,
 }
 
 /// Seed an agent_health row (real DB) — what sync_health writes and detect_stuck/detect_deadlocks read.
-fn seed_agent_health(dir: &std::path::Path, agent_id: &str, status: &str, last_output_at: &str, owner_team_id: Option<&str>) {
+fn seed_agent_health(
+    dir: &std::path::Path,
+    agent_id: &str,
+    status: &str,
+    last_output_at: &str,
+    owner_team_id: Option<&str>,
+) {
     let store = MessageStore::open(dir).unwrap();
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
     conn.execute(
@@ -106,7 +155,9 @@ fn seed_agent_health(dir: &std::path::Path, agent_id: &str, status: &str, last_o
 }
 
 fn has_event(dir: &std::path::Path, name: &str) -> bool {
-    read_event_log_dir(dir).iter().any(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
+    read_event_log_dir(dir)
+        .iter()
+        .any(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
 }
 
 // #236 nag_removal (N35) — detect_stuck no longer synthesized in coordinator tick.
@@ -123,7 +174,9 @@ fn slice2b_detect_stuck_no_longer_synthesized_by_framework_n35() {
     }));
     seed_agent_health(&dir, "w1", "RUNNING", &stale, Some("team-h"));
     let store = MessageStore::open(&dir).unwrap();
-    let _ = store.create_message(Some("t"), "leader", "w1", "do work", None, true, None).unwrap();
+    let _ = store
+        .create_message(Some("t"), "leader", "w1", "do work", None, true, None)
+        .unwrap();
     drop(store);
 
     let report = coord.tick().expect("tick");
@@ -148,7 +201,9 @@ fn slice2b_detect_deadlocks_no_longer_synthesized_by_framework_n35() {
     }));
     seed_agent_health(&dir, "w1", "IDLE", &now, Some("team-h"));
     let store = MessageStore::open(&dir).unwrap();
-    let _ = store.create_message(Some("t"), "w2", "w1", "are you done?", None, true, None).unwrap();
+    let _ = store
+        .create_message(Some("t"), "w2", "w1", "are you done?", None, true, None)
+        .unwrap();
     drop(store);
 
     let report = coord.tick().expect("tick");
@@ -199,7 +254,10 @@ fn slice2b_takeover_unarmed_idle_worker_is_never_pinged() {
         // NO coordinator.idle_takeover_monitor → not armed → reason not_armed_no_worker_turn.
     }));
     coord.tick().expect("tick");
-    assert!(!has_event(&dir, "idle_takeover.reminder"), "a NOT-armed worker must never be pinged (§121)");
+    assert!(
+        !has_event(&dir, "idle_takeover.reminder"),
+        "a NOT-armed worker must never be pinged (§121)"
+    );
     assert_eq!(
         injects.load(std::sync::atomic::Ordering::Relaxed),
         0,

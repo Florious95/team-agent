@@ -53,8 +53,8 @@ fn a1_collect_ensure_coordinator_reports_real_status() {
     save_runtime_state(&ws, &json!({"session_name": "team-x"})).unwrap();
     seed_healthy_coordinator(&ws);
 
-    let out = team_agent::messaging::results::collect(&ws, None, true)
-        .expect("collect should succeed");
+    let out =
+        team_agent::messaging::results::collect(&ws, None, true).expect("collect should succeed");
     let coordinator = out.get("coordinator").cloned().unwrap_or(Value::Null);
     assert_ne!(
         coordinator,
@@ -79,8 +79,8 @@ fn a1_collect_without_ensure_returns_not_required_literal() {
     std::fs::write(ws.join("team.spec.yaml"), "version: 1\n").unwrap();
     save_runtime_state(&ws, &json!({"session_name": "team-x"})).unwrap();
 
-    let out = team_agent::messaging::results::collect(&ws, None, false)
-        .expect("collect should succeed");
+    let out =
+        team_agent::messaging::results::collect(&ws, None, false).expect("collect should succeed");
     assert_eq!(
         out.get("coordinator"),
         Some(&json!({"ok": false, "status": "not_required"})),
@@ -108,14 +108,25 @@ fn a3_watch_filters_by_team_and_emits_result_lines() {
     insert_result(&store, "res-a", "team-a", "wa", "done A");
 
     let mut cursor = WatchCursor::default();
-    let lines = collect_watch_lines(&WorkspacePath::new(ws.clone()), &mut cursor, &store, Some("team-a"))
-        .expect("collect_watch_lines should succeed");
+    let lines = collect_watch_lines(
+        &WorkspacePath::new(ws.clone()),
+        &mut cursor,
+        &store,
+        Some("team-a"),
+    )
+    .expect("collect_watch_lines should succeed");
 
     let mut failures = Vec::new();
-    if !lines.iter().any(|line| line.contains("wa") && line.contains("boom-a")) {
+    if !lines
+        .iter()
+        .any(|line| line.contains("wa") && line.contains("boom-a"))
+    {
         failures.push("A-3: team-a event line missing".to_string());
     }
-    if lines.iter().any(|line| line.contains("wb") || line.contains("boom-b")) {
+    if lines
+        .iter()
+        .any(|line| line.contains("wb") || line.contains("boom-b"))
+    {
         failures.push(
             "A-3: team-b event leaked into team-a watch (Python filters by _event_team_id, watch/__init__.py:91)"
                 .to_string(),
@@ -147,16 +158,15 @@ fn a4_status_latest_results_reflects_store() {
     let store = MessageStore::open(&ws).unwrap();
     insert_result(&store, "res-1", "team-x", "w1", "did the thing");
 
-    let status = team_agent::cli::status_port::status(&ws, false, false)
-        .expect("status should succeed");
+    let status =
+        team_agent::cli::status_port::status(&ws, false, false).expect("status should succeed");
     let latest = status
         .get("latest_results")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
     assert!(
-        !latest.is_empty()
-            && latest[0].get("result_id") == Some(&json!("res-1")),
+        !latest.is_empty() && latest[0].get("result_id") == Some(&json!("res-1")),
         "A-4: status.latest_results must surface store.latest_results (Python \
 queries.py:76); got latest_results={latest:?}"
     );
@@ -202,8 +212,8 @@ fn a4_status_detail_returns_full_payload() {
     let ws = tmp_ws("a4-detail");
     seed_status_state(&ws);
 
-    let status = team_agent::cli::status_port::status(&ws, true, true)
-        .expect("status should succeed");
+    let status =
+        team_agent::cli::status_port::status(&ws, true, true).expect("status should succeed");
     assert!(
         status
             .pointer("/agents/w1/spawn_cwd")
@@ -225,8 +235,8 @@ fn a5_missing_leader_receiver_must_not_report_attached() {
     let ws = tmp_ws("a5-receiver");
     seed_status_state(&ws); // note: seeds NO leader_receiver key
 
-    let status = team_agent::cli::status_port::status(&ws, false, false)
-        .expect("status should succeed");
+    let status =
+        team_agent::cli::status_port::status(&ws, false, false).expect("status should succeed");
     assert_eq!(
         status.get("all_attached_receiver"),
         Some(&json!(false)),

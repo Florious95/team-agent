@@ -299,7 +299,10 @@ mod tests {
         // (windows) — both must resolve our own ppid.
         let my = std::process::id();
         let ppid = parent_pid(my);
-        assert!(ppid.is_some(), "parent_pid must resolve own pid on both unix and windows");
+        assert!(
+            ppid.is_some(),
+            "parent_pid must resolve own pid on both unix and windows"
+        );
         assert!(ppid.unwrap() > 0);
     }
 

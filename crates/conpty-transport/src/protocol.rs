@@ -137,7 +137,11 @@ pub enum ProtocolError {
     PipeTokenMismatch { message: String },
     /// Schema field on the wire did not match `PROTOCOL_SCHEMA`. Both
     /// sides fail-closed on skew (CR C-7).
-    SchemaSkew { message: String, sent: u32, expected: u32 },
+    SchemaSkew {
+        message: String,
+        sent: u32,
+        expected: u32,
+    },
     /// The named pane/target does not exist in the shim registry.
     TargetNotFound { message: String },
     /// Physical spawn (CreatePseudoConsole / CreateProcessW) failed.
@@ -208,8 +212,8 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
 
 /// Serialise a `Request` to a length-prefixed frame in one call.
 pub fn write_request<W: Write>(writer: &mut W, req: &Request) -> io::Result<usize> {
-    let json = serde_json::to_vec(req)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let json =
+        serde_json::to_vec(req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_frame(writer, &json)
 }
 
@@ -220,8 +224,8 @@ pub fn read_request<R: Read>(reader: &mut R) -> io::Result<Request> {
 }
 
 pub fn write_response<W: Write>(writer: &mut W, resp: &Response) -> io::Result<usize> {
-    let json = serde_json::to_vec(resp)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let json =
+        serde_json::to_vec(resp).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     write_frame(writer, &json)
 }
 

@@ -58,7 +58,11 @@ fn stat_001_status_json_shape() {
             "--detail",
         ],
     );
-    assert!(detail.is_success(), "status --detail stderr={}", detail.stderr);
+    assert!(
+        detail.is_success(),
+        "status --detail stderr={}",
+        detail.stderr
+    );
     let d = detail.json();
     assert_json_field_present(&d, "/coordinator/status");
     assert_json_field_present(&d, "/readiness/ready");

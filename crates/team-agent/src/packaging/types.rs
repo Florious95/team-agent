@@ -51,8 +51,11 @@ pub enum SkillTarget {
 impl SkillTarget {
     /// `All` fan-out 的单目标全集(表驱动唯一真相源:新增 provider 只改这里,
     /// install/uninstall/install-skill 三处共用,杜绝漏装/漏卸)。
-    pub const SINGLE_TARGETS: [SkillTarget; 3] =
-        [SkillTarget::Codex, SkillTarget::Claude, SkillTarget::Copilot];
+    pub const SINGLE_TARGETS: [SkillTarget; 3] = [
+        SkillTarget::Codex,
+        SkillTarget::Claude,
+        SkillTarget::Copilot,
+    ];
 
     /// 单目标 → 对应 provider(`All` 无单一 provider → `None`)。与 [`Provider`] 对齐,防散字符串再生。
     pub fn provider(self) -> Option<Provider> {
@@ -67,9 +70,15 @@ impl SkillTarget {
     /// `_skill_dest_dir`:`~/.codex|.claude|.copilot/skills/team-agent`(`All` fan-out 全集,非单 dir → None)。
     pub fn dest_dir(self, home: &Path) -> Option<SkillDestDir> {
         match self {
-            Self::Codex => Some(SkillDestDir(home.join(".codex").join("skills").join("team-agent"))),
-            Self::Claude => Some(SkillDestDir(home.join(".claude").join("skills").join("team-agent"))),
-            Self::Copilot => Some(SkillDestDir(home.join(".copilot").join("skills").join("team-agent"))),
+            Self::Codex => Some(SkillDestDir(
+                home.join(".codex").join("skills").join("team-agent"),
+            )),
+            Self::Claude => Some(SkillDestDir(
+                home.join(".claude").join("skills").join("team-agent"),
+            )),
+            Self::Copilot => Some(SkillDestDir(
+                home.join(".copilot").join("skills").join("team-agent"),
+            )),
             Self::All => None,
         }
     }
@@ -240,7 +249,10 @@ pub enum PathHint {
     /// bin 已在 PATH。
     OnPath { bin_dir: PathBuf },
     /// bin 不在 PATH —— 携带诊断(保留 WSL/`.npmrc` 等价提示)。// REAL-MACHINE-E2E: 真探 PATH。
-    NotOnPath { bin_dir: PathBuf, diagnostic: PathDiagnostic },
+    NotOnPath {
+        bin_dir: PathBuf,
+        diagnostic: PathDiagnostic,
+    },
 }
 
 /// 「bin 不在 PATH」诊断(`bincheck.mjs:39-65` 自由 console.error → typed struct)。
@@ -280,7 +292,10 @@ pub enum AtomicReplaceOutcome {
     /// 跨卷 `EXDEV` → copy+fsync+rename fallback 成功。// REAL-MACHINE-E2E: 需跨卷真机。
     ReplacedCrossDevice { backup: PathBuf },
     /// 替换失败 → 已回滚到 `.previous`(原 dest 仍可用)。// REAL-MACHINE-E2E.
-    RolledBack { restored_from: PathBuf, error: String },
+    RolledBack {
+        restored_from: PathBuf,
+        error: String,
+    },
 }
 
 /// `uninstall` 结果(`install.mjs:109-130`)。默认保留 runtime/workspace(有 team 在跑勿 purge)。

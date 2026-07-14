@@ -34,7 +34,11 @@ pub fn build_idle_nodes(
             ) {
                 continue;
             }
-            let Some(provider) = agent.get("provider").and_then(Value::as_str).and_then(parse_provider) else {
+            let Some(provider) = agent
+                .get("provider")
+                .and_then(Value::as_str)
+                .and_then(parse_provider)
+            else {
                 continue;
             };
             let rollout_path = agent
@@ -50,7 +54,10 @@ pub fn build_idle_nodes(
                 turn_id: classification.turn_id,
                 annotations: classification.annotations,
                 provider: Some(provider),
-                auth_mode: agent.get("auth_mode").and_then(Value::as_str).map(str::to_string),
+                auth_mode: agent
+                    .get("auth_mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 rollout_path,
             });
         }
@@ -72,12 +79,20 @@ pub fn leader_node(
     let provider = leader
         .and_then(|l| l.get("provider"))
         .and_then(Value::as_str)
-        .or_else(|| receiver.and_then(|r| r.get("provider")).and_then(Value::as_str))
+        .or_else(|| {
+            receiver
+                .and_then(|r| r.get("provider"))
+                .and_then(Value::as_str)
+        })
         .and_then(parse_provider);
     let rollout_path = leader
         .and_then(|l| l.get("rollout_path"))
         .and_then(Value::as_str)
-        .or_else(|| receiver.and_then(|r| r.get("rollout_path")).and_then(Value::as_str))
+        .or_else(|| {
+            receiver
+                .and_then(|r| r.get("rollout_path"))
+                .and_then(Value::as_str)
+        })
         .map(|p| RolloutPath::new(PathBuf::from(p)));
     let (Some(provider), Some(rollout_path)) = (provider, rollout_path) else {
         return Ok(None);
@@ -108,7 +123,10 @@ pub fn classify_provider_turn_state(
     event_log: Option<&crate::event_log::EventLog>,
 ) -> Result<TurnClassification, LeaderError> {
     let classification = classifier.classify(provider, session_log_text)?;
-    if matches!(classification.state, TurnState::Unknown | TurnState::Abnormal) {
+    if matches!(
+        classification.state,
+        TurnState::Unknown | TurnState::Abnormal
+    ) {
         if let Some(log) = event_log {
             log.write(
                 LeaderEvent::IdleTakeoverClassify.name(),
@@ -171,7 +189,9 @@ pub fn evaluate_takeover_reminder(
         .collect();
     Ok(TakeoverReminderResult {
         should_ping: true,
-        message: Some("All active nodes appear idle; leader takeover may be appropriate.".to_string()),
+        message: Some(
+            "All active nodes appear idle; leader takeover may be appropriate.".to_string(),
+        ),
         interrupted_nodes,
         reason: Some("all_idle_debounce_elapsed".to_string()),
     })
@@ -211,19 +231,34 @@ pub fn should_reread(
 ) -> RereadDecision {
     let _ = last_mtime;
     let Some(current) = current_mtime else {
-        return RereadDecision { reread: false, reason: RereadReason::NoFile };
+        return RereadDecision {
+            reread: false,
+            reason: RereadReason::NoFile,
+        };
     };
     let Some(classified) = last_classified_mtime else {
-        return RereadDecision { reread: true, reason: RereadReason::NeverClassified };
+        return RereadDecision {
+            reread: true,
+            reason: RereadReason::NeverClassified,
+        };
     };
     if current != classified {
-        return RereadDecision { reread: true, reason: RereadReason::FileChanged };
+        return RereadDecision {
+            reread: true,
+            reason: RereadReason::FileChanged,
+        };
     }
     let silent_for = (now - current).max(0.0);
     if silent_for >= debounce_seconds {
-        RereadDecision { reread: false, reason: RereadReason::QuiescentAlreadyClassified }
+        RereadDecision {
+            reread: false,
+            reason: RereadReason::QuiescentAlreadyClassified,
+        }
     } else {
-        RereadDecision { reread: false, reason: RereadReason::Unchanged }
+        RereadDecision {
+            reread: false,
+            reason: RereadReason::Unchanged,
+        }
     }
 }
 

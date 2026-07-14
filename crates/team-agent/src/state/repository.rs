@@ -338,9 +338,7 @@ fn route_direct(
         // intent lives under `coordinator.abnormal_api_error_recovery`, a
         // root-scoped bookkeeping namespace that must survive across team
         // boundaries; use the same helper family as CoordinatorConptyShim.
-        StateWriteIntent::CoordinatorApiErrorRecovery { .. } => {
-            helper_write_root(workspace, state)
-        }
+        StateWriteIntent::CoordinatorApiErrorRecovery { .. } => helper_write_root(workspace, state),
         // McpAssignTask uses the reapply variant today; direct save routes
         // to the root helper for parity.
         StateWriteIntent::McpAssignTask { .. } => helper_write_root(workspace, state),

@@ -28,9 +28,9 @@ use team_agent::provider::get_adapter;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 #[test]
@@ -55,10 +55,9 @@ fn provider_home_codex_rollout_session_meta_is_captured_for_restart_resume() {
         "Codex capture must extract session_meta.payload.id from provider-home rollout JSONL"
     );
     assert!(
-        captured
-            .rollout_path
-            .as_ref()
-            .is_some_and(|path| path.as_path().starts_with(fixture.home().join(".codex/sessions"))),
+        captured.rollout_path.as_ref().is_some_and(|path| path
+            .as_path()
+            .starts_with(fixture.home().join(".codex/sessions"))),
         "Codex capture must scan provider home, not only spawn_cwd; captured={captured:?}"
     );
 }
@@ -175,7 +174,10 @@ fn session_attribution_leaves_ambiguous_when_no_unique_match() {
         .into_iter()
         .find(|agent_id| agent_session(&state, agent_id).is_none())
         .expect("one agent should remain uncaptured");
-    let agent = state.get("agents").and_then(|agents| agents.get(ambiguous_agent)).unwrap();
+    let agent = state
+        .get("agents")
+        .and_then(|agents| agents.get(ambiguous_agent))
+        .unwrap();
     assert_eq!(
         agent.get("attribution_ambiguous").and_then(serde_json::Value::as_bool),
         Some(true),
@@ -214,8 +216,11 @@ fn restart_waits_for_delayed_rollout_before_writing_resume_decisions() {
     let transport = RecordingTransport::new().with_session_present(true);
 
     let report = restart_with_transport(&fixture.team, false, None, &transport);
-    delayed.join().expect("delayed rollout writer should finish");
-    let report = report.expect("restart should wait for delayed rollout convergence instead of refusing early");
+    delayed
+        .join()
+        .expect("delayed rollout writer should finish");
+    let report = report
+        .expect("restart should wait for delayed rollout convergence instead of refusing early");
     let state = load_runtime_state(&fixture.team).unwrap();
     let events = read_events(&fixture.team);
 
@@ -258,8 +263,16 @@ fn restart_refuses_resume_not_ready_without_teardown_when_delayed_rollout_never_
             "without --allow-fresh, missing delayed rollout must refuse before teardown, not restart/fresh-start; got {other:?}"
         ),
     }
-    assert_eq!(transport.kill_count(), 0, "resume_not_ready refusal must not teardown the existing session");
-    assert_eq!(transport.spawn_count(), 0, "resume_not_ready refusal must not spawn fresh workers");
+    assert_eq!(
+        transport.kill_count(),
+        0,
+        "resume_not_ready refusal must not teardown the existing session"
+    );
+    assert_eq!(
+        transport.spawn_count(),
+        0,
+        "resume_not_ready refusal must not spawn fresh workers"
+    );
     let state_after = load_runtime_state(&fixture.team).unwrap();
     assert_eq!(
         state_after, state_before,
@@ -342,13 +355,20 @@ fn restart_waits_for_running_resumable_session_incomplete_agent_even_when_first_
     let transport = RecordingTransport::new().with_session_present(true);
 
     let report = restart_with_transport(&fixture.team, false, None, &transport);
-    delayed.join().expect("delayed rollout writer should finish");
-    let report = report.expect("restart should wait for first_send_at=null running resumable worker");
+    delayed
+        .join()
+        .expect("delayed rollout writer should finish");
+    let report =
+        report.expect("restart should wait for first_send_at=null running resumable worker");
     let events = read_events(&fixture.team);
 
     assert_convergence_required_missing_contains(&events, "worker_a");
     assert_restarted_with_resume(&report, "codex-sess-first-send-null-delayed");
-    assert_events_contain_resume_decision(&fixture.team, "resume", "codex-sess-first-send-null-delayed");
+    assert_events_contain_resume_decision(
+        &fixture.team,
+        "resume",
+        "codex-sess-first-send-null-delayed",
+    );
     assert_eq!(
         transport.kill_count(),
         1,
@@ -364,7 +384,8 @@ fn restart_waits_for_running_resumable_session_incomplete_agent_even_when_first_
 #[test]
 #[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
 #[serial(env)]
-fn restart_refuses_first_send_at_null_running_resumable_session_incomplete_when_rollout_never_arrives() {
+fn restart_refuses_first_send_at_null_running_resumable_session_incomplete_when_rollout_never_arrives(
+) {
     let fixture = RestartFixture::new("codex-first-send-null-never-arrives", "codex");
     let _home = HomeGuard::with_home(fixture.root.join("home"));
     let _deadline = EnvGuard::set("TEAM_AGENT_RESTART_SESSION_CONVERGENCE_DEADLINE_MS", "0");
@@ -396,8 +417,16 @@ fn restart_refuses_first_send_at_null_running_resumable_session_incomplete_when_
             read_events(&fixture.team)
         ),
     }
-    assert_eq!(transport.kill_count(), 0, "resume_not_ready must not teardown existing session");
-    assert_eq!(transport.spawn_count(), 0, "resume_not_ready must not spawn fresh worker");
+    assert_eq!(
+        transport.kill_count(),
+        0,
+        "resume_not_ready must not teardown existing session"
+    );
+    assert_eq!(
+        transport.spawn_count(),
+        0,
+        "resume_not_ready must not spawn fresh worker"
+    );
     assert_eq!(
         load_runtime_state(&fixture.team).unwrap(),
         state_before,
@@ -459,11 +488,9 @@ fn wait_ready_reports_session_capture_incomplete_for_running_resumable_worker_wi
 
 #[test]
 fn status_quick_start_and_wait_ready_surfaces_include_session_capture_completeness() {
-    let diagnose = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/diagnose.rs"
-    ))
-    .unwrap();
+    let diagnose =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/diagnose.rs"))
+            .unwrap();
     let status = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/cli/status_port.rs"
@@ -474,11 +501,9 @@ fn status_quick_start_and_wait_ready_surfaces_include_session_capture_completene
         "/src/lifecycle/launch.rs"
     ))
     .unwrap();
-    let adapters = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/adapters.rs"
-    ))
-    .unwrap();
+    let adapters =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/adapters.rs"))
+            .unwrap();
 
     for (name, source) in [
         ("wait-ready", diagnose.as_str()),
@@ -501,16 +526,10 @@ fn restart_session_convergence_deadline_is_configurable_and_bounded() {
         "/src/lifecycle/restart/rebuild.rs"
     ))
     .unwrap();
-    let types = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/types.rs"
-    ))
-    .unwrap();
-    let emit = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/emit.rs"
-    ))
-    .unwrap();
+    let types =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/types.rs")).unwrap();
+    let emit =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/emit.rs")).unwrap();
 
     assert!(
         restart.contains("session_converge_deadline")
@@ -676,10 +695,9 @@ fn provider_home_claude_session_is_captured_for_restart_resume() {
         "Claude capture must recover sessionId from provider-home session JSON"
     );
     assert!(
-        captured
-            .rollout_path
-            .as_ref()
-            .is_some_and(|path| path.as_path().starts_with(fixture.home().join(".claude/sessions"))),
+        captured.rollout_path.as_ref().is_some_and(|path| path
+            .as_path()
+            .starts_with(fixture.home().join(".claude/sessions"))),
         "Claude capture must scan provider home, not only spawn_cwd; captured={captured:?}"
     );
 }
@@ -757,7 +775,11 @@ fn shutdown_force_captures_missing_provider_session_before_kill() {
     .expect("shutdown should complete after pre-kill session capture");
 
     assert_eq!(result.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(transport.kill_count(), 1, "shutdown fixture should kill the team session once");
+    assert_eq!(
+        transport.kill_count(),
+        1,
+        "shutdown fixture should kill the team session once"
+    );
     assert_state_session_id(&fixture.team, codex_session);
 }
 
@@ -765,7 +787,12 @@ fn shutdown_force_captures_missing_provider_session_before_kill() {
 #[ignore = "real-machine: provider session filesystem + restart/shutdown lifecycle convergence"]
 fn persisted_session_id_is_the_resume_authority_for_restart_plan_and_spawn_argv() {
     let codex = RestartFixture::new("codex-resume-authority", "codex");
-    seed_running_state_with_session(&codex.team, "codex", &codex.spawn_cwd, "codex-known-session");
+    seed_running_state_with_session(
+        &codex.team,
+        "codex",
+        &codex.spawn_cwd,
+        "codex-known-session",
+    );
     let codex_state = load_runtime_state(&codex.team).unwrap();
     let codex_plan = classify_restart_plan(&codex_state, false).unwrap();
     assert_eq!(codex_plan.decisions.len(), 1);
@@ -783,7 +810,12 @@ fn persisted_session_id_is_the_resume_authority_for_restart_plan_and_spawn_argv(
     );
 
     let claude = RestartFixture::new("claude-resume-authority", "claude");
-    seed_running_state_with_session(&claude.team, "claude", &claude.spawn_cwd, "claude-known-session");
+    seed_running_state_with_session(
+        &claude.team,
+        "claude",
+        &claude.spawn_cwd,
+        "claude-known-session",
+    );
     let claude_transport = RecordingTransport::new().with_session_present(true);
     let claude_report = restart_with_transport(&claude.team, false, None, &claude_transport)
         .expect("persisted Claude session_id must be resumable");
@@ -798,7 +830,11 @@ fn persisted_session_id_is_the_resume_authority_for_restart_plan_and_spawn_argv(
 fn assert_restarted_with_resume(report: &RestartReport, expected_session: &str) {
     match report {
         RestartReport::Restarted { agents, .. } => {
-            assert_eq!(agents.len(), 1, "fixture has exactly one worker; agents={agents:?}");
+            assert_eq!(
+                agents.len(),
+                1,
+                "fixture has exactly one worker; agents={agents:?}"
+            );
             assert_eq!(agents[0].decision, ResumeDecision::Resume);
             assert_eq!(agents[0].restart_mode, StartMode::Resumed);
             assert_eq!(
@@ -810,7 +846,10 @@ fn assert_restarted_with_resume(report: &RestartReport, expected_session: &str) 
     }
 }
 
-fn assert_restart_resumed_all_agents<const N: usize>(report: &RestartReport, expected_agents: [&str; N]) {
+fn assert_restart_resumed_all_agents<const N: usize>(
+    report: &RestartReport,
+    expected_agents: [&str; N],
+) {
     match report {
         RestartReport::Restarted { agents, .. } => {
             let resumed = agents
@@ -859,7 +898,9 @@ fn assert_all_live_codex_agents_have_complete_unique_sessions<const N: usize>(
         let agent = state
             .get("agents")
             .and_then(|agents| agents.get(agent_id))
-            .unwrap_or_else(|| panic!("state must contain live Codex agent {agent_id}; state={state}"));
+            .unwrap_or_else(|| {
+                panic!("state must contain live Codex agent {agent_id}; state={state}")
+            });
         let session_id = agent
             .get("session_id")
             .and_then(serde_json::Value::as_str)
@@ -881,7 +922,10 @@ fn assert_all_live_codex_agents_have_complete_unique_sessions<const N: usize>(
     }
 }
 
-fn assert_all_resume_decisions_are_session_backed<const N: usize>(events: &str, expected_agents: [&str; N]) {
+fn assert_all_resume_decisions_are_session_backed<const N: usize>(
+    events: &str,
+    expected_agents: [&str; N],
+) {
     for agent_id in expected_agents {
         let matching = events
             .lines()
@@ -918,7 +962,10 @@ fn json_result(result: team_agent::cli::CmdResult) -> Value {
     }
 }
 
-fn assert_no_agent_attribution_ambiguous<const N: usize>(state: &Value, expected_agents: [&str; N]) {
+fn assert_no_agent_attribution_ambiguous<const N: usize>(
+    state: &Value,
+    expected_agents: [&str; N],
+) {
     for agent_id in expected_agents {
         let agent = state
             .get("agents")
@@ -988,8 +1035,10 @@ fn agent_session<'a>(state: &'a serde_json::Value, agent_id: &str) -> Option<&'a
 
 fn assert_spawn_contains_adjacent(argv: &[String], expected: &[&str], message: &str) {
     assert!(
-        argv.windows(expected.len())
-            .any(|window| window.iter().map(String::as_str).eq(expected.iter().copied())),
+        argv.windows(expected.len()).any(|window| window
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())),
         "{message}; argv={argv:?}"
     );
 }
@@ -1021,7 +1070,11 @@ fn assert_state_session_id(team: &Path, expected_session: &str) {
     );
 }
 
-fn assert_events_contain_resume_decision(team: &Path, expected_decision: &str, expected_session: &str) {
+fn assert_events_contain_resume_decision(
+    team: &Path,
+    expected_decision: &str,
+    expected_session: &str,
+) {
     let events = std::fs::read_to_string(team.join(".team/logs/events.jsonl")).unwrap();
     let needle = format!(
         r#""event":"restart.resume_decision".*"decision":"{expected_decision}".*"has_session_id":true.*"session_id":"{expected_session}""#
@@ -1119,11 +1172,20 @@ fn seed_running_state_without_session(team: &Path, provider: &str, spawn_cwd: &P
     seed_healthy_coordinator(team);
 }
 
-fn seed_running_state_without_session_no_coordinator(team: &Path, provider: &str, spawn_cwd: &Path) {
+fn seed_running_state_without_session_no_coordinator(
+    team: &Path,
+    provider: &str,
+    spawn_cwd: &Path,
+) {
     seed_running_state(team, provider, spawn_cwd, None);
 }
 
-fn seed_running_state_with_session(team: &Path, provider: &str, spawn_cwd: &Path, session_id: &str) {
+fn seed_running_state_with_session(
+    team: &Path,
+    provider: &str,
+    spawn_cwd: &Path,
+    session_id: &str,
+) {
     seed_running_state(team, provider, spawn_cwd, Some(session_id));
     seed_healthy_coordinator(team);
 }
@@ -1183,7 +1245,10 @@ fn seed_two_interacted_running_codex_agents_without_sessions(team: &Path, spawn_
             .and_then(|agents| agents.get_mut(agent_id))
             .and_then(serde_json::Value::as_object_mut)
         {
-            agent.insert("first_send_at".to_string(), serde_json::json!(first_send_at));
+            agent.insert(
+                "first_send_at".to_string(),
+                serde_json::json!(first_send_at),
+            );
         }
     }
     save_runtime_state(team, &state).unwrap();
@@ -1203,10 +1268,7 @@ fn seed_running_codex_agent_without_session_and_first_send_at(team: &Path, spawn
         agent.insert("pane_id".to_string(), serde_json::json!("%1"));
         agent.insert("pane_pid".to_string(), serde_json::json!(41001));
         agent.insert("mcp_ready".to_string(), serde_json::json!(true));
-        agent.insert(
-            "startup_prompts".to_string(),
-            serde_json::json!("complete"),
-        );
+        agent.insert("startup_prompts".to_string(), serde_json::json!("complete"));
     }
     save_runtime_state(team, &state).unwrap();
     seed_true_machine_interaction_evidence(team);
@@ -1569,11 +1631,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),

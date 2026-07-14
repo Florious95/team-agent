@@ -11,8 +11,16 @@ fn profiles_dir(ws: &std::path::Path) -> std::path::PathBuf {
 fn seed_official_api_profile(ws: &std::path::Path) {
     let dir = profiles_dir(ws);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("AGENTS.md"), "# Team Agent Profile Secret Boundary\n").unwrap();
-    std::fs::write(dir.join("CLAUDE.md"), "# Team Agent Profile Secret Boundary\n").unwrap();
+    std::fs::write(
+        dir.join("AGENTS.md"),
+        "# Team Agent Profile Secret Boundary\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("CLAUDE.md"),
+        "# Team Agent Profile Secret Boundary\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.join("api_prof.env"),
         "AUTH_MODE=official_api\nPROFILE_NAME=api_prof\nAPI_KEY=sk-test-secret\nMODEL=gpt-test\n",
@@ -62,7 +70,11 @@ fn profile_init_routes_and_creates_secret_boundary_files() {
         ]),
         &ws,
     );
-    assert_eq!(code, ExitCode::Ok, "`profile init ... --json` must route and exit 0");
+    assert_eq!(
+        code,
+        ExitCode::Ok,
+        "`profile init ... --json` must route and exit 0"
+    );
 
     let dir = profiles_dir(&ws);
     assert!(
@@ -97,7 +109,11 @@ fn profile_init_routes_and_creates_secret_boundary_files() {
         ]),
         &ws,
     );
-    assert_eq!(second, ExitCode::Ok, "profile init is idempotent and still exits 0");
+    assert_eq!(
+        second,
+        ExitCode::Ok,
+        "profile init is idempotent and still exits 0"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.join("codex_sub.env")).unwrap(),
         "AUTH_MODE=subscription\nPROFILE_NAME=codex_sub\n",
@@ -131,20 +147,21 @@ fn profile_doctor_routes_existing_ok_and_missing_error() {
         ]),
         &ws,
     );
-    assert_eq!(existing, ExitCode::Ok, "profile doctor existing profile must exit 0");
+    assert_eq!(
+        existing,
+        ExitCode::Ok,
+        "profile doctor existing profile must exit 0"
+    );
 
     let missing = run(
-        &profile_argv(&[
-            "profile",
-            "doctor",
-            "missing",
-            "--workspace",
-            ".",
-            "--json",
-        ]),
+        &profile_argv(&["profile", "doctor", "missing", "--workspace", ".", "--json"]),
         &ws,
     );
-    assert_eq!(missing, ExitCode::Error, "profile doctor missing profile must exit 1");
+    assert_eq!(
+        missing,
+        ExitCode::Error,
+        "profile doctor missing profile must exit 1"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -165,18 +182,30 @@ fn profile_show_routes_and_preserves_redacted_secret_contract() {
         &profile_argv(&["profile", "show", "api_prof", "--workspace", ".", "--json"]),
         &ws,
     );
-    assert_eq!(code, ExitCode::Ok, "profile show existing profile must exit 0");
+    assert_eq!(
+        code,
+        ExitCode::Ok,
+        "profile show existing profile must exit 0"
+    );
 
     let missing = run(
         &profile_argv(&["profile", "show", "missing", "--workspace", ".", "--json"]),
         &ws,
     );
-    assert_eq!(missing, ExitCode::Error, "profile show missing profile must exit 1");
+    assert_eq!(
+        missing,
+        ExitCode::Error,
+        "profile show missing profile must exit 1"
+    );
 
     let code_human = run(
         &profile_argv(&["profile", "show", "api_prof", "--workspace", "."]),
         &ws,
     );
-    assert_eq!(code_human, ExitCode::Ok, "profile show human output path must route");
+    assert_eq!(
+        code_human,
+        ExitCode::Ok,
+        "profile show human output path must route"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }

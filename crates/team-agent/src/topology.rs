@@ -101,21 +101,19 @@ pub fn endpoint_convergence_decision(
     let mut converge_reason = "old_endpoint_dead";
     for old_endpoint in stale_endpoints {
         match endpoint_server_alive(&old_endpoint) {
-            Some(true) => {
-                match old_endpoint_team_liveness(state, team_key, &old_endpoint) {
-                    OldEndpointTeamLiveness::TeamLive { reason } => {
-                        return EndpointConvergenceDecision::RefuseLiveOldEndpoint {
-                            old_endpoint,
-                            new_endpoint: candidate_endpoint.to_string(),
-                            reason,
-                        };
-                    }
-                    OldEndpointTeamLiveness::TeamAbsent { reason } => {
-                        converge_reason = reason;
-                    }
-                    OldEndpointTeamLiveness::Unknown => return EndpointConvergenceDecision::Unknown,
+            Some(true) => match old_endpoint_team_liveness(state, team_key, &old_endpoint) {
+                OldEndpointTeamLiveness::TeamLive { reason } => {
+                    return EndpointConvergenceDecision::RefuseLiveOldEndpoint {
+                        old_endpoint,
+                        new_endpoint: candidate_endpoint.to_string(),
+                        reason,
+                    };
                 }
-            }
+                OldEndpointTeamLiveness::TeamAbsent { reason } => {
+                    converge_reason = reason;
+                }
+                OldEndpointTeamLiveness::Unknown => return EndpointConvergenceDecision::Unknown,
+            },
             Some(false) => {}
             None => return EndpointConvergenceDecision::Unknown,
         }
@@ -226,8 +224,7 @@ fn leader_receiver_tuple_matches(state: &Value, observed: &PaneInfo) -> bool {
             return false;
         }
     }
-    if let (Some(expected_pid), Some(observed_pid)) =
-        (agent_pane_pid(receiver), observed.pane_pid)
+    if let (Some(expected_pid), Some(observed_pid)) = (agent_pane_pid(receiver), observed.pane_pid)
     {
         if expected_pid != observed_pid {
             return false;
@@ -238,9 +235,16 @@ fn leader_receiver_tuple_matches(state: &Value, observed: &PaneInfo) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerPaneBindingMatch {
-    LiveSameWorker { agent_id: String },
-    Stale { agent_id: String, reason: &'static str },
-    IncompleteLegacy { agent_id: String },
+    LiveSameWorker {
+        agent_id: String,
+    },
+    Stale {
+        agent_id: String,
+        reason: &'static str,
+    },
+    IncompleteLegacy {
+        agent_id: String,
+    },
     NoMatch,
 }
 
@@ -504,5 +508,8 @@ fn normalize_endpoint(value: &str) -> String {
 }
 
 fn non_empty_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
 }

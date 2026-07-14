@@ -230,7 +230,12 @@ impl MessageStore {
 
     /// `mark` (`core.py:116-138`) — the messages.status state machine (this slice
     /// excludes the `delivery_tokens` side-effect, which is deferred).
-    pub fn mark(&self, message_id: &str, status: &str, error: Option<&str>) -> Result<(), MessageStoreError> {
+    pub fn mark(
+        &self,
+        message_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<(), MessageStoreError> {
         let conn = crate::db::schema::open_db(&self.path)?;
         let now = now_ts();
         conn.execute(
@@ -594,7 +599,15 @@ mod tests {
     fn create_message_inserts_accepted_row() {
         let s = store();
         let mid = s
-            .create_message(Some("task_1"), "leader", "alice", "hello", None, true, Some("team_A"))
+            .create_message(
+                Some("task_1"),
+                "leader",
+                "alice",
+                "hello",
+                None,
+                true,
+                Some("team_A"),
+            )
             .unwrap();
         assert!(mid.starts_with("msg_"), "id: {mid}");
         assert_eq!(mid.len(), 16, "msg_ + 12 hex");
@@ -604,7 +617,10 @@ mod tests {
         assert_eq!(col_str(&c, &mid, "task_id").as_deref(), Some("task_1"));
         assert_eq!(col_str(&c, &mid, "sender").as_deref(), Some("leader"));
         assert_eq!(col_str(&c, &mid, "recipient").as_deref(), Some("alice"));
-        assert_eq!(col_str(&c, &mid, "owner_team_id").as_deref(), Some("team_A"));
+        assert_eq!(
+            col_str(&c, &mid, "owner_team_id").as_deref(),
+            Some("team_A")
+        );
         assert_eq!(col_str(&c, &mid, "content").as_deref(), Some("hello"));
         assert_eq!(col_str(&c, &mid, "artifact_refs").as_deref(), Some("[]"));
         assert_eq!(col_str(&c, &mid, "reply_to"), None);
@@ -618,7 +634,9 @@ mod tests {
     #[test]
     fn create_message_no_task_no_owner_ack_false() {
         let s = store();
-        let mid = s.create_message(None, "leader", "bob", "hi", None, false, None).unwrap();
+        let mid = s
+            .create_message(None, "leader", "bob", "hi", None, false, None)
+            .unwrap();
         let c = read(&s);
         assert_eq!(col_str(&c, &mid, "task_id"), None);
         assert_eq!(col_str(&c, &mid, "owner_team_id"), None);
@@ -631,9 +649,14 @@ mod tests {
     #[test]
     fn claim_for_delivery_first_caller_wins() {
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
 
-        assert!(s.claim_for_delivery(&mid).unwrap(), "accepted is eligible → claim wins");
+        assert!(
+            s.claim_for_delivery(&mid).unwrap(),
+            "accepted is eligible → claim wins"
+        );
         let c = read(&s);
         assert_eq!(status_of(&c, &mid), "target_resolved");
         assert_eq!(col_i64(&c, &mid, "delivery_attempts"), 1);
@@ -644,9 +667,14 @@ mod tests {
         // Atomic single-winner: once target_resolved, a re-claim returns false and
         // must NOT bump delivery_attempts again.
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         assert!(s.claim_for_delivery(&mid).unwrap());
-        assert!(!s.claim_for_delivery(&mid).unwrap(), "already target_resolved → no second winner");
+        assert!(
+            !s.claim_for_delivery(&mid).unwrap(),
+            "already target_resolved → no second winner"
+        );
 
         let c = read(&s);
         assert_eq!(status_of(&c, &mid), "target_resolved");
@@ -663,7 +691,9 @@ mod tests {
     fn claim_for_delivery_ineligible_status_is_false() {
         // 'failed' is not in the eligible set → claim returns false, status unchanged.
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         s.mark(&mid, "failed", Some("boom")).unwrap();
         assert!(!s.claim_for_delivery(&mid).unwrap());
         assert_eq!(status_of(&read(&s), &mid), "failed");
@@ -674,11 +704,16 @@ mod tests {
     #[test]
     fn mark_injected_sets_status_and_delivered_at() {
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         s.mark(&mid, "injected", None).unwrap();
         let c = read(&s);
         assert_eq!(status_of(&c, &mid), "injected");
-        assert!(col_str(&c, &mid, "delivered_at").is_some(), "delivered_at set for injected");
+        assert!(
+            col_str(&c, &mid, "delivered_at").is_some(),
+            "delivered_at set for injected"
+        );
         assert_eq!(col_str(&c, &mid, "acknowledged_at"), None);
     }
 
@@ -686,22 +721,34 @@ mod tests {
     fn mark_acknowledged_is_sticky_against_delivery_statuses() {
         // CASE guard: once acknowledged, marks to injected/visible/... are ignored.
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         s.mark(&mid, "acknowledged", None).unwrap();
         assert_eq!(status_of(&read(&s), &mid), "acknowledged");
         assert!(col_str(&read(&s), &mid, "acknowledged_at").is_some());
 
         s.mark(&mid, "injected", None).unwrap();
-        assert_eq!(status_of(&read(&s), &mid), "acknowledged", "injected ignored after ack");
+        assert_eq!(
+            status_of(&read(&s), &mid),
+            "acknowledged",
+            "injected ignored after ack"
+        );
         s.mark(&mid, "visible", None).unwrap();
-        assert_eq!(status_of(&read(&s), &mid), "acknowledged", "visible ignored after ack");
+        assert_eq!(
+            status_of(&read(&s), &mid),
+            "acknowledged",
+            "visible ignored after ack"
+        );
     }
 
     #[test]
     fn mark_acknowledged_then_failed_overwrites() {
         // 'failed' is NOT in the guarded delivery set → it overwrites acknowledged.
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         s.mark(&mid, "acknowledged", None).unwrap();
         s.mark(&mid, "failed", Some("x")).unwrap();
         assert_eq!(status_of(&read(&s), &mid), "failed");
@@ -710,7 +757,9 @@ mod tests {
     #[test]
     fn mark_overwrites_for_non_acknowledged() {
         let s = store();
-        let mid = s.create_message(Some("t"), "s", "r", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "s", "r", "c", None, true, None)
+            .unwrap();
         s.mark(&mid, "injected", None).unwrap();
         s.mark(&mid, "visible", None).unwrap();
         assert_eq!(status_of(&read(&s), &mid), "visible");
@@ -742,16 +791,31 @@ mod tests {
         // and proposed id → second is deduped to the first winner.
         let s = store();
         let r1 = s
-            .claim_leader_notification_delivery(params("res_1", Some("team_A"), Some(7), Some("uuid-AAA"), "msg_notif_1"))
+            .claim_leader_notification_delivery(params(
+                "res_1",
+                Some("team_A"),
+                Some(7),
+                Some("uuid-AAA"),
+                "msg_notif_1",
+            ))
             .unwrap();
         assert_eq!(r1.status, "claimed_by_you");
         assert_eq!(r1.notified_message_id, "msg_notif_1");
 
         let r2 = s
-            .claim_leader_notification_delivery(params("res_1", Some("team_A"), Some(7), Some("uuid-BBB"), "msg_notif_2"))
+            .claim_leader_notification_delivery(params(
+                "res_1",
+                Some("team_A"),
+                Some(7),
+                Some("uuid-BBB"),
+                "msg_notif_2",
+            ))
             .unwrap();
         assert_eq!(r2.status, "already_notified_by");
-        assert_eq!(r2.notified_message_id, "msg_notif_1", "loser sees first winner's id, not its own");
+        assert_eq!(
+            r2.notified_message_id, "msg_notif_1",
+            "loser sees first winner's id, not its own"
+        );
 
         // Exactly ONE row — carrying the FIRST caller's uuid (uuid not in the key).
         assert_eq!(
@@ -769,12 +833,27 @@ mod tests {
     #[test]
     fn leader_notification_different_epoch_is_a_new_claim() {
         let s = store();
-        s.claim_leader_notification_delivery(params("res_1", Some("team_A"), Some(7), Some("uuid-AAA"), "msg_notif_1"))
-            .unwrap();
+        s.claim_leader_notification_delivery(params(
+            "res_1",
+            Some("team_A"),
+            Some(7),
+            Some("uuid-AAA"),
+            "msg_notif_1",
+        ))
+        .unwrap();
         let r3 = s
-            .claim_leader_notification_delivery(params("res_1", Some("team_A"), Some(8), Some("uuid-AAA"), "msg_notif_3"))
+            .claim_leader_notification_delivery(params(
+                "res_1",
+                Some("team_A"),
+                Some(8),
+                Some("uuid-AAA"),
+                "msg_notif_3",
+            ))
             .unwrap();
-        assert_eq!(r3.status, "claimed_by_you", "different owner_epoch → different PK → new claim");
+        assert_eq!(
+            r3.status, "claimed_by_you",
+            "different owner_epoch → different PK → new claim"
+        );
 
         let rows = notif_rows(&read(&s));
         assert_eq!(rows.len(), 2);
@@ -789,20 +868,41 @@ mod tests {
         // yields a different derived epoch → a new claim.
         let s = store();
         let a1 = s
-            .claim_leader_notification_delivery(params("res_2", Some("team_B"), None, Some("uuid-AAA"), "m1"))
+            .claim_leader_notification_delivery(params(
+                "res_2",
+                Some("team_B"),
+                None,
+                Some("uuid-AAA"),
+                "m1",
+            ))
             .unwrap();
         assert_eq!(a1.status, "claimed_by_you");
 
         let a2 = s
-            .claim_leader_notification_delivery(params("res_2", Some("team_B"), None, Some("uuid-AAA"), "m2"))
+            .claim_leader_notification_delivery(params(
+                "res_2",
+                Some("team_B"),
+                None,
+                Some("uuid-AAA"),
+                "m2",
+            ))
             .unwrap();
         assert_eq!(a2.status, "already_notified_by");
         assert_eq!(a2.notified_message_id, "m1");
 
         let a3 = s
-            .claim_leader_notification_delivery(params("res_2", Some("team_B"), None, Some("uuid-BBB"), "m3"))
+            .claim_leader_notification_delivery(params(
+                "res_2",
+                Some("team_B"),
+                None,
+                Some("uuid-BBB"),
+                "m3",
+            ))
             .unwrap();
-        assert_eq!(a3.status, "claimed_by_you", "different uuid → different derived epoch → new claim");
+        assert_eq!(
+            a3.status, "claimed_by_you",
+            "different uuid → different derived epoch → new claim"
+        );
 
         // Stored epochs equal the crc32 derivation of each uuid.
         let rows = notif_rows(&read(&s));
@@ -829,7 +929,9 @@ mod tests {
         let mut rows = c
             .prepare("select a, b from peer_allowlist order by a, b")
             .unwrap()
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -851,7 +953,9 @@ mod tests {
     #[test]
     fn fix_b1_mark_preserves_existing_error_when_none_given() {
         let s = store();
-        let mid = s.create_message(Some("t"), "a", "b", "c", None, true, None).unwrap();
+        let mid = s
+            .create_message(Some("t"), "a", "b", "c", None, true, None)
+            .unwrap();
 
         s.mark(&mid, "failed", Some("boom")).unwrap();
         assert_eq!(col_str(&read(&s), &mid, "error").as_deref(), Some("boom"));
@@ -861,7 +965,11 @@ mod tests {
         s.mark(&mid, "injected", None).unwrap();
         let c = read(&s);
         assert_eq!(status_of(&c, &mid), "injected");
-        assert_eq!(col_str(&c, &mid, "error").as_deref(), Some("boom"), "existing error must survive a no-error mark");
+        assert_eq!(
+            col_str(&c, &mid, "error").as_deref(),
+            Some("boom"),
+            "existing error must survive a no-error mark"
+        );
 
         // A NEW error overwrites.
         s.mark(&mid, "failed", Some("second")).unwrap();

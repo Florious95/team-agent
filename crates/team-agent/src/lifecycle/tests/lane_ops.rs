@@ -1,5 +1,5 @@
-use super::*;
 use super::launch_spawn::{seed_healthy_coordinator, DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO};
+use super::*;
 
 // ═════════════════════════════════════════════════════════════════════════
 
@@ -38,30 +38,86 @@ impl crate::transport::Transport for LaneTransport {
     fn kind(&self) -> crate::transport::BackendKind {
         crate::transport::BackendKind::Tmux
     }
-    fn spawn_first(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        self.spawns.lock().unwrap().push(("spawn_first".to_string(), argv.to_vec()));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())), session: session.clone(), window: window.clone(), child_pid: None })
+    fn spawn_first(
+        &self,
+        session: &crate::transport::SessionName,
+        window: &crate::transport::WindowName,
+        argv: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawns
+            .lock()
+            .unwrap()
+            .push(("spawn_first".to_string(), argv.to_vec()));
+        Ok(crate::transport::SpawnResult {
+            pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: None,
+        })
     }
-    fn spawn_into(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        self.spawns.lock().unwrap().push(("spawn_into".to_string(), argv.to_vec()));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())), session: session.clone(), window: window.clone(), child_pid: None })
+    fn spawn_into(
+        &self,
+        session: &crate::transport::SessionName,
+        window: &crate::transport::WindowName,
+        argv: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawns
+            .lock()
+            .unwrap()
+            .push(("spawn_into".to_string(), argv.to_vec()));
+        Ok(crate::transport::SpawnResult {
+            pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: None,
+        })
     }
-    fn inject(&self, _t: &crate::transport::Target, _p: &crate::transport::InjectPayload, _s: crate::transport::Key, _b: bool) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
+    fn inject(
+        &self,
+        _t: &crate::transport::Target,
+        _p: &crate::transport::InjectPayload,
+        _s: crate::transport::Key,
+        _b: bool,
+    ) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
         unimplemented!("LaneTransport::inject not reached by stop/reset/remove/fork")
     }
-    fn send_keys(&self, _t: &crate::transport::Target, _k: &[crate::transport::Key]) -> Result<(), crate::transport::TransportError> {
+    fn send_keys(
+        &self,
+        _t: &crate::transport::Target,
+        _k: &[crate::transport::Key],
+    ) -> Result<(), crate::transport::TransportError> {
         Ok(())
     }
-    fn capture(&self, _t: &crate::transport::Target, r: crate::transport::CaptureRange) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
-        Ok(crate::transport::CapturedText { text: String::new(), range: r })
+    fn capture(
+        &self,
+        _t: &crate::transport::Target,
+        r: crate::transport::CaptureRange,
+    ) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
+        Ok(crate::transport::CapturedText {
+            text: String::new(),
+            range: r,
+        })
     }
-    fn query(&self, _t: &crate::transport::Target, _f: crate::transport::PaneField) -> Result<Option<String>, crate::transport::TransportError> {
+    fn query(
+        &self,
+        _t: &crate::transport::Target,
+        _f: crate::transport::PaneField,
+    ) -> Result<Option<String>, crate::transport::TransportError> {
         Ok(None)
     }
-    fn liveness(&self, _p: &crate::transport::PaneId) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
+    fn liveness(
+        &self,
+        _p: &crate::transport::PaneId,
+    ) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
         Ok(crate::model::enums::PaneLiveness::Unknown)
     }
-    fn list_targets(&self) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
+    fn list_targets(
+        &self,
+    ) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
         Ok(self
             .windows
             .iter()
@@ -80,31 +136,57 @@ impl crate::transport::Transport for LaneTransport {
             })
             .collect())
     }
-    fn has_session(&self, _s: &crate::transport::SessionName) -> Result<bool, crate::transport::TransportError> {
+    fn has_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<bool, crate::transport::TransportError> {
         Ok(true)
     }
-    fn list_windows(&self, s: &crate::transport::SessionName) -> Result<Vec<crate::transport::WindowName>, crate::transport::TransportError> {
+    fn list_windows(
+        &self,
+        s: &crate::transport::SessionName,
+    ) -> Result<Vec<crate::transport::WindowName>, crate::transport::TransportError> {
         if s.as_str() == self.session {
-            Ok(self.windows.iter().map(|w| crate::transport::WindowName::new(w.as_str())).collect())
+            Ok(self
+                .windows
+                .iter()
+                .map(|w| crate::transport::WindowName::new(w.as_str()))
+                .collect())
         } else {
             Ok(Vec::new())
         }
     }
-    fn set_session_env(&self, _s: &crate::transport::SessionName, _k: &str, _v: &str) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &crate::transport::SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
         Ok(crate::transport::SetEnvOutcome::Applied)
     }
-    fn kill_session(&self, _s: &crate::transport::SessionName) -> Result<(), crate::transport::TransportError> {
+    fn kill_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<(), crate::transport::TransportError> {
         Ok(())
     }
-    fn kill_window(&self, t: &crate::transport::Target) -> Result<(), crate::transport::TransportError> {
+    fn kill_window(
+        &self,
+        t: &crate::transport::Target,
+    ) -> Result<(), crate::transport::TransportError> {
         let name = match t {
             crate::transport::Target::Pane(p) => p.as_str().to_string(),
-            crate::transport::Target::SessionWindow { session, window } => format!("{}:{}", session.as_str(), window.as_str()),
+            crate::transport::Target::SessionWindow { session, window } => {
+                format!("{}:{}", session.as_str(), window.as_str())
+            }
         };
         self.killed.lock().unwrap().push(name);
         Ok(())
     }
-    fn attach_session(&self, _s: &crate::transport::SessionName) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
+    fn attach_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
         Ok(crate::transport::AttachOutcome::Attached)
     }
 }
@@ -114,7 +196,11 @@ impl crate::transport::Transport for LaneTransport {
 fn lanea_ws_agents(agents: serde_json::Value) -> PathBuf {
     let ws = temp_ws().join("laneav2");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    std::fs::write(ws.join("TEAM.md"), "---\nname: laneateam\nobjective: Lane A v2 probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: laneateam\nobjective: Lane A v2 probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile lane-A v2 team");
@@ -128,11 +214,24 @@ fn lanea_ws_agents(agents: serde_json::Value) -> PathBuf {
         .replace("default_assignee: \"alpha\"", "default_assignee: \"bravo\"")
         .replace("assign_to: \"alpha\"", "assign_to: \"bravo\"")
         .replace("assignee: \"alpha\"", "assignee: \"bravo\"");
-    assert!(!yaml.contains("default_assignee: \"alpha\""), "fixture unroute: default_assignee still alpha");
-    assert!(!yaml.contains("assign_to: \"alpha\""), "fixture unroute: a routing rule still assign_to alpha");
-    assert!(!yaml.contains("assignee: \"alpha\""), "fixture unroute: task still assignee alpha");
+    assert!(
+        !yaml.contains("default_assignee: \"alpha\""),
+        "fixture unroute: default_assignee still alpha"
+    );
+    assert!(
+        !yaml.contains("assign_to: \"alpha\""),
+        "fixture unroute: a routing rule still assign_to alpha"
+    );
+    assert!(
+        !yaml.contains("assignee: \"alpha\""),
+        "fixture unroute: task still assignee alpha"
+    );
     std::fs::write(ws.join("team.spec.yaml"), yaml).unwrap();
-    crate::state::persist::save_runtime_state(&ws, &json!({ "session_name": "team-laneateam", "agents": agents })).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({ "session_name": "team-laneateam", "agents": agents }),
+    )
+    .unwrap();
     ws
 }
 
@@ -142,7 +241,11 @@ fn lanea_ws_agents(agents: serde_json::Value) -> PathBuf {
 fn lanea_one_agent_ws(alpha_status: &str) -> PathBuf {
     let ws = temp_ws().join("lanea1");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    std::fs::write(ws.join("TEAM.md"), "---\nname: laneateam\nobjective: Lane A one-agent probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: laneateam\nobjective: Lane A one-agent probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile 1-agent team");
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
@@ -156,8 +259,14 @@ fn lanea_one_agent_ws(alpha_status: &str) -> PathBuf {
 fn set_context_state_file(ws: &std::path::Path, name: &str) {
     let p = ws.join("team.spec.yaml");
     let text = std::fs::read_to_string(&p).unwrap();
-    let replaced = text.replace("state_file: \"team_state.md\"", &format!("state_file: \"{name}\""));
-    assert_ne!(replaced, text, "expected to rewrite context.state_file in the compiled spec; got:\n{text}");
+    let replaced = text.replace(
+        "state_file: \"team_state.md\"",
+        &format!("state_file: \"{name}\""),
+    );
+    assert_ne!(
+        replaced, text,
+        "expected to rewrite context.state_file in the compiled spec; got:\n{text}"
+    );
     std::fs::write(&p, replaced).unwrap();
 }
 
@@ -167,7 +276,11 @@ fn set_context_state_file(ws: &std::path::Path, name: &str) {
 pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
     let ws = temp_ws().join("forkv2");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    std::fs::write(ws.join("TEAM.md"), "---\nname: laneateam\nobjective: Fork v2 probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: laneateam\nobjective: Fork v2 probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), alpha_role).unwrap();
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile fork team");
@@ -217,9 +330,12 @@ pub(super) fn fork_ws(alpha_role: &str) -> PathBuf {
 // must skip the kill (killed empty) and set stopped=false; today kill_window IS called + stopped=true.
 #[test]
 fn lanea_stop_window_absent_returns_stopped_false_no_kill() {
-    let ws = lanea_ws_agents(json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }));
+    let ws = lanea_ws_agents(
+        json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }),
+    );
     let tx = LaneTransport::new("team-laneateam", &[]); // alpha's window is ABSENT
-    let report = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx).expect("window-absent stop is a clean Ok, not an Err (golden returns stopped:false)");
+    let report = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx)
+        .expect("window-absent stop is a clean Ok, not an Err (golden returns stopped:false)");
     assert!(
         !report.stopped,
         "golden operations.py:81-99: an ABSENT tmux window => stopped=FALSE (kill skipped); Rust hardcodes stopped:true"
@@ -237,10 +353,16 @@ fn lanea_stop_window_absent_returns_stopped_false_no_kill() {
 // window-gate fix regressing it.
 #[test]
 fn lanea_stop_window_present_kills_and_stopped_true() {
-    let ws = lanea_ws_agents(json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }));
+    let ws = lanea_ws_agents(
+        json!({ "alpha": { "status": "running", "provider": "codex", "window": "alpha" } }),
+    );
     let tx = LaneTransport::new("team-laneateam", &["alpha"]); // window present
-    let report = stop_agent_with_transport(&ws, &aid("alpha"), None, &tx).expect("present-window stop ok");
-    assert!(report.stopped, "a present window must be killed => stopped=true");
+    let report =
+        stop_agent_with_transport(&ws, &aid("alpha"), None, &tx).expect("present-window stop ok");
+    assert!(
+        report.stopped,
+        "a present window must be killed => stopped=true"
+    );
     assert_eq!(
         tx.killed(),
         vec!["team-laneateam:alpha".to_string()],
@@ -325,7 +447,10 @@ fn lanea_remove_dynamic_agent_removable_without_from_spec() {
     );
     let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
     assert!(
-        state.get("agents").and_then(serde_json::Value::as_object).is_some_and(|a| !a.contains_key("alpha")),
+        state
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|a| !a.contains_key("alpha")),
         "the dynamic agent must actually be removed from state.agents; got {result:?}"
     );
 }
@@ -337,9 +462,14 @@ fn lanea_remove_dynamic_agent_removable_without_from_spec() {
 // a from_spec refusal. RED: an unknown agent with from_spec=false must surface "unknown worker".
 #[test]
 fn lanea_remove_unknown_agent_precedes_from_spec_refusal() {
-    let ws = lanea_ws_agents(json!({ "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" } }));
+    let ws = lanea_ws_agents(
+        json!({ "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" } }),
+    );
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let text = format!("{:?}", remove_agent_with_transport(&ws, &aid("ghost"), false, false, None, &tx));
+    let text = format!(
+        "{:?}",
+        remove_agent_with_transport(&ws, &aid("ghost"), false, false, None, &tx)
+    );
     assert!(
         text.contains("unknown worker"),
         "golden agents.py:41-54: the unknown-worker check precedes the from_spec refusal; an unknown agent must \
@@ -360,8 +490,10 @@ fn lanea_remove_writes_markdown_team_state_not_json() {
         "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let _ = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).expect("remove ok");
-    let team_state = std::fs::read_to_string(ws.join("team_state.md")).expect("team_state.md written");
+    let _ =
+        remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).expect("remove ok");
+    let team_state =
+        std::fs::read_to_string(ws.join("team_state.md")).expect("team_state.md written");
     assert!(
         team_state.starts_with("# Team State"),
         "golden write_team_state emits a Markdown document starting '# Team State'; Rust dumps JSON; got:\n{team_state}"
@@ -370,7 +502,10 @@ fn lanea_remove_writes_markdown_team_state_not_json() {
         !team_state.trim_start().starts_with('{'),
         "team_state.md must NOT be a JSON dump of runtime state; got:\n{team_state}"
     );
-    assert!(team_state.contains("## Agents"), "golden has a '## Agents' section; got:\n{team_state}");
+    assert!(
+        team_state.contains("## Agents"),
+        "golden has a '## Agents' section; got:\n{team_state}"
+    );
     assert!(
         team_state.contains("bravo: Bravo Worker on codex"),
         "the '## Agents' section must list the remaining agent bravo (golden '- {{id}}: {{role}} on {{provider}} ({{status}})'); got:\n{team_state}"
@@ -446,7 +581,10 @@ fn lanea_remove_dynamic_role_file_missing_raises() {
         "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
     }));
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let text = format!("{:?}", remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx));
+    let text = format!(
+        "{:?}",
+        remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx)
+    );
     assert!(
         text.contains("dynamic role file missing"),
         "golden agents.py:259-260: a state-recorded dynamic_role_file that is MISSING must RAISE 'dynamic role \
@@ -468,7 +606,10 @@ fn lanea_remove_rollback_restores_via_spec_state_file_path() {
     std::fs::write(ws.join("custom_state.md"), "ORIGINAL CUSTOM TEAM STATE\n").unwrap(); // capture reads this
     let tx = LaneTransport::new("team-laneateam", &[]);
     let result = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx);
-    assert!(result.is_err(), "precondition: 1-worker removal -> validate_spec fails -> rollback runs; got {result:?}");
+    assert!(
+        result.is_err(),
+        "precondition: 1-worker removal -> validate_spec fails -> rollback runs; got {result:?}"
+    );
     assert!(
         !ws.join("team_state.md").exists(),
         "golden agents.py:200-204: rollback restores the spec-derived state_file (custom_state.md), it must NOT \
@@ -486,7 +627,10 @@ fn lanea_remove_rollback_restores_via_spec_state_file_path() {
 fn lanea_fork_dup_target_leader_id_is_already_exists() {
     let ws = fork_ws(DELEG_ROLE_ALPHA);
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("leader"), None, false, None, &tx));
+    let text = format!(
+        "{:?}",
+        fork_agent_with_transport(&ws, &aid("alpha"), &aid("leader"), None, false, None, &tx)
+    );
     assert!(
         text.contains("already exists"),
         "golden operations.py:301-302 (_find_agent matches the leader): forking ONTO the leader id must raise \
@@ -503,7 +647,10 @@ fn lanea_fork_dup_target_leader_id_is_already_exists() {
 fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
     let ws = fork_ws(DELEG_ROLE_ALPHA);
     let tx = LaneTransport::new("team-laneateam", &["newfork"]); // the target window already exists
-    let text = format!("{:?}", fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx));
+    let text = format!(
+        "{:?}",
+        fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx)
+    );
     assert!(
         text.contains("tmux window already exists for fork target: team-laneateam:newfork"),
         "golden operations.py:310-312: a pre-existing target window must raise 'tmux window already exists for \
@@ -527,7 +674,8 @@ fn lanea_fork_window_already_exists_guard_before_spec_mutation() {
 fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
     let ws = fork_ws(DELEG_ROLE_ALPHA_COMPAT); // source alpha auth_mode=compatible_api -> native fork unsupported
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let result = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
+    let result =
+        fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx);
     let text = format!("{result:?}");
     assert!(
         text.contains("codex does not support native session fork"),
@@ -552,7 +700,9 @@ fn lanea_fork_gate_error_text_and_spec_rollback_on_adapter_arm() {
 fn lanea_fork_report_session_id_is_not_pane_id() {
     let ws = fork_ws(DELEG_ROLE_ALPHA); // codex+subscription -> native fork supported -> full success path
     let tx = LaneTransport::new("team-laneateam", &[]);
-    let report = fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx).expect("fork ok (codex subscription supports fork)");
+    let report =
+        fork_agent_with_transport(&ws, &aid("alpha"), &aid("newfork"), None, false, None, &tx)
+            .expect("fork ok (codex subscription supports fork)");
     assert_ne!(
         report.session_id,
         Some(crate::provider::SessionId::new("%newfork")),

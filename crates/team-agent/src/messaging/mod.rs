@@ -103,9 +103,8 @@ pub use types::{
     CheckKind, CheckStatus, ContractSuiteCheck, DeliveryOutcome, DeliveryRefusal, DeliveryStage,
     DeliveryStatus, IdleEvaluation, LeaderNotificationKey, LeaderReceiver, PaneWidthQuery,
     ProviderSdkCalls, ReceiverMode, ScheduledKind, SelftestCheck, SelftestReport, SendEventPayload,
-    TrustRetryPayload, WatcherNotice, WorkerRuntimeState,
-    RESULT_DELIVERY_MAX_ATTEMPTS, SEND_RETRY_MAX_ATTEMPTS,
-    TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
+    TrustRetryPayload, WatcherNotice, WorkerRuntimeState, RESULT_DELIVERY_MAX_ATTEMPTS,
+    SEND_RETRY_MAX_ATTEMPTS, TRUST_RETRY_BACKOFF_SECONDS, TRUST_RETRY_MAX_ATTEMPTS,
 };
 pub use watchers::{
     delivered_result_message, format_result_watcher_notification, notify_result_watchers,

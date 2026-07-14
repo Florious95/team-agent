@@ -268,16 +268,28 @@ pub fn resolve_transport(
     }
     // ── Layer 3: legacy tmux endpoint / socket ────────────────────
     if let Some((_, _)) = crate::tmux_backend::runtime_tmux_endpoint_from_state_pub(input.state) {
-        return build_selected(&input, RequestedTransportBackend::Tmux, "legacy_tmux_endpoint");
+        return build_selected(
+            &input,
+            RequestedTransportBackend::Tmux,
+            "legacy_tmux_endpoint",
+        );
     }
     // ── Layer 4: spec.runtime.backend literal ─────────────────────
     if let Some(literal) = input.spec_backend_literal {
         match literal.trim().to_ascii_lowercase().as_str() {
             "tmux" => {
-                return build_selected(&input, RequestedTransportBackend::Tmux, "spec.runtime.backend");
+                return build_selected(
+                    &input,
+                    RequestedTransportBackend::Tmux,
+                    "spec.runtime.backend",
+                );
             }
             "conpty" => {
-                return build_selected(&input, RequestedTransportBackend::ConPty, "spec.runtime.backend");
+                return build_selected(
+                    &input,
+                    RequestedTransportBackend::ConPty,
+                    "spec.runtime.backend",
+                );
             }
             other => {
                 // C-1 ②: `pty` (and everything else) is NOT auto-mapped
@@ -343,8 +355,7 @@ fn build_conpty(
     // NEVER silent-downgrade to tmux; that would violate MUST-NOT-13.
     let Some(team_key) = input.team_key else {
         return Err(TransportFactoryError::ConPtyPreconditionUnmet {
-            reason: "team_key required for conpty (design §Factory Design:159-163)"
-                .to_string(),
+            reason: "team_key required for conpty (design §Factory Design:159-163)".to_string(),
         });
     };
     // Build a workspace hash from the canonical workspace path using
@@ -550,7 +561,8 @@ mod tests {
         let input = TransportFactoryInput::new(&workspace, TransportPurpose::LifecycleWorker)
             .with_team_key(Some("team-a"))
             .with_explicit_backend(Some(RequestedTransportBackend::ConPty));
-        let resolved = resolve_transport(input).expect("explicit conpty must succeed with team_key");
+        let resolved =
+            resolve_transport(input).expect("explicit conpty must succeed with team_key");
         assert_eq!(resolved.kind, BackendKind::ConPty);
         assert_eq!(resolved.source, "cli");
         assert_eq!(resolved.team_key.as_deref(), Some("team-a"));
@@ -565,7 +577,10 @@ mod tests {
         let err = resolve_transport(input).expect_err("conpty without team_key must refuse");
         match err {
             TransportFactoryError::ConPtyPreconditionUnmet { reason } => {
-                assert!(reason.contains("team_key"), "reason must mention team_key: {reason}");
+                assert!(
+                    reason.contains("team_key"),
+                    "reason must mention team_key: {reason}"
+                );
             }
             other => panic!("expected ConPtyPreconditionUnmet, got {other:?}"),
         }
@@ -578,8 +593,8 @@ mod tests {
         let input = TransportFactoryInput::new(&workspace, TransportPurpose::Launch)
             .with_team_key(Some("team-a"))
             .with_spec_backend_literal(Some("pty"));
-        let err = resolve_transport(input)
-            .expect_err("pty literal must be refused, not auto-mapped");
+        let err =
+            resolve_transport(input).expect_err("pty literal must be refused, not auto-mapped");
         match err {
             TransportFactoryError::UnsupportedSpecBackendLiteral { literal } => {
                 assert_eq!(literal, "pty");
@@ -633,7 +648,10 @@ mod tests {
         assert_eq!(resolved.source, "state.transport.kind");
         // N38: one notice emitted.
         assert_eq!(resolved.notices.len(), 1);
-        assert_eq!(resolved.notices[0].event, "transport.legacy_tmux_endpoint_ignored");
+        assert_eq!(
+            resolved.notices[0].event,
+            "transport.legacy_tmux_endpoint_ignored"
+        );
         assert_eq!(
             resolved.notices[0].payload["legacy_tmux_endpoint"],
             serde_json::json!("default")
@@ -720,10 +738,7 @@ mod tests {
             pipe_notices.is_empty(),
             "CR C-5 fix: resolve must not emit pipe-client notices \
              (connect deferred to backend lazy path). Found: {:?}",
-            pipe_notices
-                .iter()
-                .map(|n| &n.event)
-                .collect::<Vec<_>>()
+            pipe_notices.iter().map(|n| &n.event).collect::<Vec<_>>()
         );
     }
 

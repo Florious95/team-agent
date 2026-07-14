@@ -761,7 +761,13 @@ struct RealTmuxTeam {
 
 impl RealTmuxTeam {
     fn start(root: &Path, workers: Vec<String>) -> Self {
-        let socket = root.join("ta-0540-real-tmux.sock");
+        // 0.5.43 debt-sweep (§4.2): use the short_tmux_socket helper
+        // so tests stay green when TMPDIR is macOS default
+        // /var/folders/... > 104 bytes. `root` is kept as the parameter
+        // shape but is intentionally unused now — the socket lives at
+        // /private/tmp/ta43-*.sock and its Drop cleans it up.
+        let _ = root;
+        let socket = hermetic_guard::short_tmux_socket("0540-real-tmux");
         let _ = Command::new("tmux")
             .args(["-S", socket.to_str().unwrap(), "kill-server"])
             .output();

@@ -53,9 +53,7 @@ fn shim_exe_path() -> std::path::PathBuf {
             }
         }
     }
-    panic!(
-        "CARGO_BIN_EXE_windows-shim not set and no windows-shim.exe found under target/"
-    );
+    panic!("CARGO_BIN_EXE_windows-shim not set and no windows-shim.exe found under target/");
 }
 
 fn unique_pipe_name() -> String {

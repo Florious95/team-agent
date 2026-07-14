@@ -27,10 +27,10 @@ use team_agent::db::schema::{initialize_schema, open_db};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{launch_with_transport_in_workspace, restart_with_transport};
 use team_agent::message_store::MessageStore;
-use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::messaging::delivery::deliver_pending_message;
+use team_agent::model::enums::{AuthMode, Provider};
 use team_agent::provider::{
-    AuthHintStatus, CapturedSession, CaptureVia, Confidence, HandledPrompt, McpConfig,
+    AuthHintStatus, CaptureVia, CapturedSession, Confidence, HandledPrompt, McpConfig,
     ProviderAdapter, ProviderCaps, ProviderError, RolloutPath, SessionId, StatusPatterns,
 };
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
@@ -80,7 +80,8 @@ fn restart_resets_startup_prompt_state_for_respawn() {
     restart_with_transport(&case.team_dir(CURRENT), false, Some(CURRENT), &transport)
         .expect("restart should resume the worker");
     let state = load_runtime_state(&case.workspace).expect("state after restart");
-    let agent = state.pointer("/teams/current/agents/greeter")
+    let agent = state
+        .pointer("/teams/current/agents/greeter")
         .or_else(|| state.pointer("/agents/greeter"))
         .expect("greeter state exists");
     let status = agent.get("startup_prompts").and_then(Value::as_str);
@@ -196,7 +197,8 @@ fn launch_persists_agent_pane_id_and_pid() {
     )
     .expect("launch should spawn fake worker");
     let state = load_runtime_state(&case.workspace).expect("state after launch");
-    let agent = state.pointer("/teams/current/agents/greeter")
+    let agent = state
+        .pointer("/teams/current/agents/greeter")
         .or_else(|| state.pointer("/agents/greeter"))
         .expect("greeter state");
 
@@ -219,7 +221,15 @@ fn unbound_leader_receiver_is_not_attached_and_delivery_never_injects_sentinel()
     case.seed_unbound_leader_state();
     let store = MessageStore::open(&case.workspace).unwrap();
     let message_id = store
-        .create_message(None, "subgreeter", "leader", "sentinel canary", None, false, Some(SUB))
+        .create_message(
+            None,
+            "subgreeter",
+            "leader",
+            "sentinel canary",
+            None,
+            false,
+            Some(SUB),
+        )
         .unwrap();
     let state = load_runtime_state(&case.workspace).unwrap();
     let transport = RecordingTransport::new().with_default_liveness(PaneLiveness::Live);
@@ -282,8 +292,9 @@ fn shutdown_pidfile_sigterm_waits_and_normalizes() {
         .expect("spawn delayed SIGTERM child");
     case.write_coordinator_pid(child.id());
 
-    let report = team_agent::coordinator::stop_coordinator(&WorkspacePath::new(case.workspace.clone()))
-        .expect("stop coordinator");
+    let report =
+        team_agent::coordinator::stop_coordinator(&WorkspacePath::new(case.workspace.clone()))
+            .expect("stop coordinator");
     let still_running = process_running(child.id());
     if still_running {
         let _ = child.kill();
@@ -322,7 +333,10 @@ impl HotfixCase {
         std::fs::create_dir_all(dir.join("agents")).unwrap();
         std::fs::write(
             dir.join("TEAM.md"),
-            format!("---\nname: {team}\nobjective: hotfix\nprovider: {}\n---\n\nTeam.\n", provider_name(provider)),
+            format!(
+                "---\nname: {team}\nobjective: hotfix\nprovider: {}\n---\n\nTeam.\n",
+                provider_name(provider)
+            ),
         )
         .unwrap();
         std::fs::write(
@@ -334,10 +348,20 @@ impl HotfixCase {
         )
         .unwrap();
         let spec = team_agent::compiler::compile_team(&dir).unwrap();
-        std::fs::write(dir.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+        std::fs::write(
+            dir.join("team.spec.yaml"),
+            team_agent::model::yaml::dumps(&spec),
+        )
+        .unwrap();
     }
 
-    fn seed_restart_state(&self, team: &str, agent_id: &str, session_id: &str, startup_prompts: &str) {
+    fn seed_restart_state(
+        &self,
+        team: &str,
+        agent_id: &str,
+        session_id: &str,
+        startup_prompts: &str,
+    ) {
         let team_dir = self.team_dir(team);
         let state = json!({
             "active_team_key": team,
@@ -371,7 +395,11 @@ impl HotfixCase {
         std::fs::create_dir_all(&sub_dir).unwrap();
         let current = team_state(CURRENT, "greeter", &current_dir, with_leader_receivers);
         let sub = team_state(SUB, "subgreeter", &sub_dir, with_leader_receivers);
-        let mut state = if active == CURRENT { current.clone() } else { sub.clone() };
+        let mut state = if active == CURRENT {
+            current.clone()
+        } else {
+            sub.clone()
+        };
         let obj = state.as_object_mut().unwrap();
         obj.insert("active_team_key".to_string(), json!(active));
         obj.insert("teams".to_string(), json!({CURRENT: current, SUB: sub}));
@@ -436,7 +464,11 @@ impl HotfixCase {
             team_agent::coordinator::MetadataSource::Boot,
         )
         .unwrap();
-        std::fs::write(team_agent::coordinator::coordinator_pid_path(&workspace), pid.to_string()).unwrap();
+        std::fs::write(
+            team_agent::coordinator::coordinator_pid_path(&workspace),
+            pid.to_string(),
+        )
+        .unwrap();
     }
 
     fn write_coordinator_pid(&self, pid: u32) {
@@ -456,7 +488,13 @@ impl HotfixCase {
     }
 }
 
-fn restart_agent(agent_id: &str, team: &str, team_dir: &Path, session_id: &str, startup_prompts: &str) -> Value {
+fn restart_agent(
+    agent_id: &str,
+    team: &str,
+    team_dir: &Path,
+    session_id: &str,
+    startup_prompts: &str,
+) -> Value {
     json!({
         "status": "running",
         "agent_id": agent_id,
@@ -636,7 +674,12 @@ impl RecordingTransport {
 
     fn single_spawn(&self) -> RecordedSpawn {
         let state = self.state.lock().unwrap();
-        assert_eq!(state.spawns.len(), 1, "expected one spawn; spawns={:?}", state.spawns);
+        assert_eq!(
+            state.spawns.len(),
+            1,
+            "expected one spawn; spawns={:?}",
+            state.spawns
+        );
         state.spawns[0].clone()
     }
 
@@ -653,7 +696,7 @@ impl RecordingTransport {
         env: &BTreeMap<String, String>,
     ) -> SpawnResult {
         let mut state = self.state.lock().unwrap();
-    let pane_id = state
+        let pane_id = state
             .targets
             .iter()
             .find(|pane| pane.session == *session && pane.window_name.as_ref() == Some(window))
@@ -735,7 +778,11 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         let text = self
             .state
             .lock()
@@ -884,11 +931,19 @@ impl ProviderAdapter for StaticCaptureAdapter {
         }))
     }
 
-    fn recover_session_id(&self, _agent_id: &str, _spawn_cwd: &Path) -> Result<Option<SessionId>, ProviderError> {
+    fn recover_session_id(
+        &self,
+        _agent_id: &str,
+        _spawn_cwd: &Path,
+    ) -> Result<Option<SessionId>, ProviderError> {
         Ok(Some(SessionId::new(self.session_id.clone())))
     }
 
-    fn session_is_resumable(&self, _session_id: Option<&SessionId>, _auth_mode: AuthMode) -> Result<bool, ProviderError> {
+    fn session_is_resumable(
+        &self,
+        _session_id: Option<&SessionId>,
+        _auth_mode: AuthMode,
+    ) -> Result<bool, ProviderError> {
         Ok(true)
     }
 
@@ -913,7 +968,12 @@ impl ProviderAdapter for StaticCaptureAdapter {
         self.build_resume_command(session_id, auth_mode, mcp_config)
     }
 
-    fn fork(&self, _session_id: Option<&SessionId>, _auth_mode: AuthMode, _mcp_config: Option<&McpConfig>) -> Result<Vec<String>, ProviderError> {
+    fn fork(
+        &self,
+        _session_id: Option<&SessionId>,
+        _auth_mode: AuthMode,
+        _mcp_config: Option<&McpConfig>,
+    ) -> Result<Vec<String>, ProviderError> {
         Ok(vec!["fake".to_string(), "fork".to_string()])
     }
 
@@ -991,7 +1051,11 @@ fn db_rows(conn: &rusqlite::Connection, table: &str, columns: &str) -> Vec<Strin
     let column_count = stmt.column_count();
     stmt.query_map([], |row| {
         let values = (0..column_count)
-            .map(|idx| row.get::<_, Option<String>>(idx).unwrap_or(None).unwrap_or_else(|| "NULL".to_string()))
+            .map(|idx| {
+                row.get::<_, Option<String>>(idx)
+                    .unwrap_or(None)
+                    .unwrap_or_else(|| "NULL".to_string())
+            })
             .collect::<Vec<_>>();
         Ok(values.join("|"))
     })

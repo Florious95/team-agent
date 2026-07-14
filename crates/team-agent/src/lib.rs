@@ -69,10 +69,10 @@ pub mod transport;
 // step 10-12 (leader/messaging/coordinator) — ROUND-0.5 类型+fn surface 骨架(fn body unimplemented!(),
 // P2 porter 落实现)。leader=lease/owner-bind/idle-takeover;messaging=send/deliver/retry/watchers;
 // coordinator=daemon tick(§10 no-panic,Result<TickReport,TickError>)。
-pub mod leader;
-pub mod messaging;
 pub mod coordinator;
 pub mod diagnose;
+pub mod leader;
+pub mod messaging;
 
 // step 13-15 (lifecycle/mcp_server/cli/packaging) — ROUND-0.5b behavioral-rich 骨架(entry-fn 签名 +
 // 富返回类型,fn body unimplemented!(),P2 porter 落实现)。lifecycle=quick-start/restart/display;
@@ -87,11 +87,11 @@ pub mod lifecycle;
 pub mod platform;
 // 0.3.28 — unified adaptive layout manager (single source of truth for tmux
 // topology decisions). See `.team/artifacts/adaptive-layout-full-architecture-locate.md`.
-pub mod layout;
-pub mod topology;
-pub mod mcp_server;
 pub mod cli;
+pub mod layout;
+pub mod mcp_server;
 pub mod packaging;
+pub mod topology;
 
 // fake-worker — subscription-free backing program for Provider::Fake; lets the real spawn path
 // (launch dry_run=false → tmux window) be exercised with no real provider (port of fake_worker.py).

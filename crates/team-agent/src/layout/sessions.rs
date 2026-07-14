@@ -102,12 +102,13 @@ pub fn assert_topology_invariants(state: &JsonValue, spec: &YamlValue) -> Vec<To
             ),
         });
     }
-    let agents = state
-        .get("agents")
-        .and_then(JsonValue::as_object);
+    let agents = state.get("agents").and_then(JsonValue::as_object);
     if let Some(agents) = agents {
         for (agent_id, agent) in agents {
-            let window = agent.get("window").and_then(JsonValue::as_str).unwrap_or("");
+            let window = agent
+                .get("window")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("");
             if window.eq_ignore_ascii_case("leader") {
                 out.push(TopologyViolation {
                     kind: TopologyViolationKind::WorkerWindowNamedLeader,
@@ -120,7 +121,8 @@ pub fn assert_topology_invariants(state: &JsonValue, spec: &YamlValue) -> Vec<To
             }
         }
         // Pane-id collision among agents.
-        let mut by_pane: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut by_pane: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for (agent_id, agent) in agents {
             if let Some(pane) = agent
                 .get("pane_id")
@@ -229,7 +231,10 @@ mod tests {
             "leader_receiver": { "pane_id": "%0" }
         });
         let v = assert_topology_invariants(&state, &spec_for("alpha"));
-        assert!(v.is_empty(), "clean state should produce no violations; got {v:?}");
+        assert!(
+            v.is_empty(),
+            "clean state should produce no violations; got {v:?}"
+        );
     }
 
     #[test]
@@ -243,7 +248,8 @@ mod tests {
         });
         let v = assert_topology_invariants(&state, &spec_for("alpha"));
         assert!(
-            v.iter().any(|x| matches!(x.kind, TopologyViolationKind::AgentPaneIdCollision)),
+            v.iter()
+                .any(|x| matches!(x.kind, TopologyViolationKind::AgentPaneIdCollision)),
             "must flag AgentPaneIdCollision; got {v:?}"
         );
     }
@@ -258,7 +264,8 @@ mod tests {
         });
         let v = assert_topology_invariants(&state, &spec_for("alpha"));
         assert!(
-            v.iter().any(|x| matches!(x.kind, TopologyViolationKind::LeaderPaneIdCollidesWithAgent)),
+            v.iter()
+                .any(|x| matches!(x.kind, TopologyViolationKind::LeaderPaneIdCollidesWithAgent)),
             "must flag LeaderPaneIdCollidesWithAgent; got {v:?}"
         );
     }
@@ -272,7 +279,8 @@ mod tests {
         });
         let v = assert_topology_invariants(&state, &spec_for("alpha"));
         assert!(
-            v.iter().any(|x| matches!(x.kind, TopologyViolationKind::WorkerWindowNamedLeader)),
+            v.iter()
+                .any(|x| matches!(x.kind, TopologyViolationKind::WorkerWindowNamedLeader)),
             "must flag WorkerWindowNamedLeader; got {v:?}"
         );
     }

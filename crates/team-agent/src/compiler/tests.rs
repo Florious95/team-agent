@@ -53,7 +53,13 @@ fn compact_json(v: &Value) -> String {
         Value::Map(pairs) => {
             let inner: Vec<String> = pairs
                 .iter()
-                .map(|(k, val)| format!("{}:{}", serde_json::to_string(k).unwrap(), compact_json(val)))
+                .map(|(k, val)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap(),
+                        compact_json(val)
+                    )
+                })
                 .collect();
             format!("{{{}}}", inner.join(","))
         }
@@ -148,7 +154,10 @@ fn front_matter_body_lstrip_strips_only_newlines() {
     // body.lstrip("\n") removes leading NEWLINES but keeps the 2-space indent.
     let p = write_tmp("lstrip.md", "---\nname: x\n---\n\n\n  indented body\n");
     let (meta, body) = read_front_matter(&p).unwrap();
-    assert_eq!(meta, Value::Map(vec![("name".to_string(), Value::Str("x".to_string()))]));
+    assert_eq!(
+        meta,
+        Value::Map(vec![("name".to_string(), Value::Str("x".to_string()))])
+    );
     assert_eq!(body, "  indented body\n");
 }
 
@@ -168,7 +177,8 @@ fn front_matter_non_object_errors() {
     let p = write_tmp("list.md", "---\n- a\n- b\n---\nbody\n");
     let err = read_front_matter(&p).unwrap_err();
     assert!(
-        err.to_string().contains("front matter must be a YAML object"),
+        err.to_string()
+            .contains("front matter must be a YAML object"),
         "got: {err}"
     );
 }
@@ -203,9 +213,15 @@ fn compile_subscription_without_profile_is_thin_manifest() {
     let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_NOPROFILE)], &[]);
     let spec = compile_team(&team).unwrap();
     let agent = &spec.get("agents").and_then(Value::as_list).unwrap()[0];
-    assert_eq!(agent.get("auth_mode").and_then(Value::as_str), Some("subscription"));
+    assert_eq!(
+        agent.get("auth_mode").and_then(Value::as_str),
+        Some("subscription")
+    );
     assert!(agent.get("profile").is_none(), "profile key must be absent");
-    assert!(agent.get("credential_ref").is_none(), "credential_ref key must be absent");
+    assert!(
+        agent.get("credential_ref").is_none(),
+        "credential_ref key must be absent"
+    );
 }
 
 // Runtime front-matter defaults: every knob from TEAM.md flows through without
@@ -247,7 +263,11 @@ const RUNTIME_DEFAULTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","m
 
 #[test]
 fn compile_runtime_front_matter_defaults_match_python() {
-    let team = build_team(RUNTIME_DEFAULTS_TEAM, &[("implementer.md", RUNTIME_DEFAULTS_ROLE)], &[]);
+    let team = build_team(
+        RUNTIME_DEFAULTS_TEAM,
+        &[("implementer.md", RUNTIME_DEFAULTS_ROLE)],
+        &[],
+    );
     let spec = compile_team(&team).unwrap();
     assert_eq!(templated_compact_json(&spec), RUNTIME_DEFAULTS_JSON);
 }
@@ -357,7 +377,11 @@ const TWO_AGENTS_JSON: &str = r#"{"version":1,"team":{"name":"doc-team","mode":"
 #[test]
 fn compile_two_agents_sorted_by_filename_with_routing_and_startup_order() {
     // filenames intentionally out of name order to prove sorted(glob) is by filename.
-    let team = build_team(TEAM_BASE, &[("02-bravo.md", TWO_ROLE_B), ("01-alpha.md", TWO_ROLE_A)], &[]);
+    let team = build_team(
+        TEAM_BASE,
+        &[("02-bravo.md", TWO_ROLE_B), ("01-alpha.md", TWO_ROLE_A)],
+        &[],
+    );
     let spec = compile_team(&team).unwrap();
     assert_eq!(templated_compact_json(&spec), TWO_AGENTS_JSON);
 }
@@ -382,7 +406,8 @@ fn compile_missing_required_provider_field_errors() {
     let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_MISSING_PROVIDER)], &[]);
     let err = compile_team(&team).unwrap_err();
     assert!(
-        err.to_string().contains("missing front matter field provider"),
+        err.to_string()
+            .contains("missing front matter field provider"),
         "got: {err}"
     );
 }
@@ -403,9 +428,16 @@ Implement bounded tasks.
 
 #[test]
 fn compile_compatible_api_without_profile_errors() {
-    let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_COMPATIBLE_NO_PROFILE)], &[]);
+    let team = build_team(
+        TEAM_BASE,
+        &[("implementer.md", ROLE_COMPATIBLE_NO_PROFILE)],
+        &[],
+    );
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("profile is required"), "got: {err}");
+    assert!(
+        err.to_string().contains("profile is required"),
+        "got: {err}"
+    );
 }
 
 // ════════════════════════ FIX-LOOP (wave-1) RED tests ════════════════════════
@@ -475,7 +507,10 @@ fn fix_a1_provider_models_precede_default_model() {
     let tm = "---\nname: T\nprovider: codex\ndefault_model: team-y\nprovider_models:\n  codex: pm-z\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(agent0(&spec).get("model").and_then(Value::as_str), Some("pm-z"));
+    assert_eq!(
+        agent0(&spec).get("model").and_then(Value::as_str),
+        Some("pm-z")
+    );
 }
 
 #[test]
@@ -484,7 +519,10 @@ fn fix_a1_claude_aliases_to_claude_code_provider_models() {
     let tm = "---\nname: T\nprovider: codex\nprovider_models:\n  claude_code: cc-v\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("claude"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(agent0(&spec).get("model").and_then(Value::as_str), Some("cc-v"));
+    assert_eq!(
+        agent0(&spec).get("model").and_then(Value::as_str),
+        Some("cc-v")
+    );
 }
 
 #[test]
@@ -507,7 +545,11 @@ fn fix_a1_model_null_when_provider_absent_from_table() {
     for prov in ["gemini_cli", "fake"] {
         let team = build_team(TM_CODEX, &[("w.md", &role_nomodel(prov))], &[]);
         let spec = compile_team(&team).unwrap();
-        assert_eq!(agent0(&spec).get("model"), Some(&Value::Null), "provider {prov} → null");
+        assert_eq!(
+            agent0(&spec).get("model"),
+            Some(&Value::Null),
+            "provider {prov} → null"
+        );
     }
 }
 
@@ -526,7 +568,10 @@ fn fix_a2_objective_default_when_no_objective_and_no_body() {
     let tm = "---\nname: T\nprovider: codex\n---\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(str_path(&spec, &["team", "objective"]), "Team Agent document-driven team.");
+    assert_eq!(
+        str_path(&spec, &["team", "objective"]),
+        "Team Agent document-driven team."
+    );
 }
 
 // ── A3 name ──
@@ -535,7 +580,12 @@ fn fix_a2_objective_default_when_no_objective_and_no_body() {
 fn fix_a3_name_falls_back_to_parent_dir_name() {
     // no `name` → team_dir.parent.name (NOT a hardcoded "team").
     let tm = "---\nprovider: codex\n---\nx\n";
-    let team = build_layout("my-parent-dir", "leafteam", Some(tm), AgentsDir::WithRole(&role_nomodel("codex")));
+    let team = build_layout(
+        "my-parent-dir",
+        "leafteam",
+        Some(tm),
+        AgentsDir::WithRole(&role_nomodel("codex")),
+    );
     let spec = compile_team(&team).unwrap();
     assert_eq!(str_path(&spec, &["team", "name"]), "my-parent-dir");
 }
@@ -558,7 +608,10 @@ fn fix_a5_session_name_slugifies_team_name() {
     let tm = "---\nname: My Team!\nprovider: codex\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(str_path(&spec, &["runtime", "session_name"]), "team-My-Team");
+    assert_eq!(
+        str_path(&spec, &["runtime", "session_name"]),
+        "team-My-Team"
+    );
 }
 
 #[test]
@@ -576,7 +629,10 @@ fn fix_a6_tools_shell_maps_to_execute_bash() {
     let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ntools:\n  - shell\n  - mcp_team\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let spec = compile_team(&team).expect("shell must normalize to execute_bash and compile");
-    assert_eq!(agent0(&spec).get("tools"), Some(&list_str(vec!["execute_bash", "mcp_team"])));
+    assert_eq!(
+        agent0(&spec).get("tools"),
+        Some(&list_str(vec!["execute_bash", "mcp_team"]))
+    );
 }
 
 #[test]
@@ -584,7 +640,10 @@ fn fix_a6_missing_tools_errors() {
     let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("missing front matter field tools"), "got: {err}");
+    assert!(
+        err.to_string().contains("missing front matter field tools"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -592,7 +651,10 @@ fn fix_a6_tools_not_a_list_errors() {
     let role = "---\nname: w\nrole: R\nprovider: codex\nauth_mode: subscription\ntools: justastring\n---\nb\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("tools must be a list"), "got: {err}");
+    assert!(
+        err.to_string().contains("tools must be a list"),
+        "got: {err}"
+    );
 }
 
 // ── A7 system_prompt inline ──
@@ -602,7 +664,10 @@ fn fix_a7_empty_body_inline_falls_back_to_role() {
     let role = "---\nname: w\nrole: Reviewer Role\nprovider: codex\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n";
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(str_path(agent0(&spec), &["system_prompt", "inline"]), "Reviewer Role");
+    assert_eq!(
+        str_path(agent0(&spec), &["system_prompt", "inline"]),
+        "Reviewer Role"
+    );
 }
 
 // ── A8 auth_mode ──
@@ -614,7 +679,8 @@ fn fix_a8_official_api_without_profile_errors() {
     let team = build_team(TM_CODEX, &[("w.md", role)], &[]);
     let err = compile_team(&team).unwrap_err();
     assert!(
-        err.to_string().contains("profile is required when auth_mode is 'official_api'"),
+        err.to_string()
+            .contains("profile is required when auth_mode is 'official_api'"),
         "got: {err}"
     );
 }
@@ -622,10 +688,15 @@ fn fix_a8_official_api_without_profile_errors() {
 #[test]
 fn fix_a8_compatible_api_error_names_the_auth_mode() {
     // Full message form (the old test only checked the "profile is required" prefix).
-    let team = build_team(TEAM_BASE, &[("implementer.md", ROLE_COMPATIBLE_NO_PROFILE)], &[]);
+    let team = build_team(
+        TEAM_BASE,
+        &[("implementer.md", ROLE_COMPATIBLE_NO_PROFILE)],
+        &[],
+    );
     let err = compile_team(&team).unwrap_err();
     assert!(
-        err.to_string().contains("profile is required when auth_mode is 'compatible_api'"),
+        err.to_string()
+            .contains("profile is required when auth_mode is 'compatible_api'"),
         "got: {err}"
     );
 }
@@ -638,8 +709,16 @@ fn fix_a9_bool_coercion_yes_and_one_are_true() {
         let tm = format!("---\nname: T\nprovider: codex\ndangerous_auto_approve: {v}\nworker_to_worker: {v}\n---\nx\n");
         let team = build_team(&tm, &[("w.md", &role_nomodel("codex"))], &[]);
         let spec = compile_team(&team).unwrap();
-        assert_eq!(get_path(&spec, &["runtime", "dangerous_auto_approve"]), Some(&Value::Bool(true)), "value {v}");
-        assert_eq!(get_path(&spec, &["communication", "worker_to_worker"]), Some(&Value::Bool(true)), "value {v}");
+        assert_eq!(
+            get_path(&spec, &["runtime", "dangerous_auto_approve"]),
+            Some(&Value::Bool(true)),
+            "value {v}"
+        );
+        assert_eq!(
+            get_path(&spec, &["communication", "worker_to_worker"]),
+            Some(&Value::Bool(true)),
+            "value {v}"
+        );
     }
 }
 
@@ -650,7 +729,10 @@ fn fix_a9_bool_coercion_no_is_python_truthy() {
     let tm = "---\nname: T\nprovider: codex\ndangerous_auto_approve: no\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(get_path(&spec, &["runtime", "dangerous_auto_approve"]), Some(&Value::Bool(true)));
+    assert_eq!(
+        get_path(&spec, &["runtime", "dangerous_auto_approve"]),
+        Some(&Value::Bool(true))
+    );
 }
 
 #[test]
@@ -659,7 +741,10 @@ fn fix_a9_int_coercion_of_quoted_string() {
     let tm = "---\nname: T\nprovider: codex\ntick_interval_sec: \"5\"\n---\nx\n";
     let team = build_team(tm, &[("w.md", &role_nomodel("codex"))], &[]);
     let spec = compile_team(&team).unwrap();
-    assert_eq!(get_path(&spec, &["runtime", "tick_interval_sec"]), Some(&Value::Int(5)));
+    assert_eq!(
+        get_path(&spec, &["runtime", "tick_interval_sec"]),
+        Some(&Value::Int(5))
+    );
 }
 
 // ── A10 CRLF normalization ──
@@ -671,24 +756,42 @@ fn fix_a10_crlf_role_doc_front_matter_is_parsed() {
     let crlf_role = "---\r\nname: crlfworker\r\nrole: R\r\nprovider: codex\r\nauth_mode: subscription\r\ntools:\r\n  - mcp_team\r\n---\r\n\r\nbody\r\n";
     let team = build_team(TM_CODEX, &[("w.md", crlf_role)], &[]);
     let spec = compile_team(&team).expect("CRLF role doc must parse its front matter");
-    assert_eq!(agent0(&spec).get("id").and_then(Value::as_str), Some("crlfworker"));
-    assert_eq!(str_path(agent0(&spec), &["system_prompt", "inline"]), "body");
+    assert_eq!(
+        agent0(&spec).get("id").and_then(Value::as_str),
+        Some("crlfworker")
+    );
+    assert_eq!(
+        str_path(agent0(&spec), &["system_prompt", "inline"]),
+        "body"
+    );
 }
 
 // ── A11 error-message paths ──
 
 #[test]
 fn fix_a11_missing_team_md_message_includes_team_md_path() {
-    let team = build_layout("p", "teamdir", None, AgentsDir::WithRole(&role_nomodel("codex")));
+    let team = build_layout(
+        "p",
+        "teamdir",
+        None,
+        AgentsDir::WithRole(&role_nomodel("codex")),
+    );
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("/TEAM.md: missing TEAM.md"), "got: {err}");
+    assert!(
+        err.to_string().contains("/TEAM.md: missing TEAM.md"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn fix_a11_missing_agents_dir_message_includes_agents_path() {
     let team = build_layout("p", "teamdir", Some(TM_CODEX), AgentsDir::Missing);
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("/agents: missing agents directory"), "got: {err}");
+    assert!(
+        err.to_string()
+            .contains("/agents: missing agents directory"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -697,5 +800,8 @@ fn fix_a11_agents_is_a_file_reports_no_role_docs() {
     // gate, then the empty glob → "no role docs found" (path = agents dir).
     let team = build_layout("p", "teamdir", Some(TM_CODEX), AgentsDir::File);
     let err = compile_team(&team).unwrap_err();
-    assert!(err.to_string().contains("/agents: no role docs found"), "got: {err}");
+    assert!(
+        err.to_string().contains("/agents: no role docs found"),
+        "got: {err}"
+    );
 }

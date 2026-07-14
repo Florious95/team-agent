@@ -30,30 +30,102 @@ fn rotation_marker_is_byte_exact() {
 #[test]
 fn status_enums_serialize_to_exact_python_strings() {
     let cases: &[(String, &str)] = &[
-        (serde_json::to_string(&CoordinatorHealthStatus::Missing).unwrap(), "\"missing\""),
-        (serde_json::to_string(&CoordinatorHealthStatus::InvalidPid).unwrap(), "\"invalid_pid\""),
-        (serde_json::to_string(&CoordinatorHealthStatus::Running).unwrap(), "\"running\""),
-        (serde_json::to_string(&CoordinatorHealthStatus::Stale).unwrap(), "\"stale\""),
-        (serde_json::to_string(&StartOutcome::AlreadyRunning).unwrap(), "\"already_running\""),
-        (serde_json::to_string(&StartOutcome::RestartIncompatibleStopFailed).unwrap(), "\"restart_incompatible_stop_failed\""),
-        (serde_json::to_string(&StartOutcome::SchemaIncompatible).unwrap(), "\"schema_incompatible\""),
-        (serde_json::to_string(&StartOutcome::Started).unwrap(), "\"started\""),
-        (serde_json::to_string(&StartOutcome::StartedAfterRotation).unwrap(), "\"started_after_rotation\""),
-        (serde_json::to_string(&StopOutcome::Missing).unwrap(), "\"missing\""),
-        (serde_json::to_string(&StopOutcome::InvalidPidRemoved).unwrap(), "\"invalid_pid_removed\""),
-        (serde_json::to_string(&StopOutcome::KillFailed).unwrap(), "\"kill_failed\""),
-        (serde_json::to_string(&StopOutcome::Stopped).unwrap(), "\"stopped\""),
-        (serde_json::to_string(&TickStopReason::TmuxSessionMissing).unwrap(), "\"tmux_session_missing\""),
-        (serde_json::to_string(&TickStopReason::PersistenceDegraded).unwrap(), "\"persistence_degraded\""),
-        (serde_json::to_string(&MetadataSource::Boot).unwrap(), "\"boot\""),
-        (serde_json::to_string(&MetadataSource::Start).unwrap(), "\"start\""),
-        (serde_json::to_string(&AbnormalDecision::Skip).unwrap(), "\"skip\""),
-        (serde_json::to_string(&AbnormalDecision::NotifyBlacklist).unwrap(), "\"notify_blacklist\""),
-        (serde_json::to_string(&AbnormalDecision::NotifyDefault).unwrap(), "\"notify_default\""),
-        (serde_json::to_string(&WholeTeamGoneClass::Alive).unwrap(), "\"alive\""),
-        (serde_json::to_string(&WholeTeamGoneClass::CleanShutdown).unwrap(), "\"clean_shutdown\""),
-        (serde_json::to_string(&WholeTeamGoneClass::RestartInProgress).unwrap(), "\"restart_in_progress\""),
-        (serde_json::to_string(&WholeTeamGoneClass::UnexpectedExit).unwrap(), "\"unexpected_exit\""),
+        (
+            serde_json::to_string(&CoordinatorHealthStatus::Missing).unwrap(),
+            "\"missing\"",
+        ),
+        (
+            serde_json::to_string(&CoordinatorHealthStatus::InvalidPid).unwrap(),
+            "\"invalid_pid\"",
+        ),
+        (
+            serde_json::to_string(&CoordinatorHealthStatus::Running).unwrap(),
+            "\"running\"",
+        ),
+        (
+            serde_json::to_string(&CoordinatorHealthStatus::Stale).unwrap(),
+            "\"stale\"",
+        ),
+        (
+            serde_json::to_string(&StartOutcome::AlreadyRunning).unwrap(),
+            "\"already_running\"",
+        ),
+        (
+            serde_json::to_string(&StartOutcome::RestartIncompatibleStopFailed).unwrap(),
+            "\"restart_incompatible_stop_failed\"",
+        ),
+        (
+            serde_json::to_string(&StartOutcome::SchemaIncompatible).unwrap(),
+            "\"schema_incompatible\"",
+        ),
+        (
+            serde_json::to_string(&StartOutcome::Started).unwrap(),
+            "\"started\"",
+        ),
+        (
+            serde_json::to_string(&StartOutcome::StartedAfterRotation).unwrap(),
+            "\"started_after_rotation\"",
+        ),
+        (
+            serde_json::to_string(&StopOutcome::Missing).unwrap(),
+            "\"missing\"",
+        ),
+        (
+            serde_json::to_string(&StopOutcome::InvalidPidRemoved).unwrap(),
+            "\"invalid_pid_removed\"",
+        ),
+        (
+            serde_json::to_string(&StopOutcome::KillFailed).unwrap(),
+            "\"kill_failed\"",
+        ),
+        (
+            serde_json::to_string(&StopOutcome::Stopped).unwrap(),
+            "\"stopped\"",
+        ),
+        (
+            serde_json::to_string(&TickStopReason::TmuxSessionMissing).unwrap(),
+            "\"tmux_session_missing\"",
+        ),
+        (
+            serde_json::to_string(&TickStopReason::PersistenceDegraded).unwrap(),
+            "\"persistence_degraded\"",
+        ),
+        (
+            serde_json::to_string(&MetadataSource::Boot).unwrap(),
+            "\"boot\"",
+        ),
+        (
+            serde_json::to_string(&MetadataSource::Start).unwrap(),
+            "\"start\"",
+        ),
+        (
+            serde_json::to_string(&AbnormalDecision::Skip).unwrap(),
+            "\"skip\"",
+        ),
+        (
+            serde_json::to_string(&AbnormalDecision::NotifyBlacklist).unwrap(),
+            "\"notify_blacklist\"",
+        ),
+        (
+            serde_json::to_string(&AbnormalDecision::NotifyDefault).unwrap(),
+            "\"notify_default\"",
+        ),
+        (
+            serde_json::to_string(&WholeTeamGoneClass::Alive).unwrap(),
+            "\"alive\"",
+        ),
+        (
+            serde_json::to_string(&WholeTeamGoneClass::CleanShutdown).unwrap(),
+            "\"clean_shutdown\"",
+        ),
+        (
+            serde_json::to_string(&WholeTeamGoneClass::RestartInProgress).unwrap(),
+            "\"restart_in_progress\"",
+        ),
+        (
+            serde_json::to_string(&WholeTeamGoneClass::UnexpectedExit).unwrap(),
+            "\"unexpected_exit\"",
+        ),
     ];
     for (got, want) in cases {
         assert_eq!(got, want);
@@ -65,26 +137,64 @@ fn coordinator_event_tags_are_byte_stable() {
     // 逐一钉 events.jsonl tag(events.py 稳定契约)。
     let pid = Pid(4242);
     let cases: Vec<(CoordinatorEvent, &str)> = vec![
-        (CoordinatorEvent::Boot { workspace: "/w".into(), once: true }, "coordinator.boot"),
-        (CoordinatorEvent::Started { pid, log: "/l".into() }, "coordinator.started"),
+        (
+            CoordinatorEvent::Boot {
+                workspace: "/w".into(),
+                once: true,
+            },
+            "coordinator.boot",
+        ),
+        (
+            CoordinatorEvent::Started {
+                pid,
+                log: "/l".into(),
+            },
+            "coordinator.started",
+        ),
         (CoordinatorEvent::Stopped { pid }, "coordinator.stopped"),
         (CoordinatorEvent::Exit { stop: true }, "coordinator.exit"),
-        (CoordinatorEvent::SessionMissing { session: "s".into() }, "coordinator.session_missing"),
         (
-            CoordinatorEvent::OrphanSelfTerminate { initial_ppid: 9, current_ppid: 1, workspace: "/w".into() },
+            CoordinatorEvent::SessionMissing {
+                session: "s".into(),
+            },
+            "coordinator.session_missing",
+        ),
+        (
+            CoordinatorEvent::OrphanSelfTerminate {
+                initial_ppid: 9,
+                current_ppid: 1,
+                workspace: "/w".into(),
+            },
             "coordinator.orphan_self_terminate",
         ),
         (
-            CoordinatorEvent::TickError { error: "boom".into(), exc_type: "OSError".into(), consecutive_failures: 1, next_sleep_sec: 5.0 },
+            CoordinatorEvent::TickError {
+                error: "boom".into(),
+                exc_type: "OSError".into(),
+                consecutive_failures: 1,
+                next_sleep_sec: 5.0,
+            },
             "coordinator.tick_error",
         ),
         (
-            CoordinatorEvent::TickErrorSuppressed { consecutive_failures: 2, next_sleep_sec: 10.0 },
+            CoordinatorEvent::TickErrorSuppressed {
+                consecutive_failures: 2,
+                next_sleep_sec: 10.0,
+            },
             "coordinator.tick_error.suppressed",
         ),
-        (CoordinatorEvent::TickRecovered { consecutive_failures: 3 }, "coordinator.tick_recovered"),
         (
-            CoordinatorEvent::RestartIncompatible { pid: Some(pid), expected_protocol: 2, expected_schema: 3 },
+            CoordinatorEvent::TickRecovered {
+                consecutive_failures: 3,
+            },
+            "coordinator.tick_recovered",
+        ),
+        (
+            CoordinatorEvent::RestartIncompatible {
+                pid: Some(pid),
+                expected_protocol: 2,
+                expected_schema: 3,
+            },
             "coordinator.restart_incompatible",
         ),
         (
@@ -92,7 +202,10 @@ fn coordinator_event_tags_are_byte_stable() {
             "coordinator.restart_incompatible_stop_failed",
         ),
         (
-            CoordinatorEvent::SchemaIncompatible { table: Some("messages".into()), missing_columns: vec!["owner_team_id".into()] },
+            CoordinatorEvent::SchemaIncompatible {
+                table: Some("messages".into()),
+                missing_columns: vec!["owner_team_id".into()],
+            },
             "coordinator.schema_incompatible",
         ),
         (
@@ -106,17 +219,33 @@ fn coordinator_event_tags_are_byte_stable() {
             "idle_takeover.unknown_persistent",
         ),
         (
-            CoordinatorEvent::AbnormalNotify { signature: "sig".into(), turn_id: None, decision: AbnormalDecision::NotifyDefault },
+            CoordinatorEvent::AbnormalNotify {
+                signature: "sig".into(),
+                turn_id: None,
+                decision: AbnormalDecision::NotifyDefault,
+            },
             "abnormal.notify",
         ),
         (
-            CoordinatorEvent::AbnormalWholeTeamGone { classification: WholeTeamGoneClass::UnexpectedExit },
+            CoordinatorEvent::AbnormalWholeTeamGone {
+                classification: WholeTeamGoneClass::UnexpectedExit,
+            },
             "abnormal.whole_team_gone",
         ),
-        (CoordinatorEvent::LeaderNotificationLogPruned { removed: 7 }, "leader_notification.log_pruned"),
-        (CoordinatorEvent::LeaderNotificationPruneFailed { error: "io".into() }, "leader_notification.prune_failed"),
         (
-            CoordinatorEvent::RuntimeStateSaveFailed { phase: "tick_end".into(), error: "replace".into(), exc_type: "OSError".into() },
+            CoordinatorEvent::LeaderNotificationLogPruned { removed: 7 },
+            "leader_notification.log_pruned",
+        ),
+        (
+            CoordinatorEvent::LeaderNotificationPruneFailed { error: "io".into() },
+            "leader_notification.prune_failed",
+        ),
+        (
+            CoordinatorEvent::RuntimeStateSaveFailed {
+                phase: "tick_end".into(),
+                error: "replace".into(),
+                exc_type: "OSError".into(),
+            },
             "runtime.state.save_failed",
         ),
     ];
@@ -157,11 +286,20 @@ fn unknown_persistent_event_provider_none_is_null_not_missing() {
     let json = serde_json::to_value(&evt).unwrap();
     assert_eq!(json["event"], "idle_takeover.unknown_persistent");
     assert_eq!(json["node_id"], "w7");
-    assert!(json.get("provider").is_some(), "provider key MUST be present (None→null)");
+    assert!(
+        json.get("provider").is_some(),
+        "provider key MUST be present (None→null)"
+    );
     assert!(json["provider"].is_null(), "provider None → JSON null");
-    assert!(json.get("auth_mode").is_some(), "auth_mode key MUST be present");
+    assert!(
+        json.get("auth_mode").is_some(),
+        "auth_mode key MUST be present"
+    );
     assert!(json["auth_mode"].is_null(), "auth_mode None → JSON null");
-    assert!(json.get("rollout_path").is_some(), "rollout_path key MUST be present");
+    assert!(
+        json.get("rollout_path").is_some(),
+        "rollout_path key MUST be present"
+    );
     assert!(json["rollout_path"].is_null());
     assert_eq!(json["consecutive_ticks"], 72);
 }

@@ -130,9 +130,21 @@ fn version_current_is_not_a_hand_copied_python_drift_literal() {
         env!("CARGO_PKG_VERSION"),
         "single source of truth = CARGO_PKG_VERSION"
     );
-    assert_ne!(v.as_str(), "0.1.4", "must not hand-copy pyproject.toml drift source");
-    assert_ne!(v.as_str(), "0.2.11", "must not hand-copy package.json drift source");
-    assert_ne!(v.as_str(), "dev", "must not be install.mjs:54 'dev' fallback");
+    assert_ne!(
+        v.as_str(),
+        "0.1.4",
+        "must not hand-copy pyproject.toml drift source"
+    );
+    assert_ne!(
+        v.as_str(),
+        "0.2.11",
+        "must not hand-copy package.json drift source"
+    );
+    assert_ne!(
+        v.as_str(),
+        "dev",
+        "must not be install.mjs:54 'dev' fallback"
+    );
 }
 
 #[test]
@@ -143,8 +155,11 @@ fn no_literal_version_string_hardcoded_in_packaging_code() {
     // 0.1.4 / 0.2.11 legitimately appear in doc/line comments documenting the bug, so we strip
     // comment text first and scan only executable code. This is the one place where
     // "double-source-drift forbidden" is statically checked against the source itself.
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/packaging/types.rs"))
-        .expect("read own source");
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/packaging/types.rs"
+    ))
+    .expect("read own source");
     // Production region only (the #[cfg(test)] mod uses these literals as golden anti-examples):
     let prod = match src.find("#[cfg(test)]") {
         Some(i) => &src[..i],
@@ -375,7 +390,8 @@ fn doctor_drifted_db_emits_schema_layout_drift_blocker() {
     //   "team.db physical layout drift detected"  (EXACT string, commands.py:248).
     let ws = seed_workspace_with_drifted_db("blocker");
     let opts = doctor_opts(&ws);
-    let status = doctor(&opts).expect("doctor on drifted workspace should succeed (returns blockers)");
+    let status =
+        doctor(&opts).expect("doctor on drifted workspace should succeed (returns blockers)");
     match status {
         DoctorStatus::HasBlockers { blockers } => {
             let drift = blockers
@@ -410,7 +426,10 @@ fn doctor_status_has_blockers_carries_typed_source() {
     };
     let json = serde_json::to_string(&status).unwrap();
     assert!(json.contains("\"status\":\"has_blockers\""), "got: {json}");
-    assert!(json.contains("\"source\":\"schema_layout_drift\""), "got: {json}");
+    assert!(
+        json.contains("\"source\":\"schema_layout_drift\""),
+        "got: {json}"
+    );
     // detail 精确 == commands.py:248 schema_error 文本.
     assert!(
         json.contains("team.db physical layout drift detected"),
@@ -508,7 +527,10 @@ fn diagnose_path_not_on_path_npmrc_prefix_is_none_no_npm() {
     let bin = BinDir(PathBuf::from("/zzz-definitely-not-on-path-9f3a"));
     let hint = diagnose_path(&bin).expect("diagnose off-path bin");
     match hint {
-        PathHint::NotOnPath { bin_dir, diagnostic } => {
+        PathHint::NotOnPath {
+            bin_dir,
+            diagnostic,
+        } => {
             assert_eq!(bin_dir, PathBuf::from("/zzz-definitely-not-on-path-9f3a"));
             // Rust 无 npm → 绝不重新引入 .npmrc 解析.
             assert_eq!(diagnostic.npmrc_prefix, None);
@@ -556,11 +578,7 @@ fn skill_opts(target: SkillTarget, dest: Option<PathBuf>, dry_run: bool) -> Skil
 #[test]
 fn install_skill_dest_with_target_all_is_invalid() {
     // commands.py:453-454 — `--dest cannot be combined with --target all`.
-    let opts = skill_opts(
-        SkillTarget::All,
-        Some(PathBuf::from("/custom/dest")),
-        false,
-    );
+    let opts = skill_opts(SkillTarget::All, Some(PathBuf::from("/custom/dest")), false);
     let err = install_skill(&opts).expect_err("dest + all must error");
     match err {
         PackagingError::InvalidOptions(msg) => assert!(
@@ -620,7 +638,11 @@ fn install_skill_dry_run_explicit_dest_single_target() {
 #[ignore = "REAL-MACHINE-E2E: real copytree + stale diff removal (fixes dirs_exist_ok=True residue)"]
 fn install_skill_real_copy_removes_stale_files() {
     // 修 commands.py:480 dirs_exist_ok 残留:Rust 拷前清旧 SKILL,记录 removed_stale.
-    let opts = skill_opts(SkillTarget::Codex, Some(PathBuf::from("/tmp/ta-skill-real")), false);
+    let opts = skill_opts(
+        SkillTarget::Codex,
+        Some(PathBuf::from("/tmp/ta-skill-real")),
+        false,
+    );
     let outcomes = install_skill(&opts).expect("real install-skill");
     assert!(!outcomes[0].dry_run);
     // 真路径下若有旧残留,removed_stale 非空 (具体值依 fixture).
@@ -815,12 +837,33 @@ fn atomic_replace_outcome_serde_tag_outcome() {
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(env)]
 fn install_skill_dry_run_is_pure_no_provider_state() {
     // §84:install-skill 只拷文件;dry-run 连文件都不动 → 纯函数式可重复.
+    //
+    // 0.5.43 debt-sweep (§6.2): even dry-run reads ambient HOME to
+    // build the target skill path. Parallel real-copy sibling tests
+    // hold the same `ENV_LOCK_PKG` + `HomeGuard::set` guards; without
+    // matching guards here, two dry-run runs can observe HOME after
+    // a real-copy test swapped it, producing spurious diffs. Same
+    // env critical section as install/uninstall.
+    let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
+    let home = std::env::temp_dir().join(format!(
+        "ta-0543-pkg-dry-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("create dry-run HOME");
+    let _h = HomeGuard::set(&home);
     let opts = skill_opts(SkillTarget::Claude, None, true);
     let first = install_skill(&opts).expect("dry-run 1");
     let second = install_skill(&opts).expect("dry-run 2");
-    assert_eq!(first, second, "dry-run install-skill must be deterministic & side-effect free");
+    assert_eq!(
+        first, second,
+        "dry-run install-skill must be deterministic & side-effect free"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -892,7 +935,11 @@ fn install_skill_all_real_copies_to_three_provider_locations() {
     assert_eq!(outcomes.len(), 3, "all → codex+claude+copilot");
 
     for sub in [".codex", ".claude", ".copilot"] {
-        let dest = home.join(sub).join("skills").join("team-agent").join("SKILL.md");
+        let dest = home
+            .join(sub)
+            .join("skills")
+            .join("team-agent")
+            .join("SKILL.md");
         assert!(dest.exists(), "{sub}: SKILL.md must exist after install");
         assert_eq!(
             std::fs::read(&dest).unwrap(),

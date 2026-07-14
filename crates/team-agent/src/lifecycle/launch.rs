@@ -139,7 +139,12 @@ pub fn launch_with_transport_in_workspace(
                         .map(|id| id == agent.agent_id.as_str())
                         .unwrap_or(false)
                 })
-                .and_then(|entry| entry.get("provider").and_then(Value::as_str).map(str::to_string))
+                .and_then(|entry| {
+                    entry
+                        .get("provider")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
                 .unwrap_or_else(|| "fake".to_string());
             crate::lifecycle::restart::write_worker_spawn_timing_event(
                 workspace,

@@ -219,8 +219,7 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
             out.status.success(),
             "{command} --external-leader should parse and launch external topology; stdout={stdout:?} stderr={stderr:?}"
         );
-        let value: Value =
-            serde_json::from_slice(&out.stdout).expect("leader launcher emits json");
+        let value: Value = serde_json::from_slice(&out.stdout).expect("leader launcher emits json");
         assert_eq!(value["is_external_leader"], json!(true), "{command}");
         assert_eq!(value["leader_topology"], json!("external"), "{command}");
         assert_eq!(value["leader_window"], Value::Null, "{command}");
@@ -233,16 +232,25 @@ fn external_leader_opt_out_is_honored_for_all_provider_passthrough_commands() {
         // 0.4.x compact slim: is_external_leader / leader_topology moved to
         // --detail; default `--json` doesn't carry them anymore.
         let status = Command::new(bin())
-            .args(["status", "--workspace", workspace.to_str().unwrap(), "--json", "--detail"])
+            .args([
+                "status",
+                "--workspace",
+                workspace.to_str().unwrap(),
+                "--json",
+                "--detail",
+            ])
             .output()
             .expect("status after external leader launch");
         let status_stdout = String::from_utf8_lossy(&status.stdout);
-        let status_json: Value =
-            serde_json::from_slice(&status.stdout).unwrap_or_else(|err| {
-                panic!("status json parse failed: {err}; stdout={status_stdout:?}")
-            });
+        let status_json: Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|err| {
+            panic!("status json parse failed: {err}; stdout={status_stdout:?}")
+        });
         assert_eq!(status_json["is_external_leader"], json!(true), "{command}");
-        assert_eq!(status_json["leader_topology"], json!("external"), "{command}");
+        assert_eq!(
+            status_json["leader_topology"],
+            json!("external"),
+            "{command}"
+        );
     }
 }
 
@@ -473,7 +481,10 @@ fn managed_leader_launcher_writes_client_diagnostics_outside_owner_gate() {
         state["teams"]["current"]["team_owner"]["pane_id"],
         json!("%42")
     );
-    for path in ["/teams/current/leader_receiver", "/teams/current/team_owner"] {
+    for path in [
+        "/teams/current/leader_receiver",
+        "/teams/current/team_owner",
+    ] {
         let value = state.pointer(path).expect("owner/receiver");
         assert!(
             value.get("diagnostic_only").is_none()

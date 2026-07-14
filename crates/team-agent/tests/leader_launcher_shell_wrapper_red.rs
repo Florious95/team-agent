@@ -20,14 +20,14 @@ use std::sync::Mutex;
 use team_agent::leader::{leader_provider_health, LeaderProviderHealth};
 use team_agent::model::enums::PaneLiveness;
 use team_agent::tmux_backend::{
-    leader_provider_exit_marker, leader_shell_wrapper_command,
-    LEADER_PROVIDER_EXIT_MARKER_PREFIX, LEADER_PROVIDER_EXIT_MARKER_SUFFIX,
+    leader_provider_exit_marker, leader_shell_wrapper_command, LEADER_PROVIDER_EXIT_MARKER_PREFIX,
+    LEADER_PROVIDER_EXIT_MARKER_SUFFIX,
 };
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 #[allow(unused_imports)]
@@ -46,9 +46,10 @@ fn managed_leader_shell_line_includes_claude_unset_block() {
         "CLAUDE_CODE_EXECPATH".to_string(),
         "CLAUDECODE".to_string(),
     ];
-    let env: BTreeMap<String, String> = [
-        ("TEAM_AGENT_LEADER_PROVIDER".to_string(), "claude".to_string()),
-    ]
+    let env: BTreeMap<String, String> = [(
+        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+        "claude".to_string(),
+    )]
     .into_iter()
     .collect();
     let line = leader_shell_wrapper_command(
@@ -141,11 +142,7 @@ fn leader_provider_health_detects_provider_exited_when_shell_with_marker() {
 
 #[test]
 fn leader_provider_health_reports_alive_when_pane_current_command_is_provider() {
-    let transport = HealthMockTransport::new(
-        PaneLiveness::Live,
-        Some("claude".to_string()),
-        None,
-    );
+    let transport = HealthMockTransport::new(PaneLiveness::Live, Some("claude".to_string()), None);
     let pane_id = PaneId::new("%43");
     let health = leader_provider_health(&transport, &pane_id, "claude");
     assert_eq!(
@@ -220,8 +217,8 @@ fn leader_exit_marker_constants_are_stable() {
 fn leader_provider_health_recognizes_diverse_shells_as_fallback() {
     use team_agent::leader::is_interactive_shell_basename;
     let shells = [
-        "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh",
-        "ash", "mksh", "yash", "elvish", "nu", "nushell", "xonsh",
+        "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "ash", "mksh", "yash", "elvish",
+        "nu", "nushell", "xonsh",
     ];
     for sh in shells {
         assert!(
@@ -289,8 +286,7 @@ fn leader_env_unset_for_claude_contains_full_claude_block() {
 fn in_tmux_execprovider_path_uses_env_remove_grep_guard() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let start_rs = manifest.join("src").join("leader").join("start.rs");
-    let contents = std::fs::read_to_string(&start_rs)
-        .expect("must read leader/start.rs");
+    let contents = std::fs::read_to_string(&start_rs).expect("must read leader/start.rs");
     // The run_leader_argv function must call env_remove inside a loop
     // over leader_env_unset_for_provider.
     let run_leader_argv_pos = contents
@@ -316,9 +312,12 @@ fn in_tmux_execprovider_path_uses_env_remove_grep_guard() {
     // merged_exec_env seeds from std::env::vars() so envs() re-adds every
     // inherited CLAUDE_CODE_* the launching shell carries — env_remove must
     // run last to win.
-    let envs_pos = body.find("command.envs(env)").or_else(|| body.find(".envs(env)"))
+    let envs_pos = body
+        .find("command.envs(env)")
+        .or_else(|| body.find(".envs(env)"))
         .expect("run_leader_argv must call envs(env) on the Command");
-    let remove_pos = body.find("env_remove(key)")
+    let remove_pos = body
+        .find("env_remove(key)")
         .expect("run_leader_argv must call env_remove(key)");
     assert!(
         remove_pos > envs_pos,
@@ -353,7 +352,9 @@ fn leader_env_unset_single_source_grep_guard() {
 }
 
 fn walk_rs_files(dir: &Path, callback: &mut dyn FnMut(&Path, &str)) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -451,11 +452,7 @@ impl Transport for HealthMockTransport {
             .unwrap_or_default();
         Ok(CapturedText { text, range })
     }
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         if matches!(field, PaneField::PaneCurrentCommand) {
             Ok(self.current_command.clone())
         } else {
@@ -471,10 +468,7 @@ impl Transport for HealthMockTransport {
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
         Ok(true)
     }
-    fn list_windows(
-        &self,
-        _session: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError> {
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
     fn set_session_env(
@@ -491,10 +485,7 @@ impl Transport for HealthMockTransport {
     fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
         Ok(())
     }
-    fn attach_session(
-        &self,
-        _session: &SessionName,
-    ) -> Result<AttachOutcome, TransportError> {
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         Ok(AttachOutcome::Attached)
     }
 }

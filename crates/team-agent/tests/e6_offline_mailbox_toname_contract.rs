@@ -333,7 +333,9 @@ fn provider_spawn_offenders(files: &[&str]) -> Vec<(String, usize, String)> {
         for (idx, line) in text.lines().enumerate() {
             let lower = line.to_ascii_lowercase();
             if line.contains("Command::new")
-                && (lower.contains("codex") || lower.contains("claude") || lower.contains("copilot"))
+                && (lower.contains("codex")
+                    || lower.contains("claude")
+                    || lower.contains("copilot"))
             {
                 offenders.push(((*rel).to_string(), idx + 1, line.trim().to_string()));
             }

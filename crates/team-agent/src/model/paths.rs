@@ -137,7 +137,10 @@ mod tests {
         assert_eq!(messages_dir(ws), PathBuf::from("/ws/proj/.team/messages"));
 
         let ws2 = Path::new("/Users/alauda/x");
-        assert_eq!(runtime_dir(ws2), PathBuf::from("/Users/alauda/x/.team/runtime"));
+        assert_eq!(
+            runtime_dir(ws2),
+            PathBuf::from("/Users/alauda/x/.team/runtime")
+        );
     }
 
     #[test]
@@ -145,7 +148,10 @@ mod tests {
         // Python: runtime_dir(Path("relative/path")) -> relative/path/.team/runtime
         // (无 resolve,纯拼接)。
         let ws = Path::new("relative/path");
-        assert_eq!(runtime_dir(ws), PathBuf::from("relative/path/.team/runtime"));
+        assert_eq!(
+            runtime_dir(ws),
+            PathBuf::from("relative/path/.team/runtime")
+        );
     }
 
     #[test]
@@ -160,7 +166,10 @@ mod tests {
             PathBuf::from("/ws/proj")
         );
         // golden: /a/.team/runtime -> /a ; /a/b/c/.team/logs -> /a/b/c
-        assert_eq!(team_workspace(Path::new("/a/.team/runtime")).unwrap(), PathBuf::from("/a"));
+        assert_eq!(
+            team_workspace(Path::new("/a/.team/runtime")).unwrap(),
+            PathBuf::from("/a")
+        );
         assert_eq!(
             team_workspace(Path::new("/a/b/c/.team/logs")).unwrap(),
             PathBuf::from("/a/b/c")
@@ -174,14 +183,23 @@ mod tests {
             team_workspace(Path::new("/ws/proj/teamdir")).unwrap(),
             PathBuf::from("/ws/proj")
         );
-        assert_eq!(team_workspace(Path::new("/ws/proj/.team")).unwrap(), PathBuf::from("/ws/proj"));
-        assert_eq!(team_workspace(Path::new("/x/y")).unwrap(), PathBuf::from("/x"));
+        assert_eq!(
+            team_workspace(Path::new("/ws/proj/.team")).unwrap(),
+            PathBuf::from("/ws/proj")
+        );
+        assert_eq!(
+            team_workspace(Path::new("/x/y")).unwrap(),
+            PathBuf::from("/x")
+        );
     }
 
     #[test]
     fn team_workspace_at_root() {
         // golden: /.team/runtime -> / (parent ".team", grandparent "/")
-        assert_eq!(team_workspace(Path::new("/.team/runtime")).unwrap(), PathBuf::from("/"));
+        assert_eq!(
+            team_workspace(Path::new("/.team/runtime")).unwrap(),
+            PathBuf::from("/")
+        );
     }
 
     #[test]
@@ -218,7 +236,10 @@ mod tests {
         std::fs::create_dir_all(&team_dir).unwrap();
 
         assert_eq!(canonical_run_workspace(&run_ws).unwrap(), run_ws);
-        assert_eq!(canonical_run_workspace(&team_dir).unwrap(), base.join("project"));
+        assert_eq!(
+            canonical_run_workspace(&team_dir).unwrap(),
+            base.join("project")
+        );
     }
 
     #[test]

@@ -53,9 +53,7 @@ pub enum TerminationOutcome {
     /// Windows downgraded `TerminateGraceful` to `TerminateProcess`
     /// (no grace period). Includes a machine-readable reason so
     /// callers can log it in the audit event.
-    ForceOnly {
-        reason: &'static str,
-    },
+    ForceOnly { reason: &'static str },
     /// The pid/group was already gone by the time the call resolved.
     /// Not an error.
     AlreadyGone,
@@ -166,10 +164,7 @@ mod unix_impl {
     /// downgrade path); the `AlreadyGone` case is preserved when
     /// `kill()` returns ESRCH (the target was reaped between check
     /// and send).
-    pub fn terminate_pid(
-        pid: u32,
-        kind: SignalKind,
-    ) -> Result<TerminationOutcome, io::Error> {
+    pub fn terminate_pid(pid: u32, kind: SignalKind) -> Result<TerminationOutcome, io::Error> {
         let signal = match kind {
             SignalKind::TerminateGraceful => libc::SIGTERM,
             SignalKind::TerminateForce => libc::SIGKILL,
@@ -275,12 +270,16 @@ mod windows_impl {
         while result.is_ok() {
             if entry.th32ProcessID == my_pid {
                 let ppid = entry.th32ParentProcessID;
-                unsafe { let _ = windows::Win32::Foundation::CloseHandle(snapshot); };
+                unsafe {
+                    let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+                };
                 return Some(ppid);
             }
             result = unsafe { Process32NextW(snapshot, &mut entry) };
         }
-        unsafe { let _ = windows::Win32::Foundation::CloseHandle(snapshot); };
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(snapshot);
+        };
         None
     }
 
@@ -327,7 +326,9 @@ mod windows_impl {
         };
         let mut exit_code: u32 = 0;
         let result = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
-        unsafe { let _ = CloseHandle(handle); };
+        unsafe {
+            let _ = CloseHandle(handle);
+        };
         result.map_err(|e| io::Error::from_raw_os_error(e.code().0 as i32))?;
         // `STILL_ACTIVE` (0x103) — the process is still running.
         if exit_code == STILL_ACTIVE.0 as u32 {
@@ -358,14 +359,9 @@ mod windows_impl {
         Ok(Vec::new())
     }
 
-    pub fn terminate_pid(
-        pid: u32,
-        kind: SignalKind,
-    ) -> Result<TerminationOutcome, io::Error> {
+    pub fn terminate_pid(pid: u32, kind: SignalKind) -> Result<TerminationOutcome, io::Error> {
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
         // CR C-6 anchor: Windows has no SIGTERM analogue for a
         // non-console child. `TerminateGraceful` cannot be honored;
         // we still perform the physical `TerminateProcess` (design
@@ -394,7 +390,9 @@ mod windows_impl {
             }
         };
         let result = unsafe { TerminateProcess(handle, 1) };
-        unsafe { let _ = CloseHandle(handle); };
+        unsafe {
+            let _ = CloseHandle(handle);
+        };
         result.map_err(|e| io::Error::from_raw_os_error(e.code().0 as i32))?;
         Ok(match kind {
             SignalKind::TerminateGraceful => TerminationOutcome::ForceOnly {
@@ -444,7 +442,10 @@ mod tests {
         // Windows (Toolhelp32 snapshot) return the process's parent
         // pid. A `None` here on either platform is a regression.
         let ppid = current_parent_pid();
-        assert!(ppid.is_some(), "current_parent_pid must return Some on both unix and windows");
+        assert!(
+            ppid.is_some(),
+            "current_parent_pid must return Some on both unix and windows"
+        );
         assert!(ppid.unwrap() > 0);
     }
 
@@ -544,9 +545,7 @@ mod tests {
         // pattern-match without cfg.
         assert_ne!(SignalKind::TerminateGraceful, SignalKind::TerminateForce);
         let requested = TerminationOutcome::Requested;
-        let force_only = TerminationOutcome::ForceOnly {
-            reason: "test",
-        };
+        let force_only = TerminationOutcome::ForceOnly { reason: "test" };
         let already_gone = TerminationOutcome::AlreadyGone;
         assert_ne!(requested, force_only);
         assert_ne!(requested, already_gone);

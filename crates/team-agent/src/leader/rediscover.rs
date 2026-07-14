@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::model::ids::{LeaderSessionUuid, OwnerEpoch};
-use crate::provider::Provider;
 use crate::provider::wire::provider_wire;
+use crate::provider::Provider;
 use crate::transport::{PaneId, PaneInfo, SessionName, Transport, WindowName};
 
-use super::helpers::{get_path_str, now_ts, parse_provider, prefix, resolve_workspace_for_hash, sha1_hex_prefix};
+use super::helpers::{
+    get_path_str, now_ts, parse_provider, prefix, resolve_workspace_for_hash, sha1_hex_prefix,
+};
 use super::{
     ClaimedVia, Discovery, LeaderError, LeaderEvent, LeaderReceiver, LeaseSource, ReceiverMode,
     ReceiverStatus, TeamOwner,
@@ -56,8 +58,21 @@ pub fn try_readopt_leader_pane(
         .or_else(|| owner_record.and_then(|owner| owner.leader_session_uuid.clone()))
         .or_else(|| receiver.leader_session_uuid.clone());
     let provider = candidate.provider.unwrap_or(receiver_provider);
-    let rebound = receiver_from_candidate(&candidate, receiver, provider, uuid.clone(), owner_epoch, Discovery::AttachReadopt);
-    let owner = owner_from_candidate(&candidate, provider, uuid, owner_epoch, ClaimedVia::AttachLeader);
+    let rebound = receiver_from_candidate(
+        &candidate,
+        receiver,
+        provider,
+        uuid.clone(),
+        owner_epoch,
+        Discovery::AttachReadopt,
+    );
+    let owner = owner_from_candidate(
+        &candidate,
+        provider,
+        uuid,
+        owner_epoch,
+        ClaimedVia::AttachLeader,
+    );
     let mut owner_identity = OwnerIdentity::from_state(workspace, state)?;
     if let Some(record) = owner_record {
         owner_identity.pane_id = Some(record.pane_id.as_str().to_string());
@@ -123,7 +138,9 @@ pub fn rediscover_leader_receiver(
     event_log: &crate::event_log::EventLog,
 ) -> Result<Value, LeaderError> {
     let identity = OwnerIdentity::from_state(workspace, state)?;
-    rediscover_leader_receiver_with_identity(workspace, state, transport, event_log, &identity, None)
+    rediscover_leader_receiver_with_identity(
+        workspace, state, transport, event_log, &identity, None,
+    )
 }
 
 pub fn rediscover_leader_receiver_with_owner_identity(
@@ -164,7 +181,13 @@ fn rediscover_leader_receiver_with_identity(
                     "error": error.as_str(),
                 }),
             )?;
-            emit_failed_rebind_required(event_log, state, identity, invalidation_reason, error.as_str())?;
+            emit_failed_rebind_required(
+                event_log,
+                state,
+                identity,
+                invalidation_reason,
+                error.as_str(),
+            )?;
             return Ok(json!({
                 "status": "failed",
                 "error": error,
@@ -189,12 +212,7 @@ pub fn rediscover_leader_receiver_from_targets(
 ) -> Result<Value, LeaderError> {
     let identity = OwnerIdentity::from_state(workspace, state)?;
     rediscover_leader_receiver_from_targets_with_identity(
-        workspace,
-        state,
-        targets,
-        event_log,
-        &identity,
-        None,
+        workspace, state, targets, event_log, &identity, None,
     )
 }
 
@@ -268,7 +286,14 @@ fn rediscover_leader_receiver_from_targets_with_identity(
             )?;
         }
         if has_owner_identity {
-            emit_rebind_required(event_log, "ambiguous", state, identity, invalidation_reason, "confirm rediscover leader receiver")?;
+            emit_rebind_required(
+                event_log,
+                "ambiguous",
+                state,
+                identity,
+                invalidation_reason,
+                "confirm rediscover leader receiver",
+            )?;
             return Ok(json!({
             "status": "ambiguous",
             "owner_candidates": candidate_values(&candidates, identity.from_caller),
@@ -504,13 +529,16 @@ impl OwnerIdentity {
     }
 
     fn has_match_identity(&self) -> bool {
-        self.pane_id.is_some() || self.leader_session_uuid.is_some() || !self.machine_fingerprint.is_empty()
+        self.pane_id.is_some()
+            || self.leader_session_uuid.is_some()
+            || !self.machine_fingerprint.is_empty()
     }
 }
 
 fn target_from_value(value: &Value) -> Option<LeaderTarget> {
     let pane_id = get_str(value, "pane_id").or_else(|| get_str(value, "pane"))?;
-    let current_command = get_str(value, "pane_current_command").or_else(|| get_str(value, "current_command"));
+    let current_command =
+        get_str(value, "pane_current_command").or_else(|| get_str(value, "current_command"));
     let leader_env = map_env(value.get("leader_env").or_else(|| value.get("env")));
     let pane_pid = get_u32(value, "pane_pid");
     let provider = super::attribute_pane_provider(&PaneInfo {
@@ -553,7 +581,8 @@ fn target_from_value(value: &Value) -> Option<LeaderTarget> {
         leader_env,
         provider,
         leader_session_uuid,
-        fingerprint: get_str(value, "fingerprint").or_else(|| get_str(value, "machine_fingerprint")),
+        fingerprint: get_str(value, "fingerprint")
+            .or_else(|| get_str(value, "machine_fingerprint")),
     })
 }
 
@@ -648,7 +677,13 @@ fn candidate_pane_ids(candidates: &[LeaderTarget]) -> Vec<String> {
 
 fn ambiguous_incident_id(identity: &OwnerIdentity, panes: &[String]) -> String {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(identity.provider.map(provider_wire).unwrap_or("").as_bytes());
+    bytes.extend_from_slice(
+        identity
+            .provider
+            .map(provider_wire)
+            .unwrap_or("")
+            .as_bytes(),
+    );
     bytes.push(0);
     bytes.extend_from_slice(identity.team_id.as_bytes());
     bytes.push(0);
@@ -752,7 +787,8 @@ fn ambiguous_candidates_already_broadcast(
     incident_id: &str,
 ) -> Result<bool, LeaderError> {
     Ok(event_log.tail(200)?.iter().any(|event| {
-        event.get("event").and_then(Value::as_str) == Some(LeaderEvent::ReceiverAmbiguousCandidates.name())
+        event.get("event").and_then(Value::as_str)
+            == Some(LeaderEvent::ReceiverAmbiguousCandidates.name())
             && event.get("incident_id").and_then(Value::as_str) == Some(incident_id)
     }))
 }
@@ -915,11 +951,15 @@ fn env_triple_matches(target: &LeaderTarget, identity: &OwnerIdentity) -> bool {
         && target
             .leader_env
             .get("TEAM_AGENT_LEADER_PROVIDER")
-            .is_some_and(|value| identity.provider.is_some_and(|provider| value == provider_wire(provider)))
+            .is_some_and(|value| {
+                identity
+                    .provider
+                    .is_some_and(|provider| value == provider_wire(provider))
+            })
         && target
-        .leader_env
-        .get("TEAM_AGENT_MACHINE_FINGERPRINT")
-        .is_some_and(|value| value == &identity.machine_fingerprint)
+            .leader_env
+            .get("TEAM_AGENT_MACHINE_FINGERPRINT")
+            .is_some_and(|value| value == &identity.machine_fingerprint)
 }
 
 fn different_live_owner_uuid_mismatch(
@@ -984,7 +1024,12 @@ fn owner_from_candidate(
         machine_fingerprint: candidate
             .fingerprint
             .clone()
-            .or_else(|| candidate.leader_env.get("TEAM_AGENT_MACHINE_FINGERPRINT").cloned())
+            .or_else(|| {
+                candidate
+                    .leader_env
+                    .get("TEAM_AGENT_MACHINE_FINGERPRINT")
+                    .cloned()
+            })
             .unwrap_or_default(),
         leader_session_uuid: uuid,
         owner_epoch: epoch,
@@ -1067,7 +1112,9 @@ fn write_readopt_state(
         *state = json!({});
     }
     if !state.is_object() {
-        return Err(LeaderError::Validation("state root is not an object".to_string()));
+        return Err(LeaderError::Validation(
+            "state root is not an object".to_string(),
+        ));
     }
     let team_key = crate::state::projection::team_state_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
@@ -1086,7 +1133,9 @@ fn write_receiver_state(
         *state = json!({});
     }
     if !state.is_object() {
-        return Err(LeaderError::Validation("state root is not an object".to_string()));
+        return Err(LeaderError::Validation(
+            "state root is not an object".to_string(),
+        ));
     }
     let team_key = crate::state::projection::team_state_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()

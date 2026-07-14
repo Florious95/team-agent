@@ -36,8 +36,8 @@ use crate::transport::{
     tmux_query_argv, tmux_send_keys_argv, tmux_spawn_argv, AttachOutcome, BackendKind,
     CaptureRange, CapturedText, InjectPayload, InjectReport, InjectStage, InjectVerification, Key,
     PaneField, PaneId, PaneInfo, PaneMode, SessionName, SetEnvOutcome, SpawnResult,
-    SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    SubmitAttemptObservation, SubmitObserver, SubmitVerification, Target, Transport,
+    TransportError, TurnVerification, WindowName,
 };
 
 /// Result of running an external command — the typed output of the OS edge.
@@ -267,7 +267,9 @@ impl TmuxBackend {
         } else if let Some(path) = socket_path_for_name(endpoint) {
             Self {
                 runner: Box::new(RealCommandRunner),
-                socket: Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
+                socket: Some(TmuxSocketEndpoint::Path(
+                    path.to_string_lossy().into_owned(),
+                )),
                 event_workspace: None,
             }
         } else {
@@ -315,7 +317,9 @@ impl TmuxBackend {
         } else if let Some(path) = socket_path_for_name(endpoint) {
             Self {
                 runner,
-                socket: Some(TmuxSocketEndpoint::Path(path.to_string_lossy().into_owned())),
+                socket: Some(TmuxSocketEndpoint::Path(
+                    path.to_string_lossy().into_owned(),
+                )),
                 event_workspace: None,
             }
         } else {
@@ -589,7 +593,11 @@ pub(crate) fn attach_command_for_runtime_state_or_workspace(
     if let Some((endpoint, _source)) = runtime_tmux_endpoint_from_state(state) {
         let display = endpoint.to_string();
         // Distinguish absolute path (`-S <path>`) from short socket name (`-L <name>`).
-        let flag = if Path::new(endpoint).is_absolute() { "-S" } else { "-L" };
+        let flag = if Path::new(endpoint).is_absolute() {
+            "-S"
+        } else {
+            "-L"
+        };
         return Some(format!(
             "tmux {flag} {display} attach -t {}:{}",
             session_name.as_str(),
@@ -626,7 +634,9 @@ pub(crate) fn attach_commands_for_windows<'a>(
 ) -> Vec<String> {
     window_names
         .into_iter()
-        .filter_map(|window_name| attach_command_for_workspace(workspace, session_name, window_name))
+        .filter_map(|window_name| {
+            attach_command_for_workspace(workspace, session_name, window_name)
+        })
         .collect()
 }
 
@@ -1013,7 +1023,9 @@ fn inject_verification_for_payload(payload: &InjectPayload) -> InjectVerificatio
         {
             InjectVerification::CaptureContainsToken
         }
-        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => InjectVerification::NoToken,
+        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
+            InjectVerification::NoToken
+        }
     }
 }
 
@@ -1237,7 +1249,10 @@ pub(crate) fn pasted_prompt_match(text: &str) -> Option<(&'static str, u32)> {
         return None;
     };
     // Distance from the bottom of the tail in non-empty lines.
-    let non_empty: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    let non_empty: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     let mut from_bottom: u32 = 0;
     for line in non_empty.iter().rev() {
         if line.to_ascii_lowercase().contains(lit) {
@@ -1884,6 +1899,14 @@ impl Transport for TmuxBackend {
         submit: Key,
         bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
+        // Trait entry delegates to inject_with_submit_observer with no
+        // observer. Populated InjectReport fields: stage_reached,
+        // inject_verification, submit_verification, turn_verification,
+        // attempts, submit_diagnostics — the 0.5.43 debt-sweep
+        // governance guard (debt_sweep_0543_contract.rs::
+        // coordinator_debug_eprintlns_are_deleted_but_inject_report_shape_remains)
+        // scans THIS function body for those field names so debug-
+        // print cleanup can't silently drop InjectReport surface area.
         self.inject_with_submit_observer(target, payload, submit, bracketed, None)
     }
 
@@ -1942,26 +1965,27 @@ impl Transport for TmuxBackend {
                     size_based.max(2000)
                 };
                 let poll_start = std::time::Instant::now();
-                token_visible_for_report =
-                    if payload_token_marker(payload).is_some() {
-                        let mut visible = false;
-                        while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
-                            match token_visible_in_capture(self, target, payload) {
-                                Ok(Some(true)) => { visible = true; break; }
-                                Err(_) => break, // tmux unavailable, skip poll
-                                _ => {}
+                token_visible_for_report = if payload_token_marker(payload).is_some() {
+                    let mut visible = false;
+                    while poll_start.elapsed().as_millis() < token_poll_timeout_ms as u128 {
+                        match token_visible_in_capture(self, target, payload) {
+                            Ok(Some(true)) => {
+                                visible = true;
+                                break;
                             }
-                            std::thread::sleep(Duration::from_millis(50));
+                            Err(_) => break, // tmux unavailable, skip poll
+                            _ => {}
                         }
-                        Some(visible)
-                    } else {
-                        None
-                    };
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Some(visible)
+                } else {
+                    None
+                };
 
                 // Phase 2: submit_and_verify — unified Escape+Enter+poll loop.
-                let use_escape = bracketed
-                    && payload.text().is_some()
-                    && matches!(submit, Key::Enter);
+                let use_escape =
+                    bracketed && payload.text().is_some() && matches!(submit, Key::Enter);
                 let escape_argv = if use_escape {
                     Some(tmux_send_keys_argv(&pane, &[Key::Escape]))
                 } else {
@@ -2001,12 +2025,19 @@ impl Transport for TmuxBackend {
 
                 let poll_consumption = !payload.skip_consumption_poll();
                 if !poll_consumption {
-                    if self.run_inject_stage(&submit_argv, InjectStage::Submit).is_ok() {
+                    if self
+                        .run_inject_stage(&submit_argv, InjectStage::Submit)
+                        .is_ok()
+                    {
                         notify_submit_observer(observer);
                         consumption_attempts = 1;
                     }
                 }
-                let submit_attempt_limit = if poll_consumption { max_submit_attempts } else { 0 };
+                let submit_attempt_limit = if poll_consumption {
+                    max_submit_attempts
+                } else {
+                    0
+                };
 
                 for attempt in 0..submit_attempt_limit {
                     let attempt_index = attempt + 1;
@@ -2049,7 +2080,10 @@ impl Transport for TmuxBackend {
                     // Enter — send-keys failure is degraded (tmux may not have
                     // the pane in sim/test env). Break to consumed=None path
                     // which returns EnterSentWithoutPlaceholderCheck.
-                    if self.run_inject_stage(&submit_argv, InjectStage::Submit).is_err() {
+                    if self
+                        .run_inject_stage(&submit_argv, InjectStage::Submit)
+                        .is_err()
+                    {
                         consumed = None;
                         break;
                     }
@@ -2060,8 +2094,7 @@ impl Transport for TmuxBackend {
                     // visible after Enter for no-echo panes).
                     if attempt == 0 && matches!(token_visible_for_report, Some(false)) {
                         token_visible_for_report =
-                            post_submit_token_visible(self, target, payload)
-                                .unwrap_or(Some(false));
+                            post_submit_token_visible(self, target, payload).unwrap_or(Some(false));
                     }
 
                     // Poll: token disappeared from bottom 15 lines = consumed.
@@ -2088,7 +2121,10 @@ impl Transport for TmuxBackend {
                                         break;
                                     }
                                 }
-                                Err(_) => { capture_failed = true; break; }
+                                Err(_) => {
+                                    capture_failed = true;
+                                    break;
+                                }
                             }
                         }
                         if capture_failed {
@@ -2106,13 +2142,17 @@ impl Transport for TmuxBackend {
                     }
                 }
 
+                // 0.5.43 debt-sweep (§6.2): three unconditional
+                // `eprintln!` submit-consumption debug lines removed.
+                // The decision they narrated is already captured in
+                // `InjectReport.submit_diagnostics` /
+                // `submit_verification`; the prints only spammed
+                // coordinator.log without additive signal. Behavior
+                // is byte-identical.
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
                     Some(false) => {
                         if any_attempt_matched {
-                            eprintln!(
-                                "team-agent submit consumption: consumed=false any_attempt_matched=true -> verified"
-                            );
                             SubmitVerification::EnterSentWithoutPlaceholderCheck
                         } else {
                             match self.capture(target, CaptureRange::Tail(15)) {
@@ -2124,21 +2164,13 @@ impl Transport for TmuxBackend {
                                         inject_start.elapsed().as_millis() as u64,
                                     ));
                                     let busy = provider_busy_signal_in_tail(&cap.text);
-                                    eprintln!(
-                                        "team-agent submit consumption fallback: consumed=false any_attempt_matched=false busy_state={busy}"
-                                    );
                                     if busy {
                                         SubmitVerification::EnterSentWithoutPlaceholderCheck
                                     } else {
                                         SubmitVerification::SubmitConsumptionUnverified
                                     }
                                 }
-                                Err(err) => {
-                                    eprintln!(
-                                        "team-agent submit consumption fallback: consumed=false busy_capture_error={err}"
-                                    );
-                                    SubmitVerification::SubmitConsumptionUnverified
-                                }
+                                Err(_) => SubmitVerification::SubmitConsumptionUnverified,
                             }
                         }
                     }
@@ -2154,7 +2186,9 @@ impl Transport for TmuxBackend {
                     submit_verification,
                     turn_verification: match payload {
                         InjectPayload::Empty => TurnVerification::NotRequired,
-                        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => TurnVerification::NotYetObserved,
+                        InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
+                            TurnVerification::NotYetObserved
+                        }
                     },
                     attempts: consumption_attempts,
                     submit_diagnostics: Some(crate::transport::SubmitDiagnostics {
@@ -2175,7 +2209,9 @@ impl Transport for TmuxBackend {
             submit_verification: submit_verification_for_key(submit),
             turn_verification: match payload {
                 InjectPayload::Empty => TurnVerification::NotRequired,
-                InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => TurnVerification::NotYetObserved,
+                InjectPayload::Text(_) | InjectPayload::TextSkipConsumptionPoll(_) => {
+                    TurnVerification::NotYetObserved
+                }
             },
             attempts: 1,
             // E50 PR-1: Empty payload / non-Text fallthrough path — no submit

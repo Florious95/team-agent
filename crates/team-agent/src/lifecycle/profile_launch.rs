@@ -174,7 +174,10 @@ fn prepare_profile_launch(
         claude_config_dir = Some(dir);
     }
 
-    env_overlay.extend(compatible_api_network_exports(agent.auth_mode, &loaded.values));
+    env_overlay.extend(compatible_api_network_exports(
+        agent.auth_mode,
+        &loaded.values,
+    ));
     if agent.auth_mode == AuthMode::CompatibleApi && profile_proxy_mode(&loaded.values) == "direct"
     {
         for key in COMPATIBLE_NETWORK_ENV_KEYS {
@@ -307,7 +310,11 @@ fn validate_profile(
     {
         let profile_model = profile_model(&loaded.values);
         if let Some(profile_model) = profile_model {
-            if agent.model.as_deref().is_some_and(|model| model != profile_model) {
+            if agent
+                .model
+                .as_deref()
+                .is_some_and(|model| model != profile_model)
+            {
                 return Err(LifecycleError::RequirementUnmet(format!(
                     "role/team model does not match profile MODEL in {}",
                     loaded.path.display()
@@ -320,8 +327,7 @@ fn validate_profile(
         if key == &"API_KEY" {
             continue;
         }
-        if !profile_value_or_alternate(&loaded.values, key).is_some_and(|value| !value.is_empty())
-        {
+        if !profile_value_or_alternate(&loaded.values, key).is_some_and(|value| !value.is_empty()) {
             missing.push(*key);
         }
     }
@@ -393,16 +399,24 @@ fn provider_env_exports(
         // Subscription/OfficialApi 不导出 COPILOT_PROVIDER_*(避免误改 auth 通道)。
         Provider::Copilot => {
             if auth_mode == AuthMode::CompatibleApi {
-                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_BASE_URL", "BASE_URL") {
+                if let Some(value) =
+                    value_or_alternate(values, "COPILOT_PROVIDER_BASE_URL", "BASE_URL")
+                {
                     exports.insert("COPILOT_PROVIDER_BASE_URL".to_string(), value.to_string());
                 }
-                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_TYPE", "PROVIDER_TYPE") {
+                if let Some(value) =
+                    value_or_alternate(values, "COPILOT_PROVIDER_TYPE", "PROVIDER_TYPE")
+                {
                     exports.insert("COPILOT_PROVIDER_TYPE".to_string(), value.to_string());
                 }
-                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_API_KEY", "API_KEY") {
+                if let Some(value) =
+                    value_or_alternate(values, "COPILOT_PROVIDER_API_KEY", "API_KEY")
+                {
                     exports.insert("COPILOT_PROVIDER_API_KEY".to_string(), value.to_string());
                 }
-                if let Some(value) = value_or_alternate(values, "COPILOT_PROVIDER_WIRE_API", "WIRE_API") {
+                if let Some(value) =
+                    value_or_alternate(values, "COPILOT_PROVIDER_WIRE_API", "WIRE_API")
+                {
                     exports.insert("COPILOT_PROVIDER_WIRE_API".to_string(), value.to_string());
                 }
                 if let Some(value) = value_or_alternate(values, "COPILOT_MODEL", "MODEL") {
@@ -505,8 +519,8 @@ fn provider_command_overrides(
     // Python provider_env.py:62-79 (_provider_command_overrides codex branch).
     match agent.provider {
         Provider::Codex => {
-            codex_profile = value_or_alternate(values, "CODEX_PROFILE", "NATIVE_PROFILE")
-                .map(str::to_string);
+            codex_profile =
+                value_or_alternate(values, "CODEX_PROFILE", "NATIVE_PROFILE").map(str::to_string);
             let model_provider = values.get("MODEL_PROVIDER").filter(|v| !v.is_empty());
             let base_url = values.get("BASE_URL").filter(|v| !v.is_empty());
             if agent.auth_mode == AuthMode::CompatibleApi {
@@ -620,8 +634,14 @@ fn ensure_compatible_claude_config(dir: &Path, workspace: &Path) -> Result<(), L
         "skipDangerousModePermissionPrompt",
         serde_json::json!(true),
     );
-    settings.insert("hasCompletedOnboarding".to_string(), serde_json::json!(true));
-    settings.insert("hasTrustDialogAccepted".to_string(), serde_json::json!(true));
+    settings.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::json!(true),
+    );
+    settings.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::json!(true),
+    );
     insert_if_missing(
         &mut settings,
         "lastOnboardingVersion",
@@ -642,7 +662,10 @@ fn ensure_compatible_claude_config(dir: &Path, workspace: &Path) -> Result<(), L
 
     let state_path = dir.join(".claude.json");
     let mut state = read_json_object(&state_path)?;
-    state.insert("hasCompletedOnboarding".to_string(), serde_json::json!(true));
+    state.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::json!(true),
+    );
     insert_if_missing(
         &mut state,
         "lastOnboardingVersion",
@@ -665,8 +688,14 @@ fn ensure_compatible_claude_mcp_config(
 ) -> Result<(), LifecycleError> {
     let state_path = dir.join(".claude.json");
     let mut state = read_json_object(&state_path)?;
-    state.insert("hasCompletedOnboarding".to_string(), serde_json::json!(true));
-    state.insert("hasTrustDialogAccepted".to_string(), serde_json::json!(true));
+    state.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::json!(true),
+    );
+    state.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::json!(true),
+    );
     insert_if_missing(
         &mut state,
         "projectOnboardingSeenCount",
@@ -686,7 +715,10 @@ fn ensure_claude_projects(
     workspace: &Path,
     mcp_servers: Option<&serde_json::Value>,
 ) {
-    if !state.get("projects").is_some_and(serde_json::Value::is_object) {
+    if !state
+        .get("projects")
+        .is_some_and(serde_json::Value::is_object)
+    {
         state.insert("projects".to_string(), serde_json::json!({}));
     }
     let Some(projects) = state
@@ -703,7 +735,10 @@ fn ensure_claude_projects(
         let Some(project) = entry.as_object_mut() else {
             continue;
         };
-        project.insert("hasTrustDialogAccepted".to_string(), serde_json::json!(true));
+        project.insert(
+            "hasTrustDialogAccepted".to_string(),
+            serde_json::json!(true),
+        );
         insert_if_missing(project, "projectOnboardingSeenCount", serde_json::json!(1));
         if let Some(mcp_servers) = mcp_servers {
             insert_if_missing(project, "allowedTools", serde_json::json!([]));
@@ -892,22 +927,26 @@ pub(crate) fn profile_value_or_alternate<'a>(
         .get(key)
         .filter(|value| !value.is_empty())
         .map(String::as_str)
-        .or_else(|| match key {
-            "API_KEY" => values
-                .get("ANTHROPIC_API_KEY")
-                .or_else(|| values.get("ANTHROPIC_AUTH_TOKEN"))
-                .or_else(|| values.get("AUTH_TOKEN"))
-                .or_else(|| values.get("CLAUDE_API_KEY"))
-                .or_else(|| values.get("CLAUDE_AUTH_TOKEN"))
-                .or_else(|| values.get("BEARER_TOKEN"))
-                .or_else(|| values.get("TEAM_AGENT_PROVIDER_API_KEY"))
-                .or_else(|| values.get("OPENAI_API_KEY")),
-            "BASE_URL" => values.get("ANTHROPIC_BASE_URL").or_else(|| values.get("OPENAI_BASE_URL")),
-            "MODEL" => values.get("ANTHROPIC_MODEL"),
-            _ => None,
-        }
-        .filter(|value| !value.is_empty())
-        .map(String::as_str))
+        .or_else(|| {
+            match key {
+                "API_KEY" => values
+                    .get("ANTHROPIC_API_KEY")
+                    .or_else(|| values.get("ANTHROPIC_AUTH_TOKEN"))
+                    .or_else(|| values.get("AUTH_TOKEN"))
+                    .or_else(|| values.get("CLAUDE_API_KEY"))
+                    .or_else(|| values.get("CLAUDE_AUTH_TOKEN"))
+                    .or_else(|| values.get("BEARER_TOKEN"))
+                    .or_else(|| values.get("TEAM_AGENT_PROVIDER_API_KEY"))
+                    .or_else(|| values.get("OPENAI_API_KEY")),
+                "BASE_URL" => values
+                    .get("ANTHROPIC_BASE_URL")
+                    .or_else(|| values.get("OPENAI_BASE_URL")),
+                "MODEL" => values.get("ANTHROPIC_MODEL"),
+                _ => None,
+            }
+            .filter(|value| !value.is_empty())
+            .map(String::as_str)
+        })
 }
 
 pub(crate) fn value_or_alternate<'a>(
@@ -926,7 +965,11 @@ pub(crate) fn profile_model(values: &BTreeMap<String, String>) -> Option<&str> {
     values
         .get("MODEL")
         .filter(|value| !value.is_empty())
-        .or_else(|| values.get("ANTHROPIC_MODEL").filter(|value| !value.is_empty()))
+        .or_else(|| {
+            values
+                .get("ANTHROPIC_MODEL")
+                .filter(|value| !value.is_empty())
+        })
         .map(String::as_str)
 }
 

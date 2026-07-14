@@ -3,8 +3,8 @@
 
 use super::helpers::parse_jsonl_records;
 use super::types::{
-    ClassifyResult, ClassifySource, FactKind, FaultFact, NoPingReason, ProcessLiveness, ProviderError,
-    RemindResult, Signature, TurnId, TurnState,
+    ClassifyResult, ClassifySource, FactKind, FaultFact, NoPingReason, ProcessLiveness,
+    ProviderError, RemindResult, Signature, TurnId, TurnState,
 };
 use super::Provider;
 
@@ -116,14 +116,20 @@ fn collect_background_open_ids(value: &serde_json::Value, out: &mut Vec<String>)
     match value {
         serde_json::Value::String(s) => {
             for piece in s.split(MARKER).skip(1) {
-                let id: String = piece.chars().take_while(|c| !c.is_whitespace() && *c != '\n').collect();
+                let id: String = piece
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\n')
+                    .collect();
                 if !id.is_empty() {
                     out.push(id);
                 }
             }
         }
         serde_json::Value::Object(map) => {
-            if let Some(id) = map.get("backgroundTaskId").and_then(serde_json::Value::as_str) {
+            if let Some(id) = map
+                .get("backgroundTaskId")
+                .and_then(serde_json::Value::as_str)
+            {
                 if !id.is_empty() {
                     out.push(id.to_string());
                 }
@@ -147,9 +153,15 @@ fn collect_background_close_ids(value: &serde_json::Value, out: &mut Vec<String>
     // Form B: <task-notification> wrapper in a string with a status tag.
     if let serde_json::Value::Object(map) = value {
         if let Some(bash) = map.get("bashOutput").and_then(serde_json::Value::as_object) {
-            let status = bash.get("status").and_then(serde_json::Value::as_str).unwrap_or("");
+            let status = bash
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             if matches!(status, "completed" | "failed" | "killed") {
-                if let Some(id) = bash.get("backgroundTaskId").and_then(serde_json::Value::as_str) {
+                if let Some(id) = bash
+                    .get("backgroundTaskId")
+                    .and_then(serde_json::Value::as_str)
+                {
                     if !id.is_empty() {
                         out.push(id.to_string());
                     }
@@ -236,37 +248,90 @@ pub fn evaluate_takeover_reminder(
                 }
             }
             TurnState::Working => {
-                return Ok(remind(false, NoPingReason::Node(TurnState::Working), Vec::new(), None));
+                return Ok(remind(
+                    false,
+                    NoPingReason::Node(TurnState::Working),
+                    Vec::new(),
+                    None,
+                ));
             }
             TurnState::BlockedOnHuman => {
-                return Ok(remind(false, NoPingReason::Node(TurnState::BlockedOnHuman), Vec::new(), None));
+                return Ok(remind(
+                    false,
+                    NoPingReason::Node(TurnState::BlockedOnHuman),
+                    Vec::new(),
+                    None,
+                ));
             }
             TurnState::Abnormal => {
-                return Ok(remind(false, NoPingReason::Node(TurnState::Abnormal), Vec::new(), None));
+                return Ok(remind(
+                    false,
+                    NoPingReason::Node(TurnState::Abnormal),
+                    Vec::new(),
+                    None,
+                ));
             }
             TurnState::Unknown => {
-                return Ok(remind(false, NoPingReason::Node(TurnState::Unknown), Vec::new(), None));
+                return Ok(remind(
+                    false,
+                    NoPingReason::Node(TurnState::Unknown),
+                    Vec::new(),
+                    None,
+                ));
             }
         }
     }
 
     let Some(ms) = monitor_state else {
-        return Ok(remind(false, NoPingReason::NotArmedNoWorkerTurn, Vec::new(), None));
+        return Ok(remind(
+            false,
+            NoPingReason::NotArmedNoWorkerTurn,
+            Vec::new(),
+            None,
+        ));
     };
-    if ms.get("opened_worker_turn_since_ack").and_then(serde_json::Value::as_bool) != Some(true) {
-        return Ok(remind(false, NoPingReason::NotArmedNoWorkerTurn, Vec::new(), None));
+    if ms
+        .get("opened_worker_turn_since_ack")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Ok(remind(
+            false,
+            NoPingReason::NotArmedNoWorkerTurn,
+            Vec::new(),
+            None,
+        ));
     }
     if ms.get("suppressed").and_then(serde_json::Value::as_bool) == Some(true) {
         return Ok(remind(false, NoPingReason::Acknowledged, Vec::new(), None));
     }
     let Some(all_idle_since) = ms.get("all_idle_since").and_then(serde_json::Value::as_f64) else {
-        return Ok(remind(false, NoPingReason::NotArmedNoWorkerTurn, Vec::new(), None));
+        return Ok(remind(
+            false,
+            NoPingReason::NotArmedNoWorkerTurn,
+            Vec::new(),
+            None,
+        ));
     };
-    if ms.get("pinged_for_episode").and_then(serde_json::Value::as_f64) == Some(all_idle_since) {
-        return Ok(remind(false, NoPingReason::AlreadyPingedThisEpisode, Vec::new(), None));
+    if ms
+        .get("pinged_for_episode")
+        .and_then(serde_json::Value::as_f64)
+        == Some(all_idle_since)
+    {
+        return Ok(remind(
+            false,
+            NoPingReason::AlreadyPingedThisEpisode,
+            Vec::new(),
+            None,
+        ));
     }
     if now_monotonic - all_idle_since < debounce_seconds {
-        return Ok(remind(false, NoPingReason::DebounceActive, Vec::new(), None));
+        return Ok(remind(
+            false,
+            NoPingReason::DebounceActive,
+            Vec::new(),
+            None,
+        ));
     }
     Ok(remind(
         true,
@@ -301,7 +366,10 @@ fn classify_result(
     }
 }
 
-fn extract_lifecycle_facts(provider: Provider, records: &[serde_json::Value]) -> Vec<LifecycleFact> {
+fn extract_lifecycle_facts(
+    provider: Provider,
+    records: &[serde_json::Value],
+) -> Vec<LifecycleFact> {
     records
         .iter()
         .filter_map(|record| match provider {
@@ -328,7 +396,9 @@ fn codex_latest_explicit_error_fact(record: &serde_json::Value) -> Option<FaultF
     }
     Some(FaultFact::new(
         Signature::new("turn_failed"),
-        turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+        turn.get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(TurnId::new),
         FactKind::Failed,
     ))
 }
@@ -431,29 +501,43 @@ fn claude_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
         ));
     }
     if record_type == Some("assistant") {
-        let turn_id = record.get("requestId").and_then(serde_json::Value::as_str).map(TurnId::new);
+        let turn_id = record
+            .get("requestId")
+            .and_then(serde_json::Value::as_str)
+            .map(TurnId::new);
         let Some(stop_reason) = record
             .get("message")
             .and_then(|m| m.get("stop_reason"))
-            .and_then(serde_json::Value::as_str) else {
-                if record
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(serde_json::Value::as_array)
-                    .is_some()
-                {
-                    return Some(lifecycle(
-                        FactKind::TurnOpen,
-                        turn_id,
-                        "assistant_in_flight",
-                        vec!["assistant_in_flight".to_string()],
-                    ));
-                }
-                return None;
-            };
+            .and_then(serde_json::Value::as_str)
+        else {
+            if record
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(serde_json::Value::as_array)
+                .is_some()
+            {
+                return Some(lifecycle(
+                    FactKind::TurnOpen,
+                    turn_id,
+                    "assistant_in_flight",
+                    vec!["assistant_in_flight".to_string()],
+                ));
+            }
+            return None;
+        };
         return match stop_reason {
-            "tool_use" => Some(lifecycle(FactKind::TurnOpen, turn_id, "open_turn", Vec::new())),
-            "end_turn" => Some(lifecycle(FactKind::TurnComplete, turn_id, "end_turn", Vec::new())),
+            "tool_use" => Some(lifecycle(
+                FactKind::TurnOpen,
+                turn_id,
+                "open_turn",
+                Vec::new(),
+            )),
+            "end_turn" => Some(lifecycle(
+                FactKind::TurnComplete,
+                turn_id,
+                "end_turn",
+                Vec::new(),
+            )),
             "stop_sequence" => Some(lifecycle(
                 FactKind::TurnComplete,
                 turn_id,
@@ -466,7 +550,10 @@ fn claude_lifecycle_fact(record: &serde_json::Value) -> Option<LifecycleFact> {
     if record_type == Some("user") && claude_user_interrupted(record) {
         return Some(lifecycle(
             FactKind::Interrupted,
-            record.get("uuid").and_then(serde_json::Value::as_str).map(TurnId::new),
+            record
+                .get("uuid")
+                .and_then(serde_json::Value::as_str)
+                .map(TurnId::new),
             "user_interrupt",
             vec!["interrupted".to_string()],
         ));
@@ -585,9 +672,7 @@ fn claude_user_interrupted(record: &serde_json::Value) -> bool {
         .is_some_and(|items| {
             items.iter().any(|item| {
                 item.get("type").and_then(serde_json::Value::as_str) == Some("text")
-                    && item
-                        .get("text")
-                        .and_then(serde_json::Value::as_str)
+                    && item.get("text").and_then(serde_json::Value::as_str)
                         == Some("[Request interrupted by user]")
             })
         })

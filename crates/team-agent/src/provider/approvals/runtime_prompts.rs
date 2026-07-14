@@ -13,7 +13,10 @@ pub fn runtime_mcp_tool_allowlisted(tool: &str) -> bool {
 
 pub fn runtime_mcp_prompt_allowlisted(prompt: &ApprovalPrompt) -> bool {
     prompt.server.as_deref() == Some(RUNTIME_MCP_APPROVAL_SERVER)
-        && prompt.tool.as_deref().is_some_and(runtime_mcp_tool_allowlisted)
+        && prompt
+            .tool
+            .as_deref()
+            .is_some_and(runtime_mcp_tool_allowlisted)
 }
 
 /// Issue 1 (Round 3b gate review §6): Team-Agent control-plane MCP tools
@@ -126,7 +129,11 @@ pub fn awaiting_human_confirm_reason(
     }
 }
 
-pub fn approval_prompt_fingerprint(team: &str, agent_id: &str, prompt: &ApprovalPrompt) -> ApprovalFingerprint {
+pub fn approval_prompt_fingerprint(
+    team: &str,
+    agent_id: &str,
+    prompt: &ApprovalPrompt,
+) -> ApprovalFingerprint {
     let mut hasher = Sha256::new();
     hasher.update(team.as_bytes());
     hasher.update([0]);
@@ -161,7 +168,10 @@ pub fn awaiting_human_confirm_dedupe_key(
     agent_id: &str,
     fingerprint: &ApprovalFingerprint,
 ) -> String {
-    format!("awaiting_human_confirm:{team}:{agent_id}:{}", fingerprint.as_str())
+    format!(
+        "awaiting_human_confirm:{team}:{agent_id}:{}",
+        fingerprint.as_str()
+    )
 }
 
 pub fn awaiting_human_confirm_fact(

@@ -43,7 +43,10 @@ use team_agent::lifecycle::launch_with_transport;
 fn b4_profile_invalid_json_fails_explicit_and_never_flattens_the_file() {
     // Pin a neutral process ancestry so the launch path is deterministic regardless of
     // which provider flags this test process inherited (same guard as the #264 batch).
-    std::env::set_var("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    std::env::set_var(
+        "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
+        "[\"/bin/zsh\"]",
+    );
     let ws = tmp_ws("b4-profile");
     let team_dir = write_claude_compatible_team(&ws);
     let config_dir = ws.join(".team/runtime/provider-config/worker_a/claude");
@@ -136,7 +139,9 @@ internal_runtime_error leak; body={}",
         json!({"to": "worker_a", "content": "b4 recovery probe"}),
     );
     let recovered_text = recovered.body.to_string();
-    if !recovered_text.contains("TEAM_AGENT_OWNER_TEAM_ID") && !recovered_text.contains("scope_refused") {
+    if !recovered_text.contains("TEAM_AGENT_OWNER_TEAM_ID")
+        && !recovered_text.contains("scope_refused")
+    {
         failures.push(format!(
             "C7: after state recovery the same call must reach the verifiable multi-team \
 gate (owner-required refusal), not some degraded path; body={}",
@@ -175,7 +180,11 @@ fn write_claude_compatible_team(ws: &Path) -> PathBuf {
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&team).expect("compile fixture team");
-    std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     team
 }
 
@@ -247,7 +256,7 @@ mod offline_transport {
                 submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
                 turn_verification: TurnVerification::NotYetObserved,
                 attempts: 1,
-            submit_diagnostics: None,
+                submit_diagnostics: None,
             })
         }
 
@@ -255,14 +264,22 @@ mod offline_transport {
             Ok(())
         }
 
-        fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+        fn capture(
+            &self,
+            _target: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
             Ok(CapturedText {
                 text: "Claude Code\n> ".to_string(),
                 range,
             })
         }
 
-        fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
+        fn query(
+            &self,
+            _target: &Target,
+            field: PaneField,
+        ) -> Result<Option<String>, TransportError> {
             match field {
                 PaneField::PaneWidth => Ok(Some("120".to_string())),
                 _ => Ok(None),

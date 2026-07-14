@@ -8,7 +8,9 @@ use serde_json::Value;
 use crate::event_log::EventLog;
 use crate::message_store::{MessageStore, NotificationClaimParams};
 use crate::model::ids::TaskId;
-use crate::transport::{InjectPayload, InjectReport, Key, PaneId, Target, Transport, TransportError};
+use crate::transport::{
+    InjectPayload, InjectReport, Key, PaneId, Target, Transport, TransportError,
+};
 
 use super::helpers::MessageStatusShadow;
 use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError};
@@ -405,10 +407,7 @@ pub fn deliver_to_leader_fallback_pane(
             // Row status is left untouched so status/monitor surfaces the
             // pending notification until the operator rebinds the leader.
             let (status, channel) = if socket_bound {
-                (
-                    DeliveryStatus::Blocked,
-                    "rebind_required".to_string(),
-                )
+                (DeliveryStatus::Blocked, "rebind_required".to_string())
             } else {
                 (DeliveryStatus::Failed, "fallback_pane".to_string())
             };

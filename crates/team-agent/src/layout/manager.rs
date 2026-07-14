@@ -99,7 +99,11 @@ pub fn next_worker_window(
         .iter()
         .any(|w| w.as_str() == window.as_str());
     let action = if window_exists {
-        if force { WorkerSpawnAction::ForceReplace } else { WorkerSpawnAction::Noop }
+        if force {
+            WorkerSpawnAction::ForceReplace
+        } else {
+            WorkerSpawnAction::Noop
+        }
     } else {
         WorkerSpawnAction::NewWindow
     };
@@ -134,7 +138,11 @@ mod worker_placement_tests {
             return WorkerSpawnTarget::new(session, window, WorkerSpawnAction::NewSession);
         }
         let action = if window_exists {
-            if force { WorkerSpawnAction::ForceReplace } else { WorkerSpawnAction::Noop }
+            if force {
+                WorkerSpawnAction::ForceReplace
+            } else {
+                WorkerSpawnAction::Noop
+            }
         } else {
             WorkerSpawnAction::NewWindow
         };
@@ -191,8 +199,11 @@ mod tests {
 
     #[test]
     fn exec_provider_mode_returns_exec_current_pane() {
-        let placement =
-            leader_placement(LeaderStartMode::ExecProvider, Provider::Claude, Path::new("/tmp/x"));
+        let placement = leader_placement(
+            LeaderStartMode::ExecProvider,
+            Provider::Claude,
+            Path::new("/tmp/x"),
+        );
         assert_eq!(placement, LeaderPlacement::ExecCurrentPane);
     }
 

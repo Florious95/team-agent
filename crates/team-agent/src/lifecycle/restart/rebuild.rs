@@ -523,7 +523,10 @@ fn restart_with_selected_team_and_transport(
         // as pre-0.5.38 (fake harness + missing agent branches). Where a
         // parallel Some(Ok(spawn)) is present we skip the transport spawn
         // and jump straight to verify + mark.
-        let parallel_result = parallel_outcomes.get(decision_index).cloned().unwrap_or(None);
+        let parallel_result = parallel_outcomes
+            .get(decision_index)
+            .cloned()
+            .unwrap_or(None);
         if let Some(parallel_result) = parallel_result {
             match parallel_result {
                 Ok(pspawn) => {
@@ -642,11 +645,7 @@ fn restart_with_selected_team_and_transport(
                     "tmux_server_crashed: session {} disappeared during replacement build; refusing to touch original agent state",
                     session_name.as_str()
                 );
-                failed_agents.push(restart_failed_agent(
-                    decision,
-                    "tmux_server_crashed",
-                    error,
-                ));
+                failed_agents.push(restart_failed_agent(decision, "tmux_server_crashed", error));
                 continue;
             }
             if let Some(previous) = successful_agents.pop() {
@@ -741,10 +740,9 @@ fn restart_with_selected_team_and_transport(
             continue;
         }
         let pane_verify_ms = u64::try_from(verify_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let transport_spawn_ms = u64::try_from(
-            (verify_start.saturating_duration_since(spawn_start)).as_millis(),
-        )
-        .unwrap_or(u64::MAX);
+        let transport_spawn_ms =
+            u64::try_from((verify_start.saturating_duration_since(spawn_start)).as_millis())
+                .unwrap_or(u64::MAX);
         // 0.5.38 Step 1: per-worker spawn timing so operators can identify
         // whether wall time is spent in command-plan compilation, transport
         // spawn, pane verification, or provider startup prompts.
@@ -1096,7 +1094,11 @@ fn restart_with_selected_team_and_transport(
     drop(lifecycle_lock);
     let coordinator =
         start_coordinator_for_workspace(&selected.run_workspace, Some(&selected.team_key))?;
-    phase_timer.emit(&selected.run_workspace, "restart.phase", "coordinator_start");
+    phase_timer.emit(
+        &selected.run_workspace,
+        "restart.phase",
+        "coordinator_start",
+    );
     let coordinator_started = coordinator.ok;
     phase_timer.emit(&selected.run_workspace, "restart.phase", "readiness_wait");
     wait_restart_readiness_or_timeout(
@@ -2420,12 +2422,11 @@ fn run_bounded_parallel_worker_spawns(
     let _ = concurrency_placeholder(inputs_len); // reserved for future config
     let inputs_shared: Vec<Option<SpawnInput>> = inputs.into_iter().map(Some).collect();
     let inputs_shared = std::sync::Arc::new(std::sync::Mutex::new(inputs_shared));
-    let next_submit_slot = std::sync::Arc::new((
-        std::sync::Mutex::new(0usize),
-        std::sync::Condvar::new(),
-    ));
-    let results: std::sync::Arc<std::sync::Mutex<Vec<(usize, Result<ParallelSpawnResult, String>)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let next_submit_slot =
+        std::sync::Arc::new((std::sync::Mutex::new(0usize), std::sync::Condvar::new()));
+    let results: std::sync::Arc<
+        std::sync::Mutex<Vec<(usize, Result<ParallelSpawnResult, String>)>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     std::thread::scope(|scope| {
         for slot in 0..inputs_len {
             let inputs_shared = std::sync::Arc::clone(&inputs_shared);
@@ -2530,8 +2531,8 @@ fn apply_marked_respawn(
     fatal_resume_failure: &mut bool,
 ) {
     let verify_start = std::time::Instant::now();
-    if let Err(error) = verify_spawned_agent_live(&decision.agent_id, spawn, transport)
-        .and_then(|_| {
+    if let Err(error) =
+        verify_spawned_agent_live(&decision.agent_id, spawn, transport).and_then(|_| {
             mark_agent_respawned(
                 state,
                 &decision.agent_id,
@@ -2553,9 +2554,12 @@ fn apply_marked_respawn(
         return;
     }
     let pane_verify_ms = u64::try_from(verify_start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let transport_spawn_ms =
-        u64::try_from(verify_start.saturating_duration_since(spawn_start).as_millis())
-            .unwrap_or(u64::MAX);
+    let transport_spawn_ms = u64::try_from(
+        verify_start
+            .saturating_duration_since(spawn_start)
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX);
     write_worker_spawn_timing_event(
         run_workspace,
         phase_timer.elapsed_ms(),

@@ -24,7 +24,11 @@ fn provider_effort_max_is_claude_only() {
         ProviderEffort::High,
         ProviderEffort::XHigh,
     ] {
-        assert!(!e.is_claude_only(), "{} must not be claude-only", e.as_str());
+        assert!(
+            !e.is_claude_only(),
+            "{} must not be claude-only",
+            e.as_str()
+        );
     }
 }
 
@@ -38,7 +42,11 @@ fn provider_effort_support_matrix() {
         ProviderEffort::XHigh,
         ProviderEffort::Max,
     ] {
-        assert!(e.is_supported_by(Provider::Claude), "Claude must support {}", e.as_str());
+        assert!(
+            e.is_supported_by(Provider::Claude),
+            "Claude must support {}",
+            e.as_str()
+        );
         assert!(
             e.is_supported_by(Provider::ClaudeCode),
             "ClaudeCode must support {}",
@@ -52,7 +60,11 @@ fn provider_effort_support_matrix() {
         ProviderEffort::High,
         ProviderEffort::XHigh,
     ] {
-        assert!(e.is_supported_by(Provider::Codex), "Codex must support {}", e.as_str());
+        assert!(
+            e.is_supported_by(Provider::Codex),
+            "Codex must support {}",
+            e.as_str()
+        );
     }
     assert!(
         !ProviderEffort::Max.is_supported_by(Provider::Codex),
@@ -75,8 +87,8 @@ fn provider_effort_support_matrix() {
 
 /// Steps 5 + 6: adapter argv contains adjacent effort flag.
 mod adapter_argv {
-    use team_agent::provider::{get_adapter, McpConfig, ProviderCommandContext};
     use team_agent::model::enums::{AuthMode, Provider, ProviderEffort};
+    use team_agent::provider::{get_adapter, McpConfig, ProviderCommandContext};
 
     fn ctx<'a>(effort: Option<ProviderEffort>) -> ProviderCommandContext<'a> {
         ProviderCommandContext {
@@ -108,9 +120,7 @@ mod adapter_argv {
     #[test]
     fn claude_fresh_argv_omits_effort_when_none() {
         let adapter = get_adapter(Provider::Claude);
-        let plan = adapter
-            .build_command_plan(ctx(None))
-            .expect("claude plan");
+        let plan = adapter.build_command_plan(ctx(None)).expect("claude plan");
         assert!(
             !plan.argv.iter().any(|a| a == "--effort"),
             "no --effort when effort is None; got {:?}",
@@ -136,11 +146,12 @@ mod adapter_argv {
     #[test]
     fn codex_fresh_argv_omits_effort_when_none() {
         let adapter = get_adapter(Provider::Codex);
-        let plan = adapter
-            .build_command_plan(ctx(None))
-            .expect("codex plan");
+        let plan = adapter.build_command_plan(ctx(None)).expect("codex plan");
         assert!(
-            !plan.argv.iter().any(|a| a.starts_with("model_reasoning_effort=")),
+            !plan
+                .argv
+                .iter()
+                .any(|a| a.starts_with("model_reasoning_effort=")),
             "no model_reasoning_effort=… when None; got {:?}",
             plan.argv
         );
@@ -149,7 +160,9 @@ mod adapter_argv {
     /// Effort=max on Claude survives an MCP-config code path.
     #[test]
     fn claude_effort_with_mcp_config_still_includes_effort_flag() {
-        let cfg = McpConfig { raw: serde_json::json!({}) };
+        let cfg = McpConfig {
+            raw: serde_json::json!({}),
+        };
         let mut c = ctx(Some(ProviderEffort::Max));
         c.mcp_config = Some(&cfg);
         let adapter = get_adapter(Provider::Claude);
@@ -235,7 +248,9 @@ tasks: []
         let result = validate_spec_yaml_str(&yaml);
         let errors = result.expect_err("must reject unknown effort");
         assert!(
-            errors.iter().any(|e| e.contains("provider_effort") && e.contains("unknown effort")),
+            errors
+                .iter()
+                .any(|e| e.contains("provider_effort") && e.contains("unknown effort")),
             "errors should mention unknown provider_effort; got {errors:?}"
         );
     }
@@ -250,7 +265,9 @@ tasks: []
         let result = validate_spec_yaml_str(&yaml);
         let errors = result.expect_err("must reject unknown agent effort");
         assert!(
-            errors.iter().any(|e| e.contains("/agents/0/effort") && e.contains("unknown effort")),
+            errors
+                .iter()
+                .any(|e| e.contains("/agents/0/effort") && e.contains("unknown effort")),
             "errors should mention unknown agent effort; got {errors:?}"
         );
     }
@@ -258,16 +275,16 @@ tasks: []
     #[test]
     fn agent_effort_max_on_codex_rejected() {
         let mut yaml = base_team("");
-        yaml = yaml
-            .replace("provider: claude", "provider: codex")
-            .replace(
-                "preferred_for: [dev]",
-                "preferred_for: [dev]\n    effort: max",
-            );
+        yaml = yaml.replace("provider: claude", "provider: codex").replace(
+            "preferred_for: [dev]",
+            "preferred_for: [dev]\n    effort: max",
+        );
         let result = validate_spec_yaml_str(&yaml);
         let errors = result.expect_err("must reject max + codex");
         assert!(
-            errors.iter().any(|e| e.contains("/agents/0/effort") && e.contains("only supported by claude")),
+            errors
+                .iter()
+                .any(|e| e.contains("/agents/0/effort") && e.contains("only supported by claude")),
             "errors should mention claude-only constraint; got {errors:?}"
         );
     }
@@ -286,7 +303,9 @@ tasks: []
         match validate_spec_yaml_str(&yaml) {
             Ok(()) => {}
             Err(errors) => assert!(
-                !errors.iter().any(|e| e.contains("/effort:") || e.contains("/provider_effort:")),
+                !errors
+                    .iter()
+                    .any(|e| e.contains("/effort:") || e.contains("/provider_effort:")),
                 "no effort error should be reported for valid high+claude; got {errors:?}"
             ),
         }
@@ -339,7 +358,10 @@ tasks: []
             "wrapper MUST NOT re-export CLAUDE_EFFORT after unsetting it; got {line}"
         );
         // Other env keys still exported.
-        assert!(line.contains("PATH=/usr/bin"), "PATH still exported; got {line}");
+        assert!(
+            line.contains("PATH=/usr/bin"),
+            "PATH still exported; got {line}"
+        );
     }
 
     #[test]
@@ -348,7 +370,9 @@ tasks: []
         match validate_spec_yaml_str(&yaml) {
             Ok(()) => {}
             Err(errors) => assert!(
-                !errors.iter().any(|e| e.contains("provider_effort:") && e.contains("unknown effort")),
+                !errors
+                    .iter()
+                    .any(|e| e.contains("provider_effort:") && e.contains("unknown effort")),
                 "no provider_effort error should be reported for valid value; got {errors:?}"
             ),
         }

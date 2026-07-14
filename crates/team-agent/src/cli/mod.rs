@@ -3347,8 +3347,7 @@ pub mod lifecycle_port {
                 let repair_team = team
                     .filter(|team| !team.is_empty())
                     .unwrap_or(session_name.as_str());
-                let shutdown_scoped =
-                    format!("team-agent shutdown --team {repair_team}");
+                let shutdown_scoped = format!("team-agent shutdown --team {repair_team}");
                 json!({
                     "ok": false,
                     "status": "refused_build_before_destroy",
@@ -4126,8 +4125,18 @@ pub mod leader_port {
         let mut value = lease_value(result);
         insert_resolved_team(&mut value, requested_team, resolved_team.as_deref());
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            emit_topology_convergence_event(workspace, resolved_team.as_deref(), "takeover", &value);
-            register_after_binding_success(workspace, resolved_team.as_deref(), "takeover", &mut value);
+            emit_topology_convergence_event(
+                workspace,
+                resolved_team.as_deref(),
+                "takeover",
+                &value,
+            );
+            register_after_binding_success(
+                workspace,
+                resolved_team.as_deref(),
+                "takeover",
+                &mut value,
+            );
         }
         Ok(value)
     }
@@ -4163,8 +4172,18 @@ pub mod leader_port {
         let mut value = lease_value(result);
         insert_resolved_team(&mut value, team, resolved_team.as_deref());
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            emit_topology_convergence_event(workspace, resolved_team.as_deref(), "claim-leader", &value);
-            register_after_binding_success(workspace, resolved_team.as_deref(), "claim-leader", &mut value);
+            emit_topology_convergence_event(
+                workspace,
+                resolved_team.as_deref(),
+                "claim-leader",
+                &value,
+            );
+            register_after_binding_success(
+                workspace,
+                resolved_team.as_deref(),
+                "claim-leader",
+                &mut value,
+            );
         }
         Ok(value)
     }
@@ -4332,7 +4351,8 @@ pub mod leader_port {
     }
 
     fn insert_resolved_team(value: &mut Value, requested: Option<&str>, resolved: Option<&str>) {
-        let (Some(requested), Some(resolved)) = (requested.filter(|team| !team.is_empty()), resolved)
+        let (Some(requested), Some(resolved)) =
+            (requested.filter(|team| !team.is_empty()), resolved)
         else {
             return;
         };

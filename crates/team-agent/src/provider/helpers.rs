@@ -22,10 +22,7 @@ pub(crate) fn find_session_id(record: &serde_json::Value) -> Option<String> {
     if let Some(s) = record.get("sessionId").and_then(serde_json::Value::as_str) {
         return Some(s.to_string());
     }
-    if let Some(s) = record
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-    {
+    if let Some(s) = record.get("session_id").and_then(serde_json::Value::as_str) {
         return Some(s.to_string());
     }
     record
@@ -37,7 +34,11 @@ pub(crate) fn find_session_id(record: &serde_json::Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-pub(crate) fn patterns(idle: &str, processing: &str, error: &str) -> Result<StatusPatterns, ProviderError> {
+pub(crate) fn patterns(
+    idle: &str,
+    processing: &str,
+    error: &str,
+) -> Result<StatusPatterns, ProviderError> {
     Ok(StatusPatterns {
         idle: compile_regex(idle)?,
         processing: compile_regex(processing)?,

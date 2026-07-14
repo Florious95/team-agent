@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::lifecycle::{ResetAgentOutcome, ResetRefusal};
-use crate::model::yaml::{self, Value as YamlValue};
 use crate::model::ids::{AgentId, TeamKey};
+use crate::model::yaml::{self, Value as YamlValue};
 
 use super::super::helpers::{enum_value, object_fields, tool_runtime_error};
 use super::super::{ToolOk, ToolResult};
@@ -126,7 +126,9 @@ pub(crate) fn fork_agent(
 
 fn reset_refusal_reason(reason: ResetRefusal) -> Value {
     match reason {
-        ResetRefusal::DiscardSessionRequired => Value::String("discard_session_required".to_string()),
+        ResetRefusal::DiscardSessionRequired => {
+            Value::String("discard_session_required".to_string())
+        }
     }
 }
 
@@ -211,7 +213,10 @@ fn state_spec_workspace(state: &Value, team: Option<&str>) -> Option<PathBuf> {
     state_spec_workspace_from_entry(state).or_else(|| {
         let teams = state.get("teams").and_then(Value::as_object)?;
         if teams.len() == 1 {
-            teams.values().next().and_then(state_spec_workspace_from_entry)
+            teams
+                .values()
+                .next()
+                .and_then(state_spec_workspace_from_entry)
         } else {
             None
         }
@@ -294,20 +299,35 @@ fn materialize_mcp_lifecycle_spec(
         ),
         (
             "leader".to_string(),
-            YamlValue::Map(vec![("provider".to_string(), YamlValue::Str("codex".to_string()))]),
+            YamlValue::Map(vec![(
+                "provider".to_string(),
+                YamlValue::Str("codex".to_string()),
+            )]),
         ),
         ("agents".to_string(), YamlValue::List(agent_items)),
     ]);
     let spec_workspace = workspace.join(".team").join(&team_name);
     std::fs::create_dir_all(&spec_workspace).map_err(|e| {
-        tool_runtime_error(format!("create MCP lifecycle spec dir {}: {e}", spec_workspace.display()))
+        tool_runtime_error(format!(
+            "create MCP lifecycle spec dir {}: {e}",
+            spec_workspace.display()
+        ))
     })?;
     let spec_path = spec_workspace.join("team.spec.yaml");
     std::fs::write(&spec_path, yaml::dumps(&spec)).map_err(|e| {
-        tool_runtime_error(format!("write MCP lifecycle spec {}: {e}", spec_path.display()))
+        tool_runtime_error(format!(
+            "write MCP lifecycle spec {}: {e}",
+            spec_path.display()
+        ))
     })?;
     if prepare_state {
-        prepare_selected_team_state(workspace, &mut state, &team_name, &spec_workspace, &spec_path)?;
+        prepare_selected_team_state(
+            workspace,
+            &mut state,
+            &team_name,
+            &spec_workspace,
+            &spec_path,
+        )?;
     }
     Ok(spec_workspace)
 }
@@ -316,16 +336,15 @@ fn selected_agents<'a>(
     state: &'a Value,
     team: Option<&str>,
 ) -> Option<&'a serde_json::Map<String, Value>> {
-    team
-        .and_then(|team| {
-            state
-                .get("teams")
-                .and_then(Value::as_object)
-                .and_then(|teams| teams.get(team))
-                .and_then(|entry| entry.get("agents"))
-                .and_then(Value::as_object)
-        })
-        .or_else(|| state.get("agents").and_then(Value::as_object))
+    team.and_then(|team| {
+        state
+            .get("teams")
+            .and_then(Value::as_object)
+            .and_then(|teams| teams.get(team))
+            .and_then(|entry| entry.get("agents"))
+            .and_then(Value::as_object)
+    })
+    .or_else(|| state.get("agents").and_then(Value::as_object))
 }
 
 fn prepare_selected_team_state(
@@ -370,19 +389,27 @@ fn prepare_selected_team_state(
     if let Some(top_agents) = top_agents {
         if let Some(team_agents) = entry.get_mut("agents").and_then(Value::as_object_mut) {
             for (agent_id, top_agent) in top_agents {
-                let Some(team_agent) = team_agents.get_mut(&agent_id).and_then(Value::as_object_mut) else {
+                let Some(team_agent) = team_agents
+                    .get_mut(&agent_id)
+                    .and_then(Value::as_object_mut)
+                else {
                     continue;
                 };
                 let Some(top_agent) = top_agent.as_object() else {
                     continue;
                 };
                 for (key, value) in top_agent {
-                    team_agent.entry(key.clone()).or_insert_with(|| value.clone());
+                    team_agent
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
                 }
             }
         }
     }
     crate::state::persist::save_runtime_state(workspace, state).map_err(|e| {
-        tool_runtime_error(format!("save MCP lifecycle scoped state {}: {e}", workspace.display()))
+        tool_runtime_error(format!(
+            "save MCP lifecycle scoped state {}: {e}",
+            workspace.display()
+        ))
     })
 }

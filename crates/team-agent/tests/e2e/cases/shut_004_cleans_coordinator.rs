@@ -23,7 +23,12 @@ fn shut_004_shutdown_cleans_coordinator_sidecar() {
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
-    assert!(out.is_success(), "shutdown exit {}; stderr={}", out.exit_code, out.stderr);
+    assert!(
+        out.is_success(),
+        "shutdown exit {}; stderr={}",
+        out.exit_code,
+        out.stderr
+    );
     let j = out.json();
 
     assert_json_field_eq_bool(&j, "/ok", true);

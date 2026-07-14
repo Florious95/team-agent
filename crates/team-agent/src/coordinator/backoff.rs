@@ -350,11 +350,7 @@ fn run_daemon_body_with_panic_marker(
         );
         match run_tick_with_panic_marker(&event_log, || coordinator.tick()) {
             Ok(report) => {
-                let status = if report.stop {
-                    "stop_requested"
-                } else {
-                    "ok"
-                };
+                let status = if report.stop { "stop_requested" } else { "ok" };
                 let _ = write_coordinator_heartbeat(
                     &args.workspace,
                     pid,
@@ -584,8 +580,7 @@ pub enum DaemonError {
 static SIGNAL_STOP_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(unix)]
-static SIGNAL_STOP_NUMBER: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(0);
+static SIGNAL_STOP_NUMBER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]
 extern "C" fn coordinator_signal_handler(signal: libc::c_int) {

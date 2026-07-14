@@ -29,7 +29,10 @@ fn bin() -> &'static str {
 #[test]
 #[serial(env)]
 fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
-    let _ancestry = EnvGuard::set("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let _ancestry = EnvGuard::set(
+        "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
+        "[\"/bin/zsh\"]",
+    );
     let ws = tmp_dir("claude-argv");
     let team_dir = write_team(
         &ws,
@@ -40,13 +43,7 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
             id: "worker_a",
             role: "Implementation Worker",
             provider: "claude",
-            tools: &[
-                "fs_read",
-                "fs_write",
-                "fs_list",
-                "execute_bash",
-                "mcp_team",
-            ],
+            tools: &["fs_read", "fs_write", "fs_list", "execute_bash", "mcp_team"],
             body: "ROLE BODY SENTINEL: build the porcelain adapter without hiding failures.",
         }],
     );
@@ -101,7 +98,9 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
         }
     }
     if argv_has_flag(&spawn.argv, "--allowedTools") {
-        failures.push("B1 Python parity violated: Claude argv must not switch to --allowedTools".to_string());
+        failures.push(
+            "B1 Python parity violated: Claude argv must not switch to --allowedTools".to_string(),
+        );
     }
     assert!(
         failures.is_empty(),
@@ -114,7 +113,10 @@ fn claude_worker_spawn_argv_uses_compiled_prompt_and_resolved_role_tools() {
 #[test]
 #[serial(env)]
 fn claude_control_role_without_native_tools_still_disallows_native_tools() {
-    let _ancestry = EnvGuard::set("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let _ancestry = EnvGuard::set(
+        "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
+        "[\"/bin/zsh\"]",
+    );
     let ws = tmp_dir("claude-control");
     let team_dir = write_team(
         &ws,
@@ -166,7 +168,10 @@ fn claude_control_role_without_native_tools_still_disallows_native_tools() {
 #[test]
 #[serial(env)]
 fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_tools() {
-    let _ancestry = EnvGuard::set("TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON", "[\"/bin/zsh\"]");
+    let _ancestry = EnvGuard::set(
+        "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON",
+        "[\"/bin/zsh\"]",
+    );
     let ws = tmp_dir("claude-restart-tools");
     let team_dir = write_team(
         &ws,
@@ -177,13 +182,7 @@ fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_
             id: "worker_a",
             role: "Implementation Worker",
             provider: "claude",
-            tools: &[
-                "fs_read",
-                "fs_write",
-                "fs_list",
-                "execute_bash",
-                "mcp_team",
-            ],
+            tools: &["fs_read", "fs_write", "fs_list", "execute_bash", "mcp_team"],
             body: "ROLE BODY SENTINEL: restart must keep declared native tools.",
         }],
     );
@@ -663,7 +662,10 @@ impl Transport for RecordingTransport {
         }
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<team_agent::transport::PaneLiveness, TransportError> {
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
         Ok(team_agent::transport::PaneLiveness::Live)
     }
 
@@ -754,7 +756,12 @@ fn write_team(
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let pid = team_agent::coordinator::Pid::new(std::process::id());
-    std::fs::create_dir_all(team_agent::coordinator::coordinator_pid_path(&workspace).parent().unwrap()).unwrap();
+    std::fs::create_dir_all(
+        team_agent::coordinator::coordinator_pid_path(&workspace)
+            .parent()
+            .unwrap(),
+    )
+    .unwrap();
     team_agent::coordinator::write_coordinator_metadata(
         &workspace,
         pid,

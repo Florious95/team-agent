@@ -17,7 +17,12 @@ fn shut_001_clean_shutdown_kills_worker_session() {
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
 
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start did not launch: {} / {}", qs.stdout, qs.stderr);
+    assert!(
+        quick_start_launched(&qs),
+        "quick-start did not launch: {} / {}",
+        qs.stdout,
+        qs.stderr
+    );
 
     let session = worker_session_name(team_id);
 
@@ -41,7 +46,9 @@ fn shut_001_clean_shutdown_kills_worker_session() {
     assert!(
         out.is_success(),
         "shutdown exit {}; stdout={} stderr={}",
-        out.exit_code, out.stdout, out.stderr
+        out.exit_code,
+        out.stdout,
+        out.stderr
     );
 
     let j = out.json();

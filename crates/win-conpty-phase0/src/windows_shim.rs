@@ -43,13 +43,13 @@ mod windows_shim {
     use conpty_transport::protocol::{read_frame, write_frame, Request};
     use conpty_transport::shim::{PaneRuntime, Shim};
     use windows::core::PWSTR;
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
-    use windows::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows::Win32::Storage::FileSystem::{
-        ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
+    use windows::Win32::Foundation::{
+        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
     };
-    use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Storage::FileSystem::FlushFileBuffers;
+    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+    use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
         PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -98,8 +98,7 @@ mod windows_shim {
         // insecure fallback in the help text.
         let env_token = std::env::var("TA_CONPTY_PIPE_TOKEN").ok();
         Ok(Args {
-            workspace_hash: workspace_hash
-                .ok_or_else(|| anyhow!("--workspace-hash required"))?,
+            workspace_hash: workspace_hash.ok_or_else(|| anyhow!("--workspace-hash required"))?,
             team_key: team_key.ok_or_else(|| anyhow!("--team required"))?,
             pipe_name: pipe_name.ok_or_else(|| anyhow!("--pipe-name required"))?,
             pipe_token: env_token
@@ -224,8 +223,8 @@ mod windows_shim {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e.into()),
             };
-            let req: Request = serde_json::from_slice(&frame)
-                .context("parse request frame as JSON")?;
+            let req: Request =
+                serde_json::from_slice(&frame).context("parse request frame as JSON")?;
             let resp = shim.handle(&req);
             let resp_bytes = serde_json::to_vec(&resp).context("serialize response")?;
             let mut writer = PipeIo(handle);
@@ -321,8 +320,7 @@ mod windows_shim {
                 let mut attr_size: usize = 0;
                 let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut attr_size);
                 let mut attr_buf = vec![0u8; attr_size];
-                let attr_list =
-                    LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut _);
+                let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut _);
                 InitializeProcThreadAttributeList(Some(attr_list), 1, Some(0), &mut attr_size)
                     .context("InitializeProcThreadAttributeList")?;
                 UpdateProcThreadAttribute(
@@ -424,7 +422,11 @@ mod windows_shim {
             Ok(String::from_utf8_lossy(&bytes).to_string())
         }
         fn child_pid(&self) -> Option<u32> {
-            self.proc_info.lock().unwrap().as_ref().map(|p| p.dwProcessId)
+            self.proc_info
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|p| p.dwProcessId)
         }
         fn is_alive(&self) -> bool {
             self.alive.load(Ordering::Relaxed)

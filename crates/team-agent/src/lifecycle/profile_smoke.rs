@@ -187,7 +187,9 @@ impl SmokeTarget {
             }
             // C-7-1 cr verdict: copilot 一期 subscription-only,无 BYOK HTTP smoke
             // 入口;同 GeminiCli/Fake 走 unsupported_provider_smoke_skipped。
-            Provider::Copilot | Provider::GeminiCli | Provider::Fake => Err("unsupported_provider_smoke_skipped"),
+            Provider::Copilot | Provider::GeminiCli | Provider::Fake => {
+                Err("unsupported_provider_smoke_skipped")
+            }
         }
     }
 

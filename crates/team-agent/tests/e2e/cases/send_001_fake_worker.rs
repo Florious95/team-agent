@@ -17,7 +17,11 @@ fn send_001_delivers_to_fake_worker() {
     let team_id = "send001";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start did not launch: {}", qs.stdout);
+    assert!(
+        quick_start_launched(&qs),
+        "quick-start did not launch: {}",
+        qs.stdout
+    );
 
     let mid = "msg-e2e-send-001";
     let out = run_ta(
@@ -40,7 +44,9 @@ fn send_001_delivers_to_fake_worker() {
     assert!(
         out.is_success(),
         "send exit {}; stdout={} stderr={}",
-        out.exit_code, out.stdout, out.stderr
+        out.exit_code,
+        out.stdout,
+        out.stderr
     );
     let j = out.json();
 
@@ -50,7 +56,13 @@ fn send_001_delivers_to_fake_worker() {
     assert_json_field_eq_str(&j, "/sender", "leader");
 
     let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");
-    let allowed = ["queued", "accepted", "submitted", "submitted_unverified", "delivered"];
+    let allowed = [
+        "queued",
+        "accepted",
+        "submitted",
+        "submitted_unverified",
+        "delivered",
+    ];
     assert!(
         allowed.contains(&status),
         "status {status:?} should be in {allowed:?}; full json: {j}"

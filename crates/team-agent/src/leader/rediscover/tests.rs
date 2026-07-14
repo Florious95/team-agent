@@ -206,8 +206,14 @@ fn rediscover_updates_unique_env_triple_match() {
     let ws = ws("rediscover");
     let mut env = BTreeMap::new();
     env.insert("TEAM_AGENT_LEADER_PANE_ID".to_string(), "%r".to_string());
-    env.insert("TEAM_AGENT_LEADER_PROVIDER".to_string(), "codex".to_string());
-    env.insert("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "fp".to_string());
+    env.insert(
+        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+        "codex".to_string(),
+    );
+    env.insert(
+        "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+        "fp".to_string(),
+    );
     let target = PaneInfo {
         pane_id: PaneId::new("%r"),
         session: SessionName::new("sess"),
@@ -235,10 +241,14 @@ fn rediscover_updates_unique_env_triple_match() {
     });
     let event_log = crate::event_log::EventLog::new(&ws);
 
-    let out = rediscover_leader_receiver_from_targets(&ws, &mut state, &[target], &event_log).unwrap();
+    let out =
+        rediscover_leader_receiver_from_targets(&ws, &mut state, &[target], &event_log).unwrap();
 
     assert_eq!(out["status"], json!("updated"));
-    assert!(out.get("ok").is_none(), "golden rediscover result has no ok wrapper");
+    assert!(
+        out.get("ok").is_none(),
+        "golden rediscover result has no ok wrapper"
+    );
     assert_eq!(out["owner_identity"]["pane_id"], json!("%r"));
     // Stage 3d: receiver lives at canonical teams.<team_key>.leader_receiver.
     let team_key = crate::state::projection::team_state_key(&state);
@@ -255,9 +265,15 @@ fn rediscover_updates_unique_env_triple_match() {
     assert!(rebound.get("reason").is_some_and(Value::is_null));
     assert_eq!(rebound["old_pane_id"], json!("%r"));
     assert_eq!(rebound["new_pane_id"], json!("%r"));
-    assert_eq!(rebound["owner_identity"]["machine_fingerprint"], json!("fp"));
+    assert_eq!(
+        rebound["owner_identity"]["machine_fingerprint"],
+        json!("fp")
+    );
     assert_eq!(rebound["uuid_prefix"], json!("OWNERUUI"));
-    assert_eq!(receiver["discovery"], json!("stale_rediscovery_unique_candidate"));
+    assert_eq!(
+        receiver["discovery"],
+        json!("stale_rediscovery_unique_candidate")
+    );
 }
 
 #[test]
@@ -276,8 +292,14 @@ fn rediscover_owner_identity_passthrough_sets_discovery_and_reason() {
         pane_pid: None,
         leader_env: BTreeMap::from([
             ("TEAM_AGENT_LEADER_PANE_ID".to_string(), "%raw".to_string()),
-            ("TEAM_AGENT_LEADER_PROVIDER".to_string(), "codex".to_string()),
-            ("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "fp".to_string()),
+            (
+                "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+                "codex".to_string(),
+            ),
+            (
+                "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+                "fp".to_string(),
+            ),
         ]),
     };
     let raw_identity = json!({
@@ -305,8 +327,14 @@ fn rediscover_owner_identity_passthrough_sets_discovery_and_reason() {
     // Stage 3d: receiver lives at canonical teams.<team_key>.leader_receiver.
     let team_key = crate::state::projection::team_state_key(&state);
     let receiver = &state["teams"][&team_key]["leader_receiver"];
-    assert_eq!(receiver["discovery"], json!("stale_rediscovery_owner_identity"));
-    let rebound = event_named(&event_log.tail(10).unwrap(), "leader_receiver.rebind_applied");
+    assert_eq!(
+        receiver["discovery"],
+        json!("stale_rediscovery_owner_identity")
+    );
+    let rebound = event_named(
+        &event_log.tail(10).unwrap(),
+        "leader_receiver.rebind_applied",
+    );
     assert_eq!(rebound["reason"], json!("stale_receiver"));
     assert_eq!(rebound["owner_identity"], raw_identity);
     assert_eq!(rebound["uuid_prefix"], json!("RAWUUID1"));
@@ -328,16 +356,23 @@ fn rediscover_missing_and_ambiguous_use_golden_status_names() {
             "claimed_via": "claim-leader"
         }
     });
-    let missing = rediscover_leader_receiver_from_targets(&ws, &mut state, &[], &event_log).unwrap();
+    let missing =
+        rediscover_leader_receiver_from_targets(&ws, &mut state, &[], &event_log).unwrap();
     assert_eq!(missing["status"], json!("missing"));
     assert!(missing.get("ok").is_none());
     assert_eq!(missing["owner_identity"]["pane_id"], json!("%owner"));
-    let missing_event = event_named(&event_log.tail(10).unwrap(), "leader_receiver.rediscover_missing");
+    let missing_event = event_named(
+        &event_log.tail(10).unwrap(),
+        "leader_receiver.rediscover_missing",
+    );
     assert_eq!(missing_event["owner_identity"]["pane_id"], json!("%owner"));
     assert_eq!(missing_event["provider"], json!("codex"));
     assert_eq!(missing_event["old_target"], json!("%owner"));
     assert_eq!(missing_event["candidate_count"], json!(0));
-    let missing_rebind = last_event_named(&event_log.tail(10).unwrap(), "leader_receiver.rebind_required");
+    let missing_rebind = last_event_named(
+        &event_log.tail(10).unwrap(),
+        "leader_receiver.rebind_required",
+    );
     assert!(missing_rebind.get("reason").is_some_and(Value::is_null));
     assert_eq!(missing_rebind["provider"], json!("codex"));
     assert_eq!(missing_rebind["team_id"], json!("sess"));
@@ -350,9 +385,18 @@ fn rediscover_missing_and_ambiguous_use_golden_status_names() {
     assert!(missing_rebind.get("invalidation_reason").is_none());
 
     let mut env = BTreeMap::new();
-    env.insert("TEAM_AGENT_LEADER_PANE_ID".to_string(), "%owner".to_string());
-    env.insert("TEAM_AGENT_LEADER_PROVIDER".to_string(), "codex".to_string());
-    env.insert("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "fp".to_string());
+    env.insert(
+        "TEAM_AGENT_LEADER_PANE_ID".to_string(),
+        "%owner".to_string(),
+    );
+    env.insert(
+        "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+        "codex".to_string(),
+    );
+    env.insert(
+        "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+        "fp".to_string(),
+    );
     let mk = |pane: &str, window: u32, pane_index: u32, tty: &str| PaneInfo {
         pane_id: PaneId::new(pane),
         session: SessionName::new("sess"),
@@ -375,18 +419,29 @@ fn rediscover_missing_and_ambiguous_use_golden_status_names() {
     .unwrap();
     assert_eq!(ambiguous["status"], json!("ambiguous"));
     assert!(ambiguous.get("ok").is_none());
-    assert_eq!(ambiguous["owner_candidates"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        ambiguous["owner_candidates"].as_array().map(Vec::len),
+        Some(2)
+    );
     assert_eq!(ambiguous["owner_candidates"][0]["pane_id"], json!("%a"));
     assert_eq!(ambiguous["owner_candidates"][0]["window_index"], json!(1));
     assert_eq!(ambiguous["owner_candidates"][0]["pane_index"], json!(0));
-    assert_eq!(ambiguous["owner_candidates"][0]["pane_tty"], json!("/ttys001"));
-    assert_eq!(ambiguous["owner_candidates"][0]["current_command"], json!("codex"));
+    assert_eq!(
+        ambiguous["owner_candidates"][0]["pane_tty"],
+        json!("/ttys001")
+    );
+    assert_eq!(
+        ambiguous["owner_candidates"][0]["current_command"],
+        json!("codex")
+    );
     assert_eq!(ambiguous["owner_candidates"][0]["fingerprint"], json!("fp"));
     assert!(ambiguous["owner_candidates"][0]["current_path"]
         .as_str()
         .is_some_and(|path| path.contains("rediscover-%a")));
     assert!(ambiguous.get("incident").is_none());
-    assert!(ambiguous["incident_id"].as_str().is_some_and(|id| id.starts_with("rediscover_")));
+    assert!(ambiguous["incident_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("rediscover_")));
     assert_eq!(ambiguous["deduped"], json!(false));
     let events = event_log.tail(20).unwrap();
     let ambiguous_event = event_named(&events, "leader_receiver.rediscover_ambiguous");
@@ -398,7 +453,10 @@ fn rediscover_missing_and_ambiguous_use_golden_status_names() {
     assert_eq!(candidates_event["provider"], json!("codex"));
     assert_eq!(candidates_event["team_id"], json!("sess"));
     assert_eq!(candidates_event["uuid_prefix"], json!("OWNERUUI"));
-    assert_eq!(candidates_event["debounce_bucket"], ambiguous["incident_id"]);
+    assert_eq!(
+        candidates_event["debounce_bucket"],
+        ambiguous["incident_id"]
+    );
     assert_eq!(candidates_event["reason"], json!("force_confirm_required"));
     assert_eq!(candidates_event["queued"].as_array().map(Vec::len), Some(2));
 }
@@ -538,19 +596,25 @@ fn rediscover_failed_uses_golden_status_and_rebind_shape() {
     .unwrap();
 
     assert_eq!(out["status"], json!("failed"));
-    assert!(out["error"].as_str().is_some_and(|error| error.contains("scan failed")));
+    assert!(out["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("scan failed")));
     assert!(out.get("ok").is_none());
     let events = event_log.tail(10).unwrap();
     let failed = event_named(&events, "leader_receiver.rediscover_failed");
     assert_eq!(failed["provider"], json!("codex"));
-    assert!(failed["error"].as_str().is_some_and(|error| error.contains("scan failed")));
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("scan failed")));
     let rebind = event_named(&events, "leader_receiver.rebind_required");
     assert_eq!(rebind["old_pane_id"], json!("%old"));
     assert_eq!(rebind["reason"], json!("stale_receiver"));
     assert_eq!(rebind["provider"], json!("codex"));
     assert_eq!(rebind["team_id"], json!("sess"));
     assert_eq!(rebind["rediscovery_status"], json!("failed"));
-    assert!(rebind["error"].as_str().is_some_and(|error| error.contains("scan failed")));
+    assert!(rebind["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("scan failed")));
     assert!(rebind.get("owner_identity").is_none());
     assert!(rebind.get("uuid_prefix").is_none());
     assert!(rebind.get("invalidation_reason").is_none());

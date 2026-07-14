@@ -38,7 +38,9 @@ pub(crate) fn claude_explicit_error_fact(record: &serde_json::Value) -> Option<F
                 FactKind::Error,
             )
             .with_api_error_details(
-                record.get("apiErrorStatus").and_then(serde_json::Value::as_i64),
+                record
+                    .get("apiErrorStatus")
+                    .and_then(serde_json::Value::as_i64),
                 non_empty_string_field(record, "error"),
                 non_empty_string_field(record, "requestId"),
                 non_empty_string_field(record, "uuid"),
@@ -58,7 +60,9 @@ fn codex_explicit_error_fact(record: &serde_json::Value) -> Option<FaultFact> {
     }
     Some(FaultFact::new(
         Signature::new("turn_failed"),
-        turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+        turn.get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(TurnId::new),
         FactKind::Failed,
     ))
 }
@@ -126,8 +130,14 @@ fn claude_record_is_assistant_api_error(record: &serde_json::Value) -> bool {
             .and_then(|message| message.get("role"))
             .and_then(serde_json::Value::as_str)
             == Some("assistant")
-        && record.get("isApiErrorMessage").and_then(serde_json::Value::as_bool) == Some(true)
-        && (record.get("apiErrorStatus").and_then(serde_json::Value::as_i64).is_some()
+        && record
+            .get("isApiErrorMessage")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && (record
+            .get("apiErrorStatus")
+            .and_then(serde_json::Value::as_i64)
+            .is_some()
             || non_empty_string_field(record, "error").is_some()
             || non_empty_string_field(record, "requestId").is_some())
 }
@@ -156,7 +166,9 @@ fn codex_fault_fact(record: &serde_json::Value) -> Option<FaultFact> {
         if turn.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
             return Some(FaultFact::new(
                 Signature::new("turn_failed"),
-                turn.get("id").and_then(serde_json::Value::as_str).map(TurnId::new),
+                turn.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(TurnId::new),
                 FactKind::Failed,
             ));
         }

@@ -31,8 +31,7 @@ fn src_root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = src_root().join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 fn non_comment(src: &str) -> String {
@@ -102,7 +101,8 @@ fn batch5_kill_decision_and_owned_socket_cleanup_untouched() {
     );
     let code = non_comment(&body);
     assert!(
-        code.contains("kill_server()") || code.contains(".kill_server(")
+        code.contains("kill_server()")
+            || code.contains(".kill_server(")
             || code.contains("kill_server()"),
         "cli/mod.rs owned-socket cleanup must still call `.kill_server()` — \
          Batch 5 does not move kill policy into the factory (CR C-2)."

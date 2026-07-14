@@ -178,13 +178,12 @@ pub fn start_coordinator_with_team(
             action: None,
         });
     }
-    let rotation_reason = if matches!(health.status, CoordinatorHealthStatus::Running)
-        && !health.metadata_ok
-    {
-        health.metadata_mismatch_reason.clone()
-    } else {
-        None
-    };
+    let rotation_reason =
+        if matches!(health.status, CoordinatorHealthStatus::Running) && !health.metadata_ok {
+            health.metadata_mismatch_reason.clone()
+        } else {
+            None
+        };
     if matches!(health.status, CoordinatorHealthStatus::Running) && !health.metadata_ok {
         crate::event_log::EventLog::new(workspace.as_path()).write(
             "coordinator.rotation_required",
@@ -215,7 +214,10 @@ pub fn start_coordinator_with_team(
                 binary_identity_relation: health.binary_identity_relation,
                 log: None,
                 schema_error: None,
-                action: Some("refusing to rotate coordinator metadata that points at the caller process".to_string()),
+                action: Some(
+                    "refusing to rotate coordinator metadata that points at the caller process"
+                        .to_string(),
+                ),
             });
         }
         match stop_coordinator(workspace) {
@@ -413,8 +415,7 @@ fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
         Command::new("ps").args(["-axo", "pid=,command="]),
         "ps_table",
         None,
-    )
-    {
+    ) {
         Ok(output) if output.status.success() => output,
         _ => return Vec::new(),
     };
@@ -432,9 +433,7 @@ fn discover_coordinator_pids(workspace: &WorkspacePath) -> Vec<Pid> {
 
 fn parse_ps_command_line(line: &str) -> Option<(u32, &str)> {
     let line = line.trim_start();
-    let split = line
-        .find(char::is_whitespace)
-        .unwrap_or(line.len());
+    let split = line.find(char::is_whitespace).unwrap_or(line.len());
     let pid = line.get(..split)?.trim().parse::<u32>().ok()?;
     let command = line.get(split..)?.trim();
     Some((pid, command))
@@ -455,9 +454,13 @@ fn coordinator_command_matches_workspace(command: &str, workspaces: &[String]) -
     command
         .split_whitespace()
         .any(|token| token == "team-agent" || token.ends_with("/team-agent"))
-        && command.split_whitespace().any(|token| token == "coordinator")
+        && command
+            .split_whitespace()
+            .any(|token| token == "coordinator")
         && command.contains("--workspace")
-        && workspaces.iter().any(|workspace| command.contains(workspace))
+        && workspaces
+            .iter()
+            .any(|workspace| command.contains(workspace))
 }
 
 fn terminate_pid(pid: Pid) -> bool {
@@ -505,17 +508,17 @@ fn process_tree_pids(root: Pid) -> Vec<Pid> {
         "ps_parent",
         None,
     )
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next()?.parse::<u32>().ok()?;
-            let ppid = parts.next()?.parse::<u32>().ok()?;
-            Some((pid, ppid))
-        })
-        .collect::<Vec<_>>();
+    .ok()
+    .map(|out| String::from_utf8_lossy(&out.stdout).to_string())
+    .unwrap_or_default()
+    .lines()
+    .filter_map(|line| {
+        let mut parts = line.split_whitespace();
+        let pid = parts.next()?.parse::<u32>().ok()?;
+        let ppid = parts.next()?.parse::<u32>().ok()?;
+        Some((pid, ppid))
+    })
+    .collect::<Vec<_>>();
     let mut out = Vec::new();
     collect_child_pids(root_pid, &pairs, &mut out);
     out.push(root_pid);
@@ -718,11 +721,17 @@ fn coordinator_binary_identity_mismatch_reason(
     let Some(metadata) = metadata else {
         return Some(CoordinatorMetadataMismatchReason::MetadataMissing);
     };
-    let Some(binary_version) = metadata.binary_version.as_deref().filter(|value| !value.is_empty())
+    let Some(binary_version) = metadata
+        .binary_version
+        .as_deref()
+        .filter(|value| !value.is_empty())
     else {
         return Some(CoordinatorMetadataMismatchReason::BinaryIdentityMissing);
     };
-    let Some(binary_path) = metadata.binary_path.as_deref().filter(|value| !value.is_empty())
+    let Some(binary_path) = metadata
+        .binary_path
+        .as_deref()
+        .filter(|value| !value.is_empty())
     else {
         return Some(CoordinatorMetadataMismatchReason::BinaryIdentityMissing);
     };
@@ -928,7 +937,9 @@ fn collect_event_lines(
     let archive_signature = file_signature(&archive_path)?;
     let mut lines = Vec::new();
 
-    let size = std::fs::metadata(&events_path).map(|m| m.len()).unwrap_or(0);
+    let size = std::fs::metadata(&events_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     let rotated = cursor.initialized
         && (cursor.archive_signature != archive_signature || cursor.event_offset > size);
     if rotated {
@@ -1004,7 +1015,10 @@ fn collect_result_lines(
         let mut summary = crate::message_store::result_summary_from_row(&row)
             .unwrap_or_else(|| serde_json::json!({}));
         if let Some(obj) = summary.as_object_mut() {
-            obj.insert("event".to_string(), Value::String("result_received".to_string()));
+            obj.insert(
+                "event".to_string(),
+                Value::String("result_received".to_string()),
+            );
         }
         if let Some(rendered) = render_event_line(&summary) {
             lines.push(rendered);
@@ -1100,7 +1114,8 @@ fn file_signature(path: &Path) -> Result<Option<(u64, i128)>, WatchError> {
 }
 
 fn first_field<'a>(event: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|key| event.get(*key).and_then(Value::as_str))
+    keys.iter()
+        .find_map(|key| event.get(*key).and_then(Value::as_str))
 }
 
 fn clean_field(event: &Value, keys: &[&str], default: &str) -> String {

@@ -13,7 +13,11 @@ fn skill_source() -> PathBuf {
         CTR.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::create_dir_all(dir.join("team-agent")).unwrap();
-    std::fs::write(dir.join("team-agent").join("SKILL.md"), b"---\nname: team-agent\n---\nbody\n").unwrap();
+    std::fs::write(
+        dir.join("team-agent").join("SKILL.md"),
+        b"---\nname: team-agent\n---\nbody\n",
+    )
+    .unwrap();
     dir.join("team-agent")
 }
 
@@ -34,7 +38,11 @@ fn dispatch_routes_install_skill_dry_run_all() {
         ],
         &ws,
     );
-    assert_eq!(code, ExitCode::Ok, "`install-skill --target all --source <dir> --dry-run` must route + exit 0");
+    assert_eq!(
+        code,
+        ExitCode::Ok,
+        "`install-skill --target all --source <dir> --dry-run` must route + exit 0"
+    );
     let _ = std::fs::remove_dir_all(&ws);
     let _ = std::fs::remove_dir_all(source.parent().unwrap());
 }
@@ -52,7 +60,11 @@ fn install_skill_missing_source_is_usage_error() {
         ],
         &ws,
     );
-    assert_eq!(code, ExitCode::Error, "install-skill without --source must error (CliError::Usage -> emit_cli_error exit 1)");
+    assert_eq!(
+        code,
+        ExitCode::Error,
+        "install-skill without --source must error (CliError::Usage -> emit_cli_error exit 1)"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 
@@ -70,7 +82,11 @@ fn install_skill_invalid_target_is_usage_error() {
         ],
         &ws,
     );
-    assert_eq!(code, ExitCode::Error, "install-skill --target bogus must error (CliError::Usage -> emit_cli_error exit 1)");
+    assert_eq!(
+        code,
+        ExitCode::Error,
+        "install-skill --target bogus must error (CliError::Usage -> emit_cli_error exit 1)"
+    );
     let _ = std::fs::remove_dir_all(&ws);
     let _ = std::fs::remove_dir_all(source.parent().unwrap());
 }

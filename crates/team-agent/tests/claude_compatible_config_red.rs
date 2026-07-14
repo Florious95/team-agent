@@ -23,9 +23,9 @@ use team_agent::provider::{
 };
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 #[test]
@@ -34,15 +34,8 @@ fn compatible_api_profile_writes_claude_settings_and_project_state_with_mcp_serv
     let team = write_claude_profile_team(&ws, "cfgteam", "clauder");
     let transport = RecordingTransport::default();
 
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("cfgteam"),
-        &transport,
-    )
-    .expect("quick-start through recording transport should resolve compatible profile config");
+    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("cfgteam"), &transport)
+        .expect("quick-start through recording transport should resolve compatible profile config");
 
     let spawn = transport.single_spawn();
     let config_dir = spawn
@@ -110,7 +103,7 @@ fn managed_profile_command_plan_omits_mcp_config_even_when_mcp_config_is_availab
             tools: &tools,
             profile_launch: Some(&profile),
             agent_id_hint: None,
-                effort: None,
+            effort: None,
         })
         .expect("managed compatible_api command plan should build");
 
@@ -133,10 +126,18 @@ fn settings_contains_trust_onboarding_and_theme(settings: &Value) -> bool {
 }
 
 fn read_json(path: &Path) -> Value {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|err| panic!("expected managed Claude config file {}: {err}", path.display()));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|err| panic!("managed Claude config file must be JSON {}: {err}; text={text}", path.display()))
+    let text = std::fs::read_to_string(path).unwrap_or_else(|err| {
+        panic!(
+            "expected managed Claude config file {}: {err}",
+            path.display()
+        )
+    });
+    serde_json::from_str(&text).unwrap_or_else(|err| {
+        panic!(
+            "managed Claude config file must be JSON {}: {err}; text={text}",
+            path.display()
+        )
+    })
 }
 
 fn write_claude_profile_team(ws: &Path, team_key: &str, agent_id: &str) -> PathBuf {
@@ -195,7 +196,11 @@ struct RecordingTransport {
 impl RecordingTransport {
     fn single_spawn(&self) -> RecordedSpawn {
         let spawns = self.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1, "fixture should record one Claude worker spawn; spawns={spawns:?}");
+        assert_eq!(
+            spawns.len(),
+            1,
+            "fixture should record one Claude worker spawn; spawns={spawns:?}"
+        );
         spawns[0].clone()
     }
 }
@@ -258,8 +263,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
@@ -269,7 +281,10 @@ impl Transport for RecordingTransport {
         }
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<team_agent::transport::PaneLiveness, TransportError> {
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
         Ok(team_agent::transport::PaneLiveness::Live)
     }
 

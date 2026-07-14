@@ -14,11 +14,18 @@ pub fn repair_schema(workspace: &Path) -> Result<MigrationOutcome, PackagingErro
     match fix_schema_layout(workspace, SCHEMA_VERSION)? {
         FixResult::Missing(diagnosis) => Ok(MigrationOutcome::UpToDate { diagnosis }),
         FixResult::Blocked { reason } => Ok(MigrationOutcome::Blocked { reason }),
-        FixResult::Fixed { diagnosis, rebuilds } if rebuilds.is_empty() => {
-            Ok(MigrationOutcome::UpToDate { diagnosis })
-        }
-        FixResult::Fixed { diagnosis, rebuilds } => {
-            Ok(MigrationOutcome::Migrated { fix: FixResult::Fixed { diagnosis, rebuilds } })
-        }
+        FixResult::Fixed {
+            diagnosis,
+            rebuilds,
+        } if rebuilds.is_empty() => Ok(MigrationOutcome::UpToDate { diagnosis }),
+        FixResult::Fixed {
+            diagnosis,
+            rebuilds,
+        } => Ok(MigrationOutcome::Migrated {
+            fix: FixResult::Fixed {
+                diagnosis,
+                rebuilds,
+            },
+        }),
     }
 }

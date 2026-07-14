@@ -80,14 +80,15 @@ pub fn cmd_init(args: &InitArgs) -> Result<CmdResult, CliError> {
     if args.force || !state_path.exists() {
         std::fs::write(&state_path, INIT_STATE_TEMPLATE)?;
     }
-    crate::event_log::EventLog::new(&args.workspace).write(
-        "init",
-        json!({
-            "spec_path": spec_path.to_string_lossy().to_string(),
-            "state_path": state_path.to_string_lossy().to_string(),
-        }),
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
+    crate::event_log::EventLog::new(&args.workspace)
+        .write(
+            "init",
+            json!({
+                "spec_path": spec_path.to_string_lossy().to_string(),
+                "state_path": state_path.to_string_lossy().to_string(),
+            }),
+        )
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
     Ok(CmdResult::from_json(
         json!({
             "ok": true,
@@ -122,7 +123,10 @@ pub fn cmd_quick_start(args: &QuickStartArgs) -> Result<CmdResult, CliError> {
         .and_then(|readiness| readiness.get("ready"))
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let status = value.get("status").and_then(Value::as_str).map(str::to_string);
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if args.json
         || value.get("ok").and_then(Value::as_bool) == Some(false)
         || session_capture_incomplete
@@ -173,8 +177,8 @@ fn append_reminder(text: String, reminder: &str) -> String {
 
 /// `cmd_compile`(`commands.py:42`)。
 pub fn cmd_compile(args: &CompileArgs) -> Result<CmdResult, CliError> {
-    let spec = crate::compiler::compile_team(&args.team)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    let spec =
+        crate::compiler::compile_team(&args.team).map_err(|e| CliError::Runtime(e.to_string()))?;
     warn_ignored_owner_team_id(&args.team);
     std::fs::write(&args.out, crate::model::yaml::dumps(&spec))?;
     Ok(CmdResult::from_json(
@@ -194,7 +198,10 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
     };
     let workspace = crate::model::paths::team_workspace(team_dir)
         .unwrap_or_else(|_| team_dir.parent().unwrap_or(team_dir).to_path_buf());
-    eprintln!("Warning: ignored TEAM.md {}={}", ignored.field, ignored.value);
+    eprintln!(
+        "Warning: ignored TEAM.md {}={}",
+        ignored.field, ignored.value
+    );
     eprintln!("Reason: owner identity is the canonical runtime team key, not TEAM.md front matter");
     eprintln!("Action: remove {} from TEAM.md", ignored.field);
     let fields = json!({
@@ -205,7 +212,9 @@ fn warn_ignored_owner_team_id(team_dir: &std::path::Path) {
         "reason": "owner identity is derived from the canonical runtime team key",
         "action": "remove owner_team_id from TEAM.md",
     });
-    if let Err(err) = crate::event_log::EventLog::new(&workspace).write("spec.field_ignored", fields) {
+    if let Err(err) =
+        crate::event_log::EventLog::new(&workspace).write("spec.field_ignored", fields)
+    {
         eprintln!("Warning: spec.field_ignored event write failed: {err}");
     }
 }
@@ -362,17 +371,17 @@ pub fn cmd_watch(args: &WatchArgs) -> Result<CmdResult, CliError> {
     }
     #[cfg(test)]
     {
-    let store = crate::message_store::MessageStore::open(&args.workspace)
+        let store = crate::message_store::MessageStore::open(&args.workspace)
+            .map_err(|e| CliError::Runtime(e.to_string()))?;
+        let mut cursor = crate::coordinator::WatchCursor::default();
+        let lines = crate::coordinator::collect_watch_lines(
+            &workspace,
+            &mut cursor,
+            &store,
+            args.team.as_deref(),
+        )
         .map_err(|e| CliError::Runtime(e.to_string()))?;
-    let mut cursor = crate::coordinator::WatchCursor::default();
-    let lines = crate::coordinator::collect_watch_lines(
-        &workspace,
-        &mut cursor,
-        &store,
-        args.team.as_deref(),
-    )
-    .map_err(|e| CliError::Runtime(e.to_string()))?;
-    Ok(CmdResult::human(lines.join("\n")))
+        Ok(CmdResult::human(lines.join("\n")))
     }
 }
 
@@ -494,7 +503,11 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
     )
     .map_err(|e| CliError::Runtime(e.to_string()))?;
     let state = selected.state;
-    let event_log = selected.run_workspace.join(".team").join("logs").join("events.jsonl");
+    let event_log = selected
+        .run_workspace
+        .join(".team")
+        .join("logs")
+        .join("events.jsonl");
     // 0.5.x Phase 1d Batch 3: factory-routed diagnose backend so
     // conpty teams get accurate `has_session` / capture from the shim
     // rather than a workspace tmux fallback (which would always miss
@@ -537,19 +550,13 @@ pub fn cmd_diagnose(args: &DiagnoseArgs) -> Result<CmdResult, CliError> {
 /// `cmd_preflight`(`parser.py:160`)。
 pub fn cmd_preflight(args: &PreflightArgs) -> Result<CmdResult, CliError> {
     let report = build_preflight_report(&args.team)?;
-    Ok(CmdResult::from_json(
-        report,
-        args.json,
-    ))
+    Ok(CmdResult::from_json(report, args.json))
 }
 
 /// `cmd_wait_ready`(`parser.py:171`)。
 pub fn cmd_wait_ready(args: &WaitReadyArgs) -> Result<CmdResult, CliError> {
     let report = build_wait_ready_report(&args.workspace, args.timeout, args.team.as_deref())?;
-    Ok(CmdResult::from_json(
-        report,
-        args.json,
-    ))
+    Ok(CmdResult::from_json(report, args.json))
 }
 
 /// `cmd_e2e`(`parser.py:449`)。
@@ -579,10 +586,15 @@ pub fn cmd_e2e(args: &E2eArgs) -> Result<CmdResult, CliError> {
 /// `cmd_peek`(`commands.py:118`)。
 pub fn cmd_peek(args: &PeekArgs) -> Result<CmdResult, CliError> {
     if !args.allow_raw_screen {
-        return Err(CliError::Usage("peek requires --allow-raw-screen".to_string()));
+        return Err(CliError::Usage(
+            "peek requires --allow-raw-screen".to_string(),
+        ));
     }
     let state = crate::state::persist::load_runtime_state(&args.workspace)?;
-    let Some(agent_state) = state.get("agents").and_then(|agents| agents.get(&args.agent)) else {
+    let Some(agent_state) = state
+        .get("agents")
+        .and_then(|agents| agents.get(&args.agent))
+    else {
         return Ok(CmdResult::from_json(
             json!({
                 "ok": false,
@@ -661,13 +673,29 @@ fn peek_unavailable(agent: &str, json: bool) -> CmdResult {
     )
 }
 
-fn agent_pane_id(state: &Value, agent: &str, agent_state: &Value) -> Option<(String, String, String)> {
-    let session = state.get("session_name").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+fn agent_pane_id(
+    state: &Value,
+    agent: &str,
+    agent_state: &Value,
+) -> Option<(String, String, String)> {
+    let session = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
     let window = ["window", "window_name"]
         .iter()
-        .find_map(|key| agent_state.get(*key).and_then(Value::as_str).filter(|s| !s.is_empty()))
+        .find_map(|key| {
+            agent_state
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or(agent);
-    Some((session.to_string(), window.to_string(), format!("{session}:{window}")))
+    Some((
+        session.to_string(),
+        window.to_string(),
+        format!("{session}:{window}"),
+    ))
 }
 
 fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
@@ -787,7 +815,10 @@ fn command_on_path(command: &str) -> bool {
 }
 
 fn command_version(command: &str) -> Value {
-    match std::process::Command::new(command).arg("--version").output() {
+    match std::process::Command::new(command)
+        .arg("--version")
+        .output()
+    {
         Ok(output) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if text.is_empty() {
@@ -959,7 +990,10 @@ tasks:
 
 fn sessions_overview(state: &Value, spec: Option<&crate::model::yaml::Value>) -> Value {
     let mut rows = Vec::new();
-    if let Some(agents) = spec.and_then(|v| v.get("agents")).and_then(crate::model::yaml::Value::as_list) {
+    if let Some(agents) = spec
+        .and_then(|v| v.get("agents"))
+        .and_then(crate::model::yaml::Value::as_list)
+    {
         for agent in agents {
             let Some(agent_id) = agent.get("id").and_then(crate::model::yaml::Value::as_str) else {
                 continue;
@@ -1015,7 +1049,10 @@ fn session_row(
 }
 
 fn yaml_str(value: &crate::model::yaml::Value, key: &str) -> Option<String> {
-    value.get(key).and_then(crate::model::yaml::Value::as_str).map(ToString::to_string)
+    value
+        .get(key)
+        .and_then(crate::model::yaml::Value::as_str)
+        .map(ToString::to_string)
 }
 
 fn field_or_null(value: &Value, keys: &[&str]) -> Value {
@@ -1041,7 +1078,11 @@ fn last_task_for_agent(state: &Value, agent_id: &str) -> Value {
                 .rev()
                 .find(|task| task.get("assignee").and_then(Value::as_str) == Some(agent_id))
         })
-        .and_then(|task| task.get("id").and_then(Value::as_str).map(ToString::to_string))
+        .and_then(|task| {
+            task.get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
         .map(Value::String)
         .unwrap_or(Value::Null)
 }
@@ -1067,8 +1108,10 @@ fn window_target(agent_state: &Value, agent_id: &str) -> Value {
     }
 }
 
-
-fn load_team_spec_optional(workspace: &Path, state: &Value) -> Result<Option<crate::model::yaml::Value>, CliError> {
+fn load_team_spec_optional(
+    workspace: &Path,
+    state: &Value,
+) -> Result<Option<crate::model::yaml::Value>, CliError> {
     let spec_path = state
         .get("spec_path")
         .and_then(Value::as_str)
@@ -1196,7 +1239,10 @@ fn format_inbox_human(
     Ok(lines.join("\n"))
 }
 
-fn uncollected_result_count(workspace: &Path, owner_team_id: Option<&str>) -> Result<i64, CliError> {
+fn uncollected_result_count(
+    workspace: &Path,
+    owner_team_id: Option<&str>,
+) -> Result<i64, CliError> {
     let store = crate::message_store::MessageStore::open(workspace)
         .map_err(|e| CliError::Runtime(e.to_string()))?;
     let conn = crate::db::schema::open_db(store.db_path())
@@ -1401,10 +1447,16 @@ pub fn cmd_doctor(args: &DoctorArgs) -> Result<CmdResult, CliError> {
         ));
     }
     if args.comms || matches!(args.gate, Some(DoctorGate::Comms)) {
-        let value = crate::diagnose::comms::doctor_comms_json(&args.workspace, args.team.as_deref(), Some("comms"))?;
+        let value = crate::diagnose::comms::doctor_comms_json(
+            &args.workspace,
+            args.team.as_deref(),
+            Some("comms"),
+        )?;
         if !args.json {
             let json_tail = serde_json::to_string_pretty(&sort_json(&value))?;
-            return Ok(CmdResult::human(format!("{COMMS_BOUNDARY_TEXT}\n{json_tail}")));
+            return Ok(CmdResult::human(format!(
+                "{COMMS_BOUNDARY_TEXT}\n{json_tail}"
+            )));
         }
         return Ok(CmdResult::from_json(value, true));
     }
@@ -1439,9 +1491,18 @@ mod tests {
         });
         let out = quickstart_human(&value);
         assert!(out.contains("team started"), "must keep summary; got {out}");
-        assert!(out.contains("attach:"), "must render attach block; got {out}");
-        assert!(out.contains("team-y:w1") && out.contains("team-y:w2"), "must list each attach cmd; got {out}");
-        assert!(out.ends_with(crate::cli::QUICK_START_REMINDER), "must append harness reminder; got {out}");
+        assert!(
+            out.contains("attach:"),
+            "must render attach block; got {out}"
+        );
+        assert!(
+            out.contains("team-y:w1") && out.contains("team-y:w2"),
+            "must list each attach cmd; got {out}"
+        );
+        assert!(
+            out.ends_with(crate::cli::QUICK_START_REMINDER),
+            "must append harness reminder; got {out}"
+        );
     }
 
     #[test]
@@ -1467,11 +1528,18 @@ mod tests {
                 "w1": {"pane_id": "%7", "window": "w1"}
             }
         });
-        let agent = state.get("agents").and_then(|agents| agents.get("w1")).unwrap();
+        let agent = state
+            .get("agents")
+            .and_then(|agents| agents.get("w1"))
+            .unwrap();
 
         assert_eq!(
             agent_pane_id(&state, "w1", agent).unwrap(),
-            ("team-x".to_string(), "w1".to_string(), "team-x:w1".to_string())
+            (
+                "team-x".to_string(),
+                "w1".to_string(),
+                "team-x:w1".to_string()
+            )
         );
     }
 
@@ -1483,11 +1551,18 @@ mod tests {
                 "w1": {"window": "worker-one"}
             }
         });
-        let agent = state.get("agents").and_then(|agents| agents.get("w1")).unwrap();
+        let agent = state
+            .get("agents")
+            .and_then(|agents| agents.get("w1"))
+            .unwrap();
 
         assert_eq!(
             agent_pane_id(&state, "w1", agent).unwrap(),
-            ("team-x".to_string(), "worker-one".to_string(), "team-x:worker-one".to_string())
+            (
+                "team-x".to_string(),
+                "worker-one".to_string(),
+                "team-x:worker-one".to_string()
+            )
         );
     }
 }

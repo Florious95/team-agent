@@ -28,7 +28,15 @@
 //! contracts blitz 可 NAME 这些类型并 CALL 这些 fn、断言其 rich return。
 
 // ROUND-0 skeleton:fn body 全 unimplemented!() → import/field/param/大 Err 暂未落地;P2 porter 实现时移除。
-#![allow(dead_code, unused_imports, unused_variables, clippy::result_large_err, clippy::doc_overindented_list_items, clippy::doc_lazy_continuation, clippy::io_other_error)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::result_large_err,
+    clippy::doc_overindented_list_items,
+    clippy::doc_lazy_continuation,
+    clippy::io_other_error
+)]
 // §10:lifecycle 写路径(save_runtime_state/snapshot/plan_state,bug-084 高危)实现层禁 unwrap/expect/panic
 // (unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

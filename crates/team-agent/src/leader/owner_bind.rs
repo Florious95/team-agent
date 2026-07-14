@@ -74,7 +74,9 @@ pub fn leader_identity_context(
     }
     if let Some(state_uuid) = state
         .and_then(|s| get_path_str(s, &["team_owner", "leader_session_uuid"]))
-        .or_else(|| state.and_then(|s| get_path_str(s, &["leader_receiver", "leader_session_uuid"])))
+        .or_else(|| {
+            state.and_then(|s| get_path_str(s, &["leader_receiver", "leader_session_uuid"]))
+        })
     {
         return Ok(LeaderIdentity {
             leader_session_uuid: serde_json::from_value(Value::String(state_uuid))?,
@@ -144,7 +146,13 @@ pub fn bind_owner_from_caller_pane(
     let os_user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_default();
-    let identity = family_a_identity(workspace, team_id, override_uuid, &machine_fingerprint, &os_user)?;
+    let identity = family_a_identity(
+        workspace,
+        team_id,
+        override_uuid,
+        &machine_fingerprint,
+        &os_user,
+    )?;
     let owner = TeamOwner {
         pane_id: PaneId::new(pane.clone()),
         provider,
@@ -281,19 +289,23 @@ fn tmux_pane_info(workspace: &Path, pane: &str) -> Option<PaneInfo> {
         .ok()?
         .into_iter()
         .find(|info| info.pane_id == target)
-        .or_else(|| tmux_pane_current_command(workspace, pane).ok().map(|command| PaneInfo {
-            pane_id: target,
-            session: SessionName::new(""),
-            window_index: None,
-            window_name: None,
-            pane_index: None,
-            tty: None,
-            current_command: (!command.is_empty()).then_some(command),
-            current_path: None,
-            active: true,
-            pane_pid: None,
-            leader_env: Default::default(),
-        }))
+        .or_else(|| {
+            tmux_pane_current_command(workspace, pane)
+                .ok()
+                .map(|command| PaneInfo {
+                    pane_id: target,
+                    session: SessionName::new(""),
+                    window_index: None,
+                    window_name: None,
+                    pane_index: None,
+                    tty: None,
+                    current_command: (!command.is_empty()).then_some(command),
+                    current_path: None,
+                    active: true,
+                    pane_pid: None,
+                    leader_env: Default::default(),
+                })
+        })
 }
 
 // NOTE: `derive_leader_session_uuid`(`leader_binding.py:146`)已由
@@ -308,16 +320,31 @@ mod e11_provider_bind_tests {
     // E11 层2:copilot leader 命令必须绑成 Provider::Copilot(此前缺臂 → _ => Codex 误绑)。
     #[test]
     fn copilot_command_binds_copilot_not_codex() {
-        assert_eq!(super::super::attribute_command_provider("copilot --banner -C /ws"), Some(Provider::Copilot));
-        assert_eq!(super::super::attribute_command_provider("/opt/homebrew/bin/copilot"), Some(Provider::Copilot));
+        assert_eq!(
+            super::super::attribute_command_provider("copilot --banner -C /ws"),
+            Some(Provider::Copilot)
+        );
+        assert_eq!(
+            super::super::attribute_command_provider("/opt/homebrew/bin/copilot"),
+            Some(Provider::Copilot)
+        );
         assert_eq!(owner_bind_provider_wire("copilot --banner"), "copilot");
     }
 
     #[test]
     fn known_commands_map_via_single_source() {
-        assert_eq!(super::super::attribute_command_provider("claude"), Some(Provider::ClaudeCode));
-        assert_eq!(super::super::attribute_command_provider("codex"), Some(Provider::Codex));
-        assert_eq!(super::super::attribute_command_provider("fake"), Some(Provider::Fake));
+        assert_eq!(
+            super::super::attribute_command_provider("claude"),
+            Some(Provider::ClaudeCode)
+        );
+        assert_eq!(
+            super::super::attribute_command_provider("codex"),
+            Some(Provider::Codex)
+        );
+        assert_eq!(
+            super::super::attribute_command_provider("fake"),
+            Some(Provider::Fake)
+        );
         assert_eq!(owner_bind_provider_wire("claude"), "claude");
         assert_eq!(owner_bind_provider_wire("codex"), "codex");
     }
@@ -325,8 +352,14 @@ mod e11_provider_bind_tests {
     // E11 层2:未知命令不再静默默认 codex —— attribution → None,wire → ""。
     #[test]
     fn unknown_command_is_none_not_silent_codex() {
-        assert_eq!(super::super::attribute_command_provider("node /some/thing.js"), None);
-        assert_eq!(super::super::attribute_command_provider("totally-unknown"), None);
+        assert_eq!(
+            super::super::attribute_command_provider("node /some/thing.js"),
+            None
+        );
+        assert_eq!(
+            super::super::attribute_command_provider("totally-unknown"),
+            None
+        );
         assert_eq!(owner_bind_provider_wire("totally-unknown"), "");
     }
 }

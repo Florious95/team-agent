@@ -9,10 +9,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 fn tmp_ws(tag: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "ta-rs-mcp-stdio-{tag}-{}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("ta-rs-mcp-stdio-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&path).unwrap();
     path
 }
@@ -51,12 +48,22 @@ fn mcp_server_binary_subcommand_routes_to_stdio_wire_main() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "one initialize request writes one frame: {stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "one initialize request writes one frame: {stdout}"
+    );
     let frame: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(frame["jsonrpc"], serde_json::json!("2.0"));
     assert_eq!(frame["id"], serde_json::json!(1));
     assert_eq!(frame["result"]["protocolVersion"], serde_json::json!("X"));
-    assert_eq!(frame["result"]["serverInfo"]["name"], serde_json::json!("team_orchestrator"));
-    assert_eq!(frame["result"]["capabilities"], serde_json::json!({"tools": {}}));
+    assert_eq!(
+        frame["result"]["serverInfo"]["name"],
+        serde_json::json!("team_orchestrator")
+    );
+    assert_eq!(
+        frame["result"]["capabilities"],
+        serde_json::json!({"tools": {}})
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }

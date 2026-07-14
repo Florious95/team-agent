@@ -18,9 +18,9 @@ use serde_json::json;
 use team_agent::lifecycle::{launch_with_transport, restart_with_transport, RestartReport};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -245,11 +245,7 @@ impl Transport for PanicOnStartupPromptTransport {
         panic!("fault adapter: startup prompt capture panicked after spawn");
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
     }
 
@@ -262,9 +258,12 @@ impl Transport for PanicOnStartupPromptTransport {
 
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
         let spawns = self.spawns.lock().expect("spawns lock");
-        Ok(Some(spawns.iter().enumerate().any(|(idx, _)| {
-            pane.as_str() == format!("%{idx}")
-        })))
+        Ok(Some(
+            spawns
+                .iter()
+                .enumerate()
+                .any(|(idx, _)| pane.as_str() == format!("%{idx}")),
+        ))
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {

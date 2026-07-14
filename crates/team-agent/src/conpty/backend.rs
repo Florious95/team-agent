@@ -53,9 +53,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::model::enums::PaneLiveness;
 use crate::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 use conpty_transport::{
@@ -164,8 +164,8 @@ impl ConPtyBackend {
                 detail: format!("hello failed: {:?}", resp.error),
             });
         }
-        let hello: HelloResult = serde_json::from_value(resp.result)
-            .map_err(|e| TransportError::MuxUnavailable {
+        let hello: HelloResult =
+            serde_json::from_value(resp.result).map_err(|e| TransportError::MuxUnavailable {
                 backend: BackendKind::ConPty,
                 detail: format!("hello response malformed: {e}"),
             })?;
@@ -303,12 +303,11 @@ impl ConPtyBackend {
             source: std::io::Error::other(e),
         })?;
         let resp = self.dispatch(Op::Spawn, payload)?;
-        let spawn: ProtoSpawnResult = serde_json::from_value(resp.result).map_err(|e| {
-            TransportError::Spawn {
+        let spawn: ProtoSpawnResult =
+            serde_json::from_value(resp.result).map_err(|e| TransportError::Spawn {
                 backend: BackendKind::ConPty,
                 source: std::io::Error::other(e),
-            }
-        })?;
+            })?;
         Ok(SpawnResult {
             pane_id: PaneId::new(spawn.pane_id),
             session: SessionName::new(spawn.session),
@@ -368,13 +367,17 @@ fn map_protocol_error(err: Option<&ProtocolError>) -> TransportError {
             backend: BackendKind::ConPty,
             detail: format!("pipe_token_mismatch: {message}"),
         },
-        ProtocolError::SchemaSkew { message, sent, expected } => TransportError::MuxUnavailable {
+        ProtocolError::SchemaSkew {
+            message,
+            sent,
+            expected,
+        } => TransportError::MuxUnavailable {
             backend: BackendKind::ConPty,
             detail: format!("schema_skew sent={sent} expected={expected}: {message}"),
         },
-        ProtocolError::TargetNotFound { message } => {
-            TransportError::TargetNotFound { target: message.clone() }
-        }
+        ProtocolError::TargetNotFound { message } => TransportError::TargetNotFound {
+            target: message.clone(),
+        },
         ProtocolError::Spawn { message } => TransportError::Spawn {
             backend: BackendKind::ConPty,
             source: std::io::Error::other(message.clone()),
@@ -556,11 +559,10 @@ impl Transport for ConPtyBackend {
             source: std::io::Error::other(e),
         })?;
         let resp = self.dispatch(Op::Capture, payload)?;
-        let cap: protocol::CaptureResult = serde_json::from_value(resp.result).map_err(|e| {
-            TransportError::Capture {
+        let cap: protocol::CaptureResult =
+            serde_json::from_value(resp.result).map_err(|e| TransportError::Capture {
                 source: std::io::Error::other(e),
-            }
-        })?;
+            })?;
         Ok(CapturedText {
             text: cap.text,
             range,
@@ -572,10 +574,7 @@ impl Transport for ConPtyBackend {
     }
 
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
-        let resp = self.dispatch(
-            Op::Liveness,
-            serde_json::json!({"pane_id": pane.as_str()}),
-        )?;
+        let resp = self.dispatch(Op::Liveness, serde_json::json!({"pane_id": pane.as_str()}))?;
         let known = resp.result["known"].as_bool().unwrap_or(false);
         let alive = resp.result["alive"].as_bool().unwrap_or(false);
         Ok(match (known, alive) {
@@ -645,10 +644,7 @@ impl Transport for ConPtyBackend {
     }
 
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
-        let resp = self.dispatch(
-            Op::HasPane,
-            serde_json::json!({"pane_id": pane.as_str()}),
-        )?;
+        let resp = self.dispatch(Op::HasPane, serde_json::json!({"pane_id": pane.as_str()}))?;
         Ok(Some(resp.result["present"].as_bool().unwrap_or(false)))
     }
 
@@ -673,10 +669,7 @@ impl Transport for ConPtyBackend {
     fn kill_window(&self, target: &Target) -> Result<(), TransportError> {
         match target {
             Target::Pane(pane) => {
-                self.dispatch(
-                    Op::KillPane,
-                    serde_json::json!({"pane_id": pane.as_str()}),
-                )?;
+                self.dispatch(Op::KillPane, serde_json::json!({"pane_id": pane.as_str()}))?;
             }
             Target::SessionWindow { session, window } => {
                 self.dispatch(
@@ -692,10 +685,7 @@ impl Transport for ConPtyBackend {
     }
 
     fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
-        self.dispatch(
-            Op::KillPane,
-            serde_json::json!({"pane_id": pane.as_str()}),
-        )?;
+        self.dispatch(Op::KillPane, serde_json::json!({"pane_id": pane.as_str()}))?;
         Ok(())
     }
 

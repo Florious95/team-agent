@@ -20,7 +20,9 @@ fn assert_codex_safety_flags(argv: &[String]) {
         "codex command must always include approval mode: {argv:?}"
     );
     assert!(
-        !argv.iter().any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+        !argv
+            .iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
         "non-dangerous codex command must not bypass approvals/sandbox: {argv:?}"
     );
 }
@@ -62,11 +64,14 @@ fn codex_dangerous_auto_approve_replaces_sandbox_and_approval_flags() {
         )
         .expect("codex dangerous command");
     assert!(
-        argv.iter().any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
+        argv.iter()
+            .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
         "dangerous codex command must use bypass flag: {argv:?}"
     );
     assert!(
-        !argv.iter().any(|arg| arg == "--sandbox" || arg == "--ask-for-approval"),
+        !argv
+            .iter()
+            .any(|arg| arg == "--sandbox" || arg == "--ask-for-approval"),
         "dangerous codex command must replace sandbox/approval flags: {argv:?}"
     );
 
@@ -83,6 +88,10 @@ fn codex_dangerous_auto_approve_replaces_sandbox_and_approval_flags() {
         .expect("codex fork command");
     assert_eq!(fork.get(1).map(String::as_str), Some("fork"));
     assert_eq!(fork.last().map(String::as_str), Some("source-session"));
-    assert!(fork.iter().any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
-    assert!(!fork.iter().any(|arg| arg == "--sandbox" || arg == "--ask-for-approval"));
+    assert!(fork
+        .iter()
+        .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"));
+    assert!(!fork
+        .iter()
+        .any(|arg| arg == "--sandbox" || arg == "--ask-for-approval"));
 }

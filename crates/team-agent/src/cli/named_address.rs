@@ -97,9 +97,15 @@ impl NamedAddressError {
         obj.insert("error".to_string(), Value::String(self.message.clone()));
         obj.insert("action".to_string(), Value::String(self.action.clone()));
         obj.insert("log".to_string(), Value::String(self.log.clone()));
-        obj.insert("candidates".to_string(), Value::Array(self.candidates.clone()));
+        obj.insert(
+            "candidates".to_string(),
+            Value::Array(self.candidates.clone()),
+        );
         if let Some(requested) = self.requested_team.as_deref() {
-            obj.insert("requested_team".to_string(), Value::String(requested.to_string()));
+            obj.insert(
+                "requested_team".to_string(),
+                Value::String(requested.to_string()),
+            );
         }
         if !self.available_team_keys.is_empty() {
             obj.insert(
@@ -113,7 +119,10 @@ impl NamedAddressError {
             );
         }
         if let Some(suggested) = self.suggested_name.as_deref() {
-            obj.insert("suggested_name".to_string(), Value::String(suggested.to_string()));
+            obj.insert(
+                "suggested_name".to_string(),
+                Value::String(suggested.to_string()),
+            );
         }
         Value::Object(obj)
     }
@@ -662,8 +671,8 @@ fn resolve_leader(
     // silently reused the `current` team's receiver and reported a stale
     // pane_id). Legacy single-team compat is preserved only when the state
     // has no `teams` map yet and the requested key equals `active_team_key`.
-    let receiver = resolve_team_scoped_leader_receiver(state, team, target_workspace)?
-        .ok_or_else(|| {
+    let receiver =
+        resolve_team_scoped_leader_receiver(state, team, target_workspace)?.ok_or_else(|| {
             let mut err = leader_not_attached_third_party(
                 target_workspace,
                 team,

@@ -12,7 +12,11 @@ use super::*;
 fn daemon_ws() -> (WorkspacePath, std::path::PathBuf) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("ta-rs-daemon-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let dir = std::env::temp_dir().join(format!(
+        "ta-rs-daemon-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(crate::model::paths::runtime_dir(&dir)).unwrap();
     let _ = crate::message_store::MessageStore::open(&dir).unwrap(); // create the schema (schema_ok)
     (WorkspacePath::new(dir.clone()), dir)
@@ -35,8 +39,15 @@ fn coordinator_health_running_with_matching_metadata_is_ok() {
     write_coordinator_metadata(&wp, me, MetadataSource::Boot).unwrap();
     std::fs::write(coordinator_pid_path(&wp), me.0.to_string()).unwrap();
     let h = coordinator_health(&wp);
-    assert_eq!(h.status, CoordinatorHealthStatus::Running, "a live pid -> status running");
-    assert!(h.metadata_ok, "pid+protocol+schema all match -> metadata_ok");
+    assert_eq!(
+        h.status,
+        CoordinatorHealthStatus::Running,
+        "a live pid -> status running"
+    );
+    assert!(
+        h.metadata_ok,
+        "pid+protocol+schema all match -> metadata_ok"
+    );
     assert!(h.ok, "running ∧ metadata_ok ∧ schema_ok -> healthy");
 }
 
@@ -48,7 +59,11 @@ fn coordinator_health_dead_pid_is_stale_not_ok() {
     write_coordinator_metadata(&wp, dead, MetadataSource::Boot).unwrap();
     std::fs::write(coordinator_pid_path(&wp), dead.0.to_string()).unwrap();
     let h = coordinator_health(&wp);
-    assert_eq!(h.status, CoordinatorHealthStatus::Stale, "a dead pid -> status stale");
+    assert_eq!(
+        h.status,
+        CoordinatorHealthStatus::Stale,
+        "a dead pid -> status stale"
+    );
     assert!(!h.ok, "a stale daemon is not healthy");
 }
 
@@ -60,7 +75,11 @@ fn start_coordinator_when_healthy_is_already_running_no_spawn() {
     write_coordinator_metadata(&wp, me, MetadataSource::Boot).unwrap();
     std::fs::write(coordinator_pid_path(&wp), me.0.to_string()).unwrap();
     let report = start_coordinator(&wp).expect("start_coordinator");
-    assert_eq!(report.status, StartOutcome::AlreadyRunning, "a healthy coordinator -> AlreadyRunning (no spawn)");
+    assert_eq!(
+        report.status,
+        StartOutcome::AlreadyRunning,
+        "a healthy coordinator -> AlreadyRunning (no spawn)"
+    );
     assert!(report.ok);
     assert_eq!(report.pid, Some(me));
 }
@@ -86,10 +105,22 @@ fn start_coordinator_fresh_workspace_decides_started() {
             single-tick testing"]
 fn run_daemon_once_writes_boot_metadata_and_returns_ok() {
     let (wp, dir) = daemon_ws();
-    crate::state::persist::save_runtime_state(&dir, &serde_json::json!({"session_name": "team-x", "agents": {}})).unwrap();
-    let r = run_daemon(DaemonArgs { workspace: wp.clone(), once: true, tick_interval_sec: None, team_key: None });
+    crate::state::persist::save_runtime_state(
+        &dir,
+        &serde_json::json!({"session_name": "team-x", "agents": {}}),
+    )
+    .unwrap();
+    let r = run_daemon(DaemonArgs {
+        workspace: wp.clone(),
+        once: true,
+        tick_interval_sec: None,
+        team_key: None,
+    });
     assert!(r.is_ok(), "run_daemon --once must return Ok; got {r:?}");
-    assert!(coordinator_meta_path(&wp).exists(), "run_daemon must write the coordinator boot metadata");
+    assert!(
+        coordinator_meta_path(&wp).exists(),
+        "run_daemon must write the coordinator boot metadata"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -403,8 +434,11 @@ fn tick_genuine_fast_session_miss_still_stops() {
     // genuinely gone) => {ok:false, stop:true, reason:tmux_session_missing}. The OTHER side of the
     // fork from the timeout case: a definitive miss MUST still stop the daemon. LOCK (already GREEN):
     // guards the genuine-miss stop from being swallowed when the timeout tolerance is added.
-    let (coord, _dir, _seen) =
-        coord_over_staged_tmux("team-spine", vec![RunnerStep::Exit(false)], RunnerStep::Exit(false));
+    let (coord, _dir, _seen) = coord_over_staged_tmux(
+        "team-spine",
+        vec![RunnerStep::Exit(false)],
+        RunnerStep::Exit(false),
+    );
     let report = coord
         .tick()
         .expect("a definitive miss is a typed stop report, not an Err");
@@ -453,15 +487,21 @@ fn run_daemon_backs_off_on_transient_tick_err_then_recovers_without_exiting() {
     let err_idx = tags
         .iter()
         .position(|t| *t == "coordinator.tick_error")
-        .unwrap_or_else(|| panic!("a transient tick Err must log coordinator.tick_error; got {tags:?}"));
+        .unwrap_or_else(|| {
+            panic!("a transient tick Err must log coordinator.tick_error; got {tags:?}")
+        });
     let rec_idx = tags
         .iter()
         .position(|t| *t == "coordinator.tick_recovered")
-        .unwrap_or_else(|| panic!("the recovering Ok tick must log coordinator.tick_recovered; got {tags:?}"));
+        .unwrap_or_else(|| {
+            panic!("the recovering Ok tick must log coordinator.tick_recovered; got {tags:?}")
+        });
     let exit_idx = tags
         .iter()
         .position(|t| *t == "coordinator.exit")
-        .unwrap_or_else(|| panic!("the daemon must log coordinator.exit once it stops; got {tags:?}"));
+        .unwrap_or_else(|| {
+            panic!("the daemon must log coordinator.exit once it stops; got {tags:?}")
+        });
     assert!(
         err_idx < rec_idx,
         "tick_recovered must FOLLOW tick_error (backoff then recover); got {tags:?}"

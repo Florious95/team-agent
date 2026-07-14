@@ -43,8 +43,7 @@ fn make_backend() -> ConPtyBackend {
             Ok(Arc::new(FakePaneRuntime::new()) as Arc<dyn PaneRuntime>)
         }),
     ));
-    let client: Box<dyn PipeClientTrait> =
-        Box::new(PipeClientAdapter(LocalShimClient::new(shim)));
+    let client: Box<dyn PipeClientTrait> = Box::new(PipeClientAdapter(LocalShimClient::new(shim)));
     ConPtyBackend::new("ws-e2e", "team-a")
         .with_pipe_client(client)
         .expect("pipe client should connect for in-memory shim")
@@ -64,7 +63,10 @@ fn phase1_bullet1_quick_start_equivalent_spawns_fake_worker() {
         .expect("spawn must succeed with a live pipe client");
     // Design §Authority Model:155 pane_id shape.
     assert!(
-        spawn.pane_id.as_str().starts_with("conpty:ws-e2e:team-a:w1:"),
+        spawn
+            .pane_id
+            .as_str()
+            .starts_with("conpty:ws-e2e:team-a:w1:"),
         "pane_id shape drift; got {}",
         spawn.pane_id.as_str()
     );
@@ -89,10 +91,7 @@ fn phase1_bullet2_status_reports_conpty_backend_and_pane_row() {
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].pane_id.as_str(), spawn.pane_id.as_str());
     assert_eq!(list[0].session.as_str(), "team-a");
-    assert_eq!(
-        list[0].window_name.as_ref().map(|w| w.as_str()),
-        Some("w1")
-    );
+    assert_eq!(list[0].window_name.as_ref().map(|w| w.as_str()), Some("w1"));
 }
 
 #[test]

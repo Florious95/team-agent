@@ -40,20 +40,38 @@ pub fn attach_leader(
     let targets = attach_leader_targets(workspace, &state);
     let pane_id = pane
         .cloned()
-        .or_else(|| std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()).map(PaneId::new))
+        .or_else(|| {
+            std::env::var("TMUX_PANE")
+                .ok()
+                .filter(|p| !p.is_empty())
+                .map(PaneId::new)
+        })
         .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
     let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
     let Some(target) = targets.iter().find(|target| target.info.pane_id == pane_id) else {
-        return Err(LeaderError::Validation(format!("tmux pane not found: {pane_id}")));
+        return Err(LeaderError::Validation(format!(
+            "tmux pane not found: {pane_id}"
+        )));
     };
-    let mut receiver = receiver_for_attach_target(workspace, &state, &target.info, provider, Discovery::ExplicitPane)?;
+    let mut receiver = receiver_for_attach_target(
+        workspace,
+        &state,
+        &target.info,
+        provider,
+        Discovery::ExplicitPane,
+    )?;
     if let Some(endpoint) = target.endpoint.as_ref() {
         receiver.tmux_socket = Some(endpoint.clone());
     }
     let validation = validate_attach_target(workspace, &state, &target.info, provider);
     if validation.is_err() {
         let pane_info = pane_info_value(&target.info);
-        let targets_value = Value::Array(targets.iter().map(|target| pane_info_value(&target.info)).collect());
+        let targets_value = Value::Array(
+            targets
+                .iter()
+                .map(|target| pane_info_value(&target.info))
+                .collect(),
+        );
         let owner_record = state_owner(&state);
         if let Some((readopted, validation)) = crate::leader::try_readopt_leader_pane(
             workspace,
@@ -66,8 +84,11 @@ pub fn attach_leader(
             LeaseSource::Manual,
             &event_log,
         )? {
-            if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
-            let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
+            if let Some(endpoint) = target.endpoint.as_deref() {
+                quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
+            }
+            let _ =
+                requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
             return Ok(LeaseResult {
                 ok: true,
                 status: LeaseStatus::Claimed,
@@ -90,7 +111,9 @@ pub fn attach_leader(
                 "reason": validation.err().unwrap_or("leader_pane_validation_failed"),
             }),
         )?;
-        return Err(LeaderError::Validation(format!("leader pane validation failed: {pane_id}")));
+        return Err(LeaderError::Validation(format!(
+            "leader pane validation failed: {pane_id}"
+        )));
     }
     let epoch = current_owner_epoch(&state);
     if state.get("team_owner").is_some() {
@@ -100,7 +123,9 @@ pub fn attach_leader(
             super::LeaderEvent::ReceiverAttached.name(),
             json!({"pane_id": pane_id.as_str(), "owner_epoch": epoch.0}),
         )?;
-        if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
+        if let Some(endpoint) = target.endpoint.as_deref() {
+            quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
+        }
         let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
         return Ok(LeaseResult {
             ok: true,
@@ -125,7 +150,9 @@ pub fn attach_leader(
         super::LeaderEvent::ReceiverAttached.name(),
         json!({"pane_id": pane_id.as_str(), "owner_epoch": next_epoch.0}),
     )?;
-    if let Some(endpoint) = target.endpoint.as_deref() { quiet_fake_leader_pane_echo(provider, &target.info, endpoint); }
+    if let Some(endpoint) = target.endpoint.as_deref() {
+        quiet_fake_leader_pane_echo(provider, &target.info, endpoint);
+    }
     let _ = requeue_exhausted_watchers_after_attach(workspace, &state, &event_log, &pane_id)?;
     Ok(LeaseResult {
         ok: true,
@@ -279,7 +306,10 @@ fn attach_leader_targets(workspace: &Path, state: &Value) -> Vec<AttachLeaderTar
             .list_targets()
             .unwrap_or_default()
             .into_iter()
-            .map(|info| AttachLeaderTarget { info, endpoint: None }),
+            .map(|info| AttachLeaderTarget {
+                info,
+                endpoint: None,
+            }),
     );
     targets
 }
@@ -336,11 +366,7 @@ fn requeue_exhausted_watchers_after_attach(
     let store = MessageStore::open(workspace)?;
     let team_id = TeamKey::new(crate::state::projection::team_state_key(state));
     let notices = crate::messaging::requeue_delivery_exhausted_watchers(
-        workspace,
-        &store,
-        event_log,
-        &team_id,
-        pane_id,
+        workspace, &store, event_log, &team_id, pane_id,
     )?;
     event_log.write(
         super::LeaderEvent::ReceiverRequeuedExhaustedWatchers.name(),
@@ -359,7 +385,10 @@ pub(crate) fn requeued_exhausted_watchers_event_payload(
     _team_id: &TeamKey,
     notices: &[crate::messaging::WatcherNotice],
 ) -> serde_json::Value {
-    let watcher_ids: Vec<&str> = notices.iter().map(|notice| notice.watcher_id.as_str()).collect();
+    let watcher_ids: Vec<&str> = notices
+        .iter()
+        .map(|notice| notice.watcher_id.as_str())
+        .collect();
     json!({
         "watcher_ids": watcher_ids,
         "count": watcher_ids.len(),
@@ -382,16 +411,32 @@ pub fn attach_leader_to_state(
     require_current: bool,
 ) -> Result<(LeaderReceiver, Value), LeaderError> {
     let _ = (source, require_current);
-    let pane_id = pane.cloned().ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
+    let pane_id = pane
+        .cloned()
+        .ok_or_else(|| LeaderError::Validation("tmux pane not found".to_string()))?;
     let non_empty_pane_id = NonEmptyPaneId::try_from_pane(&pane_id)?;
     let identity = leader_identity_context(workspace, None, Some(state))?;
     let epoch = current_owner_epoch(state);
-    let receiver = make_receiver(provider, &non_empty_pane_id, &identity.leader_session_uuid, epoch, Discovery::EnvPane, None);
+    let receiver = make_receiver(
+        provider,
+        &non_empty_pane_id,
+        &identity.leader_session_uuid,
+        epoch,
+        Discovery::EnvPane,
+        None,
+    );
     if state.get("team_owner").is_some() {
         write_receiver_to_state(state, &receiver)?;
     } else {
         let next_epoch = OwnerEpoch(epoch.0.saturating_add(1));
-        let receiver = make_receiver(provider, &non_empty_pane_id, &identity.leader_session_uuid, next_epoch, Discovery::EnvPane, None);
+        let receiver = make_receiver(
+            provider,
+            &non_empty_pane_id,
+            &identity.leader_session_uuid,
+            next_epoch,
+            Discovery::EnvPane,
+            None,
+        );
         let owner = make_owner(provider, &non_empty_pane_id, &identity, next_epoch);
         write_binding_to_state(state, &receiver, &owner)?;
         write_lease_dual_state(workspace, state)?;
@@ -436,7 +481,11 @@ pub fn claim_leader(
     let caller = std::env::var("TMUX_PANE")
         .ok()
         .filter(|pane| !pane.is_empty())
-        .or_else(|| std::env::var("TEAM_AGENT_LEADER_PANE_ID").ok().filter(|pane| !pane.is_empty()))
+        .or_else(|| {
+            std::env::var("TEAM_AGENT_LEADER_PANE_ID")
+                .ok()
+                .filter(|pane| !pane.is_empty())
+        })
         .unwrap_or_default();
     let raw_state = crate::state::persist::load_runtime_state(workspace)?;
     let event_log = crate::event_log::EventLog::new(workspace);
@@ -458,13 +507,15 @@ pub fn claim_leader(
     let explicit_team = team.filter(|team| !team.is_empty());
     let requested_team = explicit_team
         .filter(|team| !team.is_empty())
-        .or_else(|| caller_target.as_ref().and_then(|target| target.team_id.as_deref()))
+        .or_else(|| {
+            caller_target
+                .as_ref()
+                .and_then(|target| target.team_id.as_deref())
+        })
         .or(env_team.as_deref());
-    let team_id = TeamKey::new(
-        requested_team
-            .map(str::to_string)
-            .unwrap_or_else(|| crate::messaging::leader_receiver::active_team_key(workspace, &raw_state)),
-    );
+    let team_id = TeamKey::new(requested_team.map(str::to_string).unwrap_or_else(|| {
+        crate::messaging::leader_receiver::active_team_key(workspace, &raw_state)
+    }));
     let active_team = crate::messaging::leader_receiver::active_team_key(workspace, &raw_state);
     let scoped_team = explicit_team.filter(|team| {
         *team == active_team
@@ -504,12 +555,7 @@ pub fn claim_leader(
         if let Some(pane) = result.bound_pane_id.as_ref() {
             let store = MessageStore::open(workspace)?;
             crate::messaging::watchers::requeue_after_claim_leader(
-                workspace,
-                &store,
-                &event_log,
-                &team_id,
-                pane,
-                None,
+                workspace, &store, &event_log, &team_id, pane, None,
             )?;
         }
     }
@@ -568,7 +614,9 @@ struct NonEmptyPaneId(PaneId);
 impl NonEmptyPaneId {
     fn try_from_pane(pane: &PaneId) -> Result<Self, LeaderError> {
         if pane.as_str().trim().is_empty() {
-            return Err(LeaderError::Validation("leader pane id is empty".to_string()));
+            return Err(LeaderError::Validation(
+                "leader pane id is empty".to_string(),
+            ));
         }
         Ok(Self(pane.clone()))
     }
@@ -640,14 +688,13 @@ fn claim_lease_no_incident_with_target(
         } else {
             None
         };
-        let (mut topology_convergence, converged) =
-            apply_endpoint_convergence(
-                state,
-                team_id,
-                convergence_candidate,
-                candidate_source,
-                pre_epoch,
-            );
+        let (mut topology_convergence, converged) = apply_endpoint_convergence(
+            state,
+            team_id,
+            convergence_candidate,
+            candidate_source,
+            pre_epoch,
+        );
         if converged {
             write_claim_state(workspace, state, scoped_team, team)?;
             topology_convergence = verify_persisted_topology_convergence(
@@ -681,14 +728,12 @@ fn claim_lease_no_incident_with_target(
             topology_convergence,
         });
     }
-    let owner_live = bound_pane_id
-        .as_deref()
-        .is_some_and(|pane| {
-            if pane == caller_pane.as_str() && !bound_endpoint_matches_caller {
-                return false;
-            }
-            liveness.liveness(pane) == PaneLiveness::Live
-        });
+    let owner_live = bound_pane_id.as_deref().is_some_and(|pane| {
+        if pane == caller_pane.as_str() && !bound_endpoint_matches_caller {
+            return false;
+        }
+        liveness.liveness(pane) == PaneLiveness::Live
+    });
     if owner_live && !confirm {
         emit_lease_refusal(
             event_log,
@@ -724,9 +769,9 @@ fn claim_lease_no_incident_with_target(
             ));
         }
         let locked_bound_pane = bound_pane(&locked);
-        let locked_owner_live = locked_bound_pane
-            .as_deref()
-            .is_some_and(|pane| pane != caller_pane.as_str() && liveness.liveness(pane) == PaneLiveness::Live);
+        let locked_owner_live = locked_bound_pane.as_deref().is_some_and(|pane| {
+            pane != caller_pane.as_str() && liveness.liveness(pane) == PaneLiveness::Live
+        });
         if locked_owner_live && !confirm {
             emit_lease_refusal(
                 event_log,
@@ -750,10 +795,8 @@ fn claim_lease_no_incident_with_target(
     // pane → delivery routes worker messages to itself (loop) and the leader
     // loses its handle (the macmini "hand-handle mapping 灾难" truth source).
     if let Some(caller_pane_info) = caller_pane_info {
-        match crate::topology::classify_registered_worker_for_observed_pane(
-            state,
-            caller_pane_info,
-        ) {
+        match crate::topology::classify_registered_worker_for_observed_pane(state, caller_pane_info)
+        {
             crate::topology::WorkerPaneBindingMatch::LiveSameWorker { agent_id } => {
                 emit_lease_refusal(
                     event_log,
@@ -829,14 +872,13 @@ fn claim_lease_no_incident_with_target(
     } else {
         None
     };
-    let (mut topology_convergence, converged) =
-        apply_endpoint_convergence(
-            state,
-            team_id,
-            receiver.tmux_socket.as_deref(),
-            candidate_source,
-            next_epoch,
-        );
+    let (mut topology_convergence, converged) = apply_endpoint_convergence(
+        state,
+        team_id,
+        receiver.tmux_socket.as_deref(),
+        candidate_source,
+        next_epoch,
+    );
     write_claim_state(workspace, state, scoped_team, team)?;
     if converged {
         topology_convergence = verify_persisted_topology_convergence(
@@ -858,7 +900,12 @@ fn claim_lease_no_incident_with_target(
             ));
         }
     }
-    let uuid_prefix = identity.leader_session_uuid.as_str().chars().take(8).collect::<String>();
+    let uuid_prefix = identity
+        .leader_session_uuid
+        .as_str()
+        .chars()
+        .take(8)
+        .collect::<String>();
     if reason == LeaseReason::PreviousOwnerPaneDead {
         event_log.write(
             super::LeaderEvent::OwnerAdoptedOnRestart.name(),
@@ -1105,7 +1152,10 @@ fn mark_convergence_persisted(metadata: &mut Value, team_id: &str) {
         return;
     };
     obj.insert("persisted".to_string(), json!(true));
-    obj.insert("checked_paths".to_string(), json!(convergence_checked_paths(team_id)));
+    obj.insert(
+        "checked_paths".to_string(),
+        json!(convergence_checked_paths(team_id)),
+    );
 }
 
 fn mark_convergence_persistence_conflict(metadata: &mut Value, team_id: &str) {
@@ -1114,7 +1164,10 @@ fn mark_convergence_persistence_conflict(metadata: &mut Value, team_id: &str) {
     };
     obj.insert("status".to_string(), json!("persistence_conflict"));
     obj.insert("persisted".to_string(), json!(false));
-    obj.insert("checked_paths".to_string(), json!(convergence_checked_paths(team_id)));
+    obj.insert(
+        "checked_paths".to_string(),
+        json!(convergence_checked_paths(team_id)),
+    );
     obj.insert(
         "action".to_string(),
         json!("endpoint convergence was not durably persisted; retry claim-leader or takeover"),
@@ -1170,7 +1223,11 @@ fn refused(
         owner: None,
         owner_epoch: epoch,
         reason: Some(reason),
-        action: if action.is_empty() { None } else { Some(action.to_string()) },
+        action: if action.is_empty() {
+            None
+        } else {
+            Some(action.to_string())
+        },
         bound_pane_id,
         topology_convergence: None,
     }
@@ -1178,7 +1235,8 @@ fn refused(
 
 fn current_owner_epoch(state: &Value) -> OwnerEpoch {
     let owner_epoch = get_path_u64(state, &["team_owner", "owner_epoch"]).filter(|v| *v != 0);
-    let receiver_epoch = get_path_u64(state, &["leader_receiver", "owner_epoch"]).filter(|v| *v != 0);
+    let receiver_epoch =
+        get_path_u64(state, &["leader_receiver", "owner_epoch"]).filter(|v| *v != 0);
     OwnerEpoch(owner_epoch.or(receiver_epoch).unwrap_or(0))
 }
 
@@ -1189,7 +1247,9 @@ fn bound_pane(state: &Value) -> Option<String> {
 }
 
 fn bound_endpoint_matches_current_process(state: &Value) -> bool {
-    let Some(bound) = get_path_str(state, &["leader_receiver", "tmux_socket"]).filter(|v| !v.is_empty()) else {
+    let Some(bound) =
+        get_path_str(state, &["leader_receiver", "tmux_socket"]).filter(|v| !v.is_empty())
+    else {
         return true;
     };
     let Some(current) = crate::tmux_backend::socket_name_from_tmux_env() else {
@@ -1316,7 +1376,11 @@ fn claim_target_from_pane_info(workspace: &Path, target: &PaneInfo) -> Option<Le
     Some(LeaderClaimTarget {
         provider,
         leader_session_uuid: target_leader_session_uuid(target),
-        team_id: target.leader_env.get("TEAM_AGENT_TEAM_ID").filter(|raw| !raw.is_empty()).cloned(),
+        team_id: target
+            .leader_env
+            .get("TEAM_AGENT_TEAM_ID")
+            .filter(|raw| !raw.is_empty())
+            .cloned(),
         pane_info: Some(target.clone()),
         endpoint: None,
     })
@@ -1359,7 +1423,10 @@ fn validate_attach_target(
         .or_else(|| get_path_str(state, &["leader_receiver", "leader_session_uuid"]));
     if let (Some(recorded), Some(target_uuid)) = (
         recorded_uuid.as_deref(),
-        claim_target.leader_session_uuid.as_ref().map(|u| u.as_str()),
+        claim_target
+            .leader_session_uuid
+            .as_ref()
+            .map(|u| u.as_str()),
     ) {
         if recorded != target_uuid {
             return Err("leader_session_uuid_mismatch");
@@ -1472,7 +1539,10 @@ impl crate::state::owner_gate::PaneLivenessProbe for TargetScanLiveness {
     }
 }
 
-fn locked_runtime_state(workspace: &Path, scoped_team: Option<&str>) -> Result<Option<Value>, LeaderError> {
+fn locked_runtime_state(
+    workspace: &Path,
+    scoped_team: Option<&str>,
+) -> Result<Option<Value>, LeaderError> {
     let path = crate::state::persist::runtime_state_path(workspace);
     if !path.exists() {
         return Ok(None);
@@ -1537,9 +1607,13 @@ fn make_receiver(
         provider,
         pane_id: pane.as_pane_id().clone(),
         session_name: target.as_ref().map(|t| t.session.clone()),
-        window_index: target.as_ref().and_then(|t| t.window_index.map(|v| v.to_string())),
+        window_index: target
+            .as_ref()
+            .and_then(|t| t.window_index.map(|v| v.to_string())),
         window_name: target.as_ref().and_then(|t| t.window_name.clone()),
-        pane_index: target.as_ref().and_then(|t| t.pane_index.map(|v| v.to_string())),
+        pane_index: target
+            .as_ref()
+            .and_then(|t| t.pane_index.map(|v| v.to_string())),
         pane_tty: target.as_ref().and_then(|t| t.tty.clone()),
         pane_current_command: target.as_ref().and_then(|t| t.current_command.clone()),
         tmux_socket: crate::tmux_backend::socket_name_from_tmux_env(),
@@ -1557,8 +1631,12 @@ fn receiver_fingerprint(target: &PaneInfo) -> String {
     format!(
         "{}|{}|{}|{}",
         target.session.as_str(),
-        target.window_index.map_or_else(String::new, |v| v.to_string()),
-        target.pane_index.map_or_else(String::new, |v| v.to_string()),
+        target
+            .window_index
+            .map_or_else(String::new, |v| v.to_string()),
+        target
+            .pane_index
+            .map_or_else(String::new, |v| v.to_string()),
         target.tty.as_deref().unwrap_or("")
     )
 }
@@ -1605,7 +1683,9 @@ fn write_binding_to_state(
         *state = json!({});
     }
     if !state.is_object() {
-        return Err(LeaderError::Validation("state root is not an object".to_string()));
+        return Err(LeaderError::Validation(
+            "state root is not an object".to_string(),
+        ));
     }
     let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
@@ -1624,7 +1704,9 @@ fn write_receiver_to_state(
         *state = json!({});
     }
     if !state.is_object() {
-        return Err(LeaderError::Validation("state root is not an object".to_string()));
+        return Err(LeaderError::Validation(
+            "state root is not an object".to_string(),
+        ));
     }
     let team_key = canonical_owner_write_key(state);
     let record = crate::state::ownership::OwnershipWrite::new()
@@ -1787,7 +1869,11 @@ fn write_claim_state(
     }
 }
 
-fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &str) -> Result<(), LeaderError> {
+fn save_claim_team_scoped_state(
+    workspace: &Path,
+    state: &Value,
+    target_key: &str,
+) -> Result<(), LeaderError> {
     let existing = crate::state::persist::load_runtime_state(workspace)?;
     let mut teams = existing
         .get("teams")

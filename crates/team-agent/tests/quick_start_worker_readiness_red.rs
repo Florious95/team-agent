@@ -23,9 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use team_agent::lifecycle::{
-    quick_start_with_transport, QuickStartReadiness, QuickStartReport,
-};
+use team_agent::lifecycle::{quick_start_with_transport, QuickStartReadiness, QuickStartReport};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
     InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
@@ -55,13 +53,16 @@ fn t1_quick_start_must_not_emit_bare_ready_when_worker_tool_load_is_unverified()
     // but the framework has no way to verify the worker MCP tool set actually
     // loaded — codex/claude can still reject schemas asynchronously. The report
     // therefore must be PendingToolLoad, not bare Ready.
-    let transport = RecordingTransport::new().with_windows(vec![
-        WindowName::new("codexer"),
-        WindowName::new("clauder"),
-    ]);
+    let transport = RecordingTransport::new()
+        .with_windows(vec![WindowName::new("codexer"), WindowName::new("clauder")]);
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should succeed for healthy spawn");
-    let QuickStartReport::Ready { worker_readiness, session_name, .. } = &report else {
+    let QuickStartReport::Ready {
+        worker_readiness,
+        session_name,
+        ..
+    } = &report
+    else {
         panic!("quick-start must return Ready for healthy spawn; got {report:?}");
     };
     assert_eq!(
@@ -104,7 +105,10 @@ fn t2_quick_start_must_report_degraded_when_a_worker_spawn_yields_no_live_window
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
     let report = quick_start_with_transport(&team, None, true, None, &transport)
         .expect("quick_start_with_transport should reach the spawn/state path even when an agent fails to spawn");
-    let QuickStartReport::Ready { worker_readiness, .. } = &report else {
+    let QuickStartReport::Ready {
+        worker_readiness, ..
+    } = &report
+    else {
         panic!("quick-start must still return Ready (with Degraded verdict) so the user sees session details; got {report:?}");
     };
     let QuickStartReadiness::Degraded { unhealthy_agents } = worker_readiness else {
@@ -150,7 +154,11 @@ fn render_quick_start_summary(report: &QuickStartReport) -> String {
     // tests can verify the user-visible string without re-running the full CLI
     // path. Keep this in lock-step with the CLI emit branch.
     match report {
-        QuickStartReport::Ready { session_name, worker_readiness, .. } => match worker_readiness {
+        QuickStartReport::Ready {
+            session_name,
+            worker_readiness,
+            ..
+        } => match worker_readiness {
             QuickStartReadiness::Degraded { unhealthy_agents } => format!(
                 "quick-start degraded: {}; unhealthy: {}",
                 session_name.as_str(),
@@ -212,7 +220,11 @@ impl Transport for RecordingTransport {
     ) -> Result<SpawnResult, TransportError> {
         {
             let mut guard = self.state.lock().expect("lock");
-            if !guard.sessions.iter().any(|s| s.as_str() == session.as_str()) {
+            if !guard
+                .sessions
+                .iter()
+                .any(|s| s.as_str() == session.as_str())
+            {
                 guard.sessions.push(session.clone());
             }
         }
@@ -266,14 +278,13 @@ impl Transport for RecordingTransport {
         _target: &Target,
         range: CaptureRange,
     ) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
     }
 
@@ -287,13 +298,13 @@ impl Transport for RecordingTransport {
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError> {
         let guard = self.state.lock().expect("lock");
-        Ok(guard.sessions.iter().any(|s| s.as_str() == session.as_str()))
+        Ok(guard
+            .sessions
+            .iter()
+            .any(|s| s.as_str() == session.as_str()))
     }
 
-    fn list_windows(
-        &self,
-        _session: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError> {
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         let guard = self.state.lock().expect("lock");
         Ok(guard.windows.clone())
     }
@@ -315,10 +326,7 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn attach_session(
-        &self,
-        _session: &SessionName,
-    ) -> Result<AttachOutcome, TransportError> {
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         Ok(AttachOutcome::Attached)
     }
 }

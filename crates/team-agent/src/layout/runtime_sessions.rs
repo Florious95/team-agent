@@ -205,9 +205,12 @@ impl RuntimeSessions {
     /// True if a `state.session_name` looked like a leader launcher session
     /// — the exact 0.3.39 shape unit-3 must refuse before any kill.
     pub fn worker_session_name_is_leader_prefixed(&self) -> bool {
-        self.anomalies
-            .iter()
-            .any(|a| matches!(a, RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }))
+        self.anomalies.iter().any(|a| {
+            matches!(
+                a,
+                RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }
+            )
+        })
     }
 }
 
@@ -261,10 +264,7 @@ mod tests {
         });
         let r = RuntimeSessions::from_state(&state);
         assert_eq!(r.worker.unwrap().as_str(), "team-foo");
-        assert_eq!(
-            r.leader.unwrap().as_str(),
-            "team-agent-leader-codex-abc"
-        );
+        assert_eq!(r.leader.unwrap().as_str(), "team-agent-leader-codex-abc");
         assert!(r.anomalies.is_empty());
     }
 

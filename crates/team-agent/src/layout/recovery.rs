@@ -92,9 +92,11 @@ mod tests {
         match recover_leader_pane(env) {
             RecoveryOutcome::NeedsUserAttach => {} // expected
             RecoveryOutcome::AutobindToPane(_) => {
-                panic!("recovery must not autobind without TMUX_PANE — \
+                panic!(
+                    "recovery must not autobind without TMUX_PANE — \
                         the worker session must NEVER carry a co-located leader \
-                        window in managed mode (E57-3 root)")
+                        window in managed mode (E57-3 root)"
+                )
             }
         }
     }

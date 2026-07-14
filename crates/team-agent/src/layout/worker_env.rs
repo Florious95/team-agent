@@ -114,7 +114,9 @@ fn is_stripped(key: &str) -> bool {
 
 fn is_posix_shell_identifier(s: &str) -> bool {
     let mut bytes = s.bytes();
-    let Some(first) = bytes.next() else { return false };
+    let Some(first) = bytes.next() else {
+        return false;
+    };
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
     }
@@ -147,12 +149,24 @@ mod tests {
             ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
             ("COPILOT_TOKEN".to_string(), "tok".to_string()),
             // Leader identity — must be stripped.
-            ("TEAM_AGENT_LEADER_PROVIDER".to_string(), "claude".to_string()),
-            ("TEAM_AGENT_LEADER_SESSION_UUID".to_string(), "leader-uuid".to_string()),
-            ("TEAM_AGENT_MACHINE_FINGERPRINT".to_string(), "fp".to_string()),
+            (
+                "TEAM_AGENT_LEADER_PROVIDER".to_string(),
+                "claude".to_string(),
+            ),
+            (
+                "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+                "leader-uuid".to_string(),
+            ),
+            (
+                "TEAM_AGENT_MACHINE_FINGERPRINT".to_string(),
+                "fp".to_string(),
+            ),
             ("TEAM_AGENT_TEAM_ID".to_string(), "alpha".to_string()),
             ("TEAM_AGENT_LEADER_BYPASS".to_string(), "1".to_string()),
-            ("COPILOT_DISABLE_TERMINAL_TITLE".to_string(), "1".to_string()),
+            (
+                "COPILOT_DISABLE_TERMINAL_TITLE".to_string(),
+                "1".to_string(),
+            ),
             // Random noise — non-whitelisted prefix.
             ("RANDOM_NOISE".to_string(), "x".to_string()),
             ("TMUX".to_string(), "leader-pane".to_string()),
@@ -197,20 +211,27 @@ mod tests {
             "developer",
             Some("alpha"),
         );
-        assert_eq!(env.get("TEAM_AGENT_ID").map(String::as_str), Some("developer"));
-        assert_eq!(env.get("TEAM_AGENT_AGENT_ID").map(String::as_str), Some("developer"));
-        assert_eq!(env.get("TEAM_AGENT_WORKSPACE").map(String::as_str), Some("/ws"));
-        assert_eq!(env.get("TEAM_AGENT_OWNER_TEAM_ID").map(String::as_str), Some("alpha"));
+        assert_eq!(
+            env.get("TEAM_AGENT_ID").map(String::as_str),
+            Some("developer")
+        );
+        assert_eq!(
+            env.get("TEAM_AGENT_AGENT_ID").map(String::as_str),
+            Some("developer")
+        );
+        assert_eq!(
+            env.get("TEAM_AGENT_WORKSPACE").map(String::as_str),
+            Some("/ws")
+        );
+        assert_eq!(
+            env.get("TEAM_AGENT_OWNER_TEAM_ID").map(String::as_str),
+            Some("alpha")
+        );
     }
 
     #[test]
     fn worker_spawn_env_inherits_parent_env_minus_strip_list() {
-        let env = worker_spawn_env(
-            make_parent_env(&[]),
-            Path::new("/ws"),
-            "developer",
-            None,
-        );
+        let env = worker_spawn_env(make_parent_env(&[]), Path::new("/ws"), "developer", None);
         // Inherit-then-strip: every parent key passes through EXCEPT the
         // strip list. PATH-like + provider creds + random user vars all
         // present.
@@ -240,15 +261,24 @@ mod tests {
     #[test]
     fn worker_spawn_cwd_returns_workspace_when_no_spec_override() {
         // YAML agent with no spawn_cwd field.
-        let agent = YamlValue::Map(vec![("id".to_string(), YamlValue::Str("developer".to_string()))]);
-        assert_eq!(worker_spawn_cwd(&agent, Path::new("/ws")), PathBuf::from("/ws"));
+        let agent = YamlValue::Map(vec![(
+            "id".to_string(),
+            YamlValue::Str("developer".to_string()),
+        )]);
+        assert_eq!(
+            worker_spawn_cwd(&agent, Path::new("/ws")),
+            PathBuf::from("/ws")
+        );
     }
 
     #[test]
     fn worker_spawn_cwd_returns_yaml_override_when_present() {
         let agent = YamlValue::Map(vec![
             ("id".to_string(), YamlValue::Str("developer".to_string())),
-            ("spawn_cwd".to_string(), YamlValue::Str("/explicit/cwd".to_string())),
+            (
+                "spawn_cwd".to_string(),
+                YamlValue::Str("/explicit/cwd".to_string()),
+            ),
         ]);
         assert_eq!(
             worker_spawn_cwd(&agent, Path::new("/ws")),
@@ -262,6 +292,9 @@ mod tests {
             ("id".to_string(), YamlValue::Str("developer".to_string())),
             ("spawn_cwd".to_string(), YamlValue::Str("".to_string())),
         ]);
-        assert_eq!(worker_spawn_cwd(&agent, Path::new("/ws")), PathBuf::from("/ws"));
+        assert_eq!(
+            worker_spawn_cwd(&agent, Path::new("/ws")),
+            PathBuf::from("/ws")
+        );
     }
 }

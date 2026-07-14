@@ -57,7 +57,10 @@ fn doctor_orphans_gate_reports_real_orphan_coordinator_instead_of_empty_pass() {
         "orphan gate must not return ok:true while a real orphan coordinator process exists; body={body}"
     );
     assert!(
-        matches!(body["status"].as_str(), Some("failed" | "fail" | "degraded")),
+        matches!(
+            body["status"].as_str(),
+            Some("failed" | "fail" | "degraded")
+        ),
         "orphan gate must report a non-pass status for real orphan residue; body={body}"
     );
     assert!(
@@ -107,11 +110,15 @@ fn doctor_comms_gate_fails_stale_receiver_and_runs_contract_suite_not_deferred()
         "comms gate top-level ok must be false when a mandatory subcheck fails; body={body}"
     );
     assert!(
-        matches!(body["status"].as_str(), Some("fail" | "failed" | "degraded")),
+        matches!(
+            body["status"].as_str(),
+            Some("fail" | "failed" | "degraded")
+        ),
         "comms gate top-level status must be non-pass when receiver_binding fails; body={body}"
     );
     assert_eq!(
-        body.pointer("/checks/receiver_binding/status").and_then(Value::as_str),
+        body.pointer("/checks/receiver_binding/status")
+            .and_then(Value::as_str),
         Some("fail"),
         "stale stored receiver pane must fail receiver_binding; body={body}"
     );

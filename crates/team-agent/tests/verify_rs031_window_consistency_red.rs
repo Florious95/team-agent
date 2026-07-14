@@ -47,11 +47,17 @@ const CLAUDE_ROLE: &str = "---\nname: clauder\nrole: Claude Worker\nprovider: cl
 fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
     let hermetic = HermeticTestEnv::enter("rs031-mcp-owner-scope");
     let team = mixed_provider_team_dir(&hermetic, "mcp-owner-scope");
-    let transport =
-        RecordingTransport::new().with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
-    let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
-        .expect("quick-start should reach worker spawn path"));
-    assert_eq!(launch.started.len(), 2, "fixture precondition: both workers spawn");
+    let transport = RecordingTransport::new()
+        .with_windows(vec![WindowName::new("clauder"), WindowName::new("codexer")]);
+    let launch = ready_launch(
+        quick_start_with_transport(&team, None, true, None, &transport)
+            .expect("quick-start should reach worker spawn path"),
+    );
+    assert_eq!(
+        launch.started.len(),
+        2,
+        "fixture precondition: both workers spawn"
+    );
 
     let workspace = team.parent().expect("teamdir has parent workspace");
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
@@ -89,14 +95,17 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
 
 #[test]
 #[serial(env)]
-fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_across_tmux_sockets() {
+fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_across_tmux_sockets()
+{
     let hermetic = HermeticTestEnv::enter("rs031-external-pane-collision");
     let _tmux = hermetic.with_env("TMUX", "/tmp/default-tmux-socket,123,0");
     let _pane = hermetic.with_env("TMUX_PANE", "%0");
     let team = codex_only_team_dir(&hermetic, "external-pane-collision");
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
-    let launch = ready_launch(quick_start_with_transport(&team, None, true, None, &transport)
-        .expect("quick-start should reach worker spawn path"));
+    let launch = ready_launch(
+        quick_start_with_transport(&team, None, true, None, &transport)
+            .expect("quick-start should reach worker spawn path"),
+    );
     let worker_pane = launch
         .started
         .iter()
@@ -162,7 +171,11 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
     let transport = RecordingTransport::new().with_windows(vec![WindowName::new("codexer")]);
     let launch = launch_with_transport(&spec_path, false, true, true, &transport)
         .expect("launch should reach the real spawn/state path");
-    assert_eq!(launch.started.len(), 2, "fixture precondition: both spawn calls returned");
+    assert_eq!(
+        launch.started.len(),
+        2,
+        "fixture precondition: both spawn calls returned"
+    );
 
     let workspace = team.parent().expect("teamdir has parent workspace");
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
@@ -185,7 +198,9 @@ fn running_worker_state_must_only_be_written_for_windows_that_exist_after_launch
             .and_then(serde_json::Value::as_str)
             .unwrap_or(agent_id);
         if !live_windows.iter().any(|live| live.as_str() == window) {
-            violations.push(format!("{agent_id} status=running window={window} missing from tmux list"));
+            violations.push(format!(
+                "{agent_id} status=running window={window} missing from tmux list"
+            ));
         }
     }
 
@@ -261,19 +276,41 @@ fn leader_bound_delivery_must_target_bound_leader_pane_not_missing_leader_window
     let store = MessageStore::open(&workspace).expect("open message store");
     hermetic.assert_store_under_root(&store);
     let message_id = store
-        .create_message(None, "codexer", "leader", "BUG4 worker to leader canary", None, false, Some("teamdir"))
+        .create_message(
+            None,
+            "codexer",
+            "leader",
+            "BUG4 worker to leader canary",
+            None,
+            false,
+            Some("teamdir"),
+        )
         .expect("create accepted leader-bound message");
     let event_log = EventLog::new(&workspace);
     let transport = RecordingTransport::new()
         .with_windows(vec![WindowName::new("codexer")])
         .with_targets(vec![pane_info("%0", "external-leader-socket", "leader")]);
 
-    let outcome = deliver_pending_message(&workspace, &store, &transport, &message_id, &event_log, &state)
-        .expect("delivery should use the recorded transport");
-    assert!(outcome.ok, "fixture delivery should complete through OfflineTransport");
+    let outcome = deliver_pending_message(
+        &workspace,
+        &store,
+        &transport,
+        &message_id,
+        &event_log,
+        &state,
+    )
+    .expect("delivery should use the recorded transport");
+    assert!(
+        outcome.ok,
+        "fixture delivery should complete through OfflineTransport"
+    );
 
     let targets = transport.inject_targets();
-    assert_eq!(targets.len(), 1, "expected exactly one physical injection target");
+    assert_eq!(
+        targets.len(),
+        1,
+        "expected exactly one physical injection target"
+    );
     assert_eq!(
         targets[0],
         Target::Pane(team_agent::transport::PaneId::new("%0")),
@@ -299,7 +336,11 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
         ])
         .with_targets(vec![
             pane_info(leader_pane.as_str(), "default-leader-socket", "leader"),
-            pane_info(product_worker_pane.as_str(), product_session.as_str(), "codexer"),
+            pane_info(
+                product_worker_pane.as_str(),
+                product_session.as_str(),
+                "codexer",
+            ),
         ]);
 
     save_runtime_state(
@@ -403,8 +444,13 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
     );
 }
 
-fn assert_bound_reachable_leader_send_message_delivers(binding: &str, discovery: &str, claimed_via: &str) {
-    let hermetic = HermeticTestEnv::enter(&format!("rs031-fresh-leader-single-authority-{binding}"));
+fn assert_bound_reachable_leader_send_message_delivers(
+    binding: &str,
+    discovery: &str,
+    claimed_via: &str,
+) {
+    let hermetic =
+        HermeticTestEnv::enter(&format!("rs031-fresh-leader-single-authority-{binding}"));
     let workspace = hermetic.workspace(&format!("fresh-leader-single-authority-{binding}"));
     let leader_pane = PaneId::new("%claimed-leader");
     let worker_pane = PaneId::new("%worker");
@@ -469,7 +515,10 @@ fn assert_bound_reachable_leader_send_message_delivers(binding: &str, discovery:
          return a non-null message_id and enqueue the row. It must not be synchronously rejected \
          by send.rs before the unified delivery authority runs. out={queued:?}"
     );
-    let message_id = queued.message_id.as_deref().expect("queued row carries message id");
+    let message_id = queued
+        .message_id
+        .as_deref()
+        .expect("queued row carries message id");
 
     let delivered = deliver_pending_messages(&workspace, &state, &transport, &event_log)
         .expect("deliver_pending_messages should own the physical delivery decision");
@@ -530,7 +579,8 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
                 "team_owner": {"pane_id": "%missing-leader", "provider": "codex", "owner_epoch": 1},
                 "agents": {"codexer": {"status": "running", "provider": "codex", "window": "codexer"}}
             }),
-            RecordingTransport::new().with_liveness(vec![("%missing-leader".to_string(), PaneLiveness::Dead)]),
+            RecordingTransport::new()
+                .with_liveness(vec![("%missing-leader".to_string(), PaneLiveness::Dead)]),
         ),
     ] {
         let hermetic = HermeticTestEnv::enter(&format!("rs031-{label}"));
@@ -648,7 +698,8 @@ fn mixed_provider_team_dir(hermetic: &HermeticTestEnv, tag: &str) -> PathBuf {
     let team = hermetic.workspace(tag).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).expect("create agents dir");
     std::fs::write(team.join("TEAM.md"), TEAM_MD).expect("write TEAM.md");
-    std::fs::write(team.join("agents").join("clauder.md"), CLAUDE_ROLE).expect("write clauder role");
+    std::fs::write(team.join("agents").join("clauder.md"), CLAUDE_ROLE)
+        .expect("write clauder role");
     std::fs::write(team.join("agents").join("codexer.md"), CODEX_ROLE).expect("write codexer role");
     team
 }
@@ -793,8 +844,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: "OpenAI Codex".to_string(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: "OpenAI Codex".to_string(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {

@@ -92,10 +92,18 @@ tasks:
     status: "pending"
 "#;
 
-fn write_validate_spec(ws: &std::path::Path, file_name: &str, provider: &str) -> std::path::PathBuf {
+fn write_validate_spec(
+    ws: &std::path::Path,
+    file_name: &str,
+    provider: &str,
+) -> std::path::PathBuf {
     let spec = VALIDATE_SPEC_TEMPLATE
         .replace("__WS__", &ws.to_string_lossy())
-        .replacen("provider: \"fake\"", &format!("provider: \"{provider}\""), 1);
+        .replacen(
+            "provider: \"fake\"",
+            &format!("provider: \"{provider}\""),
+            1,
+        );
     let path = ws.join(file_name);
     std::fs::write(&path, spec).unwrap();
     path
@@ -179,6 +187,10 @@ fn dispatch_routes_validate_default_spec() {
     let ws = tmp_workspace();
     let _spec_path = write_validate_spec(&ws, "team.spec.yaml", "fake");
     let code = run(&["validate".to_string(), "--json".to_string()], &ws);
-    assert_eq!(code, ExitCode::Ok, "`validate --json` must route and exit 0 for default team.spec.yaml");
+    assert_eq!(
+        code,
+        ExitCode::Ok,
+        "`validate --json` must route and exit 0 for default team.spec.yaml"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }

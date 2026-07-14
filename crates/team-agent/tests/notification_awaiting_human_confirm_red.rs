@@ -40,7 +40,10 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
     let mut failures = Vec::new();
 
     if !src.contains("worker.awaiting_human_confirm") {
-        failures.push("must emit worker.awaiting_human_confirm for blocked structural approval prompts".to_string());
+        failures.push(
+            "must emit worker.awaiting_human_confirm for blocked structural approval prompts"
+                .to_string(),
+        );
     }
     if !src.contains("extract_approval_prompt") || !src.contains("active_approval_control_index") {
         failures.push(
@@ -59,14 +62,12 @@ fn awaiting_human_confirm_uses_active_tail_structural_prompt_and_dedupes_per_fin
         || !src.contains("awaiting_human_confirm_seen")
     {
         failures.push(
-            "same prompt across ticks must dedupe by (team, agent_id, fingerprint)"
-                .to_string(),
+            "same prompt across ticks must dedupe by (team, agent_id, fingerprint)".to_string(),
         );
     }
     if !src.contains("send_to_leader_receiver") || !src.contains("deliver_to_leader.submit") {
         failures.push(
-            "awaiting_human_confirm must notify through the shared N32 leader funnel"
-                .to_string(),
+            "awaiting_human_confirm must notify through the shared N32 leader funnel".to_string(),
         );
     }
 

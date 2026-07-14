@@ -29,7 +29,10 @@ pub fn notify_result_watchers(
     let conn = crate::db::schema::open_db(store.db_path())?;
     let result_task = result.get("task_id").and_then(|v| v.as_str());
     let result_agent = result.get("agent_id").and_then(|v| v.as_str());
-    let result_id = result.get("result_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    let result_id = result
+        .get("result_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     let mut matched: Vec<&serde_json::Value> = watchers
         .iter()
         .filter(|w| watcher_matches(w, result_task, result_agent))
@@ -145,7 +148,13 @@ fn deliver_primary_watcher(
             .get("message_id")
             .and_then(|v| v.as_str())
             .map(ToString::to_string);
-        mark_watcher_notified(conn, event_log, watcher_id, result_id, message_id.as_deref())?;
+        mark_watcher_notified(
+            conn,
+            event_log,
+            watcher_id,
+            result_id,
+            message_id.as_deref(),
+        )?;
         return Ok(WatcherNotice {
             watcher_id: watcher_id.to_string(),
             result_id: Some(result_id.to_string()),
@@ -171,7 +180,10 @@ fn deliver_primary_watcher(
     let content = format_result_watcher_notification(result);
     let message_id = store.create_message(
         result_task,
-        watcher.get("leader_id").and_then(|v| v.as_str()).unwrap_or("team-agent"),
+        watcher
+            .get("leader_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("team-agent"),
         "leader",
         &content,
         None,
@@ -596,7 +608,9 @@ pub fn delivered_result_message(
     for row in rows.into_iter().rev() {
         let (message_id, content) = row;
         if result_id_from_text(&content).as_deref() == Some(result_id) {
-            return Ok(Some(serde_json::json!({"message_id": message_id, "content": content})));
+            return Ok(Some(
+                serde_json::json!({"message_id": message_id, "content": content}),
+            ));
         }
     }
     Ok(None)
@@ -624,11 +638,25 @@ pub fn result_id_from_text(content: &str) -> Option<String> {
 /// `format_result_watcher_notification` (`result_delivery.py:521`):拼 watcher 通知文案 +
 /// `Result id: <id>` 行。**格式必须字节级稳定** (golden fixture,与 [`result_id_from_text`] 对偶)。
 pub fn format_result_watcher_notification(result: &serde_json::Value) -> String {
-    let task_id = result.get("task_id").and_then(|v| v.as_str()).unwrap_or("unknown task");
-    let agent_id = result.get("agent_id").and_then(|v| v.as_str()).unwrap_or("unknown agent");
-    let status = result.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let summary = result.get("summary").and_then(|v| v.as_str()).unwrap_or("completed");
-    let mut lines = vec![format!("Task {task_id} reported {status} from {agent_id}: {summary}")];
+    let task_id = result
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown task");
+    let agent_id = result
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown agent");
+    let status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let summary = result
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("completed");
+    let mut lines = vec![format!(
+        "Task {task_id} reported {status} from {agent_id}: {summary}"
+    )];
     if let Some(tests) = result.get("tests").and_then(|v| v.as_array()) {
         let rendered: Vec<String> = tests
             .iter()

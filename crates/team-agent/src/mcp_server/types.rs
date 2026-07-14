@@ -275,7 +275,11 @@ impl ToolError {
 
     /// `_tool_error_result(reason, message, exc_type)` (`server.py:98-106`) for the
     /// `unknown_tool` / `peer_not_in_scope` non-exception paths.
-    pub fn new(reason: ToolErrorReason, message: impl Into<String>, exc_type: impl Into<String>) -> Self {
+    pub fn new(
+        reason: ToolErrorReason,
+        message: impl Into<String>,
+        exc_type: impl Into<String>,
+    ) -> Self {
         Self {
             reason,
             exc_type: exc_type.into(),
@@ -289,7 +293,11 @@ impl ToolError {
     pub fn public_exception_message(raw: &str, exc_type: &str) -> String {
         let cleaned = raw.replace(['\n', '\r'], " ");
         let trimmed = cleaned.trim();
-        let base = if trimmed.is_empty() { exc_type } else { trimmed };
+        let base = if trimmed.is_empty() {
+            exc_type
+        } else {
+            trimmed
+        };
         base.chars().take(200).collect()
     }
 }
@@ -320,7 +328,10 @@ impl SendOutcome {
     /// the [`ToolResult`] `Ok` body.
     pub fn to_value(&self) -> Value {
         match self {
-            SendOutcome::WorkerAccepted { message_id, poll_via } => {
+            SendOutcome::WorkerAccepted {
+                message_id,
+                poll_via,
+            } => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("status".to_string(), Value::String("accepted".to_string()));
                 obj.insert("delivery_pending".to_string(), Value::Bool(true));

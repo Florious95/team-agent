@@ -20,9 +20,17 @@ fn idle_stuck_deadlock_nag_paths_are_not_generated_by_coordinator_tick() {
 
     for (label, haystack, needle) in [
         ("coordinator tick", tick.as_str(), "detect_stuck_agents("),
-        ("coordinator tick", tick.as_str(), "record_unknown_idle_nodes("),
+        (
+            "coordinator tick",
+            tick.as_str(),
+            "record_unknown_idle_nodes(",
+        ),
         ("coordinator tick", tick.as_str(), "evaluate_takeover("),
-        ("coordinator tick", tick.as_str(), "detect_cross_worker_deadlocks("),
+        (
+            "coordinator tick",
+            tick.as_str(),
+            "detect_cross_worker_deadlocks(",
+        ),
     ] {
         if haystack.contains(needle) {
             failures.push(format!(
@@ -67,15 +75,23 @@ fn product_delivery_notifications_stay_on_n31_n32_funnel() {
         );
     }
     if !results.contains("send_to_leader_receiver") || !results.contains("mcp.report_result") {
-        failures.push("report_result notification must remain on send_to_leader_receiver".to_string());
+        failures
+            .push("report_result notification must remain on send_to_leader_receiver".to_string());
     }
     if !tools.contains("request_human") || !tools.contains("send_to_leader_receiver") {
-        failures.push("request_human must remain on the same leader-delivery primitive".to_string());
+        failures
+            .push("request_human must remain on the same leader-delivery primitive".to_string());
     }
     if !send.contains("send_to_leader_receiver") || !send.contains("MessageTarget::Broadcast") {
-        failures.push("send(to=leader)/broadcast-to-leader must remain on N31/N32 delivery".to_string());
+        failures.push(
+            "send(to=leader)/broadcast-to-leader must remain on N31/N32 delivery".to_string(),
+        );
     }
-    for forbidden in ["notification_status\", \"queued\"", "notification_status=queued_only", "queued_only"] {
+    for forbidden in [
+        "notification_status\", \"queued\"",
+        "notification_status=queued_only",
+        "queued_only",
+    ] {
         if results.contains(forbidden) || leader_receiver.contains(forbidden) {
             failures.push(format!(
                 "delivery notifications must not regress to queued-only fake success: `{forbidden}`"

@@ -86,7 +86,10 @@ impl Value {
     }
     /// dict get:首个匹配 key 的值(`insert_ordered` 已去重 → 首即唯一)。非 Map → `None`。
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.as_map()?.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+        self.as_map()?
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
     }
     /// Python 真值语义:None/Null/false/0/""/空集 → false。
     pub fn is_truthy(&self) -> bool {
@@ -330,7 +333,8 @@ fn parse_scalar(raw: &str) -> Value {
     if raw == "{}" {
         return Value::Map(Vec::new());
     }
-    if (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
+    if (raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))
     {
         if raw.len() < 2 {
             // 单个引号字符:不是合法的成对引号,落到末尾 return raw。
@@ -576,10 +580,7 @@ fn dump(value: &Value, indent: usize) -> Vec<String> {
                                 lines.extend(dump(child, indent + 4));
                             } else {
                                 // 注意:此分支**不**对多行字符串做 `|`,与 Python 一致。
-                                lines.push(format!(
-                                    "{pad}{prefix}{key}: {}",
-                                    format_scalar(child)
-                                ));
+                                lines.push(format!("{pad}{prefix}{key}: {}", format_scalar(child)));
                             }
                             first = false;
                         }

@@ -65,8 +65,7 @@ use team_agent::transport::{
 #[test]
 fn a2_all_idle_but_unarmed_must_not_ping() {
     let nodes = vec![idle_node("w1"), idle_node("w2")];
-    let result = evaluate_takeover_reminder(&nodes, &json!({}))
-        .expect("evaluate should succeed");
+    let result = evaluate_takeover_reminder(&nodes, &json!({})).expect("evaluate should succeed");
     assert!(
         !result.should_ping,
         "A-2: an un-armed monitor must never ping (Python C1: only a worker turn-open \
@@ -219,17 +218,29 @@ fn b232_tick_auto_approved_mcp_tool_writes_audit_event() {
 
     coord.tick().expect("tick");
 
-    let events = team_agent::event_log::EventLog::new(&ws).tail(0).expect("events");
+    let events = team_agent::event_log::EventLog::new(&ws)
+        .tail(0)
+        .expect("events");
     let event = events
         .iter()
-        .find(|event| {
-            event.get("event").and_then(Value::as_str) == Some("mcp.tool.auto_approved")
-        })
+        .find(|event| event.get("event").and_then(Value::as_str) == Some("mcp.tool.auto_approved"))
         .unwrap_or_else(|| panic!("missing mcp.tool.auto_approved event: {events:?}"));
-    assert_eq!(event.get("server").and_then(Value::as_str), Some("team_orchestrator"));
-    assert_eq!(event.get("tool").and_then(Value::as_str), Some("report_result"));
-    assert_eq!(event.get("inherit_reason").and_then(Value::as_str), Some("leader_bypass"));
-    assert_eq!(event.get("bypass_source").and_then(Value::as_str), Some("leader_process"));
+    assert_eq!(
+        event.get("server").and_then(Value::as_str),
+        Some("team_orchestrator")
+    );
+    assert_eq!(
+        event.get("tool").and_then(Value::as_str),
+        Some("report_result")
+    );
+    assert_eq!(
+        event.get("inherit_reason").and_then(Value::as_str),
+        Some("leader_bypass")
+    );
+    assert_eq!(
+        event.get("bypass_source").and_then(Value::as_str),
+        Some("leader_process")
+    );
     assert_eq!(
         event.get("flag").and_then(Value::as_str),
         Some("--dangerously-bypass-approvals-and-sandbox")
@@ -249,7 +260,8 @@ fn a8_old_schema_db_must_refuse_coordinator_start() {
     // Pre-init incompatible shape: the messages table exists but carries none of the
     // required columns (Python lifecycle.py:197+ flags missing required columns and
     // refuses with an action hint).
-    conn.execute("create table messages (id integer primary key)", []).unwrap();
+    conn.execute("create table messages (id integer primary key)", [])
+        .unwrap();
     drop(conn);
 
     let coord = Coordinator::new(
@@ -320,7 +332,10 @@ impl ProviderRegistry for RealAdapterRegistry {
         get_adapter(provider)
     }
     fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists { whitelist: Vec::new(), blacklist: Vec::new() }
+        ErrorLists {
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 }
 
@@ -417,7 +432,11 @@ impl Transport for ApprovalPromptTransport {
         }
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: "Allow the team_orchestrator MCP server to run tool \"report_result\"?\n  1. Allow\n  2. Deny\nEnter to submit | Esc to cancel\n".to_string(),
             range,

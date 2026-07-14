@@ -75,9 +75,9 @@ mod conpty_cli {
 
     fn parse_args() -> Result<Args> {
         let mut argv = std::env::args().skip(1);
-        let subcommand = argv
-            .next()
-            .ok_or_else(|| anyhow!("subcommand required (quick-start|status|send|capture|shutdown)"))?;
+        let subcommand = argv.next().ok_or_else(|| {
+            anyhow!("subcommand required (quick-start|status|send|capture|shutdown)")
+        })?;
         let mut args = Args {
             subcommand,
             pipe: String::new(),
@@ -168,16 +168,23 @@ mod conpty_cli {
         match args.subcommand.as_str() {
             "quick-start" => {
                 // Bullet #1: spawn one worker.
-                let session = args.session.clone().unwrap_or_else(|| args.team_key.clone());
+                let session = args
+                    .session
+                    .clone()
+                    .unwrap_or_else(|| args.team_key.clone());
                 let window = args.window.clone().unwrap_or_else(|| "w1".to_string());
                 let argv = if args.argv.is_empty() {
-                    vec!["cmd.exe".to_string(), "/K".to_string(), "echo phase1c-ready".to_string()]
+                    vec![
+                        "cmd.exe".to_string(),
+                        "/K".to_string(),
+                        "echo phase1c-ready".to_string(),
+                    ]
                 } else {
                     args.argv.clone()
                 };
                 let cwd = args.cwd.clone().unwrap_or_else(|| ".".to_string());
-                let spawn_payload = serde_json::to_value(
-                    conpty_transport::protocol::SpawnRequest {
+                let spawn_payload =
+                    serde_json::to_value(conpty_transport::protocol::SpawnRequest {
                         session: session.clone(),
                         window: window.clone(),
                         argv,
@@ -186,8 +193,7 @@ mod conpty_cli {
                         env_unset: vec![],
                         cols: 120,
                         rows: 30,
-                    },
-                )?;
+                    })?;
                 let req = Request::new(
                     new_request_id(),
                     &args.workspace_hash,
@@ -224,7 +230,10 @@ mod conpty_cli {
                     println!("shim_pid={}", hello_result.shim_pid);
                     println!(
                         "target_count={}",
-                        resp.result["targets"].as_array().map(|a| a.len()).unwrap_or(0)
+                        resp.result["targets"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0)
                     );
                     if let Some(arr) = resp.result["targets"].as_array() {
                         for row in arr {
@@ -251,14 +260,12 @@ mod conpty_cli {
                     .submit_key
                     .clone()
                     .unwrap_or_else(|| "enter".to_string());
-                let payload = serde_json::to_value(
-                    conpty_transport::protocol::InjectRequest {
-                        pane_id,
-                        text,
-                        submit_key: Some(submit_key),
-                        bracketed: false,
-                    },
-                )?;
+                let payload = serde_json::to_value(conpty_transport::protocol::InjectRequest {
+                    pane_id,
+                    text,
+                    submit_key: Some(submit_key),
+                    bracketed: false,
+                })?;
                 let req = Request::new(
                     new_request_id(),
                     &args.workspace_hash,
@@ -277,9 +284,10 @@ mod conpty_cli {
                     .clone()
                     .ok_or_else(|| anyhow!("--pane-id required for capture"))?;
                 let range = args.range.clone().unwrap_or_else(|| "full".to_string());
-                let payload = serde_json::to_value(
-                    conpty_transport::protocol::CaptureRequest { pane_id, range },
-                )?;
+                let payload = serde_json::to_value(conpty_transport::protocol::CaptureRequest {
+                    pane_id,
+                    range,
+                })?;
                 let req = Request::new(
                     new_request_id(),
                     &args.workspace_hash,
@@ -378,7 +386,9 @@ mod conpty_cli {
             )
             .context("CreateFileW named pipe")?;
             if handle == INVALID_HANDLE_VALUE {
-                return Err(anyhow!("CreateFileW returned INVALID_HANDLE_VALUE for {name}"));
+                return Err(anyhow!(
+                    "CreateFileW returned INVALID_HANDLE_VALUE for {name}"
+                ));
             }
             Ok(handle)
         }
@@ -400,8 +410,7 @@ mod conpty_cli {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let mut n: u32 = 0;
             unsafe {
-                ReadFile(self.0, Some(buf), Some(&mut n), None)
-                    .map_err(std::io::Error::other)?;
+                ReadFile(self.0, Some(buf), Some(&mut n), None).map_err(std::io::Error::other)?;
             }
             Ok(n as usize)
         }
@@ -410,8 +419,7 @@ mod conpty_cli {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             let mut n: u32 = 0;
             unsafe {
-                WriteFile(self.0, Some(buf), Some(&mut n), None)
-                    .map_err(std::io::Error::other)?;
+                WriteFile(self.0, Some(buf), Some(&mut n), None).map_err(std::io::Error::other)?;
             }
             Ok(n as usize)
         }

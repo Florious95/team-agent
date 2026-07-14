@@ -120,26 +120,31 @@ impl Drop for ShimHandle {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShimError {
-    #[error("windows-shim binary not found: expected `{expected}` alongside team-agent.exe; \
-             action: reinstall team-agent so the shim exe sits next to the main binary")]
+    #[error(
+        "windows-shim binary not found: expected `{expected}` alongside team-agent.exe; \
+             action: reinstall team-agent so the shim exe sits next to the main binary"
+    )]
     BinaryMissing { expected: String },
-    #[error("windows-shim spawn failed: {source} (pipe_name={pipe_name}); \
-             action: check windows-shim.exe permissions and PATH")]
+    #[error(
+        "windows-shim spawn failed: {source} (pipe_name={pipe_name}); \
+             action: check windows-shim.exe permissions and PATH"
+    )]
     Spawn {
         pipe_name: String,
         #[source]
         source: std::io::Error,
     },
-    #[error("windows-shim connect timed out after {attempts} attempts (pipe_name={pipe_name}); \
+    #[error(
+        "windows-shim connect timed out after {attempts} attempts (pipe_name={pipe_name}); \
              action: check shim.err.log for CreateNamedPipeW / ACL errors, \
-             then re-run team-agent quick-start")]
-    ConnectTimeout {
-        attempts: u32,
-        pipe_name: String,
-    },
-    #[error("windows-shim hello handshake failed: {reason} (pipe_name={pipe_name}); \
+             then re-run team-agent quick-start"
+    )]
+    ConnectTimeout { attempts: u32, pipe_name: String },
+    #[error(
+        "windows-shim hello handshake failed: {reason} (pipe_name={pipe_name}); \
              action: ensure team-agent.exe and windows-shim.exe are the same build \
-             (`sha256sum team-agent.exe windows-shim.exe` matches CI tracking)")]
+             (`sha256sum team-agent.exe windows-shim.exe` matches CI tracking)"
+    )]
     HelloFailed { pipe_name: String, reason: String },
     #[error("state persistence failed after shim spawn: {source}")]
     StatePersist {
@@ -191,7 +196,11 @@ fn fresh_pipe_token() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{:08x}{:024x}", pid, nanos & 0xffff_ffff_ffff_ffff_ffff_ffff)
+    format!(
+        "{:08x}{:024x}",
+        pid,
+        nanos & 0xffff_ffff_ffff_ffff_ffff_ffff
+    )
 }
 
 /// Coordinator hook: spawn `windows-shim.exe` for the given
@@ -305,10 +314,7 @@ pub fn spawn_shim_and_handshake(
                         let mut child = child;
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(ShimError::HelloFailed {
-                            pipe_name,
-                            reason,
-                        });
+                        return Err(ShimError::HelloFailed { pipe_name, reason });
                     }
                 }
             }
@@ -401,12 +407,14 @@ fn finalize(
         json!({})
     };
     // CR C-1: token NOT stored. Only pid/pipe_name/pipe_ready.
-    let obj = state.as_object_mut().ok_or_else(|| ShimError::StatePersist {
-        source: StateError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "state.json root not an object",
-        )),
-    })?;
+    let obj = state
+        .as_object_mut()
+        .ok_or_else(|| ShimError::StatePersist {
+            source: StateError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "state.json root not an object",
+            )),
+        })?;
     let transport = obj
         .entry("transport".to_string())
         .or_insert_with(|| json!({}));
@@ -540,12 +548,11 @@ pub fn reconnect_recorded_shim(
     team_key: &str,
     _workspace_hash: &str,
 ) -> Result<ShimHandle, ShimError> {
-    let pipe_name = recorded_shim_pipe_name(workspace).ok_or_else(|| {
-        ShimError::ConnectTimeout {
+    let pipe_name =
+        recorded_shim_pipe_name(workspace).ok_or_else(|| ShimError::ConnectTimeout {
             attempts: 0,
             pipe_name: "<state.transport.shim.pipe_name missing>".to_string(),
-        }
-    })?;
+        })?;
     // For reconnect we don't have the original pipe_token (CR C-1:
     // token was never persisted). Hello is designed to accept any
     // token from the client and echo back the shim's own token, so
@@ -561,24 +568,19 @@ pub fn reconnect_recorded_shim(
     let mut last_err: Option<ShimError> = None;
     for attempt in 1..=CONNECT_ATTEMPTS {
         match NamedPipeClient::connect(&pipe_name, 500) {
-            Ok(mut client) => {
-                match reconnect_hello(&mut client, team_key) {
-                    Ok(()) => {
-                        return Ok(ShimHandle {
-                            child: None,
-                            pid: recorded_shim_pid(workspace).unwrap_or(0),
-                            pipe_name,
-                            client: Some(client),
-                        });
-                    }
-                    Err(reason) => {
-                        return Err(ShimError::HelloFailed {
-                            pipe_name,
-                            reason,
-                        });
-                    }
+            Ok(mut client) => match reconnect_hello(&mut client, team_key) {
+                Ok(()) => {
+                    return Ok(ShimHandle {
+                        child: None,
+                        pid: recorded_shim_pid(workspace).unwrap_or(0),
+                        pipe_name,
+                        client: Some(client),
+                    });
                 }
-            }
+                Err(reason) => {
+                    return Err(ShimError::HelloFailed { pipe_name, reason });
+                }
+            },
             Err(err) => {
                 let _ = attempt;
                 let _ = placeholder_token;
@@ -599,10 +601,7 @@ pub fn reconnect_recorded_shim(
 /// Reconnect Hello: the client sends Hello with the current workspace/
 /// team scope; the shim replies with its OWN pipe_token (which the
 /// client doesn't know yet). We just validate `resp.ok`.
-fn reconnect_hello(
-    client: &mut NamedPipeClient,
-    team_key: &str,
-) -> Result<(), String> {
+fn reconnect_hello(client: &mut NamedPipeClient, team_key: &str) -> Result<(), String> {
     use conpty_transport::{Op, PipeClient, Request};
     let req = Request::new(
         "coord-reconnect-hello",
@@ -633,15 +632,10 @@ fn reconnect_hello(
 /// The Windows-only `#[cfg]` gate is at the mod level (see
 /// `coordinator/mod.rs`); on Unix this file isn't compiled, so
 /// downstream callers must cfg-gate their reference themselves.
-pub fn mark_transport_unavailable(
-    workspace: &Path,
-    reason: &str,
-) -> Result<(), StateError> {
+pub fn mark_transport_unavailable(workspace: &Path, reason: &str) -> Result<(), StateError> {
     // Best-effort event emission — a failed event write should not
     // fail the caller. The state-clearing step below is authoritative.
-    if let Ok(event_log) = std::panic::catch_unwind(|| {
-        crate::event_log::EventLog::new(workspace)
-    }) {
+    if let Ok(event_log) = std::panic::catch_unwind(|| crate::event_log::EventLog::new(workspace)) {
         let _ = event_log.write(
             "transport.conpty_shim_unavailable",
             serde_json::json!({
@@ -659,16 +653,10 @@ pub fn mark_transport_unavailable(
     }
     let text = std::fs::read_to_string(&state_path).map_err(StateError::from)?;
     let mut state: Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}));
-    if let Some(transport) = state
-        .get_mut("transport")
-        .and_then(|t| t.as_object_mut())
-    {
+    if let Some(transport) = state.get_mut("transport").and_then(|t| t.as_object_mut()) {
         if let Some(shim) = transport.get_mut("shim").and_then(|s| s.as_object_mut()) {
             shim.insert("pipe_ready".to_string(), serde_json::json!(false));
-            shim.insert(
-                "unavailable_reason".to_string(),
-                serde_json::json!(reason),
-            );
+            shim.insert("unavailable_reason".to_string(), serde_json::json!(reason));
         }
     }
     save_runtime_state(workspace, &state)
@@ -687,9 +675,7 @@ mod tests {
         let src = include_str!("conpty_shim.rs");
         // Locate the `finalize` fn body and grep for pipe_token
         // insertion.
-        let (_, finalize_and_after) = src
-            .split_once("fn finalize(")
-            .expect("finalize fn present");
+        let (_, finalize_and_after) = src.split_once("fn finalize(").expect("finalize fn present");
         let finalize_body = finalize_and_after
             .split_once("\n}")
             .map(|(body, _)| body)
@@ -711,7 +697,9 @@ mod tests {
         // {pid, pipe_name, pipe_ready}. If a future edit adds a 4th
         // key that carries a secret, this test fires.
         let src = include_str!("conpty_shim.rs");
-        let (_, after) = src.split_once("\"shim\".to_string(),").expect("shim insert");
+        let (_, after) = src
+            .split_once("\"shim\".to_string(),")
+            .expect("shim insert");
         let block_end = after.find("}),").unwrap_or(after.len());
         let block = &after[..block_end];
         for expected in ["pid", "pipe_name", "pipe_ready"] {

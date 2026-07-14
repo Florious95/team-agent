@@ -293,20 +293,62 @@ mod tests {
     #[test]
     fn enums_serialize_to_exact_python_strings() {
         let cases: &[(String, &str)] = &[
-            (serde_json::to_string(&Provider::ClaudeCode).unwrap(), "\"claude_code\""),
-            (serde_json::to_string(&Provider::GeminiCli).unwrap(), "\"gemini_cli\""),
-            (serde_json::to_string(&AuthMode::CompatibleApi).unwrap(), "\"compatible_api\""),
-            (serde_json::to_string(&TaskStatus::NeedsRetry).unwrap(), "\"needs_retry\""),
-            (serde_json::to_string(&TestStatus::NotRun).unwrap(), "\"not_run\""),
-            (serde_json::to_string(&TeamMode::SupervisorWorker).unwrap(), "\"supervisor_worker\""),
-            (serde_json::to_string(&CommProtocol::McpInbox).unwrap(), "\"mcp_inbox\""),
-            (serde_json::to_string(&DisplayBackend::TmuxAttach).unwrap(), "\"tmux_attach\""),
-            (serde_json::to_string(&DisplayBackend::GhosttyWorkspace).unwrap(), "\"ghostty_workspace\""),
-            (serde_json::to_string(&DisplayBackend::Adaptive).unwrap(), "\"adaptive\""),
-            (serde_json::to_string(&Tool::ExecuteBash).unwrap(), "\"execute_bash\""),
-            (serde_json::to_string(&Tool::ProviderBuiltin).unwrap(), "\"provider_builtin\""),
-            (serde_json::to_string(&Enforcement::PromptOnly).unwrap(), "\"prompt_only\""),
-            (serde_json::to_string(&PaneLiveness::Unknown).unwrap(), "\"unknown\""),
+            (
+                serde_json::to_string(&Provider::ClaudeCode).unwrap(),
+                "\"claude_code\"",
+            ),
+            (
+                serde_json::to_string(&Provider::GeminiCli).unwrap(),
+                "\"gemini_cli\"",
+            ),
+            (
+                serde_json::to_string(&AuthMode::CompatibleApi).unwrap(),
+                "\"compatible_api\"",
+            ),
+            (
+                serde_json::to_string(&TaskStatus::NeedsRetry).unwrap(),
+                "\"needs_retry\"",
+            ),
+            (
+                serde_json::to_string(&TestStatus::NotRun).unwrap(),
+                "\"not_run\"",
+            ),
+            (
+                serde_json::to_string(&TeamMode::SupervisorWorker).unwrap(),
+                "\"supervisor_worker\"",
+            ),
+            (
+                serde_json::to_string(&CommProtocol::McpInbox).unwrap(),
+                "\"mcp_inbox\"",
+            ),
+            (
+                serde_json::to_string(&DisplayBackend::TmuxAttach).unwrap(),
+                "\"tmux_attach\"",
+            ),
+            (
+                serde_json::to_string(&DisplayBackend::GhosttyWorkspace).unwrap(),
+                "\"ghostty_workspace\"",
+            ),
+            (
+                serde_json::to_string(&DisplayBackend::Adaptive).unwrap(),
+                "\"adaptive\"",
+            ),
+            (
+                serde_json::to_string(&Tool::ExecuteBash).unwrap(),
+                "\"execute_bash\"",
+            ),
+            (
+                serde_json::to_string(&Tool::ProviderBuiltin).unwrap(),
+                "\"provider_builtin\"",
+            ),
+            (
+                serde_json::to_string(&Enforcement::PromptOnly).unwrap(),
+                "\"prompt_only\"",
+            ),
+            (
+                serde_json::to_string(&PaneLiveness::Unknown).unwrap(),
+                "\"unknown\"",
+            ),
             (serde_json::to_string(&Backend::Pty).unwrap(), "\"pty\""),
         ];
         for (got, want) in cases {
@@ -357,7 +399,11 @@ mod tests {
         ] {
             assert!(b.has_worker_views());
         }
-        for b in [DisplayBackend::None, DisplayBackend::TmuxAttach, DisplayBackend::Iterm] {
+        for b in [
+            DisplayBackend::None,
+            DisplayBackend::TmuxAttach,
+            DisplayBackend::Iterm,
+        ] {
             assert!(!b.has_worker_views());
         }
     }
@@ -367,7 +413,10 @@ mod tests {
         // compiler 发的 drift 值必须原样保留(byte 不丢),不被拒。
         let drift = "\"business_messages_and_short_summaries\"";
         let v: ReceiveWorkerOutputs = serde_json::from_str(drift).unwrap();
-        assert_eq!(v, ReceiveWorkerOutputs::Other("business_messages_and_short_summaries".to_string()));
+        assert_eq!(
+            v,
+            ReceiveWorkerOutputs::Other("business_messages_and_short_summaries".to_string())
+        );
         assert_eq!(serde_json::to_string(&v).unwrap(), drift);
         // 已知值仍映射到 variant。
         assert_eq!(

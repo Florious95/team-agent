@@ -22,7 +22,13 @@ fn rest_013_restart_allow_fresh_succeeds_for_fake_team() {
     );
 
     let out = run_ta(&ws, &["restart", ws_path, "--allow-fresh", "--json"]);
-    assert!(out.is_success(), "restart exit {} stdout={} stderr={}", out.exit_code, out.stdout, out.stderr);
+    assert!(
+        out.is_success(),
+        "restart exit {} stdout={} stderr={}",
+        out.exit_code,
+        out.stdout,
+        out.stderr
+    );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", true);
     let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("");

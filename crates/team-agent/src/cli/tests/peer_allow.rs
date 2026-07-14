@@ -64,7 +64,12 @@ fn allow_peer_talk_output_byte_locks_golden_compat_noop() {
         }),
         "golden leader.py:28 return dict (key set + values); got {v:?}"
     );
-    let order: Vec<&str> = v.as_object().expect("object").keys().map(String::as_str).collect();
+    let order: Vec<&str> = v
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(String::as_str)
+        .collect();
     assert_eq!(
         order,
         vec!["ok", "a", "b", "status", "reason"],
@@ -101,7 +106,10 @@ fn allow_peer_talk_is_idempotent_and_fires_event_per_call() {
     let ws = tmp_workspace();
     let v1 = app_out(app_call(&ws, "alpha", "bravo"));
     let v2 = app_out(app_call(&ws, "alpha", "bravo")); // duplicate pair
-    assert_eq!(v1, v2, "repeated allow returns identical compat_noop output");
+    assert_eq!(
+        v1, v2,
+        "repeated allow returns identical compat_noop output"
+    );
     let lines = app_events(&ws);
     assert_eq!(
         lines.len(),

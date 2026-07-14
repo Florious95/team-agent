@@ -1,9 +1,9 @@
-use super::*;
 use super::agent_ops::lanea_team_ws;
 use super::lane_ops::{LaneSpawns, LaneTransport};
 use super::launch_spawn::{
     restart_ws_two_resumable_workers, seed_healthy_coordinator, DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO,
 };
+use super::*;
 
 type RecordedSpawns = LaneSpawns;
 
@@ -46,56 +46,118 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
     fn kind(&self) -> crate::transport::BackendKind {
         crate::transport::BackendKind::Tmux
     }
-    fn spawn_first(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _cwd: &std::path::Path, _env: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        self.spawns.lock().unwrap().push(("spawn_first".to_string(), argv.to_vec()));
+    fn spawn_first(
+        &self,
+        session: &crate::transport::SessionName,
+        window: &crate::transport::WindowName,
+        argv: &[String],
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawns
+            .lock()
+            .unwrap()
+            .push(("spawn_first".to_string(), argv.to_vec()));
         self.spawn_targets.lock().unwrap().push((
             session.as_str().to_string(),
             window.as_str().to_string(),
             "%0".to_string(),
         ));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new("%0"), session: session.clone(), window: window.clone(), child_pid: Some(6856) })
+        Ok(crate::transport::SpawnResult {
+            pane_id: crate::transport::PaneId::new("%0"),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: Some(6856),
+        })
     }
-    fn spawn_into(&self, session: &crate::transport::SessionName, window: &crate::transport::WindowName, argv: &[String], _cwd: &std::path::Path, _env: &std::collections::BTreeMap<String, String>) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
-        self.spawns.lock().unwrap().push(("spawn_into".to_string(), argv.to_vec()));
+    fn spawn_into(
+        &self,
+        session: &crate::transport::SessionName,
+        window: &crate::transport::WindowName,
+        argv: &[String],
+        _cwd: &std::path::Path,
+        _env: &std::collections::BTreeMap<String, String>,
+    ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawns
+            .lock()
+            .unwrap()
+            .push(("spawn_into".to_string(), argv.to_vec()));
         let pane = format!("%{}", window.as_str());
         self.spawn_targets.lock().unwrap().push((
             session.as_str().to_string(),
             window.as_str().to_string(),
             pane.clone(),
         ));
-        Ok(crate::transport::SpawnResult { pane_id: crate::transport::PaneId::new(pane), session: session.clone(), window: window.clone(), child_pid: Some(6856) })
+        Ok(crate::transport::SpawnResult {
+            pane_id: crate::transport::PaneId::new(pane),
+            session: session.clone(),
+            window: window.clone(),
+            child_pid: Some(6856),
+        })
     }
-    fn inject(&self, _t: &crate::transport::Target, _p: &crate::transport::InjectPayload, _s: crate::transport::Key, _b: bool) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
+    fn inject(
+        &self,
+        _t: &crate::transport::Target,
+        _p: &crate::transport::InjectPayload,
+        _s: crate::transport::Key,
+        _b: bool,
+    ) -> Result<crate::transport::InjectReport, crate::transport::TransportError> {
         unimplemented!("not reached by start_agent respawn")
     }
-    fn send_keys(&self, _t: &crate::transport::Target, _k: &[crate::transport::Key]) -> Result<(), crate::transport::TransportError> {
+    fn send_keys(
+        &self,
+        _t: &crate::transport::Target,
+        _k: &[crate::transport::Key],
+    ) -> Result<(), crate::transport::TransportError> {
         unimplemented!("not reached")
     }
-    fn capture(&self, _t: &crate::transport::Target, _r: crate::transport::CaptureRange) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
+    fn capture(
+        &self,
+        _t: &crate::transport::Target,
+        _r: crate::transport::CaptureRange,
+    ) -> Result<crate::transport::CapturedText, crate::transport::TransportError> {
         Ok(crate::transport::CapturedText {
             text: String::new(),
             range: crate::transport::CaptureRange::Full,
         })
     }
-    fn query(&self, _t: &crate::transport::Target, _f: crate::transport::PaneField) -> Result<Option<String>, crate::transport::TransportError> {
+    fn query(
+        &self,
+        _t: &crate::transport::Target,
+        _f: crate::transport::PaneField,
+    ) -> Result<Option<String>, crate::transport::TransportError> {
         unimplemented!("not reached")
     }
-    fn liveness(&self, p: &crate::transport::PaneId) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
+    fn liveness(
+        &self,
+        p: &crate::transport::PaneId,
+    ) -> Result<crate::model::enums::PaneLiveness, crate::transport::TransportError> {
         let killed = self.killed_panes.lock().unwrap();
         if killed.contains(p.as_str()) {
             return Ok(crate::model::enums::PaneLiveness::Dead);
         }
         Ok(crate::model::enums::PaneLiveness::Live)
     }
-    fn has_pane(&self, p: &crate::transport::PaneId) -> Result<Option<bool>, crate::transport::TransportError> {
+    fn has_pane(
+        &self,
+        p: &crate::transport::PaneId,
+    ) -> Result<Option<bool>, crate::transport::TransportError> {
         let killed = self.killed_panes.lock().unwrap();
         Ok(Some(!killed.contains(p.as_str())))
     }
-    fn kill_pane(&self, p: &crate::transport::PaneId) -> Result<(), crate::transport::TransportError> {
-        self.killed_panes.lock().unwrap().insert(p.as_str().to_string());
+    fn kill_pane(
+        &self,
+        p: &crate::transport::PaneId,
+    ) -> Result<(), crate::transport::TransportError> {
+        self.killed_panes
+            .lock()
+            .unwrap()
+            .insert(p.as_str().to_string());
         Ok(())
     }
-    fn list_targets(&self) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
+    fn list_targets(
+        &self,
+    ) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
         Ok(self
             .spawn_targets
             .lock()
@@ -116,23 +178,47 @@ impl crate::transport::Transport for SessionProbeRecordingTransport {
             })
             .collect())
     }
-    fn has_session(&self, _s: &crate::transport::SessionName) -> Result<bool, crate::transport::TransportError> {
+    fn has_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<bool, crate::transport::TransportError> {
         Ok(self.session_exists)
     }
-    fn list_windows(&self, _s: &crate::transport::SessionName) -> Result<Vec<crate::transport::WindowName>, crate::transport::TransportError> {
+    fn list_windows(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<Vec<crate::transport::WindowName>, crate::transport::TransportError> {
         // a dead server has no windows; a live one has the agent window.
-        Ok(if self.session_exists { vec![crate::transport::WindowName::new("alpha")] } else { Vec::new() })
+        Ok(if self.session_exists {
+            vec![crate::transport::WindowName::new("alpha")]
+        } else {
+            Vec::new()
+        })
     }
-    fn set_session_env(&self, _s: &crate::transport::SessionName, _k: &str, _v: &str) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &crate::transport::SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<crate::transport::SetEnvOutcome, crate::transport::TransportError> {
         unimplemented!("not reached")
     }
-    fn kill_session(&self, _s: &crate::transport::SessionName) -> Result<(), crate::transport::TransportError> {
+    fn kill_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<(), crate::transport::TransportError> {
         unimplemented!("not reached")
     }
-    fn kill_window(&self, _t: &crate::transport::Target) -> Result<(), crate::transport::TransportError> {
+    fn kill_window(
+        &self,
+        _t: &crate::transport::Target,
+    ) -> Result<(), crate::transport::TransportError> {
         Ok(())
     }
-    fn attach_session(&self, _s: &crate::transport::SessionName) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
+    fn attach_session(
+        &self,
+        _s: &crate::transport::SessionName,
+    ) -> Result<crate::transport::AttachOutcome, crate::transport::TransportError> {
         unimplemented!("not reached")
     }
 }
@@ -163,10 +249,27 @@ fn start_agent_respawn_into_dead_session_uses_new_session_not_new_window() {
     let ws = respawn_ws_one_resumable_worker();
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // session_exists=false models the dead CP-1 `-L` server after --discard-session.
-    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), spawn_targets: std::sync::Mutex::new(Vec::new()), session_exists: false, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
-    let _ = start_agent_with_transport(&ws, &AgentId::new("alpha"), false, false, false, None, &transport);
+    let transport = SessionProbeRecordingTransport {
+        spawns: std::sync::Arc::clone(&spawns),
+        spawn_targets: std::sync::Mutex::new(Vec::new()),
+        session_exists: false,
+        killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+    };
+    let _ = start_agent_with_transport(
+        &ws,
+        &AgentId::new("alpha"),
+        false,
+        false,
+        false,
+        None,
+        &transport,
+    );
     let recorded = spawns.lock().unwrap().clone();
-    assert_eq!(recorded.len(), 1, "exactly one respawn for alpha; got {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one respawn for alpha; got {recorded:?}"
+    );
     assert_eq!(
         recorded[0].0, "spawn_first",
         "golden runtime.py:1017: when `tmux has-session` is FALSE (dead -L server after \
@@ -195,7 +298,12 @@ fn reset_agent_discard_session_rebuilds_window_via_start_respawn() {
     let ws = restart_ws_two_resumable_workers(); // compiled spec + state(alpha,bravo running) + seeded coordinator
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // live session present (other workers keep it alive) but alpha's window was discarded.
-    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), spawn_targets: std::sync::Mutex::new(Vec::new()), session_exists: true, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
+    let transport = SessionProbeRecordingTransport {
+        spawns: std::sync::Arc::clone(&spawns),
+        spawn_targets: std::sync::Mutex::new(Vec::new()),
+        session_exists: true,
+        killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+    };
     let _ = reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport);
     let recorded = spawns.lock().unwrap().clone();
     assert!(
@@ -233,9 +341,15 @@ fn reset_agent_discard_session_syncs_projection_epoch_inputs_for_restart_agent_c
 
     let before = chrono::Utc::now();
     let spawns = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let transport = SessionProbeRecordingTransport { spawns: std::sync::Arc::clone(&spawns), spawn_targets: std::sync::Mutex::new(Vec::new()), session_exists: true, killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()) };
-    let outcome = reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport)
-        .expect("reset-agent alpha --discard-session --no-display");
+    let transport = SessionProbeRecordingTransport {
+        spawns: std::sync::Arc::clone(&spawns),
+        spawn_targets: std::sync::Mutex::new(Vec::new()),
+        session_exists: true,
+        killed_panes: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+    };
+    let outcome =
+        reset_agent_with_transport(&ws, &AgentId::new("alpha"), true, false, None, &transport)
+            .expect("reset-agent alpha --discard-session --no-display");
     assert!(
         matches!(outcome, ResetAgentOutcome::Reset { .. }),
         "restart-agent alpha --discard-session --no-display must complete reset; got {outcome:?}"
@@ -323,7 +437,10 @@ fn bugb_routed_team_ws() -> PathBuf {
     let yaml = crate::model::yaml::dumps(&spec);
     // sanity: the UNMODIFIED compiled spec really routes bravo — that route-bravo rule is the dangling
     // ref the cascade-prune must drop (and which makes golden's validate_spec raise + rollback).
-    assert!(yaml.contains("assign_to: \"bravo\""), "fixture: compiled spec must carry route-bravo (assign_to bravo); got:\n{yaml}");
+    assert!(
+        yaml.contains("assign_to: \"bravo\""),
+        "fixture: compiled spec must carry route-bravo (assign_to bravo); got:\n{yaml}"
+    );
     std::fs::write(ws.join("team.spec.yaml"), yaml).unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
@@ -383,7 +500,10 @@ fn remove_routed_worker_prunes_dangling_routing_rule_divergence() {
     );
     let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
     assert!(
-        state.get("agents").and_then(serde_json::Value::as_object).is_some_and(|a| !a.contains_key("bravo")),
+        state
+            .get("agents")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|a| !a.contains_key("bravo")),
         "bravo must also be removed from state.agents; got {state:?}"
     );
     let _ = std::fs::remove_dir_all(&ws);

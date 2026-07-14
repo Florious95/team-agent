@@ -78,8 +78,15 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("d123team"), &transport)
-        .expect("quick-start should reach codex command construction");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("d123team"),
+        &transport,
+    )
+    .expect("quick-start should reach codex command construction");
     let spawn = transport.single_spawn();
     let argv = &spawn.argv;
     let mut failures = Vec::new();
@@ -89,7 +96,8 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
         .iter()
         .find(|arg| arg.starts_with("developer_instructions=\""));
     match dev {
-        None => failures.push("D1: no `-c developer_instructions=\"...\"` value in codex argv".to_string()),
+        None => failures
+            .push("D1: no `-c developer_instructions=\"...\"` value in codex argv".to_string()),
         Some(dev) => {
             if dev.contains('\n') {
                 failures.push(format!(
@@ -128,7 +136,9 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
         "model_providers.relay.name=\"Relay\"",
     ] {
         if !argv.iter().any(|arg| arg == config) {
-            failures.push(format!("D3: codex argv missing `-c {config}` (profile codex_config)"));
+            failures.push(format!(
+                "D3: codex argv missing `-c {config}` (profile codex_config)"
+            ));
         }
     }
     // Python golden order: --profile before --sandbox; codex_config -c before developer_instructions.
@@ -137,12 +147,15 @@ fn d1_d2_d3_codex_argv_matches_python_golden_escape_timeout_profile() {
         argv.iter().position(|arg| arg == "--sandbox"),
     ) {
         if profile_idx > sandbox_idx {
-            failures.push("D3: `--profile` must precede `--sandbox` (codex.py:105-113)".to_string());
+            failures
+                .push("D3: `--profile` must precede `--sandbox` (codex.py:105-113)".to_string());
         }
     }
     if let (Some(config_idx), Some(dev_idx)) = (
-        argv.iter().position(|arg| arg == "model_provider=\"relay\""),
-        argv.iter().position(|arg| arg.starts_with("developer_instructions=")),
+        argv.iter()
+            .position(|arg| arg == "model_provider=\"relay\""),
+        argv.iter()
+            .position(|arg| arg.starts_with("developer_instructions=")),
     ) {
         if config_idx > dev_idx {
             failures.push(
@@ -325,7 +338,10 @@ keystrokes/injections={sent:?}"
 fn d8_launch_session_name_fallback_derives_from_team_name() {
     let _ancestry = EnvGuard::set(&[(ANCESTRY_KEY, NEUTRAL_ANCESTRY)]);
     let ws = tmp_dir("d8-session-name");
-    let team_dir = write_team(&ws, &simple_codex_team("d8team", "worker_a", "Session Worker"));
+    let team_dir = write_team(
+        &ws,
+        &simple_codex_team("d8team", "worker_a", "Session Worker"),
+    );
     let spec = team_agent::compiler::compile_team(&team_dir).expect("compile fixture team");
     let spec_text = team_agent::model::yaml::dumps(&spec);
     let stripped: String = spec_text
@@ -409,7 +425,9 @@ fn d9_profile_env_unset_reaches_worker_shell_line() {
         .flatten()
         .find(|arg| arg.starts_with("cd ") && arg.contains(" exec "))
         .cloned()
-        .unwrap_or_else(|| panic!("no worker `cd … exec …` shell line recorded; tmux calls={recorded:?}"));
+        .unwrap_or_else(|| {
+            panic!("no worker `cd … exec …` shell line recorded; tmux calls={recorded:?}")
+        });
 
     let env_file = ws.join(".team/runtime/provider-env/worker_a.env");
     let mut failures = Vec::new();
@@ -727,7 +745,11 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: "Claude Code\n> \nOpenAI Codex\ncodex>".to_string(),
             range,
@@ -808,7 +830,9 @@ impl RecordingRunner {
 impl CommandRunner for RecordingRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
         self.argv_log.lock().unwrap().push(argv.to_vec());
-        let subcommand = argv.iter().find(|arg| !arg.starts_with('-') && *arg != "tmux");
+        let subcommand = argv
+            .iter()
+            .find(|arg| !arg.starts_with('-') && *arg != "tmux");
         let (success, stdout) = match subcommand.map(String::as_str) {
             Some("has-session") => (false, String::new()),
             Some("display-message") => (true, "%1\n".to_string()),

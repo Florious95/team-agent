@@ -26,10 +26,7 @@ pub fn halt_plan(
 }
 
 /// `plan_status(workspace, plan_id)`(`orchestrator/__init__.py:177`)。读 plan 持久态。
-pub fn plan_status(
-    workspace: &Path,
-    plan_id: &PlanId,
-) -> Result<PlanState, LifecycleError> {
+pub fn plan_status(workspace: &Path, plan_id: &PlanId) -> Result<PlanState, LifecycleError> {
     let path = plan_state_path(workspace, plan_id);
     if !path.exists() {
         return Err(LifecycleError::InvalidPlan(format!(

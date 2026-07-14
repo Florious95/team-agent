@@ -22,9 +22,16 @@ fn abnormal_default_notify_for_structured_fault() {
     )
     .unwrap();
     assert_eq!(out.notifications.len(), 1);
-    assert_eq!(out.notifications[0].decision, AbnormalDecision::NotifyDefault);
+    assert_eq!(
+        out.notifications[0].decision,
+        AbnormalDecision::NotifyDefault
+    );
     // §84:绝不触碰 provider adapter client。
-    assert_eq!(reg.adapter_calls.get(), 0, "MUST NOT call adapter_for (provider client)");
+    assert_eq!(
+        reg.adapter_calls.get(),
+        0,
+        "MUST NOT call adapter_for (provider client)"
+    );
 }
 
 #[test]
@@ -40,7 +47,10 @@ fn abnormal_blacklist_hit_yields_notify_blacklist() {
     )
     .unwrap();
     assert_eq!(out.notifications.len(), 1);
-    assert_eq!(out.notifications[0].decision, AbnormalDecision::NotifyBlacklist);
+    assert_eq!(
+        out.notifications[0].decision,
+        AbnormalDecision::NotifyBlacklist
+    );
     assert_eq!(reg.adapter_calls.get(), 0);
 }
 
@@ -56,7 +66,11 @@ fn abnormal_whitelist_beats_blacklist_and_skips() {
         &AbnormalNotificationState::default(),
     )
     .unwrap();
-    assert_eq!(out.notifications.len(), 0, "whitelist wins → skip (probe confirmed)");
+    assert_eq!(
+        out.notifications.len(),
+        0,
+        "whitelist wins → skip (probe confirmed)"
+    );
     assert_eq!(reg.adapter_calls.get(), 0);
 }
 
@@ -91,7 +105,11 @@ fn abnormal_same_turn_id_folds_to_one_notification() {
         &AbnormalNotificationState::default(),
     )
     .unwrap();
-    assert_eq!(out.notifications.len(), 1, "retry-loop in SAME turn folds (probe: 1)");
+    assert_eq!(
+        out.notifications.len(),
+        1,
+        "retry-loop in SAME turn folds (probe: 1)"
+    );
     // seen 状态回存,key = "sig_a\0t1"。
     assert!(out.notification_state.seen.contains("sig_a\u{0}t1"));
 }
@@ -112,7 +130,11 @@ fn abnormal_missing_turn_id_distinct_faults_each_notify() {
         &AbnormalNotificationState::default(),
     )
     .unwrap();
-    assert_eq!(out.notifications.len(), 2, "distinct raw → 2 notifies (probe)");
+    assert_eq!(
+        out.notifications.len(),
+        2,
+        "distinct raw → 2 notifies (probe)"
+    );
 }
 
 #[test]
@@ -130,7 +152,11 @@ fn abnormal_missing_turn_id_identical_faults_fold() {
         &AbnormalNotificationState::default(),
     )
     .unwrap();
-    assert_eq!(out.notifications.len(), 1, "identical raw folds even w/o turn_id (probe)");
+    assert_eq!(
+        out.notifications.len(),
+        1,
+        "identical raw folds even w/o turn_id (probe)"
+    );
 }
 
 #[test]
@@ -140,14 +166,12 @@ fn abnormal_preseeded_seen_suppresses_duplicate_across_calls() {
     let mut state = AbnormalNotificationState::default();
     state.seen.insert("sig_a\u{0}t1".to_string());
     let records = vec![serde_json::json!({"signature": "sig_a", "turn_id": "t1", "raw": "boom"})];
-    let out = process_abnormal_records(
-        &records,
-        &reg,
-        Provider::Codex,
-        &state,
-    )
-    .unwrap();
-    assert_eq!(out.notifications.len(), 0, "pre-seeded seen suppresses (probe: 0)");
+    let out = process_abnormal_records(&records, &reg, Provider::Codex, &state).unwrap();
+    assert_eq!(
+        out.notifications.len(),
+        0,
+        "pre-seeded seen suppresses (probe: 0)"
+    );
 }
 
 #[test]
@@ -387,7 +411,10 @@ fn whole_team_gone_clean_shutdown_is_silent() {
     assert!(!r.notify);
     assert!(!r.escalate_user_on_next_leader_command);
     assert!(!r.marker_written);
-    assert!(ms.markers.is_empty(), "clean shutdown writes NO durable marker");
+    assert!(
+        ms.markers.is_empty(),
+        "clean shutdown writes NO durable marker"
+    );
 }
 
 #[test]
@@ -425,9 +452,15 @@ fn whole_team_gone_unexpected_writes_marker_and_defers_escalation() {
     assert!(r.whole_team_gone);
     assert_eq!(r.classification, WholeTeamGoneClass::UnexpectedExit);
     assert!(r.notify);
-    assert!(r.escalate_user_on_next_leader_command, "defer to next leader command");
+    assert!(
+        r.escalate_user_on_next_leader_command,
+        "defer to next leader command"
+    );
     assert!(r.marker_written);
-    assert!(ms.markers.contains_key("whole_team_gone"), "durable marker named whole_team_gone");
+    assert!(
+        ms.markers.contains_key("whole_team_gone"),
+        "durable marker named whole_team_gone"
+    );
 }
 
 #[test]
@@ -446,5 +479,8 @@ fn whole_team_gone_unexpected_marker_failure_reflected() {
     let r = detect_whole_team_gone(&snap, &mut ms);
     assert_eq!(r.classification, WholeTeamGoneClass::UnexpectedExit);
     assert!(r.notify);
-    assert!(!r.marker_written, "marker set failed → marker_written false");
+    assert!(
+        !r.marker_written,
+        "marker set failed → marker_written false"
+    );
 }

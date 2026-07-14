@@ -24,9 +24,9 @@ use team_agent::provider::{ProviderCommandOverrides, ProviderProfileLaunch};
 use team_agent::state::persist::load_runtime_state;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 #[test]
@@ -38,15 +38,10 @@ fn compatible_api_profile_quick_start_spawns_claude_with_profile_env_and_state_m
     let team = write_claude_profile_team(&ws, "claudeprof", "clauder");
     let transport = RecordingTransport::default();
 
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("claudeprof"),
-        &transport,
-    )
-    .expect("quick-start through recording transport should reach the real lifecycle spawn path");
+    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("claudeprof"), &transport)
+        .expect(
+            "quick-start through recording transport should reach the real lifecycle spawn path",
+        );
 
     let spawn = transport.single_spawn();
     for (key, expected) in [
@@ -100,15 +95,8 @@ fn subscription_profile_keeps_default_claude_config_dir_for_logged_in_quota() {
     let team = write_claude_subscription_profile_team(&ws, "subteam", "clauder");
     let transport = RecordingTransport::default();
 
-    quick_start_with_transport_in_workspace(
-        &ws,
-        &team,
-        None,
-        true,
-        Some("subteam"),
-        &transport,
-    )
-    .expect("subscription profile should launch without managed config isolation");
+    quick_start_with_transport_in_workspace(&ws, &team, None, true, Some("subteam"), &transport)
+        .expect("subscription profile should launch without managed config isolation");
 
     let spawn = transport.single_spawn();
     assert!(
@@ -161,16 +149,16 @@ fn launch_restart_start_add_and_fork_all_delegate_to_the_profile_launch_resolver
 fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
     let ws = tmp_dir("diagnose-missing-profile");
     let team = write_claude_profile_team(&ws, "diagteam", "clauder");
-    std::fs::remove_file(ws.join(".team").join("current").join("profiles").join("local.env"))
-        .unwrap();
+    std::fs::remove_file(
+        ws.join(".team")
+            .join("current")
+            .join("profiles")
+            .join("local.env"),
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_team-agent"))
-        .args([
-            "diagnose",
-            "--workspace",
-            ws.to_str().unwrap(),
-            "--json",
-        ])
+        .args(["diagnose", "--workspace", ws.to_str().unwrap(), "--json"])
         .current_dir(&team)
         .output()
         .expect("diagnose subprocess should run");
@@ -199,7 +187,10 @@ fn diagnose_missing_profile_is_rc1_ok_false_and_zero_token() {
 
 fn assert_s0_profile_launch_shape() {
     let profile = ProviderProfileLaunch {
-        env_overlay: BTreeMap::from([("ANTHROPIC_MODEL".to_string(), "profile-effective-haiku".to_string())]),
+        env_overlay: BTreeMap::from([(
+            "ANTHROPIC_MODEL".to_string(),
+            "profile-effective-haiku".to_string(),
+        )]),
         env_unset: BTreeSet::from(["ANTHROPIC_API_KEY".to_string()]),
         command_overrides: ProviderCommandOverrides {
             model: Some("profile-effective-haiku".to_string()),
@@ -243,7 +234,10 @@ fn write_claude_subscription_profile_team(ws: &Path, team_key: &str, agent_id: &
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::create_dir_all(ws.join(".team").join("current").join("profiles")).unwrap();
     std::fs::write(
-        ws.join(".team").join("current").join("profiles").join("local.env"),
+        ws.join(".team")
+            .join("current")
+            .join("profiles")
+            .join("local.env"),
         "AUTH_MODE=subscription\nMODEL=claude-sonnet-4-6\n",
     )
     .unwrap();
@@ -299,7 +293,11 @@ struct RecordingTransport {
 impl RecordingTransport {
     fn single_spawn(&self) -> RecordedSpawn {
         let spawns = self.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1, "fixture should record one Claude worker spawn; spawns={spawns:?}");
+        assert_eq!(
+            spawns.len(),
+            1,
+            "fixture should record one Claude worker spawn; spawns={spawns:?}"
+        );
         spawns[0].clone()
     }
 }
@@ -362,8 +360,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
@@ -373,7 +378,10 @@ impl Transport for RecordingTransport {
         }
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<team_agent::transport::PaneLiveness, TransportError> {
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
         Ok(team_agent::transport::PaneLiveness::Live)
     }
 

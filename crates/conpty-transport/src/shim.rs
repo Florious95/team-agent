@@ -38,8 +38,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use crate::protocol::{
-    HelloResult, InjectRequest, Op, ProtocolError, Request, Response, SpawnRequest, SpawnResult,
-    CaptureRequest, CaptureResult, PROTOCOL_SCHEMA,
+    CaptureRequest, CaptureResult, HelloResult, InjectRequest, Op, ProtocolError, Request,
+    Response, SpawnRequest, SpawnResult, PROTOCOL_SCHEMA,
 };
 
 /// Physical-pane abstraction. The Windows `bin/windows_shim` supplies a
@@ -169,10 +169,7 @@ impl Shim {
                     message: format!(
                         "shim serves workspace_hash={} team_key={}; \
                          request targeted workspace_hash={} team_key={}",
-                        self.workspace_hash,
-                        self.team_key,
-                        req.workspace_hash,
-                        req.team_key
+                        self.workspace_hash, self.team_key, req.workspace_hash, req.team_key
                     ),
                 },
             );
@@ -226,10 +223,7 @@ impl Shim {
         let runtime = match (self.pane_factory)(&spawn) {
             Ok(r) => r,
             Err(e) => {
-                return Response::err(
-                    &req.request_id,
-                    ProtocolError::Spawn { message: e },
-                );
+                return Response::err(&req.request_id, ProtocolError::Spawn { message: e });
             }
         };
         let epoch = {
@@ -240,10 +234,7 @@ impl Shim {
         // Design §Authority Model:155 pane_id shape.
         let pane_id = format!(
             "conpty:{}:{}:{}:{}",
-            self.workspace_hash,
-            self.team_key,
-            spawn.window,
-            epoch
+            self.workspace_hash, self.team_key, spawn.window, epoch
         );
         let child_pid = runtime.child_pid();
         let entry = PaneEntry {
@@ -522,10 +513,7 @@ impl Shim {
                 entry.runtime.kill();
             }
         }
-        Response::ok(
-            &req.request_id,
-            serde_json::json!({"killed_count": count}),
-        )
+        Response::ok(&req.request_id, serde_json::json!({"killed_count": count}))
     }
 }
 
@@ -626,9 +614,8 @@ impl PipeClient for LocalShimClient {
 mod tests {
     use super::*;
 
-    fn fake_factory() -> Box<
-        dyn Fn(&SpawnRequest) -> Result<Arc<dyn PaneRuntime>, String> + Send + Sync,
-    > {
+    fn fake_factory(
+    ) -> Box<dyn Fn(&SpawnRequest) -> Result<Arc<dyn PaneRuntime>, String> + Send + Sync> {
         Box::new(|_spawn| Ok(Arc::new(FakePaneRuntime::new()) as Arc<dyn PaneRuntime>))
     }
 
@@ -792,8 +779,7 @@ mod tests {
         })
         .unwrap();
         let s = shim.handle(
-            &Request::new("s", "wshash", "team-a", &token, Op::Spawn)
-                .with_payload(spawn_payload),
+            &Request::new("s", "wshash", "team-a", &token, Op::Spawn).with_payload(spawn_payload),
         );
         let sp: SpawnResult = serde_json::from_value(s.result).unwrap();
         let chinese = "王小明·测试·令牌";
@@ -873,7 +859,13 @@ mod tests {
         let targets = list_resp.result["targets"].as_array().unwrap().len();
         assert_eq!(targets, 3);
         // Shutdown.
-        let sd = shim.handle(&Request::new("sd", "wshash", "team-a", &token, Op::Shutdown));
+        let sd = shim.handle(&Request::new(
+            "sd",
+            "wshash",
+            "team-a",
+            &token,
+            Op::Shutdown,
+        ));
         assert!(sd.ok);
         assert_eq!(sd.result["killed_count"], serde_json::json!(3));
         // list is now empty.

@@ -38,7 +38,10 @@ fn restart_rechecks_session_liveness_before_spawning_second_worker() {
         1,
         "after alpha spawn_first reports success but the recreated session disappears, restart must stop before spawning bravo; result={result:?} records={records:?}"
     );
-    assert_eq!(records[0].kind, "spawn_first", "alpha must be the only spawn and must recreate the session; records={records:?}");
+    assert_eq!(
+        records[0].kind, "spawn_first",
+        "alpha must be the only spawn and must recreate the session; records={records:?}"
+    );
     assert!(
         records.iter().all(|record| record.kind != "spawn_into"),
         "restart must not call spawn_into/new-window for bravo against a dead session; result={result:?} records={records:?}"
@@ -123,7 +126,11 @@ fn real_tmux_restart_names_first_resume_agent_when_first_resume_exits_before_sec
         ])
         .env(
             "PATH",
-            format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap_or_default()),
+            format!(
+                "{}:{}",
+                fake_bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
         )
         .env("CODEX_FAKE_LOG", fixture.root.join("fake-codex.log"))
         .output()
@@ -289,7 +296,11 @@ impl Transport for RestartLivenessTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: String::new(),
             range,
@@ -417,7 +428,11 @@ impl Transport for LaunchPaneIdTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: String::new(),
             range,
@@ -453,7 +468,7 @@ fn inject_report() -> InjectReport {
         submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
         turn_verification: TurnVerification::NotRequired,
         attempts: 1,
-            submit_diagnostics: None,
+        submit_diagnostics: None,
     }
 }
 
@@ -483,7 +498,11 @@ impl RestartFixture {
             .unwrap();
         }
         let spec = team_agent::compiler::compile_team(&team).unwrap();
-        std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+        std::fs::write(
+            team.join("team.spec.yaml"),
+            team_agent::model::yaml::dumps(&spec),
+        )
+        .unwrap();
         Self {
             root,
             team,

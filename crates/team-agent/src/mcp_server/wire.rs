@@ -12,8 +12,8 @@ use super::helpers::{json_dumps_default, object_fields};
 use super::normalize::normalize_result_status;
 use super::tools::TeamOrchestratorTools;
 use super::types::{
-    McpError, McpTool, RpcError, RpcId, RpcMethod, RpcResponse, Scope, SendOutcome, ServerRunReport,
-    ToolError, ToolErrorReason, ToolOk, ToolResult,
+    McpError, McpTool, RpcError, RpcId, RpcMethod, RpcResponse, Scope, SendOutcome,
+    ServerRunReport, ToolError, ToolErrorReason, ToolOk, ToolResult,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -38,10 +38,7 @@ pub fn tools_contract() -> Vec<Value> {
         McpTool::StuckList,
         McpTool::StuckCancel,
     ];
-    tools
-        .into_iter()
-        .map(tool_contract)
-        .collect()
+    tools.into_iter().map(tool_contract).collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -58,7 +55,11 @@ pub fn dispatch(tools: &TeamOrchestratorTools, request: &Value) -> ToolResult {
     let tool_value = request
         .get("tool")
         .filter(|v| !v.as_str().is_some_and(str::is_empty))
-        .or_else(|| request.get("name").filter(|v| !v.as_str().is_some_and(str::is_empty)))
+        .or_else(|| {
+            request
+                .get("name")
+                .filter(|v| !v.as_str().is_some_and(str::is_empty))
+        })
         .or_else(|| request.get("method"));
     let name = tool_value.and_then(Value::as_str);
     let args = request
@@ -95,7 +96,10 @@ pub fn dispatch(tools: &TeamOrchestratorTools, request: &Value) -> ToolResult {
 /// frame.
 ///
 /// [`ToolCallResult`]: super::ToolCallResult
-pub fn handle_mcp(tools: &TeamOrchestratorTools, request: &Value) -> Result<Option<RpcResponse>, McpError> {
+pub fn handle_mcp(
+    tools: &TeamOrchestratorTools,
+    request: &Value,
+) -> Result<Option<RpcResponse>, McpError> {
     let id = rpc_id_from_request(request);
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     match RpcMethod::classify(method) {
@@ -106,7 +110,10 @@ pub fn handle_mcp(tools: &TeamOrchestratorTools, request: &Value) -> Result<Opti
                 .and_then(Value::as_str)
                 .unwrap_or("2024-11-05");
             let mut result = serde_json::Map::new();
-            result.insert("protocolVersion".to_string(), Value::String(protocol.to_string()));
+            result.insert(
+                "protocolVersion".to_string(),
+                Value::String(protocol.to_string()),
+            );
             result.insert("capabilities".to_string(), serde_json::json!({"tools": {}}));
             result.insert(
                 "serverInfo".to_string(),
@@ -130,7 +137,10 @@ pub fn handle_mcp(tools: &TeamOrchestratorTools, request: &Value) -> Result<Opti
             let body = match dispatch(tools, params) {
                 Ok(ok) => {
                     let value = Value::Object(ok.fields);
-                    tool_call_result_value(value.get("ok").and_then(Value::as_bool) == Some(false), &value)
+                    tool_call_result_value(
+                        value.get("ok").and_then(Value::as_bool) == Some(false),
+                        &value,
+                    )
                 }
                 Err(err) => tool_call_result_value(true, &err.to_envelope()),
             };
@@ -247,7 +257,9 @@ fn handle_stdin_line(
 
 fn rpc_id_from_request(request: &Value) -> RpcId {
     match request.get("id") {
-        Some(Value::Number(n)) => n.as_i64().map_or_else(|| RpcId::Number(n.clone()), RpcId::Int),
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .map_or_else(|| RpcId::Number(n.clone()), RpcId::Int),
         Some(Value::String(s)) => RpcId::Str(s.clone()),
         _ => RpcId::Null,
     }
@@ -385,56 +397,172 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
     let mut properties = serde_json::Map::new();
     match tool {
         McpTool::AssignTask => {
-            insert_property(&mut properties, "task", object_property("Task object to add or update."));
-            insert_property(&mut properties, "message", string_property("Optional message to deliver with the task."));
+            insert_property(
+                &mut properties,
+                "task",
+                object_property("Task object to add or update."),
+            );
+            insert_property(
+                &mut properties,
+                "message",
+                string_property("Optional message to deliver with the task."),
+            );
         }
         McpTool::SendMessage => {
-            insert_property(&mut properties, "to", string_property("Target agent id, 'leader', or '*' for broadcast."));
+            insert_property(
+                &mut properties,
+                "to",
+                string_property("Target agent id, 'leader', or '*' for broadcast."),
+            );
             insert_property(&mut properties, "content", string_property("Message body."));
-            insert_property(&mut properties, "task_id", string_property("Optional task id to associate with the message."));
-            insert_property(&mut properties, "sender", string_property("Optional sender override."));
-            insert_property(&mut properties, "requires_ack", boolean_property("Whether the recipient should acknowledge delivery."));
+            insert_property(
+                &mut properties,
+                "task_id",
+                string_property("Optional task id to associate with the message."),
+            );
+            insert_property(
+                &mut properties,
+                "sender",
+                string_property("Optional sender override."),
+            );
+            insert_property(
+                &mut properties,
+                "requires_ack",
+                boolean_property("Whether the recipient should acknowledge delivery."),
+            );
         }
         McpTool::ReportResult => {
-            insert_property(&mut properties, "envelope", object_property("Optional full result envelope."));
-            insert_property(&mut properties, "summary", string_property("Short result summary."));
+            insert_property(
+                &mut properties,
+                "envelope",
+                object_property("Optional full result envelope."),
+            );
+            insert_property(
+                &mut properties,
+                "summary",
+                string_property("Short result summary."),
+            );
             insert_property(&mut properties, "status", string_property("Result status."));
-            insert_property(&mut properties, "changes", array_property("Changed files or artifacts."));
-            insert_property(&mut properties, "tests", array_property("Tests or checks performed."));
-            insert_property(&mut properties, "risks", array_property("Risks or blockers."));
-            insert_property(&mut properties, "artifacts", array_property("Artifact references."));
-            insert_property(&mut properties, "next_actions", array_property("Suggested next actions."));
-            insert_property(&mut properties, "task_id", string_property("Optional task id override."));
-            insert_property(&mut properties, "agent_id", string_property("Optional reporting agent id override."));
+            insert_property(
+                &mut properties,
+                "changes",
+                array_property("Changed files or artifacts."),
+            );
+            insert_property(
+                &mut properties,
+                "tests",
+                array_property("Tests or checks performed."),
+            );
+            insert_property(
+                &mut properties,
+                "risks",
+                array_property("Risks or blockers."),
+            );
+            insert_property(
+                &mut properties,
+                "artifacts",
+                array_property("Artifact references."),
+            );
+            insert_property(
+                &mut properties,
+                "next_actions",
+                array_property("Suggested next actions."),
+            );
+            insert_property(
+                &mut properties,
+                "task_id",
+                string_property("Optional task id override."),
+            );
+            insert_property(
+                &mut properties,
+                "agent_id",
+                string_property("Optional reporting agent id override."),
+            );
         }
         McpTool::UpdateState => {
-            insert_property(&mut properties, "note", string_property("Note to append to team state."));
+            insert_property(
+                &mut properties,
+                "note",
+                string_property("Note to append to team state."),
+            );
         }
         McpTool::GetTeamStatus | McpTool::StuckList => {}
         McpTool::StopAgent => {
-            insert_property(&mut properties, "agent_id", string_property("Agent id to stop."));
+            insert_property(
+                &mut properties,
+                "agent_id",
+                string_property("Agent id to stop."),
+            );
         }
         McpTool::ResetAgent => {
-            insert_property(&mut properties, "agent_id", string_property("Agent id to reset."));
-            insert_property(&mut properties, "discard_session", boolean_property("Whether to discard the existing provider session."));
+            insert_property(
+                &mut properties,
+                "agent_id",
+                string_property("Agent id to reset."),
+            );
+            insert_property(
+                &mut properties,
+                "discard_session",
+                boolean_property("Whether to discard the existing provider session."),
+            );
         }
         McpTool::AddAgent => {
-            insert_property(&mut properties, "new_agent_id", string_property("New agent id."));
-            insert_property(&mut properties, "role_file_path", string_property("Workspace-relative role file path."));
+            insert_property(
+                &mut properties,
+                "new_agent_id",
+                string_property("New agent id."),
+            );
+            insert_property(
+                &mut properties,
+                "role_file_path",
+                string_property("Workspace-relative role file path."),
+            );
         }
         McpTool::ForkAgent => {
-            insert_property(&mut properties, "source_agent_id", string_property("Agent id to fork from."));
-            insert_property(&mut properties, "as_agent_id", string_property("Agent id for the forked worker."));
-            insert_property(&mut properties, "label", string_property("Optional display label."));
+            insert_property(
+                &mut properties,
+                "source_agent_id",
+                string_property("Agent id to fork from."),
+            );
+            insert_property(
+                &mut properties,
+                "as_agent_id",
+                string_property("Agent id for the forked worker."),
+            );
+            insert_property(
+                &mut properties,
+                "label",
+                string_property("Optional display label."),
+            );
         }
         McpTool::RequestHuman => {
-            insert_property(&mut properties, "question", string_property("Question to ask the human."));
-            insert_property(&mut properties, "task_id", string_property("Optional related task id."));
-            insert_property(&mut properties, "agent_id", string_property("Optional requesting agent id."));
+            insert_property(
+                &mut properties,
+                "question",
+                string_property("Question to ask the human."),
+            );
+            insert_property(
+                &mut properties,
+                "task_id",
+                string_property("Optional related task id."),
+            );
+            insert_property(
+                &mut properties,
+                "agent_id",
+                string_property("Optional requesting agent id."),
+            );
         }
         McpTool::StuckCancel => {
-            insert_property(&mut properties, "agent_id", string_property("Agent id whose stuck alerts should be suppressed."));
-            insert_property(&mut properties, "alert_type", string_property("Alert type to suppress, or all."));
+            insert_property(
+                &mut properties,
+                "agent_id",
+                string_property("Agent id whose stuck alerts should be suppressed."),
+            );
+            insert_property(
+                &mut properties,
+                "alert_type",
+                string_property("Alert type to suppress, or all."),
+            );
         }
     }
     properties
@@ -460,12 +588,19 @@ fn array_property(description: &str) -> Value {
     serde_json::json!({"type": "array", "description": description, "items": {"type": "object", "additionalProperties": true}})
 }
 
-pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: &Value) -> ToolResult {
+pub(crate) fn dispatch_tool(
+    tools: &TeamOrchestratorTools,
+    tool: McpTool,
+    args: &Value,
+) -> ToolResult {
     if scope_ceiling_tool(tool) {
         tools.validate_rpc_scope_args(tool.wire_name(), args)?;
     }
     match tool {
-        McpTool::AssignTask => tools.assign_task(args.get("task").unwrap_or(args), args.get("message").and_then(Value::as_str)),
+        McpTool::AssignTask => tools.assign_task(
+            args.get("task").unwrap_or(args),
+            args.get("message").and_then(Value::as_str),
+        ),
         McpTool::SendMessage => {
             let target = message_target_from_value(args.get("to"));
             let content = args.get("content").and_then(Value::as_str).unwrap_or("");
@@ -490,36 +625,61 @@ pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: 
             // cr verdict (T3-1 refined): an unknown status literal normalizes to
             // Partial and is OBSERVABLE at this ingestion boundary, never silent.
             {
-                let (status, unknown) = crate::mcp_server::normalize::normalize_result_status_observed(
-                    args.get("status").and_then(Value::as_str),
-                );
+                let (status, unknown) =
+                    crate::mcp_server::normalize::normalize_result_status_observed(
+                        args.get("status").and_then(Value::as_str),
+                    );
                 if let Some(raw) = unknown {
                     tools.note_unknown_result_status(&raw);
                 }
                 status
             },
-            args.get("changes").and_then(Value::as_array).map(Vec::as_slice),
-            args.get("tests").and_then(Value::as_array).map(Vec::as_slice),
-            args.get("risks").and_then(Value::as_array).map(Vec::as_slice),
-            args.get("artifacts").and_then(Value::as_array).map(Vec::as_slice),
-            args.get("next_actions").and_then(Value::as_array).map(Vec::as_slice),
+            args.get("changes")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            args.get("tests")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            args.get("risks")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            args.get("artifacts")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
+            args.get("next_actions")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice),
             args.get("task_id").and_then(Value::as_str),
             args.get("agent_id").and_then(Value::as_str),
         ),
-        McpTool::UpdateState => tools.update_state(args.get("note").and_then(Value::as_str).unwrap_or("")),
+        McpTool::UpdateState => {
+            tools.update_state(args.get("note").and_then(Value::as_str).unwrap_or(""))
+        }
         McpTool::GetTeamStatus => tools.get_team_status(),
-        McpTool::StopAgent => tools.stop_agent(args.get("agent_id").and_then(Value::as_str).unwrap_or("")),
+        McpTool::StopAgent => {
+            tools.stop_agent(args.get("agent_id").and_then(Value::as_str).unwrap_or(""))
+        }
         McpTool::ResetAgent => tools.reset_agent(
             args.get("agent_id").and_then(Value::as_str).unwrap_or(""),
-            args.get("discard_session").and_then(Value::as_bool).unwrap_or(false),
+            args.get("discard_session")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         ),
         McpTool::AddAgent => tools.add_agent(
-            args.get("new_agent_id").and_then(Value::as_str).unwrap_or(""),
-            args.get("role_file_path").and_then(Value::as_str).unwrap_or(""),
+            args.get("new_agent_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            args.get("role_file_path")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
         ),
         McpTool::ForkAgent => tools.fork_agent(
-            args.get("source_agent_id").and_then(Value::as_str).unwrap_or(""),
-            args.get("as_agent_id").and_then(Value::as_str).unwrap_or(""),
+            args.get("source_agent_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            args.get("as_agent_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
             args.get("label").and_then(Value::as_str),
         ),
         McpTool::RequestHuman => tools.request_human(
@@ -531,7 +691,9 @@ pub(crate) fn dispatch_tool(tools: &TeamOrchestratorTools, tool: McpTool, args: 
         McpTool::StuckCancel => tools.stuck_cancel(
             args.get("agent_id").and_then(Value::as_str).unwrap_or(""),
             // tools.py:351 — the MCP default alert_type is "stuck", not "all".
-            args.get("alert_type").and_then(Value::as_str).unwrap_or("stuck"),
+            args.get("alert_type")
+                .and_then(Value::as_str)
+                .unwrap_or("stuck"),
         ),
     }
 }
@@ -598,7 +760,10 @@ mod e23_lifecycle_marker_tests {
         assert_eq!(events[0]["event"], serde_json::json!("mcp.server_started"));
         assert_eq!(events[1]["event"], serde_json::json!("mcp.server_exit"));
         assert_eq!(events[1]["reason"], serde_json::json!("stdin_eof"));
-        assert_eq!(events[1]["workspace"], serde_json::json!(ws.display().to_string()));
+        assert_eq!(
+            events[1]["workspace"],
+            serde_json::json!(ws.display().to_string())
+        );
         assert_eq!(events[1]["pid"], serde_json::json!(std::process::id()));
         assert!(events[1].get("ppid").is_some());
         let _ = std::fs::remove_dir_all(&ws);
@@ -618,9 +783,8 @@ mod e23_lifecycle_marker_tests {
         }
 
         let ws = marker_ws("fatal");
-        let input = std::io::Cursor::new(
-            br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.to_vec(),
-        );
+        let input =
+            std::io::Cursor::new(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.to_vec());
 
         let err = run_stdio_loop(&ws, input, FailingWriter).expect_err("writer failure");
 
@@ -629,12 +793,10 @@ mod e23_lifecycle_marker_tests {
         assert_eq!(events[0]["event"], serde_json::json!("mcp.server_started"));
         assert_eq!(events[1]["event"], serde_json::json!("mcp.server_exit"));
         assert_eq!(events[1]["reason"], serde_json::json!("fatal_error"));
-        assert!(
-            events[1]["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("simulated stdout failure")
-        );
+        assert!(events[1]["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("simulated stdout failure"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

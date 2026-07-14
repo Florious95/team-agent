@@ -17,7 +17,11 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn duplicate_report_result_preserves_first_result_row() {
     let ws = temp_workspace("f015_preserve");
     let first = envelope("res_f015_dup_preserve", "success", "first summary");
-    let second = envelope("res_f015_dup_preserve", "failed", "second summary must not overwrite first");
+    let second = envelope(
+        "res_f015_dup_preserve",
+        "failed",
+        "second summary must not overwrite first",
+    );
 
     report_result(&ws, &first).expect("first report_result accepted");
     report_result(&ws, &second).expect("duplicate report_result returns a typed duplicate outcome");
@@ -39,7 +43,8 @@ fn duplicate_report_result_preserves_first_result_row() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("read stored result");
-    let stored: serde_json::Value = serde_json::from_str(&raw_envelope).expect("stored envelope json");
+    let stored: serde_json::Value =
+        serde_json::from_str(&raw_envelope).expect("stored envelope json");
     assert_eq!(
         status, "success",
         "duplicate report_result must preserve the first status, not replace it"
@@ -70,14 +75,24 @@ fn duplicate_report_result_is_duplicate_ignored_and_does_not_requeue_notificatio
     let ws = temp_workspace("f015_duplicate_ignored");
     let result_id = "res_f015_dup_notify";
 
-    let first_out = report_result(&ws, &envelope(result_id, "success", "first")).expect("first report_result");
-    let second_out = report_result(&ws, &envelope(result_id, "success", "duplicate")).expect("duplicate report_result");
-    assert_eq!(first_out.get("ok").and_then(serde_json::Value::as_bool), Some(true));
-    assert_eq!(second_out.get("ok").and_then(serde_json::Value::as_bool), Some(true));
+    let first_out =
+        report_result(&ws, &envelope(result_id, "success", "first")).expect("first report_result");
+    let second_out = report_result(&ws, &envelope(result_id, "success", "duplicate"))
+        .expect("duplicate report_result");
+    assert_eq!(
+        first_out.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        second_out.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
 
     let conn = open_runtime_db(&ws);
     let queued: i64 = conn
-        .query_row("select count(*) from scheduled_events", [], |row| row.get(0))
+        .query_row("select count(*) from scheduled_events", [], |row| {
+            row.get(0)
+        })
         .expect("scheduled notification count");
     assert_eq!(
         queued, 0,
@@ -142,5 +157,6 @@ fn temp_workspace(tag: &str) -> PathBuf {
 }
 
 fn open_runtime_db(workspace: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open(workspace.join(".team/runtime/team.db")).expect("open runtime team.db")
+    rusqlite::Connection::open(workspace.join(".team/runtime/team.db"))
+        .expect("open runtime team.db")
 }

@@ -41,7 +41,14 @@ fn mcp_get_team_status_returns_scoped_rich_status_without_sibling_leak() {
             call.body
         );
     }
-    for forbidden in ["messages", "results", "coordinator", "readiness", "queued_messages", "latest_results"] {
+    for forbidden in [
+        "messages",
+        "results",
+        "coordinator",
+        "readiness",
+        "queued_messages",
+        "latest_results",
+    ] {
         assert!(
             call.body.get(forbidden).is_none(),
             "0.4.x: get_team_status slim payload must NOT include diagnostic `{forbidden}` (CLI --detail only); body={}",
@@ -70,7 +77,12 @@ fn mcp_update_state_writes_selected_team_notes_and_team_state_file_only() {
         call.body,
         call.raw
     );
-    assert_eq!(call.body["ok"], json!(true), "update_state should succeed after writing selected team state; body={}", call.body);
+    assert_eq!(
+        call.body["ok"],
+        json!(true),
+        "update_state should succeed after writing selected team state; body={}",
+        call.body
+    );
     assert_eq!(
         object_keys(&call.body),
         vec!["ok", "state_file"],
@@ -102,8 +114,9 @@ fn mcp_update_state_writes_selected_team_notes_and_team_state_file_only() {
         text.contains("old teamB note") && text.contains("new teamB note"),
         "team_state.md returned by update_state must contain old and new selected-team notes; state_file={state_file} text={text:?}"
     );
-    let team_a_text = std::fs::read_to_string(harness.workspace_path().join("teamA").join("team_state.md"))
-        .unwrap_or_default();
+    let team_a_text =
+        std::fs::read_to_string(harness.workspace_path().join("teamA").join("team_state.md"))
+            .unwrap_or_default();
     assert!(
         !team_a_text.contains("new teamB note"),
         "update_state for teamB must not write the new note into teamA team_state.md; team_a_text={team_a_text:?}"
@@ -181,7 +194,11 @@ fn write_team_dir(root: &Path, name: &str, agent: &str) -> PathBuf {
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&team).unwrap();
-    std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     team
 }
 

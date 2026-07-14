@@ -45,7 +45,11 @@ fn t2_install_skill_does_not_destroy_existing_dir_on_copy_failure() {
     let ws = tmp_ws("t2-install");
     let dest = ws.join("existing-skill");
     std::fs::create_dir_all(&dest).unwrap();
-    std::fs::write(dest.join("USER_DATA.md"), "irreplaceable user skill content").unwrap();
+    std::fs::write(
+        dest.join("USER_DATA.md"),
+        "irreplaceable user skill content",
+    )
+    .unwrap();
 
     // Source that does not exist → copy_tree must fail.
     let bad_source = ws.join("no-such-source");
@@ -58,14 +62,17 @@ fn t2_install_skill_does_not_destroy_existing_dir_on_copy_failure() {
 
     let mut failures = Vec::new();
     if result.is_ok() {
-        failures.push("T2-1: install_skill with a missing source must fail, not silently succeed".to_string());
+        failures.push(
+            "T2-1: install_skill with a missing source must fail, not silently succeed".to_string(),
+        );
     }
     // The pre-existing user content MUST survive a failed install.
     if !dest.join("USER_DATA.md").exists() {
         failures.push(
             "T2-1: a failed copy must not leave the user's skill dir wiped — install_skill \
 must stage into a temp dir and only swap after a successful copy (write_worker_mcp_config \
-tmp+rename范式); the user data was destroyed".to_string(),
+tmp+rename范式); the user data was destroyed"
+                .to_string(),
         );
     }
     assert!(
@@ -92,7 +99,10 @@ fn t2_snapshot_no_stale_tmp_residue_on_failed_write() {
         &serde_json::json!({"session_name": "team-x", "agents": {}}),
     );
 
-    assert!(result.is_err(), "fixture: the snapshot write must fail when tmp is a dir");
+    assert!(
+        result.is_err(),
+        "fixture: the snapshot write must fail when tmp is a dir"
+    );
     // A failed snapshot must not leave a stale FILE tmp residue (the dir we created is
     // the fixture's, not residue; the contract is that no stray state.json.tmp FILE is
     // written elsewhere and the real state.json was never half-written).
@@ -133,14 +143,12 @@ two-line state+file delete must be atomic-or-rolled-back"
 /// in-place truncate). Grep guard on the self_heal data-preservation shape.
 #[test]
 fn t2_persist_failed_save_never_truncates_in_place() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/state/persist.rs"
-    ))
-    .unwrap();
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/state/persist.rs"))
+        .unwrap();
     let heal = fn_body(&src, "fn self_heal");
     let stages_via_tmp = heal.contains("heal.tmp") && heal.contains("atomic_replace");
-    let no_inplace_truncate = !heal.contains("File::create(path)") && !heal.contains("truncate(true)");
+    let no_inplace_truncate =
+        !heal.contains("File::create(path)") && !heal.contains("truncate(true)");
     assert!(
         stages_via_tmp && no_inplace_truncate,
         "T2-3: a failed state save must rebuild via heal-tmp + atomic_replace (+ backup), \
@@ -182,7 +190,11 @@ Python's else->success); got {status:?}"
             ));
         }
     }
-    assert!(failures.is_empty(), "T3-1 unknown-status normalization failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "T3-1 unknown-status normalization failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// T3-1 parity lock (cr path 1): a MISSING / null / empty status is the
@@ -201,7 +213,11 @@ got {status:?}"
             ));
         }
     }
-    assert!(failures.is_empty(), "T3-1 parity lock failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "T3-1 parity lock failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// T3-1 event arm (cr: must emit `provider.result.unknown_status_normalized` with the
@@ -268,7 +284,9 @@ fn t3_schema_diagnosis_missing_is_layered_parity_not_swallow() {
     // Value axes (compile-safe struct fields): ok=true + status="missing" are the parity
     // GREEN part — the missing state is legal for the next step and explicitly named.
     if !diag.ok {
-        failures.push(format!("T3-3 parity: missing db must report ok=true (legal next step); diag={diag:?}"));
+        failures.push(format!(
+            "T3-3 parity: missing db must report ok=true (legal next step); diag={diag:?}"
+        ));
     }
     if diag.status != "missing" {
         failures.push(format!(
@@ -280,13 +298,15 @@ fn t3_schema_diagnosis_missing_is_layered_parity_not_swallow() {
     // guidance string; RS's Diagnosis omits the field entirely (parity gap). Grep guard
     // the missing branch so the layered guidance is surfaced (the field is part of the
     // honest layering — without it the ok:true is bare). Turns green when dev adds it.
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/migration.rs")).unwrap();
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/db/migration.rs"))
+        .unwrap();
     if !src.contains("recommended_action") || !src.contains("initialize_schema") {
         failures.push(
             "T3-3 parity: the missing-db diagnosis must carry a recommended_action with \
 initialize_schema guidance (Python schema_migration.py missing branch: 'initialize_schema \
 will create it on first use'); RS Diagnosis currently omits the field — the ok:true is \
-bare without the layered guidance".to_string(),
+bare without the layered guidance"
+                .to_string(),
         );
     }
     assert!(
@@ -346,11 +366,8 @@ fine while drift exists = silent concealment); diag={diag:?}"
 /// the fabricated constant is the audited defect).
 #[test]
 fn t3_tmux_pane_id_not_fabricated_as_percent_zero() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/tmux_backend.rs"
-    ))
-    .unwrap();
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tmux_backend.rs"))
+        .unwrap();
     assert!(
         !src.contains("if pane.is_empty() { \"%0\" }")
             && !src.contains("if pane.is_empty() {\n            \"%0\""),
@@ -422,10 +439,12 @@ must NOT report Present (auth misreported as available is a false green); got {s
 /// drop a detached thread handle.
 #[test]
 fn t5_stop_coordinator_bounded_must_not_leak_detached_thread() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/mod.rs")).unwrap();
+    let src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/mod.rs")).unwrap();
     let body = fn_body(&src, "fn stop_coordinator_bounded");
     let spawns = body.contains("thread::spawn") || body.contains("std::thread::spawn");
-    let reclaims = body.contains(".join(") || body.contains("JoinHandle") || body.contains("join_timeout");
+    let reclaims =
+        body.contains(".join(") || body.contains("JoinHandle") || body.contains("join_timeout");
     assert!(
         !spawns || reclaims,
         "T5: stop_coordinator_bounded spawns a thread but never joins it — a timed-out \

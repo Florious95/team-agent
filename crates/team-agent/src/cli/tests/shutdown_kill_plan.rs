@@ -381,10 +381,16 @@ fn scoped_clean_shutdown_persists_team_shutdown_status_after_disk_roundtrip() {
 
     assert_eq!(out["ok"], json!(true), "shutdown report: {out}");
     assert_eq!(out["session_killed"], json!(true), "shutdown report: {out}");
-    assert_eq!(out["verification_degraded"], json!(false), "shutdown report: {out}");
+    assert_eq!(
+        out["verification_degraded"],
+        json!(false),
+        "shutdown report: {out}"
+    );
     let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(
-        saved.pointer("/teams/current/status").and_then(serde_json::Value::as_str),
+        saved
+            .pointer("/teams/current/status")
+            .and_then(serde_json::Value::as_str),
         Some("shutdown"),
         "0.5.27 RED: clean scoped shutdown returned session_killed=true and not degraded, \
          so disk state must persist teams.current.status=shutdown. The compact projected \
@@ -444,10 +450,16 @@ fn scoped_degraded_shutdown_does_not_persist_team_shutdown_status() {
     .expect("shutdown should complete");
 
     assert_eq!(out["session_killed"], json!(true), "shutdown report: {out}");
-    assert_eq!(out["verification_degraded"], json!(true), "shutdown report: {out}");
+    assert_eq!(
+        out["verification_degraded"],
+        json!(true),
+        "shutdown report: {out}"
+    );
     let saved = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_ne!(
-        saved.pointer("/teams/current/status").and_then(serde_json::Value::as_str),
+        saved
+            .pointer("/teams/current/status")
+            .and_then(serde_json::Value::as_str),
         Some("shutdown"),
         "degraded shutdown must remain dirty/diagnostic and must not stamp \
          teams.current.status=shutdown; saved={saved}"
@@ -808,7 +820,8 @@ fn shutdown_outcome_late_or_postcheck_gone_is_ok_with_lsof_diagnostic() {
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone, target_session_spared: false,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            target_session_spared: false,
         },
     );
 
@@ -828,7 +841,8 @@ fn shutdown_outcome_coordinator_timeout_still_running_is_timeout() {
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running, target_session_spared: false,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+            target_session_spared: false,
         },
     );
 
@@ -848,7 +862,8 @@ fn shutdown_outcome_ps_table_degraded_still_partial_after_coordinator_gone() {
             cleanup_truth_degraded: true,
             coordinator_timeout: true,
             coordinator_stop_ok: None,
-            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone, target_session_spared: false,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            target_session_spared: false,
         },
     );
 
@@ -1266,8 +1281,7 @@ fn unit0_classify_outcome_session_residual_returns_failed() {
             cleanup_truth_degraded: false,
             coordinator_timeout: false,
             coordinator_stop_ok: Some(true),
-            coordinator_post_stop:
-                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
             target_session_spared: false,
         },
     );
@@ -1286,8 +1300,7 @@ fn unit0_classify_outcome_coordinator_timeout_returns_timeout_phase() {
             cleanup_truth_degraded: false,
             coordinator_timeout: true,
             coordinator_stop_ok: Some(false),
-            coordinator_post_stop:
-                crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Running,
             target_session_spared: false,
         },
     );
@@ -1307,8 +1320,7 @@ fn unit0_classify_outcome_cleanup_truth_degraded_returns_partial_os_probe() {
             cleanup_truth_degraded: true,
             coordinator_timeout: false,
             coordinator_stop_ok: Some(true),
-            coordinator_post_stop:
-                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
             target_session_spared: false,
         },
     );
@@ -1331,8 +1343,7 @@ fn unit2_classify_outcome_target_session_spared_is_not_green() {
             cleanup_truth_degraded: false,
             coordinator_timeout: false,
             coordinator_stop_ok: Some(true),
-            coordinator_post_stop:
-                crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
+            coordinator_post_stop: crate::cli::lifecycle_port::CoordinatorStopObservation::Gone,
             target_session_spared: true,
         },
     );

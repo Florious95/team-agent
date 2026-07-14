@@ -30,13 +30,22 @@ fn compile_team_dir_with_owner_team_id(tag: &str) -> std::path::PathBuf {
 fn cmd_compile_json_and_human_match_golden_shape_and_writes_out() {
     let team = compile_team_dir("compile-ok");
     let out = team.parent().unwrap().join("out.yaml");
-    let args = CompileArgs { team: team.clone(), out: out.clone(), json: true };
+    let args = CompileArgs {
+        team: team.clone(),
+        out: out.clone(),
+        json: true,
+    };
 
     let result = cmd_compile(&args).expect("compile");
     assert_eq!(result.exit, ExitCode::Ok);
-    assert!(out.exists(), "compile must write the compiled spec to --out");
     assert!(
-        std::fs::read_to_string(&out).unwrap().contains("version: 1"),
+        out.exists(),
+        "compile must write the compiled spec to --out"
+    );
+    assert!(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("version: 1"),
         "compiled out file must contain the spec YAML"
     );
 
@@ -46,7 +55,10 @@ fn cmd_compile_json_and_human_match_golden_shape_and_writes_out() {
         out.to_string_lossy(),
         team.to_string_lossy()
     );
-    assert_eq!(json_text, expected_json, "golden --json is sorted pretty JSON");
+    assert_eq!(
+        json_text, expected_json,
+        "golden --json is sorted pretty JSON"
+    );
 
     let human_text = emit(&result.output, false).unwrap();
     let expected_human = format!(
@@ -54,7 +66,10 @@ fn cmd_compile_json_and_human_match_golden_shape_and_writes_out() {
         team.to_string_lossy(),
         out.to_string_lossy()
     );
-    assert_eq!(human_text, expected_human, "golden human output preserves cmd_compile insertion order");
+    assert_eq!(
+        human_text, expected_human,
+        "golden human output preserves cmd_compile insertion order"
+    );
 }
 
 #[test]
@@ -62,7 +77,11 @@ fn cmd_compile_ignores_user_owner_team_id_and_emits_warning_event() {
     let team = compile_team_dir_with_owner_team_id("compile-ignored-owner");
     let workspace = team.parent().unwrap().to_path_buf();
     let out = workspace.join("ignored-owner-out.yaml");
-    let args = CompileArgs { team: team.clone(), out: out.clone(), json: true };
+    let args = CompileArgs {
+        team: team.clone(),
+        out: out.clone(),
+        json: true,
+    };
 
     let result = cmd_compile(&args).expect("compile");
     assert_eq!(result.exit, ExitCode::Ok);
@@ -75,10 +94,7 @@ fn cmd_compile_ignores_user_owner_team_id_and_emits_warning_event() {
     let event = events
         .iter()
         .find(|event| {
-            event
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                == Some("spec.field_ignored")
+            event.get("event").and_then(serde_json::Value::as_str) == Some("spec.field_ignored")
         })
         .expect("owner_team_id warning event");
     assert_eq!(
@@ -100,17 +116,18 @@ fn cmd_compile_without_owner_team_id_emits_no_ignored_field_event() {
     let team = compile_team_dir("compile-no-ignored-owner");
     let workspace = team.parent().unwrap().to_path_buf();
     let out = workspace.join("no-ignored-owner-out.yaml");
-    let args = CompileArgs { team: team.clone(), out, json: true };
+    let args = CompileArgs {
+        team: team.clone(),
+        out,
+        json: true,
+    };
 
     let result = cmd_compile(&args).expect("compile");
     assert_eq!(result.exit, ExitCode::Ok);
     let events = crate::event_log::EventLog::new(&workspace).tail(0).unwrap();
     assert!(
         events.iter().all(|event| {
-            event
-                .get("event")
-                .and_then(serde_json::Value::as_str)
-                != Some("spec.field_ignored")
+            event.get("event").and_then(serde_json::Value::as_str) != Some("spec.field_ignored")
         }),
         "TEAM.md without owner_team_id must not emit ignored-field warning"
     );
@@ -129,7 +146,10 @@ fn run_dispatches_compile_and_error_path_exits_error() {
         "--json".to_string(),
     ];
     assert_eq!(run(&argv, team.parent().unwrap()), ExitCode::Ok);
-    assert!(out.exists(), "dispatch compile must route to cmd_compile and write --out");
+    assert!(
+        out.exists(),
+        "dispatch compile must route to cmd_compile and write --out"
+    );
 
     let bad = tmp_workspace().join("compile-bad");
     std::fs::create_dir_all(bad.join("agents")).unwrap();
@@ -144,9 +164,16 @@ fn run_dispatches_compile_and_error_path_exits_error() {
     )
     .unwrap();
     let bad_out = bad.parent().unwrap().join("bad.yaml");
-    let bad_args = CompileArgs { team: bad.clone(), out: bad_out.clone(), json: true };
+    let bad_args = CompileArgs {
+        team: bad.clone(),
+        out: bad_out.clone(),
+        json: true,
+    };
     let err = cmd_compile(&bad_args).unwrap_err().to_string();
-    assert!(err.contains("missing front matter field provider"), "got {err}");
+    assert!(
+        err.contains("missing front matter field provider"),
+        "got {err}"
+    );
     assert_eq!(
         run(
             &[
