@@ -558,6 +558,15 @@ use rusqlite::params;
                     // When that positive proof is present, no stale downgrade
                     // fires here so the agent renders as working.
                     let provider_command_positive_proof = provider_current_command_matches(obj);
+                    // 0.5.41 Slice 3 (0.5.35 R4 regression guard): when the
+                    // runtime classifier has already written canonical
+                    // `worker_state=UNKNOWN` / `activity.status=uncertain`,
+                    // that is the authoritative honest observation — do NOT
+                    // reclassify it as `coordinator_unavailable` stale (which
+                    // would land it in the Stopped bucket instead of Unknown).
+                    // Host-boot mismatch and provider-exited marker are
+                    // stronger, more specific signals and still win.
+                    let canonical_unknown = agent_canonical_worker_state_is_unknown(obj);
                     let new_reason = if freshness.host_boot_stale && has_pane_binding {
                         freshness.host_boot_stale_reason()
                     } else if freshness.provider_exited_agents.contains(agent_id) {
@@ -565,6 +574,7 @@ use rusqlite::params;
                     } else if !freshness.coordinator_service_available
                         && has_pane_binding
                         && !provider_command_positive_proof
+                        && !canonical_unknown
                     {
                         Some("coordinator_unavailable")
                     } else {
@@ -639,6 +649,25 @@ use rusqlite::params;
             (true, false) => Some("pane_dead"),
             (false, false) => None,
         }
+    }
+
+    /// 0.5.41 Slice 3 (0.5.35 R4 regression guard): true when the agent
+    /// row carries the canonical `worker_state=UNKNOWN` OR
+    /// `activity.status=uncertain` observation the runtime classifier
+    /// writes. Used to skip the coordinator-unavailable stale mark
+    /// (see `enrich_agents`) so the pre-existing R4 rendering (UNKNOWN
+    /// beats WORKING) is preserved.
+    fn agent_canonical_worker_state_is_unknown(agent: &serde_json::Map<String, Value>) -> bool {
+        let worker_state_unknown = agent
+            .get("worker_state")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("UNKNOWN"));
+        let activity_uncertain = agent
+            .get("activity")
+            .and_then(|v| v.get("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("uncertain"));
+        worker_state_unknown || activity_uncertain
     }
 
     /// 0.5.41 Slice 3 (fault-invisibility-locate.md §9 RED4 live-provider
