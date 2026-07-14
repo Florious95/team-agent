@@ -315,8 +315,9 @@ fn path_str(path: &Path) -> &str {
 
 fn normalize(value: &str) -> String {
     value
+        .replace("::", "")
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == ':')
         .flat_map(char::to_lowercase)
         .collect()
 }
