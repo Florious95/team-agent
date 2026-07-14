@@ -1750,7 +1750,25 @@ fn state_owner(state: &Value) -> Option<TeamOwner> {
 /// name for 0.5.x call-site stability. The B0 legacy snapshot is
 /// diagnostic-only via `lifecycle::save_team_runtime_snapshot`.
 pub fn write_lease_dual_state(workspace: &Path, state: &Value) -> Result<(), LeaderError> {
-    crate::state::persist::save_runtime_state(workspace, state)?;
+    // 0.5.42 S1b (s1b-writer-cluster-locate.md §4.4): terminal root
+    // save routes through `StateRepository` with the `ClaimLeader`
+    // intent. Dispatch is byte-identical to the old
+    // `save_runtime_state` helper (see
+    // `state/repository.rs:ClaimLeader => helper_write_root`), so the
+    // full lease writer cluster (attach_leader / attach_app_server /
+    // attach_leader_to_state / claim_lease_no_incident_with_target /
+    // rediscover) keeps its persist/merge/CAS/readback semantics.
+    // Public signature/error mapping preserved for caller stability.
+    // Repository does NOT compute owner_epoch, re-run convergence,
+    // emit ownership events, or acquire a second lease lock — the
+    // caller still owns all of that.
+    let team_key = canonical_owner_write_key(state);
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::ClaimLeader {
+            team_key: team_key.as_str(),
+        },
+        state,
+    )?;
     Ok(())
 }
 
@@ -1838,7 +1856,16 @@ fn save_claim_team_scoped_state(workspace: &Path, state: &Value, target_key: &st
         writes_endpoint_convergence,
     );
     merged.insert("teams".to_string(), Value::Object(teams));
-    crate::state::persist::save_runtime_state(workspace, &Value::Object(merged))?;
+    // 0.5.42 S1b (s1b-writer-cluster-locate.md §4.4): only the
+    // terminal save routes through `StateRepository`; the entire
+    // load/merge/compact block above stays in place — repository is a
+    // writer facade, not a projection assembler.
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::ClaimLeader {
+            team_key: target_key,
+        },
+        &Value::Object(merged),
+    )?;
     Ok(())
 }
 

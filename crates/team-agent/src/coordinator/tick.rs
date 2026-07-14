@@ -424,7 +424,25 @@ impl Coordinator {
         let saved = match &self.save_hook {
             Some(hook) => hook(&self.workspace, &state),
             None => {
-                crate::state::projection::save_team_scoped_state(self.workspace.as_path(), &state)
+                // 0.5.42 S1b (s1b-writer-cluster-locate.md §3.2 /
+                // §4.4): the daemon tick's single terminal save
+                // routes through `StateRepository` with the
+                // `CoordinatorTick` intent. Repository dispatch is
+                // byte-identical to the old `save_team_scoped_state`
+                // helper (see `state/repository.rs:CoordinatorTick =>
+                // helper_write_team_scoped`), so persist/merge/lock/
+                // atomic-rename semantics and degraded-mapping stay
+                // unchanged. No cached repository, no extra load, no
+                // retry — the caller still owns the `Value` and
+                // failure still returns `TickReport{PersistenceDegraded}`
+                // via the `saved.is_err()` branch below.
+                let team_key = crate::state::projection::team_state_key(&state);
+                crate::state::repository::StateRepository::new(self.workspace.as_path()).save(
+                    crate::state::repository::StateWriteIntent::CoordinatorTick {
+                        team_key: team_key.as_str(),
+                    },
+                    &state,
+                )
             }
         };
         if saved.is_err() {

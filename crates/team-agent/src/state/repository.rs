@@ -1,17 +1,32 @@
-//! S1a StateRepository facade.
+//! StateRepository facade.
 //!
-//! Ref: `.team/artifacts/s1a-state-repository-design.md`
+//! Ref:
+//! - `.team/artifacts/s1a-state-repository-design.md` (skeleton)
+//! - `.team/artifacts/s1b-writer-cluster-locate.md` (0.5.42 first
+//!   writer-cluster migration: `CoordinatorTick` + `ClaimLeader`)
 //!
-//! S1a is a **skeleton + governance** slice. `StateRepository` is a thin write
-//! facade that dispatches every write to the existing helper family without
-//! changing helper behavior, merge policy, or on-disk layout. The value it adds
-//! is that every write now carries a `StateWriteIntent`, so S1b can migrate
-//! writer clusters one semantic at a time.
+//! `StateRepository` is a thin write facade that dispatches every write
+//! to the existing helper family without changing helper behavior,
+//! merge policy, or on-disk layout. The value it adds is that every
+//! write now carries a `StateWriteIntent`, so writer clusters migrate
+//! one semantic at a time.
 //!
-//! Non-goals in S1a (see design section 11): no schema rewrite, no path
-//! layout change, no writer migration, no helper deletion. Every existing
-//! caller keeps calling the raw helpers behind the S1a allowlist; only new
-//! direct callsites are governed.
+//! 0.5.42 status: first real consumers are the daemon `Coordinator::
+//! tick` production save (`CoordinatorTick`) and the lease/claim
+//! writer cluster's two terminal saves (`ClaimLeader`) —
+//! `write_lease_dual_state` + `save_claim_team_scoped_state`.
+//! Post-S1b, the direct-save allowlist drops from 73 to 70; the three
+//! migrated sites have no allowlist row and every future direct save
+//! must either enter through `StateRepository` or claim an explicit
+//! new allowlist row (fail-closed).
+//!
+//! Non-goals kept from S1a (design §11) + reasserted by
+//! s1b-writer-cluster-locate.md §7: no schema rewrite, no path layout
+//! change, no helper deletion, no epoch computation in the repository,
+//! no retry / reload / event emission, no reinterpretation of
+//! `owner_epoch` / `topology_convergence` / readback proof — the
+//! caller still owns the whole `Value`, and repository dispatches to
+//! the same existing persist helper the direct edge used to hit.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
