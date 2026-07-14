@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 73;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 70;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -92,14 +92,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "s1a_legacy_external",
         674
     ),
-    allow!(
-        "coordinator/tick.rs",
-        "tick",
-        "save_team_scoped_state",
-        "CoordinatorTick",
-        "s1b_migrate_first",
-        427
-    ),
     // 0.5.36 (`.team/artifacts/supermarket-api-error-recovery-locate.md`
     // §7.3): post-save recovery step writes the recovery intent result
     // (attempts, status, last_error, blocked_reason) via a dedicated
@@ -124,22 +116,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "CoordinatorApiErrorRecovery",
         "s1a_legacy_external",
         1790
-    ),
-    allow!(
-        "leader/lease.rs",
-        "write_lease_dual_state",
-        "save_runtime_state",
-        "ClaimLeader",
-        "s1b_migrate_first",
-        1625
-    ),
-    allow!(
-        "leader/lease.rs",
-        "save_claim_team_scoped_state",
-        "save_runtime_state",
-        "ClaimLeader",
-        "s1b_migrate_first",
-        1702
     ),
     allow!(
         "leader/start.rs",

@@ -105,7 +105,7 @@ fn red1_baseline_allowlist_classifies_all_current_direct_state_saves() {
 
     assert!(
         failures.is_empty(),
-        "RED1: every one of the 71 G0 direct state-save callsites must be classified by path+function+callee family, with repository skeleton present.\n{}",
+        "RED1: every one of the {BASELINE_DIRECT_SAVE_COUNT} G0 direct state-save callsites must be classified by path+function+callee family, with repository skeleton present.\n{}",
         failures.join("\n")
     );
 }
@@ -201,6 +201,11 @@ fn red3_state_write_intent_has_no_escape_bucket_and_covers_allowlist_intents() {
 fn red4_repository_dispatches_representative_intents_to_existing_helpers() {
     let repository = repository_source_or_panic("RED4");
     let expectations = [
+        (
+            "ClaimLeader",
+            "helper_write_root",
+            "ClaimLeader must dispatch to the existing root helper",
+        ),
         (
             "CoordinatorTick",
             "save_team_scoped_state",
