@@ -562,6 +562,7 @@ mod tests {
             path: normalize_existing_path(&std::env::temp_dir())
                 .join(format!("ta-e2e-platform-{}-0", std::process::id())),
             ta_binary: Mutex::new(Some(normalize_existing_path(&bin))),
+            owned_tmux_sockets: Mutex::new(Vec::new()),
         };
         let platform_tmp_owned = format!(
             "{} coordinator --workspace {}",
