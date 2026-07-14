@@ -399,7 +399,20 @@ mod tests {
     #[test]
     fn timeout_error_carries_path_and_seconds() {
         // Convenience wrapper's timeout error shape.
-        let dir = std::env::temp_dir().join("ta-b2-timeout");
+        //
+        // 0.5.43 debt-sweep (§6.2): the pre-0.5.43 fixed
+        // `ta-b2-timeout/timeout-lock.tmp` path let parallel test
+        // workers race for the same file across cargo threads. Each
+        // run now allocates a per-process + monotonic-atomic dir so
+        // `--test-threads=2` cannot false-fail. Timeout shape and
+        // `timeout-lock.tmp` basename are preserved so downstream
+        // guards keep firing.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ta-b2-timeout-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("timeout-lock.tmp");
         let _hold = try_lock_exclusive(&path, Duration::from_secs(1))
@@ -414,5 +427,6 @@ mod tests {
             other => panic!("expected Timeout, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

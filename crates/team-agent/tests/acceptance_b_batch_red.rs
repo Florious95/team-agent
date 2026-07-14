@@ -449,16 +449,11 @@ struct LiveTmuxSession {
 
 impl LiveTmuxSession {
     fn start(_workspace: &Path, session: &str) -> Self {
-        static SOCKET_N: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::var_os("TEAM_AGENT_TEST_TMP")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        std::fs::create_dir_all(&root).unwrap();
-        let socket = root.join(format!(
-            "ta-b5-{}-{}.sock",
-            std::process::id(),
-            SOCKET_N.fetch_add(1, Ordering::Relaxed)
-        ));
+        // 0.5.43 debt-sweep (§4.2): use the short_tmux_socket helper.
+        // The pre-0.5.43 code inherited $TMPDIR which on macOS is
+        // /var/folders/... > 104 bytes, tripping AF_UNIX sun_path
+        // and causing the Gate2 flake family.
+        let socket = hermetic_guard::short_tmux_socket("b5-live-session");
         let socket_str = socket.to_str().expect("socket path utf8");
         let out = Command::new("tmux")
             .args([

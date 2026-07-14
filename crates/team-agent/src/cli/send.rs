@@ -375,9 +375,15 @@ fn coordinator_health_status_wire(
 /// F1 (0.3.26): direct pane-id send — bypasses agent-name routing + team
 /// membership check. Constructs `Target::Pane`, renders the message with
 /// the standard protocol block (Team Agent message from sender + token),
-/// injects via the default tmux backend, and surfaces the inject report as
-/// a JSON result. Cross-team capable: no restriction on which tmux session
-/// or socket the pane belongs to.
+/// injects via the selected team's endpoint-local tmux transport, and
+/// surfaces the inject report as a JSON result.
+///
+/// 0.5.43 debt-sweep (§6.2): the pre-0.5.43 comment overstated the
+/// scope. pane_id is inherently endpoint-local —
+/// `lifecycle_worker_tmux_backend_for_selected_state` below builds the
+/// transport from the SELECTED team's persisted endpoint. For cross-
+/// workspace delivery, use `--to-name` / `--to-leader` instead; there
+/// is intentionally no `--socket` flag.
 fn send_to_pane_direct(
     workspace: &Path,
     pane_id: &str,

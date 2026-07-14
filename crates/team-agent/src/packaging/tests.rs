@@ -815,12 +815,30 @@ fn atomic_replace_outcome_serde_tag_outcome() {
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
+#[serial_test::serial(env)]
 fn install_skill_dry_run_is_pure_no_provider_state() {
     // §84:install-skill 只拷文件;dry-run 连文件都不动 → 纯函数式可重复.
+    //
+    // 0.5.43 debt-sweep (§6.2): even dry-run reads ambient HOME to
+    // build the target skill path. Parallel real-copy sibling tests
+    // hold the same `ENV_LOCK_PKG` + `HomeGuard::set` guards; without
+    // matching guards here, two dry-run runs can observe HOME after
+    // a real-copy test swapped it, producing spurious diffs. Same
+    // env critical section as install/uninstall.
+    let _g = ENV_LOCK_PKG.lock().unwrap_or_else(|p| p.into_inner());
+    let home = std::env::temp_dir().join(format!(
+        "ta-0543-pkg-dry-{}-{}",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("create dry-run HOME");
+    let _h = HomeGuard::set(&home);
     let opts = skill_opts(SkillTarget::Claude, None, true);
     let first = install_skill(&opts).expect("dry-run 1");
     let second = install_skill(&opts).expect("dry-run 2");
     assert_eq!(first, second, "dry-run install-skill must be deterministic & side-effect free");
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 // ───────────────────────────────────────────────────────────────────────

@@ -1,17 +1,51 @@
 #!/usr/bin/env python3
+"""line-count gate — self-contained (0.5.43 debt-sweep §6.2).
+
+Historical shape imported `team_agent.quality_gates.load_line_count_allowlist`
+from a Python package that no longer ships under `src/`. This tool is now
+self-contained: inline strict JSON allowlist parser + gate logic, no repo-
+relative imports. Fails closed on unknown keys or malformed shapes so
+governance cannot silently drop debt.
+"""
+
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = REPO_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
 
-from team_agent.quality_gates import load_line_count_allowlist
+def load_line_count_allowlist(path: Path) -> dict[str, object]:
+    """Strict allowlist parser.
+
+    Accepts JSON with EXACTLY the two top-level keys
+    `approved_exceptions` and `temporary_debt`, each mapping filenames
+    to metadata objects. Any other top-level key fails closed. Empty
+    files raise `ValueError` too so a truncated file cannot pass as
+    empty allowlist.
+    """
+    raw = path.read_text(encoding="utf-8").strip()
+    if not raw:
+        raise ValueError("allowlist file is empty")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"allowlist is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("allowlist top level must be an object")
+    allowed_keys = {"approved_exceptions", "temporary_debt"}
+    unexpected = sorted(set(payload) - allowed_keys)
+    if unexpected:
+        raise ValueError(f"unknown allowlist keys: {', '.join(unexpected)}")
+    approved = payload.get("approved_exceptions", {})
+    temporary = payload.get("temporary_debt", {})
+    if not isinstance(approved, dict) or not isinstance(temporary, dict):
+        raise ValueError(
+            "approved_exceptions and temporary_debt must both be objects"
+        )
+    return {"approved_exceptions": approved, "temporary_debt": temporary}
 
 
 def _line_count(path: Path) -> int:

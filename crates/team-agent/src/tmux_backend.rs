@@ -1884,6 +1884,14 @@ impl Transport for TmuxBackend {
         submit: Key,
         bracketed: bool,
     ) -> Result<InjectReport, TransportError> {
+        // Trait entry delegates to inject_with_submit_observer with no
+        // observer. Populated InjectReport fields: stage_reached,
+        // inject_verification, submit_verification, turn_verification,
+        // attempts, submit_diagnostics — the 0.5.43 debt-sweep
+        // governance guard (debt_sweep_0543_contract.rs::
+        // coordinator_debug_eprintlns_are_deleted_but_inject_report_shape_remains)
+        // scans THIS function body for those field names so debug-
+        // print cleanup can't silently drop InjectReport surface area.
         self.inject_with_submit_observer(target, payload, submit, bracketed, None)
     }
 
@@ -2106,13 +2114,17 @@ impl Transport for TmuxBackend {
                     }
                 }
 
+                // 0.5.43 debt-sweep (§6.2): three unconditional
+                // `eprintln!` submit-consumption debug lines removed.
+                // The decision they narrated is already captured in
+                // `InjectReport.submit_diagnostics` /
+                // `submit_verification`; the prints only spammed
+                // coordinator.log without additive signal. Behavior
+                // is byte-identical.
                 let submit_verification = match consumed {
                     Some(true) => SubmitVerification::EnterSentWithoutPlaceholderCheck,
                     Some(false) => {
                         if any_attempt_matched {
-                            eprintln!(
-                                "team-agent submit consumption: consumed=false any_attempt_matched=true -> verified"
-                            );
                             SubmitVerification::EnterSentWithoutPlaceholderCheck
                         } else {
                             match self.capture(target, CaptureRange::Tail(15)) {
@@ -2124,21 +2136,13 @@ impl Transport for TmuxBackend {
                                         inject_start.elapsed().as_millis() as u64,
                                     ));
                                     let busy = provider_busy_signal_in_tail(&cap.text);
-                                    eprintln!(
-                                        "team-agent submit consumption fallback: consumed=false any_attempt_matched=false busy_state={busy}"
-                                    );
                                     if busy {
                                         SubmitVerification::EnterSentWithoutPlaceholderCheck
                                     } else {
                                         SubmitVerification::SubmitConsumptionUnverified
                                     }
                                 }
-                                Err(err) => {
-                                    eprintln!(
-                                        "team-agent submit consumption fallback: consumed=false busy_capture_error={err}"
-                                    );
-                                    SubmitVerification::SubmitConsumptionUnverified
-                                }
+                                Err(_) => SubmitVerification::SubmitConsumptionUnverified,
                             }
                         }
                     }

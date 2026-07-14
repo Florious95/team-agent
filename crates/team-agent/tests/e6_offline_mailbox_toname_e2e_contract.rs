@@ -391,7 +391,11 @@ impl E6Case {
             sender_workspace: std::fs::canonicalize(sender_workspace)
                 .expect("canonical sender workspace"),
             team_dir: std::fs::canonicalize(team_dir).expect("canonical team dir"),
-            team_key: "mail059".to_string(),
+            // 0.5.43 debt-sweep (§6.1): E6 team_key must include
+            // pid+counter so parallel runs / host-fixture cohabitation
+            // don't collide on a fixed key like "mail059". Session
+            // names derived from team_key inherit the uniqueness.
+            team_key: format!("mail059-{}-{n}", std::process::id()),
         }
     }
 
@@ -491,8 +495,13 @@ impl E6Case {
 
 impl Drop for E6Case {
     fn drop(&mut self) {
+        // 0.5.43 debt-sweep (§6.1): try `team-agent shutdown` first,
+        // then fall back to exact `tmux -S <socket> kill-server` on
+        // each workspace's persisted tmux_endpoint. Never scans host
+        // sockets — the fallback only kills the endpoint recorded in
+        // the state file THIS fixture wrote.
         for workspace in [&self.target_workspace, &self.sender_workspace] {
-            let _ = Command::new(bin())
+            let shutdown = Command::new(bin())
                 .args([
                     "shutdown",
                     "--workspace",
@@ -503,7 +512,31 @@ impl Drop for E6Case {
                 ])
                 .env("HOME", &self.home)
                 .output();
+            if !matches!(&shutdown, Ok(out) if out.status.success()) {
+                if let Some(socket) = read_persisted_tmux_socket(workspace) {
+                    if let Some(socket_str) = socket.to_str() {
+                        let _ = Command::new("tmux")
+                            .args(["-S", socket_str, "kill-server"])
+                            .output();
+                    }
+                    let _ = std::fs::remove_file(&socket);
+                }
+            }
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+fn read_persisted_tmux_socket(workspace: &Path) -> Option<PathBuf> {
+    let state_path = workspace.join(".team/runtime/state.json");
+    let text = std::fs::read_to_string(&state_path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let socket = value
+        .get("tmux_socket")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("tmux_endpoint").and_then(serde_json::Value::as_str))?;
+    if socket.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(socket))
 }

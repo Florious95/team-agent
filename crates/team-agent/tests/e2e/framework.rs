@@ -29,6 +29,12 @@ static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct TestWorkspace {
     path: PathBuf,
     ta_binary: Mutex<Option<PathBuf>>,
+    /// 0.5.43 debt-sweep (§6.1): exact test-owned tmux sockets to
+    /// clean at Drop. Populated by `register_owned_tmux_socket`. Drop
+    /// runs `tmux -S <sock> kill-server` on each (never a host scan)
+    /// BEFORE the workspace directory removal (verified by RED
+    /// `e2e_workspace_drop_cleans_exact_tmux_before_removing_workspace`).
+    owned_tmux_sockets: Mutex<Vec<PathBuf>>,
 }
 
 impl TestWorkspace {
@@ -52,6 +58,16 @@ impl TestWorkspace {
         Self {
             path,
             ta_binary: Mutex::new(None),
+            owned_tmux_sockets: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 0.5.43 debt-sweep (§6.1): register a test-owned tmux socket for
+    /// exact Drop cleanup. Never a host-wide scan — the ledger only
+    /// contains sockets THIS fixture created.
+    pub fn register_owned_tmux_socket(&self, socket: &Path) {
+        if let Ok(mut sockets) = self.owned_tmux_sockets.lock() {
+            sockets.push(socket.to_path_buf());
         }
     }
 
@@ -207,7 +223,15 @@ impl TestWorkspace {
 
 impl Drop for TestWorkspace {
     fn drop(&mut self) {
+        // 0.5.43 debt-sweep (§6.1) Drop order = stop exact coordinator
+        // tree → kill exact owned tmux server(s) + delete socket file →
+        // remove workspace dir. `TEAM_AGENT_KEEP_TEST_PROCESSES/TMP`
+        // debug escapes preserved (loud stderr) in both helpers.
+        // Explicit non-goal: never host-scan for team-agent processes
+        // via pgrep, never scan the tmux-* socket dir under /private —
+        // sweep is exact-owned only (verified by RED).
         self.cleanup_owned_coordinator();
+        self.cleanup_owned_tmux();
         if std::env::var("TEAM_AGENT_KEEP_TEST_TMP").as_deref() != Ok("1") {
             remove_workspace_dir(&self.path);
         }
@@ -215,6 +239,39 @@ impl Drop for TestWorkspace {
 }
 
 impl TestWorkspace {
+    /// 0.5.43 debt-sweep (§6.1): kill exact registered tmux servers
+    /// and delete their socket files. Skipped loudly when
+    /// `TEAM_AGENT_KEEP_TEST_PROCESSES=1`. Never scans host tmux
+    /// sockets — only the ledger `register_owned_tmux_socket` populated.
+    fn cleanup_owned_tmux(&self) {
+        if std::env::var("TEAM_AGENT_KEEP_TEST_PROCESSES").as_deref() == Ok("1") {
+            if let Ok(sockets) = self.owned_tmux_sockets.lock() {
+                if !sockets.is_empty() {
+                    eprintln!(
+                        "TEAM_AGENT_KEEP_TEST_PROCESSES=1 — skipping cleanup of {} owned tmux socket(s) for workspace {}",
+                        sockets.len(),
+                        self.path.display()
+                    );
+                }
+            }
+            return;
+        }
+        let sockets = self
+            .owned_tmux_sockets
+            .lock()
+            .ok()
+            .map(|mut guard| std::mem::take(&mut *guard))
+            .unwrap_or_default();
+        for socket in sockets {
+            if let Some(socket_str) = socket.to_str() {
+                let _ = std::process::Command::new("tmux")
+                    .args(["-S", socket_str, "kill-server"])
+                    .output();
+            }
+            let _ = std::fs::remove_file(&socket);
+        }
+    }
+
     fn cleanup_owned_coordinator(&self) {
         if std::env::var("TEAM_AGENT_KEEP_TEST_PROCESSES").as_deref() == Ok("1") {
             return;
