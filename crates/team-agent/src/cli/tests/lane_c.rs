@@ -78,9 +78,16 @@ use super::*;
                 "binary_version",
                 "schema_ok",
                 "schema_error",
-                "schema"
+                "schema",
+                // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3):
+                // service_available and binary_identity_relation are
+                // now always emitted (not only when expose_binary_drift
+                // fires) so status/diagnose share one service-
+                // availability truth.
+                "service_available",
+                "binary_identity_relation",
             ],
-            "golden coordinator_health insertion order with 0.5.18 identity fields; got {order:?}"
+            "golden coordinator_health insertion order with 0.5.41 fault-invisibility fields; got {order:?}"
         );
         assert!(
             coord.get("schema_version").is_none(),

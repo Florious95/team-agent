@@ -330,6 +330,15 @@ pub struct StartReport {
     pub binary_path: Option<String>,
     pub binary_version: Option<String>,
     pub rotation_reason: Option<String>,
+    /// 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§9 RED3): typed
+    /// binary-identity relation between the caller and the daemon that
+    /// was observed. Populated on every path (unknown when the health
+    /// probe returned no metadata). Downstream `coordinator_start_
+    /// summary_value` exposes this so restart/start summaries no longer
+    /// flatten `daemon_newer_than_caller` into a plain `already_running`
+    /// (RED3: caller-older-than-daemon must remain distinguishable
+    /// from a same-binary fresh daemon).
+    pub binary_identity_relation: CoordinatorBinaryIdentityRelation,
     /// coordinator.log 路径(成功路径,`lifecycle.py:54/121`)。
     pub log: Option<PathBuf>,
     /// schema_incompatible 时的修复 hint / 失败原因。

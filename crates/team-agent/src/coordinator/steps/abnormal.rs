@@ -43,7 +43,10 @@ pub(crate) fn detect_abnormal_exits(
                         &agent,
                         None,
                         None,
-                        ProcessLiveness::Unverifiable,
+                        process_check(
+                            ProcessLiveness::Unverifiable,
+                            "rollout_metadata_unavailable".to_string(),
+                        ),
                         None,
                         ErrorRecency::None,
                         None,
@@ -81,7 +84,10 @@ pub(crate) fn detect_abnormal_exits(
                         &agent,
                         Some(size),
                         mtime_ns,
-                        ProcessLiveness::Unverifiable,
+                        process_check(
+                            ProcessLiveness::Unverifiable,
+                            "rollout_read_failed".to_string(),
+                        ),
                         None,
                         ErrorRecency::None,
                         None,
@@ -119,7 +125,7 @@ pub(crate) fn detect_abnormal_exits(
                 &agent,
                 Some(size),
                 mtime_ns,
-                liveness.state,
+                liveness.clone(),
                 fact.as_ref().map(|f| f.signature.as_str()),
                 error_recency,
                 error_observation_key.as_deref(),
@@ -430,7 +436,16 @@ fn abnormal_watch_agents(state: &Value) -> Vec<AbnormalWatchAgent> {
 }
 
 fn agent_pid(agent: &Value) -> Option<Pid> {
-    ["provider_pid", "process_id", "pid", "child_pid", "pane_pid"]
+    // 0.5.41 Slice 4 (fault-invisibility-locate.md §5 point 3 / §6.4,
+    // 0.5.39 CR D-m): after the 0.5.39 worker shell wrapper landed,
+    // `pane_pid` is the long-lived shell — NOT the provider. Treating
+    // it as `provider pid` and probing it via `kill(0)` reports "alive"
+    // for a pane whose provider CLI already exited, which is exactly
+    // the false-BUSY that suppressed `worker_provider_exited`. Only
+    // pids we know are the provider itself (`provider_pid` /
+    // `process_id` / `pid` written by explicit spawn accounting, or
+    // `child_pid` from the transport's SpawnResult) count here.
+    ["provider_pid", "process_id", "pid", "child_pid"]
         .into_iter()
         .find_map(|key| json_u32(agent.get(key)).map(Pid::new))
 }
@@ -512,8 +527,51 @@ fn agent_process_liveness(
     targets: &[crate::transport::PaneInfo],
     transport: &dyn crate::transport::Transport,
 ) -> ProcessCheck {
+    // 0.5.41 Slice 4 (fault-invisibility-locate.md §5 point 3 / §6.4,
+    // 0.5.39 CR D-m): after the worker wrapper landed, `pane_pid` may
+    // be the long-lived shell that survived provider exit. Reordered
+    // to prefer POSITIVE provider evidence in this order:
+    //   1. Explicit provider pid (agent.pid) — set by the transport's
+    //      SpawnResult.child_pid or explicit provider_pid state field.
+    //   2. Explicit liveness field.
+    //   3. Explicit dead-status field.
+    //   4. Explicit provider current-command (state.pane_current_command).
+    //   5. Live-pane current-command matching provider = alive.
+    //   6. Live-pane current-command shell + capture-tail worker exit
+    //      marker = DEAD (positive proof provider exited).
+    //   7. Live pane, no positive evidence = Unverifiable (NOT alive,
+    //      NOT working). Legacy code returned pid_process_check(pane_pid)
+    //      here — that was the D-m false BUSY.
+    //   8. Pane / window liveness falls back on Unverifiable.
     if let Some(pid) = agent.pid {
         return pid_process_check("pid", pid);
+    }
+    // 0.5.41 Slice 4 (fault-invisibility-locate.md §5 point 3 / §6.4):
+    // BEFORE consulting the loose `explicit_process_liveness` path
+    // (which happily maps state.status=`running` to Alive), probe the
+    // pane for POSITIVE provider evidence via current-command + worker
+    // exit marker. Under the 0.5.39 wrapper, `state.status=running` is
+    // administrative spawn accounting, not runtime truth — a provider
+    // may have exited into the shell fallback while state still reads
+    // running. The marker probe positively proves that case; when it
+    // fires we return Dead here instead of the false Alive further
+    // down.
+    if let Some(target) = matching_agent_target(agent, session_name, targets) {
+        if let Some(command) = target.current_command.as_deref() {
+            return pane_command_process_check_with_marker(agent, transport, target, command);
+        }
+    }
+    if let Some(command) = agent.current_command.as_deref() {
+        return command_process_check_with_marker(agent, transport, command);
+    }
+    if let Some(pane_id) = agent.pane_id.as_deref() {
+        // Even without pane current_command / matching target, try the
+        // marker probe directly — the wrapper's printf leaves the marker
+        // in the pane's capture tail whether or not the transport
+        // reports pane_current_command.
+        if let Some(check) = worker_provider_exit_marker_check(agent, transport) {
+            return check;
+        }
     }
     if let Some(liveness) = agent.process_liveness {
         return process_check(
@@ -532,19 +590,15 @@ fn agent_process_liveness(
             format!("status:{}", agent.status.as_deref().unwrap_or("unknown")),
         );
     }
-    if let Some(command) = agent.current_command.as_deref() {
-        return command_process_check(agent.provider, command);
-    }
     if let Some(target) = matching_agent_target(agent, session_name, targets) {
-        if let Some(command) = target.current_command.as_deref() {
-            return pane_command_process_check(agent.provider, target, command);
-        }
-        if let Some(pid) = target.pane_pid.map(Pid::new) {
-            return pid_process_check("pane_pid", pid);
-        }
+        // Reached only when the target has no current_command AND no
+        // marker was found earlier. Legacy code returned
+        // `pid_process_check("pane_pid", pane_pid)` here — that's the
+        // wrapper shell under 0.5.39. Now Unverifiable (not-working).
+        let _ = target;
         return process_check(
             ProcessLiveness::Unverifiable,
-            "pane_present_pid_unknown".to_string(),
+            "pane_present_provider_evidence_unknown".to_string(),
         );
     }
     if let Some(pane_id) = agent.pane_id.as_deref() {
@@ -555,7 +609,7 @@ fn agent_process_liveness(
             }
             Ok(crate::transport::PaneLiveness::Live) => process_check(
                 ProcessLiveness::Unverifiable,
-                format!("pane_live_pid_unknown:{pane_id}"),
+                format!("pane_live_provider_evidence_unknown:{pane_id}"),
             ),
             Ok(crate::transport::PaneLiveness::Unknown) => process_check(
                 ProcessLiveness::Unverifiable,
@@ -577,7 +631,7 @@ fn agent_process_liveness(
     match transport.list_windows(&session) {
         Ok(windows) if windows.iter().any(|known| known.as_str() == window) => process_check(
             ProcessLiveness::Unverifiable,
-            "window_present_pid_unknown".to_string(),
+            "window_present_provider_evidence_unknown".to_string(),
         ),
         Ok(_) => process_check(ProcessLiveness::Dead, format!("window_missing:{window}")),
         Err(error) => process_check(
@@ -651,6 +705,79 @@ fn pane_command_process_check(
     }
 }
 
+/// 0.5.41 Slice 4 (fault-invisibility-locate.md §5 point 3 / §6.4):
+/// after the 0.5.39 worker wrapper landed, a pane whose current command
+/// is a shell + capture-tail contains the worker exit marker is POSITIVE
+/// proof the provider exited. Falls back to plain current-command check
+/// when a pane_id is not available for capture (state-only path).
+fn command_process_check_with_marker(
+    agent: &AbnormalWatchAgent,
+    transport: &dyn crate::transport::Transport,
+    command: &str,
+) -> ProcessCheck {
+    if crate::leader::command_matches_provider(agent.provider, command) {
+        return process_check(ProcessLiveness::Alive, format!("current_command:{command}"));
+    }
+    if let Some(check) = worker_provider_exit_marker_check(agent, transport) {
+        return check;
+    }
+    process_check(
+        ProcessLiveness::Dead,
+        format!("provider_not_foreground:{command}"),
+    )
+}
+
+fn pane_command_process_check_with_marker(
+    agent: &AbnormalWatchAgent,
+    transport: &dyn crate::transport::Transport,
+    pane: &crate::transport::PaneInfo,
+    command: &str,
+) -> ProcessCheck {
+    if crate::leader::attribute_pane_provider(pane)
+        .is_some_and(|candidate| crate::leader::provider_matches(candidate, agent.provider))
+    {
+        return process_check(ProcessLiveness::Alive, format!("current_command:{command}"));
+    }
+    if let Some(check) = worker_provider_exit_marker_check(agent, transport) {
+        return check;
+    }
+    process_check(
+        ProcessLiveness::Dead,
+        format!("provider_not_foreground:{command}"),
+    )
+}
+
+/// 0.5.41 Slice 4: probe the pane's capture-tail for the single-source
+/// worker exit marker (`tmux_backend::worker_provider_exit_marker`).
+/// Returns `Some(Dead)` when the marker is found (positive proof
+/// provider exited), or `None` when we can't run the capture (no
+/// pane_id in agent), so callers keep their default decision. Absence
+/// of marker in a valid capture is intentionally NOT `alive` (locate
+/// §8 risk: capture tail can scroll past the marker) — callers still
+/// return `Dead` for "provider not foreground" because current command
+/// already disproved provider liveness at that call site.
+fn worker_provider_exit_marker_check(
+    agent: &AbnormalWatchAgent,
+    transport: &dyn crate::transport::Transport,
+) -> Option<ProcessCheck> {
+    let pane_id_str = agent.pane_id.as_deref()?;
+    let pane = crate::transport::PaneId::new(pane_id_str);
+    let target = crate::transport::Target::Pane(pane);
+    let provider_label = crate::provider::wire::command_name(agent.provider);
+    let marker = crate::tmux_backend::worker_provider_exit_marker(provider_label);
+    let cap = transport
+        .capture(&target, crate::transport::CaptureRange::Tail(200))
+        .ok()?;
+    if cap.text.contains(&marker) {
+        Some(process_check(
+            ProcessLiveness::Dead,
+            format!("worker_provider_exited:{pane_id_str}"),
+        ))
+    } else {
+        None
+    }
+}
+
 fn process_check(state: ProcessLiveness, detail: String) -> ProcessCheck {
     ProcessCheck { state, detail }
 }
@@ -681,18 +808,26 @@ fn abnormal_watch_payload(
     agent: &AbnormalWatchAgent,
     size: Option<u64>,
     mtime_ns: Option<u64>,
-    liveness: ProcessLiveness,
+    liveness: ProcessCheck,
     signature: Option<&str>,
     error_recency: ErrorRecency,
     error_observation_key: Option<&str>,
     error: Option<String>,
 ) -> Value {
-    let liveness_wire = process_liveness_wire(liveness);
-    let dead_process = liveness == ProcessLiveness::Dead;
+    let liveness_wire = process_liveness_wire(liveness.state);
+    let dead_process = liveness.state == ProcessLiveness::Dead;
     let latest_explicit_error = signature.is_some();
-    let gate = AbnormalExitGate::new(liveness, latest_explicit_error, error_recency);
+    let gate = AbnormalExitGate::new(liveness.state, latest_explicit_error, error_recency);
     let notify = gate.should_notify_worker_abnormal_exit();
     let suppressed_reason = gate.suppressed_reason();
+    // 0.5.41 Slice 4 (fault-invisibility-locate.md §6.4): typed
+    // classification for status/render — `worker_provider_exited` is
+    // true only when Dead was proven via the capture-tail worker exit
+    // marker (detail prefix `worker_provider_exited:`). status_port's
+    // RuntimeFreshness collector reads this field to downgrade the
+    // corresponding agent row.
+    let worker_provider_exited =
+        dead_process && liveness.detail.starts_with("worker_provider_exited:");
     serde_json::json!({
         "path": agent.rollout_path_display.as_str(),
         "provider": provider_wire(agent.provider),
@@ -701,9 +836,11 @@ fn abnormal_watch_payload(
         "last_offset": size,
         "last_signature": signature,
         "last_liveness": liveness_wire,
+        "last_liveness_detail": liveness.detail,
         "dead_process": dead_process,
         "process_dead": dead_process,
         "provider_process_dead": dead_process,
+        "worker_provider_exited": worker_provider_exited,
         "latest_error": latest_explicit_error,
         "latest_explicit_error": latest_explicit_error,
         "error_recency": error_recency.as_str(),

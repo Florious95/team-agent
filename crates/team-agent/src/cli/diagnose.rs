@@ -198,7 +198,84 @@ pub(crate) fn diagnose_runtime_for_workspace(
     let (mut issues, mut repairs) = diagnose_runtime(state, backend);
     append_legacy_snapshot_issue(workspace, state, &mut issues);
     append_coordinator_health_issue(workspace, state, &mut issues, &mut repairs);
+    append_runtime_bindings_stale_after_boot_issue(workspace, state, &mut issues, &mut repairs);
     (issues, repairs)
+}
+
+/// 0.5.41 Slice 1 (fault-invisibility-locate.md §5/§6.2): read the
+/// coordinator heartbeat sidecar for the last-observed host boot
+/// identity and compare it against the current host boot. If they
+/// differ, the pane/pid/session bindings in state predate the current
+/// boot — surface `runtime_bindings_stale_after_boot` with a reused
+/// `team-agent restart` hint. Read-only: no mutation. When the
+/// heartbeat is missing OR the current host boot cannot be probed,
+/// stay silent (per §8 risk note — do not guess).
+fn append_runtime_bindings_stale_after_boot_issue(
+    workspace: &std::path::Path,
+    state: &Value,
+    issues: &mut Value,
+    repairs: &mut Value,
+) {
+    let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+    let Some(heartbeat) = crate::coordinator::read_coordinator_heartbeat(&workspace_path) else {
+        return;
+    };
+    let Some(recorded_host_boot) = heartbeat
+        .get("host_boot_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty() && *s != "unknown")
+    else {
+        return;
+    };
+    let Some(current_host_boot) = crate::coordinator::probe_host_boot_id() else {
+        return;
+    };
+    if current_host_boot == recorded_host_boot {
+        return;
+    }
+    // Only surface when state actually has pane/session bindings that
+    // matter — otherwise there's nothing to be stale about.
+    let has_bindings = state
+        .get("agents")
+        .and_then(Value::as_object)
+        .is_some_and(|agents| {
+            agents.values().any(|agent| {
+                agent
+                    .get("pane_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            })
+        });
+    if !has_bindings {
+        return;
+    }
+    let session_name = state
+        .get("session_name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if let Some(items) = issues.as_array_mut() {
+        items.push(json!({
+            "id": "runtime_bindings_stale_after_boot",
+            "session_name": session_name,
+            "recorded_host_boot_id": recorded_host_boot,
+            "current_host_boot_id": current_host_boot,
+            "details": "cached pane/pid/session bindings predate the current host boot; runtime facts are stale",
+        }));
+    }
+    if let Some(items) = repairs.as_array_mut() {
+        items.push(json!({
+            "issue": "runtime_bindings_stale_after_boot",
+            "action_required": true,
+            "advisory": false,
+            "hint_action": "team-agent restart",
+            "action": format!(
+                "runtime bindings for `{session_name}` predate the current host boot \
+                 (recorded {recorded_host_boot}, current {current_host_boot}); rerun \
+                 `team-agent restart` to rebuild the pane/pid/session tuple"
+            ),
+            "dedupe_key": "runtime_bindings_stale_after_boot",
+        }));
+    }
 }
 
 fn append_legacy_snapshot_issue(workspace: &std::path::Path, state: &Value, issues: &mut Value) {

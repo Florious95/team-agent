@@ -91,6 +91,12 @@ pub struct CoordinatorStartSummary {
     pub binary_path: Option<String>,
     pub binary_version: Option<String>,
     pub rotation_reason: Option<String>,
+    /// 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§9 RED3): typed
+    /// binary-identity relation between caller and daemon that was
+    /// observed. Carried through from `StartReport` so restart/start
+    /// summaries keep `daemon_newer_than_caller` distinguishable from
+    /// a same-binary fresh daemon (both surface as `already_running`).
+    pub binary_identity_relation: String,
 }
 
 impl CoordinatorStartSummary {
@@ -102,6 +108,7 @@ impl CoordinatorStartSummary {
             binary_path: report.binary_path.clone(),
             binary_version: report.binary_version.clone(),
             rotation_reason: report.rotation_reason.clone(),
+            binary_identity_relation: report.binary_identity_relation.as_str().to_string(),
         }
     }
 }
@@ -126,6 +133,7 @@ pub fn coordinator_start_summary_value(summary: &CoordinatorStartSummary) -> ser
         "binary_path": summary.binary_path,
         "binary_version": summary.binary_version,
         "rotation_reason": summary.rotation_reason,
+        "binary_identity_relation": summary.binary_identity_relation,
     })
 }
 
