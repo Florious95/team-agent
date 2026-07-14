@@ -36,12 +36,19 @@ use rusqlite::params;
         let undelivered_backlog = count_undelivered_backlog(&conn, owner_team_id)?;
         let session_name = state.get("session_name").cloned().unwrap_or(Value::Null);
         let tmux_present = tmux_session_present(workspace, state, session_name.as_str());
+        // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3): resolve
+        // RuntimeFreshness once and thread it through the runtime block
+        // and per-agent enrichment. This is the single-source read that
+        // makes host-boot / coordinator / provider-exit staleness win
+        // over cached state.agents and DB agent_health.
+        let freshness = compute_runtime_freshness(workspace, state, &health);
         let runtime_block = build_runtime_status_block(
             coordinator_running,
             undelivered_backlog,
             !tmux_present,
+            &freshness,
         );
-        let agents = enrich_agents(state.get("agents"), tmux_present);
+        let agents = enrich_agents(state.get("agents"), tmux_present, &freshness);
         let tasks = state
             .get("tasks")
             .cloned()
@@ -438,7 +445,88 @@ use rusqlite::params;
             .to_string()
     }
 
-    fn enrich_agents(agents: Option<&Value>, tmux_session_present: bool) -> Value {
+    /// 0.5.41 Slice 3 (fault-invisibility-locate.md §5): single-source
+    /// runtime freshness projection consumed by status/diagnose. Read-
+    /// only over existing sources (`coordinator_health`, heartbeat
+    /// sidecar, watch state); computes NO transport calls of its own.
+    #[derive(Default, Clone)]
+    pub(crate) struct RuntimeFreshness {
+        pub coordinator_service_available: bool,
+        pub host_boot_stale: bool,
+        pub host_boot_recorded: Option<String>,
+        pub host_boot_current: Option<String>,
+        pub provider_exited_agents: std::collections::BTreeSet<String>,
+    }
+
+    impl RuntimeFreshness {
+        fn host_boot_stale_reason(&self) -> Option<&'static str> {
+            self.host_boot_stale.then_some("host_boot_mismatch")
+        }
+    }
+
+    pub(crate) fn compute_runtime_freshness(
+        workspace: &Path,
+        state: &Value,
+        health: &crate::coordinator::HealthReport,
+    ) -> RuntimeFreshness {
+        let workspace_path = crate::coordinator::WorkspacePath::new(workspace.to_path_buf());
+        let heartbeat = crate::coordinator::read_coordinator_heartbeat(&workspace_path);
+        let host_boot_recorded = heartbeat
+            .as_ref()
+            .and_then(|hb| hb.get("host_boot_id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && *s != "unknown")
+            .map(str::to_string);
+        let host_boot_current = crate::coordinator::probe_host_boot_id();
+        let host_boot_stale = match (host_boot_recorded.as_deref(), host_boot_current.as_deref()) {
+            (Some(recorded), Some(current)) => recorded != current,
+            _ => false,
+        };
+        // Collect worker-provider-exited agents from the coordinator
+        // abnormal_exit_watch payload (0.5.41 Slice 4 writes
+        // `worker_provider_exited` / `provider_process_dead=true`
+        // there). Read from top-level `coordinator.abnormal_exit_watch`
+        // OR the team-scoped mirror `teams.<key>.coordinator...`.
+        let mut provider_exited_agents = std::collections::BTreeSet::new();
+        for path in [
+            "/coordinator/abnormal_exit_watch",
+            &format!(
+                "/teams/{}/coordinator/abnormal_exit_watch",
+                state
+                    .get("active_team_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            ),
+        ] {
+            if let Some(watch) = state.pointer(path).and_then(Value::as_object) {
+                for (agent_id, entry) in watch {
+                    let exited = entry
+                        .get("worker_provider_exited")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                        || entry.get("provider_process_dead").and_then(Value::as_bool)
+                            == Some(true)
+                        || entry.get("provider_exit_marker").is_some();
+                    if exited {
+                        provider_exited_agents.insert(agent_id.clone());
+                    }
+                }
+            }
+        }
+        RuntimeFreshness {
+            coordinator_service_available: health.service_available,
+            host_boot_stale,
+            host_boot_recorded,
+            host_boot_current,
+            provider_exited_agents,
+        }
+    }
+
+    fn enrich_agents(
+        agents: Option<&Value>,
+        tmux_session_present: bool,
+        freshness: &RuntimeFreshness,
+    ) -> Value {
         let Some(Value::Object(input)) = agents else {
             return json!({});
         };
@@ -451,15 +539,74 @@ use rusqlite::params;
                         "interacted".to_string(),
                         Value::String(interacted_marker(obj.get("first_send_at"))),
                     );
-                    if let Some(reason) =
-                        stale_reason_for_agent(&Value::Object(obj.clone()), tmux_session_present)
+                    // 0.5.41 Slice 3: order stale sources most-authoritative-first.
+                    // Host boot mismatch wins because it invalidates all cached
+                    // pane/pid/session facts. Provider-exit marker wins over
+                    // pane liveness because the wrapper leaves an interactive
+                    // shell live. Coordinator unavailability without stronger
+                    // live provider proof means DB agent_health rows are stale.
+                    // Tmux session missing keeps its existing legacy path so
+                    // pre-0.5.41 tests remain byte-identical when no new
+                    // signal fires.
+                    let has_pane_binding = agent_has_pane_fact(&Value::Object(obj.clone()));
+                    // 0.5.41 Slice 3 (fault-invisibility-locate.md §5 point 3
+                    // + §9 RED4 live-provider guard): the wrapper-era pane
+                    // liveness cannot prove provider liveness — but a state
+                    // `pane_current_command` that MATCHES the agent's provider
+                    // IS positive proof (the abnormal.rs classifier writes it
+                    // when the pane's foreground command is the provider CLI).
+                    // When that positive proof is present, no stale downgrade
+                    // fires here so the agent renders as working.
+                    let provider_command_positive_proof = provider_current_command_matches(obj);
+                    // 0.5.41 Slice 3 (0.5.35 R4 regression guard): when the
+                    // runtime classifier has already written canonical
+                    // `worker_state=UNKNOWN` / `activity.status=uncertain`,
+                    // that is the authoritative honest observation — do NOT
+                    // reclassify it as `coordinator_unavailable` stale (which
+                    // would land it in the Stopped bucket instead of Unknown).
+                    // Host-boot mismatch and provider-exited marker are
+                    // stronger, more specific signals and still win.
+                    let canonical_unknown = agent_canonical_worker_state_is_unknown(obj);
+                    let new_reason = if freshness.host_boot_stale && has_pane_binding {
+                        freshness.host_boot_stale_reason()
+                    } else if freshness.provider_exited_agents.contains(agent_id) {
+                        Some("worker_provider_exited")
+                    } else if !freshness.coordinator_service_available
+                        && has_pane_binding
+                        && !provider_command_positive_proof
+                        && !canonical_unknown
                     {
+                        Some("coordinator_unavailable")
+                    } else {
+                        None
+                    };
+                    let legacy_reason = if provider_command_positive_proof {
+                        None
+                    } else {
+                        stale_reason_for_agent(
+                            &Value::Object(obj.clone()),
+                            tmux_session_present,
+                        )
+                    };
+                    let reason = new_reason.or(legacy_reason);
+                    if let Some(reason) = reason {
                         enriched.insert("stale".to_string(), Value::Bool(true));
                         enriched.insert(
                             "stale_reason".to_string(),
                             Value::String(reason.to_string()),
                         );
-                        if !tmux_session_present {
+                        // Downgrade cached BUSY/working when the stale source is
+                        // one of the new authoritative signals OR the pre-existing
+                        // session-missing signal. Legacy code only downgraded on
+                        // !tmux_session_present; that let host_boot / provider-
+                        // exit / coord-unavailable stale rows keep raw=running.
+                        let is_new_signal = matches!(
+                            reason,
+                            "host_boot_mismatch"
+                                | "worker_provider_exited"
+                                | "coordinator_unavailable"
+                        );
+                        if !tmux_session_present || is_new_signal {
                             downgrade_stale_agent(&mut enriched);
                         }
                     }
@@ -502,6 +649,49 @@ use rusqlite::params;
             (true, false) => Some("pane_dead"),
             (false, false) => None,
         }
+    }
+
+    /// 0.5.41 Slice 3 (0.5.35 R4 regression guard): true when the agent
+    /// row carries the canonical `worker_state=UNKNOWN` OR
+    /// `activity.status=uncertain` observation the runtime classifier
+    /// writes. Used to skip the coordinator-unavailable stale mark
+    /// (see `enrich_agents`) so the pre-existing R4 rendering (UNKNOWN
+    /// beats WORKING) is preserved.
+    fn agent_canonical_worker_state_is_unknown(agent: &serde_json::Map<String, Value>) -> bool {
+        let worker_state_unknown = agent
+            .get("worker_state")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("UNKNOWN"));
+        let activity_uncertain = agent
+            .get("activity")
+            .and_then(|v| v.get("status"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("uncertain"));
+        worker_state_unknown || activity_uncertain
+    }
+
+    /// 0.5.41 Slice 3 (fault-invisibility-locate.md §9 RED4 live-provider
+    /// guard): true when the agent row carries a `pane_current_command`
+    /// that matches the agent's provider CLI. This is positive proof
+    /// the provider is the pane's foreground process — the abnormal.rs
+    /// classifier writes this field after the marker/current-command
+    /// check clears. When true, stale-downgrade paths in
+    /// `enrich_agents` skip so the row keeps its BUSY/working state.
+    fn provider_current_command_matches(agent: &serde_json::Map<String, Value>) -> bool {
+        let Some(command) = agent
+            .get("pane_current_command")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+        let Some(provider_wire) = agent.get("provider").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(provider) = crate::provider::wire::parse_provider(provider_wire) else {
+            return false;
+        };
+        crate::leader::command_matches_provider(provider, command)
     }
 
     fn agent_has_pane_fact(agent: &Value) -> bool {
@@ -1120,6 +1310,7 @@ use rusqlite::params;
         coordinator_running: bool,
         undelivered: i64,
         tmux_session_missing: bool,
+        freshness: &RuntimeFreshness,
     ) -> Value {
         let mut runtime = serde_json::Map::new();
         runtime.insert(
@@ -1127,10 +1318,32 @@ use rusqlite::params;
             json!({"ok": coordinator_running}),
         );
         runtime.insert("undelivered".to_string(), json!(undelivered));
+        // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3): expose
+        // typed issues on the runtime block so `status --json --detail`
+        // can be scanned for `runtime_bindings_stale_after_boot` the
+        // same way `diagnose` surfaces it. Hint precedence: session-
+        // missing > host-boot-stale > coordinator-not-running-with-
+        // backlog — most-actionable-first.
+        let mut issues: Vec<Value> = Vec::new();
+        if freshness.host_boot_stale {
+            issues.push(json!({
+                "id": "runtime_bindings_stale_after_boot",
+                "recorded_host_boot_id": freshness.host_boot_recorded,
+                "current_host_boot_id": freshness.host_boot_current,
+            }));
+        }
+        if !issues.is_empty() {
+            runtime.insert("issues".to_string(), Value::Array(issues));
+        }
         if tmux_session_missing {
             runtime.insert(
                 "hint".to_string(),
                 json!("tmux session missing — run team-agent restart"),
+            );
+        } else if freshness.host_boot_stale {
+            runtime.insert(
+                "hint".to_string(),
+                json!("runtime_bindings_stale_after_boot — run team-agent restart"),
             );
         } else if !coordinator_running && undelivered > 0 {
             runtime.insert(
@@ -1146,7 +1359,13 @@ use rusqlite::params;
     /// Whether the coordinator HealthReport reflects a running tick loop. Used by the
     /// runtime block + the hint gate.
     fn coordinator_status_running(health: &crate::coordinator::HealthReport) -> bool {
-        matches!(health.status, crate::coordinator::CoordinatorHealthStatus::Running)
+        // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3): runtime
+        // service predicate is `service_available`, not any-`Running` pid.
+        // A stale-pid daemon is CoordinatorHealthStatus::Stale (or Running
+        // with metadata_ok=false); a service-compatible newer daemon is
+        // Running + service_available=true — send/diagnose already use
+        // this same truth source, and status must agree.
+        health.service_available
     }
 
     /// Count of messages currently sitting in delivery-able backlog
@@ -1199,16 +1418,21 @@ use rusqlite::params;
             "schema": {
                 "message_store_schema_version": health.schema.schema_version,
             },
+            // 0.5.41 Slice 3 (fault-invisibility-locate.md §5/§6.3):
+            // `service_available` is now always exposed alongside `ok`
+            // and `status` so status/diagnose consumers can share one
+            // service-availability truth without keying on the legacy
+            // `expose_binary_drift` conditional (that path only fired
+            // for the newer-daemon-preserved shape). `binary_identity_
+            // relation` moves to always-on for the same reason — RED3
+            // scans the summary for `daemon_newer_than_caller`.
+            "service_available": health.service_available,
+            "binary_identity_relation": binary_identity_relation,
         });
         if expose_binary_drift {
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("wire_metadata_ok".to_string(), Value::Bool(true));
                 obj.insert("binary_identity_ok".to_string(), Value::Bool(false));
-                obj.insert(
-                    "binary_identity_relation".to_string(),
-                    Value::String(binary_identity_relation.to_string()),
-                );
-                obj.insert("service_available".to_string(), Value::Bool(true));
             }
         }
         value

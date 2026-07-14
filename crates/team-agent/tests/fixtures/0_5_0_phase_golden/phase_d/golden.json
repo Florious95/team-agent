@@ -483,6 +483,7 @@
           "all_resumable_have_session": true,
           "all_spawned": false,
           "coordinator": {
+            "binary_identity_relation": "same",
             "binary_path": "<TEAM_AGENT_BIN>",
             "binary_version": "<VERSION>",
             "metadata": {
@@ -503,6 +504,7 @@
             },
             "schema_error": null,
             "schema_ok": true,
+            "service_available": true,
             "status": "running"
           },
           "incomplete_session_capture_agents": [],

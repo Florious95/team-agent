@@ -1494,10 +1494,18 @@ pub(crate) fn write_coordinator_heartbeat(
                 .map(ToString::to_string)
         })
         .unwrap_or_else(|| format!("coord_unknown_{}", pid.get()));
+    // 0.5.41 Slice 1 (fault-invisibility-locate.md §5/§6.1): stamp the
+    // host boot identity onto every heartbeat write so downstream
+    // status/diagnose can detect "all pane/pid/session bindings predate
+    // the current host boot" without inventing a new sidecar. Existing
+    // `boot_id` stays as the daemon-generation id.
+    let host_boot_id = probe_host_boot_id().unwrap_or_else(|| "unknown".to_string());
     let mut next = serde_json::json!({
         "coordinator_tick_iteration_count": next_count,
         "pid": pid.get(),
         "boot_id": boot_id,
+        "host_boot_id": host_boot_id,
+        "host_boot_time": now.clone(),
         "binary_path": identity.binary_path,
         "binary_version": identity.binary_version,
         "last_phase": last_phase,
@@ -1521,6 +1529,57 @@ pub(crate) fn write_coordinator_heartbeat(
 
 fn coordinator_heartbeat_path(workspace: &WorkspacePath) -> PathBuf {
     crate::model::paths::runtime_dir(workspace.as_path()).join("coordinator_tick.json")
+}
+
+/// 0.5.41 Slice 1 (fault-invisibility-locate.md §6.1): single-helper
+/// probe for the current host boot identity. Test overrides via
+/// `TEAM_AGENT_TEST_HOST_BOOT_ID` (deterministic RED path). On real
+/// hosts, reads platform files: Linux `/proc/sys/kernel/random/boot_id`
+/// (128-bit UUID stable across the boot), macOS `sysctl kern.boottime`
+/// falls back to a formatted timestamp. Returns None when the platform
+/// signal cannot be read — the caller MUST NOT guess; downstream
+/// treats a missing/mismatched host boot separately from a matched one.
+pub(crate) fn probe_host_boot_id() -> Option<String> {
+    if let Ok(override_id) = std::env::var("TEAM_AGENT_TEST_HOST_BOOT_ID") {
+        if !override_id.is_empty() {
+            return Some(override_id);
+        }
+    }
+    // Linux: stable UUID for the current boot.
+    if let Ok(raw) = std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Some(format!("linux-{trimmed}"));
+        }
+    }
+    // macOS/BSD: kern.boottime via sysctl. Cheap and root-free.
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", "kern.boottime"])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(format!("macos-{trimmed}"));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 0.5.41 Slice 1: expose the last-written heartbeat sidecar so
+/// `cli::diagnose` / `cli::status_port` can consume it read-only. Any
+/// error (missing file, malformed JSON) returns None — callers treat
+/// that as "unknown, fall back to existing facts" per locate §8 risk
+/// note, they must never guess a stale/fresh verdict from absence.
+pub fn read_coordinator_heartbeat(workspace: &WorkspacePath) -> Option<Value> {
+    let path = coordinator_heartbeat_path(workspace);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 fn read_coordinator_heartbeat_value(path: &Path) -> Value {
