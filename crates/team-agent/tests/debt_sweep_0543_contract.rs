@@ -21,9 +21,21 @@ use hermetic_guard::{short_tmux_socket, HermeticTestEnv};
 static CASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+#[cfg(target_os = "macos")]
+fn short_fixture_base_uses_private_tmp_on_macos() {
+    assert_eq!(short_test_base(), PathBuf::from("/private/tmp"));
+}
+
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn short_fixture_base_uses_tmp_on_other_unix_hosts() {
+    assert_eq!(short_test_base(), PathBuf::from("/tmp"));
+}
+
+#[test]
 #[serial_test::serial(env)]
 fn long_tmpdir_still_yields_unique_short_real_tmux_sockets() {
-    let long_tmp = PathBuf::from("/private/tmp").join(format!(
+    let long_tmp = short_test_base().join(format!(
         "ta-0543-long-{}-{}",
         std::process::id(),
         "x".repeat(190)
