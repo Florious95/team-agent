@@ -720,11 +720,7 @@ impl Transport for BRealTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(Some("node".to_string()))
     }
 

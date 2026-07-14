@@ -19,10 +19,15 @@ fn send_007_broadcast_fanout_status() {
     let out = run_ta(
         &ws,
         &[
-            "send", "*", "broadcast e2e",
-            "--workspace", ws_path,
-            "--sender", "leader",
-            "--message-id", "msg-bcast-007",
+            "send",
+            "*",
+            "broadcast e2e",
+            "--workspace",
+            ws_path,
+            "--sender",
+            "leader",
+            "--message-id",
+            "msg-bcast-007",
             "--no-wait",
             "--json",
         ],
@@ -36,8 +41,14 @@ fn send_007_broadcast_fanout_status() {
         status.contains("fanout") || status == "delivered" || status == "queued",
         "broadcast status should be fanout-shaped; got {status:?} (json={j})"
     );
-    let mid = j.pointer("/message_id").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(!mid.is_empty(), "broadcast should report a message_id; got {j}");
+    let mid = j
+        .pointer("/message_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        !mid.is_empty(),
+        "broadcast should report a message_id; got {j}"
+    );
 
     let _ = run_ta(
         &ws,

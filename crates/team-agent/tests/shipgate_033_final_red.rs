@@ -43,8 +43,9 @@ fn tit16_scoped_child_shutdown_reaps_only_child_and_parent_still_delivers() {
     let parent_out = case.quick_start(&parent, "sublead", &[]);
     assert_success_json("parent quick-start fixture", &parent_out);
     let parent_state = state_value(case.root());
-    let parent_pane = agent_pane(&parent_state, &parent, "sublead")
-        .unwrap_or_else(|| panic!("parent sublead pane_id must be persisted; state={parent_state}"));
+    let parent_pane = agent_pane(&parent_state, &parent, "sublead").unwrap_or_else(|| {
+        panic!("parent sublead pane_id must be persisted; state={parent_state}")
+    });
     assert!(
         case.has_session(&format!("team-{parent}")),
         "fixture must prove parent tmux session exists after quick-start"
@@ -88,8 +89,7 @@ fn tit16_scoped_child_shutdown_reaps_only_child_and_parent_still_delivers() {
     assert!(
         !shutdown.timed_out,
         "scoped child shutdown must return; stdout={} stderr={}",
-        shutdown.stdout,
-        shutdown.stderr
+        shutdown.stdout, shutdown.stderr
     );
     assert!(
         shutdown.code == Some(0) && shutdown_json["ok"] == json!(true),
@@ -153,7 +153,12 @@ fn tit16_scoped_child_shutdown_reaps_only_child_and_parent_still_delivers() {
     );
     for _ in 0..10 {
         let _ = case.run_cli(
-            &["coordinator", "--workspace", case.root_str().as_str(), "--once"],
+            &[
+                "coordinator",
+                "--workspace",
+                case.root_str().as_str(),
+                "--once",
+            ],
             &[],
             Duration::from_secs(4),
         );
@@ -208,7 +213,9 @@ fn collect_stored_unknown_task_result_is_nonfatal_but_marks_invalid() {
             rows.iter().any(|row| {
                 row["result_id"] == json!("res_manual_stray")
                     && row["task_id"] == json!("manual")
-                    && row["error"].as_str().is_some_and(|e| e.contains("unknown task id: manual"))
+                    && row["error"]
+                        .as_str()
+                        .is_some_and(|e| e.contains("unknown task id: manual"))
             })
         }),
         "collect must surface the stored unknown-task row in invalid_results; out={out}"
@@ -219,9 +226,11 @@ fn collect_stored_unknown_task_result_is_nonfatal_but_marks_invalid() {
         "collect must increment results.invalid for the skipped stored row; out={out}"
     );
     assert!(
-        !out["collected_results"].as_array().unwrap_or(&Vec::new()).iter().any(|row| {
-            row["result_id"] == json!("res_manual_stray")
-        }),
+        !out["collected_results"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .any(|row| { row["result_id"] == json!("res_manual_stray") }),
         "collect must not fabricate a collected task result for an unknown-task row; out={out}"
     );
 }
@@ -446,8 +455,12 @@ fn parse_json_or_null(stdout: &str) -> Value {
 }
 
 fn state_value(root: &Path) -> Value {
-    load_runtime_state(root)
-        .unwrap_or_else(|e| panic!("runtime state must exist and parse: {e}; root={}", root.display()))
+    load_runtime_state(root).unwrap_or_else(|e| {
+        panic!(
+            "runtime state must exist and parse: {e}; root={}",
+            root.display()
+        )
+    })
 }
 
 fn maybe_state_value(root: &Path) -> Option<Value> {
@@ -502,11 +515,19 @@ fn db_messages(root: &Path) -> Vec<MessageRow> {
 
 fn delivered_message(root: &Path, owner_team_id: &str, token: &str) -> bool {
     db_messages(root).iter().any(|row| {
-        row.owner_team_id == owner_team_id && row.content.contains(token) && row.status == "delivered"
+        row.owner_team_id == owner_team_id
+            && row.content.contains(token)
+            && row.status == "delivered"
     })
 }
 
-fn seed_stored_result(root: &Path, owner_team_id: &str, result_id: &str, task_id: &str, agent_id: &str) {
+fn seed_stored_result(
+    root: &Path,
+    owner_team_id: &str,
+    result_id: &str,
+    task_id: &str,
+    agent_id: &str,
+) {
     let _ = MessageStore::open(root).expect("open message store");
     let db_path = root.join(".team").join("runtime").join("team.db");
     let conn = open_db(&db_path).expect("open team.db");
@@ -565,17 +586,17 @@ fn processes(root: &Path) -> ProcessSnapshot {
     let lines = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| line.contains(needle.as_ref()))
-        .filter(|line| line.contains("team-agent coordinator") || line.contains("team-agent fake-worker"))
+        .filter(|line| {
+            line.contains("team-agent coordinator") || line.contains("team-agent fake-worker")
+        })
         .map(ToString::to_string)
         .collect();
     ProcessSnapshot { lines }
 }
 
 fn tmp_dir(tag: &str, id: u64) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "ta-033-shipgate-{tag}-{}-{id}",
-        std::process::id()
-    ));
+    let dir =
+        std::env::temp_dir().join(format!("ta-033-shipgate-{tag}-{}-{id}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::canonicalize(dir).unwrap()
@@ -591,7 +612,9 @@ fn kill_default_sessions_with_id(id: u64) {
     };
     for name in String::from_utf8_lossy(&output.stdout).lines() {
         if name.starts_with("team-") && name.contains(&marker) {
-            let _ = Command::new("tmux").args(["kill-session", "-t", name]).status();
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", name])
+                .status();
         }
     }
 }

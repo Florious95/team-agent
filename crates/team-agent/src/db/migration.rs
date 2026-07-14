@@ -14,33 +14,109 @@ use crate::db::DbError;
 
 /// canonical 列序(`schema_migration.py:MANAGED_TABLE_LAYOUTS`)。
 pub const MANAGED_TABLE_LAYOUTS: &[(&str, &[&str])] = &[
-    ("messages", &[
-        "message_id", "owner_team_id", "task_id", "sender", "recipient", "reply_to", "requires_ack",
-        "status", "content", "artifact_refs", "created_at", "updated_at", "delivered_at",
-        "acknowledged_at", "error", "delivery_attempts",
-    ]),
-    ("results", &["result_id", "owner_team_id", "task_id", "agent_id", "envelope", "status", "created_at"]),
-    ("scheduled_events", &[
-        "id", "owner_team_id", "due_at", "target", "kind", "payload_json", "status", "created_at",
-        "fired_at", "result_json",
-    ]),
-    ("delivery_tokens", &[
-        "message_id", "unique_token", "injected_at", "visible_at", "consumed_at", "failed_at",
-        "failure_reason",
-    ]),
-    ("agent_health", &[
-        "owner_team_id", "agent_id", "status", "last_output_at", "context_usage_pct", "current_task_id",
-        "updated_at",
-    ]),
+    (
+        "messages",
+        &[
+            "message_id",
+            "owner_team_id",
+            "task_id",
+            "sender",
+            "recipient",
+            "reply_to",
+            "requires_ack",
+            "status",
+            "content",
+            "artifact_refs",
+            "created_at",
+            "updated_at",
+            "delivered_at",
+            "acknowledged_at",
+            "error",
+            "delivery_attempts",
+        ],
+    ),
+    (
+        "results",
+        &[
+            "result_id",
+            "owner_team_id",
+            "task_id",
+            "agent_id",
+            "envelope",
+            "status",
+            "created_at",
+        ],
+    ),
+    (
+        "scheduled_events",
+        &[
+            "id",
+            "owner_team_id",
+            "due_at",
+            "target",
+            "kind",
+            "payload_json",
+            "status",
+            "created_at",
+            "fired_at",
+            "result_json",
+        ],
+    ),
+    (
+        "delivery_tokens",
+        &[
+            "message_id",
+            "unique_token",
+            "injected_at",
+            "visible_at",
+            "consumed_at",
+            "failed_at",
+            "failure_reason",
+        ],
+    ),
+    (
+        "agent_health",
+        &[
+            "owner_team_id",
+            "agent_id",
+            "status",
+            "last_output_at",
+            "context_usage_pct",
+            "current_task_id",
+            "updated_at",
+        ],
+    ),
     ("peer_allowlist", &["a", "b", "created_at"]),
-    ("result_watchers", &[
-        "watcher_id", "owner_team_id", "task_id", "agent_id", "message_id", "leader_id", "status",
-        "created_at", "completed_at", "result_id", "notified_message_id", "error",
-    ]),
-    ("leader_notification_log", &[
-        "result_id", "owner_team_id", "owner_epoch", "leader_session_uuid", "notified_message_id",
-        "notified_at", "leader_pane_id_at_notify", "envelope_content_hash",
-    ]),
+    (
+        "result_watchers",
+        &[
+            "watcher_id",
+            "owner_team_id",
+            "task_id",
+            "agent_id",
+            "message_id",
+            "leader_id",
+            "status",
+            "created_at",
+            "completed_at",
+            "result_id",
+            "notified_message_id",
+            "error",
+        ],
+    ),
+    (
+        "leader_notification_log",
+        &[
+            "result_id",
+            "owner_team_id",
+            "owner_epoch",
+            "leader_session_uuid",
+            "notified_message_id",
+            "notified_at",
+            "leader_pane_id_at_notify",
+            "envelope_content_hash",
+        ],
+    ),
 ];
 
 /// rebuild / 建缺表用的 DDL 模板(`schema_migration.py:CREATE_TABLE_SQL`,`__TABLE__` 占位)。
@@ -134,7 +210,9 @@ fn maybe_test_fault_after_insert() -> Result<(), DbError> {
     #[cfg(test)]
     {
         if FAULT_AFTER_INSERT.with(std::cell::Cell::get) {
-            return Err(DbError::Schema("injected test fault after insert (atomicity probe)".to_string()));
+            return Err(DbError::Schema(
+                "injected test fault after insert (atomicity probe)".to_string(),
+            ));
         }
     }
     Ok(())
@@ -165,12 +243,26 @@ pub fn layout_diffs(conn: &Connection) -> Result<Vec<Diff>, DbError> {
     let mut diffs = Vec::new();
     for (table, expected) in MANAGED_TABLE_LAYOUTS {
         if !table_exists(conn, table)? {
-            diffs.push(Diff { table, expected: expected.to_vec(), actual: vec![], missing: true });
+            diffs.push(Diff {
+                table,
+                expected: expected.to_vec(),
+                actual: vec![],
+                missing: true,
+            });
             continue;
         }
         let actual = table_layout(conn, table)?;
-        if !actual.iter().map(String::as_str).eq(expected.iter().copied()) {
-            diffs.push(Diff { table, expected: expected.to_vec(), actual, missing: false });
+        if !actual
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+        {
+            diffs.push(Diff {
+                table,
+                expected: expected.to_vec(),
+                actual,
+                missing: false,
+            });
         }
     }
     Ok(diffs)
@@ -229,7 +321,10 @@ fn rebuild_tables(
             .filter(|c| diff.actual.iter().any(|a| a == c))
             .collect();
         let column_sql = common.join(", ");
-        conn.execute(&format!("insert into {temp}({column_sql}) select {column_sql} from {table}"), [])?;
+        conn.execute(
+            &format!("insert into {temp}({column_sql}) select {column_sql} from {table}"),
+            [],
+        )?;
         maybe_test_fault_after_insert()?; // insert 后、rename 前注入点(原子性探针)
         conn.execute(&format!("alter table {table} rename to {old}"), [])?;
         conn.execute(&format!("alter table {temp} rename to {table}"), [])?;
@@ -256,7 +351,9 @@ fn rebuild_tables(
 
 fn backup_path(db_path: &Path, user_version: i64) -> PathBuf {
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    db_path.with_file_name(format!("team.db.pre-migration-{stamp}-from-v{user_version}.bak"))
+    db_path.with_file_name(format!(
+        "team.db.pre-migration-{stamp}-from-v{user_version}.bak"
+    ))
 }
 
 /// `schema_migration.py:ensure_table_layout`:版本迁移 + (有漂移则)备份 + 整表 rebuild,
@@ -288,7 +385,8 @@ pub fn ensure_table_layout(
         let uv = pragma_user_version(conn)?;
         let backup = backup_path(&dbp, uv);
         if let Some(parent) = backup.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| DbError::Schema(format!("backup mkdir: {e}")))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| DbError::Schema(format!("backup mkdir: {e}")))?;
         }
         std::fs::copy(dbp, &backup).map_err(|e| DbError::Schema(format!("backup copy: {e}")))?;
         rebuild_tables(conn, &diffs, &backup)
@@ -301,7 +399,9 @@ pub fn ensure_table_layout(
             // Gap 46 契约:每次 rebuild 在 COMMIT 后发射 schema.layout_rebuild 事件(step 3↔4 集成点)。
             // 回滚的 rebuild 不发(post-commit 语义)。best-effort,不让审计失败拖垮迁移。
             if !events.is_empty() {
-                let resolved = db_path.map(Path::to_path_buf).or_else(|| db_path_from_conn(conn));
+                let resolved = db_path
+                    .map(Path::to_path_buf)
+                    .or_else(|| db_path_from_conn(conn));
                 if let Some(p) = resolved {
                     emit_rebuild_events(&p, &events);
                 }
@@ -330,8 +430,7 @@ pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis
             user_version: 0,
             layout_diffs: vec![],
             recommended_action:
-                "No team.db exists yet; initialize_schema will create it on first use."
-                    .to_string(),
+                "No team.db exists yet; initialize_schema will create it on first use.".to_string(),
         });
     }
     let conn = Connection::open(db_path)?;
@@ -341,7 +440,11 @@ pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis
     let ok = diffs.is_empty() && uv == schema_version;
     Ok(Diagnosis {
         ok,
-        status: if ok { "ok".to_string() } else { "schema_repair_available".to_string() },
+        status: if ok {
+            "ok".to_string()
+        } else {
+            "schema_repair_available".to_string()
+        },
         user_version: uv,
         recommended_action: if diff_tables.is_empty() {
             "none".to_string()
@@ -354,7 +457,10 @@ pub fn schema_diagnosis(db_path: &Path, schema_version: i64) -> Result<Diagnosis
 
 /// 便捷:对一个 workspace 的 `.team/runtime/team.db` 跑 diagnosis(对应 Python 签名)。
 pub fn schema_diagnosis_workspace(workspace: &Path) -> Result<Diagnosis, DbError> {
-    schema_diagnosis(&workspace.join(".team").join("runtime").join("team.db"), SCHEMA_VERSION)
+    schema_diagnosis(
+        &workspace.join(".team").join("runtime").join("team.db"),
+        SCHEMA_VERSION,
+    )
 }
 
 /// `schema_migration.py:_workspace_from_db_path`:`<ws>/.team/runtime/team.db` → `<ws>`。
@@ -398,7 +504,10 @@ pub enum FixResult {
     /// 撞活跃锁 → 拒绝且**不写备份**(`status:'blocked', reason:'active_lock'`)。
     Blocked { reason: String },
     /// 已修复 → diagnosis(ok)+ rebuild 事件。
-    Fixed { diagnosis: Diagnosis, rebuilds: Vec<RebuildEvent> },
+    Fixed {
+        diagnosis: Diagnosis,
+        rebuilds: Vec<RebuildEvent>,
+    },
 }
 
 /// `schema_migration.py:_db_lock_status`:0-timeout `BEGIN IMMEDIATE` 探锁;locked/busy → `active_lock`。
@@ -426,7 +535,10 @@ fn db_lock_status(db_path: &Path) -> Result<Option<String>, DbError> {
 pub fn fix_schema_layout(workspace: &Path, schema_version: i64) -> Result<FixResult, DbError> {
     let db_path = workspace.join(".team").join("runtime").join("team.db");
     if !db_path.exists() {
-        return Ok(FixResult::Missing(schema_diagnosis(&db_path, schema_version)?));
+        return Ok(FixResult::Missing(schema_diagnosis(
+            &db_path,
+            schema_version,
+        )?));
     }
     if let Some(reason) = db_lock_status(&db_path)? {
         let _ = crate::event_log::EventLog::new(workspace).write(
@@ -441,7 +553,10 @@ pub fn fix_schema_layout(workspace: &Path, schema_version: i64) -> Result<FixRes
     conn.execute_batch(&format!("pragma user_version = {schema_version}"))?;
     drop(conn);
     let diagnosis = schema_diagnosis(&db_path, schema_version)?;
-    Ok(FixResult::Fixed { diagnosis, rebuilds })
+    Ok(FixResult::Fixed {
+        diagnosis,
+        rebuilds,
+    })
 }
 
 #[cfg(test)]
@@ -503,14 +618,26 @@ mod tests {
         initialize_schema(&conn, Some(&path)).unwrap();
 
         // 迁移后:4 表 canonical 列序 + 行数保全。
-        assert_eq!(layout(&conn, "messages")[..3], ["message_id", "owner_team_id", "task_id"]);
-        assert_eq!(layout(&conn, "agent_health")[..2], ["owner_team_id", "agent_id"]);
+        assert_eq!(
+            layout(&conn, "messages")[..3],
+            ["message_id", "owner_team_id", "task_id"]
+        );
+        assert_eq!(
+            layout(&conn, "agent_health")[..2],
+            ["owner_team_id", "agent_id"]
+        );
         assert_eq!(table_count(&conn, "messages").unwrap(), 2);
         assert_eq!(table_count(&conn, "results").unwrap(), 2);
         assert_eq!(table_count(&conn, "scheduled_events").unwrap(), 2);
         assert_eq!(table_count(&conn, "agent_health").unwrap(), 2);
         // 行内容保全(owner_team_id 迁移后仍可读)。
-        let m1: String = conn.query_row("select owner_team_id from messages where message_id='m1'", [], |r| r.get(0)).unwrap();
+        let m1: String = conn
+            .query_row(
+                "select owner_team_id from messages where message_id='m1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(m1, "t");
         drop(conn);
 
@@ -522,7 +649,8 @@ mod tests {
 
         // 备份文件已写(team.db.pre-migration-*-from-v1.bak)。
         let runtime = path.parent().unwrap();
-        let baks: Vec<_> = std::fs::read_dir(runtime).unwrap()
+        let baks: Vec<_> = std::fs::read_dir(runtime)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let n = e.file_name().to_string_lossy().to_string();
@@ -583,7 +711,10 @@ mod tests {
         drop(conn);
         let conn2 = Connection::open(&path).unwrap();
         assert_eq!(
-            table_layout(&conn2, "messages").unwrap().last().map(String::as_str),
+            table_layout(&conn2, "messages")
+                .unwrap()
+                .last()
+                .map(String::as_str),
             Some("owner_team_id"),
             "回滚后 messages 应仍是 legacy 布局(owner_team_id 末列)"
         );
@@ -605,7 +736,10 @@ mod tests {
         let conn = crate::db::schema::open_db(&path).unwrap();
         let events = ensure_table_layout(&conn, SCHEMA_VERSION, None).unwrap(); // None 不再 Err
         assert_eq!(events.len(), 8);
-        assert_eq!(table_layout(&conn, "messages").unwrap()[..2], ["message_id", "owner_team_id"]);
+        assert_eq!(
+            table_layout(&conn, "messages").unwrap()[..2],
+            ["message_id", "owner_team_id"]
+        );
     }
 
     // agent_health 完全缺 owner_team_id 列 → generic rebuild 补 NULL 列、行保全。
@@ -622,10 +756,17 @@ mod tests {
         drop(c);
         let conn = crate::db::schema::open_db(&path).unwrap();
         initialize_schema(&conn, Some(&path)).unwrap();
-        assert_eq!(table_layout(&conn, "agent_health").unwrap()[0], "owner_team_id");
+        assert_eq!(
+            table_layout(&conn, "agent_health").unwrap()[0],
+            "owner_team_id"
+        );
         assert_eq!(table_count(&conn, "agent_health").unwrap(), 1);
         let owner: Option<String> = conn
-            .query_row("select owner_team_id from agent_health where agent_id='a'", [], |r| r.get(0))
+            .query_row(
+                "select owner_team_id from agent_health where agent_id='a'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(owner, None, "补的 owner_team_id 列应为 NULL");
     }
@@ -662,7 +803,11 @@ mod tests {
         let conn = crate::db::schema::open_db(&path).unwrap();
         initialize_schema(&conn, Some(&path)).unwrap();
         let (content, status): (String, Option<String>) = conn
-            .query_row("select content, status from messages where message_id='u1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                "select content, status from messages where message_id='u1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(content, "héllo🦀\n世界");
         assert_eq!(status, None);
@@ -671,7 +816,14 @@ mod tests {
     #[test]
     fn fix_schema_layout_missing_blocked_fixed() {
         // missing:无 db。
-        let ws_missing = temp_db().parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        let ws_missing = temp_db()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         match fix_schema_layout(&ws_missing, SCHEMA_VERSION).unwrap() {
             FixResult::Missing(d) => assert_eq!(d.status, "missing"),
             other => panic!("expected Missing, got {other:?}"),
@@ -680,9 +832,19 @@ mod tests {
         // fixed:legacy db。workspace = .../<dir>(db 在 ws/.team/runtime/team.db)。
         let db = temp_db();
         build_legacy(&db);
-        let ws = db.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        let ws = db
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         match fix_schema_layout(&ws, SCHEMA_VERSION).unwrap() {
-            FixResult::Fixed { diagnosis, rebuilds } => {
+            FixResult::Fixed {
+                diagnosis,
+                rebuilds,
+            } => {
                 assert!(diagnosis.ok);
                 assert_eq!(diagnosis.user_version, 3);
                 assert_eq!(rebuilds.len(), 8);
@@ -693,16 +855,26 @@ mod tests {
         // blocked:另一个连接持 BEGIN IMMEDIATE 写锁时 fix 应拒绝(不写备份)。
         let db2 = temp_db();
         build_legacy(&db2);
-        let ws2 = db2.parent().unwrap().parent().unwrap().parent().unwrap().to_path_buf();
+        let ws2 = db2
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let holder = Connection::open(&db2).unwrap();
-        holder.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        holder
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         holder.execute_batch("BEGIN IMMEDIATE").unwrap(); // 占写锁
         match fix_schema_layout(&ws2, SCHEMA_VERSION).unwrap() {
             FixResult::Blocked { reason } => assert_eq!(reason, "active_lock"),
             other => panic!("expected Blocked, got {other:?}"),
         }
         // 撞锁时不应写任何备份。
-        let baks = std::fs::read_dir(db2.parent().unwrap()).unwrap()
+        let baks = std::fs::read_dir(db2.parent().unwrap())
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains("pre-migration"))
             .count();
@@ -719,14 +891,30 @@ mod tests {
         initialize_schema(&conn, Some(&path)).unwrap();
         let ws = path.parent().unwrap().parent().unwrap().parent().unwrap();
         let events = crate::event_log::EventLog::new(ws).tail(50).unwrap();
-        let rebuilds: Vec<_> = events.iter().filter(|e| e["event"] == serde_json::json!("schema.layout_rebuild")).collect();
-        assert_eq!(rebuilds.len(), 8, "8 张 managed 表各一条 schema.layout_rebuild");
+        let rebuilds: Vec<_> = events
+            .iter()
+            .filter(|e| e["event"] == serde_json::json!("schema.layout_rebuild"))
+            .collect();
+        assert_eq!(
+            rebuilds.len(),
+            8,
+            "8 张 managed 表各一条 schema.layout_rebuild"
+        );
         for e in &rebuilds {
-            assert_eq!(e["row_count_before"], e["row_count_after"], "事件须 row_count 前后相等");
+            assert_eq!(
+                e["row_count_before"], e["row_count_after"],
+                "事件须 row_count 前后相等"
+            );
             assert!(e["backup_path"].as_str().is_some());
         }
         // 含 messages 那条,to_layout_columns 是 canonical。
-        let m = rebuilds.iter().find(|e| e["table"] == serde_json::json!("messages")).unwrap();
-        assert_eq!(m["to_layout_columns"][1], serde_json::json!("owner_team_id"));
+        let m = rebuilds
+            .iter()
+            .find(|e| e["table"] == serde_json::json!("messages"))
+            .unwrap();
+        assert_eq!(
+            m["to_layout_columns"][1],
+            serde_json::json!("owner_team_id")
+        );
     }
 }

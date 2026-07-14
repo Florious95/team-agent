@@ -38,32 +38,86 @@ const INDEX_SQL: &[&str] = &[
 
 // 各表 required 列(`schema.py` 的 *_COLUMNS 集合;此处用有序数组,成员判定与集合等价)。
 const MESSAGE_COLUMNS: &[&str] = &[
-    "owner_team_id", "message_id", "task_id", "sender", "recipient", "reply_to", "requires_ack",
-    "status", "content", "artifact_refs", "created_at", "updated_at", "delivered_at",
-    "acknowledged_at", "error", "delivery_attempts",
+    "owner_team_id",
+    "message_id",
+    "task_id",
+    "sender",
+    "recipient",
+    "reply_to",
+    "requires_ack",
+    "status",
+    "content",
+    "artifact_refs",
+    "created_at",
+    "updated_at",
+    "delivered_at",
+    "acknowledged_at",
+    "error",
+    "delivery_attempts",
 ];
-const RESULT_COLUMNS: &[&str] =
-    &["owner_team_id", "result_id", "task_id", "agent_id", "envelope", "status", "created_at"];
+const RESULT_COLUMNS: &[&str] = &[
+    "owner_team_id",
+    "result_id",
+    "task_id",
+    "agent_id",
+    "envelope",
+    "status",
+    "created_at",
+];
 const SCHEDULED_EVENT_COLUMNS: &[&str] = &[
-    "id", "owner_team_id", "due_at", "target", "kind", "payload_json", "status", "created_at",
-    "fired_at", "result_json",
+    "id",
+    "owner_team_id",
+    "due_at",
+    "target",
+    "kind",
+    "payload_json",
+    "status",
+    "created_at",
+    "fired_at",
+    "result_json",
 ];
 const DELIVERY_TOKEN_COLUMNS: &[&str] = &[
-    "message_id", "unique_token", "injected_at", "visible_at", "consumed_at", "failed_at",
+    "message_id",
+    "unique_token",
+    "injected_at",
+    "visible_at",
+    "consumed_at",
+    "failed_at",
     "failure_reason",
 ];
 const AGENT_HEALTH_COLUMNS: &[&str] = &[
-    "owner_team_id", "agent_id", "status", "last_output_at", "context_usage_pct", "current_task_id",
+    "owner_team_id",
+    "agent_id",
+    "status",
+    "last_output_at",
+    "context_usage_pct",
+    "current_task_id",
     "updated_at",
 ];
 const PEER_ALLOWLIST_COLUMNS: &[&str] = &["a", "b", "created_at"];
 const RESULT_WATCHER_COLUMNS: &[&str] = &[
-    "owner_team_id", "watcher_id", "task_id", "agent_id", "message_id", "leader_id", "status",
-    "created_at", "completed_at", "result_id", "notified_message_id", "error",
+    "owner_team_id",
+    "watcher_id",
+    "task_id",
+    "agent_id",
+    "message_id",
+    "leader_id",
+    "status",
+    "created_at",
+    "completed_at",
+    "result_id",
+    "notified_message_id",
+    "error",
 ];
 const LEADER_NOTIFICATION_LOG_COLUMNS: &[&str] = &[
-    "result_id", "owner_team_id", "owner_epoch", "leader_session_uuid", "notified_message_id",
-    "notified_at", "leader_pane_id_at_notify", "envelope_content_hash",
+    "result_id",
+    "owner_team_id",
+    "owner_epoch",
+    "leader_session_uuid",
+    "notified_message_id",
+    "notified_at",
+    "leader_pane_id_at_notify",
+    "envelope_content_hash",
 ];
 
 /// 打开 `team.db` 并设 pragmas(`core.py:60-61`:busy_timeout=30000 + WAL)。
@@ -91,7 +145,9 @@ fn retry_sqlite<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> Result<T, DbE
     }
     match last_error {
         Some(error) => Err(error.into()),
-        None => Err(DbError::Schema("sqlite retry exhausted without an error".to_string())),
+        None => Err(DbError::Schema(
+            "sqlite retry exhausted without an error".to_string(),
+        )),
     }
 }
 
@@ -176,7 +232,10 @@ fn migrate_agent_health_owner_team_id(conn: &Connection) -> Result<(), DbError> 
 
 /// `schema.py:initialize_schema`:建表 + 列迁移 + agent_health 重建 + 索引 + user_version。
 /// 一个事务内完成(对应 Python `with conn:`)。
-pub fn initialize_schema(conn: &Connection, db_path: Option<&std::path::Path>) -> Result<(), DbError> {
+pub fn initialize_schema(
+    conn: &Connection,
+    db_path: Option<&std::path::Path>,
+) -> Result<(), DbError> {
     // Gap 46 入口门(`schema.py:117`):先检测/修复物理列序漂移(legacy DB)。
     // fresh DB 下 no-op(无 managed 表 → 无 diff);随后建表 + 列迁移在自己的事务里。
     crate::db::migration::ensure_table_layout(conn, SCHEMA_VERSION, db_path)?;
@@ -197,18 +256,53 @@ pub fn initialize_schema(conn: &Connection, db_path: Option<&std::path::Path>) -
         "messages",
         MESSAGE_COLUMNS,
         &[
-            ("delivery_attempts", "alter table messages add column delivery_attempts integer not null default 0"),
-            ("owner_team_id", "alter table messages add column owner_team_id text"),
+            (
+                "delivery_attempts",
+                "alter table messages add column delivery_attempts integer not null default 0",
+            ),
+            (
+                "owner_team_id",
+                "alter table messages add column owner_team_id text",
+            ),
         ],
     )?;
-    ensure_table_columns(&tx, "results", RESULT_COLUMNS, &[("owner_team_id", "alter table results add column owner_team_id text")])?;
-    ensure_table_columns(&tx, "scheduled_events", SCHEDULED_EVENT_COLUMNS, &[("owner_team_id", "alter table scheduled_events add column owner_team_id text")])?;
+    ensure_table_columns(
+        &tx,
+        "results",
+        RESULT_COLUMNS,
+        &[(
+            "owner_team_id",
+            "alter table results add column owner_team_id text",
+        )],
+    )?;
+    ensure_table_columns(
+        &tx,
+        "scheduled_events",
+        SCHEDULED_EVENT_COLUMNS,
+        &[(
+            "owner_team_id",
+            "alter table scheduled_events add column owner_team_id text",
+        )],
+    )?;
     ensure_table_columns(&tx, "delivery_tokens", DELIVERY_TOKEN_COLUMNS, &[])?;
     migrate_agent_health_owner_team_id(&tx)?;
     ensure_table_columns(&tx, "peer_allowlist", PEER_ALLOWLIST_COLUMNS, &[])?;
-    ensure_table_columns(&tx, "result_watchers", RESULT_WATCHER_COLUMNS, &[("owner_team_id", "alter table result_watchers add column owner_team_id text")])?;
+    ensure_table_columns(
+        &tx,
+        "result_watchers",
+        RESULT_WATCHER_COLUMNS,
+        &[(
+            "owner_team_id",
+            "alter table result_watchers add column owner_team_id text",
+        )],
+    )?;
     tx.execute(CREATE_LEADER_NOTIFICATION_LOG, [])?;
-    ensure_table_columns(&tx, "leader_notification_log", LEADER_NOTIFICATION_LOG_COLUMNS, &[])?;
+    ensure_table_columns(
+        &tx,
+        "leader_notification_log",
+        LEADER_NOTIFICATION_LOG_COLUMNS,
+        &[],
+    )?;
     ensure_schema_indexes(&tx)?;
     tx.execute_batch(&format!("pragma user_version = {SCHEMA_VERSION}"))?;
     tx.commit()?;
@@ -254,14 +348,17 @@ mod tests {
             ("results", "table"),
             ("scheduled_events", "table"),
         ];
-        let got_ref: Vec<(&str, &str)> = got.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+        let got_ref: Vec<(&str, &str)> =
+            got.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
         assert_eq!(got_ref, want);
     }
 
     #[test]
     fn user_version_is_three() {
         let conn = fresh();
-        let v: i64 = conn.query_row("pragma user_version", [], |r| r.get(0)).unwrap();
+        let v: i64 = conn
+            .query_row("pragma user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
         assert_eq!(v, 3);
     }
@@ -272,9 +369,22 @@ mod tests {
         assert_eq!(
             table_layout(&conn, "messages").unwrap(),
             vec![
-                "message_id", "owner_team_id", "task_id", "sender", "recipient", "reply_to",
-                "requires_ack", "status", "content", "artifact_refs", "created_at", "updated_at",
-                "delivered_at", "acknowledged_at", "error", "delivery_attempts",
+                "message_id",
+                "owner_team_id",
+                "task_id",
+                "sender",
+                "recipient",
+                "reply_to",
+                "requires_ack",
+                "status",
+                "content",
+                "artifact_refs",
+                "created_at",
+                "updated_at",
+                "delivered_at",
+                "acknowledged_at",
+                "error",
+                "delivery_attempts",
             ]
         );
     }
@@ -286,7 +396,11 @@ mod tests {
         initialize_schema(&conn, None).unwrap();
         assert_eq!(table_layout(&conn, "messages").unwrap().len(), 16);
         let idx: i64 = conn
-            .query_row("select count(*) from sqlite_master where type='index' and sql is not null", [], |r| r.get(0))
+            .query_row(
+                "select count(*) from sqlite_master where type='index' and sql is not null",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(idx, 6, "二次 init 后 6 个 named index 仍在");
     }
@@ -296,51 +410,126 @@ mod tests {
     fn per_column_table_info_all_eight_tables() {
         type Col = (&'static str, &'static str, i64, Option<&'static str>, i64);
         let golden: &[(&str, &[Col])] = &[
-            ("messages", &[
-                ("message_id","TEXT",0,None,1),("owner_team_id","TEXT",0,None,0),("task_id","TEXT",0,None,0),
-                ("sender","TEXT",0,None,0),("recipient","TEXT",0,None,0),("reply_to","TEXT",0,None,0),
-                ("requires_ack","INTEGER",0,None,0),("status","TEXT",0,None,0),("content","TEXT",0,None,0),
-                ("artifact_refs","TEXT",0,None,0),("created_at","TEXT",0,None,0),("updated_at","TEXT",0,None,0),
-                ("delivered_at","TEXT",0,None,0),("acknowledged_at","TEXT",0,None,0),("error","TEXT",0,None,0),
-                ("delivery_attempts","INTEGER",1,Some("0"),0),
-            ]),
-            ("results", &[
-                ("result_id","TEXT",0,None,1),("owner_team_id","TEXT",0,None,0),("task_id","TEXT",1,None,0),
-                ("agent_id","TEXT",1,None,0),("envelope","TEXT",1,None,0),("status","TEXT",1,None,0),("created_at","TEXT",1,None,0),
-            ]),
-            ("scheduled_events", &[
-                ("id","INTEGER",0,None,1),("owner_team_id","TEXT",0,None,0),("due_at","TEXT",1,None,0),
-                ("target","TEXT",1,None,0),("kind","TEXT",1,None,0),("payload_json","TEXT",1,None,0),
-                ("status","TEXT",1,None,0),("created_at","TEXT",1,None,0),("fired_at","TEXT",0,None,0),("result_json","TEXT",0,None,0),
-            ]),
-            ("delivery_tokens", &[
-                ("message_id","TEXT",0,None,1),("unique_token","TEXT",1,None,0),("injected_at","TEXT",1,None,0),
-                ("visible_at","TEXT",0,None,0),("consumed_at","TEXT",0,None,0),("failed_at","TEXT",0,None,0),("failure_reason","TEXT",0,None,0),
-            ]),
-            ("agent_health", &[
-                ("owner_team_id","TEXT",0,None,0),("agent_id","TEXT",1,None,0),("status","TEXT",1,None,0),
-                ("last_output_at","TEXT",0,None,0),("context_usage_pct","INTEGER",0,None,0),("current_task_id","TEXT",0,None,0),("updated_at","TEXT",1,None,0),
-            ]),
-            ("peer_allowlist", &[
-                ("a","TEXT",1,None,1),("b","TEXT",1,None,2),("created_at","TEXT",1,None,0),
-            ]),
-            ("result_watchers", &[
-                ("watcher_id","TEXT",0,None,1),("owner_team_id","TEXT",0,None,0),("task_id","TEXT",0,None,0),
-                ("agent_id","TEXT",0,None,0),("message_id","TEXT",0,None,0),("leader_id","TEXT",1,None,0),
-                ("status","TEXT",1,None,0),("created_at","TEXT",1,None,0),("completed_at","TEXT",0,None,0),
-                ("result_id","TEXT",0,None,0),("notified_message_id","TEXT",0,None,0),("error","TEXT",0,None,0),
-            ]),
-            ("leader_notification_log", &[
-                ("result_id","TEXT",1,None,1),("owner_team_id","TEXT",1,Some("''"),2),("owner_epoch","INTEGER",1,Some("0"),3),
-                ("leader_session_uuid","TEXT",0,None,0),("notified_message_id","TEXT",1,None,0),("notified_at","TEXT",1,None,0),
-                ("leader_pane_id_at_notify","TEXT",0,None,0),("envelope_content_hash","TEXT",0,None,0),
-            ]),
+            (
+                "messages",
+                &[
+                    ("message_id", "TEXT", 0, None, 1),
+                    ("owner_team_id", "TEXT", 0, None, 0),
+                    ("task_id", "TEXT", 0, None, 0),
+                    ("sender", "TEXT", 0, None, 0),
+                    ("recipient", "TEXT", 0, None, 0),
+                    ("reply_to", "TEXT", 0, None, 0),
+                    ("requires_ack", "INTEGER", 0, None, 0),
+                    ("status", "TEXT", 0, None, 0),
+                    ("content", "TEXT", 0, None, 0),
+                    ("artifact_refs", "TEXT", 0, None, 0),
+                    ("created_at", "TEXT", 0, None, 0),
+                    ("updated_at", "TEXT", 0, None, 0),
+                    ("delivered_at", "TEXT", 0, None, 0),
+                    ("acknowledged_at", "TEXT", 0, None, 0),
+                    ("error", "TEXT", 0, None, 0),
+                    ("delivery_attempts", "INTEGER", 1, Some("0"), 0),
+                ],
+            ),
+            (
+                "results",
+                &[
+                    ("result_id", "TEXT", 0, None, 1),
+                    ("owner_team_id", "TEXT", 0, None, 0),
+                    ("task_id", "TEXT", 1, None, 0),
+                    ("agent_id", "TEXT", 1, None, 0),
+                    ("envelope", "TEXT", 1, None, 0),
+                    ("status", "TEXT", 1, None, 0),
+                    ("created_at", "TEXT", 1, None, 0),
+                ],
+            ),
+            (
+                "scheduled_events",
+                &[
+                    ("id", "INTEGER", 0, None, 1),
+                    ("owner_team_id", "TEXT", 0, None, 0),
+                    ("due_at", "TEXT", 1, None, 0),
+                    ("target", "TEXT", 1, None, 0),
+                    ("kind", "TEXT", 1, None, 0),
+                    ("payload_json", "TEXT", 1, None, 0),
+                    ("status", "TEXT", 1, None, 0),
+                    ("created_at", "TEXT", 1, None, 0),
+                    ("fired_at", "TEXT", 0, None, 0),
+                    ("result_json", "TEXT", 0, None, 0),
+                ],
+            ),
+            (
+                "delivery_tokens",
+                &[
+                    ("message_id", "TEXT", 0, None, 1),
+                    ("unique_token", "TEXT", 1, None, 0),
+                    ("injected_at", "TEXT", 1, None, 0),
+                    ("visible_at", "TEXT", 0, None, 0),
+                    ("consumed_at", "TEXT", 0, None, 0),
+                    ("failed_at", "TEXT", 0, None, 0),
+                    ("failure_reason", "TEXT", 0, None, 0),
+                ],
+            ),
+            (
+                "agent_health",
+                &[
+                    ("owner_team_id", "TEXT", 0, None, 0),
+                    ("agent_id", "TEXT", 1, None, 0),
+                    ("status", "TEXT", 1, None, 0),
+                    ("last_output_at", "TEXT", 0, None, 0),
+                    ("context_usage_pct", "INTEGER", 0, None, 0),
+                    ("current_task_id", "TEXT", 0, None, 0),
+                    ("updated_at", "TEXT", 1, None, 0),
+                ],
+            ),
+            (
+                "peer_allowlist",
+                &[
+                    ("a", "TEXT", 1, None, 1),
+                    ("b", "TEXT", 1, None, 2),
+                    ("created_at", "TEXT", 1, None, 0),
+                ],
+            ),
+            (
+                "result_watchers",
+                &[
+                    ("watcher_id", "TEXT", 0, None, 1),
+                    ("owner_team_id", "TEXT", 0, None, 0),
+                    ("task_id", "TEXT", 0, None, 0),
+                    ("agent_id", "TEXT", 0, None, 0),
+                    ("message_id", "TEXT", 0, None, 0),
+                    ("leader_id", "TEXT", 1, None, 0),
+                    ("status", "TEXT", 1, None, 0),
+                    ("created_at", "TEXT", 1, None, 0),
+                    ("completed_at", "TEXT", 0, None, 0),
+                    ("result_id", "TEXT", 0, None, 0),
+                    ("notified_message_id", "TEXT", 0, None, 0),
+                    ("error", "TEXT", 0, None, 0),
+                ],
+            ),
+            (
+                "leader_notification_log",
+                &[
+                    ("result_id", "TEXT", 1, None, 1),
+                    ("owner_team_id", "TEXT", 1, Some("''"), 2),
+                    ("owner_epoch", "INTEGER", 1, Some("0"), 3),
+                    ("leader_session_uuid", "TEXT", 0, None, 0),
+                    ("notified_message_id", "TEXT", 1, None, 0),
+                    ("notified_at", "TEXT", 1, None, 0),
+                    ("leader_pane_id_at_notify", "TEXT", 0, None, 0),
+                    ("envelope_content_hash", "TEXT", 0, None, 0),
+                ],
+            ),
         ];
         let conn = fresh();
         for (table, cols) in golden {
-            let mut stmt = conn.prepare(&format!("pragma table_info({table})")).unwrap();
+            let mut stmt = conn
+                .prepare(&format!("pragma table_info({table})"))
+                .unwrap();
             let got: Vec<(String, String, i64, Option<String>, i64)> = stmt
-                .query_map([], |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
+                .query_map([], |r| {
+                    Ok((r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+                })
                 .unwrap()
                 .collect::<Result<_, _>>()
                 .unwrap();
@@ -358,7 +547,9 @@ mod tests {
         let mut stmt = conn.prepare("select name, sql from sqlite_master where type='index' and sql is not null order by name").unwrap();
         let idx: Vec<(String, String)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap().collect::<Result<_, _>>().unwrap();
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         let want: Vec<(&str, &str)> = vec![
             ("idx_agent_health_owner_team_id", "CREATE INDEX idx_agent_health_owner_team_id on agent_health(owner_team_id)"),
             ("idx_leader_notification_log_team_epoch", "CREATE INDEX idx_leader_notification_log_team_epoch on leader_notification_log(owner_team_id, owner_epoch, notified_at)"),
@@ -371,13 +562,26 @@ mod tests {
         assert_eq!(got, want);
         // 7 个 sqlite_autoindex(每个有 pk/unique 约束的表各一)。
         let auto: Vec<String> = conn
-            .prepare("select name from sqlite_master where type='index' and sql is null order by name").unwrap()
-            .query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(auto, vec![
-            "sqlite_autoindex_agent_health_1", "sqlite_autoindex_delivery_tokens_1",
-            "sqlite_autoindex_leader_notification_log_1", "sqlite_autoindex_messages_1",
-            "sqlite_autoindex_peer_allowlist_1", "sqlite_autoindex_result_watchers_1", "sqlite_autoindex_results_1",
-        ]);
+            .prepare(
+                "select name from sqlite_master where type='index' and sql is null order by name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            auto,
+            vec![
+                "sqlite_autoindex_agent_health_1",
+                "sqlite_autoindex_delivery_tokens_1",
+                "sqlite_autoindex_leader_notification_log_1",
+                "sqlite_autoindex_messages_1",
+                "sqlite_autoindex_peer_allowlist_1",
+                "sqlite_autoindex_result_watchers_1",
+                "sqlite_autoindex_results_1",
+            ]
+        );
     }
 
     #[test]
@@ -388,9 +592,13 @@ mod tests {
         let path = dir.join("team.db");
         let _ = std::fs::remove_file(&path);
         let conn = open_db(&path).unwrap();
-        let jm: String = conn.query_row("pragma journal_mode", [], |r| r.get(0)).unwrap();
+        let jm: String = conn
+            .query_row("pragma journal_mode", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(jm.to_lowercase(), "wal");
-        let bt: i64 = conn.query_row("pragma busy_timeout", [], |r| r.get(0)).unwrap();
+        let bt: i64 = conn
+            .query_row("pragma busy_timeout", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(bt, 30000);
     }
 
@@ -398,13 +606,26 @@ mod tests {
     fn ensure_table_columns_unsupported_missing_errors_with_sorted_names() {
         // results 只建了 result_id → 缺 owner_team_id(有 migration)+ 其余(无 migration,unsupported)。
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("create table results (result_id text primary key)", []).unwrap();
+        conn.execute("create table results (result_id text primary key)", [])
+            .unwrap();
         let err = ensure_table_columns(
             &conn,
             "results",
-            &["owner_team_id", "result_id", "task_id", "agent_id", "envelope", "status", "created_at"],
-            &[("owner_team_id", "alter table results add column owner_team_id text")],
-        ).unwrap_err();
+            &[
+                "owner_team_id",
+                "result_id",
+                "task_id",
+                "agent_id",
+                "envelope",
+                "status",
+                "created_at",
+            ],
+            &[(
+                "owner_team_id",
+                "alter table results add column owner_team_id text",
+            )],
+        )
+        .unwrap_err();
         assert_eq!(
             err.to_string(),
             "schema: team.db table results is missing required column(s): agent_id, created_at, envelope, status, task_id"

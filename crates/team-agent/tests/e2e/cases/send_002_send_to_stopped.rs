@@ -19,20 +19,22 @@ fn send_002_send_to_stopped_worker_does_not_falsely_deliver() {
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
 
-    let stop = run_ta(
-        &ws,
-        &["stop-agent", "a", "--workspace", ws_path, "--json"],
-    );
+    let stop = run_ta(&ws, &["stop-agent", "a", "--workspace", ws_path, "--json"]);
     assert!(stop.is_success(), "stop-agent: {}", stop.stdout);
     assert_json_field_eq_bool(&stop.json(), "/ok", true);
 
     let out = run_ta(
         &ws,
         &[
-            "send", "a", "queued to stopped",
-            "--workspace", ws_path,
-            "--sender", "leader",
-            "--message-id", "msg-send002",
+            "send",
+            "a",
+            "queued to stopped",
+            "--workspace",
+            ws_path,
+            "--sender",
+            "leader",
+            "--message-id",
+            "msg-send002",
             "--no-wait",
             "--json",
         ],

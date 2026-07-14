@@ -81,13 +81,13 @@ pub mod types;
 // ── Re-export the full module-root surface (RE-EXPORT INVARIANT) ──────────────
 // 这些 `pub use`/`pub(crate) use` 把每个曾在 module 根可见的 item 重新 surface 到
 // `crate::coordinator::X`,使外部 crate 路径 + 测试 `use super::*` 解析保持不变。
-pub use types::*;
-pub use tick::*;
 pub use backoff::*;
-pub use orphan::*;
 pub use health::*;
+pub use orphan::*;
 pub use runtime_detectors::*;
 pub use runtime_observation::*;
+pub use tick::*;
+pub use types::*;
 
 #[cfg(test)]
 mod tests;

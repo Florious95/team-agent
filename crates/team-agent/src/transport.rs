@@ -450,7 +450,9 @@ pub enum AttachOutcome {
     /// wezterm:GUI 启动即 attach,无独立动作。
     GuiAttachIsImplicit,
     /// conpty:无 attach 概念。
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -486,7 +488,10 @@ pub enum TransportError {
     },
     /// wezterm mux 连不上 / tmux server 不在。
     #[error("mux unavailable on {backend:?}: {detail}")]
-    MuxUnavailable { backend: BackendKind, detail: String },
+    MuxUnavailable {
+        backend: BackendKind,
+        detail: String,
+    },
     #[error("target not found: {target}")]
     TargetNotFound { target: String },
     #[error(transparent)]
@@ -695,15 +700,11 @@ pub trait Transport: Send + Sync {
 
     fn send_keys(&self, target: &Target, keys: &[Key]) -> Result<(), TransportError>;
 
-    fn capture(
-        &self,
-        target: &Target,
-        range: CaptureRange,
-    ) -> Result<CapturedText, TransportError>;
+    fn capture(&self, target: &Target, range: CaptureRange)
+        -> Result<CapturedText, TransportError>;
 
     /// 非 tmux 后端无对应概念的字段返回 `Ok(None)`(typed「不适用」)。
-    fn query(&self, target: &Target, field: PaneField)
-        -> Result<Option<String>, TransportError>;
+    fn query(&self, target: &Target, field: PaneField) -> Result<Option<String>, TransportError>;
 
     /// pane 存活三态(`PaneLiveness`,bug-085 穷尽 match;unknown ≠ dead ≠ live)。
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError>;
@@ -723,10 +724,7 @@ pub trait Transport: Send + Sync {
 
     fn has_session(&self, session: &SessionName) -> Result<bool, TransportError>;
 
-    fn list_windows(
-        &self,
-        session: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError>;
+    fn list_windows(&self, session: &SessionName) -> Result<Vec<WindowName>, TransportError>;
 
     fn configure_adaptive_pane_title(
         &self,
@@ -765,10 +763,7 @@ pub trait Transport: Send + Sync {
 
     /// 交互前台 attach(leader 用)。tmux=`attach-session`;wezterm=GUI 即 attach
     /// (`GuiAttachIsImplicit`);conpty=typed 不支持(`Unsupported`)。
-    fn attach_session(
-        &self,
-        session: &SessionName,
-    ) -> Result<AttachOutcome, TransportError>;
+    fn attach_session(&self, session: &SessionName) -> Result<AttachOutcome, TransportError>;
 }
 
 pub trait SubmitObserver {

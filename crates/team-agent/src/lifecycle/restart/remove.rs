@@ -1,7 +1,9 @@
-use super::*;
-use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_at_paths, stop_agent_at_paths};
+use super::agent::{
+    resolve_team_scoped_state_or_refuse, start_agent_at_paths, stop_agent_at_paths,
+};
 use super::common::*;
 use super::team_state::write_team_state;
+use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
 /// `remove_agent(workspace, agent_id, from_spec, force, team)`(`lifecycle/agents.py:22`)。
@@ -21,8 +23,7 @@ pub fn remove_agent(
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     remove_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -66,8 +67,7 @@ pub fn remove_agent_flag_requirements(
     team: Option<&str>,
 ) -> Result<RemoveAgentFlagRequirements, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
-    let transport =
-        lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
     Ok(remove_agent_preflight(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -207,7 +207,8 @@ fn remove_agent_at_paths(
             // golden agents.py:110-133: restore is best-effort (collects per-artifact errors, restores ALL),
             // and the ORIGINAL operation error is ALWAYS re-raised, annotated with rollback_ok — a
             // restore-step failure only flips rollback_ok, it never replaces the surfaced cause.
-            let restore_errors = rollback.restore(paths.run_workspace, paths.spec_workspace, team, transport);
+            let restore_errors =
+                rollback.restore(paths.run_workspace, paths.spec_workspace, team, transport);
             let rollback_ok = restore_errors.is_empty();
             let rollback_event = RemoveRollbackEvent {
                 agent_id,
@@ -243,7 +244,13 @@ fn remove_agent_inner(
     let mut stopped = false;
     let mut cleared_locations = Vec::new();
     if force && agent_is_running(&working_state, agent_id, transport) {
-        let stop = stop_agent_at_paths(paths.run_workspace, paths.spec_workspace, agent_id, team, transport)?;
+        let stop = stop_agent_at_paths(
+            paths.run_workspace,
+            paths.spec_workspace,
+            agent_id,
+            team,
+            transport,
+        )?;
         stopped = stop.stopped;
         write_remove_step_event(
             paths.run_workspace,
@@ -265,7 +272,7 @@ fn remove_agent_inner(
         &removed_state,
         &[agent_id.as_str()],
     )
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     cleared_locations.push(serde_json::json!("state.json:agents"));
     write_remove_step_event(
         paths.run_workspace,
@@ -282,7 +289,9 @@ fn remove_agent_inner(
     }
     // golden agents.py:96-100,157: state_file = the team_state.md path written from removed_spec/state.
     let team_state_path = write_team_state(paths.spec_workspace, &removed_spec, &removed_state)?;
-    cleared_locations.push(serde_json::json!(team_state_path.to_string_lossy().to_string()));
+    cleared_locations.push(serde_json::json!(team_state_path
+        .to_string_lossy()
+        .to_string()));
     write_remove_step_event(
         paths.run_workspace,
         agent_id,
@@ -290,8 +299,11 @@ fn remove_agent_inner(
         &team_state_path.to_string_lossy(),
         None,
     )?;
-    std::fs::write(paths.spec_workspace.join("team.spec.yaml"), yaml::dumps(&removed_spec))
-        .map_err(|e| LifecycleError::StatePersist(format!("write spec: {e}")))?;
+    std::fs::write(
+        paths.spec_workspace.join("team.spec.yaml"),
+        yaml::dumps(&removed_spec),
+    )
+    .map_err(|e| LifecycleError::StatePersist(format!("write spec: {e}")))?;
     cleared_locations.push(serde_json::json!("team.spec.yaml"));
     write_remove_step_event(
         paths.run_workspace,
@@ -519,7 +531,11 @@ fn runtime_without_startup_agent(runtime: &YamlValue, agent_id: &AgentId) -> Yam
                 .map(|items| {
                     items
                         .iter()
-                        .filter(|item| item.as_str().map(|id| id != agent_id.as_str()).unwrap_or(true))
+                        .filter(|item| {
+                            item.as_str()
+                                .map(|id| id != agent_id.as_str())
+                                .unwrap_or(true)
+                        })
                         .cloned()
                         .collect::<Vec<_>>()
                 })
@@ -538,9 +554,7 @@ fn routing_without_agent(routing: &YamlValue, agent_id: &AgentId) -> YamlValue {
     };
     let mut out = Vec::new();
     for (key, value) in pairs {
-        if key == "default_assignee"
-            && value.as_str().is_some_and(|id| id == agent_id.as_str())
-        {
+        if key == "default_assignee" && value.as_str().is_some_and(|id| id == agent_id.as_str()) {
             out.push((key.clone(), YamlValue::Str(String::new())));
         } else if key == "rules" {
             let rules = value
@@ -549,8 +563,7 @@ fn routing_without_agent(routing: &YamlValue, agent_id: &AgentId) -> YamlValue {
                     items
                         .iter()
                         .filter(|rule| {
-                            rule
-                                .get("assign_to")
+                            rule.get("assign_to")
                                 .and_then(YamlValue::as_str)
                                 .map(|id| id != agent_id.as_str())
                                 .unwrap_or(true)
@@ -587,11 +600,7 @@ fn task_without_agent_assignee(task: &YamlValue, agent_id: &AgentId) -> YamlValu
         pairs
             .iter()
             .map(|(key, value)| {
-                if key == "assignee"
-                    && value
-                        .as_str()
-                        .is_some_and(|id| id == agent_id.as_str())
-                {
+                if key == "assignee" && value.as_str().is_some_and(|id| id == agent_id.as_str()) {
                     (key.clone(), YamlValue::Str(String::new()))
                 } else {
                     (key.clone(), value.clone())
@@ -601,18 +610,12 @@ fn task_without_agent_assignee(task: &YamlValue, agent_id: &AgentId) -> YamlValu
     )
 }
 
-fn remove_dynamic_role_file(
-    path: &Path,
-    required: bool,
-) -> Result<bool, LifecycleError> {
+fn remove_dynamic_role_file(path: &Path, required: bool) -> Result<bool, LifecycleError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && required => {
-            Err(LifecycleError::StatePersist(format!(
-                "dynamic role file missing: {}",
-                path.display()
-            )))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && required => Err(
+            LifecycleError::StatePersist(format!("dynamic role file missing: {}", path.display())),
+        ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(LifecycleError::StatePersist(format!(
             "remove role file {}: {e}",
@@ -660,7 +663,10 @@ fn delete_agent_health(workspace: &Path, agent_id: &AgentId) -> Result<bool, Lif
     let conn = crate::db::schema::open_db(store.db_path())
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let changed = conn
-        .execute("delete from agent_health where agent_id = ?1", [agent_id.as_str()])
+        .execute(
+            "delete from agent_health where agent_id = ?1",
+            [agent_id.as_str()],
+        )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(changed > 0)
 }
@@ -739,7 +745,11 @@ impl RemoveRollback {
         let team_state_text = match std::fs::read_to_string(&team_state_path) {
             Ok(text) => Some(text),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(LifecycleError::StatePersist(format!("read team_state: {e}"))),
+            Err(e) => {
+                return Err(LifecycleError::StatePersist(format!(
+                    "read team_state: {e}"
+                )))
+            }
         };
         let dynamic_role_path = dynamic_role_file_path(workspace, state, agent_id);
         let dynamic_role_bytes = match std::fs::read(&dynamic_role_path) {

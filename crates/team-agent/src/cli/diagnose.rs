@@ -57,8 +57,7 @@ pub(crate) fn diagnose_runtime(state: &Value, backend: &dyn Transport) -> (Value
                 let error_str = error.to_string();
                 let issue_id = classify_tmux_server_error(&error_str);
                 issues.push(json!(issue_id));
-                let mut hint =
-                    recovery_hint(session_name, issue_id, "team-agent diagnose");
+                let mut hint = recovery_hint(session_name, issue_id, "team-agent diagnose");
                 if let Some(obj) = hint.as_object_mut() {
                     obj.insert("reason".to_string(), Value::String(error_str));
                 }

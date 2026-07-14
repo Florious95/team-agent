@@ -102,7 +102,8 @@ first={first} second={second}"
 fn p1_transcript_truncate_triggers_reread() {
     let ws = tmp_ws("p1-truncate");
     let rollout = ws.join("rollout-w1.jsonl");
-    let long_line = "{\"method\":\"turn/started\",\"params\":{\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxx\"}}\n";
+    let long_line =
+        "{\"method\":\"turn/started\",\"params\":{\"pad\":\"xxxxxxxxxxxxxxxxxxxxxxxx\"}}\n";
     std::fs::write(&rollout, long_line.repeat(8)).unwrap();
     seed_tick_state(&ws, &[("w1", Some(&rollout))]);
     let coord = coordinator(&ws, CountingTransport::new());
@@ -145,7 +146,8 @@ the new tail fact (turn_failed); payload={watch}"
 fn p1_transcript_tail_64kb_finds_late_error() {
     let ws = tmp_ws("p1-tail");
     let rollout = ws.join("rollout-w1.jsonl");
-    let pad = "{\"method\":\"turn/started\",\"params\":{\"pad\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}}\n";
+    let pad =
+        "{\"method\":\"turn/started\",\"params\":{\"pad\":\"yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy\"}}\n";
     let mut text = pad.repeat(1200); // ~100KB of benign records
     text.push_str(
         "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
@@ -250,10 +252,7 @@ fn memfix_activity_truncate_invalidates_cache() {
     let coord = coordinator(&ws, CountingTransport::new());
     coord.tick().expect("first tick");
     let first_size = std::fs::metadata(&rollout).unwrap().len();
-    let first_mtime = std::fs::metadata(&rollout)
-        .unwrap()
-        .modified()
-        .unwrap();
+    let first_mtime = std::fs::metadata(&rollout).unwrap().modified().unwrap();
 
     // Shrink the file while preserving mtime: short tool_use record (idle-ish).
     std::fs::write(
@@ -262,7 +261,10 @@ fn memfix_activity_truncate_invalidates_cache() {
     )
     .unwrap();
     // Restore the mtime so only the size differs.
-    let f = std::fs::OpenOptions::new().write(true).open(&rollout).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&rollout)
+        .unwrap();
     f.set_modified(first_mtime).ok();
     drop(f);
     let second_size = std::fs::metadata(&rollout).unwrap().len();
@@ -328,7 +330,8 @@ fn p2_session_capture_tail_skips_invalid_utf8_body() {
         dir.to_string_lossy()
     )
     .into_bytes();
-    let pad = "{\"type\":\"pad\",\"data\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n".as_bytes();
+    let pad =
+        "{\"type\":\"pad\",\"data\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}\n".as_bytes();
     while bytes.len() < 80 * 1024 {
         bytes.extend_from_slice(pad);
     }
@@ -446,8 +449,18 @@ fn p4_compaction_observed_dedup_no_redundant_event() {
     let ws = tmp_ws("p4-dedup");
     let mut state = json!({"session_name": "team-perf", "agents": {"w1": {"provider": "codex"}}});
 
-    observe_runtime(&ws, &mut state, compaction_fact_map("context compacted\n"), None);
-    observe_runtime(&ws, &mut state, compaction_fact_map("context compacted\n"), None);
+    observe_runtime(
+        &ws,
+        &mut state,
+        compaction_fact_map("context compacted\n"),
+        None,
+    );
+    observe_runtime(
+        &ws,
+        &mut state,
+        compaction_fact_map("context compacted\n"),
+        None,
+    );
 
     assert_eq!(
         count_events(&ws, "coordinator.compaction_observed"),
@@ -465,7 +478,12 @@ fn p4_compaction_value_change_still_emits() {
     let ws = tmp_ws("p4-change");
     let mut state = json!({"session_name": "team-perf", "agents": {"w1": {"provider": "codex"}}});
 
-    observe_runtime(&ws, &mut state, compaction_fact_map("context compacted\n"), None);
+    observe_runtime(
+        &ws,
+        &mut state,
+        compaction_fact_map("context compacted\n"),
+        None,
+    );
     observe_runtime(
         &ws,
         &mut state,
@@ -512,11 +530,9 @@ fn p5_single_tick_list_targets_called_once() {
 /// call instead of an N+1 display-message fallback.
 #[test]
 fn p5_pane_pid_in_format_string_no_n_plus_one() {
-    let backend_src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/tmux_backend.rs"
-    ))
-    .unwrap();
+    let backend_src =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tmux_backend.rs"))
+            .unwrap();
     let format_line = backend_src
         .lines()
         .find(|line| line.contains("TMUX_PANE_FORMAT: &str"))
@@ -560,7 +576,12 @@ fn perf_total_steady_state_second_tick_is_silent() {
     if new_events > 0 {
         failures.push(format!(
             "umbrella: second steady tick emitted {new_events} new event(s); tail={}",
-            events_text(&ws).lines().rev().take(3).collect::<Vec<_>>().join(" | ")
+            events_text(&ws)
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" | ")
         ));
     }
     if counters.list_targets.load(Ordering::Relaxed) > 1 {
@@ -666,7 +687,10 @@ fn run_orphan_scenario(tag: &str) -> OrphanRun {
     if !final_read.is_empty() {
         captured = final_read;
     }
-    OrphanRun { exited, events: captured }
+    OrphanRun {
+        exited,
+        events: captured,
+    }
 }
 
 /// PERF-7 F2 (folded into the P4 dedup family per leader): repeated tick failures
@@ -690,7 +714,9 @@ fn p7_f2_identical_tick_errors_are_deduped() {
             .count()
             >= 3
     });
-    let _ = std::process::Command::new("kill").arg(daemon.pid.to_string()).status();
+    let _ = std::process::Command::new("kill")
+        .arg(daemon.pid.to_string())
+        .status();
 
     let full_errors = events_text(&ws)
         .lines()
@@ -715,7 +741,9 @@ struct DaemonHandle {
 impl Drop for DaemonHandle {
     fn drop(&mut self) {
         // Teardown of the test's OWN daemon (never touches any live coordinator).
-        let _ = std::process::Command::new("kill").arg(self.pid.to_string()).status();
+        let _ = std::process::Command::new("kill")
+            .arg(self.pid.to_string())
+            .status();
     }
 }
 
@@ -743,13 +771,15 @@ fn spawn_detached_daemon(ws: &Path, extra: &[&str]) -> DaemonHandle {
     DaemonHandle { pid }
 }
 
-
 fn parent_pid(pid: u32) -> Option<u32> {
     let out = std::process::Command::new("ps")
         .args(["-o", "ppid=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -885,7 +915,10 @@ fn events_text(ws: &Path) -> String {
 fn count_events(ws: &Path, name: &str) -> usize {
     events_text(ws)
         .lines()
-        .filter(|line| line.contains(&format!("\"event\":\"{name}\"")) || line.contains(&format!("\"event\": \"{name}\"")))
+        .filter(|line| {
+            line.contains(&format!("\"event\":\"{name}\""))
+                || line.contains(&format!("\"event\": \"{name}\""))
+        })
         .count()
 }
 
@@ -904,7 +937,10 @@ impl ProviderRegistry for RealAdapterRegistry {
         get_adapter(provider)
     }
     fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists { whitelist: Vec::new(), blacklist: Vec::new() }
+        ErrorLists {
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 }
 
@@ -921,7 +957,9 @@ struct CountingTransport {
 
 impl CountingTransport {
     fn new() -> Self {
-        Self { counters: Arc::new(TransportCounters::default()) }
+        Self {
+            counters: Arc::new(TransportCounters::default()),
+        }
     }
 
     fn counters(&self) -> Arc<TransportCounters> {
@@ -982,7 +1020,11 @@ impl Transport for CountingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: "OpenAI Codex\ncodex>".to_string(),
             range,

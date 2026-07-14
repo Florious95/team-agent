@@ -8,9 +8,7 @@
 //! helpers now live under `provider/session_scan/claude.rs`.
 
 use crate::model::enums::AuthMode;
-use crate::provider::adapter::{
-    next_session_token, prompt_needs_native_mcp, BasicProviderAdapter,
-};
+use crate::provider::adapter::{next_session_token, prompt_needs_native_mcp, BasicProviderAdapter};
 use crate::provider::{McpConfig, ProviderAdapter, ProviderError};
 
 pub(crate) fn claude_launch_command(

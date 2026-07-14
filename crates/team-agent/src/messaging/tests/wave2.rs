@@ -34,7 +34,7 @@
 use super::*;
 use crate::messaging::deliver_pending_message;
 use crate::transport::test_support::OfflineTransport;
-use crate::transport::{PaneLiveness, PaneId, SessionName, WindowName};
+use crate::transport::{PaneId, PaneLiveness, SessionName, WindowName};
 
 fn pane_info_w(pane_id: &str, session: &str, window: &str) -> PaneInfo {
     PaneInfo {
@@ -97,8 +97,7 @@ fn u1_a_leader_pane_drift_falls_back_to_live_session_window_not_failed() {
         .with_liveness("%old", PaneLiveness::Dead)
         .with_liveness("%new", PaneLiveness::Live);
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     assert!(
         out.reason != Some(DeliveryRefusal::LeaderNotAttached),
@@ -108,14 +107,15 @@ fn u1_a_leader_pane_drift_falls_back_to_live_session_window_not_failed() {
         out.message_status.0
     );
     assert_ne!(
-        out.message_status.0,
-        "failed",
+        out.message_status.0, "failed",
         "U1-A: drift must not be terminal; got status={}",
         out.message_status.0
     );
     let inject_targets = transport.inject_targets();
     assert!(
-        inject_targets.iter().any(|t| matches!(t, Target::Pane(p) if p.as_str() == "%new")),
+        inject_targets
+            .iter()
+            .any(|t| matches!(t, Target::Pane(p) if p.as_str() == "%new")),
         "U1-A: fallback chain must inject into the LIVE pane (%new), not the stale \
          %old; injected targets={inject_targets:?}"
     );
@@ -147,8 +147,7 @@ fn u1_a_leader_truly_not_attached_still_leader_not_attached_not_synthetic_target
         .with_targets(vec![])
         .with_session_present(false);
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     assert_eq!(
         out.reason,
@@ -205,22 +204,19 @@ fn u1_b_list_targets_err_defers_does_not_reuse_unvalidated_cached_pane() {
         .with_session_present(true)
         .with_default_liveness(PaneLiveness::Live); // cached looks alive in isolation
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     assert!(
         !out.ok,
         "U1-B: jitter must not declare delivered (false-green guard)"
     );
     assert_ne!(
-        out.message_status.0,
-        "delivered",
+        out.message_status.0, "delivered",
         "U1-B: jitter must not mark delivered; got status={}",
         out.message_status.0
     );
     assert_ne!(
-        out.message_status.0,
-        "failed",
+        out.message_status.0, "failed",
         "U1-B: jitter must not terminal-fail this tick (defer); got status={}",
         out.message_status.0
     );
@@ -233,8 +229,14 @@ fn u1_b_list_targets_err_defers_does_not_reuse_unvalidated_cached_pane() {
     let events = log.tail(0).unwrap();
     assert!(
         events.iter().any(|event| {
-            let reason = event.get("reason").and_then(serde_json::Value::as_str).unwrap_or("");
-            let verif = event.get("verification").and_then(serde_json::Value::as_str).unwrap_or("");
+            let reason = event
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            let verif = event
+                .get("verification")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
             reason.contains("list_targets")
                 || verif.contains("list_targets")
                 || reason.contains("server_jitter")
@@ -280,8 +282,7 @@ fn u1_b_list_targets_ok_empty_is_authoritative_not_deferred() {
         .with_session_present(true)
         .with_default_liveness(PaneLiveness::Unknown);
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     // We don't assert ok=true (the fake provider may or may not roundtrip);
     // we assert the pre-existing inject ATTEMPT happened (i.e. NOT deferred
@@ -353,8 +354,7 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
         .with_default_liveness(PaneLiveness::Live)
         .with_capture_for_pane("%cdx", "OpenAI Codex\ncodex>\n");
 
-    let _ = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let _ = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     let ranges = transport.capture_ranges();
     assert!(
@@ -363,7 +363,9 @@ fn u1_c_delivery_peek_uses_tail_eighty_not_full() {
          startup_prompts; got no capture calls"
     );
     assert!(
-        ranges.iter().any(|r| matches!(r, CaptureRange::Tail(n) if *n == 80)),
+        ranges
+            .iter()
+            .any(|r| matches!(r, CaptureRange::Tail(n) if *n == 80)),
         "U1-C: delivery peek site must request Tail(80), not Full. ranges={ranges:?}. \
          Full was the pre-wave-2 default and caused scrolled-off answered-trust \
          residue to be classified as actionable, parking idle codex panes forever."
@@ -415,16 +417,13 @@ Do you trust the contents of this directory?
         .with_default_liveness(PaneLiveness::Live)
         .with_capture_for_pane("%cdx", live_trust);
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     assert_eq!(
-        out.message_status.0,
-        "queued_until_trust",
+        out.message_status.0, "queued_until_trust",
         "U1-C regression guard: a live trust modal in Tail(80) must still park as \
          queued_until_trust; got status={} reason={:?}",
-        out.message_status.0,
-        out.reason
+        out.message_status.0, out.reason
     );
 }
 
@@ -553,8 +552,7 @@ fn u1_a_projected_team_state_with_null_session_still_finds_drifted_leader_pane()
         .with_liveness("%old", PaneLiveness::Dead)
         .with_liveness("%new", PaneLiveness::Live);
 
-    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
-        .unwrap();
+    let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state).unwrap();
 
     assert!(
         out.reason != Some(DeliveryRefusal::LeaderNotAttached),
@@ -568,15 +566,16 @@ fn u1_a_projected_team_state_with_null_session_still_finds_drifted_leader_pane()
         out.message_status.0
     );
     assert_ne!(
-        out.message_status.0,
-        "failed",
+        out.message_status.0, "failed",
         "U1-A projection-null escape: drift via projected state must not be \
          terminal; got status={}",
         out.message_status.0
     );
     let inject_targets = transport.inject_targets();
     assert!(
-        inject_targets.iter().any(|t| matches!(t, Target::Pane(p) if p.as_str() == "%new")),
+        inject_targets
+            .iter()
+            .any(|t| matches!(t, Target::Pane(p) if p.as_str() == "%new")),
         "U1-A projection-null escape: fallback chain must inject into the LIVE \
          pane (%new) reachable via session+window probe; injected={inject_targets:?}"
     );

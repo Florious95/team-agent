@@ -26,9 +26,9 @@ use team_agent::lifecycle::{DangerousApprovalSource, LaunchReport, LifecycleErro
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
@@ -41,14 +41,8 @@ fn codex_worker_inherits_leader_bypass_flag_on_fresh_launch() {
     let team = compiled_team_dir("fresh-inherited", false, &[("worker_a", "Worker A")]);
     let transport = RecordingTransport::new();
 
-    let report = launch_with_transport(
-        &team.join("team.spec.yaml"),
-        false,
-        true,
-        true,
-        &transport,
-    )
-    .expect("fresh launch should spawn worker under recording transport");
+    let report = launch_with_transport(&team.join("team.spec.yaml"), false, true, true, &transport)
+        .expect("fresh launch should spawn worker under recording transport");
     let argv = transport.only_spawn_argv("fresh launch");
 
     assert_codex_bypass(&argv, "fresh launch inherited leader Codex bypass");
@@ -57,7 +51,10 @@ fn codex_worker_inherits_leader_bypass_flag_on_fresh_launch() {
         DangerousApprovalSource::LeaderProcess,
         "AI-1: dry/launch safety source must be leader_process when inherited from Codex ancestry"
     );
-    assert!(report.safety.inherited, "AI-1: inherited approval must be marked inherited=true");
+    assert!(
+        report.safety.inherited,
+        "AI-1: inherited approval must be marked inherited=true"
+    );
     assert_eq!(report.safety.provider.as_deref(), Some("codex"));
     assert_eq!(report.safety.flag.as_deref(), Some(CODEX_BYPASS));
 }
@@ -69,14 +66,8 @@ fn codex_worker_restricted_when_leader_restricted_reverse_core() {
     let team = compiled_team_dir("fresh-restricted", false, &[("worker_a", "Worker A")]);
     let transport = RecordingTransport::new();
 
-    launch_with_transport(
-        &team.join("team.spec.yaml"),
-        false,
-        true,
-        true,
-        &transport,
-    )
-    .expect("restricted fresh launch should still spawn worker");
+    launch_with_transport(&team.join("team.spec.yaml"), false, true, true, &transport)
+        .expect("restricted fresh launch should still spawn worker");
     let argv = transport.only_spawn_argv("restricted fresh launch");
 
     assert_codex_restricted(&argv, "AI-3: leader restricted -> worker restricted");
@@ -91,7 +82,10 @@ fn runtime_config_dangerous_requires_yes_and_then_applies_with_audit() {
 
     let dry_run = launch_with_transport(&spec, true, false, true, &RecordingTransport::new())
         .expect("dry-run should expose explicit runtime config safety");
-    assert_eq!(dry_run.safety.source, DangerousApprovalSource::RuntimeConfig);
+    assert_eq!(
+        dry_run.safety.source,
+        DangerousApprovalSource::RuntimeConfig
+    );
     assert!(!dry_run.safety.inherited);
 
     let without_yes = launch_with_transport(&spec, false, false, true, &RecordingTransport::new());
@@ -108,15 +102,17 @@ fn runtime_config_dangerous_requires_yes_and_then_applies_with_audit() {
         "AI-6: explicit RuntimeConfig override above restricted leader must expose worker_capability_above_leader audit field; safety={:?}",
         with_yes.safety
     );
-    assert_codex_bypass(&transport.only_spawn_argv("runtime config --yes"), "runtime config + --yes");
+    assert_codex_bypass(
+        &transport.only_spawn_argv("runtime config --yes"),
+        "runtime config + --yes",
+    );
 }
 
 #[test]
 #[serial(env)]
 fn inherited_bypass_non_dry_run_does_not_require_yes_but_explicit_raise_does() {
     let _inherited = MockAncestry::codex_bypass();
-    let inherited_team =
-        compiled_team_dir("inherited-no-yes", false, &[("worker_a", "Worker A")]);
+    let inherited_team = compiled_team_dir("inherited-no-yes", false, &[("worker_a", "Worker A")]);
     let inherited_transport = RecordingTransport::new();
 
     let inherited = launch_with_transport(
@@ -144,8 +140,7 @@ fn inherited_bypass_non_dry_run_does_not_require_yes_but_explicit_raise_does() {
     drop(_inherited);
 
     let _restricted = MockAncestry::restricted();
-    let explicit_team =
-        compiled_team_dir("explicit-no-yes", true, &[("worker_a", "Worker A")]);
+    let explicit_team = compiled_team_dir("explicit-no-yes", true, &[("worker_a", "Worker A")]);
     let explicit = launch_with_transport(
         &explicit_team.join("team.spec.yaml"),
         false,
@@ -254,7 +249,10 @@ fn add_agent_preserves_restricted_default_and_fork_preserves_restricted_origin()
         &add_transport,
     )
     .expect("add-agent restricted fixture should spawn worker");
-    assert_codex_restricted(&add_transport.only_spawn_argv("restricted add-agent"), "add-agent restricted default");
+    assert_codex_restricted(
+        &add_transport.only_spawn_argv("restricted add-agent"),
+        "add-agent restricted default",
+    );
 
     let fork_team = team_dir_with_forkable_source("fork-restricted");
     let fork_transport = RecordingTransport::new().with_session_present(true);
@@ -268,13 +266,17 @@ fn add_agent_preserves_restricted_default_and_fork_preserves_restricted_origin()
         &fork_transport,
     )
     .expect("fork restricted fixture should spawn worker");
-    assert_codex_restricted(&fork_transport.only_spawn_argv("restricted fork-agent"), "fork preserves restricted origin");
+    assert_codex_restricted(
+        &fork_transport.only_spawn_argv("restricted fork-agent"),
+        "fork preserves restricted origin",
+    );
 }
 
 #[test]
 #[serial(env)]
 fn approval_detection_uses_token_boundaries_and_warns_unexpected_binary() {
-    let _substring = MockAncestry::raw(&["codex", &format!("--comment=literal-{CODEX_BYPASS}-inside")]);
+    let _substring =
+        MockAncestry::raw(&["codex", &format!("--comment=literal-{CODEX_BYPASS}-inside")]);
     let detected = team_agent::lifecycle::detect_dangerous_approval()
         .expect("detect dangerous approval with substring fixture");
     assert!(
@@ -285,7 +287,10 @@ fn approval_detection_uses_token_boundaries_and_warns_unexpected_binary() {
     let _unexpected = MockAncestry::raw(&["bash", CODEX_BYPASS]);
     let detected = team_agent::lifecycle::detect_dangerous_approval()
         .expect("detect dangerous approval with unexpected binary fixture");
-    assert!(detected.enabled, "AI-5: wrapper/alias parity still allows inheritance");
+    assert!(
+        detected.enabled,
+        "AI-5: wrapper/alias parity still allows inheritance"
+    );
     assert_eq!(detected.provider.as_deref(), Some("codex"));
     assert!(
         detected
@@ -318,7 +323,8 @@ fn prompt_handler_does_not_raise_worker_above_leader() {
                 .to_string(),
         );
     }
-    let runtime_uses_approval_choice = coordinator_sources.contains("choose_internal_mcp_approval_choice")
+    let runtime_uses_approval_choice = coordinator_sources
+        .contains("choose_internal_mcp_approval_choice")
         || source("src/provider/mod.rs").contains("choose_internal_mcp_approval_choice");
     if runtime_uses_approval_choice {
         if !coordinator_sources.contains("runtime_approval_policy_from_agent") {
@@ -346,14 +352,19 @@ fn prompt_handler_does_not_raise_worker_above_leader() {
             );
         }
     }
-    if !provider_sources.contains("ApprovalKind::Command => Some(\"command_approval_requires_human\")") {
+    if !provider_sources
+        .contains("ApprovalKind::Command => Some(\"command_approval_requires_human\")")
+    {
         failures.push(
             "AI-7/#232 C5: command approval must stay on the human-confirm path even when persisted policy allows MCP auto-approval"
                 .to_string(),
         );
     }
     if all.contains("Automation is consent") {
-        failures.push("AI-2: automation is not consent; prompt handler must not encode the opposite policy".to_string());
+        failures.push(
+            "AI-2: automation is not consent; prompt handler must not encode the opposite policy"
+                .to_string(),
+        );
     }
 
     assert!(
@@ -376,20 +387,32 @@ fn approval_inheritance_static_guards_cover_ai_1_through_ai_9() {
     {
         failures.push("AI-4: detect_dangerous_approval must not use raw cmdline contains without argv token splitting".to_string());
     }
-    if !launch.contains("split('\\0')") && !launch.contains("argv_tokens") && !launch.contains(ANCESTRY_ENV) {
-        failures.push("AI-4: detect_dangerous_approval must expose argv-token parsing over NUL/argv tokens".to_string());
+    if !launch.contains("split('\\0')")
+        && !launch.contains("argv_tokens")
+        && !launch.contains(ANCESTRY_ENV)
+    {
+        failures.push(
+            "AI-4: detect_dangerous_approval must expose argv-token parsing over NUL/argv tokens"
+                .to_string(),
+        );
     }
-    if !launch.contains("dangerous_flag_in_unexpected_binary") || !launch.contains("ancestry_binary_name") {
+    if !launch.contains("dangerous_flag_in_unexpected_binary")
+        || !launch.contains("ancestry_binary_name")
+    {
         failures.push("AI-5: dangerous flag in non-provider binary must emit warning audit with ancestry_binary_name".to_string());
     }
     if !launch.contains("worker_capability_above_leader") {
-        failures.push("AI-6: RuntimeConfig override audit must include worker_capability_above_leader".to_string());
+        failures.push(
+            "AI-6: RuntimeConfig override audit must include worker_capability_above_leader"
+                .to_string(),
+        );
     }
     if !launch.contains("effective_runtime_config") && !launch.contains("effective_worker") {
         failures.push("AI-8: worker spawn approval policy must be centralized in an effective runtime/config helper".to_string());
     }
     if !adapter.contains("dangerous_auto_approve") {
-        failures.push("AI-1: Codex adapter must still have a bypass command-shape input".to_string());
+        failures
+            .push("AI-1: Codex adapter must still have a bypass command-shape input".to_string());
     }
     for (surface, text) in [
         ("fresh launch", launch.as_str()),
@@ -433,7 +456,10 @@ fn codex_bypass_failures(argv: &[String], label: &str) -> Vec<String> {
             "{label}: Codex worker argv must inherit bypass flag; argv={argv:?}"
         ));
     }
-    if argv.iter().any(|arg| arg == "--sandbox" || arg == "--ask-for-approval") {
+    if argv
+        .iter()
+        .any(|arg| arg == "--sandbox" || arg == "--ask-for-approval")
+    {
         failures.push(format!(
             "{label}: bypass argv must not also include restricted sandbox/approval flags; argv={argv:?}"
         ));
@@ -499,8 +525,11 @@ fn compiled_team_dir(tag: &str, dangerous: bool, agents: &[(&str, &str)]) -> Pat
     )
     .unwrap();
     for (name, role) in agents {
-        std::fs::write(team.join("agents").join(format!("{name}.md")), role_doc(name, role))
-            .unwrap();
+        std::fs::write(
+            team.join("agents").join(format!("{name}.md")),
+            role_doc(name, role),
+        )
+        .unwrap();
     }
     let spec = team_agent::compiler::compile_team(&team).unwrap();
     std::fs::write(
@@ -726,7 +755,13 @@ impl MockAncestry {
     }
 
     fn restricted() -> Self {
-        Self::raw(&["codex", "--sandbox", "read-only", "--ask-for-approval", "on-request"])
+        Self::raw(&[
+            "codex",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "on-request",
+        ])
     }
 
     fn raw(argv: &[&str]) -> Self {
@@ -870,11 +905,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),

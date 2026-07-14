@@ -44,7 +44,8 @@ fn seed_status_workspace() -> std::path::PathBuf {
 
 const DELEG_VALID_ROLE: &str = "---\nname: implementer\nrole: Implementation Engineer\nprovider: fake\nmodel: fake\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nImplement bounded tasks.\n";
 const DELEG_INVALID_ROLE: &str = "---\nname: broken\nrole: Broken Worker\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nNo provider field.\n";
-const DELEG_TEAM_MD: &str = "---\nname: clidelegteam\nobjective: Delegation probe.\nprovider: fake\n---\n\nteam.\n";
+const DELEG_TEAM_MD: &str =
+    "---\nname: clidelegteam\nobjective: Delegation probe.\nprovider: fake\n---\n\nteam.\n";
 
 fn deleg_uniq_dir(tag: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,8 +70,17 @@ fn deleg_team_dir_with_healthy_coordinator() -> std::path::PathBuf {
     std::fs::create_dir_all(crate::model::paths::runtime_dir(&base)).unwrap();
     let _ = crate::message_store::MessageStore::open(&base).unwrap();
     let me = crate::coordinator::Pid::new(std::process::id());
-    crate::coordinator::write_coordinator_metadata(&wp, me, crate::coordinator::MetadataSource::Boot).unwrap();
-    std::fs::write(crate::coordinator::coordinator_pid_path(&wp), me.to_string()).unwrap();
+    crate::coordinator::write_coordinator_metadata(
+        &wp,
+        me,
+        crate::coordinator::MetadataSource::Boot,
+    )
+    .unwrap();
+    std::fs::write(
+        crate::coordinator::coordinator_pid_path(&wp),
+        me.to_string(),
+    )
+    .unwrap();
     team
 }
 
@@ -86,13 +96,13 @@ mod compile;
 mod divergence;
 mod lane_c;
 mod leader_watch;
+mod main_preserved;
 mod missing_subcommands;
 mod named_address;
 mod peer_allow;
 mod run_delegation;
-mod status_send;
-mod verb_validate;
-mod verb_profile;
-mod verb_install_skill;
-mod main_preserved;
 mod shutdown_kill_plan;
+mod status_send;
+mod verb_install_skill;
+mod verb_profile;
+mod verb_validate;

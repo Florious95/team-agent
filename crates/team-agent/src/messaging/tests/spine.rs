@@ -19,18 +19,34 @@ fn p2_trust_refuses_subdirectory_and_sibling_of_workspace() {
 
     let subdir = format!("Allow Codex to write to {canon}/subproject ?");
     let s = attempt_trust_auto_answer(
-        &canonical, &t, Some(&pane), &subdir, &PaneWidthQuery::Ok { pane_width: 200 }, &log,
+        &canonical,
+        &t,
+        Some(&pane),
+        &subdir,
+        &PaneWidthQuery::Ok { pane_width: 200 },
+        &log,
     )
     .unwrap();
-    assert!(!s.answered, "a SUBDIRECTORY of the workspace must NOT auto-answer trust");
+    assert!(
+        !s.answered,
+        "a SUBDIRECTORY of the workspace must NOT auto-answer trust"
+    );
     assert_eq!(s.reason, "workspace_dir_mismatch");
 
     let sibling = format!("Allow Codex to write to {canon}-backup ?");
     let sib = attempt_trust_auto_answer(
-        &canonical, &t, Some(&pane), &sibling, &PaneWidthQuery::Ok { pane_width: 200 }, &log,
+        &canonical,
+        &t,
+        Some(&pane),
+        &sibling,
+        &PaneWidthQuery::Ok { pane_width: 200 },
+        &log,
     )
     .unwrap();
-    assert!(!sib.answered, "a SIBLING (<ws>-backup) must NOT auto-answer trust");
+    assert!(
+        !sib.answered,
+        "a SIBLING (<ws>-backup) must NOT auto-answer trust"
+    );
     assert_eq!(sib.reason, "workspace_dir_mismatch");
 }
 
@@ -106,14 +122,12 @@ fn p2_classify_activity_reads_command_stale_and_prompts() {
     assert_eq!((e.status, e.confidence), (ActivityStatus::Uncertain, 0.5));
     // (5b) E47 structural Working: a real codex live spinner in the bottom
     // active region must still classify Working 0.9.
-    let e_struct = classify_agent_activity(
-        &st,
-        "• Working (12s · esc to interrupt)",
-        false,
-        None,
-        None,
+    let e_struct =
+        classify_agent_activity(&st, "• Working (12s · esc to interrupt)", false, None, None);
+    assert_eq!(
+        (e_struct.status, e_struct.confidence),
+        (ActivityStatus::Working, 0.9)
     );
-    assert_eq!((e_struct.status, e_struct.confidence), (ActivityStatus::Working, 0.9));
 }
 
 // P1 — scheduler dispatch must be exhaustive: an unknown kind surfaces an error, not a
@@ -160,17 +174,38 @@ impl Transport for DeliverOkTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
-            submit_verification: crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            submit_verification:
+                crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
             submit_diagnostics: None,
@@ -180,7 +215,10 @@ impl Transport for DeliverOkTransport {
         Ok(())
     }
     fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
     fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
@@ -197,7 +235,12 @@ impl Transport for DeliverOkTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
@@ -213,15 +256,29 @@ impl Transport for DeliverOkTransport {
 
 fn set_message_status(store: &MessageStore, message_id: &str, status: &str) {
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.execute("update messages set status = ?2 where message_id = ?1", sql_params![message_id, status]).unwrap();
+    conn.execute(
+        "update messages set status = ?2 where message_id = ?1",
+        sql_params![message_id, status],
+    )
+    .unwrap();
 }
 fn message_status_of(store: &MessageStore, message_id: &str) -> String {
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row("select status from messages where message_id = ?1", sql_params![message_id], |r| r.get::<_, String>(0)).unwrap()
+    conn.query_row(
+        "select status from messages where message_id = ?1",
+        sql_params![message_id],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap()
 }
 fn scheduled_status_of(store: &MessageStore, id: i64) -> String {
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    conn.query_row("select status from scheduled_events where id = ?1", [id], |r| r.get::<_, String>(0)).unwrap()
+    conn.query_row(
+        "select status from scheduled_events where id = ?1",
+        [id],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap()
 }
 fn seed_agent_health(store: &MessageStore, agent_id: &str, status: &str) {
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
@@ -245,7 +302,10 @@ fn seed_event_due(store: &MessageStore, kind: &str, due_at: &str, payload: &str)
 fn read_event_log(ws: &Path) -> Vec<serde_json::Value> {
     let path = crate::model::paths::logs_dir(ws).join("events.jsonl");
     match std::fs::read_to_string(&path) {
-        Ok(text) => text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
+        Ok(text) => text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -257,17 +317,31 @@ fn spine_delivery_skips_queued_statuses() {
     let ws = tmp_ws("deliver-queued");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
-    let _acc = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
-    let qidle = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
-    let qstart = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let _acc = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
+    let qidle = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
+    let qstart = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     set_message_status(&store, &qidle, "queued_until_idle");
     set_message_status(&store, &qstart, "queued_until_start");
     let state = serde_json::json!({"agents": {"w1": {}}});
 
     let _ = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
 
-    assert_eq!(message_status_of(&store, &qidle), "queued_until_idle", "queued_until_idle must NOT be claimed/injected/marked by deliver_pending");
-    assert_eq!(message_status_of(&store, &qstart), "queued_until_start", "queued_until_start must NOT be touched by deliver_pending");
+    assert_eq!(
+        message_status_of(&store, &qidle),
+        "queued_until_idle",
+        "queued_until_idle must NOT be claimed/injected/marked by deliver_pending"
+    );
+    assert_eq!(
+        message_status_of(&store, &qstart),
+        "queued_until_start",
+        "queued_until_start must NOT be touched by deliver_pending"
+    );
 }
 
 // #2 (CONTRACT, corrected) — busy recipient = LIFECYCLE status=="busy" → emit ONE send.deferred_busy
@@ -280,21 +354,40 @@ fn spine_delivery_busy_recipient_defers_with_event() {
     let ws = tmp_ws("deliver-busy");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
-    let mid = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let mid = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     let state = serde_json::json!({"agents": {"w1": {"status": "busy"}}});
 
     let delivered = deliver_pending_messages(&ws, &state, &DeliverOkTransport, &log).unwrap();
 
-    assert!(!delivered.contains(&mid), "a busy recipient's message must NOT be delivered");
-    assert_eq!(message_status_of(&store, &mid), "accepted", "the row must stay 'accepted' (no-drop, left for a later tick)");
+    assert!(
+        !delivered.contains(&mid),
+        "a busy recipient's message must NOT be delivered"
+    );
+    assert_eq!(
+        message_status_of(&store, &mid),
+        "accepted",
+        "the row must stay 'accepted' (no-drop, left for a later tick)"
+    );
     let events = read_event_log(&ws);
     let deferred: Vec<_> = events
         .iter()
         .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy"))
         .collect();
-    assert_eq!(deferred.len(), 1, "exactly one send.deferred_busy event expected; got {events:?}");
-    assert_eq!(deferred[0].get("recipient").and_then(|v| v.as_str()), Some("w1"));
-    assert_eq!(deferred[0].get("reason").and_then(|v| v.as_str()), Some("recipient_busy"));
+    assert_eq!(
+        deferred.len(),
+        1,
+        "exactly one send.deferred_busy event expected; got {events:?}"
+    );
+    assert_eq!(
+        deferred[0].get("recipient").and_then(|v| v.as_str()),
+        Some("w1")
+    );
+    assert_eq!(
+        deferred[0].get("reason").and_then(|v| v.as_str()),
+        Some("recipient_busy")
+    );
 }
 
 // CONTRACT (shared-root, real-machine-driven; golden = correct-behavior baseline): an ALIVE worker
@@ -309,7 +402,9 @@ fn contract_alive_worker_with_working_health_is_deliverable_not_deferred() {
     let ws = tmp_ws("deliver-alive-working");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
-    let mid = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let mid = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     seed_agent_health(&store, "w1", "WORKING"); // turn-level state — must NOT gate delivery
     let state = serde_json::json!({"agents": {"w1": {"status": "running"}}}); // lifecycle: alive
 
@@ -360,7 +455,12 @@ fn spine_scheduler_poison_event_does_not_halt_batch() {
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
     // earlier due_at → selected first; malformed JSON payload errors at from_str.
-    let poison = seed_event_due(&store, "send", "2000-01-01T00:00:00+00:00", "{not valid json");
+    let poison = seed_event_due(
+        &store,
+        "send",
+        "2000-01-01T00:00:00+00:00",
+        "{not valid json",
+    );
     // later due_at → selected after poison; healthy.
     let healthy = seed_event_due(&store, "health_ping", "2000-01-02T00:00:00+00:00", "{}");
 
@@ -381,7 +481,9 @@ fn spine_scheduler_poison_event_does_not_halt_batch() {
     // failure is loud: scheduler.event_failed event emitted for the poison.
     let events = read_event_log(&ws);
     assert!(
-        events.iter().any(|e| e.get("event").and_then(|v| v.as_str()) == Some("scheduler.event_failed")),
+        events
+            .iter()
+            .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("scheduler.event_failed")),
         "U1 #5: a poison event must emit scheduler.event_failed (failure must be loud, not silent)"
     );
 }
@@ -423,7 +525,9 @@ fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
     let ws = tmp_ws("deliver-target");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
-    let _mid = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let _mid = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     // in-team, non-busy agent -> deliver proceeds; the session-qualified resolution uses session_name + window.
     let state = serde_json::json!({
         "session_name": "team-x",
@@ -434,7 +538,11 @@ fn spine_delivery_injects_resolvable_target_not_bare_agent_pane() {
     let _ = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
 
     let recorded = transport.inject_targets();
-    assert_eq!(recorded.len(), 1, "deliver must inject the one pending message exactly once; got {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "deliver must inject the one pending message exactly once; got {recorded:?}"
+    );
     let target = recorded[0].clone();
     // THE BUG (rt-host-a #3): deliver builds Target::Pane(PaneId(message.recipient)) — the agent id as a
     // BARE pane, which a non-attached coordinator can't resolve ("can't find pane: w1").
@@ -473,7 +581,9 @@ fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
     let ws = tmp_ws("deliver-render");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
-    let mid = store.create_message(Some("t1"), "leader", "w1", "do the thing", None, true, None).unwrap();
+    let mid = store
+        .create_message(Some("t1"), "leader", "w1", "do the thing", None, true, None)
+        .unwrap();
     let state = serde_json::json!({
         "session_name": "team-x",
         "agents": {"w1": {"status": "idle", "window": "w1"}}
@@ -483,7 +593,11 @@ fn spine_delivery_injects_rendered_protocol_block_not_raw_content() {
     let _ = deliver_pending_messages(&ws, &state, &transport, &log).unwrap();
 
     let recorded = transport.inject_payloads();
-    assert_eq!(recorded.len(), 1, "deliver must inject the one pending message exactly once; got {recorded:?}");
+    assert_eq!(
+        recorded.len(),
+        1,
+        "deliver must inject the one pending message exactly once; got {recorded:?}"
+    );
     let payload = recorded[0].clone();
     // THE BUG (rt-host-a #4): deliver injects the RAW content -> the worker never reports (it only builds
     // a result_envelope on the rendered block with the token).

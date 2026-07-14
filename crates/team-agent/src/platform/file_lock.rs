@@ -263,10 +263,7 @@ pub enum LockError {
 /// Existing product callers do NOT use this — they need their own
 /// metadata/waiter/held_long event machinery. This wrapper exists for
 /// simple future callers.
-pub fn try_lock_exclusive(
-    path: &Path,
-    timeout: Duration,
-) -> Result<FileLockGuard, LockError> {
+pub fn try_lock_exclusive(path: &Path, timeout: Duration) -> Result<FileLockGuard, LockError> {
     let file = File::options()
         .read(true)
         .write(true)
@@ -415,12 +412,15 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("timeout-lock.tmp");
-        let _hold = try_lock_exclusive(&path, Duration::from_secs(1))
-            .expect("first acquire must succeed");
+        let _hold =
+            try_lock_exclusive(&path, Duration::from_secs(1)).expect("first acquire must succeed");
         let err = try_lock_exclusive(&path, Duration::from_millis(150))
             .expect_err("second acquire must timeout");
         match err {
-            LockError::Timeout { timeout_secs, path: p } => {
+            LockError::Timeout {
+                timeout_secs,
+                path: p,
+            } => {
                 assert!(timeout_secs > 0.0);
                 assert!(p.ends_with("timeout-lock.tmp"), "path suffix: {p}");
             }

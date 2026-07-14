@@ -36,7 +36,10 @@ fn enum_unknown_wire_falls_back_to_unknown() {
         WorkerRuntimeState::parse_wire("FUTURE_VARIANT"),
         WorkerRuntimeState::Unknown
     );
-    assert_eq!(WorkerRuntimeState::parse_wire(""), WorkerRuntimeState::Unknown);
+    assert_eq!(
+        WorkerRuntimeState::parse_wire(""),
+        WorkerRuntimeState::Unknown
+    );
 }
 
 #[test]

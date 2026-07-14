@@ -362,7 +362,10 @@ pub fn deliver_pending_message(
     }
     let resolved = resolve_inject_target(state, &message.recipient, transport, &live_targets);
     if let Some(stale) = resolved.stale_binding.as_ref() {
-        event_log.write("worker_pane_binding_stale", stale.as_event_payload(message_id, &message.recipient))?;
+        event_log.write(
+            "worker_pane_binding_stale",
+            stale.as_event_payload(message_id, &message.recipient),
+        )?;
     }
     let target = resolved.target.clone();
     if let Some(outcome) = block_missing_worker_target(
@@ -1232,7 +1235,11 @@ fn resolve_inject_target(
         }) {
             return ResolvedInjectTarget {
                 target: Target::Pane(pane),
-                metadata: Some(target_metadata(transport, live_pane, "validated_cached_pane")),
+                metadata: Some(target_metadata(
+                    transport,
+                    live_pane,
+                    "validated_cached_pane",
+                )),
                 stale_binding: None,
             };
         }
@@ -1259,15 +1266,13 @@ fn live_pane_for_session_window<'a>(
     session: &str,
     window: &str,
 ) -> Option<&'a PaneInfo> {
-    targets
-        .iter()
-        .find(|target| {
-            target.session.as_str() == session
-                && target
-                    .window_name
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == window)
-        })
+    targets.iter().find(|target| {
+        target.session.as_str() == session
+            && target
+                .window_name
+                .as_ref()
+                .is_some_and(|name| name.as_str() == window)
+    })
 }
 
 fn stale_worker_pane_binding(
@@ -2221,8 +2226,7 @@ fn record_turn_open_if_leader_to_worker_scoped(
     save_scoped_state_reapplying_after_conflict(workspace, &state, owner_team_id, |latest| {
         arm_turn_open(latest, recipient, &delivered.message_id);
     })?;
-    let mut event =
-        serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
+    let mut event = serde_json::json!({"agent_id": recipient, "message_id": delivered.message_id});
     if let Some(metadata) = metadata {
         append_target_metadata(&mut event, metadata);
     }
@@ -2256,11 +2260,9 @@ fn arm_turn_open(state: &mut serde_json::Value, recipient: &str, message_id: &Op
         // (whitelisted for the transition) and `mcp_server/helpers.rs`; other
         // messaging/lifecycle/mcp_server code MUST NOT treat this as
         // authoritative task state.
-        let field = message_id
-            .as_ref()
-            .map_or(serde_json::Value::Null, |id| {
-                serde_json::Value::String(id.clone())
-            });
+        let field = message_id.as_ref().map_or(serde_json::Value::Null, |id| {
+            serde_json::Value::String(id.clone())
+        });
         agent.insert("current_turn_message_id".to_string(), field);
     }
 }

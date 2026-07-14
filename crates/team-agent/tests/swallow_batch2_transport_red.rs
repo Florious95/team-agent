@@ -68,7 +68,9 @@ fn b2_list_targets_survives_single_pane_pid_query_failure() {
         }
     }
     let events = events_text(&ws);
-    let probe_line = events.lines().find(|line| line.contains("pane_pid_query_failed"));
+    let probe_line = events
+        .lines()
+        .find(|line| line.contains("pane_pid_query_failed"));
     match probe_line {
         None => failures.push(
             "①: the failed pane probe must write a `tmux.pane_pid_query_failed` event \
@@ -77,7 +79,9 @@ fn b2_list_targets_survives_single_pane_pid_query_failure() {
         ),
         Some(line) => {
             if line.contains("\"error\":null") || line.contains("\"error\": null") {
-                failures.push(format!("①: the failure event must carry a non-null error; line={line}"));
+                failures.push(format!(
+                    "①: the failure event must carry a non-null error; line={line}"
+                ));
             }
         }
     }
@@ -145,7 +149,9 @@ today the failure is swallowed (`let _ =` family)"
         ),
         Some(line) => {
             if line.contains("\"error\":null") || line.contains("\"error\": null") {
-                failures.push(format!("②: the failure event must carry a non-null error; line={line}"));
+                failures.push(format!(
+                    "②: the failure event must carry a non-null error; line={line}"
+                ));
             }
         }
     }
@@ -257,7 +263,11 @@ impl Transport for CaptureFailsTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, _range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        _range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Err(TransportError::Subprocess {
             argv: vec!["tmux".to_string(), "capture-pane".to_string()],
             code: Some(1),
@@ -317,7 +327,10 @@ impl ProviderRegistry for RealAdapterRegistry {
         get_adapter(provider)
     }
     fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists { whitelist: Vec::new(), blacklist: Vec::new() }
+        ErrorLists {
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 }
 

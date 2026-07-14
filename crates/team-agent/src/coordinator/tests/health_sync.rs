@@ -20,17 +20,38 @@ impl Transport for CapturingTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached")
     }
-    fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &std::path::Path, _e: &std::collections::BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        _s: &SessionName,
+        _w: &WindowName,
+        _a: &[String],
+        _c: &std::path::Path,
+        _e: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached")
     }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             inject_verification: crate::transport::InjectVerification::CaptureContainsToken,
-            submit_verification: crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            submit_verification:
+                crate::transport::SubmitVerification::EnterSentWithoutPlaceholderCheck,
             turn_verification: crate::transport::TurnVerification::NotYetObserved,
             attempts: 1,
             submit_diagnostics: None,
@@ -40,7 +61,10 @@ impl Transport for CapturingTransport {
         Ok(())
     }
     fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: self.scrollback.clone(), range })
+        Ok(CapturedText {
+            text: self.scrollback.clone(),
+            range,
+        })
     }
     fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
@@ -57,7 +81,12 @@ impl Transport for CapturingTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("w1")])
     }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
     fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
@@ -74,7 +103,10 @@ impl Transport for CapturingTransport {
 /// Build a Coordinator over a real seeded workspace (truthy session_name + the given agents map) with
 /// the CapturingTransport staging `scrollback` for every pane. Returns the workspace dir so the test
 /// can load_runtime_state after the tick.
-fn seeded_health_coord(agents: serde_json::Value, scrollback: &str) -> (Coordinator, std::path::PathBuf) {
+fn seeded_health_coord(
+    agents: serde_json::Value,
+    scrollback: &str,
+) -> (Coordinator, std::path::PathBuf) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -93,7 +125,9 @@ fn seeded_health_coord(agents: serde_json::Value, scrollback: &str) -> (Coordina
     let coord = Coordinator::for_test(
         ws,
         reg,
-        Box::new(CapturingTransport { scrollback: scrollback.to_string() }),
+        Box::new(CapturingTransport {
+            scrollback: scrollback.to_string(),
+        }),
         None,
         None,
     );
@@ -136,11 +170,18 @@ fn spine2_sync_health_classifies_idle_scrollback() {
 // NEVER as idle. Today: no activity written.
 #[test]
 fn spine2_sync_health_unknown_scrollback_never_idle() {
-    let (coord, dir) = seeded_health_coord(one_agent("codex"), "garbled noise xyz 12345 no recognizable signal");
+    let (coord, dir) = seeded_health_coord(
+        one_agent("codex"),
+        "garbled noise xyz 12345 no recognizable signal",
+    );
     coord.tick().expect("tick");
     let status = agent_activity_status(&dir, "w1");
     assert!(status.is_some(), "sync_health must classify the agent (write activity); today the probe writes nothing. got {status:?}");
-    assert_ne!(status.as_deref(), Some("idle"), "§11: an UNKNOWN scrollback must NEVER be classified idle");
+    assert_ne!(
+        status.as_deref(),
+        Some("idle"),
+        "§11: an UNKNOWN scrollback must NEVER be classified idle"
+    );
 }
 
 // P0 §11 — a WORKING scrollback classifies the agent but never idle.
@@ -149,8 +190,15 @@ fn spine2_sync_health_working_scrollback_never_idle() {
     let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
     coord.tick().expect("tick");
     let status = agent_activity_status(&dir, "w1");
-    assert!(status.is_some(), "sync_health must classify a working agent; today no activity. got {status:?}");
-    assert_ne!(status.as_deref(), Some("idle"), "§11: a WORKING scrollback must not be idle");
+    assert!(
+        status.is_some(),
+        "sync_health must classify a working agent; today no activity. got {status:?}"
+    );
+    assert_ne!(
+        status.as_deref(),
+        Some("idle"),
+        "§11: a WORKING scrollback must not be idle"
+    );
 }
 
 // P1 — sync_health records last_output_at on a pane delta (so detect_stuck / take-over downstream can
@@ -172,7 +220,11 @@ fn spine2_sync_health_records_last_output_at() {
 fn spine2_capture_missing_captures_session_id_for_missing_agent() {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let tdir = std::env::temp_dir().join(format!("ta-rs-health-tx-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let tdir = std::env::temp_dir().join(format!(
+        "ta-rs-health-tx-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&tdir).unwrap();
     // lane-046-capture-gap: Claude no-expected_session_id capture now requires
     // positive_agent_id_match (TEAM_AGENT_ID=<id>) OR agent_path_match. Without
@@ -195,7 +247,9 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
         "capture_missing must capture+persist a session_id for an agent with a discoverable transcript; today it's a probe"
     );
     assert_eq!(
-        agent_field(&dir, "w2", "session_id").and_then(|v| v.as_str().map(str::to_string)).as_deref(),
+        agent_field(&dir, "w2", "session_id")
+            .and_then(|v| v.as_str().map(str::to_string))
+            .as_deref(),
         Some("existing-sess"),
         "an agent that already has a session_id must be untouched"
     );
@@ -208,7 +262,9 @@ fn spine2_capture_missing_captures_session_id_for_missing_agent() {
 fn spine2_sync_health_working_status_delivers_same_tick() {
     let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
     let store = MessageStore::open(&dir).unwrap();
-    let mid = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let mid = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
     conn.execute(
         "insert into agent_health(owner_team_id, agent_id, status, updated_at)
@@ -223,7 +279,9 @@ fn spine2_sync_health_working_status_delivers_same_tick() {
     coord.tick().expect("tick");
     let events = read_event_log_dir(&dir);
     assert!(
-        !events.iter().any(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy")),
+        !events
+            .iter()
+            .any(|e| e.get("event").and_then(|v| v.as_str()) == Some("send.deferred_busy")),
         "turn-level WORKING must not trigger lifecycle busy deferral; got {events:?}"
     );
     assert!(
@@ -250,7 +308,9 @@ fn spine2_sync_health_working_status_delivers_same_tick() {
 fn contract_working_worker_stays_alive_and_deliverable_in_real_tick() {
     let (coord, dir) = seeded_health_coord(one_agent("codex"), "Working (5s · esc to interrupt)");
     let store = MessageStore::open(&dir).unwrap();
-    let _mid = store.create_message(Some("t"), "leader", "w1", "hi", None, true, None).unwrap();
+    let _mid = store
+        .create_message(Some("t"), "leader", "w1", "hi", None, true, None)
+        .unwrap();
     drop(store);
     coord.tick().expect("tick");
     let status = agent_field(&dir, "w1", "status").and_then(|v| v.as_str().map(str::to_string));
@@ -406,8 +466,7 @@ fn rm039_stat001_jsonl_close_turn_preserves_e47_idle_classification() {
     // The pane Tail(40) still shows the live working spinner — the E47
     // stale-working scenario. The JSONL `task_complete` MUST close the
     // turn anyway.
-    let (coord, dir) =
-        seeded_health_coord(agents, "Working (5s · esc to interrupt)\n• Working\n");
+    let (coord, dir) = seeded_health_coord(agents, "Working (5s · esc to interrupt)\n• Working\n");
     coord.tick().expect("tick");
     let status = agent_activity_status(&dir, "stat-worker");
     assert_eq!(

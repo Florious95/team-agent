@@ -24,7 +24,6 @@ mod temp_workspace;
 
 use rusqlite::params;
 use serde_json::json;
-use temp_workspace::TempWorkspace;
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::launch_with_transport;
 use team_agent::message_store::MessageStore;
@@ -32,15 +31,14 @@ use team_agent::messaging::delivery::deliver_pending_message;
 use team_agent::messaging::trust::attempt_trust_auto_answer;
 use team_agent::messaging::PaneWidthQuery;
 use team_agent::model::enums::{AuthMode, Provider};
-use team_agent::provider::{
-    classify, get_adapter, ProcessLiveness, TurnState,
-};
+use team_agent::provider::{classify, get_adapter, ProcessLiveness, TurnState};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
+use temp_workspace::TempWorkspace;
 
 const PROBE5_TRUST_PANE: &str = r#"> You are in /private/tmp/ta-subprep-SUB-PROBE-1-trust-startup.Ey2Xk6/teamdir
 
@@ -159,7 +157,11 @@ fn foreign_workspace_path(canonical_teamdir: &Path) -> PathBuf {
         .and_then(Path::parent)
         .unwrap_or_else(|| canonical_teamdir.parent().unwrap_or(canonical_teamdir))
         .join("foreign-team")
-        .join(canonical_teamdir.file_name().unwrap_or_else(|| std::ffi::OsStr::new("teamdir")))
+        .join(
+            canonical_teamdir
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("teamdir")),
+        )
 }
 
 #[test]
@@ -228,7 +230,9 @@ fn contract_a_subroot_tick_answers_full_pane_trust_and_persists_startup_handled(
         Box::new(transport.clone()),
     );
 
-    let report = coord.tick().expect("coordinator tick should stay typed/fallible");
+    let report = coord
+        .tick()
+        .expect("coordinator tick should stay typed/fallible");
     let state = team_agent::state::persist::load_runtime_state(&ws).unwrap();
     let agent = &state["agents"]["w1"];
     let events = read_events(&ws);
@@ -318,7 +322,9 @@ fn contract_a_step1_trust_auto_answer_is_idempotent_across_repeated_ticks() {
         Box::new(transport.clone()),
     );
 
-    coord.tick().expect("first tick should answer the startup trust prompt");
+    coord
+        .tick()
+        .expect("first tick should answer the startup trust prompt");
     coord
         .tick()
         .expect("second tick over the same pane must not answer trust again");
@@ -523,8 +529,8 @@ fn contract_b_delivery_does_not_mark_delivered_or_inject_task_while_trust_prompt
     let transport = RecordingTransport::new(vec![PROBE5_TRUST_PANE.to_string()]);
     let event_log = EventLog::new(&ws);
 
-    let outcome = deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state)
-        .unwrap();
+    let outcome =
+        deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state).unwrap();
     let status = message_status(store.db_path(), &message_id);
     let events = read_events(&ws);
 
@@ -578,8 +584,8 @@ fn contract_b_probe5_delivered_without_result_is_rejected_as_lost_task_evidence(
     let transport = RecordingTransport::new(vec![PROBE5_TRUST_PANE.to_string()]);
     let event_log = EventLog::new(&ws);
 
-    let outcome = deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state)
-        .unwrap();
+    let outcome =
+        deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state).unwrap();
     let status = message_status(store.db_path(), &message_id);
     let events = read_events(&ws);
 
@@ -791,8 +797,8 @@ fn contract_b_step2_retry_delivers_queued_message_after_startup_trust_is_handled
     .with_windows(vec![WindowName::new("w1")]);
     let event_log = EventLog::new(&ws);
 
-    let deferred = deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state)
-        .unwrap();
+    let deferred =
+        deliver_pending_message(&ws, &store, &transport, &message_id, &event_log, &state).unwrap();
     assert!(
         !matches!(deferred.status, team_agent::messaging::DeliveryStatus::Delivered),
         "fixture sanity: the first delivery attempt must defer while the trust prompt is actionable; outcome={deferred:?}"
@@ -875,7 +881,11 @@ fn contract_c_lifecycle_launch_command_carries_role_tools_and_real_mcp_context()
     let transport = RecordingTransport::new(vec![PROBE5_READY_AFTER_TRUST_CONSUMED.to_string()]);
     let report = launch_with_transport(&spec_path, false, true, true, &transport)
         .expect("launch should reach transport spawn");
-    assert_eq!(report.started.len(), 1, "fixture sanity: one Codex worker starts");
+    assert_eq!(
+        report.started.len(),
+        1,
+        "fixture sanity: one Codex worker starts"
+    );
     let argv = transport.spawn_argv().join(" ");
 
     assert!(
@@ -887,7 +897,9 @@ fn contract_c_lifecycle_launch_command_carries_role_tools_and_real_mcp_context()
         "Contract C/MUST-8: Codex worker command must include a real Team Agent tool/MCP capability mechanism, not prompt-only state metadata; argv={argv:?}"
     );
     assert!(
-        !argv.contains("/tmp/ta-provider-ws") && !argv.contains("worker1") && !argv.contains("teamA"),
+        !argv.contains("/tmp/ta-provider-ws")
+            && !argv.contains("worker1")
+            && !argv.contains("teamA"),
         "Contract C: provider command/config must not leak placeholder MCP context; argv={argv:?}"
     );
 }
@@ -971,8 +983,13 @@ fn contract_d_codex_capture_rejects_team_agent_events_jsonl_as_rollout() {
 #[test]
 fn contract_d_codex_rollout_requires_provider_lifecycle_shape_or_stays_unknown() {
     let team_agent_events = r#"{"event":"message.delivered","message_id":"msg_1"}"#;
-    let classified =
-        classify(Provider::Codex, team_agent_events, ProcessLiveness::Unverifiable, 0.0).unwrap();
+    let classified = classify(
+        Provider::Codex,
+        team_agent_events,
+        ProcessLiveness::Unverifiable,
+        0.0,
+    )
+    .unwrap();
     assert_eq!(
         classified.state,
         TurnState::Unknown,
@@ -1183,11 +1200,7 @@ impl Transport for RecordingTransport {
         Ok(CapturedText { text, range })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),

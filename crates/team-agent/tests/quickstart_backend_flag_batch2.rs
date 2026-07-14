@@ -82,7 +82,10 @@ fn no_backend_flag_leaves_backend_none_for_byte_equivalent_tmux_path() {
     // the existing tmux path. The first check is: `backend` is `None`
     // so the lifecycle port picks the legacy tmux entrypoint.
     let args = parse_quick_start(&["--yes"]).expect("must parse");
-    assert!(args.backend.is_none(), "no --backend must leave backend=None");
+    assert!(
+        args.backend.is_none(),
+        "no --backend must leave backend=None"
+    );
 }
 
 #[test]
@@ -168,8 +171,7 @@ fn batch2_migration_anchors_present_in_source() {
     // away, this test fires so Batch 3 cannot proceed on a
     // half-checked abstraction.
     let launch = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/lifecycle/launch.rs"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/launch.rs"),
     )
     .unwrap();
     assert!(

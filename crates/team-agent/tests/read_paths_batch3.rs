@@ -24,10 +24,26 @@ use std::path::PathBuf;
 fn batch3_all_five_migration_sites_route_through_factory() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let sites = [
-        ("coordinator/backoff.rs", "resolve_transport", "coordinator boot"),
-        ("cli/status_port.rs",     "resolve_read_only_transport", "status has_session + approvals"),
-        ("cli/diagnose.rs",        "resolve_read_only_transport", "diagnose session-present"),
-        ("cli/adapters.rs",        "resolve_read_only_transport", "diagnose-runtime + peek"),
+        (
+            "coordinator/backoff.rs",
+            "resolve_transport",
+            "coordinator boot",
+        ),
+        (
+            "cli/status_port.rs",
+            "resolve_read_only_transport",
+            "status has_session + approvals",
+        ),
+        (
+            "cli/diagnose.rs",
+            "resolve_read_only_transport",
+            "diagnose session-present",
+        ),
+        (
+            "cli/adapters.rs",
+            "resolve_read_only_transport",
+            "diagnose-runtime + peek",
+        ),
     ];
     for (rel, needle, purpose) in sites {
         let body = std::fs::read_to_string(root.join(rel))
@@ -46,9 +62,7 @@ fn batch3_all_five_migration_sites_route_through_factory() {
 #[test]
 fn batch3_read_only_factory_for_tmux_state_returns_tmux_backend_byte_equivalent() {
     use team_agent::transport::BackendKind;
-    use team_agent::transport_factory::{
-        resolve_read_only_transport, TransportPurpose,
-    };
+    use team_agent::transport_factory::{resolve_read_only_transport, TransportPurpose};
     let ws = std::env::temp_dir().join("ta-batch3-tmux");
     std::fs::create_dir_all(&ws).unwrap();
     // Default: no state → factory picks Layer 5 default = tmux workspace.
@@ -81,9 +95,7 @@ fn batch3_read_only_factory_for_tmux_state_returns_tmux_backend_byte_equivalent(
 #[test]
 fn batch3_read_only_factory_for_conpty_state_returns_conpty_backend_not_tmux() {
     use team_agent::transport::BackendKind;
-    use team_agent::transport_factory::{
-        resolve_read_only_transport, TransportPurpose,
-    };
+    use team_agent::transport_factory::{resolve_read_only_transport, TransportPurpose};
     let ws = std::env::temp_dir().join("ta-batch3-conpty");
     std::fs::create_dir_all(&ws).unwrap();
     // Design §Batch 3 Verification anchor: state.transport.kind=conpty

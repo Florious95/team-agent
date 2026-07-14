@@ -122,7 +122,10 @@ pub(crate) fn working_seconds(scrollback: &str) -> Option<u64> {
     // `❯ Run /review`, `Worked for 8m 34s`, or an empty composer prompt,
     // there is no LIVE working indicator and we return None — handing off
     // to the structural latest_prompt_signal / IRON LAW Uncertain path.
-    let last_non_empty = scrollback.lines().rev().find(|line| !line.trim().is_empty())?;
+    let last_non_empty = scrollback
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())?;
     let lower = last_non_empty.to_ascii_lowercase();
     let start = lower.find("working (")?;
     let rest = last_non_empty.get(start + "Working (".len()..)?;
@@ -193,9 +196,27 @@ pub(crate) fn latest_prompt_signal(scrollback: &str) -> Option<AgentActivity> {
         // and Claude Code tool-progress verbs. We look for STRUCTURAL
         // composer/status signals in the active region only.
         if [
-            "working (", "thinking", "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦",
-            "⠧", "⠇", "⠏", "✶", "✢", "✻", "analyzing", "reading", "writing",
-            "searching", "running", "editing",
+            "working (",
+            "thinking",
+            "⠋",
+            "⠙",
+            "⠹",
+            "⠸",
+            "⠼",
+            "⠴",
+            "⠦",
+            "⠧",
+            "⠇",
+            "⠏",
+            "✶",
+            "✢",
+            "✻",
+            "analyzing",
+            "reading",
+            "writing",
+            "searching",
+            "running",
+            "editing",
         ]
         .iter()
         .any(|needle| lower.contains(needle))

@@ -63,7 +63,13 @@ pub(crate) fn resolve_workspace_for_hash(workspace: &Path) -> PathBuf {
 pub(crate) fn sanitize_session_folder(raw: &str) -> String {
     let replaced: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(48)
         .collect();
     let trimmed = replaced.trim_matches(|c| matches!(c, '_' | '-' | '.'));

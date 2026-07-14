@@ -81,10 +81,7 @@ pub(crate) fn write_team_state(
             let Some(id) = agent.get("id").and_then(YamlValue::as_str) else {
                 continue;
             };
-            let role = agent
-                .get("role")
-                .and_then(YamlValue::as_str)
-                .unwrap_or(id);
+            let role = agent.get("role").and_then(YamlValue::as_str).unwrap_or(id);
             let provider = agent
                 .get("provider")
                 .and_then(YamlValue::as_str)
@@ -108,17 +105,31 @@ pub(crate) fn write_team_state(
         let title = task_field_str(task, "title");
         let status = {
             let s = task_field_str(task, "status");
-            if s.is_empty() { "pending".to_string() } else { s }
+            if s.is_empty() {
+                "pending".to_string()
+            } else {
+                s
+            }
         };
         let assignee = {
             let a = task_field_str(task, "assignee");
-            if a.is_empty() { "unassigned".to_string() } else { a }
+            if a.is_empty() {
+                "unassigned".to_string()
+            } else {
+                a
+            }
         };
         let deps = {
             let d = task_field_list(task, "deps");
-            if d.is_empty() { "none".to_string() } else { d.join(", ") }
+            if d.is_empty() {
+                "none".to_string()
+            } else {
+                d.join(", ")
+            }
         };
-        lines.push(format!("- {id} [{status}], assignee={assignee}, deps={deps}: {title}"));
+        lines.push(format!(
+            "- {id} [{status}], assignee={assignee}, deps={deps}: {title}"
+        ));
         let summary = task_field_str(task, "last_result_summary");
         if !summary.is_empty() {
             lines.push(format!("  Summary: {summary}"));
@@ -136,7 +147,12 @@ pub(crate) fn write_team_state(
     lines.push(String::new());
     let blockers: Vec<&TeamStateTask> = tasks
         .iter()
-        .filter(|t| matches!(task_field_str(t, "status").as_str(), "blocked" | "failed" | "needs_retry"))
+        .filter(|t| {
+            matches!(
+                task_field_str(t, "status").as_str(),
+                "blocked" | "failed" | "needs_retry"
+            )
+        })
         .collect();
     if blockers.is_empty() {
         lines.push("- None".to_string());
@@ -145,7 +161,11 @@ pub(crate) fn write_team_state(
             let id = task_field_str(task, "id");
             let summary = {
                 let s = task_field_str(task, "last_result_summary");
-                if s.is_empty() { task_field_str(task, "title") } else { s }
+                if s.is_empty() {
+                    task_field_str(task, "title")
+                } else {
+                    s
+                }
             };
             lines.push(format!("- {id}: {summary}"));
         }
@@ -177,7 +197,9 @@ enum TeamStateTask {
 
 /// golden `datetime.now(timezone.utc).isoformat()` analog (microseconds + `+00:00`).
 fn team_state_now() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+        .to_string()
 }
 
 fn team_state_tasks(spec: &YamlValue, state: &serde_json::Value) -> Vec<TeamStateTask> {
@@ -196,15 +218,27 @@ fn team_state_notes(state: &serde_json::Value) -> Option<Vec<String>> {
             .get("notes")?
             .as_array()?
             .iter()
-            .filter_map(|note| note.as_str().filter(|text| !text.is_empty()).map(str::to_string))
+            .filter_map(|note| {
+                note.as_str()
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+            })
             .collect(),
     )
 }
 
 fn task_field_str(task: &TeamStateTask, key: &str) -> String {
     match task {
-        TeamStateTask::Json(v) => v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        TeamStateTask::Yaml(v) => v.get(key).and_then(YamlValue::as_str).unwrap_or("").to_string(),
+        TeamStateTask::Json(v) => v
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        TeamStateTask::Yaml(v) => v
+            .get(key)
+            .and_then(YamlValue::as_str)
+            .unwrap_or("")
+            .to_string(),
     }
 }
 
@@ -213,12 +247,22 @@ fn task_field_list(task: &TeamStateTask, key: &str) -> Vec<String> {
         TeamStateTask::Json(v) => v
             .get(key)
             .and_then(|v| v.as_array())
-            .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_string)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
         TeamStateTask::Yaml(v) => v
             .get(key)
             .and_then(YamlValue::as_list)
-            .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_string)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     }
 }
@@ -250,7 +294,9 @@ fn task_artifact_refs(task: &TeamStateTask) -> Vec<String> {
                         Some(_) => format!(
                             "  Artifact: {} - {}",
                             r.get("path").and_then(YamlValue::as_str).unwrap_or("None"),
-                            r.get("description").and_then(YamlValue::as_str).unwrap_or("")
+                            r.get("description")
+                                .and_then(YamlValue::as_str)
+                                .unwrap_or("")
                         ),
                         None => format!("  Artifact: INVALID artifact ref {:?}", r),
                     })

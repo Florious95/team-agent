@@ -105,7 +105,9 @@ pub fn uninstall(opts: &UninstallOptions) -> Result<UninstallOutcome, PackagingE
 /// `--target all` fan-out 两者;`--dest` 不能与 `--target all` 组合(`commands.py:453` → Err)。
 /// 拷前清陈旧残留(修 `dirs_exist_ok` 残留);`--dry-run` 只报告不落地。
 /// // REAL-MACHINE-E2E:真拷 / removed_stale 需文件系统;dry-run 与 plan 可单测。
-pub fn install_skill(opts: &SkillInstallOptions) -> Result<Vec<SkillInstallOutcome>, PackagingError> {
+pub fn install_skill(
+    opts: &SkillInstallOptions,
+) -> Result<Vec<SkillInstallOutcome>, PackagingError> {
     if opts.target == SkillTarget::All && opts.dest.is_some() {
         return Err(PackagingError::InvalidOptions(
             "--dest cannot be combined with --target all".to_string(),
@@ -120,9 +122,9 @@ pub fn install_skill(opts: &SkillInstallOptions) -> Result<Vec<SkillInstallOutco
     for target in targets {
         let dest = match &opts.dest {
             Some(dest) => SkillDestDir(dest.clone()),
-            None => target
-                .dest_dir(&home)
-                .ok_or_else(|| PackagingError::InvalidOptions("target all has no single dest".to_string()))?,
+            None => target.dest_dir(&home).ok_or_else(|| {
+                PackagingError::InvalidOptions("target all has no single dest".to_string())
+            })?,
         };
         let mut removed_stale = Vec::new();
         if !opts.dry_run {
@@ -169,7 +171,9 @@ pub fn diagnose_path(bin_dir: &BinDir) -> Result<PathHint, PackagingError> {
         .map(PathBuf::from)
         .collect();
     if entries.iter().any(|p| p == &bin_dir.0) {
-        return Ok(PathHint::OnPath { bin_dir: bin_dir.0.clone() });
+        return Ok(PathHint::OnPath {
+            bin_dir: bin_dir.0.clone(),
+        });
     }
     let executable_bit_set = bin_dir.0.join("team-agent").metadata().is_ok_and(|m| {
         #[cfg(unix)]
@@ -197,14 +201,21 @@ pub fn diagnose_path(bin_dir: &BinDir) -> Result<PathHint, PackagingError> {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn default_skill_source() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills").join("team-agent")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("skills")
+        .join("team-agent")
 }
 
-fn atomic_replace_binary(source: &Path, dest: &Path) -> Result<AtomicReplaceOutcome, PackagingError> {
+fn atomic_replace_binary(
+    source: &Path,
+    dest: &Path,
+) -> Result<AtomicReplaceOutcome, PackagingError> {
     if !source.exists() {
         return Err(PackagingError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -293,7 +304,10 @@ fn staging_dir_for(dest: &Path) -> Result<PathBuf, PackagingError> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("skill");
-    let parent = dest.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let parent = dest
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&parent)?;
     Ok(parent.join(format!(".{name}.ta-staging-{}", std::process::id())))
 }

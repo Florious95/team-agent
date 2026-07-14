@@ -96,7 +96,10 @@ fn receiver_binding_snapshot(workspace: &Path, team: Option<&TeamKey>) -> Value 
         .or_else(|| crate::state::ownership::read_owner_value(&state, "").cloned())
         .and_then(|v| v.get("pane_id").cloned())
         .unwrap_or(Value::Null);
-    let caller_pane_id = std::env::var("TMUX_PANE").ok().map(Value::String).unwrap_or(Value::Null);
+    let caller_pane_id = std::env::var("TMUX_PANE")
+        .ok()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     let pane_id = receiver
         .and_then(|r| r.get("pane_id"))
         .cloned()
@@ -140,7 +143,11 @@ fn receiver_binding_snapshot(workspace: &Path, team: Option<&TeamKey>) -> Value 
 fn receiver_pane_stale(socket: &str, pane_id: &str) -> bool {
     crate::tmux_backend::TmuxBackend::for_tmux_endpoint(socket)
         .list_targets()
-        .map(|targets| !targets.iter().any(|target| target.pane_id.as_str() == pane_id))
+        .map(|targets| {
+            !targets
+                .iter()
+                .any(|target| target.pane_id.as_str() == pane_id)
+        })
         .unwrap_or(true)
 }
 

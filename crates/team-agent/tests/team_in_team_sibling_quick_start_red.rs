@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rusqlite::params;
-use serial_test::{file_serial, serial};
 use serde_json::Value;
+use serial_test::{file_serial, serial};
 use team_agent::event_log::EventLog;
 use team_agent::lifecycle::{quick_start_with_transport, QuickStartReport};
 use team_agent::message_store::MessageStore;
@@ -28,9 +28,9 @@ use team_agent::state::persist::load_runtime_state;
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 #[test]
@@ -53,31 +53,17 @@ fn quick_start_sibling_teamdir_in_same_workspace_starts_new_team_not_existing_ru
     let team_b = team_dir(&root, "teamB", "worker_b");
     let transport = SessionRecordingTransport::default();
 
-    let first = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("fixture: first teamA quick-start should succeed");
+    let first = quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+        .expect("fixture: first teamA quick-start should succeed");
     assert_ready_team("teamA first quick-start", &first, "team-teamA");
 
-    let second = quick_start_with_transport(
-        &team_b,
-        Some("teamB"),
-        true,
-        Some("teamB"),
-        &transport,
-    )
-    .expect("teamB quick-start must not be refused by teamA's runtime");
+    let second =
+        quick_start_with_transport(&team_b, Some("teamB"), true, Some("teamB"), &transport)
+            .expect("teamB quick-start must not be refused by teamA's runtime");
 
-    assert_ready_team(
-        "sibling teamB quick-start",
-        &second,
-        "team-teamB",
-    );
-    let state = load_runtime_state(&root).expect("state.json should exist in shared parent workspace");
+    assert_ready_team("sibling teamB quick-start", &second, "team-teamB");
+    let state =
+        load_runtime_state(&root).expect("state.json should exist in shared parent workspace");
     assert_team_present(&state, "teamA", "team-teamA");
     assert_team_present(&state, "teamB", "team-teamB");
     assert_eq!(
@@ -113,31 +99,20 @@ fn quick_start_sibling_teamdir_without_team_arg_infers_compiled_spec_name() {
     let team_b = team_dir(&root, "teamB", "worker_b");
     let transport = SessionRecordingTransport::default();
 
-    let first = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("fixture: first teamA quick-start should succeed");
+    let first = quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+        .expect("fixture: first teamA quick-start should succeed");
     assert_ready_team("teamA first quick-start", &first, "team-teamA");
 
-    let second = quick_start_with_transport(
-        &team_b,
-        None,
-        true,
-        None,
-        &transport,
-    )
-    .expect("quick-start teamB without --team should still use TEAM.md name=teamB");
+    let second = quick_start_with_transport(&team_b, None, true, None, &transport)
+        .expect("quick-start teamB without --team should still use TEAM.md name=teamB");
 
     assert_ready_team(
         "sibling teamB quick-start without --team",
         &second,
         "team-teamB",
     );
-    let state = load_runtime_state(&root).expect("state.json should exist in shared parent workspace");
+    let state =
+        load_runtime_state(&root).expect("state.json should exist in shared parent workspace");
     assert_team_present(&state, "teamA", "team-teamA");
     assert_team_present(&state, "teamB", "team-teamB");
     assert_eq!(
@@ -173,24 +148,12 @@ fn quick_start_sibling_teamdir_without_team_arg_same_spec_name_still_returns_exi
     let team_b_same_name = team_dir_with_name(&root, "teamB", "teamA", "worker_b");
     let transport = SessionRecordingTransport::default();
 
-    let first = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("fixture: first teamA quick-start should succeed");
+    let first = quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+        .expect("fixture: first teamA quick-start should succeed");
     assert_ready_team("teamA first quick-start", &first, "team-teamA");
 
-    let duplicate = quick_start_with_transport(
-        &team_b_same_name,
-        None,
-        true,
-        None,
-        &transport,
-    )
-    .expect("same spec.name should return a typed ExistingRuntime report");
+    let duplicate = quick_start_with_transport(&team_b_same_name, None, true, None, &transport)
+        .expect("same spec.name should return a typed ExistingRuntime report");
 
     match duplicate {
         QuickStartReport::ExistingRuntime {
@@ -234,24 +197,13 @@ fn quick_start_same_existing_team_still_returns_existing_runtime() {
     let team_a = team_dir(&root, "teamA", "worker_a");
     let transport = SessionRecordingTransport::default();
 
-    let first = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("fixture: first teamA quick-start should succeed");
+    let first = quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+        .expect("fixture: first teamA quick-start should succeed");
     assert_ready_team("teamA first quick-start", &first, "team-teamA");
 
-    let duplicate = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("same-team duplicate should return a typed report, not an error");
+    let duplicate =
+        quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+            .expect("same-team duplicate should return a typed report, not an error");
 
     match duplicate {
         QuickStartReport::ExistingRuntime {
@@ -298,14 +250,8 @@ fn quick_start_sibling_after_shutdown_is_allowed_not_nested() {
     let team_b = team_dir(&root, "child-team", "worker_b");
     let transport = SessionRecordingTransport::default();
 
-    let first = quick_start_with_transport(
-        &team_a,
-        Some("teamA"),
-        true,
-        Some("teamA"),
-        &transport,
-    )
-    .expect("fixture: first teamA quick-start should succeed");
+    let first = quick_start_with_transport(&team_a, Some("teamA"), true, Some("teamA"), &transport)
+        .expect("fixture: first teamA quick-start should succeed");
     assert_ready_team("teamA first quick-start", &first, "team-teamA");
 
     let shutdown = team_agent::cli::lifecycle_port::shutdown_with_transport(
@@ -533,8 +479,12 @@ fn quick_start_returns_degraded_when_no_positive_caller_pane() {
         .output()
         .expect("run team-agent quick-start");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let value: Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|err| panic!("quick-start stdout must be JSON: {err}; stdout={stdout} stderr={}", String::from_utf8_lossy(&out.stderr)));
+    let value: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|err| {
+        panic!(
+            "quick-start stdout must be JSON: {err}; stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
     let state = load_runtime_state(&root).expect("state after unbound quick-start");
     let receiver = state
         .pointer("/teams/unbound/leader_receiver")
@@ -628,14 +578,23 @@ fn delivery_grep_guard_no_owner_mutation() {
         .nth(1)
         .and_then(|tail| tail.split("pub fn mirror_peer_message_to_leader").next())
         .unwrap_or("");
-    let send = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/messaging/send.rs")).unwrap();
+    let send = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/messaging/send.rs"
+    ))
+    .unwrap();
     let scheduler = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/messaging/scheduler.rs"
     ))
     .unwrap_or_default();
-    let tick = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/coordinator/tick.rs")).unwrap();
-    let global_delivery_guard = format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}\n{tick}");
+    let tick = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/coordinator/tick.rs"
+    ))
+    .unwrap();
+    let global_delivery_guard =
+        format!("{delivery}\n{send_to_leader_body}\n{send}\n{scheduler}\n{tick}");
     for forbidden in [
         "seed_launched_owner",
         "seed_unbound_launched_owner",
@@ -710,7 +669,9 @@ fn assert_team_present(state: &Value, team_key: &str, expected_session: &str) {
         "state.teams.{team_key}.session_name must be isolated per requested team; team={team}"
     );
     assert!(
-        team.get("agents").and_then(Value::as_object).is_some_and(|agents| !agents.is_empty()),
+        team.get("agents")
+            .and_then(Value::as_object)
+            .is_some_and(|agents| !agents.is_empty()),
         "state.teams.{team_key}.agents must be retained; team={team}"
     );
 }
@@ -728,7 +689,9 @@ impl RealSiblingCase {
         let leader_session = SessionName::new(format!(
             "team-red2-leader-{}-{}",
             std::process::id(),
-            root.file_name().and_then(|name| name.to_str()).unwrap_or("case")
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("case")
         ));
         Self {
             root,
@@ -775,7 +738,11 @@ impl RealSiblingCase {
         })
     }
 
-    fn run_team_agent_status(&self, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
+    fn run_team_agent_status(
+        &self,
+        args: &[&str],
+        extra_env: &[(&str, &str)],
+    ) -> std::process::Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
         command.args(args);
         command.current_dir(&self.root);
@@ -907,7 +874,11 @@ fn team_dir_with_name(root: &Path, dir_name: &str, spec_name: &str, agent_id: &s
         ),
     )
     .unwrap();
-    std::fs::write(team.join("agents").join(format!("{agent_id}.md")), role_doc(agent_id)).unwrap();
+    std::fs::write(
+        team.join("agents").join(format!("{agent_id}.md")),
+        role_doc(agent_id),
+    )
+    .unwrap();
     team
 }
 
@@ -1088,11 +1059,7 @@ impl Transport for SessionRecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
     }
 

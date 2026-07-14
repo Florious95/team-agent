@@ -29,8 +29,7 @@ fn src_root() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let path = src_root().join(rel);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
 /// Extract non-comment lines from a source body so grep guards don't
@@ -69,10 +68,7 @@ fn batch4_leader_channel_uses_factory_helpers_not_direct_tmux_backend() {
     // Design §Batch 4: leader-fallback sites must go through the
     // factory tmux channel helpers so `grep transport_factory::tmux_`
     // enumerates every intentional tmux-only leader-channel site.
-    let files = [
-        "messaging/delivery.rs",
-        "messaging/leader_receiver.rs",
-    ];
+    let files = ["messaging/delivery.rs", "messaging/leader_receiver.rs"];
     for rel in files {
         let body = read(rel);
         let code = non_comment_body(&body);
@@ -136,7 +132,9 @@ fn batch4_results_report_retry_uses_factory_transport() {
     let retry_body = &retry_ctx[..retry_end];
     // Inside the retry block, `TmuxBackend::for_workspace` must only
     // appear on a fallback arm.
-    let count_direct = retry_body.matches("TmuxBackend::for_workspace(workspace)").count();
+    let count_direct = retry_body
+        .matches("TmuxBackend::for_workspace(workspace)")
+        .count();
     let count_factory = retry_body.matches("resolve_read_only_transport").count();
     assert!(
         count_factory >= 1,

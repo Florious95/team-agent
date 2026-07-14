@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use crate::model::ids::TeamKey;
 use crate::message_store::MessageStore;
+use crate::model::ids::TeamKey;
 
 use super::helpers::next_run_id;
 use super::{
@@ -42,11 +42,22 @@ pub fn run_comms_selftest(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let receiver_status = if mismatches.is_empty() { CheckStatus::Pass } else { CheckStatus::Fail };
+    let receiver_status = if mismatches.is_empty() {
+        CheckStatus::Pass
+    } else {
+        CheckStatus::Fail
+    };
     let calls = driver.provider_sdk_calls();
-    let provider_status = if calls.is_zero() { CheckStatus::Pass } else { CheckStatus::Fail };
+    let provider_status = if calls.is_zero() {
+        CheckStatus::Pass
+    } else {
+        CheckStatus::Fail
+    };
     let contract_checks = run_contract_suite(workspace, team, &run_id);
-    let contract_status = if contract_checks.iter().all(|check| check.status == CheckStatus::Pass) {
+    let contract_status = if contract_checks
+        .iter()
+        .all(|check| check.status == CheckStatus::Pass)
+    {
         CheckStatus::Pass
     } else {
         CheckStatus::Fail
@@ -54,12 +65,17 @@ pub fn run_comms_selftest(
     let receiver_binding = SelftestCheck {
         status: receiver_status,
         verifies: CheckKind::ReceiverBinding,
-        evidence: CheckEvidence::Binding { mismatches, details: binding },
+        evidence: CheckEvidence::Binding {
+            mismatches,
+            details: binding,
+        },
     };
     let contract_suite = SelftestCheck {
         status: contract_status,
         verifies: CheckKind::ContractSuite,
-        evidence: CheckEvidence::ContractSuite { checks: contract_checks },
+        evidence: CheckEvidence::ContractSuite {
+            checks: contract_checks,
+        },
     };
     let provider_sdk_calls = SelftestCheck {
         status: provider_status,
@@ -71,7 +87,11 @@ pub fn run_comms_selftest(
         && provider_sdk_calls.status == CheckStatus::Pass;
     Ok(SelftestReport {
         ok,
-        status: if ok { CheckStatus::Pass } else { CheckStatus::Fail },
+        status: if ok {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Fail
+        },
         run_id,
         scope: "binding_consistency".to_string(),
         boundary: "messaging".to_string(),
@@ -86,15 +106,17 @@ fn run_contract_suite(
     team: Option<&TeamKey>,
     run_id: &str,
 ) -> Vec<ContractSuiteCheck> {
-    let scratch = std::env::temp_dir().join(format!(
-        "ta-comms-contract-{run_id}-{}",
-        std::process::id()
-    ));
+    let scratch =
+        std::env::temp_dir().join(format!("ta-comms-contract-{run_id}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let mut checks = Vec::new();
     let mut scratch_store = match MessageStore::open(&scratch) {
         Ok(store) => {
-            checks.push(contract_check("message_store_schema", CheckStatus::Pass, None));
+            checks.push(contract_check(
+                "message_store_schema",
+                CheckStatus::Pass,
+                None,
+            ));
             Some(store)
         }
         Err(error) => {
@@ -127,7 +149,11 @@ fn run_contract_suite(
             let token = format!("[team-agent-token:{message_id}]");
             checks.push(contract_check(
                 "message_token_shape",
-                if rendered.ends_with(&token) { CheckStatus::Pass } else { CheckStatus::Fail },
+                if rendered.ends_with(&token) {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Fail
+                },
                 (!rendered.ends_with(&token)).then(|| "rendered token suffix missing".to_string()),
             ));
         }
@@ -195,10 +221,11 @@ fn run_contract_suite(
             );
             match outcome {
                 Ok(outcome) => {
-                    let actual_owner = outcome
-                        .message_id
-                        .as_deref()
-                        .and_then(|message_id| message_owner_team(store.db_path(), message_id).ok().flatten());
+                    let actual_owner = outcome.message_id.as_deref().and_then(|message_id| {
+                        message_owner_team(store.db_path(), message_id)
+                            .ok()
+                            .flatten()
+                    });
                     checks.push(contract_check(
                         "leader_projection_owner_team",
                         if actual_owner.as_deref() == Some(owner_team.as_str()) {
@@ -237,11 +264,7 @@ fn run_contract_suite(
     checks
 }
 
-fn contract_check(
-    name: &str,
-    status: CheckStatus,
-    reason: Option<String>,
-) -> ContractSuiteCheck {
+fn contract_check(name: &str, status: CheckStatus, reason: Option<String>) -> ContractSuiteCheck {
     ContractSuiteCheck {
         name: name.to_string(),
         status,
@@ -249,10 +272,7 @@ fn contract_check(
     }
 }
 
-fn message_owner_team(
-    db_path: &Path,
-    message_id: &str,
-) -> Result<Option<String>, MessagingError> {
+fn message_owner_team(db_path: &Path, message_id: &str) -> Result<Option<String>, MessagingError> {
     let conn = crate::db::schema::open_db(db_path)?;
     let owner = conn.query_row(
         "select owner_team_id from messages where message_id = ?1",

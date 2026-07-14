@@ -20,7 +20,11 @@ fn rest_001_refuses_leader_prefixed_worker_session() {
     // Bootstrap via quick-start so state.json has a realistic shape, then
     // poison session_name.
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start did not launch: {}", qs.stdout);
+    assert!(
+        quick_start_launched(&qs),
+        "quick-start did not launch: {}",
+        qs.stdout
+    );
 
     // Shutdown to remove the legit worker session before we poison state.
     let _ = run_ta(
@@ -37,35 +41,59 @@ fn rest_001_refuses_leader_prefixed_worker_session() {
     let leader_prefixed = "team-agent-leader-claude-x";
 
     // Poison session_name in both top-level state and the active team entry.
-    ws.inject_state("session_name", serde_json::Value::String(leader_prefixed.to_string()));
+    ws.inject_state(
+        "session_name",
+        serde_json::Value::String(leader_prefixed.to_string()),
+    );
     let teams = ws.read_state().get("teams").cloned().unwrap_or_default();
-    if let Some(active) = ws.read_state().get("active_team_key").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+    if let Some(active) = ws
+        .read_state()
+        .get("active_team_key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+    {
         if let Some(mut teams_obj) = teams.as_object().cloned() {
             if let Some(entry) = teams_obj.get_mut(&active).and_then(|v| v.as_object_mut()) {
-                entry.insert("session_name".to_string(), serde_json::Value::String(leader_prefixed.to_string()));
+                entry.insert(
+                    "session_name".to_string(),
+                    serde_json::Value::String(leader_prefixed.to_string()),
+                );
             }
             ws.inject_state("teams", serde_json::Value::Object(teams_obj));
         }
     }
 
-    let out = run_ta(
-        &ws,
-        &[
-            "restart",
-            ws.path().to_str().unwrap(),
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["restart", ws.path().to_str().unwrap(), "--json"]);
     let j = out.json();
 
     let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(true);
-    assert!(!ok, "restart must refuse when session_name is leader-prefixed; got {}", j);
+    assert!(
+        !ok,
+        "restart must refuse when session_name is leader-prefixed; got {}",
+        j
+    );
 
     // Status/error must surface a refusal-style label, not bare-green.
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let error = j.pointer("/error").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let status = j
+        .pointer("/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let error = j
+        .pointer("/error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let combined = format!("{status} {error}").to_lowercase();
-    let refusal_terms = ["refused", "leader", "topology", "atomicity", "worker_session", "blocked", "dirty"];
+    let refusal_terms = [
+        "refused",
+        "leader",
+        "topology",
+        "atomicity",
+        "worker_session",
+        "blocked",
+        "dirty",
+    ];
     assert!(
         refusal_terms.iter().any(|t| combined.contains(t)),
         "restart refusal JSON should mention dirty/refused/leader/topology; got status={status:?} error={error:?}"

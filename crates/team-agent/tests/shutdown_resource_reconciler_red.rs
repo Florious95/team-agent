@@ -31,9 +31,9 @@ use team_agent::event_log::EventLog;
 use team_agent::state::persist::save_runtime_state;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 #[test]
@@ -144,7 +144,9 @@ fn stale_coordinator_pid_file_does_not_create_false_kill_failed_when_process_is_
         .expect("shutdown should surface typed coordinator status");
 
     assert_ne!(
-        report.pointer("/coordinator/status").and_then(Value::as_str),
+        report
+            .pointer("/coordinator/status")
+            .and_then(Value::as_str),
         Some("kill_failed"),
         "W1 guard: a stale pid file whose process is already gone must be verified as not-live, \
          not reported as kill_failed; stale_pid={stale_pid} report={report}"
@@ -185,7 +187,9 @@ fn bare_shutdown_reports_shared_socket_tail_cleanup_before_result_and_event() {
     assert_json_strings_include(&report["killed_sessions"], tail.as_str());
     assert_json_strings_include(&report["spared_sessions"], leader.as_str());
     assert_eq!(
-        report.pointer("/coordinator/status").and_then(Value::as_str),
+        report
+            .pointer("/coordinator/status")
+            .and_then(Value::as_str),
         Some("missing")
     );
     assert_eq!(report.pointer("/residuals/sessions"), Some(&json!([])));
@@ -297,8 +301,15 @@ impl Transport for ShutdownTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
@@ -388,7 +399,12 @@ impl Drop for ProcessTree {
     }
 }
 
-fn pane_info(pane_id: &str, session: &SessionName, window: &str, pane_pid: Option<u32>) -> PaneInfo {
+fn pane_info(
+    pane_id: &str,
+    session: &SessionName,
+    window: &str,
+    pane_pid: Option<u32>,
+) -> PaneInfo {
     PaneInfo {
         pane_id: PaneId::new(pane_id),
         session: session.clone(),
@@ -503,16 +519,24 @@ fn nonexistent_pid() -> u32 {
 
 fn reap_process_tree(pid: u32) {
     let pid_arg = pid.to_string();
-    let _ = Command::new("pkill").args(["-TERM", "-P", &pid_arg]).status();
+    let _ = Command::new("pkill")
+        .args(["-TERM", "-P", &pid_arg])
+        .status();
     let _ = Command::new("kill").args(["-TERM", &pid_arg]).status();
     std::thread::sleep(Duration::from_millis(50));
-    let _ = Command::new("pkill").args(["-KILL", "-P", &pid_arg]).status();
+    let _ = Command::new("pkill")
+        .args(["-KILL", "-P", &pid_arg])
+        .status();
     let _ = Command::new("kill").args(["-KILL", &pid_arg]).status();
 }
 
 fn slice_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
-    let start_index = text.find(start).unwrap_or_else(|| panic!("missing start marker {start:?}"));
+    let start_index = text
+        .find(start)
+        .unwrap_or_else(|| panic!("missing start marker {start:?}"));
     let tail = &text[start_index..];
-    let end_index = tail.find(end).unwrap_or_else(|| panic!("missing end marker {end:?}"));
+    let end_index = tail
+        .find(end)
+        .unwrap_or_else(|| panic!("missing end marker {end:?}"));
     &tail[..end_index]
 }

@@ -17,8 +17,8 @@
 //! policy here mirrors it byte-for-byte (verified by `endpoint_priority_matches_backend`
 //! contract tests).
 
-use std::path::Path;
 use serde_json::Value;
+use std::path::Path;
 
 /// Which state field (or fallback) supplied the chosen endpoint.
 ///

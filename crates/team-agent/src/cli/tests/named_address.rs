@@ -337,8 +337,14 @@ fn resolve_leader_name_not_live() {
     assert_eq!(err.kind, NamedAddressErrorKind::LeaderNotAttached);
     let n38 = err.n38_message();
     assert!(n38.contains("attach-leader"), "{n38}");
-    assert!(!n38.contains("claim-leader"), "third-party copy must not suggest claim-leader: {n38}");
-    assert!(!n38.contains("takeover"), "third-party copy must not suggest takeover: {n38}");
+    assert!(
+        !n38.contains("claim-leader"),
+        "third-party copy must not suggest claim-leader: {n38}"
+    );
+    assert!(
+        !n38.contains("takeover"),
+        "third-party copy must not suggest takeover: {n38}"
+    );
     let _ = std::fs::remove_dir_all(&ws);
 }
 

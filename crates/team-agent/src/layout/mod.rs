@@ -20,15 +20,15 @@
 //!                 (Step 8)
 //!   * `worker_env` — worker_spawn_env whitelist + worker_spawn_cwd (Step 3)
 
-pub mod sessions;
 pub mod manager;
-pub mod worker_window_helpers;
-pub mod worker_env;
+pub mod overlay;
 pub mod placement;
 pub mod recovery;
-pub mod overlay;
 pub mod runtime_sessions;
+pub mod sessions;
 pub mod tmux_endpoint;
+pub mod worker_env;
+pub mod worker_window_helpers;
 
 pub use runtime_sessions::{
     LeaderLauncherSession, LeaderLauncherSessionError, RuntimeSessionAnomaly, RuntimeSessions,

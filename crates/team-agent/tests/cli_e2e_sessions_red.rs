@@ -63,7 +63,9 @@ fn e2e_fake_writes_spec_and_sends_task_message() {
     let value = json_output(result);
     assert_eq!(value["providers"]["fake"]["launch"]["ok"], json!(true));
     assert!(
-        value["providers"]["fake"]["send"]["message_id"].as_str().is_some(),
+        value["providers"]["fake"]["send"]["message_id"]
+            .as_str()
+            .is_some(),
         "fake e2e must delegate through send_message and expose message_id"
     );
     assert!(

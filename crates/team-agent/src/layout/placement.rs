@@ -42,6 +42,10 @@ pub struct WorkerSpawnTarget {
 
 impl WorkerSpawnTarget {
     pub fn new(session: SessionName, window: WindowName, action: WorkerSpawnAction) -> Self {
-        Self { session, window, action }
+        Self {
+            session,
+            window,
+            action,
+        }
     }
 }

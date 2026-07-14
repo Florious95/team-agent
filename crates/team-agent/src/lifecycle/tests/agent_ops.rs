@@ -1,8 +1,8 @@
-use super::*;
 use super::launch_spawn::{
     quick_start_team_dir, seed_healthy_coordinator, DELEG_ROLE_ALPHA, DELEG_ROLE_BRAVO,
     QS_VALID_ROLE,
 };
+use super::*;
 use crate::transport::test_support::OfflineTransport;
 
 /// A no-owner workspace (= self-contained team dir) with a compiled 2-agent spec (alpha, bravo) + state
@@ -10,7 +10,11 @@ use crate::transport::test_support::OfflineTransport;
 pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
     let ws = temp_ws().join("laneateam");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
-    std::fs::write(ws.join("TEAM.md"), "---\nname: laneateam\nobjective: Lane A probe.\nprovider: codex\n---\n\nteam.\n").unwrap();
+    std::fs::write(
+        ws.join("TEAM.md"),
+        "---\nname: laneateam\nobjective: Lane A probe.\nprovider: codex\n---\n\nteam.\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("agents").join("alpha.md"), DELEG_ROLE_ALPHA).unwrap();
     std::fs::write(ws.join("agents").join("bravo.md"), DELEG_ROLE_BRAVO).unwrap();
     let spec = crate::compiler::compile_team(&ws).expect("compile lane-A team");
@@ -21,9 +25,18 @@ pub(super) fn lanea_team_ws(status: &str) -> PathBuf {
         .replace("default_assignee: \"alpha\"", "default_assignee: \"bravo\"")
         .replace("assign_to: \"alpha\"", "assign_to: \"bravo\"")
         .replace("assignee: \"alpha\"", "assignee: \"bravo\"");
-    assert!(!yaml.contains("default_assignee: \"alpha\""), "fixture unroute: default_assignee still alpha");
-    assert!(!yaml.contains("assign_to: \"alpha\""), "fixture unroute: a routing rule still assign_to alpha");
-    assert!(!yaml.contains("assignee: \"alpha\""), "fixture unroute: task still assignee alpha");
+    assert!(
+        !yaml.contains("default_assignee: \"alpha\""),
+        "fixture unroute: default_assignee still alpha"
+    );
+    assert!(
+        !yaml.contains("assign_to: \"alpha\""),
+        "fixture unroute: a routing rule still assign_to alpha"
+    );
+    assert!(
+        !yaml.contains("assignee: \"alpha\""),
+        "fixture unroute: task still assignee alpha"
+    );
     std::fs::write(ws.join("team.spec.yaml"), yaml).unwrap();
     crate::state::persist::save_runtime_state(
         &ws,
@@ -90,7 +103,10 @@ fn lanea_stop_agent_unknown_agent_is_unknown_worker_not_owner_refused() {
 #[test]
 fn lanea_fork_agent_unknown_source_is_unknown_worker_before_session_check() {
     let ws = lanea_team_ws("stopped");
-    let text = format!("{:?}", fork_agent(&ws, &aid("ghost"), &aid("newfork"), None, false, None));
+    let text = format!(
+        "{:?}",
+        fork_agent(&ws, &aid("ghost"), &aid("newfork"), None, false, None)
+    );
     assert!(
         text.contains("unknown worker"),
         "fork_agent must reject an UNKNOWN source as 'unknown worker agent id: ghost' BEFORE the session-id \
@@ -105,7 +121,10 @@ fn lanea_fork_agent_unknown_source_is_unknown_worker_before_session_check() {
 fn lanea_fork_agent_duplicate_target_is_already_exists_before_session_check() {
     let ws = lanea_team_ws("stopped");
     // target 'bravo' already exists in the spec -> duplicate; source 'alpha' exists (its session_id is irrelevant).
-    let text = format!("{:?}", fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None));
+    let text = format!(
+        "{:?}",
+        fork_agent(&ws, &aid("alpha"), &aid("bravo"), None, false, None)
+    );
     assert!(
         text.contains("already exists"),
         "fork_agent must reject a DUPLICATE target 'bravo' as 'agent id already exists' BEFORE the session-id \
@@ -125,8 +144,14 @@ fn lanea_stop_agent_kills_window_and_marks_stopped() {
     let ws = lanea_team_ws("running");
     let _ = stop_agent(&ws, &aid("alpha"), None); // real machine: tmux kill-window team-laneateam:alpha
     let state = crate::state::persist::load_runtime_state(&ws).expect("load state");
-    let status = state.pointer("/agents/alpha/status").and_then(serde_json::Value::as_str);
-    assert_eq!(status, Some("stopped"), "stop_agent must mark agents[alpha].status='stopped' after killing the window");
+    let status = state
+        .pointer("/agents/alpha/status")
+        .and_then(serde_json::Value::as_str);
+    assert_eq!(
+        status,
+        Some("stopped"),
+        "stop_agent must mark agents[alpha].status='stopped' after killing the window"
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -145,8 +170,10 @@ fn lanea_stop_agent_kills_window_and_marks_stopped() {
 #[test]
 fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     let team_dir = quick_start_team_dir(QS_VALID_ROLE); // <base>/teamdir (agents/implementer.md)
-    let workspace = team_dir.parent().expect("team_workspace(team_dir) = parent"); // the RUNNING team's workspace
-    // a RUNNING team already in the session (roster = ['w1'], session_name set).
+    let workspace = team_dir
+        .parent()
+        .expect("team_workspace(team_dir) = parent"); // the RUNNING team's workspace
+                                                      // a RUNNING team already in the session (roster = ['w1'], session_name set).
     crate::state::persist::save_runtime_state(
         workspace,
         &json!({
@@ -156,7 +183,7 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     )
     .unwrap();
     seed_healthy_coordinator(workspace); // start_coordinator -> AlreadyRunning (no real daemon)
-    // the new agent's role file, OUTSIDE agents/ so it's not a duplicate of an existing agent.
+                                         // the new agent's role file, OUTSIDE agents/ so it's not a duplicate of an existing agent.
     let role_file = team_dir.join("w2-role.md");
     std::fs::write(
         &role_file,
@@ -165,7 +192,14 @@ fn add_agent_joins_w2_into_running_roster_and_existing_session() {
     .unwrap();
     let transport = OfflineTransport::new().with_session_present(true);
 
-    let _ = add_agent_with_transport(team_dir.as_path(), &aid("w2"), &role_file, false, None, &transport);
+    let _ = add_agent_with_transport(
+        team_dir.as_path(),
+        &aid("w2"),
+        &role_file,
+        false,
+        None,
+        &transport,
+    );
 
     // (1) [load-bearing] the RUNNING roster (team_workspace) must now contain w2.
     let state = crate::state::persist::load_runtime_state(workspace).expect("load running state");
@@ -218,11 +252,11 @@ impl crate::tmux_backend::CommandRunner for SocketRecordingRunner {
 fn socket_for_workspace(workspace: &std::path::Path) -> String {
     use crate::transport::Transport as _;
     let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let runner = SocketRecordingRunner { recorded: std::sync::Arc::clone(&recorded) };
-    let backend = crate::tmux_backend::TmuxBackend::with_runner_for_workspace(
-        Box::new(runner),
-        workspace,
-    );
+    let runner = SocketRecordingRunner {
+        recorded: std::sync::Arc::clone(&recorded),
+    };
+    let backend =
+        crate::tmux_backend::TmuxBackend::with_runner_for_workspace(Box::new(runner), workspace);
     backend.has_session(&sess("team-implteam")).unwrap();
     let socket = recorded.lock().unwrap()[0][2].clone();
     socket
@@ -257,7 +291,10 @@ fn bug_a_team_dir_lifecycle_socket_matches_daemon_run_workspace_socket() {
 fn bug_a_stop_agent_team_dir_input_kills_existing_window_real_machine() {
     let team_dir = quick_start_team_dir(QS_VALID_ROLE);
     let report = stop_agent(&team_dir, &aid("w1"), None).expect("real stop-agent");
-    assert!(report.stopped, "existing worker window must be killed, not silently reported absent");
+    assert!(
+        report.stopped,
+        "existing worker window must be killed, not silently reported absent"
+    );
 }
 
 struct EnvVarGuard {
@@ -467,11 +504,16 @@ fn e27_stop_agent_uses_attached_explicit_state_socket() {
 
     let report = stop_agent(&ws, &aid("alpha"), None).expect("stop-agent");
 
-    assert!(report.stopped, "attached explicit-socket worker should be stopped");
+    assert!(
+        report.stopped,
+        "attached explicit-socket worker should be stopped"
+    );
     assert_only_expected_socket_used(&shim.log, endpoint);
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_eq!(
-        state.pointer("/agents/alpha/status").and_then(serde_json::Value::as_str),
+        state
+            .pointer("/agents/alpha/status")
+            .and_then(serde_json::Value::as_str),
         Some("stopped")
     );
 }
@@ -494,14 +536,19 @@ fn e27_reset_agent_uses_attached_explicit_state_socket_for_stop_and_spawn() {
     );
     assert_only_expected_socket_used(&shim.log, endpoint);
     let raw = std::fs::read_to_string(&shim.log).unwrap();
-    assert!(raw.contains("kill-pane"), "reset must stop the old pane first; argv log:\n{raw}");
+    assert!(
+        raw.contains("kill-pane"),
+        "reset must stop the old pane first; argv log:\n{raw}"
+    );
     assert!(
         raw.contains("new-window") || raw.contains("new-session"),
         "reset must respawn the worker through the same endpoint; argv log:\n{raw}"
     );
     let state = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert_ne!(
-        state.pointer("/agents/alpha/session_id").and_then(serde_json::Value::as_str),
+        state
+            .pointer("/agents/alpha/session_id")
+            .and_then(serde_json::Value::as_str),
         Some("old-session"),
         "discard-session must not preserve the old session id"
     );
@@ -553,10 +600,16 @@ fn e27_stop_agent_expands_short_state_socket_name() {
 // Read every events.jsonl the verb could write to (run-workspace resolves to either the team dir or its
 // parent; read both so the lock is robust to that resolution).
 fn lifecycle_events(ws: &std::path::Path) -> Vec<serde_json::Value> {
-    let mut out = crate::event_log::EventLog::new(ws).tail(0).unwrap_or_default();
+    let mut out = crate::event_log::EventLog::new(ws)
+        .tail(0)
+        .unwrap_or_default();
     if let Ok(parent) = crate::model::paths::team_workspace(ws) {
         if parent != ws {
-            out.extend(crate::event_log::EventLog::new(&parent).tail(0).unwrap_or_default());
+            out.extend(
+                crate::event_log::EventLog::new(&parent)
+                    .tail(0)
+                    .unwrap_or_default(),
+            );
         }
     }
     out
@@ -565,16 +618,30 @@ fn lifecycle_events(ws: &std::path::Path) -> Vec<serde_json::Value> {
 fn payload_keys(event: &serde_json::Value) -> std::collections::BTreeSet<String> {
     event
         .as_object()
-        .map(|o| o.keys().filter(|k| *k != "ts" && *k != "event").cloned().collect())
+        .map(|o| {
+            o.keys()
+                .filter(|k| *k != "ts" && *k != "event")
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn find_event<'a>(events: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
-    events.iter().find(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
+    events
+        .iter()
+        .find(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
 }
 
 fn names(events: &[serde_json::Value]) -> Vec<String> {
-    events.iter().filter_map(|e| e.get("event").and_then(|v| v.as_str()).map(ToString::to_string)).collect()
+    events
+        .iter()
+        .filter_map(|e| {
+            e.get("event")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        })
+        .collect()
 }
 
 // remove-agent — golden agents.py:66-147 writes lifecycle.remove_step_completed (per step) +
@@ -590,30 +657,62 @@ fn remove_agent_emits_golden_lifecycle_event_payloads() {
         "remove_agent must write `remove_agent.complete` (golden agents.py:140); Rust restart/remove.rs emits NO \
          events. events seen: {:?}", names(&events)
     ));
-    let expected: std::collections::BTreeSet<String> =
-        ["agent_id", "from_spec", "force", "stopped", "role_file_removed", "cleared_locations"]
-            .iter().map(ToString::to_string).collect();
-    assert_eq!(payload_keys(complete), expected,
-        "remove_agent.complete payload key set must match golden agents.py:140-147; got {:?}", payload_keys(complete));
-    assert_eq!(complete.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
-    assert_eq!(complete.get("from_spec").and_then(|v| v.as_bool()), Some(true));
+    let expected: std::collections::BTreeSet<String> = [
+        "agent_id",
+        "from_spec",
+        "force",
+        "stopped",
+        "role_file_removed",
+        "cleared_locations",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        payload_keys(complete),
+        expected,
+        "remove_agent.complete payload key set must match golden agents.py:140-147; got {:?}",
+        payload_keys(complete)
+    );
+    assert_eq!(
+        complete.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        complete.get("from_spec").and_then(|v| v.as_bool()),
+        Some(true)
+    );
     assert_eq!(complete.get("force").and_then(|v| v.as_bool()), Some(true));
 
     // lifecycle.remove_step_completed (golden agents.py:66-72) — fired per step; key set {agent_id, step,
     // resource}; the workspace_state + agent_health steps fire for a stopped from_spec remove.
-    let step_events: Vec<&serde_json::Value> = events.iter()
-        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("lifecycle.remove_step_completed")).collect();
-    let steps: Vec<&str> = step_events.iter().filter_map(|e| e.get("step").and_then(|v| v.as_str())).collect();
+    let step_events: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| {
+            e.get("event").and_then(|v| v.as_str()) == Some("lifecycle.remove_step_completed")
+        })
+        .collect();
+    let steps: Vec<&str> = step_events
+        .iter()
+        .filter_map(|e| e.get("step").and_then(|v| v.as_str()))
+        .collect();
     assert!(steps.contains(&"workspace_state") && steps.contains(&"agent_health"),
         "remove_agent must write lifecycle.remove_step_completed for each step (golden agents.py:86,109); got steps {steps:?}");
-    let ws_step = step_events.iter().find(|e| e.get("step").and_then(|v| v.as_str()) == Some("workspace_state"))
+    let ws_step = step_events
+        .iter()
+        .find(|e| e.get("step").and_then(|v| v.as_str()) == Some("workspace_state"))
         .expect("the workspace_state step event");
-    let expected_step: std::collections::BTreeSet<String> =
-        ["agent_id", "step", "resource"].iter().map(ToString::to_string).collect();
+    let expected_step: std::collections::BTreeSet<String> = ["agent_id", "step", "resource"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(payload_keys(ws_step), expected_step,
         "lifecycle.remove_step_completed (non-stop step) payload must be EXACTLY {{agent_id, step, resource}} (golden agents.py:68-70)");
-    assert_eq!(ws_step.get("resource").and_then(|v| v.as_str()), Some("state.json:agents"),
-        "workspace_state step resource == golden 'state.json:agents' (agents.py:82)");
+    assert_eq!(
+        ws_step.get("resource").and_then(|v| v.as_str()),
+        Some("state.json:agents"),
+        "workspace_state step resource == golden 'state.json:agents' (agents.py:82)"
+    );
 }
 
 // reset-agent — golden operations.py:123/132 writes discard.session_tombstone {agent_id,
@@ -627,7 +726,14 @@ fn reset_agent_emits_golden_lifecycle_event_payloads() {
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
 
     let transport = OfflineTransport::new().with_session_present(true);
-    let _ = crate::lifecycle::reset_agent_with_transport(&ws, &aid("alpha"), true, false, None, &transport);
+    let _ = crate::lifecycle::reset_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        true,
+        false,
+        None,
+        &transport,
+    );
     let events = lifecycle_events(&ws);
 
     // discard.session_tombstone (golden operations.py:123) — EXACT key set + the discarded session id.
@@ -635,23 +741,38 @@ fn reset_agent_emits_golden_lifecycle_event_payloads() {
         "reset_agent must write `discard.session_tombstone` (golden operations.py:123); Rust restart/agent.rs emits \
          NO events. events seen: {:?}", names(&events)
     ));
-    let expected_tomb: std::collections::BTreeSet<String> =
-        ["agent_id", "discarded_session_id"].iter().map(ToString::to_string).collect();
+    let expected_tomb: std::collections::BTreeSet<String> = ["agent_id", "discarded_session_id"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(payload_keys(tombstone), expected_tomb,
         "discard.session_tombstone payload key set must be EXACTLY {{agent_id, discarded_session_id}} (golden operations.py:123)");
-    assert_eq!(tombstone.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
-    assert_eq!(tombstone.get("discarded_session_id").and_then(|v| v.as_str()), Some("S-alpha"),
-        "discarded_session_id == the agent's stored session_id (golden operations.py:118)");
+    assert_eq!(
+        tombstone.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        tombstone
+            .get("discarded_session_id")
+            .and_then(|v| v.as_str()),
+        Some("S-alpha"),
+        "discarded_session_id == the agent's stored session_id (golden operations.py:118)"
+    );
 
     // reset_agent.complete (golden operations.py:132) — EXACT key set {agent_id, stopped, started}.
     let complete = find_event(&events, "reset_agent.complete").unwrap_or_else(|| panic!(
         "reset_agent must write `reset_agent.complete` (golden operations.py:132); events seen: {:?}", names(&events)
     ));
-    let expected_complete: std::collections::BTreeSet<String> =
-        ["agent_id", "stopped", "started"].iter().map(ToString::to_string).collect();
+    let expected_complete: std::collections::BTreeSet<String> = ["agent_id", "stopped", "started"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(payload_keys(complete), expected_complete,
         "reset_agent.complete payload key set must be EXACTLY {{agent_id, stopped, started}} (golden operations.py:132)");
-    assert_eq!(complete.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
+    assert_eq!(
+        complete.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
 }
 
 // 0.4.10+ reset duplicate-window fix RED tests
@@ -666,7 +787,7 @@ fn reset_agent_emits_golden_lifecycle_event_payloads() {
 /// kills by pane_id, returns stopped=true. Reset proceeds normally.
 #[test]
 fn reset_agent_stale_pane_with_same_role_residue_kills_by_pane_id() {
-    use crate::transport::{PaneInfo, PaneId as PaneIdT, SessionName, WindowName};
+    use crate::transport::{PaneId as PaneIdT, PaneInfo, SessionName, WindowName};
     let ws = lanea_team_ws("running");
     let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
     state["agents"]["alpha"]["pane_id"] = json!("%STALE");
@@ -713,8 +834,8 @@ fn reset_agent_stale_pane_with_same_role_residue_kills_by_pane_id() {
     );
     // The stop_complete event must report stopped=true (residual was killed).
     let events = lifecycle_events(&ws);
-    let stop_complete = find_event(&events, "stop_agent.complete")
-        .expect("stop_agent.complete must be emitted");
+    let stop_complete =
+        find_event(&events, "stop_agent.complete").expect("stop_agent.complete must be emitted");
     assert_eq!(
         stop_complete.get("stopped").and_then(|v| v.as_bool()),
         Some(true),
@@ -756,8 +877,7 @@ fn reset_agent_stop_not_proven_grep_guard_hard_gate_wired() {
         "gate must run only when stop.stopped=false (the dangerous case)"
     );
     assert!(
-        contents.contains("list_same_role_panes")
-            && contents.contains("is_per_agent_window"),
+        contents.contains("list_same_role_panes") && contents.contains("is_per_agent_window"),
         "stop_agent_at_paths must enumerate same-role panes via the new helpers"
     );
 }
@@ -805,12 +925,7 @@ fn reset_agent_already_absent_can_start() {
 fn stop_agent_already_absent_still_returns_stopped_false() {
     let ws = lanea_team_ws("stopped");
     let transport = OfflineTransport::new().with_session_present(true);
-    let result = crate::lifecycle::stop_agent_with_transport(
-        &ws,
-        &aid("alpha"),
-        None,
-        &transport,
-    );
+    let result = crate::lifecycle::stop_agent_with_transport(&ws, &aid("alpha"), None, &transport);
     let report = result.expect("stop_agent must return Ok for absent agent");
     assert!(
         !report.stopped,
@@ -832,11 +947,16 @@ fn stop_agent_emits_golden_complete_event_payload() {
         "stop_agent must write `stop_agent.complete` (golden operations.py:98); Rust restart/agent.rs emits NO \
          events for stop. events seen: {:?}", names(&events)
     ));
-    let expected: std::collections::BTreeSet<String> =
-        ["agent_id", "target", "stopped"].iter().map(ToString::to_string).collect();
+    let expected: std::collections::BTreeSet<String> = ["agent_id", "target", "stopped"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(payload_keys(complete), expected,
         "stop_agent.complete payload key set must be EXACTLY {{agent_id, target, stopped}} (golden operations.py:98)");
-    assert_eq!(complete.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
+    assert_eq!(
+        complete.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
 }
 
 // start-agent — golden start.py:225 writes start_agent.agent_start on the spawn path (9 keys). Rust emits
@@ -845,7 +965,15 @@ fn stop_agent_emits_golden_complete_event_payload() {
 fn start_agent_emits_golden_agent_start_event_payload() {
     let ws = lanea_team_ws("stopped"); // not running -> fresh spawn path (not noop)
     let transport = OfflineTransport::new();
-    let _ = crate::lifecycle::start_agent_with_transport(&ws, &aid("alpha"), true, false, true, None, &transport);
+    let _ = crate::lifecycle::start_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        true,
+        false,
+        true,
+        None,
+        &transport,
+    );
     let events = lifecycle_events(&ws);
 
     let agent_start = find_event(&events, "start_agent.agent_start").unwrap_or_else(|| panic!(
@@ -853,14 +981,33 @@ fn start_agent_emits_golden_agent_start_event_payload() {
          start_agent.noop. events seen: {:?}", names(&events)
     ));
     let expected: std::collections::BTreeSet<String> = [
-        "agent_id", "provider", "start_mode", "session_id", "session", "window",
-        "tmux_start_mode", "command", "mcp_config",
-    ].iter().map(ToString::to_string).collect();
-    assert_eq!(payload_keys(agent_start), expected,
-        "start_agent.agent_start payload key set must match golden start.py:225-235 (9 keys)");
-    assert_eq!(agent_start.get("agent_id").and_then(|v| v.as_str()), Some("alpha"));
-    assert_eq!(agent_start.get("window").and_then(|v| v.as_str()), Some("alpha"),
-        "agent_start.window == agent_id (golden start.py:232)");
+        "agent_id",
+        "provider",
+        "start_mode",
+        "session_id",
+        "session",
+        "window",
+        "tmux_start_mode",
+        "command",
+        "mcp_config",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+    assert_eq!(
+        payload_keys(agent_start),
+        expected,
+        "start_agent.agent_start payload key set must match golden start.py:225-235 (9 keys)"
+    );
+    assert_eq!(
+        agent_start.get("agent_id").and_then(|v| v.as_str()),
+        Some("alpha")
+    );
+    assert_eq!(
+        agent_start.get("window").and_then(|v| v.as_str()),
+        Some("alpha"),
+        "agent_start.window == agent_id (golden start.py:232)"
+    );
 }
 
 // restart — golden orchestration.py:507 writes ONE restart.resume_decision per non-paused worker
@@ -872,16 +1019,36 @@ fn restart_emits_golden_resume_decision_event_payload() {
     let _ = crate::lifecycle::restart_with_transport(&ws, true, None, &transport);
     let events = lifecycle_events(&ws);
 
-    let decisions: Vec<&serde_json::Value> = events.iter()
-        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("restart.resume_decision")).collect();
-    assert!(!decisions.is_empty(), "restart must write one `restart.resume_decision` per non-paused worker \
-        (golden orchestration.py:128/507); Rust emits NO restart events. events seen: {:?}", names(&events));
+    let decisions: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("restart.resume_decision"))
+        .collect();
+    assert!(
+        !decisions.is_empty(),
+        "restart must write one `restart.resume_decision` per non-paused worker \
+        (golden orchestration.py:128/507); Rust emits NO restart events. events seen: {:?}",
+        names(&events)
+    );
     let expected: std::collections::BTreeSet<String> = [
-        "worker_id", "has_first_send_at", "has_session_id", "allow_fresh", "decision", "first_send_at", "session_id",
-    ].iter().map(ToString::to_string).collect();
+        "worker_id",
+        "has_first_send_at",
+        "has_session_id",
+        "allow_fresh",
+        "decision",
+        "first_send_at",
+        "session_id",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
     assert_eq!(payload_keys(decisions[0]), expected,
         "restart.resume_decision payload key set must match golden orchestration.py:507-514 (7 keys, `worker_id`)");
-    let worker_ids: Vec<&str> = decisions.iter().filter_map(|e| e.get("worker_id").and_then(|v| v.as_str())).collect();
-    assert!(worker_ids.contains(&"alpha") || worker_ids.contains(&"bravo"),
-        "restart.resume_decision.worker_id must name a real worker (golden); got {worker_ids:?}");
+    let worker_ids: Vec<&str> = decisions
+        .iter()
+        .filter_map(|e| e.get("worker_id").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        worker_ids.contains(&"alpha") || worker_ids.contains(&"bravo"),
+        "restart.resume_decision.worker_id must name a real worker (golden); got {worker_ids:?}"
+    );
 }

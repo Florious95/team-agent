@@ -177,7 +177,9 @@ impl OfflineTransport {
         command: impl Into<String>,
     ) -> Self {
         self.with_state(|state| {
-            state.pane_current_commands.insert(pane_id.into(), command.into());
+            state
+                .pane_current_commands
+                .insert(pane_id.into(), command.into());
         });
         self
     }
@@ -252,7 +254,13 @@ impl OfflineTransport {
     }
 
     pub fn spawn_cwd_records(&self) -> Vec<std::path::PathBuf> {
-        self.with_state(|state| state.spawns.iter().map(|record| record.cwd.clone()).collect())
+        self.with_state(|state| {
+            state
+                .spawns
+                .iter()
+                .map(|record| record.cwd.clone())
+                .collect()
+        })
     }
 
     pub fn pane_title_records(&self) -> Vec<(String, String, String, String)> {
@@ -451,11 +459,7 @@ impl Transport for OfflineTransport {
         Ok(CapturedText { text, range })
     }
 
-    fn query(
-        &self,
-        target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         self.record("query");
         if !matches!(field, PaneField::PaneCurrentCommand) {
             return Ok(None);
@@ -464,9 +468,7 @@ impl Transport for OfflineTransport {
             Target::Pane(p) => p.as_str().to_string(),
             Target::SessionWindow { .. } => return Ok(None),
         };
-        Ok(self.with_state(|state| {
-            state.pane_current_commands.get(&pane_id).cloned()
-        }))
+        Ok(self.with_state(|state| state.pane_current_commands.get(&pane_id).cloned()))
     }
 
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
@@ -509,14 +511,15 @@ impl Transport for OfflineTransport {
         }))
     }
 
-    fn list_windows(
-        &self,
-        _session: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError> {
+    fn list_windows(&self, _session: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(self.with_state(|state| {
             state.calls.push("list_windows");
             if state.windows.is_empty() {
-                state.targets.iter().filter_map(|pane| pane.window_name.clone()).collect()
+                state
+                    .targets
+                    .iter()
+                    .filter_map(|pane| pane.window_name.clone())
+                    .collect()
             } else {
                 state.windows.clone()
             }
@@ -568,10 +571,7 @@ impl Transport for OfflineTransport {
             if let Target::SessionWindow { session, window } = target {
                 state.targets.retain(|pane| {
                     pane.session != *session
-                        || pane
-                            .window_name
-                            .as_ref()
-                            .is_none_or(|name| name != window)
+                        || pane.window_name.as_ref().is_none_or(|name| name != window)
                 });
                 state.windows.retain(|name| name != window);
             }
@@ -591,10 +591,7 @@ impl Transport for OfflineTransport {
         Ok(())
     }
 
-    fn attach_session(
-        &self,
-        _session: &SessionName,
-    ) -> Result<AttachOutcome, TransportError> {
+    fn attach_session(&self, _session: &SessionName) -> Result<AttachOutcome, TransportError> {
         self.record("attach_session");
         Ok(AttachOutcome::Attached)
     }

@@ -46,7 +46,11 @@ fn stat_002_status_stopped_team() {
             "--detail",
         ],
     );
-    assert!(detail.is_success(), "status --detail stderr={}", detail.stderr);
+    assert!(
+        detail.is_success(),
+        "status --detail stderr={}",
+        detail.stderr
+    );
     let d = detail.json();
     assert_json_field_eq_bool(&d, "/tmux_session_present", false);
     assert_json_field_eq_str(&d, "/coordinator/status", "missing");

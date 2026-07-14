@@ -86,7 +86,10 @@ fn perf6_grep_snapshot_consumers_take_table_param() {
     let mut failures = Vec::new();
     let pgids = fn_body(&src, "fn process_pgids");
     if pgids.contains("process_table()") {
-        failures.push("C-①-4: process_pgids re-fetches process_table() instead of taking the entry snapshot".to_string());
+        failures.push(
+            "C-①-4: process_pgids re-fetches process_table() instead of taking the entry snapshot"
+                .to_string(),
+        );
     }
     let tree = fn_body(&src, "fn process_tree_pids");
     if tree.contains("process_parent_pairs()") {
@@ -144,10 +147,13 @@ fn perf6_grep_term_before_kill_sequence() {
 fn perf6_grace_window_slow_cleanup_not_killed() {
     let ws = tmp_ws("grace");
     let marker = ws.join("graceful-exit.marker");
-    let pid = spawn_detached_trap_loop(&ws, &format!(
-        "trap 'sleep 0.1; echo graceful > {}; exit 0' TERM; while :; do sleep 0.05; done",
-        marker.to_string_lossy()
-    ));
+    let pid = spawn_detached_trap_loop(
+        &ws,
+        &format!(
+            "trap 'sleep 0.1; echo graceful > {}; exit 0' TERM; while :; do sleep 0.05; done",
+            marker.to_string_lossy()
+        ),
+    );
     seed_state_with_pids(&ws, &[pid]);
 
     lifecycle_port::shutdown(&ws, false, None).expect("bare shutdown should succeed");
@@ -167,10 +173,13 @@ fn perf6_grace_window_slow_cleanup_not_killed() {
 fn perf6_mixed_fast_slow_kill_semantics() {
     let ws = tmp_ws("mixed");
     let fast_marker = ws.join("fast-exit.marker");
-    let fast = spawn_detached_trap_loop(&ws, &format!(
-        "trap 'echo fast > {}; exit 0' TERM; while :; do sleep 0.02; done",
-        fast_marker.to_string_lossy()
-    ));
+    let fast = spawn_detached_trap_loop(
+        &ws,
+        &format!(
+            "trap 'echo fast > {}; exit 0' TERM; while :; do sleep 0.02; done",
+            fast_marker.to_string_lossy()
+        ),
+    );
     let stubborn = spawn_detached_trap_loop(&ws, "trap '' TERM; while :; do sleep 0.05; done");
     seed_state_with_pids(&ws, &[fast, stubborn]);
 
@@ -178,13 +187,17 @@ fn perf6_mixed_fast_slow_kill_semantics() {
 
     let mut failures = Vec::new();
     if !wait_until(3_000, || fast_marker.exists()) {
-        failures.push("C-②-8: the fast pid must exit via its TERM handler (marker missing)".to_string());
+        failures.push(
+            "C-②-8: the fast pid must exit via its TERM handler (marker missing)".to_string(),
+        );
     }
     if !wait_until(3_000, || !pid_alive(stubborn)) {
         failures.push(format!(
             "C-②-8: the TERM-ignoring pid {stubborn} must be escalated to SIGKILL and be gone"
         ));
-        let _ = std::process::Command::new("kill").args(["-9", &stubborn.to_string()]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &stubborn.to_string()])
+            .status();
     }
     assert!(
         failures.is_empty(),
@@ -210,9 +223,7 @@ fn swallow1_broken_ps_probe_is_observable_not_silent() {
 
     let events = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap_or_default();
     let mut failures = Vec::new();
-    let probe_event = events
-        .lines()
-        .find(|line| line.contains("probe_failed"));
+    let probe_event = events.lines().find(|line| line.contains("probe_failed"));
     match probe_event {
         None => failures.push(
             "batch1: ps failure produced NO probe_failed event — the empty process table \
@@ -257,8 +268,14 @@ impl Drop for ChildGuard {
 /// State with two reapable test-owned `sleep` children registered as pane pids
 /// (the real-machine agent row shape: status/provider/window/pane_pid/spawn_cwd).
 fn seed_reapable_state(ws: &Path) -> ChildGuard {
-    let a = std::process::Command::new("sleep").arg("300").spawn().unwrap();
-    let b = std::process::Command::new("sleep").arg("300").spawn().unwrap();
+    let a = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    let b = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
     seed_state_with_pids(ws, &[a.id(), b.id()]);
     ChildGuard(vec![a, b])
 }
@@ -321,7 +338,10 @@ fn install_shim(ws: &Path, script: &str) -> PathGuard {
             .unwrap();
     }
     let old_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", shim_dir.to_string_lossy(), old_path));
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", shim_dir.to_string_lossy(), old_path),
+    );
     PathGuard { old_path }
 }
 
@@ -336,10 +356,11 @@ fn install_counting_ps_shim(ws: &Path, count_file: &Path) -> PathGuard {
 
 /// `ps` shim that always fails (probe outage injection).
 fn install_failing_ps_shim(ws: &Path) -> PathGuard {
-    install_shim(ws, "#!/bin/sh\necho 'ps: injected probe failure' >&2\nexit 1\n")
+    install_shim(
+        ws,
+        "#!/bin/sh\necho 'ps: injected probe failure' >&2\nexit 1\n",
+    )
 }
-
-
 
 /// Double-hop detach (`sh -c '... & echo $!'`): the loop process is NOT a child of the
 /// test process, so the in-process shutdown's waitpid cannot consume its status and
@@ -351,7 +372,10 @@ fn spawn_detached_trap_loop(ws: &Path, body: &str) -> u32 {
         .current_dir(ws)
         .output()
         .expect("spawn detached loop");
-    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().expect("pid")
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .expect("pid")
 }
 
 fn pid_alive(pid: u32) -> bool {

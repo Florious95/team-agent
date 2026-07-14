@@ -26,7 +26,9 @@ fn lnch_001_quick_start_basic() {
     assert!(
         quick_start_launched(&out),
         "quick-start did not launch the team. exit={} stdout={} stderr={}",
-        out.exit_code, out.stdout, out.stderr
+        out.exit_code,
+        out.stdout,
+        out.stderr
     );
     let j = out.json();
     // The session name and worker spawn must be set even in degraded mode.

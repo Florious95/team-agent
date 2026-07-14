@@ -884,7 +884,8 @@ fn e5_restart_missing_role_docs_refuses_and_preserves_old_spec() {
 
 #[test]
 fn e5_restart_missing_role_docs_refuses_even_after_endpoint_convergence_marker() {
-    let _harness_gate = EnvVarGuard::unset("TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK");
+    let _harness_gate =
+        EnvVarGuard::unset("TEAM_AGENT_TEST_ENDPOINT_CONVERGENCE_HARNESS_SPEC_FALLBACK");
     let ws = restart_ws_two_resumable_workers();
     let prev_spec = crate::model::paths::runtime_spec_path(&ws, "restartteam");
     std::fs::create_dir_all(prev_spec.parent().unwrap()).unwrap();

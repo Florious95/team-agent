@@ -16,12 +16,12 @@ pub mod named_pipe_client;
 pub mod protocol;
 pub mod shim;
 
+pub use named_pipe_client::pipe_name_for;
+#[cfg(windows)]
+pub use named_pipe_client::NamedPipeClient;
 pub use protocol::{
     read_frame, read_request, read_response, write_frame, write_request, write_response,
     CaptureRequest, CaptureResult, HelloResult, InjectRequest, Op, ProtocolError, Request,
     Response, SpawnRequest, SpawnResult, MAX_FRAME_BYTES, PROTOCOL_SCHEMA,
 };
 pub use shim::{FakePaneRuntime, LocalShimClient, PaneEntry, PaneRuntime, PipeClient, Shim};
-pub use named_pipe_client::pipe_name_for;
-#[cfg(windows)]
-pub use named_pipe_client::NamedPipeClient;

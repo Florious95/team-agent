@@ -20,7 +20,7 @@ use rusqlite::params;
 use serde_json::{json, Value};
 use serial_test::serial;
 use team_agent::cli::{
-    cmd_collect_for_team, cmd_status_for_team, CollectArgs, CmdOutput, StatusArgs,
+    cmd_collect_for_team, cmd_status_for_team, CmdOutput, CollectArgs, StatusArgs,
 };
 use team_agent::db::schema::{initialize_schema, open_db, table_layout, SCHEMA_VERSION};
 use team_agent::event_log::EventLog;
@@ -32,9 +32,9 @@ use team_agent::state::persist::save_runtime_state;
 use team_agent::state::selector::{resolve_active_team, SelectorMode};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 const TEAM_KEY: &str = "upgrade-key";
@@ -48,9 +48,12 @@ fn upgrade_0211_state_team_key_runtime_key_not_spec_name() {
     fixture.write_spec(TEAM_KEY, LEGACY_NAME);
     fixture.seed_dual_team_state(TEAM_KEY);
 
-    let selected =
-        resolve_active_team(&fixture.workspace, Some(TEAM_KEY), SelectorMode::RuntimeOnly)
-            .expect("selector must accept the runtime team key");
+    let selected = resolve_active_team(
+        &fixture.workspace,
+        Some(TEAM_KEY),
+        SelectorMode::RuntimeOnly,
+    )
+    .expect("selector must accept the runtime team key");
     assert_eq!(
         selected.team_key, TEAM_KEY,
         "runtime team key comes from team_dir/spec_path state key, not spec.name"
@@ -119,7 +122,10 @@ fn upgrade_legacy_owner_team_id_delivery_projects_state_team() {
     )
     .expect("delivery should run");
 
-    assert!(outcome.ok, "runtime-key owner row should deliver; outcome={outcome:?}");
+    assert!(
+        outcome.ok,
+        "runtime-key owner row should deliver; outcome={outcome:?}"
+    );
     assert_eq!(
         transport.injected_windows(),
         vec![(format!("team-{TEAM_KEY}"), "upgrade-window".to_string())],
@@ -151,7 +157,10 @@ fn upgrade_spec_name_owner_team_id_projects_without_read_side_migration() {
     let owner_after = owner_team_id_for_message(&fixture.workspace, &message_id);
     let status_after = message_status(&fixture.workspace, &message_id);
 
-    assert!(outcome.ok, "legacy alias must still project to canonical state; outcome={outcome:?}");
+    assert!(
+        outcome.ok,
+        "legacy alias must still project to canonical state; outcome={outcome:?}"
+    );
     assert_eq!(
         owner_after.as_deref(),
         Some(LEGACY_NAME),
@@ -181,8 +190,20 @@ fn upgrade_status_collect_scope_by_selected_team_key() {
     fixture.write_spec(TEAM_KEY, LEGACY_NAME);
     fixture.seed_dual_team_state(TEAM_KEY);
     fixture.seed_python_v3_db();
-    fixture.seed_result("res-upgrade", TEAM_KEY, "task-upgrade", "upgrade_worker", "success");
-    fixture.seed_result("res-sibling", SIBLING_KEY, "task-sibling", "sibling_worker", "success");
+    fixture.seed_result(
+        "res-upgrade",
+        TEAM_KEY,
+        "task-upgrade",
+        "upgrade_worker",
+        "success",
+    );
+    fixture.seed_result(
+        "res-sibling",
+        SIBLING_KEY,
+        "task-sibling",
+        "sibling_worker",
+        "success",
+    );
 
     let status = json_output(cmd_status_for_team(
         &StatusArgs {
@@ -251,7 +272,10 @@ fn upgrade_restart_plan_uses_persisted_session_id() {
     let plan = classify_restart_plan(&state, false).expect("restart plan");
     assert_eq!(plan.decisions[0].decision, ResumeDecision::Resume);
     assert_eq!(plan.decisions[0].restart_mode, StartMode::Resumed);
-    assert_eq!(plan.decisions[0].session_id.as_ref().map(|s| s.as_str()), Some("sess-upgrade"));
+    assert_eq!(
+        plan.decisions[0].session_id.as_ref().map(|s| s.as_str()),
+        Some("sess-upgrade")
+    );
 }
 
 /// 0.4.7 partial-resume: a worker that has NEVER been captured
@@ -353,7 +377,10 @@ fn upgrade_rust_mcp_config_uses_current_binary_and_runtime_key() {
         .expect("restart should spawn resumable worker");
     let spawn = transport.single_spawn();
     let command_line = spawn.command_line();
-    let current_exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+    let current_exe = std::env::current_exe()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
 
     assert!(
         format!("{report:?}").contains("Resumed"),
@@ -389,7 +416,10 @@ fn upgrade_db_layout_rebuild_preserves_owner_team_id() {
     let after = distinct_owner_ids(store.db_path(), "messages");
 
     assert_eq!(before, vec![TEAM_KEY.to_string()]);
-    assert_eq!(after, before, "layout rebuild must preserve owner_team_id values");
+    assert_eq!(
+        after, before,
+        "layout rebuild must preserve owner_team_id values"
+    );
     assert_eq!(
         table_layout(&open_db(store.db_path()).unwrap(), "messages").unwrap()[..2],
         ["message_id".to_string(), "owner_team_id".to_string()],
@@ -409,7 +439,10 @@ impl UpgradeFixture {
         let team_dir = workspace.join(TEAM_KEY);
         std::fs::create_dir_all(&team_dir).unwrap();
         std::fs::create_dir_all(team_agent::model::paths::runtime_dir(&workspace)).unwrap();
-        Self { workspace, team_dir }
+        Self {
+            workspace,
+            team_dir,
+        }
     }
 
     fn write_spec(&self, team_key: &str, spec_name: &str) {
@@ -515,11 +548,18 @@ impl UpgradeFixture {
             },
             "tasks": [{"id": "task-sibling", "assignee": "sibling_worker", "status": "pending"}]
         });
-        let active_state = if active == TEAM_KEY { upgrade.clone() } else { sibling.clone() };
+        let active_state = if active == TEAM_KEY {
+            upgrade.clone()
+        } else {
+            sibling.clone()
+        };
         let mut state = active_state;
         let obj = state.as_object_mut().unwrap();
         obj.insert("active_team_key".to_string(), json!(active));
-        obj.insert("teams".to_string(), json!({TEAM_KEY: upgrade, SIBLING_KEY: sibling}));
+        obj.insert(
+            "teams".to_string(),
+            json!({TEAM_KEY: upgrade, SIBLING_KEY: sibling}),
+        );
         state
     }
 
@@ -531,7 +571,8 @@ impl UpgradeFixture {
         std::fs::create_dir_all(self.db_path().parent().unwrap()).unwrap();
         let conn = open_db(&self.db_path()).unwrap();
         initialize_schema(&conn, Some(&self.db_path())).unwrap();
-        conn.execute_batch(&format!("pragma user_version = {SCHEMA_VERSION};")).unwrap();
+        conn.execute_batch(&format!("pragma user_version = {SCHEMA_VERSION};"))
+            .unwrap();
         conn.execute(
             "insert into messages(message_id, owner_team_id, sender, recipient, requires_ack, status, content, artifact_refs, created_at, updated_at, delivery_attempts)
              values ('msg-upgrade', ?1, 'leader', 'upgrade_worker', 0, 'accepted', 'hello', '[]', '2026-06-07T00:00:00+00:00', '2026-06-07T00:00:00+00:00', 0),
@@ -539,7 +580,13 @@ impl UpgradeFixture {
             params![TEAM_KEY, SIBLING_KEY],
         )
         .unwrap();
-        self.seed_result("res-existing-upgrade", TEAM_KEY, "task-upgrade", "upgrade_worker", "success");
+        self.seed_result(
+            "res-existing-upgrade",
+            TEAM_KEY,
+            "task-upgrade",
+            "upgrade_worker",
+            "success",
+        );
         conn.execute(
             "insert or replace into agent_health(owner_team_id, agent_id, status, updated_at)
              values (?1, 'upgrade_worker', 'running', '2026-06-07T00:00:00+00:00'),
@@ -549,7 +596,14 @@ impl UpgradeFixture {
         .unwrap();
     }
 
-    fn seed_result(&self, result_id: &str, owner_team_id: &str, task_id: &str, agent_id: &str, status: &str) {
+    fn seed_result(
+        &self,
+        result_id: &str,
+        owner_team_id: &str,
+        task_id: &str,
+        agent_id: &str,
+        status: &str,
+    ) {
         let conn = open_db(&self.db_path()).unwrap();
         let envelope = json!({
             "schema_version": "result_envelope_v1",
@@ -583,7 +637,8 @@ impl UpgradeFixture {
 
     fn seed_healthy_coordinator(&self) {
         let workspace = team_agent::coordinator::WorkspacePath::new(self.workspace.clone());
-        std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path())).unwrap();
+        std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path()))
+            .unwrap();
         let _ = MessageStore::open(workspace.as_path()).unwrap();
         let pid = team_agent::coordinator::Pid::new(std::process::id());
         team_agent::coordinator::write_coordinator_metadata(
@@ -592,7 +647,11 @@ impl UpgradeFixture {
             team_agent::coordinator::MetadataSource::Boot,
         )
         .unwrap();
-        std::fs::write(team_agent::coordinator::coordinator_pid_path(&workspace), pid.to_string()).unwrap();
+        std::fs::write(
+            team_agent::coordinator::coordinator_pid_path(&workspace),
+            pid.to_string(),
+        )
+        .unwrap();
     }
 
     fn table_counts(&self, tables: &[&str]) -> BTreeMap<String, i64> {
@@ -601,7 +660,9 @@ impl UpgradeFixture {
             .iter()
             .map(|table| {
                 let count = conn
-                    .query_row(&format!("select count(*) from {table}"), [], |row| row.get(0))
+                    .query_row(&format!("select count(*) from {table}"), [], |row| {
+                        row.get(0)
+                    })
                     .unwrap();
                 ((*table).to_string(), count)
             })
@@ -734,8 +795,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
@@ -751,9 +819,12 @@ impl Transport for RecordingTransport {
 
     fn has_pane(&self, pane: &PaneId) -> Result<Option<bool>, TransportError> {
         let spawns = self.spawns.lock().unwrap();
-        Ok(Some(spawns.iter().enumerate().any(|(idx, _)| {
-            pane.as_str() == format!("%{}", idx + 1)
-        })))
+        Ok(Some(
+            spawns
+                .iter()
+                .enumerate()
+                .any(|(idx, _)| pane.as_str() == format!("%{}", idx + 1)),
+        ))
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {

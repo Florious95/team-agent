@@ -30,7 +30,8 @@ pub fn leader_launcher_args(values: &[String]) -> Result<LeaderLauncherArgs, Cli
                     )));
                 }
             }
-            out.provider_args.extend(values.iter().skip(idx + 1).cloned());
+            out.provider_args
+                .extend(values.iter().skip(idx + 1).cloned());
             break;
         } else if token == "--attach" || token == "--attach-existing" {
             out.attach_existing = true;

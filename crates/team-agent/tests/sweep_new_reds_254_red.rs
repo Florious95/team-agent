@@ -94,15 +94,27 @@ fn wait_ready_fake_live_worker_with_mcp_config_and_window_is_ready() {
         json!(true),
         "wait-ready must treat selected-team fake running worker + MCP config as startup ready; task prompt delivery is a separate signal. out={out}"
     );
-    assert_eq!(out["readiness"]["process_started"], json!(true), "out={out}");
+    assert_eq!(
+        out["readiness"]["process_started"],
+        json!(true),
+        "out={out}"
+    );
     assert_eq!(out["readiness"]["mcp_ready"], json!(true), "out={out}");
 }
 
 #[test]
 fn cli_add_agent_without_explicit_team_persists_to_active_team() {
     let launch = source("src/lifecycle/launch.rs");
-    let add_agent = source_section(&launch, "pub fn add_agent(", "/// `add_agent` with an injected transport");
-    let at_paths = source_section(&launch, "fn add_agent_with_transport_at_paths", "fn materialize_added_role_file");
+    let add_agent = source_section(
+        &launch,
+        "pub fn add_agent(",
+        "/// `add_agent` with an injected transport",
+    );
+    let at_paths = source_section(
+        &launch,
+        "fn add_agent_with_transport_at_paths",
+        "fn materialize_added_role_file",
+    );
     assert!(
         add_agent.contains("resolve_active_team")
             && (add_agent.contains("Some(selected.team_key.as_str())")
@@ -218,17 +230,40 @@ fn peek_help_and_parser_accept_head_search() {
     let peek_type = source_section(&types, "pub struct PeekArgs", "/// `e2e`");
     let handler = source_section(&adapters, "pub fn cmd_peek", "fn peek_unavailable");
     let failures = [
-        (!help.contains("--head") || !help.contains("--search"), "help must list --head and --search"),
-        (!parsed.contains("head: Option<usize>") || !parsed.contains("search: Option<String>"), "ParsedArgs must carry head/search"),
-        (!parser.contains("\"--head\"") || !parser.contains("\"--search\""), "parse_args must accept --head/--search"),
-        (!peek_args.contains("head:") || !peek_args.contains("search:"), "peek_args must transfer head/search"),
-        (!peek_type.contains("pub head: Option<usize>") || !peek_type.contains("pub search: Option<String>"), "PeekArgs must expose head/search"),
-        (!handler.contains("CaptureRange::Head") || !handler.contains("search"), "cmd_peek must dispatch head/search behavior"),
+        (
+            !help.contains("--head") || !help.contains("--search"),
+            "help must list --head and --search",
+        ),
+        (
+            !parsed.contains("head: Option<usize>") || !parsed.contains("search: Option<String>"),
+            "ParsedArgs must carry head/search",
+        ),
+        (
+            !parser.contains("\"--head\"") || !parser.contains("\"--search\""),
+            "parse_args must accept --head/--search",
+        ),
+        (
+            !peek_args.contains("head:") || !peek_args.contains("search:"),
+            "peek_args must transfer head/search",
+        ),
+        (
+            !peek_type.contains("pub head: Option<usize>")
+                || !peek_type.contains("pub search: Option<String>"),
+            "PeekArgs must expose head/search",
+        ),
+        (
+            !handler.contains("CaptureRange::Head") || !handler.contains("search"),
+            "cmd_peek must dispatch head/search behavior",
+        ),
     ]
     .into_iter()
     .filter_map(|(bad, msg)| bad.then_some(msg))
     .collect::<Vec<_>>();
-    assert!(failures.is_empty(), "peek CLI parity is incomplete: {}\nhelp={help}\nPeekArgs={peek_type}\nhandler={handler}", failures.join("; "));
+    assert!(
+        failures.is_empty(),
+        "peek CLI parity is incomplete: {}\nhelp={help}\nPeekArgs={peek_type}\nhandler={handler}",
+        failures.join("; ")
+    );
 }
 
 #[test]
@@ -262,8 +297,9 @@ fn attach_leader_help_lists_pane_provider_and_dispatches_handler() {
         "attach-leader help must list explicit --pane and --provider; help={help}"
     );
     assert!(
-        !emit.contains("SPEC_ONLY_HELP_COMMANDS: &[&str] = &[\"start\", \"purge-agent\", \"attach-leader\"]")
-            && dispatch.contains("\"attach-leader\"")
+        !emit.contains(
+            "SPEC_ONLY_HELP_COMMANDS: &[&str] = &[\"start\", \"purge-agent\", \"attach-leader\"]"
+        ) && dispatch.contains("\"attach-leader\"")
             && dispatch.contains("cmd_attach_leader"),
         "attach-leader must be a real dispatch arm, not help-only; dispatch={dispatch}"
     );
@@ -360,7 +396,11 @@ fn worker_mcp_send_ignores_or_refuses_scope_arg_and_cannot_self_route_to_sibling
 #[test]
 fn worker_recipient_mcp_uses_messaging_send_message_not_direct_store_write() {
     let tools = source("src/mcp_server/tools.rs");
-    let worker_path = source_section(&tools, "if is_worker_recipient(to)", "let opts = SendOptions");
+    let worker_path = source_section(
+        &tools,
+        "if is_worker_recipient(to)",
+        "let opts = SendOptions",
+    );
     assert!(
         !worker_path.contains("MessageStore::open")
             && !worker_path.contains(".create_message(")
@@ -424,7 +464,10 @@ fn mcp_send_canonicalize_owner_team_id_no_fallback() {
         .ok()
         .map(|store| count_messages(store.db_path()))
         .unwrap_or(0);
-    assert_eq!(rows, 0, "canonicalize failure must not create a message row");
+    assert_eq!(
+        rows, 0,
+        "canonicalize failure must not create a message row"
+    );
 }
 
 #[test]
@@ -447,7 +490,9 @@ fn mcp_send_same_team_owner_still_creates_team_scoped_message() {
         call.raw
     );
     assert!(
-        call.body["message_id"].as_str().is_some_and(|id| !id.is_empty())
+        call.body["message_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
             || call.body["status"] == json!("accepted")
             || call.body["status"] == json!("delivered"),
         "same-team worker MCP send must return an accepted/delivered message shape; body={} raw={}",
@@ -481,10 +526,18 @@ fn write_team_dir(root: &Path, name: &str, agents: &[(&str, &str)]) -> PathBuf {
     )
     .unwrap();
     for (agent, role) in agents {
-        std::fs::write(team.join("agents").join(format!("{agent}.md")), role_doc(agent, role)).unwrap();
+        std::fs::write(
+            team.join("agents").join(format!("{agent}.md")),
+            role_doc(agent, role),
+        )
+        .unwrap();
     }
     let spec = team_agent::compiler::compile_team(&team).unwrap();
-    std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     team
 }
 
@@ -544,7 +597,14 @@ fn seed_selected_team_state(root: &Path, team_key: &str, team_dir: &Path, attach
     save_runtime_state(root, &state).unwrap();
 }
 
-fn insert_result(root: &Path, result_id: &str, task_id: &str, agent_id: &str, owner_team_id: &str, status: &str) {
+fn insert_result(
+    root: &Path,
+    result_id: &str,
+    task_id: &str,
+    agent_id: &str,
+    owner_team_id: &str,
+    status: &str,
+) {
     let store = MessageStore::open(root).unwrap();
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
     let envelope = json!({
@@ -576,7 +636,8 @@ fn insert_result(root: &Path, result_id: &str, task_id: &str, agent_id: &str, ow
 
 fn count_messages(db_path: &Path) -> i64 {
     let conn = team_agent::db::schema::open_db(db_path).unwrap();
-    conn.query_row("select count(*) from messages", [], |row| row.get(0)).unwrap()
+    conn.query_row("select count(*) from messages", [], |row| row.get(0))
+        .unwrap()
 }
 
 fn source(relative: &str) -> String {
@@ -584,7 +645,9 @@ fn source(relative: &str) -> String {
 }
 
 fn source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
-    let idx = source.find(start).unwrap_or_else(|| panic!("missing source start marker {start}"));
+    let idx = source
+        .find(start)
+        .unwrap_or_else(|| panic!("missing source start marker {start}"));
     let rest = &source[idx..];
     let end_idx = rest.find(end).unwrap_or(rest.len());
     &rest[..end_idx]

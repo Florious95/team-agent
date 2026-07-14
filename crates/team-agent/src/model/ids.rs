@@ -141,8 +141,14 @@ mod tests {
 
     #[test]
     fn id_newtypes_serialize_as_bare_string() {
-        assert_eq!(serde_json::to_string(&AgentId::new("leader")).unwrap(), "\"leader\"");
-        assert_eq!(serde_json::from_str::<TaskId>("\"t1\"").unwrap(), TaskId::new("t1"));
+        assert_eq!(
+            serde_json::to_string(&AgentId::new("leader")).unwrap(),
+            "\"leader\""
+        );
+        assert_eq!(
+            serde_json::from_str::<TaskId>("\"t1\"").unwrap(),
+            TaskId::new("t1")
+        );
         assert_eq!(TeamKey::from("default").as_str(), "default");
     }
 
@@ -150,6 +156,9 @@ mod tests {
     fn owner_epoch_first_is_zero_and_serializes_as_int() {
         assert_eq!(OwnerEpoch::FIRST.0, 0);
         assert_eq!(serde_json::to_string(&OwnerEpoch(3)).unwrap(), "3");
-        assert_eq!(serde_json::from_str::<OwnerEpoch>("0").unwrap(), OwnerEpoch::FIRST);
+        assert_eq!(
+            serde_json::from_str::<OwnerEpoch>("0").unwrap(),
+            OwnerEpoch::FIRST
+        );
     }
 }

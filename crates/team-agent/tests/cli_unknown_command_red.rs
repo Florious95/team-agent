@@ -46,7 +46,11 @@ fn tmp_cwd(tag: &str) -> PathBuf {
 }
 
 fn run(args: &[&str], cwd: &Path) -> Output {
-    Command::new(bin()).args(args).current_dir(cwd).output().unwrap()
+    Command::new(bin())
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap()
 }
 
 #[test]

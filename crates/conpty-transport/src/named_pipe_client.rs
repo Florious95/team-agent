@@ -37,9 +37,7 @@
 /// the same inputs. Portable across platforms so tests can build the
 /// same string without needing a Windows target.
 pub fn pipe_name_for(workspace_hash: &str, team_key: &str) -> String {
-    format!(
-        r"\\.\pipe\team-agent-conpty-{workspace_hash}-{team_key}"
-    )
+    format!(r"\\.\pipe\team-agent-conpty-{workspace_hash}-{team_key}")
 }
 
 #[cfg(windows)]
@@ -102,9 +100,7 @@ mod imp {
                 if handle == INVALID_HANDLE_VALUE {
                     return Err(io::Error::new(
                         io::ErrorKind::NotConnected,
-                        format!(
-                            "CreateFileW returned INVALID_HANDLE_VALUE for {pipe_name}"
-                        ),
+                        format!("CreateFileW returned INVALID_HANDLE_VALUE for {pipe_name}"),
                     ));
                 }
                 handle

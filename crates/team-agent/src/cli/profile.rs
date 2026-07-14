@@ -34,11 +34,17 @@ fn init_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     let mut obj = Map::new();
     obj.insert("ok".to_string(), Value::Bool(true));
     obj.insert("profile".to_string(), Value::String(args.name.clone()));
-    obj.insert("auth_mode".to_string(), Value::String(auth_mode.to_string()));
+    obj.insert(
+        "auth_mode".to_string(),
+        Value::String(auth_mode.to_string()),
+    );
     obj.insert("path".to_string(), path_value(&path));
     obj.insert("template_path".to_string(), path_value(&template_path));
     obj.insert("created_profile".to_string(), Value::Bool(created_profile));
-    obj.insert("created_template".to_string(), Value::Bool(created_template));
+    obj.insert(
+        "created_template".to_string(),
+        Value::Bool(created_template),
+    );
     obj.insert("secret_written".to_string(), Value::Bool(created_profile));
     obj.insert(
         "safe_inspection_command".to_string(),
@@ -116,7 +122,10 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
     );
     obj.insert("auth_mode".to_string(), Value::String(auth_mode));
     obj.insert("values".to_string(), redacted_values(&values));
-    obj.insert("keys_present".to_string(), string_array(sorted_keys(&values)));
+    obj.insert(
+        "keys_present".to_string(),
+        string_array(sorted_keys(&values)),
+    );
     obj.insert("secret_keys_present".to_string(), string_array(secret_keys));
     obj.insert("missing_common".to_string(), string_array(missing_common));
     obj.insert("safe_for_agent_context".to_string(), Value::Bool(true));
@@ -134,7 +143,10 @@ fn show_profile(args: &ProfileArgs) -> Result<Value, CliError> {
 
 fn profile_dir(args: &ProfileArgs) -> PathBuf {
     let _ = &args.team;
-    args.workspace.join(".team").join("current").join("profiles")
+    args.workspace
+        .join(".team")
+        .join("current")
+        .join("profiles")
 }
 
 fn validate_auth_mode(auth_mode: &str) -> Result<(), CliError> {
@@ -274,9 +286,9 @@ fn secret_keys_present(values: &Map<String, Value>) -> Vec<String> {
 }
 
 fn credential_present(values: &Map<String, Value>) -> bool {
-    values.iter().any(|(key, value)| {
-        is_secret_key(key) && value.as_str().is_some_and(|raw| !raw.is_empty())
-    })
+    values
+        .iter()
+        .any(|(key, value)| is_secret_key(key) && value.as_str().is_some_and(|raw| !raw.is_empty()))
 }
 
 fn missing_common_keys(values: &Map<String, Value>, auth_mode: &str) -> Vec<String> {

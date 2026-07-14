@@ -68,10 +68,16 @@ struct MapMarkerStore {
 }
 impl MapMarkerStore {
     fn ok() -> Self {
-        Self { markers: Default::default(), fail: false }
+        Self {
+            markers: Default::default(),
+            fail: false,
+        }
     }
     fn failing() -> Self {
-        Self { markers: Default::default(), fail: true }
+        Self {
+            markers: Default::default(),
+            fail: true,
+        }
     }
 }
 impl MarkerStore for MapMarkerStore {
@@ -159,19 +165,11 @@ impl Transport for MockTransport {
         self.record("send_keys");
         self.inner.send_keys(t, keys)
     }
-    fn capture(
-        &self,
-        t: &Target,
-        range: CaptureRange,
-    ) -> Result<CapturedText, TransportError> {
+    fn capture(&self, t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
         self.record("capture");
         self.inner.capture(t, range)
     }
-    fn query(
-        &self,
-        t: &Target,
-        f: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
         self.record("query");
         self.inner.query(t, f)
     }
@@ -187,10 +185,7 @@ impl Transport for MockTransport {
         self.record("has_session");
         self.inner.has_session(s)
     }
-    fn list_windows(
-        &self,
-        s: &SessionName,
-    ) -> Result<Vec<WindowName>, TransportError> {
+    fn list_windows(&self, s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         self.record("list_windows");
         self.inner.list_windows(s)
     }
@@ -211,10 +206,7 @@ impl Transport for MockTransport {
         self.record("kill_window");
         self.inner.kill_window(t)
     }
-    fn attach_session(
-        &self,
-        s: &SessionName,
-    ) -> Result<AttachOutcome, TransportError> {
+    fn attach_session(&self, s: &SessionName) -> Result<AttachOutcome, TransportError> {
         self.record("attach_session");
         self.inner.attach_session(s)
     }
@@ -229,7 +221,10 @@ fn coord_for_test(
     session_present: bool,
     save_hook: Option<SaveHook>,
     recorder: Option<OrderRecorder>,
-) -> (Coordinator, std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>) {
+) -> (
+    Coordinator,
+    std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+) {
     let dir = std::env::temp_dir().join(format!(
         "team-agent-coord-tick-{}-{}",
         std::process::id(),
@@ -243,13 +238,7 @@ fn coord_for_test(
     let reg: Box<dyn ProviderRegistry> = Box::new(MockRegistry::new(&[], &[]));
     let transport = MockTransport::new(session_present);
     let calls = std::sync::Arc::clone(&transport.calls);
-    let coord = Coordinator::for_test(
-        ws,
-        reg,
-        Box::new(transport),
-        save_hook,
-        recorder,
-    );
+    let coord = Coordinator::for_test(ws, reg, Box::new(transport), save_hook, recorder);
     (coord, calls)
 }
 
@@ -261,7 +250,10 @@ fn coord_for_test(
 fn coord_for_test_with_session(
     session_present: bool,
     session_name: &str,
-) -> (Coordinator, std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>) {
+) -> (
+    Coordinator,
+    std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>,
+) {
     let dir = std::env::temp_dir().join(format!(
         "team-agent-coord-tick-sess-{}-{}",
         std::process::id(),
@@ -296,21 +288,23 @@ fn failing_save_hook() -> SaveHook {
 fn read_event_log_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
     let path = crate::model::paths::logs_dir(dir).join("events.jsonl");
     match std::fs::read_to_string(&path) {
-        Ok(text) => text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect(),
+        Ok(text) => text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
 
-
-mod basics;
+mod a0_lostupdate;
 mod abnormal;
-mod watch;
-mod tick_core;
-mod spine;
-mod health_sync;
-mod takeover;
+mod api_error_recovery;
+mod basics;
 mod daemon;
 mod energy;
+mod health_sync;
 mod main_preserved;
-mod a0_lostupdate;
-mod api_error_recovery;
+mod spine;
+mod takeover;
+mod tick_core;
+mod watch;

@@ -1454,13 +1454,33 @@ impl Transport for ReadbackMissingTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, _: &SessionName, _: &WindowName, _: &[String], _: &Path, _: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _: &SessionName,
+        _: &WindowName,
+        _: &[String],
+        _: &Path,
+        _: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn spawn_into(&self, _: &SessionName, _: &WindowName, _: &[String], _: &Path, _: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        _: &SessionName,
+        _: &WindowName,
+        _: &[String],
+        _: &Path,
+        _: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         unimplemented!("not reached in delivery")
     }
-    fn inject(&self, _: &Target, _: &InjectPayload, _: Key, _: bool) -> Result<InjectReport, TransportError> {
+    fn inject(
+        &self,
+        _: &Target,
+        _: &InjectPayload,
+        _: Key,
+        _: bool,
+    ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: crate::transport::InjectStage::Submit,
             // submit verified, but the token never appeared in the pane → readback missing.
@@ -1477,7 +1497,10 @@ impl Transport for ReadbackMissingTransport {
         Ok(())
     }
     fn capture(&self, _: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
     fn query(&self, _: &Target, _: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
@@ -1494,7 +1517,12 @@ impl Transport for ReadbackMissingTransport {
     fn list_windows(&self, _: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(Vec::new())
     }
-    fn set_session_env(&self, _: &SessionName, _: &str, _: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _: &SessionName,
+        _: &str,
+        _: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
     fn kill_session(&self, _: &SessionName) -> Result<(), TransportError> {
@@ -2848,8 +2876,8 @@ fn gate054_rebind_required_status_refuses_leader_delivery_without_cross_server_p
     // The transport we pass is the "main"/default server backend which does
     // have a live `%1`. If the fix regresses and delivery falls back cross-
     // server by pane id, it would inject here.
-    let default_backend = OfflineTransport::new()
-        .with_targets(vec![pane_info("%1", "team-main", "leader")]);
+    let default_backend =
+        OfflineTransport::new().with_targets(vec![pane_info("%1", "team-main", "leader")]);
 
     let out = deliver_pending_message(&ws, &store, &default_backend, &message_id, &log, &state)
         .expect("status guard must be a business refusal, not panic");
@@ -2904,8 +2932,11 @@ fn gate054_attached_status_still_delivers_when_pane_is_live() {
     let message_id = store
         .create_message(None, "w1", "leader", "hi", None, false, None)
         .unwrap();
-    let transport = OfflineTransport::new()
-        .with_targets(vec![pane_info("%leader", "team-gate054ok", "leader")]);
+    let transport = OfflineTransport::new().with_targets(vec![pane_info(
+        "%leader",
+        "team-gate054ok",
+        "leader",
+    )]);
 
     let out = deliver_pending_message(&ws, &store, &transport, &message_id, &log, &state)
         .expect("attached leader must still deliver");
@@ -2948,7 +2979,15 @@ fn gate054_fallback_pane_socket_recorded_does_not_cross_to_default_server() {
     });
     crate::state::persist::save_runtime_state(&ws, &state).unwrap();
     let message_id = store
-        .create_message(None, "coordinator", "leader", "fallback payload", None, false, None)
+        .create_message(
+            None,
+            "coordinator",
+            "leader",
+            "fallback payload",
+            None,
+            false,
+            None,
+        )
         .unwrap();
 
     let outcome = deliver_to_leader_fallback_pane(
@@ -2978,12 +3017,10 @@ fn gate054_fallback_pane_socket_recorded_does_not_cross_to_default_server() {
     // Audit noise: fallback_pane_attempt + fallback_pane_failed with the
     // recorded socket_bound=true forensic field.
     let events = log.tail(0).unwrap();
-    let attempt = events
-        .iter()
-        .find(|e| {
-            e.get("event").and_then(serde_json::Value::as_str)
-                == Some("leader_receiver.fallback_pane_attempt")
-        });
+    let attempt = events.iter().find(|e| {
+        e.get("event").and_then(serde_json::Value::as_str)
+            == Some("leader_receiver.fallback_pane_attempt")
+    });
     assert!(
         attempt.is_some(),
         "fallback_pane_attempt audit must fire even on socket-bounded refusal; events={events:?}"
@@ -3051,10 +3088,9 @@ fn gate054_rebind_replay_requeues_failed_leader_message_on_attach() {
     // it must flip the blocked leader row back to accepted.
     let team = TeamKey::new(team_id);
     let new_pane = PaneId::new("%1"); // new leader window on the private socket
-    let notices = crate::messaging::requeue_delivery_exhausted_watchers(
-        &ws, &store, &log, &team, &new_pane,
-    )
-    .unwrap();
+    let notices =
+        crate::messaging::requeue_delivery_exhausted_watchers(&ws, &store, &log, &team, &new_pane)
+            .unwrap();
     assert!(
         notices.is_empty(),
         "no exhausted watchers seeded → no watcher notices; only the message row should have been requeued"
@@ -3159,8 +3195,7 @@ fn gate054_status_surfaces_pending_leader_notifications() {
     assert!(entry
         .get("action")
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|action| action.contains("attach-leader")
-            || action.contains("takeover")));
+        .is_some_and(|action| action.contains("attach-leader") || action.contains("takeover")));
 }
 
 #[test]

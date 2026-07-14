@@ -61,7 +61,15 @@ fn b4_monitor_step_failure_does_not_block_deliver_pending() {
     seed_copilot_team_state(&ws, "cp1", true);
     let store = MessageStore::open(&ws).unwrap();
     store
-        .create_message(Some("task_mcp"), "leader", "cp1", "do the thing", None, false, None)
+        .create_message(
+            Some("task_mcp"),
+            "leader",
+            "cp1",
+            "do the thing",
+            None,
+            false,
+            None,
+        )
         .unwrap();
 
     let coord = Coordinator::new(
@@ -99,11 +107,20 @@ delivery trunk does not depend on the monitor face (N36 three-way availability);
         .unwrap()
         .inbox("cp1", 10, None)
         .ok()
-        .and_then(|rows| rows.first().and_then(|r| r.get("status").and_then(Value::as_str).map(String::from)));
+        .and_then(|rows| {
+            rows.first()
+                .and_then(|r| r.get("status").and_then(Value::as_str).map(String::from))
+        });
     if status.as_deref() == Some("accepted") {
-        failures.push("B-4: the accepted message must leave the 'accepted' state after the tick".to_string());
+        failures.push(
+            "B-4: the accepted message must leave the 'accepted' state after the tick".to_string(),
+        );
     }
-    assert!(failures.is_empty(), "B-4 monitor isolation contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "B-4 monitor isolation contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// B-4 reverse (cr `force_paste_flag_not_in_argv`): the --force-paste flag (REJECTed —
@@ -183,7 +200,11 @@ fn b2_quick_start_ready_has_attach_commands_and_socket_miss_is_observable() {
             "B-2 duplicate quick-start expected ExistingRuntime report; got {other:?}"
         )),
     }
-    assert!(failures.is_empty(), "B-2 attach_commands contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "B-2 attach_commands contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ───────────────────────────── B-5 · status runtime block ─────────────────────────
@@ -205,8 +226,12 @@ fn b5_status_surfaces_runtime_hint_on_stale_coordinator_with_backlog() {
     .unwrap();
     // NO coordinator pid file written (stale/dead). Two accepted messages backlog.
     let store = MessageStore::open(&ws).unwrap();
-    store.create_message(Some("t1"), "leader", "w1", "m1", None, false, None).unwrap();
-    store.create_message(Some("t1"), "leader", "w1", "m2", None, false, None).unwrap();
+    store
+        .create_message(Some("t1"), "leader", "w1", "m1", None, false, None)
+        .unwrap();
+    store
+        .create_message(Some("t1"), "leader", "w1", "m2", None, false, None)
+        .unwrap();
 
     let status = team_agent::cli::status_port::status(&ws, false, false).expect("status");
     let text = status.to_string();
@@ -221,14 +246,19 @@ fn b5_status_surfaces_runtime_hint_on_stale_coordinator_with_backlog() {
 coordinator is not running (consume coordinator_health); got runtime/coordinator/ok={runtime_ok:?}"
         ));
     }
-    let has_hint = text.contains("undelivered") || (text.to_lowercase().contains("coordinator") && text.contains("restart"));
+    let has_hint = text.contains("undelivered")
+        || (text.to_lowercase().contains("coordinator") && text.contains("restart"));
     if !has_hint {
         failures.push(format!(
             "B-5: status must add a hint naming the coordinator + restart when it is down \
 AND there is accepted backlog (N38 explicable, no auto-recovery); status={text}"
         ));
     }
-    assert!(failures.is_empty(), "B-5 status runtime-hint contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "B-5 status runtime-hint contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// B-5 anti-nag: a HEALTHY coordinator with backlog must NOT show the down-hint.
@@ -248,7 +278,9 @@ fn b5_status_no_hint_when_coordinator_healthy() {
     .unwrap();
     seed_healthy_coordinator(&ws);
     let store = MessageStore::open(&ws).unwrap();
-    store.create_message(Some("t1"), "leader", "w1", "m1", None, false, None).unwrap();
+    store
+        .create_message(Some("t1"), "leader", "w1", "m1", None, false, None)
+        .unwrap();
 
     let status = team_agent::cli::status_port::status(&ws, false, false).expect("status");
     let text = status.to_string().to_lowercase();
@@ -296,7 +328,11 @@ make quick-start fail-fast, not bind silently; got Ok: {text}"
 leader pane (N38 three-line: error/action/log); got {text}"
         ));
     }
-    assert!(failures.is_empty(), "B-7 dead-pane fail-fast contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "B-7 dead-pane fail-fast contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// B-7 (no false-positive): with the env UNSET, quick-start must proceed normally.
@@ -367,7 +403,9 @@ fn seed_healthy_coordinator(workspace: &Path) {
     let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     let pid = team_agent::coordinator::Pid::new(std::process::id());
     std::fs::create_dir_all(
-        team_agent::coordinator::coordinator_pid_path(&workspace).parent().unwrap(),
+        team_agent::coordinator::coordinator_pid_path(&workspace)
+            .parent()
+            .unwrap(),
     )
     .unwrap();
     team_agent::coordinator::write_coordinator_metadata(
@@ -376,7 +414,11 @@ fn seed_healthy_coordinator(workspace: &Path) {
         team_agent::coordinator::MetadataSource::Boot,
     )
     .expect("write coordinator metadata");
-    std::fs::write(team_agent::coordinator::coordinator_pid_path(&workspace), pid.to_string()).unwrap();
+    std::fs::write(
+        team_agent::coordinator::coordinator_pid_path(&workspace),
+        pid.to_string(),
+    )
+    .unwrap();
 }
 
 fn events_text(ws: &Path) -> String {
@@ -391,7 +433,10 @@ fn grep_tree(root: &Path, needle: &str) -> usize {
         if path.is_dir() {
             count += grep_tree(&path, needle);
         } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            count += std::fs::read_to_string(&path).unwrap_or_default().matches(needle).count();
+            count += std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .matches(needle)
+                .count();
         }
     }
     count
@@ -403,7 +448,10 @@ impl ProviderRegistry for RealRegistry {
         get_adapter(provider)
     }
     fn error_lists(&self, _provider: Provider) -> ErrorLists {
-        ErrorLists { whitelist: Vec::new(), blacklist: Vec::new() }
+        ErrorLists {
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 }
 
@@ -412,7 +460,10 @@ struct EnvGuard {
 }
 impl EnvGuard {
     fn set(values: &[(&'static str, &'static str)]) -> Self {
-        let previous = values.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        let previous = values
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
         for (k, v) in values {
             std::env::set_var(k, v);
         }
@@ -475,7 +526,10 @@ impl LiveTmuxSession {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        Self { socket, session: session.to_string() }
+        Self {
+            socket,
+            session: session.to_string(),
+        }
     }
 }
 
@@ -551,7 +605,9 @@ struct MonitorFailTransport {
 }
 impl MonitorFailTransport {
     fn new() -> Self {
-        Self { session: Mutex::new(true) }
+        Self {
+            session: Mutex::new(true),
+        }
     }
 }
 
@@ -578,16 +634,34 @@ impl WindowedTransport {
 /// Reports the leader pane (%9999) as DEAD (B-7).
 struct DeadPaneTransport;
 
-
 impl Transport for MonitorFailTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
     }
-    fn spawn_first(&self, s: &SessionName, w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         *self.session.lock().unwrap() = true;
-        Ok(SpawnResult { pane_id: PaneId::new("%1"), session: s.clone(), window: w.clone(), child_pid: None })
+        Ok(SpawnResult {
+            pane_id: PaneId::new("%1"),
+            session: s.clone(),
+            window: w.clone(),
+            child_pid: None,
+        })
     }
-    fn spawn_into(&self, s: &SessionName, w: &WindowName, a: &[String], c: &Path, e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &Path,
+        e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.spawn_first(s, w, a, c, e)
     }
     fn capture(&self, _t: &Target, _r: CaptureRange) -> Result<CapturedText, TransportError> {
@@ -607,7 +681,10 @@ impl Transport for MonitorFailTransport {
         Ok(())
     }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
-        match f { PaneField::PaneWidth => Ok(Some("120".to_string())), _ => Ok(None) }
+        match f {
+            PaneField::PaneWidth => Ok(Some("120".to_string())),
+            _ => Ok(None),
+        }
     }
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         Ok(Vec::new())
@@ -615,13 +692,30 @@ impl Transport for MonitorFailTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("cp1")])
     }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
         Ok(SetEnvOutcome::Applied)
     }
-    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> { Ok(()) }
-    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
         Ok(InjectReport {
             stage_reached: InjectStage::Submit,
             inject_verification: InjectVerification::CaptureContainsToken,
@@ -634,14 +728,36 @@ impl Transport for MonitorFailTransport {
 }
 
 impl Transport for QuietTransport {
-    fn spawn_first(&self, s: &SessionName, w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
-        Ok(SpawnResult { pane_id: PaneId::new("%1"), session: s.clone(), window: w.clone(), child_pid: None })
+    fn spawn_first(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(SpawnResult {
+            pane_id: PaneId::new("%1"),
+            session: s.clone(),
+            window: w.clone(),
+            child_pid: None,
+        })
     }
-    fn spawn_into(&self, s: &SessionName, w: &WindowName, a: &[String], c: &Path, e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &Path,
+        e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.spawn_first(s, w, a, c, e)
     }
     fn capture(&self, _t: &Target, r: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: "Copilot\n> ".to_string(), range: r })
+        Ok(CapturedText {
+            text: "Copilot\n> ".to_string(),
+            range: r,
+        })
     }
     fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
         Ok(PaneLiveness::Live)
@@ -652,32 +768,88 @@ impl Transport for QuietTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("cp1")])
     }
-    fn kind(&self) -> BackendKind { BackendKind::Tmux }
-    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> { Ok(()) }
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
-        match f { PaneField::PaneWidth => Ok(Some("120".to_string())), _ => Ok(None) }
+        match f {
+            PaneField::PaneWidth => Ok(Some("120".to_string())),
+            _ => Ok(None),
+        }
     }
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> { Ok(Vec::new()) }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> { Ok(SetEnvOutcome::Applied) }
-    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> { Ok(()) }
-    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
     }
-
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: InjectVerification::CaptureContainsToken,
+            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            turn_verification: TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
+    }
 }
 
 impl Transport for WindowedTransport {
-    fn spawn_first(&self, _s: &SessionName, w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_first(
+        &self,
+        _s: &SessionName,
+        w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         *self.present.lock().unwrap() = true;
-        Ok(SpawnResult { pane_id: PaneId::new("%1"), session: self.session.clone(), window: w.clone(), child_pid: None })
+        Ok(SpawnResult {
+            pane_id: PaneId::new("%1"),
+            session: self.session.clone(),
+            window: w.clone(),
+            child_pid: None,
+        })
     }
-    fn spawn_into(&self, s: &SessionName, w: &WindowName, a: &[String], c: &Path, e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &Path,
+        e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.spawn_first(s, w, a, c, e)
     }
     fn capture(&self, _t: &Target, r: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: "OpenAI Codex\ncodex>".to_string(), range: r })
+        Ok(CapturedText {
+            text: "OpenAI Codex\ncodex>".to_string(),
+            range: r,
+        })
     }
     fn liveness(&self, _p: &PaneId) -> Result<PaneLiveness, TransportError> {
         Ok(PaneLiveness::Live)
@@ -688,31 +860,87 @@ impl Transport for WindowedTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(self.windows.clone())
     }
-    fn kind(&self) -> BackendKind { BackendKind::Tmux }
-    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> { Ok(()) }
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
-        match f { PaneField::PaneWidth => Ok(Some("120".to_string())), _ => Ok(None) }
+        match f {
+            PaneField::PaneWidth => Ok(Some("120".to_string())),
+            _ => Ok(None),
+        }
     }
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> { Ok(Vec::new()) }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> { Ok(SetEnvOutcome::Applied) }
-    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> { Ok(()) }
-    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
     }
-
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: InjectVerification::CaptureContainsToken,
+            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            turn_verification: TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
+    }
 }
 
 impl Transport for DeadPaneTransport {
-    fn spawn_first(&self, s: &SessionName, w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
-        Ok(SpawnResult { pane_id: PaneId::new("%1"), session: s.clone(), window: w.clone(), child_pid: None })
+    fn spawn_first(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        _a: &[String],
+        _c: &Path,
+        _e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(SpawnResult {
+            pane_id: PaneId::new("%1"),
+            session: s.clone(),
+            window: w.clone(),
+            child_pid: None,
+        })
     }
-    fn spawn_into(&self, s: &SessionName, w: &WindowName, a: &[String], c: &Path, e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+    fn spawn_into(
+        &self,
+        s: &SessionName,
+        w: &WindowName,
+        a: &[String],
+        c: &Path,
+        e: &BTreeMap<String, String>,
+    ) -> Result<SpawnResult, TransportError> {
         self.spawn_first(s, w, a, c, e)
     }
     fn capture(&self, _t: &Target, r: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range: r })
+        Ok(CapturedText {
+            text: String::new(),
+            range: r,
+        })
     }
     fn liveness(&self, pane: &PaneId) -> Result<PaneLiveness, TransportError> {
         // %9999 (the leader pane env) is dead; everything else live.
@@ -728,18 +956,52 @@ impl Transport for DeadPaneTransport {
     fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
         Ok(vec![WindowName::new("worker_a")])
     }
-    fn kind(&self) -> BackendKind { BackendKind::Tmux }
-    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> { Ok(()) }
+    fn kind(&self) -> BackendKind {
+        BackendKind::Tmux
+    }
+    fn send_keys(&self, _t: &Target, _k: &[Key]) -> Result<(), TransportError> {
+        Ok(())
+    }
     fn query(&self, _t: &Target, f: PaneField) -> Result<Option<String>, TransportError> {
-        match f { PaneField::PaneWidth => Ok(Some("120".to_string())), _ => Ok(None) }
+        match f {
+            PaneField::PaneWidth => Ok(Some("120".to_string())),
+            _ => Ok(None),
+        }
     }
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> { Ok(Vec::new()) }
-    fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> { Ok(SetEnvOutcome::Applied) }
-    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> { Ok(()) }
-    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> { Ok(()) }
-    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> { Ok(AttachOutcome::Attached) }
-    fn inject(&self, _t: &Target, _p: &InjectPayload, _s: Key, _b: bool) -> Result<InjectReport, TransportError> {
-        Ok(InjectReport { stage_reached: InjectStage::Submit, inject_verification: InjectVerification::CaptureContainsToken, submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck, turn_verification: TurnVerification::NotYetObserved, attempts: 1, submit_diagnostics: None })
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        Ok(Vec::new())
     }
-
+    fn set_session_env(
+        &self,
+        _s: &SessionName,
+        _k: &str,
+        _v: &str,
+    ) -> Result<SetEnvOutcome, TransportError> {
+        Ok(SetEnvOutcome::Applied)
+    }
+    fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn kill_window(&self, _t: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+    fn attach_session(&self, _s: &SessionName) -> Result<AttachOutcome, TransportError> {
+        Ok(AttachOutcome::Attached)
+    }
+    fn inject(
+        &self,
+        _t: &Target,
+        _p: &InjectPayload,
+        _s: Key,
+        _b: bool,
+    ) -> Result<InjectReport, TransportError> {
+        Ok(InjectReport {
+            stage_reached: InjectStage::Submit,
+            inject_verification: InjectVerification::CaptureContainsToken,
+            submit_verification: SubmitVerification::EnterSentWithoutPlaceholderCheck,
+            turn_verification: TurnVerification::NotYetObserved,
+            attempts: 1,
+            submit_diagnostics: None,
+        })
+    }
 }

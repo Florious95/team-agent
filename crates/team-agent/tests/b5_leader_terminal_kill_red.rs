@@ -115,8 +115,7 @@ fn green_scoped_shutdown_spares_leader_session_and_process() {
     let fixture = SocketFixture::spawn(&ws);
     write_team_state(&ws, fixture.worker_pid);
 
-    lifecycle_port::shutdown(&ws, false, Some("team-x"))
-        .expect("scoped shutdown should succeed");
+    lifecycle_port::shutdown(&ws, false, Some("team-x")).expect("scoped shutdown should succeed");
 
     let worker_alive = fixture
         .backend
@@ -156,7 +155,8 @@ fn red_v3_residual_sweep_must_not_reap_leaders_tmux_server() {
     let ws = tmp_ws("v3-server");
     let fixture = SocketFixture::spawn(&ws);
     write_team_state(&ws, fixture.worker_pid);
-    let server_pid = parent_pid(fixture.leader_pid).expect("leader pane must have a tmux server parent");
+    let server_pid =
+        parent_pid(fixture.leader_pid).expect("leader pane must have a tmux server parent");
 
     lifecycle_port::shutdown(&ws, false, None).expect("bare shutdown should succeed");
 
@@ -220,7 +220,10 @@ fn parent_pid(pid: u32) -> Option<u32> {
         .args(["-o", "ppid=", "-p", &pid.to_string()])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok()
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +292,13 @@ fn spawn_session(
         keepalive.to_string_lossy().to_string(),
     ];
     backend
-        .spawn_first(session, &WindowName::new(window), &argv, cwd, &BTreeMap::new())
+        .spawn_first(
+            session,
+            &WindowName::new(window),
+            &argv,
+            cwd,
+            &BTreeMap::new(),
+        )
         .unwrap_or_else(|e| panic!("spawn {} failed: {e}", session.as_str()));
 }
 

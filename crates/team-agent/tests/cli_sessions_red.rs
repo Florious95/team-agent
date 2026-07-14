@@ -227,7 +227,10 @@ fn seed_rich_workspace(ws: &Path) {
 #[test]
 fn sessions_empty_workspace_json_and_human_are_byte_locked() {
     let ws = tmp_ws("empty");
-    let json = run(&["sessions", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let json = run(
+        &["sessions", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     assert_success(&json);
     assert_eq!(
         stdout(&json),
@@ -255,7 +258,10 @@ fn sessions_state_only_without_spec_stays_empty_like_python() {
     )
     .unwrap();
 
-    let output = run(&["sessions", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let output = run(
+        &["sessions", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     assert_success(&output);
     assert_eq!(
         stdout(&output),
@@ -303,7 +309,10 @@ fn sessions_resolves_spec_path_from_runtime_state_like_quick_start() {
     )
     .unwrap();
 
-    let output = run(&["sessions", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let output = run(
+        &["sessions", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     assert_success(&output);
     assert_eq!(
         stdout(&output),
@@ -403,7 +412,10 @@ fn sessions_resolves_team_dir_from_runtime_state_like_real_quick_start() {
     )
     .unwrap();
 
-    let output = run(&["sessions", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let output = run(
+        &["sessions", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     assert_success(&output);
     assert_eq!(
         stdout(&output),
@@ -472,7 +484,10 @@ fn sessions_rich_workspace_json_and_human_are_byte_locked() {
     let ws = tmp_ws("rich");
     seed_rich_workspace(&ws);
 
-    let json = run(&["sessions", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let json = run(
+        &["sessions", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     assert_success(&json);
     assert_eq!(stdout(&json), expected_rich_json(&ws));
 

@@ -13,10 +13,10 @@ fn main() -> anyhow::Result<()> {
                 other => return Err(anyhow::anyhow!("unknown fake-worker argument: {other}")),
             }
         }
-        let workspace = workspace
-            .ok_or_else(|| anyhow::anyhow!("fake-worker requires --workspace <path>"))?;
-        let agent_id = agent_id
-            .ok_or_else(|| anyhow::anyhow!("fake-worker requires --agent-id <id>"))?;
+        let workspace =
+            workspace.ok_or_else(|| anyhow::anyhow!("fake-worker requires --workspace <path>"))?;
+        let agent_id =
+            agent_id.ok_or_else(|| anyhow::anyhow!("fake-worker requires --agent-id <id>"))?;
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         team_agent::fake_worker::run(&workspace, &agent_id, stdin.lock(), stdout.lock())

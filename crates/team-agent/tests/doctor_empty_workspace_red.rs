@@ -27,7 +27,12 @@ fn doctor_bogus_empty_workspace_without_spec_or_runtime_exits_nonzero() {
     let home = tmp_dir("home");
 
     let output = run(
-        &["doctor", "--workspace", workspace.to_str().unwrap(), "--json"],
+        &[
+            "doctor",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--json",
+        ],
         &workspace,
         &home,
     );

@@ -826,12 +826,7 @@ pub(crate) fn start_agent_at_paths_for_recovery(
     // subsequent start creates a fresh provider process instead of a Noop.
     // Stop errors are absorbed into the start attempt result — the important
     // invariant is that a successful start returns Running, never Noop.
-    let _ = stop_agent_with_transport(
-        &paths.run_workspace,
-        agent_id,
-        team,
-        transport,
-    );
+    let _ = stop_agent_with_transport(&paths.run_workspace, agent_id, team, transport);
     let start_result = start_agent_with_transport(
         &paths.run_workspace,
         agent_id,

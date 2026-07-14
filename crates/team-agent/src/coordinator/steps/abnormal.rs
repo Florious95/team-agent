@@ -178,11 +178,8 @@ pub(crate) fn detect_abnormal_exits(
         // intent (retryable only), then compose the policy-aware tail. This
         // is INTENT WRITE only — actual lifecycle work happens post-save
         // via `attempt_due_recoveries` (§7.3, R6 guard).
-        let manual_command = recovery_manual_command(
-            agent.agent_id.as_str(),
-            workspace,
-            team.as_str(),
-        );
+        let manual_command =
+            recovery_manual_command(agent.agent_id.as_str(), workspace, team.as_str());
         let error_observation_key_string = error_observation_key.clone().unwrap_or_default();
         let (recovery_class, recovery_schedule, recovery_cohort_key, recovery_backpressure_until) =
             process_api_error_recovery_intent(
@@ -202,14 +199,8 @@ pub(crate) fn detect_abnormal_exits(
             &fact,
             &manual_command,
         );
-        let content = format_abnormal_exit_message(
-            &team,
-            &agent,
-            &fact,
-            &liveness,
-            size,
-            &recovery_tail,
-        );
+        let content =
+            format_abnormal_exit_message(&team, &agent, &fact, &liveness, size, &recovery_tail);
         let outcome = crate::messaging::send_to_leader_receiver(
             workspace,
             state,
@@ -1471,7 +1462,10 @@ fn record_backpressure_event(
     if reset_window {
         obj.insert("window_started_at".to_string(), serde_json::json!(now_str));
         obj.insert("count".to_string(), serde_json::json!(0u64));
-        obj.insert("agents".to_string(), serde_json::json!(Vec::<String>::new()));
+        obj.insert(
+            "agents".to_string(),
+            serde_json::json!(Vec::<String>::new()),
+        );
     }
     obj.insert("last_seen_at".to_string(), serde_json::json!(now_str));
     let count = obj
@@ -1504,7 +1498,10 @@ fn record_backpressure_event(
             .map(|dt| dt.with_timezone(&chrono::Utc));
     } else if (count as usize) >= BACKPRESSURE_THRESHOLD {
         let until = now + cooldown;
-        obj.insert("cooldown_until".to_string(), serde_json::json!(until.to_rfc3339()));
+        obj.insert(
+            "cooldown_until".to_string(),
+            serde_json::json!(until.to_rfc3339()),
+        );
         obj.insert("status".to_string(), serde_json::json!("active"));
         cooldown_until = Some(until);
         just_activated = true;
@@ -1721,9 +1718,9 @@ fn process_api_error_recovery_intent(
     // cohort already holds a scheduled intent, defer the new arrival to
     // the cohort cooldown (or a synthetic short cooldown if none yet).
     if canary_active {
-        let synthetic = bp_decision.cooldown_until.unwrap_or_else(|| {
-            now + chrono::Duration::seconds(BACKPRESSURE_COOLDOWN_SECS)
-        });
+        let synthetic = bp_decision
+            .cooldown_until
+            .unwrap_or_else(|| now + chrono::Duration::seconds(BACKPRESSURE_COOLDOWN_SECS));
         bp_decision.cooldown_until = Some(synthetic);
     }
     if bp_decision.just_activated {
@@ -1816,7 +1813,12 @@ fn process_api_error_recovery_intent(
             }),
         )?;
     }
-    Ok((class, schedule, bp_decision.cohort_key, bp_decision.cooldown_until))
+    Ok((
+        class,
+        schedule,
+        bp_decision.cohort_key,
+        bp_decision.cooldown_until,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1869,10 +1871,7 @@ fn collect_due_recovery_agents(state: &Value) -> Vec<String> {
     };
     let mut due = Vec::new();
     for (agent_id, intent) in agents {
-        let status = intent
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let status = intent.get("status").and_then(Value::as_str).unwrap_or("");
         // 0.5.37 R8: dispatch only for non-terminal states. `succeeded`,
         // `blocked`, `exhausted`, `backpressured` are terminal / awaiting
         // manual action — a lifecycle dispatch here would be double-fire
@@ -1917,10 +1916,7 @@ fn clear_stale_terminal_next_retry_at(state: &mut Value) -> bool {
             if !matches!(status.as_str(), "succeeded" | "blocked" | "exhausted") {
                 continue;
             }
-            let had_stale = obj
-                .get("next_retry_at")
-                .filter(|v| !v.is_null())
-                .is_some();
+            let had_stale = obj.get("next_retry_at").filter(|v| !v.is_null()).is_some();
             if had_stale {
                 obj.remove("next_retry_at");
                 mutated = true;
@@ -2096,10 +2092,7 @@ fn write_recovery_intent_result(workspace: &Path, agent_id: &str, update: Recove
             );
             match update.blocked_reason {
                 Some(reason) => {
-                    obj.insert(
-                        "blocked_reason".to_string(),
-                        serde_json::json!(reason),
-                    );
+                    obj.insert("blocked_reason".to_string(), serde_json::json!(reason));
                 }
                 None => {
                     obj.remove("blocked_reason");

@@ -170,11 +170,17 @@ impl TickFixture {
             Box::new(RegistryHandle(Arc::clone(&registry))),
             Box::new(transport),
         );
-        Self { workspace, coord, registry }
+        Self {
+            workspace,
+            coord,
+            registry,
+        }
     }
 
     fn events(&self) -> Vec<Value> {
-        EventLog::new(&self.workspace).tail(100).expect("read events")
+        EventLog::new(&self.workspace)
+            .tail(100)
+            .expect("read events")
     }
 }
 
@@ -255,7 +261,11 @@ impl Transport for DetectorTransport {
         Ok(())
     }
 
-    fn capture(&self, target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         let text = match target {
             Target::Pane(pane) if pane.as_str() == "%leader" => self.leader_capture.clone(),
             _ => self.worker_capture.clone(),
@@ -276,10 +286,7 @@ impl Transport for DetectorTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(vec![
-            pane_info("%leader", "leader"),
-            pane_info("%w1", "w1"),
-        ])
+        Ok(vec![pane_info("%leader", "leader"), pane_info("%w1", "w1")])
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {

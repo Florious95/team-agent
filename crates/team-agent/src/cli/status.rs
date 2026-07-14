@@ -9,8 +9,7 @@ use super::*;
 pub fn classify_agent_bucket(raw_status: &str, health_status: &str) -> SummaryBucket {
     let raw = raw_status.to_ascii_lowercase();
     let health = health_status.to_ascii_lowercase();
-    if matches!(raw.as_str(), "failed" | "error") || matches!(health.as_str(), "failed" | "error")
-    {
+    if matches!(raw.as_str(), "failed" | "error") || matches!(health.as_str(), "failed" | "error") {
         SummaryBucket::Failed
     } else if matches!(raw.as_str(), "stopped" | "done") || health == "done" {
         SummaryBucket::Stopped
@@ -43,10 +42,7 @@ pub fn agent_summary_counts(agents: &Value, health: &Value) -> SummaryCounts {
             }
             continue;
         }
-        let raw = agent
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let raw = agent.get("status").and_then(Value::as_str).unwrap_or("");
         let hstatus = health
             .get(agent_id)
             .and_then(|v| v.get("status"))
@@ -136,17 +132,13 @@ pub fn format_status_summary(data: &Value) -> String {
         "stopped",
     );
     let schema_ok = python_truthy(
-        data
-        .get("coordinator")
-        .and_then(|v| v.get("schema_ok"))
+        data.get("coordinator")
+            .and_then(|v| v.get("schema_ok"))
             .unwrap_or(&Value::Null),
     );
     let tmux = python_truthy(data.get("tmux_session_present").unwrap_or(&Value::Null));
     let receiver = data.get("leader_receiver").unwrap_or(&Value::Null);
-    let pane = non_empty_str(
-        receiver.get("pane_id").and_then(Value::as_str),
-        "-",
-    );
+    let pane = non_empty_str(receiver.get("pane_id").and_then(Value::as_str), "-");
     let cmd = first_non_empty_str(
         &[
             receiver.get("pane_current_command").and_then(Value::as_str),
@@ -266,17 +258,8 @@ fn csv_agent_status(
 /// `_latest_result_line`(`commands.py:333-337`):agent_id/summary/created_at 渲染单行。
 /// summary `\n`→` ` 后 [:80] 截断、空 → `-`;agent_id 空 → `-`;created_at 经 age_text。
 pub(crate) fn format_latest_result(value: &Value) -> String {
-    let agent = non_empty_str(
-        value
-        .get("agent_id")
-        .and_then(Value::as_str)
-        ,
-        "-",
-    );
-    let raw_summary = value
-        .get("summary")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let agent = non_empty_str(value.get("agent_id").and_then(Value::as_str), "-");
+    let raw_summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
     let summary_flat = raw_summary.replace('\n', " ");
     let summary = prefix_chars(&summary_flat, 80);
     let summary = if summary.is_empty() {
@@ -284,12 +267,7 @@ pub(crate) fn format_latest_result(value: &Value) -> String {
     } else {
         summary
     };
-    let created = age_text(
-        value
-        .get("created_at")
-        .and_then(Value::as_str)
-        ,
-    );
+    let created = age_text(value.get("created_at").and_then(Value::as_str));
     format!("{agent} -> {summary} @ {created}")
 }
 

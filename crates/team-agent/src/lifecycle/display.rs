@@ -217,7 +217,10 @@ fn open_adaptive_worker_displays(
                     workspace_window: target.window.clone(),
                     pane_id: target.pane_id.clone(),
                     pane_title: Some(agent_id),
-                    target: target.pane_id.as_ref().map(|pane| pane.as_str().to_string()),
+                    target: target
+                        .pane_id
+                        .as_ref()
+                        .map(|pane| pane.as_str().to_string()),
                     target_worker_session: Some(session_name.as_str().to_string()),
                     linked_session: None,
                     leader_session: Some(session_name.clone()),
@@ -279,7 +282,9 @@ fn close_adaptive_displays(
         }
     }
     if let Some(leader_session) = adaptive_leader_session(&state) {
-        for target in close_adaptive_windows(&transport, leader_session.as_str(), session_name.as_str()) {
+        for target in
+            close_adaptive_windows(&transport, leader_session.as_str(), session_name.as_str())
+        {
             orphans_cleaned.push(target.clone());
             if seen.insert(target.clone()) {
                 closed.push(target);
@@ -481,4 +486,3 @@ fn string_field(display: &serde_json::Map<String, serde_json::Value>, key: &str)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
 }
-

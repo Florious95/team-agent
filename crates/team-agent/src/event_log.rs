@@ -48,14 +48,22 @@ pub enum EventLogError {
 struct PythonFormatter;
 
 impl serde_json::ser::Formatter for PythonFormatter {
-    fn begin_array_value<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
+    fn begin_array_value<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
         if first {
             Ok(())
         } else {
             w.write_all(b", ")
         }
     }
-    fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, w: &mut W, first: bool) -> std::io::Result<()> {
+    fn begin_object_key<W: ?Sized + std::io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
         if first {
             Ok(())
         } else {
@@ -114,7 +122,9 @@ pub struct EventLog {
 impl EventLog {
     /// `EventLog(workspace)`:路径 = `<workspace>/.team/logs/events.jsonl`。
     pub fn new(workspace: &Path) -> Self {
-        Self { path: logs_dir(workspace).join("events.jsonl") }
+        Self {
+            path: logs_dir(workspace).join("events.jsonl"),
+        }
     }
 
     /// 直接指定 events.jsonl 路径(测试 / 非标准布局)。
@@ -142,7 +152,10 @@ impl EventLog {
         // 单次 write_all(line+"\n"):POSIX O_APPEND 对 <PIPE_BUF 写原子,避免并发写者交错(对抗 P1)。
         let mut bytes = to_python_json(&sort_value(&event)).into_bytes();
         bytes.push(b'\n');
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(&bytes)?;
         Ok(event)
     }
@@ -155,7 +168,11 @@ impl EventLog {
         let text = std::fs::read_to_string(&self.path)?;
         let lines: Vec<&str> = text.lines().collect();
         // Python lines[-limit:]:limit==0 → lines[0:] = 全部(负零切片怪癖);limit>len → 全部。
-        let start = if limit == 0 { 0 } else { lines.len().saturating_sub(limit) };
+        let start = if limit == 0 {
+            0
+        } else {
+            lines.len().saturating_sub(limit)
+        };
         let mut out = Vec::new();
         for line in &lines[start..] {
             match serde_json::from_str::<Value>(line) {
@@ -194,7 +211,10 @@ impl EventLog {
     }
 
     fn archive_path(&self, index: u32) -> PathBuf {
-        let name = self.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        let name = self
+            .path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         self.path.with_file_name(format!("{name}.{index}"))
     }
 }
@@ -223,7 +243,10 @@ mod tests {
             r#"{"event": "u", "msg": "héllo🦀\n世界", "nested": {"a": [1, 2], "b": 2}}"#
         );
         // 空 fields。
-        assert_eq!(to_python_json(&sort_value(&json!({"event":"empty"}))), r#"{"event": "empty"}"#);
+        assert_eq!(
+            to_python_json(&sort_value(&json!({"event":"empty"}))),
+            r#"{"event": "empty"}"#
+        );
         // 类型:bool/null/int 与 Python 一致。
         assert_eq!(
             to_python_json(&sort_value(&json!({"missing":false,"x":null,"n":2}))),
@@ -235,7 +258,11 @@ mod tests {
     fn write_sorts_keys_and_has_ts_event() {
         let ws = temp_ws();
         let log = EventLog::new(&ws);
-        log.write("schema.layout_rebuild", json!({"table":"messages","row_count_before":2,"row_count_after":2,"missing":false})).unwrap();
+        log.write(
+            "schema.layout_rebuild",
+            json!({"table":"messages","row_count_before":2,"row_count_after":2,"missing":false}),
+        )
+        .unwrap();
         let line = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap();
         let line = line.trim_end();
         // 键全排序:event < missing < row_count_after < row_count_before < table < ts。
@@ -243,7 +270,10 @@ mod tests {
         // ts 是合法 rfc3339 UTC。
         let v: Value = serde_json::from_str(line).unwrap();
         let ts = v["ts"].as_str().unwrap();
-        assert!(chrono::DateTime::parse_from_rfc3339(ts).is_ok(), "ts 非合法 rfc3339: {ts}");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(ts).is_ok(),
+            "ts 非合法 rfc3339: {ts}"
+        );
         assert!(ts.ends_with("+00:00"));
     }
 
@@ -276,7 +306,11 @@ mod tests {
         // 预置 current >= 5MiB + 已有 .1..=.5 archive(各带标记内容)。
         std::fs::write(&p, vec![b'x'; EVENT_LOG_ROTATE_BYTES as usize]).unwrap();
         for i in 1..=EVENT_LOG_ARCHIVE_KEEP {
-            std::fs::write(p.with_file_name(format!("events.jsonl.{i}")), format!("arc{i}")).unwrap();
+            std::fs::write(
+                p.with_file_name(format!("events.jsonl.{i}")),
+                format!("arc{i}"),
+            )
+            .unwrap();
         }
         // 下一次 write 触发轮转:.5 丢弃,.4→.5 ... .1→.2,current→.1。
         log.write("after.rotate", json!({})).unwrap();
@@ -285,10 +319,21 @@ mod tests {
         assert_eq!(new_current.lines().count(), 1);
         assert!(new_current.contains("after.rotate"));
         // .1 = 旧 current(5MiB 的 x)。
-        assert_eq!(std::fs::metadata(p.with_file_name("events.jsonl.1")).unwrap().len(), EVENT_LOG_ROTATE_BYTES);
+        assert_eq!(
+            std::fs::metadata(p.with_file_name("events.jsonl.1"))
+                .unwrap()
+                .len(),
+            EVENT_LOG_ROTATE_BYTES
+        );
         // .2 = 旧 .1(内容 "arc1");.5 = 旧 .4("arc4");旧 .5("arc5")被丢弃。
-        assert_eq!(std::fs::read_to_string(p.with_file_name("events.jsonl.2")).unwrap(), "arc1");
-        assert_eq!(std::fs::read_to_string(p.with_file_name("events.jsonl.5")).unwrap(), "arc4");
+        assert_eq!(
+            std::fs::read_to_string(p.with_file_name("events.jsonl.2")).unwrap(),
+            "arc1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.with_file_name("events.jsonl.5")).unwrap(),
+            "arc4"
+        );
     }
 
     #[test]
@@ -319,7 +364,11 @@ mod tests {
         for i in 0..3 {
             log.write("e", json!({ "i": i })).unwrap();
         }
-        assert_eq!(log.tail(0).unwrap().len(), 3, "tail(0) == 全部(Python [-0:])");
+        assert_eq!(
+            log.tail(0).unwrap().len(),
+            3,
+            "tail(0) == 全部(Python [-0:])"
+        );
         assert_eq!(log.tail(2).unwrap().len(), 2);
         assert_eq!(log.tail(99).unwrap().len(), 3);
     }
@@ -349,7 +398,8 @@ mod tests {
         assert_eq!(lines.len(), 8 * 50, "无半行/丢行");
         for line in &lines {
             // 每行完整合法 JSON 且含 event 键 → 未交错。
-            let v: Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("交错坏行: {line:?} ({e})"));
+            let v: Value =
+                serde_json::from_str(line).unwrap_or_else(|e| panic!("交错坏行: {line:?} ({e})"));
             assert_eq!(v["event"], json!("concurrent"));
         }
     }
@@ -367,7 +417,11 @@ mod tests {
                 continue;
             }
             let v: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(to_python_json(&sort_value(&v)), line, "第 {n} 行 round-trip 不字节一致");
+            assert_eq!(
+                to_python_json(&sort_value(&v)),
+                line,
+                "第 {n} 行 round-trip 不字节一致"
+            );
             n += 1;
         }
         assert_eq!(n, 60, "fixture 应 60 行");

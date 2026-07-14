@@ -25,21 +25,48 @@ fn rest_014_restart_team_selector_targets_named_team() {
     assert!(quick_start_launched(&qs_b), "qs b: {}", qs_b.stdout);
 
     // Shut both down so restart picks fresh launches.
-    let _ = run_ta(&ws, &["shutdown", "--workspace", ws_path, "--team", team_a, "--keep-logs", "--json"]);
-    let _ = run_ta(&ws, &["shutdown", "--workspace", ws_path, "--team", team_b, "--keep-logs", "--json"]);
+    let _ = run_ta(
+        &ws,
+        &[
+            "shutdown",
+            "--workspace",
+            ws_path,
+            "--team",
+            team_a,
+            "--keep-logs",
+            "--json",
+        ],
+    );
+    let _ = run_ta(
+        &ws,
+        &[
+            "shutdown",
+            "--workspace",
+            ws_path,
+            "--team",
+            team_b,
+            "--keep-logs",
+            "--json",
+        ],
+    );
 
     let out = run_ta(
         &ws,
         &[
-            "restart", ws_path,
-            "--team", team_a,
+            "restart",
+            ws_path,
+            "--team",
+            team_a,
             "--allow-fresh",
             "--json",
         ],
     );
     let j = out.json();
     assert_json_field_eq_bool(&j, "/ok", true);
-    let session_name = j.pointer("/session_name").and_then(|v| v.as_str()).unwrap_or("");
+    let session_name = j
+        .pointer("/session_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let expected = worker_session_name(team_a);
     assert_eq!(
         session_name, expected,
@@ -47,6 +74,28 @@ fn rest_014_restart_team_selector_targets_named_team() {
     );
 
     // Cleanup
-    let _ = run_ta(&ws, &["shutdown", "--workspace", ws_path, "--team", team_a, "--keep-logs", "--json"]);
-    let _ = run_ta(&ws, &["shutdown", "--workspace", ws_path, "--team", team_b, "--keep-logs", "--json"]);
+    let _ = run_ta(
+        &ws,
+        &[
+            "shutdown",
+            "--workspace",
+            ws_path,
+            "--team",
+            team_a,
+            "--keep-logs",
+            "--json",
+        ],
+    );
+    let _ = run_ta(
+        &ws,
+        &[
+            "shutdown",
+            "--workspace",
+            ws_path,
+            "--team",
+            team_b,
+            "--keep-logs",
+            "--json",
+        ],
+    );
 }

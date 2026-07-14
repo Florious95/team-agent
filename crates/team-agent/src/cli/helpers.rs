@@ -30,7 +30,9 @@ pub(crate) fn python_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(b) => *b,
-        Value::Number(n) => n.as_i64().map(|v| v != 0)
+        Value::Number(n) => n
+            .as_i64()
+            .map(|v| v != 0)
             .or_else(|| n.as_u64().map(|v| v != 0))
             .or_else(|| n.as_f64().map(|v| v != 0.0))
             .unwrap_or(false),

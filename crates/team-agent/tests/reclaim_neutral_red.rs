@@ -58,7 +58,10 @@ fn send_path_reclaim_neutral_static_guard_no_send_auto_reclaim_callsite() {
 fn send_path_reclaim_neutral_cli_broadcast_fanout_and_mcp_do_not_claim() {
     let mut failures = Vec::new();
     for (label, target) in [
-        ("CLI-style single send", MessageTarget::Single("worker_a".to_string())),
+        (
+            "CLI-style single send",
+            MessageTarget::Single("worker_a".to_string()),
+        ),
         ("broadcast send", MessageTarget::Broadcast),
         (
             "fanout send",
@@ -99,7 +102,12 @@ fn send_path_reclaim_neutral_cli_broadcast_fanout_and_mcp_do_not_claim() {
 #[file_serial(tmux)]
 fn report_result_reclaim_neutral_preserves_result_and_message_but_not_owner() {
     let case = TmuxCase::new("report-neutral");
-    seed_state(&case.workspace, Some("%dead-leader"), 9, &[("worker_a", "codex")]);
+    seed_state(
+        &case.workspace,
+        Some("%dead-leader"),
+        9,
+        &[("worker_a", "codex")],
+    );
     let before = runtime_state(&case.workspace);
 
     let out = report_result(&case.workspace, &result_envelope("res_report_neutral"))
@@ -137,7 +145,12 @@ fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owne
     let leader = case.spawn_leader_shaped_pane("leader");
     let worker = case.spawn_cat_pane("worker-a-pane");
     let _env = EnvGuard::set(&[("TMUX_PANE", leader.as_str())]);
-    seed_state(&case.workspace, Some(leader.as_str()), 4, &[("worker_a", "codex")]);
+    seed_state(
+        &case.workspace,
+        Some(leader.as_str()),
+        4,
+        &[("worker_a", "codex")],
+    );
     set_agent_pane(&case.workspace, "worker_a", &worker);
     let before = runtime_state(&case.workspace);
 
@@ -165,7 +178,11 @@ fn transport_retry_reclaim_neutral_injection_and_pending_paths_do_not_write_owne
         binding_snapshot(&after),
         "transport delivery/retry/fallback layer must only inject or update message state; it must not write owner/receiver"
     );
-    assert_eq!(delivered.len(), 1, "fixture should physically inject one pending message");
+    assert_eq!(
+        delivered.len(),
+        1,
+        "fixture should physically inject one pending message"
+    );
     assert!(
         transport
             .capture(
@@ -246,7 +263,12 @@ fn explicit_claim_unconditional_live_caller_claims_vacant_or_dead_and_requeues_s
 fn explicit_takeover_live_owner_unconditional_replaces_live_owner_without_split_brain() {
     let case = TmuxCase::new("explicit-takeover");
     let old = case.spawn_leader_shaped_pane("old-live-leader");
-    seed_state(&case.workspace, Some(old.as_str()), 6, &[("worker_a", "codex")]);
+    seed_state(
+        &case.workspace,
+        Some(old.as_str()),
+        6,
+        &[("worker_a", "codex")],
+    );
     let caller = case.spawn_plain_pane("ordinary-takeover-caller");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
 
@@ -284,7 +306,12 @@ fn dead_leader_send_does_not_autofix_and_tells_user_to_claim_or_takeover() {
     let case = TmuxCase::new("dead-send-no-autofix");
     let caller = case.spawn_plain_pane("ordinary-sender");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
-    seed_state(&case.workspace, Some("%dead-leader"), 12, &[("worker_a", "codex")]);
+    seed_state(
+        &case.workspace,
+        Some("%dead-leader"),
+        12,
+        &[("worker_a", "codex")],
+    );
     let before = runtime_state(&case.workspace);
 
     let out = send_message(
@@ -394,12 +421,19 @@ fn assert_same_team_live_owner_mismatch_requires_takeover() -> Result<(), String
     )
     .map_err(|err| format!("same_team_owner_live_mismatch: send errored: {err}"))?;
 
-    if out.status != DeliveryStatus::Refused || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch) {
+    if out.status != DeliveryStatus::Refused
+        || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch)
+    {
         return Err(format!(
             "same_team_owner_live_mismatch must return TeamOwnerMismatch, got {out:?}"
         ));
     }
-    if !out.verification.as_deref().unwrap_or("").contains("takeover") {
+    if !out
+        .verification
+        .as_deref()
+        .unwrap_or("")
+        .contains("takeover")
+    {
         return Err(format!(
             "same_team_owner_live_mismatch must hint explicit takeover; got {out:?}"
         ));
@@ -422,7 +456,9 @@ fn assert_l1_send_to_child_live_owner_is_refused() -> Result<(), String> {
     )
     .map_err(|err| format!("l1_send_to_c_owner_live: send errored: {err}"))?;
 
-    if out.status != DeliveryStatus::Refused || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch) {
+    if out.status != DeliveryStatus::Refused
+        || out.reason != Some(DeliveryRefusal::TeamOwnerMismatch)
+    {
         return Err(format!(
             "l1_send_to_c_owner_live must return TeamOwnerMismatch; got {out:?}"
         ));
@@ -464,7 +500,12 @@ fn assert_l1_send_to_child_dead_owner_retreats_without_binding() -> Result<(), S
             "l1_send_to_c_owner_dead must return rebind_required, not TeamOwnerMismatch/autoclaim; got {out:?}"
         ));
     }
-    if !out.verification.as_deref().unwrap_or("").contains("claim-leader --team child") {
+    if !out
+        .verification
+        .as_deref()
+        .unwrap_or("")
+        .contains("claim-leader --team child")
+    {
         return Err(format!(
             "l1_send_to_c_owner_dead must hint explicit `claim-leader --team child`; got {out:?}"
         ));
@@ -472,11 +513,20 @@ fn assert_l1_send_to_child_dead_owner_retreats_without_binding() -> Result<(), S
     Ok(())
 }
 
-fn assert_worker_send_to_parent_dead_leader_retreats_without_binding_worker() -> Result<(), String> {
+fn assert_worker_send_to_parent_dead_leader_retreats_without_binding_worker() -> Result<(), String>
+{
     let case = TmuxCase::new("owner-gate-worker-parent-dead");
     let worker = case.spawn_plain_pane("worker-pane");
-    let _env = EnvGuard::set(&[("TMUX_PANE", worker.as_str()), ("TEAM_AGENT_ID", "subleader_w")]);
-    seed_parent_child_state(&case.workspace, "%dead-parent-owner", "%child-owner", "parent");
+    let _env = EnvGuard::set(&[
+        ("TMUX_PANE", worker.as_str()),
+        ("TEAM_AGENT_ID", "subleader_w"),
+    ]);
+    seed_parent_child_state(
+        &case.workspace,
+        "%dead-parent-owner",
+        "%child-owner",
+        "parent",
+    );
     set_team_agent_pane(&case.workspace, "parent", "subleader_w", &worker);
     let before_parent = team_binding_snapshot(&case.workspace, "parent");
 
@@ -529,7 +579,12 @@ fn assert_send_after_explicit_child_claim_succeeds() -> Result<(), String> {
         &send_opts("leader", Some("child")),
     )
     .map_err(|err| format!("send_after_explicit_claim_succeeds: send errored: {err}"))?;
-    if !out.ok || !matches!(out.status, DeliveryStatus::Queued | DeliveryStatus::Delivered) {
+    if !out.ok
+        || !matches!(
+            out.status,
+            DeliveryStatus::Queued | DeliveryStatus::Delivered
+        )
+    {
         return Err(format!(
             "send_after_explicit_claim_succeeds must queue/deliver after explicit child claim; got {out:?}"
         ));
@@ -544,7 +599,12 @@ fn assert_send_variant_is_reclaim_neutral(
     let case = TmuxCase::new(&format!("send-neutral-{}", label.replace(' ', "-")));
     let caller = case.spawn_plain_pane("ordinary-sender");
     let _env = EnvGuard::set(&[("TMUX_PANE", caller.as_str())]);
-    seed_state(&case.workspace, Some("%dead-leader"), 3, &[("worker_a", "codex"), ("worker_b", "codex")]);
+    seed_state(
+        &case.workspace,
+        Some("%dead-leader"),
+        3,
+        &[("worker_a", "codex"), ("worker_b", "codex")],
+    );
     let before = runtime_state(&case.workspace);
     let out = send_message(
         &case.workspace,
@@ -590,7 +650,11 @@ fn team_binding_snapshot(workspace: &Path, team: &str) -> TeamBindingSnapshot {
         owner_epoch: entry
             .get("team_owner")
             .and_then(|v| v.get("owner_epoch"))
-            .or_else(|| entry.get("leader_receiver").and_then(|v| v.get("owner_epoch")))
+            .or_else(|| {
+                entry
+                    .get("leader_receiver")
+                    .and_then(|v| v.get("owner_epoch"))
+            })
             .and_then(Value::as_u64),
     }
 }
@@ -610,7 +674,11 @@ fn seed_parent_child_state(workspace: &Path, parent_owner: &str, child_owner: &s
         1,
         &[("child_worker", "codex")],
     );
-    let active_state = if active == "child" { child.clone() } else { parent.clone() };
+    let active_state = if active == "child" {
+        child.clone()
+    } else {
+        parent.clone()
+    };
     let mut state = active_state;
     state["active_team_key"] = json!(active);
     state["teams"] = json!({
@@ -801,7 +869,11 @@ fn binding_snapshot(state: &Value) -> BindingSnapshot {
         epoch: state
             .get("team_owner")
             .and_then(|v| v.get("owner_epoch"))
-            .or_else(|| state.get("leader_receiver").and_then(|v| v.get("owner_epoch")))
+            .or_else(|| {
+                state
+                    .get("leader_receiver")
+                    .and_then(|v| v.get("owner_epoch"))
+            })
             .and_then(Value::as_u64),
     }
 }
@@ -882,7 +954,10 @@ impl TmuxCase {
     }
 
     fn spawn_leader_shaped_pane(&self, window: &str) -> String {
-        self.spawn_pane(window, vec![self.fake.to_string_lossy().to_string(), "120".to_string()])
+        self.spawn_pane(
+            window,
+            vec![self.fake.to_string_lossy().to_string(), "120".to_string()],
+        )
     }
 
     fn spawn_plain_pane(&self, window: &str) -> String {

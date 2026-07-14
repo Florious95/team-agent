@@ -26,9 +26,9 @@ use team_agent::messaging::{send_message, MessageTarget, SendOptions};
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 fn bin() -> &'static str {
@@ -192,14 +192,8 @@ fn g3_add_send_remove_readd_send_keeps_runtime_and_spec_rosters_coherent() {
         "CR-030/G3: send after add-agent must route to worker_b, proving runtime roster recognizes the new worker; got {first_send:?}"
     );
 
-    let remove = remove_agent_with_transport(
-        &fixture.root,
-        &worker_b,
-        true,
-        true,
-        None,
-        &transport,
-    );
+    let remove =
+        remove_agent_with_transport(&fixture.root, &worker_b, true, true, None, &transport);
     assert!(
         remove.is_ok(),
         "CR-030/G3: remove-agent worker_b after successful add+send must succeed and must not report `unknown worker agent id: worker_b`; got {remove:?}"
@@ -588,11 +582,7 @@ impl Transport for DuplicateSessionTrapTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         self.record("query");
         Ok(None)
     }

@@ -21,17 +21,24 @@ fn shut_002_false_green_guard() {
     let team_id = "shut002";
     let ws = TestWorkspace::new(team_id).with_fake_spec(&["a"]);
     let qs = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&qs), "quick-start did not launch: {}", qs.stdout);
+    assert!(
+        quick_start_launched(&qs),
+        "quick-start did not launch: {}",
+        qs.stdout
+    );
 
     let worker_session = worker_session_name(team_id);
 
     // Make leader_receiver collide with the worker session — classic dirty
     // topology that triggered the 0.3.39 false-green.
-    ws.inject_state("leader_receiver", json!({
-        "session_name": worker_session,
-        "pane_id": "%9999",
-        "status": "attached"
-    }));
+    ws.inject_state(
+        "leader_receiver",
+        json!({
+            "session_name": worker_session,
+            "pane_id": "%9999",
+            "status": "attached"
+        }),
+    );
 
     let out = run_ta(
         &ws,
@@ -45,9 +52,16 @@ fn shut_002_false_green_guard() {
     );
 
     let j = out.json();
-    let session_killed = j.pointer("/session_killed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let session_killed = j
+        .pointer("/session_killed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let ok = j.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    let status = j.pointer("/status").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let status = j
+        .pointer("/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if !session_killed {
         // False-green guard: must NOT be plain green.

@@ -27,9 +27,9 @@ use team_agent::provider::{get_adapter, ProviderAdapter};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 const CLAUDE_TRUST_YES_ACTIVE: &str = r#"Claude Code
@@ -132,7 +132,8 @@ fn claude_ready_idle_shape_is_not_confused_with_numbered_trust_menu() {
 
     let ready_transport = ScriptedTransport::new([CLAUDE_READY_IDLE]);
     let target = Target::Pane(PaneId::new("%3"));
-    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&ready_transport, &target, 1, 0.0);
+    let handled =
+        get_adapter(Provider::Claude).handle_startup_prompts(&ready_transport, &target, 1, 0.0);
     assert!(
         handled.is_empty() && ready_transport.sent_keys().is_empty(),
         "normal Claude idle prompt should be ready/no-op, not workspace-trust; handled={handled:?} sent={:?}",
@@ -140,7 +141,8 @@ fn claude_ready_idle_shape_is_not_confused_with_numbered_trust_menu() {
     );
 
     let trust_transport = ScriptedTransport::new([CLAUDE_TRUST_YES_ACTIVE]);
-    let handled = get_adapter(Provider::Claude).handle_startup_prompts(&trust_transport, &target, 1, 0.0);
+    let handled =
+        get_adapter(Provider::Claude).handle_startup_prompts(&trust_transport, &target, 1, 0.0);
     assert!(
         handled.iter().any(|item| item.prompt == "claude_workspace_trust"),
         "Claude trust menu contains a numbered selector `❯ 1`, but that must be startup trust, not ready idle; handled={handled:?}"
@@ -160,12 +162,17 @@ fn coordinator_tick_handles_claude_startup_trust_and_persists_state() {
         Box::new(transport.clone()),
     );
 
-    let report = coord.tick().expect("coordinator tick should stay typed/fallible");
+    let report = coord
+        .tick()
+        .expect("coordinator tick should stay typed/fallible");
     let state = load_runtime_state(&ws).unwrap();
     let agent = &state["agents"]["clauder"];
     let events = read_events(&ws);
 
-    assert!(report.ok && !report.stop, "startup trust handling must not stop coordinator tick; report={report:?}");
+    assert!(
+        report.ok && !report.stop,
+        "startup trust handling must not stop coordinator tick; report={report:?}"
+    );
     assert_eq!(
         agent["startup_prompts"],
         json!("handled"),
@@ -232,7 +239,10 @@ fn delivery_defers_claude_trust_prompt_then_replays_same_message_after_handled()
         vec![message_id.clone()],
         "same message_id must replay and deliver after startup_prompts=handled"
     );
-    assert_eq!(message_status(&ws, &message_id).as_deref(), Some("delivered"));
+    assert_eq!(
+        message_status(&ws, &message_id).as_deref(),
+        Some("delivered")
+    );
     assert_eq!(
         transport.injects().len(),
         1,
@@ -361,7 +371,11 @@ impl Transport for ScriptedTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         let mut screens = self.screens.lock().unwrap();
         let text = if screens.is_empty() {
             String::new()

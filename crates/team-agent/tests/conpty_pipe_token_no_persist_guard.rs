@@ -51,9 +51,7 @@ fn pipe_token_string_appears_only_inside_conpty_module() {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        if rel.starts_with("conpty/") || rel == "conpty.rs"
-            || rel == "coordinator/conpty_shim.rs"
-        {
+        if rel.starts_with("conpty/") || rel == "conpty.rs" || rel == "coordinator/conpty_shim.rs" {
             continue;
         }
         offenders.push(rel);

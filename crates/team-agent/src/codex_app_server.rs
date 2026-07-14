@@ -120,10 +120,7 @@ pub fn attach_probe(endpoint: &str, thread_id: &str) -> Result<AppServerBinding,
 /// Batch 1 Windows N38 typed-unsupported stub. Callers see the same
 /// `AppServerError` shape as Unix — no silent success, no panic.
 #[cfg(not(unix))]
-pub fn attach_probe(
-    _endpoint: &str,
-    _thread_id: &str,
-) -> Result<AppServerBinding, AppServerError> {
+pub fn attach_probe(_endpoint: &str, _thread_id: &str) -> Result<AppServerBinding, AppServerError> {
     Err(AppServerError::SocketUnreachable(
         "codex_app_server unix-socket client not supported on this platform \
          (Windows); use codex CLI stdio or ConPTY worker delivery instead"
@@ -432,7 +429,7 @@ impl AppServerClient {
                     _ => Err(AppServerError::ProtocolMismatch(format!(
                         "{method} failed: {message}"
                     ))),
-                }
+                };
             }
             return value
                 .get("result")

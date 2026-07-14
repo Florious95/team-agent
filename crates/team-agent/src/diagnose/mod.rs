@@ -2,9 +2,7 @@
 
 use std::path::Path;
 
-use crate::packaging::types::{
-    Blocker, BlockerSource, DoctorGate, PackagingError,
-};
+use crate::packaging::types::{Blocker, BlockerSource, DoctorGate, PackagingError};
 
 pub mod comms;
 pub mod orphans;

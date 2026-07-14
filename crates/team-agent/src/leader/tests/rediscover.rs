@@ -8,7 +8,10 @@ fn r12_ws(tag: &str) -> std::path::PathBuf {
         "ta-r12-{}-{}-{}",
         tag,
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&ws).unwrap();
     ws
@@ -31,14 +34,23 @@ fn usable_target(pane: &str, cmd: &str) -> crate::transport::PaneInfo {
 }
 
 fn r12_events(ws: &std::path::Path) -> Vec<serde_json::Value> {
-    crate::event_log::EventLog::new(ws).tail(0).unwrap_or_default()
+    crate::event_log::EventLog::new(ws)
+        .tail(0)
+        .unwrap_or_default()
 }
 fn find_ev<'a>(evs: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
-    evs.iter().rev().find(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
+    evs.iter()
+        .rev()
+        .find(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
 }
 fn r12_keys(e: &serde_json::Value) -> std::collections::BTreeSet<String> {
     e.as_object()
-        .map(|o| o.keys().filter(|k| *k != "ts" && *k != "event").cloned().collect())
+        .map(|o| {
+            o.keys()
+                .filter(|k| *k != "ts" && *k != "event")
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -46,12 +58,16 @@ fn r12_keys(e: &serde_json::Value) -> std::collections::BTreeSet<String> {
 // path D3: golden _rediscover_leader_receiver:133-145, owner present + >1 owner_candidates → broadcast).
 fn owner_matching_target(pane: &str, cmd: &str, uuid: &str) -> crate::transport::PaneInfo {
     let mut t = usable_target(pane, cmd);
-    t.leader_env
-        .insert("TEAM_AGENT_LEADER_SESSION_UUID".to_string(), uuid.to_string());
+    t.leader_env.insert(
+        "TEAM_AGENT_LEADER_SESSION_UUID".to_string(),
+        uuid.to_string(),
+    );
     t
 }
 fn count_ev(evs: &[serde_json::Value], name: &str) -> usize {
-    evs.iter().filter(|e| e.get("event").and_then(|v| v.as_str()) == Some(name)).count()
+    evs.iter()
+        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some(name))
+        .count()
 }
 
 // R12-0 + R12-3: NO owner_identity + 2 command-usable targets -> golden two-tier AMBIGUOUS (command-usable
@@ -61,10 +77,16 @@ fn count_ev(evs: &[serde_json::Value], name: &str) -> usize {
 fn r12_no_owner_two_usable_targets_is_ambiguous_not_missing() {
     let ws = r12_ws("noownerambig");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let targets = vec![usable_target("%a", "codex"), usable_target("%b", "codex")];
     let out = crate::leader::rediscover_leader_receiver_from_targets_with_owner_identity(
-        &ws, &mut state, &targets, &log, &serde_json::json!({}), None,
+        &ws,
+        &mut state,
+        &targets,
+        &log,
+        &serde_json::json!({}),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -86,10 +108,16 @@ fn r12_no_owner_two_usable_targets_is_ambiguous_not_missing() {
 fn r12_no_owner_zero_usable_missing_is_lean_payload() {
     let ws = r12_ws("noownermiss");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let targets: Vec<crate::transport::PaneInfo> = vec![];
     let out = crate::leader::rediscover_leader_receiver_from_targets_with_owner_identity(
-        &ws, &mut state, &targets, &log, &serde_json::json!({}), None,
+        &ws,
+        &mut state,
+        &targets,
+        &log,
+        &serde_json::json!({}),
+        None,
     )
     .unwrap();
     assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("missing"));
@@ -108,7 +136,10 @@ fn r12_no_owner_zero_usable_missing_is_lean_payload() {
         "R12-1: no-owner D7 rebind_required (golden leader_panes.py:186) has rediscovery_status only, NO \
          recovery_action/owner_identity; got {rk:?}"
     );
-    assert_eq!(rebind.get("rediscovery_status").and_then(|v| v.as_str()), Some("missing"));
+    assert_eq!(
+        rebind.get("rediscovery_status").and_then(|v| v.as_str()),
+        Some("missing")
+    );
 }
 
 // R12-1/R12-2: owner_identity PRESENT + non-matching + 2 command-usable -> golden owner-MISSING (D4):
@@ -119,7 +150,8 @@ fn r12_no_owner_zero_usable_missing_is_lean_payload() {
 fn r12_owner_missing_candidate_count_is_command_usable_len_and_rebind_shape() {
     let ws = r12_ws("ownermiss");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let owner = serde_json::json!({
         "pane_id": "%owner", "leader_session_uuid": "U-abcdef01",
         "machine_fingerprint": "F", "provider": "codex", "team_id": "team-a"
@@ -161,7 +193,8 @@ fn r12_owner_missing_candidate_count_is_command_usable_len_and_rebind_shape() {
 fn r12_5_ambiguous_candidates_event_is_full_golden_candidates_key() {
     let ws = r12_ws("ambigbroadcast");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let owner = serde_json::json!({
         "pane_id": "%owner", "leader_session_uuid": "U-abcdef01",
         "machine_fingerprint": "F", "provider": "codex", "team_id": "team-a"
@@ -174,7 +207,10 @@ fn r12_5_ambiguous_candidates_event_is_full_golden_candidates_key() {
         &ws, &mut state, &targets, &log, &owner, None,
     )
     .unwrap();
-    assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("ambiguous"));
+    assert_eq!(
+        out.get("status").and_then(|v| v.as_str()),
+        Some("ambiguous")
+    );
     let evs = r12_events(&ws);
     let bc = find_ev(&evs, "leader_receiver.ambiguous_candidates")
         .expect("OWNER-ambiguous must broadcast leader_receiver.ambiguous_candidates");
@@ -193,7 +229,10 @@ fn r12_5_ambiguous_candidates_event_is_full_golden_candidates_key() {
         Some(serde_json::json!(["%a", "%b"])),
         "R12-5: candidates == sorted pane_ids (golden candidate_ids = sorted); bc={bc:?}"
     );
-    assert_eq!(bc.get("reason").and_then(|v| v.as_str()), Some("force_confirm_required"));
+    assert_eq!(
+        bc.get("reason").and_then(|v| v.as_str()),
+        Some("force_confirm_required")
+    );
 }
 
 // R12-5 dedup: golden _broadcast_ambiguous_candidates:263 skips re-broadcast when a prior
@@ -204,7 +243,8 @@ fn r12_5_ambiguous_candidates_event_is_full_golden_candidates_key() {
 fn r12_5_ambiguous_candidates_dedups_on_repeat_incident() {
     let ws = r12_ws("ambigdedup");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let owner = serde_json::json!({
         "pane_id": "%owner", "leader_session_uuid": "U-abcdef01",
         "machine_fingerprint": "F", "provider": "codex", "team_id": "team-a"
@@ -240,7 +280,8 @@ fn r12_5_ambiguous_candidates_dedups_on_repeat_incident() {
 fn r12_6_per_candidate_emits_separate_ambiguous_candidate_queued_events() {
     let ws = r12_ws("percand");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let owner = serde_json::json!({
         "pane_id": "%owner", "leader_session_uuid": "U-abcdef01",
         "machine_fingerprint": "F", "provider": "codex", "team_id": "team-a"
@@ -263,8 +304,15 @@ fn r12_6_per_candidate_emits_separate_ambiguous_candidate_queued_events() {
     );
     let qpanes: std::collections::BTreeSet<String> = evs
         .iter()
-        .filter(|e| e.get("event").and_then(|v| v.as_str()) == Some("leader_receiver.ambiguous_candidate_queued"))
-        .filter_map(|e| e.get("pane_id").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|e| {
+            e.get("event").and_then(|v| v.as_str())
+                == Some("leader_receiver.ambiguous_candidate_queued")
+        })
+        .filter_map(|e| {
+            e.get("pane_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .collect();
     assert_eq!(
         qpanes,
@@ -296,7 +344,8 @@ fn r12_return_candidates(out: &serde_json::Value) -> &Vec<serde_json::Value> {
 fn r12_7_candidate_raw_uses_golden_pane_current_spelling() {
     let ws = r12_ws("rawkeys");
     let log = crate::event_log::EventLog::new(&ws);
-    let mut state = serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
+    let mut state =
+        serde_json::json!({"leader_receiver": {"pane_id": "%old", "provider": "codex"}});
     let owner = serde_json::json!({
         "pane_id": "%owner", "leader_session_uuid": "U-abcdef01",
         "machine_fingerprint": "F", "provider": "codex", "team_id": "team-a"
@@ -339,7 +388,10 @@ fn r12_7_event_provider_defaults_to_codex_when_absent() {
         &ws, &mut state, &targets, &log, &owner, None,
     )
     .unwrap();
-    assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("ambiguous"));
+    assert_eq!(
+        out.get("status").and_then(|v| v.as_str()),
+        Some("ambiguous")
+    );
     let evs = r12_events(&ws);
     let amb = find_ev(&evs, "leader_receiver.rediscover_ambiguous").expect("rediscover_ambiguous");
     assert_eq!(

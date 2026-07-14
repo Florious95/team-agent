@@ -95,32 +95,38 @@ pub fn orphan_gate_json(workspace: &Path, fix: bool, confirm: bool) -> Result<Va
     let scope = OrphanScanScope::current_workspace(workspace);
     let report = scan_orphans_bounded(&scope, false);
     if report.orphans.is_empty() {
-        return Ok(with_ignored_foreign(json!({
-            "ok": true,
-            "gate": "orphans",
-            "status": "passed",
-            "scanned": report.scanned,
-            "dry_run": !fix,
-            "scanned_at": chrono::Utc::now().to_rfc3339(),
-            "action_required": false,
-            "fix": fix,
-            "orphans": [],
-        }), &report));
+        return Ok(with_ignored_foreign(
+            json!({
+                "ok": true,
+                "gate": "orphans",
+                "status": "passed",
+                "scanned": report.scanned,
+                "dry_run": !fix,
+                "scanned_at": chrono::Utc::now().to_rfc3339(),
+                "action_required": false,
+                "fix": fix,
+                "orphans": [],
+            }),
+            &report,
+        ));
     }
     if fix {
         return fix_orphans(&scope, report);
     }
-    Ok(with_ignored_foreign(json!({
-        "ok": false,
-        "gate": "orphans",
-        "status": "failed",
-        "scanned": report.scanned,
-        "dry_run": true,
-        "scanned_at": chrono::Utc::now().to_rfc3339(),
-        "action_required": true,
-        "fix": false,
-        "orphans": orphan_values(&report.orphans),
-    }), &report))
+    Ok(with_ignored_foreign(
+        json!({
+            "ok": false,
+            "gate": "orphans",
+            "status": "failed",
+            "scanned": report.scanned,
+            "dry_run": true,
+            "scanned_at": chrono::Utc::now().to_rfc3339(),
+            "action_required": true,
+            "fix": false,
+            "orphans": orphan_values(&report.orphans),
+        }),
+        &report,
+    ))
 }
 
 pub fn cleanup_orphans_json(workspace: &Path, confirm: bool) -> Result<Value, CliError> {
@@ -128,26 +134,32 @@ pub fn cleanup_orphans_json(workspace: &Path, confirm: bool) -> Result<Value, Cl
     let report = scan_orphans_bounded(&scope, false);
     if confirm {
         if report.orphans.is_empty() {
-            return Ok(with_ignored_foreign(json!({
-                "ok": true,
-                "scanned": report.scanned,
-                "orphans": [],
-                "dry_run": false,
-                "scanned_at": chrono::Utc::now().to_rfc3339(),
-                "killed": [],
-                "failed": [],
-            }), &report));
+            return Ok(with_ignored_foreign(
+                json!({
+                    "ok": true,
+                    "scanned": report.scanned,
+                    "orphans": [],
+                    "dry_run": false,
+                    "scanned_at": chrono::Utc::now().to_rfc3339(),
+                    "killed": [],
+                    "failed": [],
+                }),
+                &report,
+            ));
         }
         return cleanup_confirmed(&scope, report);
     }
-    Ok(with_ignored_foreign(json!({
-        "ok": true,
-        "scanned": report.scanned,
-        "orphans": orphan_values(&report.orphans),
-        "dry_run": true,
-        "scanned_at": chrono::Utc::now().to_rfc3339(),
-        "action_required": "re-run with --confirm to send SIGTERM",
-    }), &report))
+    Ok(with_ignored_foreign(
+        json!({
+            "ok": true,
+            "scanned": report.scanned,
+            "orphans": orphan_values(&report.orphans),
+            "dry_run": true,
+            "scanned_at": chrono::Utc::now().to_rfc3339(),
+            "action_required": "re-run with --confirm to send SIGTERM",
+        }),
+        &report,
+    ))
 }
 
 pub fn has_orphan_residue(workspace: &Path) -> bool {
@@ -188,33 +200,39 @@ pub fn orphan_blocker_detail(workspace: &Path) -> String {
 fn fix_orphans(scope: &OrphanScanScope, report: ScanReport) -> Result<Value, CliError> {
     let cleanup = cleanup_report(report, scope);
     let residual = scan_orphans(scope, false);
-    Ok(with_ignored_foreign(json!({
-        "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
-        "gate": "orphans",
-        "status": if residual.orphans.is_empty() && cleanup.failed.is_empty() { "fixed" } else { "failed" },
-        "scanned": cleanup.scanned,
-        "dry_run": false,
-        "scanned_at": chrono::Utc::now().to_rfc3339(),
-        "action_required": !residual.orphans.is_empty() || !cleanup.failed.is_empty(),
-        "fix": true,
-        "orphans": orphan_values(&residual.orphans),
-        "killed": cleanup.killed,
-        "failed": cleanup.failed,
-    }), &residual))
+    Ok(with_ignored_foreign(
+        json!({
+            "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
+            "gate": "orphans",
+            "status": if residual.orphans.is_empty() && cleanup.failed.is_empty() { "fixed" } else { "failed" },
+            "scanned": cleanup.scanned,
+            "dry_run": false,
+            "scanned_at": chrono::Utc::now().to_rfc3339(),
+            "action_required": !residual.orphans.is_empty() || !cleanup.failed.is_empty(),
+            "fix": true,
+            "orphans": orphan_values(&residual.orphans),
+            "killed": cleanup.killed,
+            "failed": cleanup.failed,
+        }),
+        &residual,
+    ))
 }
 
 fn cleanup_confirmed(scope: &OrphanScanScope, report: ScanReport) -> Result<Value, CliError> {
     let cleanup = cleanup_report(report, scope);
     let residual = scan_orphans(scope, false);
-    Ok(with_ignored_foreign(json!({
-        "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
-        "scanned": cleanup.scanned,
-        "orphans": orphan_values(&residual.orphans),
-        "dry_run": false,
-        "scanned_at": chrono::Utc::now().to_rfc3339(),
-        "killed": cleanup.killed,
-        "failed": cleanup.failed,
-    }), &residual))
+    Ok(with_ignored_foreign(
+        json!({
+            "ok": residual.orphans.is_empty() && cleanup.failed.is_empty(),
+            "scanned": cleanup.scanned,
+            "orphans": orphan_values(&residual.orphans),
+            "dry_run": false,
+            "scanned_at": chrono::Utc::now().to_rfc3339(),
+            "killed": cleanup.killed,
+            "failed": cleanup.failed,
+        }),
+        &residual,
+    ))
 }
 
 struct CleanupReport {

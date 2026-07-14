@@ -49,7 +49,11 @@ pub fn active_approval_control_index(lines: &[&str]) -> Option<usize> {
         .rev()
         .find(|(_, line)| is_control_line(&clean_line(line)))
         .map(|(idx, _)| idx)?;
-    if lines.iter().skip(idx + 1).any(|line| !clean_line(line).is_empty()) {
+    if lines
+        .iter()
+        .skip(idx + 1)
+        .any(|line| !clean_line(line).is_empty())
+    {
         return None;
     }
     Some(idx)
@@ -61,15 +65,39 @@ pub fn extract_approval_prompt(agent_id: &str, capture: &str) -> Option<Approval
 
     if let Some((matched_idx, prompt, server, tool)) = explicit_mcp_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(server), Some(tool), None));
+        return Some(approval(
+            agent_id,
+            ApprovalKind::McpTool,
+            prompt,
+            choices,
+            Some(server),
+            Some(tool),
+            None,
+        ));
     }
     if let Some((matched_idx, prompt, server, tool)) = short_mcp_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::McpTool, prompt, choices, Some(server), Some(tool), None));
+        return Some(approval(
+            agent_id,
+            ApprovalKind::McpTool,
+            prompt,
+            choices,
+            Some(server),
+            Some(tool),
+            None,
+        ));
     }
     if let Some((matched_idx, prompt, command)) = command_prompt(&lines, control_idx) {
         let choices = approval_choices_between(&lines, matched_idx, control_idx);
-        return Some(approval(agent_id, ApprovalKind::Command, prompt, choices, None, None, Some(command)));
+        return Some(approval(
+            agent_id,
+            ApprovalKind::Command,
+            prompt,
+            choices,
+            None,
+            None,
+            Some(command),
+        ));
     }
     let choices = approval_choices_between(&lines, 0, control_idx);
     Some(approval(
@@ -84,7 +112,11 @@ pub fn extract_approval_prompt(agent_id: &str, capture: &str) -> Option<Approval
 }
 
 pub fn choose_internal_mcp_approval_choice(prompt: &ApprovalPrompt) -> String {
-    if prompt.choices.iter().any(|choice| choice == "Allow for this session") {
+    if prompt
+        .choices
+        .iter()
+        .any(|choice| choice == "Allow for this session")
+    {
         return "Allow for this session".to_string();
     }
     for choice in &prompt.choices {
@@ -100,8 +132,16 @@ pub fn choose_internal_mcp_approval_choice(prompt: &ApprovalPrompt) -> String {
     "Allow for this session".to_string()
 }
 
-pub fn approval_choice_keys(prompt: &ApprovalPrompt, capture: &str, target_choice: &str) -> Vec<String> {
-    let Some(target_index) = prompt.choices.iter().position(|choice| choice == target_choice) else {
+pub fn approval_choice_keys(
+    prompt: &ApprovalPrompt,
+    capture: &str,
+    target_choice: &str,
+) -> Vec<String> {
+    let Some(target_index) = prompt
+        .choices
+        .iter()
+        .position(|choice| choice == target_choice)
+    else {
         return vec!["Down".to_string(), "Enter".to_string()];
     };
     let Some(active) = active_choice_index(capture) else {
@@ -145,7 +185,10 @@ fn is_control_line(line: &str) -> bool {
         || (lower.contains("esc to cancel") && lower.contains("tab to amend"))
 }
 
-fn explicit_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String, String, String)> {
+fn explicit_mcp_prompt(
+    lines: &[&str],
+    control_idx: usize,
+) -> Option<(usize, String, String, String)> {
     for (idx, raw) in lines.iter().enumerate().take(control_idx).rev() {
         let line = clean_line(raw);
         let prefix = "Allow the ";
@@ -171,10 +214,20 @@ fn short_mcp_prompt(lines: &[&str], control_idx: usize) -> Option<(usize, String
             continue;
         }
         if let Some(tool) = team_orchestrator_tool(&line, '-') {
-            return Some((idx, format!("team_orchestrator - {tool}"), "team_orchestrator".to_string(), tool));
+            return Some((
+                idx,
+                format!("team_orchestrator - {tool}"),
+                "team_orchestrator".to_string(),
+                tool,
+            ));
         }
         if let Some(tool) = team_orchestrator_tool(&line, '.') {
-            return Some((idx, format!("team_orchestrator - {tool}"), "team_orchestrator".to_string(), tool));
+            return Some((
+                idx,
+                format!("team_orchestrator - {tool}"),
+                "team_orchestrator".to_string(),
+                tool,
+            ));
         }
     }
     None
@@ -192,7 +245,12 @@ fn team_orchestrator_tool(line: &str, separator: char) -> Option<String> {
         .chars()
         .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
         .collect();
-    if tool.is_empty() || !tool.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_') {
+    if tool.is_empty()
+        || !tool
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
         None
     } else {
         Some(tool)
@@ -300,7 +358,10 @@ mod tests {
         assert_eq!(prompt.kind, ApprovalKind::McpTool);
         assert_eq!(prompt.server.as_deref(), Some("team_orchestrator"));
         assert_eq!(prompt.tool.as_deref(), Some("send_message"));
-        assert_eq!(prompt.prompt, "Allow the team_orchestrator MCP server to run tool \"send_message\"?");
+        assert_eq!(
+            prompt.prompt,
+            "Allow the team_orchestrator MCP server to run tool \"send_message\"?"
+        );
         assert_eq!(prompt.choices, vec!["Allow for this session", "Deny"]);
     }
 
@@ -338,7 +399,10 @@ mod tests {
         .unwrap();
         assert_eq!(prompt.kind, ApprovalKind::Command);
         assert_eq!(prompt.command.as_deref(), Some("Bash(echo hi)"));
-        assert_eq!(prompt.prompt, "Would you like to run the following command?");
+        assert_eq!(
+            prompt.prompt,
+            "Would you like to run the following command?"
+        );
     }
 
     #[test]
@@ -348,7 +412,10 @@ mod tests {
             None
         );
         assert_eq!(
-            extract_approval_prompt("agent-x", "MCP tool: team_orchestrator - send_message requires approval\n  1. Allow\n"),
+            extract_approval_prompt(
+                "agent-x",
+                "MCP tool: team_orchestrator - send_message requires approval\n  1. Allow\n"
+            ),
             None
         );
     }
@@ -381,10 +448,20 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(choose_internal_mcp_approval_choice(&prompt), "Allow for this session");
+        assert_eq!(
+            choose_internal_mcp_approval_choice(&prompt),
+            "Allow for this session"
+        );
         prompt.choices = vec!["Maybe".to_string()];
-        assert_eq!(choose_internal_mcp_approval_choice(&prompt), "Allow for this session");
-        prompt.choices = vec!["Maybe".to_string(), "Yes, and don't ask again for this command".to_string(), "Allow".to_string()];
+        assert_eq!(
+            choose_internal_mcp_approval_choice(&prompt),
+            "Allow for this session"
+        );
+        prompt.choices = vec![
+            "Maybe".to_string(),
+            "Yes, and don't ask again for this command".to_string(),
+            "Allow".to_string(),
+        ];
         assert_eq!(
             choose_internal_mcp_approval_choice(&prompt),
             "Yes, and don't ask again for this command"
@@ -402,11 +479,26 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(approval_choice_keys(&prompt, "❯ 1. Allow\n", "Missing"), vec!["Down", "Enter"]);
-        assert_eq!(approval_choice_keys(&prompt, "  1. Allow\n  2. Deny\n", "Deny"), vec!["2", "Enter"]);
-        assert_eq!(approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Deny"), vec!["Down", "Enter"]);
-        assert_eq!(approval_choice_keys(&prompt, "  1. Allow\n❯ 2. Deny\n", "Allow"), vec!["Up", "Enter"]);
-        assert_eq!(approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Allow"), vec!["Enter"]);
+        assert_eq!(
+            approval_choice_keys(&prompt, "❯ 1. Allow\n", "Missing"),
+            vec!["Down", "Enter"]
+        );
+        assert_eq!(
+            approval_choice_keys(&prompt, "  1. Allow\n  2. Deny\n", "Deny"),
+            vec!["2", "Enter"]
+        );
+        assert_eq!(
+            approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Deny"),
+            vec!["Down", "Enter"]
+        );
+        assert_eq!(
+            approval_choice_keys(&prompt, "  1. Allow\n❯ 2. Deny\n", "Allow"),
+            vec!["Up", "Enter"]
+        );
+        assert_eq!(
+            approval_choice_keys(&prompt, "❯ 1. Allow\n  2. Deny\n", "Allow"),
+            vec!["Enter"]
+        );
     }
 
     #[test]
@@ -445,8 +537,16 @@ mod tests {
             None,
         )
         .to_ordered_value();
-        let keys: Vec<&str> = mcp.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["agent_id", "state", "kind", "tool", "prompt", "choices"]);
+        let keys: Vec<&str> = mcp
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["agent_id", "state", "kind", "tool", "prompt", "choices"]
+        );
 
         let command = approval(
             "agent-x",
@@ -458,8 +558,16 @@ mod tests {
             Some("Bash(echo hi)".to_string()),
         )
         .to_ordered_value();
-        let keys: Vec<&str> = command.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["agent_id", "state", "kind", "command", "prompt", "choices"]);
+        let keys: Vec<&str> = command
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["agent_id", "state", "kind", "command", "prompt", "choices"]
+        );
     }
 
     #[test]

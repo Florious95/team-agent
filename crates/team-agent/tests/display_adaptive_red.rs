@@ -46,7 +46,11 @@ fn adaptive_open_creates_real_tmux_pane_records_instead_of_placeholder_state() {
     .expect("adaptive display opening should return a typed report");
 
     assert_eq!(report.backend, DisplayBackend::Adaptive);
-    assert_eq!(report.displays.len(), 2, "fixture has two worker panes; report={report:?}");
+    assert_eq!(
+        report.displays.len(),
+        2,
+        "fixture has two worker panes; report={report:?}"
+    );
     for (agent_id, display) in &report.displays {
         let value = serde_json::to_value(display).unwrap();
         let pane_id = value.get("pane_id").and_then(Value::as_str);
@@ -54,7 +58,13 @@ fn adaptive_open_creates_real_tmux_pane_records_instead_of_placeholder_state() {
             pane_id.is_some_and(|pane| pane.starts_with('%')),
             "adaptive display must create a real tmux overview/split pane and persist pane_id; agent={agent_id} display={value}"
         );
-        for field in ["leader_session", "display_session", "linked_session", "pane_title", "target_worker_session"] {
+        for field in [
+            "leader_session",
+            "display_session",
+            "linked_session",
+            "pane_title",
+            "target_worker_session",
+        ] {
             assert!(
                 value.get(field).and_then(Value::as_str).is_some_and(|s| !s.is_empty()),
                 "adaptive display metadata must include cleanup/status field `{field}`; agent={agent_id} display={value}"
@@ -73,8 +83,9 @@ fn adaptive_close_uses_recorded_display_metadata_to_close_windows_and_linked_ses
     let fixture = DisplayFixture::new("close-records");
     fixture.seed_state_with_open_adaptive_display();
 
-    let report = close_team_display_backends(&fixture.workspace, &SessionName::new("team-adaptive"))
-        .expect("adaptive close should return concrete cleanup targets");
+    let report =
+        close_team_display_backends(&fixture.workspace, &SessionName::new("team-adaptive"))
+            .expect("adaptive close should return concrete cleanup targets");
 
     for expected in [
         "leader-live:team-agent:team-adaptive:overview",
@@ -101,21 +112,49 @@ fn real_tmux_adaptive_display_creates_tiled_overview_and_close_removes_only_tagg
     let socket = format!("ta-display-{}-{}", std::process::id(), fixture.id);
     let leader_session = format!("leader-display-{}", fixture.id);
     let team_session = "team-adaptive";
-    let cleanup = RealTmuxCleanup { socket: socket.clone(), sessions: vec![leader_session.clone(), team_session.to_string()] };
+    let cleanup = RealTmuxCleanup {
+        socket: socket.clone(),
+        sessions: vec![leader_session.clone(), team_session.to_string()],
+    };
 
-    run_tmux(&socket, ["new-session", "-d", "-s", &leader_session, "-n", "leader"]).unwrap();
-    run_tmux(&socket, ["new-session", "-d", "-s", team_session, "-n", "alpha"]).unwrap();
-    run_tmux(&socket, ["new-window", "-t", team_session, "-n", "bravo", "sleep 60"]).unwrap();
-    let socket_path = run_tmux(&socket, ["display-message", "-p", "-t", &leader_session, "-F", "#{socket_path}"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let leader_pane = run_tmux(&socket, ["list-panes", "-t", &leader_session, "-F", "#{pane_id}"])
-        .unwrap()
-        .lines()
-        .next()
-        .unwrap_or("%0")
-        .to_string();
+    run_tmux(
+        &socket,
+        ["new-session", "-d", "-s", &leader_session, "-n", "leader"],
+    )
+    .unwrap();
+    run_tmux(
+        &socket,
+        ["new-session", "-d", "-s", team_session, "-n", "alpha"],
+    )
+    .unwrap();
+    run_tmux(
+        &socket,
+        ["new-window", "-t", team_session, "-n", "bravo", "sleep 60"],
+    )
+    .unwrap();
+    let socket_path = run_tmux(
+        &socket,
+        [
+            "display-message",
+            "-p",
+            "-t",
+            &leader_session,
+            "-F",
+            "#{socket_path}",
+        ],
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let leader_pane = run_tmux(
+        &socket,
+        ["list-panes", "-t", &leader_session, "-F", "#{pane_id}"],
+    )
+    .unwrap()
+    .lines()
+    .next()
+    .unwrap_or("%0")
+    .to_string();
     let tmux_env = format!("{socket_path},{},0", std::process::id());
     let _env = EnvGuard::set_many([
         ("TMUX", tmux_env.as_str()),
@@ -144,7 +183,10 @@ fn real_tmux_adaptive_display_creates_tiled_overview_and_close_removes_only_tagg
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "quick-start should run before checking real tmux display; output={combined}");
+    assert!(
+        output.status.success(),
+        "quick-start should run before checking real tmux display; output={combined}"
+    );
 
     let probe = probe_display_capabilities(&fixture.workspace)
         .expect("real tmux fixture should produce a typed adaptive display probe");
@@ -163,8 +205,17 @@ fn real_tmux_adaptive_display_creates_tiled_overview_and_close_removes_only_tagg
     assert_real_display_records(&opened.displays);
     fixture.persist_display_records(&opened.displays);
 
-    let windows = run_tmux(&socket, ["list-windows", "-t", &leader_session, "-F", "#{window_name}:#{window_panes}"])
-        .unwrap();
+    let windows = run_tmux(
+        &socket,
+        [
+            "list-windows",
+            "-t",
+            &leader_session,
+            "-F",
+            "#{window_name}:#{window_panes}",
+        ],
+    )
+    .unwrap();
     assert!(
         windows.contains("team-agent:team-adaptive:overview") && windows.contains(":2"),
         "adaptive display must create a tiled overview window in the leader tmux socket; windows={windows} output={combined}"
@@ -172,11 +223,23 @@ fn real_tmux_adaptive_display_creates_tiled_overview_and_close_removes_only_tagg
     let closed = close_team_display_backends(&fixture.workspace, &SessionName::new(team_session))
         .expect("real adaptive display close should return cleanup evidence");
     assert!(
-        closed.closed.iter().any(|target| target.contains("team-agent:team-adaptive:overview")),
+        closed
+            .closed
+            .iter()
+            .any(|target| target.contains("team-agent:team-adaptive:overview")),
         "adaptive close must clean the tagged overview window; closed={closed:?}"
     );
-    let after_close = run_tmux(&socket, ["list-windows", "-t", &leader_session, "-F", "#{window_name}"])
-        .unwrap();
+    let after_close = run_tmux(
+        &socket,
+        [
+            "list-windows",
+            "-t",
+            &leader_session,
+            "-F",
+            "#{window_name}",
+        ],
+    )
+    .unwrap();
     assert!(
         !after_close.contains("team-agent:team-adaptive:overview"),
         "adaptive close must remove tagged overview windows while leaving leader session alive; after_close={after_close}"
@@ -199,7 +262,10 @@ impl DisplayFixture {
         ));
         let _ = std::fs::remove_dir_all(&workspace);
         std::fs::create_dir_all(&workspace).unwrap();
-        Self { id, workspace: std::fs::canonicalize(workspace).unwrap() }
+        Self {
+            id,
+            workspace: std::fs::canonicalize(workspace).unwrap(),
+        }
     }
 
     fn seed_running_workers<const N: usize>(&self, workers: [&str; N]) {
@@ -257,7 +323,10 @@ impl DisplayFixture {
         .unwrap();
     }
 
-    fn persist_display_records(&self, displays: &std::collections::BTreeMap<String, WorkerDisplay>) {
+    fn persist_display_records(
+        &self,
+        displays: &std::collections::BTreeMap<String, WorkerDisplay>,
+    ) {
         let mut state = load_runtime_state(&self.workspace).unwrap();
         let state_snapshot = state.to_string();
         let agents = state
@@ -269,7 +338,10 @@ impl DisplayFixture {
                 .get_mut(agent_id)
                 .and_then(Value::as_object_mut)
                 .unwrap_or_else(|| panic!("display report referenced unknown agent {agent_id}; state={state_snapshot}"));
-            agent.insert("display".to_string(), serde_json::to_value(display).unwrap());
+            agent.insert(
+                "display".to_string(),
+                serde_json::to_value(display).unwrap(),
+            );
         }
         save_runtime_state(&self.workspace, &state).unwrap();
     }
@@ -343,21 +415,46 @@ impl Drop for EnvGuard {
 }
 
 fn run_tmux<const N: usize>(socket: &str, args: [&str; N]) -> std::io::Result<String> {
-    let output = Command::new("tmux").arg("-L").arg(socket).args(args).output()?;
+    let output = Command::new("tmux")
+        .arg("-L")
+        .arg(socket)
+        .args(args)
+        .output()?;
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn assert_real_display_records(displays: &std::collections::BTreeMap<String, WorkerDisplay>) {
-    assert_eq!(displays.len(), 2, "real fixture has two fake workers; displays={displays:?}");
+    assert_eq!(
+        displays.len(),
+        2,
+        "real fixture has two fake workers; displays={displays:?}"
+    );
     for (agent_id, display) in displays {
         let value = serde_json::to_value(display).unwrap();
-        assert_eq!(value.get("backend").and_then(Value::as_str), Some("adaptive"), "agent={agent_id} display={value}");
-        assert_eq!(value.get("status").and_then(Value::as_str), Some("opened"), "agent={agent_id} display={value}");
+        assert_eq!(
+            value.get("backend").and_then(Value::as_str),
+            Some("adaptive"),
+            "agent={agent_id} display={value}"
+        );
+        assert_eq!(
+            value.get("status").and_then(Value::as_str),
+            Some("opened"),
+            "agent={agent_id} display={value}"
+        );
         assert!(
-            value.get("pane_id").and_then(Value::as_str).is_some_and(|pane| pane.starts_with('%')),
+            value
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .is_some_and(|pane| pane.starts_with('%')),
             "real adaptive display must record concrete pane_id; agent={agent_id} display={value}"
         );
-        for field in ["leader_session", "display_session", "linked_session", "pane_title", "target_worker_session"] {
+        for field in [
+            "leader_session",
+            "display_session",
+            "linked_session",
+            "pane_title",
+            "target_worker_session",
+        ] {
             assert!(
                 value.get(field).and_then(Value::as_str).is_some_and(|s| !s.is_empty()),
                 "real adaptive display must persist `{field}` for cleanup/status; agent={agent_id} display={value}"
@@ -369,8 +466,16 @@ fn assert_real_display_records(displays: &std::collections::BTreeMap<String, Wor
 #[allow(dead_code)]
 fn assert_not_ghostty(display: &WorkerDisplay) {
     assert!(
-        !matches!(display, WorkerDisplay::GhosttyWindow { .. } | WorkerDisplay::GhosttyWorkspace { .. }),
+        !matches!(
+            display,
+            WorkerDisplay::GhosttyWindow { .. } | WorkerDisplay::GhosttyWorkspace { .. }
+        ),
         "Ghostty backends are explicitly out of scope for this adaptive-only contract"
     );
-    assert!(!matches!(display, WorkerDisplay::Blocked { reason: AdaptiveBlockReason::NotImplementedThisPlatform }));
+    assert!(!matches!(
+        display,
+        WorkerDisplay::Blocked {
+            reason: AdaptiveBlockReason::NotImplementedThisPlatform
+        }
+    ));
 }

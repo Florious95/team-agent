@@ -1673,13 +1673,7 @@ mod tests {
     fn hidden_commands_not_in_default_help() {
         let top_help = command_help(None);
         let visible = visible_help_commands(&top_help);
-        for command in [
-            "leaders",
-            "doctor",
-            "e2e",
-            "peek",
-            "coordinator",
-        ] {
+        for command in ["leaders", "doctor", "e2e", "peek", "coordinator"] {
             assert!(
                 !visible.iter().any(|visible| visible == command),
                 "`{command}` must stay hidden from default help"

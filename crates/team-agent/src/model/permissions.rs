@@ -137,7 +137,11 @@ where
     let mut out: Vec<String> = Vec::new();
     for raw in tools {
         match raw.as_ref() {
-            "fs_*" => out.extend(["fs_read", "fs_write", "fs_list"].into_iter().map(String::from)),
+            "fs_*" => out.extend(
+                ["fs_read", "fs_write", "fs_list"]
+                    .into_iter()
+                    .map(String::from),
+            ),
             "@builtin" => out.push("provider_builtin".to_string()),
             "@team-orchestrator" | "@cao-mcp-server" => out.push("mcp_team".to_string()),
             "*" => out.extend(
@@ -306,7 +310,10 @@ pub fn missing_tools(
     let allowed = resolve_permissions(agent)?.tools;
     let required = task_required_tools(task_type, requires_tools)?;
     // required 已是去重集;按字符串字母序输出,对齐 Python。
-    let mut missing: Vec<Tool> = required.into_iter().filter(|t| !allowed.contains(t)).collect();
+    let mut missing: Vec<Tool> = required
+        .into_iter()
+        .filter(|t| !allowed.contains(t))
+        .collect();
     missing.sort_unstable_by_key(|t| t.canonical_str());
     Ok(missing)
 }
@@ -323,7 +330,11 @@ mod tests {
         v
     }
 
-    fn agent(provider: Provider, role: Option<&str>, tools: Option<&[&str]>) -> AgentPermissionInput {
+    fn agent(
+        provider: Provider,
+        role: Option<&str>,
+        tools: Option<&[&str]>,
+    ) -> AgentPermissionInput {
         AgentPermissionInput {
             id: Some(AgentId::new("x")),
             provider,
@@ -336,9 +347,15 @@ mod tests {
     #[test]
     fn expand_tools_matches_python_golden() {
         // E1
-        assert_eq!(strs(&expand_tools(["fs_*"]).unwrap()), ["fs_list", "fs_read", "fs_write"]);
+        assert_eq!(
+            strs(&expand_tools(["fs_*"]).unwrap()),
+            ["fs_list", "fs_read", "fs_write"]
+        );
         // E2
-        assert_eq!(strs(&expand_tools(["@builtin"]).unwrap()), ["provider_builtin"]);
+        assert_eq!(
+            strs(&expand_tools(["@builtin"]).unwrap()),
+            ["provider_builtin"]
+        );
         // E3
         assert_eq!(
             strs(&expand_tools(["*"]).unwrap()),
@@ -368,7 +385,13 @@ mod tests {
         // E7
         assert_eq!(
             strs(&expand_tools(["fs_*", "@builtin", "network"]).unwrap()),
-            ["fs_list", "fs_read", "fs_write", "network", "provider_builtin"]
+            [
+                "fs_list",
+                "fs_read",
+                "fs_write",
+                "network",
+                "provider_builtin"
+            ]
         );
         // E8 — * 已含 fs_read,去重无变化
         assert_eq!(
@@ -408,15 +431,33 @@ mod tests {
         );
         assert_eq!(
             strs(&default_tools_for_role("researcher")),
-            ["fs_list", "fs_read", "mcp_team", "network", "provider_builtin"]
+            [
+                "fs_list",
+                "fs_read",
+                "mcp_team",
+                "network",
+                "provider_builtin"
+            ]
         );
         assert_eq!(
             strs(&default_tools_for_role("reviewer")),
-            ["fs_list", "fs_read", "git_diff", "mcp_team", "provider_builtin"]
+            [
+                "fs_list",
+                "fs_read",
+                "git_diff",
+                "mcp_team",
+                "provider_builtin"
+            ]
         );
         assert_eq!(
             strs(&default_tools_for_role("code_reviewer")),
-            ["fs_list", "fs_read", "git_diff", "mcp_team", "provider_builtin"]
+            [
+                "fs_list",
+                "fs_read",
+                "git_diff",
+                "mcp_team",
+                "provider_builtin"
+            ]
         );
         let dev = [
             "execute_bash",
@@ -428,7 +469,10 @@ mod tests {
             "provider_builtin",
         ];
         assert_eq!(strs(&default_tools_for_role("developer")), dev);
-        assert_eq!(strs(&default_tools_for_role("implementation_engineer")), dev);
+        assert_eq!(
+            strs(&default_tools_for_role("implementation_engineer")),
+            dev
+        );
         // 未知 role → developer 集。
         assert_eq!(strs(&default_tools_for_role("qa")), dev);
     }
@@ -438,18 +482,47 @@ mod tests {
     fn provider_enforcement_matches_python_matrix() {
         use Enforcement::{Hard, PromptOnly};
         // claude_code: network=prompt_only,其余 hard。
-        assert_eq!(provider_enforcement(Provider::ClaudeCode, Tool::Network), PromptOnly);
-        for t in [Tool::FsRead, Tool::FsWrite, Tool::FsList, Tool::ExecuteBash, Tool::GitDiff, Tool::McpTeam, Tool::ProviderBuiltin] {
+        assert_eq!(
+            provider_enforcement(Provider::ClaudeCode, Tool::Network),
+            PromptOnly
+        );
+        for t in [
+            Tool::FsRead,
+            Tool::FsWrite,
+            Tool::FsList,
+            Tool::ExecuteBash,
+            Tool::GitDiff,
+            Tool::McpTeam,
+            Tool::ProviderBuiltin,
+        ] {
             assert_eq!(provider_enforcement(Provider::ClaudeCode, t), Hard);
         }
         // gemini_cli: network + mcp_team = prompt_only,其余 hard。
-        assert_eq!(provider_enforcement(Provider::GeminiCli, Tool::Network), PromptOnly);
-        assert_eq!(provider_enforcement(Provider::GeminiCli, Tool::McpTeam), PromptOnly);
-        for t in [Tool::FsRead, Tool::FsWrite, Tool::FsList, Tool::ExecuteBash, Tool::GitDiff, Tool::ProviderBuiltin] {
+        assert_eq!(
+            provider_enforcement(Provider::GeminiCli, Tool::Network),
+            PromptOnly
+        );
+        assert_eq!(
+            provider_enforcement(Provider::GeminiCli, Tool::McpTeam),
+            PromptOnly
+        );
+        for t in [
+            Tool::FsRead,
+            Tool::FsWrite,
+            Tool::FsList,
+            Tool::ExecuteBash,
+            Tool::GitDiff,
+            Tool::ProviderBuiltin,
+        ] {
             assert_eq!(provider_enforcement(Provider::GeminiCli, t), Hard);
         }
         // codex: 全 prompt_only。fake: 全 hard。
-        for t in [Tool::FsRead, Tool::Network, Tool::McpTeam, Tool::ProviderBuiltin] {
+        for t in [
+            Tool::FsRead,
+            Tool::Network,
+            Tool::McpTeam,
+            Tool::ProviderBuiltin,
+        ] {
             assert_eq!(provider_enforcement(Provider::Codex, t), PromptOnly);
             assert_eq!(provider_enforcement(Provider::Fake, t), Hard);
             // claude 不在表中 → fallback prompt_only。
@@ -462,7 +535,10 @@ mod tests {
     fn resolve_permissions_leader_claude_code() {
         // R-leader-cc
         let r = resolve_permissions(&agent(Provider::ClaudeCode, Some("leader"), None)).unwrap();
-        assert_eq!(r.sorted_tool_strings(), ["fs_list", "fs_read", "mcp_team", "provider_builtin"]);
+        assert_eq!(
+            r.sorted_tool_strings(),
+            ["fs_list", "fs_read", "mcp_team", "provider_builtin"]
+        );
         assert!(!r.has_prompt_only);
         for e in &r.resolved_tools {
             assert_eq!(e.enforcement, Enforcement::Hard);
@@ -475,7 +551,15 @@ mod tests {
         let r = resolve_permissions(&agent(Provider::Codex, Some("developer"), None)).unwrap();
         assert_eq!(
             r.sorted_tool_strings(),
-            ["execute_bash", "fs_list", "fs_read", "fs_write", "git_diff", "mcp_team", "provider_builtin"]
+            [
+                "execute_bash",
+                "fs_list",
+                "fs_read",
+                "fs_write",
+                "git_diff",
+                "mcp_team",
+                "provider_builtin"
+            ]
         );
         assert!(r.has_prompt_only);
         for e in &r.resolved_tools {
@@ -486,19 +570,40 @@ mod tests {
     #[test]
     fn resolve_permissions_impl_gemini_mcp_team_prompt_only() {
         // R-impl-gem:mcp_team=prompt_only,其余 hard → has_prompt_only=true。
-        let r = resolve_permissions(&agent(Provider::GeminiCli, Some("implementation_engineer"), None)).unwrap();
+        let r = resolve_permissions(&agent(
+            Provider::GeminiCli,
+            Some("implementation_engineer"),
+            None,
+        ))
+        .unwrap();
         assert!(r.has_prompt_only);
-        let mcp = r.resolved_tools.iter().find(|e| e.tool == Tool::McpTeam).unwrap();
+        let mcp = r
+            .resolved_tools
+            .iter()
+            .find(|e| e.tool == Tool::McpTeam)
+            .unwrap();
         assert_eq!(mcp.enforcement, Enforcement::PromptOnly);
-        let gd = r.resolved_tools.iter().find(|e| e.tool == Tool::GitDiff).unwrap();
+        let gd = r
+            .resolved_tools
+            .iter()
+            .find(|e| e.tool == Tool::GitDiff)
+            .unwrap();
         assert_eq!(gd.enforcement, Enforcement::Hard);
     }
 
     #[test]
     fn resolve_permissions_explicit_tools_and_norole_and_unknownprov() {
         // R-explicit:显式 tools 走 expand_tools,provider=claude_code。
-        let r = resolve_permissions(&agent(Provider::ClaudeCode, None, Some(&["fs_*", "network"]))).unwrap();
-        assert_eq!(r.sorted_tool_strings(), ["fs_list", "fs_read", "fs_write", "network"]);
+        let r = resolve_permissions(&agent(
+            Provider::ClaudeCode,
+            None,
+            Some(&["fs_*", "network"]),
+        ))
+        .unwrap();
+        assert_eq!(
+            r.sorted_tool_strings(),
+            ["fs_list", "fs_read", "fs_write", "network"]
+        );
         assert!(r.has_prompt_only); // network=prompt_only
 
         // R-norole:无 role → developer 默认,全 hard(claude_code)。
@@ -511,7 +616,15 @@ mod tests {
         .unwrap();
         assert_eq!(
             r2.sorted_tool_strings(),
-            ["execute_bash", "fs_list", "fs_read", "fs_write", "git_diff", "mcp_team", "provider_builtin"]
+            [
+                "execute_bash",
+                "fs_list",
+                "fs_read",
+                "fs_write",
+                "git_diff",
+                "mcp_team",
+                "provider_builtin"
+            ]
         );
         assert!(!r2.has_prompt_only);
 
@@ -529,26 +642,41 @@ mod tests {
     #[test]
     fn resolve_permissions_empty_tools_falls_back_to_role_default() {
         // Python: agent.get("tools") or default → 空 list falsy → 用 role 默认。
-        let r = resolve_permissions(&agent(Provider::ClaudeCode, Some("leader"), Some(&[]))).unwrap();
-        assert_eq!(r.sorted_tool_strings(), ["fs_list", "fs_read", "mcp_team", "provider_builtin"]);
+        let r =
+            resolve_permissions(&agent(Provider::ClaudeCode, Some("leader"), Some(&[]))).unwrap();
+        assert_eq!(
+            r.sorted_tool_strings(),
+            ["fs_list", "fs_read", "mcp_team", "provider_builtin"]
+        );
     }
 
     // ---- task_required_tools 行为对拍(golden) ----
     #[test]
     fn task_required_tools_matches_python_golden() {
         // T1
-        assert_eq!(strs(&task_required_tools(Some("implementation"), &[]).unwrap()), ["execute_bash", "fs_write"]);
+        assert_eq!(
+            strs(&task_required_tools(Some("implementation"), &[]).unwrap()),
+            ["execute_bash", "fs_write"]
+        );
         // T2
-        assert_eq!(strs(&task_required_tools(Some("review"), &[]).unwrap()), ["fs_read", "git_diff"]);
+        assert_eq!(
+            strs(&task_required_tools(Some("review"), &[]).unwrap()),
+            ["fs_read", "git_diff"]
+        );
         // T3
-        assert_eq!(strs(&task_required_tools(Some("research"), &[]).unwrap()), ["fs_read"]);
+        assert_eq!(
+            strs(&task_required_tools(Some("research"), &[]).unwrap()),
+            ["fs_read"]
+        );
         // T4
         assert_eq!(
             strs(&task_required_tools(Some("bug_fix"), &["network".to_string()]).unwrap()),
             ["execute_bash", "fs_write", "network"]
         );
         // T5 未知 type
-        assert!(task_required_tools(Some("unknown_type"), &[]).unwrap().is_empty());
+        assert!(task_required_tools(Some("unknown_type"), &[])
+            .unwrap()
+            .is_empty());
         // T6 无 type
         assert!(task_required_tools(None, &[]).unwrap().is_empty());
         // T7 requires_tools 走 expand_tools(fs_* 展开)
@@ -562,13 +690,28 @@ mod tests {
     #[test]
     fn missing_tools_matches_python_golden() {
         // M1:reviewer(claude_code)缺 implementation 所需 fs_write/execute_bash。
-        let m1 = missing_tools(&agent(Provider::ClaudeCode, Some("reviewer"), None), Some("implementation"), &[]).unwrap();
+        let m1 = missing_tools(
+            &agent(Provider::ClaudeCode, Some("reviewer"), None),
+            Some("implementation"),
+            &[],
+        )
+        .unwrap();
         assert_eq!(m1, [Tool::ExecuteBash, Tool::FsWrite]);
         // M2:developer 不缺。
-        let m2 = missing_tools(&agent(Provider::ClaudeCode, Some("developer"), None), Some("implementation"), &[]).unwrap();
+        let m2 = missing_tools(
+            &agent(Provider::ClaudeCode, Some("developer"), None),
+            Some("implementation"),
+            &[],
+        )
+        .unwrap();
         assert!(m2.is_empty());
         // M3:researcher 缺 git_diff(review 需要),但有 fs_read。
-        let m3 = missing_tools(&agent(Provider::ClaudeCode, Some("researcher"), None), Some("review"), &[]).unwrap();
+        let m3 = missing_tools(
+            &agent(Provider::ClaudeCode, Some("researcher"), None),
+            Some("review"),
+            &[],
+        )
+        .unwrap();
         assert_eq!(m3, [Tool::GitDiff]);
     }
 }

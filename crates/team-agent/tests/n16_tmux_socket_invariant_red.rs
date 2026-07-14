@@ -127,5 +127,7 @@ fn tmux_server_op(window: &str) -> Option<&'static str> {
         "attach-session",
         "kill-server",
     ];
-    OPS.iter().copied().find(|op| window.contains(&format!("\"{op}\"")))
+    OPS.iter()
+        .copied()
+        .find(|op| window.contains(&format!("\"{op}\"")))
 }

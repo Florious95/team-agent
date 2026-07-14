@@ -24,9 +24,9 @@ use team_agent::messaging::deliver_pending_messages;
 use team_agent::tmux_backend::{CommandOutput, CommandRunner, TmuxBackend};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 /// 0.3.27 UNIFIED pipeline: the old pasted-content-block detection branch is
@@ -39,10 +39,10 @@ use team_agent::transport::{
 #[test]
 fn tmux_text_inject_non_token_payload_single_enter_with_placeholder_check() {
     let runner = PastePromptRunner::new([
-        "",                                  // baseline/no block
-        "[Pasted Content 2048 chars]",       // block appears after paste
-        "[Pasted Content 2048 chars]",       // would have triggered pasted-prompt branch pre-0.3.27
-        "OpenAI Codex\n›",                   // cleared on next capture
+        "",                            // baseline/no block
+        "[Pasted Content 2048 chars]", // block appears after paste
+        "[Pasted Content 2048 chars]", // would have triggered pasted-prompt branch pre-0.3.27
+        "OpenAI Codex\n›",             // cleared on next capture
     ]);
     let calls = runner.calls();
     let backend = TmuxBackend::with_runner(Box::new(runner));
@@ -75,7 +75,8 @@ fn tmux_text_inject_non_token_payload_single_enter_with_placeholder_check() {
 }
 
 #[test]
-fn tmux_text_inject_non_token_payload_with_persistent_pasted_block_still_reports_placeholder_check() {
+fn tmux_text_inject_non_token_payload_with_persistent_pasted_block_still_reports_placeholder_check()
+{
     let runner = PastePromptRunner::new([
         "[Pasted Content 4096 chars]",
         "[Pasted Content 4096 chars]",
@@ -127,8 +128,9 @@ fn delivery_marks_enter_sent_without_placeholder_check_as_delivered_after_succes
     let state = delivery_state();
     let transport = ReportTransport::new(vec![enter_sent_without_placeholder_report()]);
 
-    let delivered = deliver_pending_messages(&ws, &state, &transport, &event_log)
-        .expect("delivery should accept successful paste+Enter without requiring a placeholder probe");
+    let delivered = deliver_pending_messages(&ws, &state, &transport, &event_log).expect(
+        "delivery should accept successful paste+Enter without requiring a placeholder probe",
+    );
 
     assert_eq!(
         delivered,
@@ -161,10 +163,26 @@ fn delivery_verifies_each_peer_message_independently_so_second_paste_cannot_fake
     let store = MessageStore::open(&ws).unwrap();
     let event_log = EventLog::new(&ws);
     let first = store
-        .create_message(Some("task-1"), "talker", "coder", "first large block", None, false, Some("team"))
+        .create_message(
+            Some("task-1"),
+            "talker",
+            "coder",
+            "first large block",
+            None,
+            false,
+            Some("team"),
+        )
         .unwrap();
     let second = store
-        .create_message(Some("task-2"), "talker", "coder", "second large block", None, false, Some("team"))
+        .create_message(
+            Some("task-2"),
+            "talker",
+            "coder",
+            "second large block",
+            None,
+            false,
+            Some("team"),
+        )
         .unwrap();
     let state = delivery_state();
     let transport = ReportTransport::new(vec![verified_report(2), failed_submit_report()]);
@@ -264,7 +282,10 @@ fn message_status(store: &MessageStore, message_id: &str) -> String {
     message_status_and_delivered_at(store, message_id).0
 }
 
-fn message_status_and_delivered_at(store: &MessageStore, message_id: &str) -> (String, Option<String>) {
+fn message_status_and_delivered_at(
+    store: &MessageStore,
+    message_id: &str,
+) -> (String, Option<String>) {
     let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
     conn.query_row(
         "select status, delivered_at from messages where message_id = ?1",
@@ -295,7 +316,9 @@ fn is_tmux_subcommand(argv: &[String], subcommand: &str) -> bool {
 }
 
 fn first_call_index(calls: &[Vec<String>], subcommand: &str) -> Option<usize> {
-    calls.iter().position(|argv| is_tmux_subcommand(argv, subcommand))
+    calls
+        .iter()
+        .position(|argv| is_tmux_subcommand(argv, subcommand))
 }
 
 fn first_send_enter_index(calls: &[Vec<String>]) -> Option<usize> {
@@ -307,7 +330,9 @@ fn first_send_enter_index(calls: &[Vec<String>]) -> Option<usize> {
 fn send_enter_count(calls: &[Vec<String>]) -> usize {
     calls
         .iter()
-        .filter(|argv| is_tmux_subcommand(argv, "send-keys") && argv.iter().any(|arg| arg == "Enter"))
+        .filter(|argv| {
+            is_tmux_subcommand(argv, "send-keys") && argv.iter().any(|arg| arg == "Enter")
+        })
         .count()
 }
 
@@ -336,7 +361,11 @@ impl CommandRunner for PastePromptRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
         self.calls.lock().unwrap().push(argv.to_vec());
         let stdout = if is_tmux_subcommand(argv, "capture-pane") {
-            self.captures.lock().unwrap().pop_front().unwrap_or_default()
+            self.captures
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -348,7 +377,11 @@ impl CommandRunner for PastePromptRunner {
         })
     }
 
-    fn run_with_stdin(&self, argv: &[String], _stdin: &str) -> Result<CommandOutput, std::io::Error> {
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
         self.run(argv)
     }
 }
@@ -422,18 +455,17 @@ impl Transport for ReportTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         match field {
             PaneField::PaneWidth => Ok(Some("120".to_string())),
             _ => Ok(None),
         }
     }
 
-    fn liveness(&self, _pane: &PaneId) -> Result<team_agent::transport::PaneLiveness, TransportError> {
+    fn liveness(
+        &self,
+        _pane: &PaneId,
+    ) -> Result<team_agent::transport::PaneLiveness, TransportError> {
         Ok(team_agent::transport::PaneLiveness::Live)
     }
 

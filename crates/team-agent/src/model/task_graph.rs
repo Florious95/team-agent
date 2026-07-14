@@ -207,7 +207,10 @@ mod tests {
             t("a", &["b"], TaskStatus::Pending),
             t("b", &["a"], TaskStatus::Pending),
         ];
-        assert_eq!(cycle_ids(&find_dependency_cycle(&tasks)), vec!["a", "b", "a"]);
+        assert_eq!(
+            cycle_ids(&find_dependency_cycle(&tasks)),
+            vec!["a", "b", "a"]
+        );
     }
 
     #[test]
@@ -239,7 +242,10 @@ mod tests {
             t("a", &["b"], TaskStatus::Pending),
             t("b", &["a"], TaskStatus::Pending),
         ];
-        assert_eq!(cycle_ids(&find_dependency_cycle(&tasks)), vec!["a", "b", "a"]);
+        assert_eq!(
+            cycle_ids(&find_dependency_cycle(&tasks)),
+            vec!["a", "b", "a"]
+        );
     }
 
     #[test]
@@ -351,7 +357,14 @@ mod tests {
         let mut node = t("a", &[], TaskStatus::Pending);
         node.last_result_summary = Some("old".to_string());
         let mut tasks = [node];
-        update_task_status(&mut tasks, &TaskId::new("a"), TaskStatus::Running, None, None).unwrap();
+        update_task_status(
+            &mut tasks,
+            &TaskId::new("a"),
+            TaskStatus::Running,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(tasks[0].status, TaskStatus::Running);
         assert_eq!(tasks[0].last_result_summary.as_deref(), Some("old"));
     }
@@ -360,9 +373,14 @@ mod tests {
     fn update_unknown_id_errors() {
         // Python U4:未知 id -> KeyError "Unknown task id: zzz"。Rust -> Runtime。
         let mut tasks = [t("a", &[], TaskStatus::Pending)];
-        let err =
-            update_task_status(&mut tasks, &TaskId::new("zzz"), TaskStatus::Done, None, None)
-                .unwrap_err();
+        let err = update_task_status(
+            &mut tasks,
+            &TaskId::new("zzz"),
+            TaskStatus::Done,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err, ModelError::Runtime("Unknown task id: zzz".to_string()));
     }
 
@@ -371,10 +389,19 @@ mod tests {
         // Python U5:summary=None 只写 artifact_refs
         let mut tasks = [t("a", &[], TaskStatus::Pending)];
         let refs = vec![serde_json::json!({"r": 1})];
-        update_task_status(&mut tasks, &TaskId::new("a"), TaskStatus::Done, None, Some(refs))
-            .unwrap();
+        update_task_status(
+            &mut tasks,
+            &TaskId::new("a"),
+            TaskStatus::Done,
+            None,
+            Some(refs),
+        )
+        .unwrap();
         assert_eq!(tasks[0].status, TaskStatus::Done);
         assert!(tasks[0].last_result_summary.is_none());
-        assert_eq!(tasks[0].artifact_refs, Some(vec![serde_json::json!({"r": 1})]));
+        assert_eq!(
+            tasks[0].artifact_refs,
+            Some(vec![serde_json::json!({"r": 1})])
+        );
     }
 }

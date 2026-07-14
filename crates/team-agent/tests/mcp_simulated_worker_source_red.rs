@@ -13,7 +13,9 @@ use std::collections::BTreeSet;
 use mcp_sim_harness::{McpSimHarness, McpToolCall};
 use serde_json::json;
 use team_agent::event_log::EventLog;
-use team_agent::messaging::{mirror_peer_message_to_leader, send_to_leader_receiver, DeliveryStatus};
+use team_agent::messaging::{
+    mirror_peer_message_to_leader, send_to_leader_receiver, DeliveryStatus,
+};
 use team_agent::model::ids::TaskId;
 
 // #230 -> #236 N35 obsolete note:
@@ -27,8 +29,7 @@ fn assert_mcp_tool_success(call: &McpToolCall, context: &str) {
     assert!(
         !call.is_error,
         "{context}: MCP tools/call must not return isError=true; body={} raw={}",
-        call.body,
-        call.raw
+        call.body, call.raw
     );
     assert!(
         call.body.get("ok").and_then(|v| v.as_bool()) != Some(false),
@@ -89,10 +90,12 @@ fn mcp_harness_uses_same_binary_env_jsonrpc_trace_and_no_cli_fallback() {
         ],
         "I-1: MCP simulation entrypoint must be `team-agent mcp-server --workspace <workspace>`; spawn={spawn:?}"
     );
-    assert_eq!(spawn.env["TEAM_AGENT_ID"], "worker_a", "I-7: sender identity is spawn-time env");
     assert_eq!(
-        spawn.env["TEAM_AGENT_OWNER_TEAM_ID"],
-        "teamA",
+        spawn.env["TEAM_AGENT_ID"], "worker_a",
+        "I-7: sender identity is spawn-time env"
+    );
+    assert_eq!(
+        spawn.env["TEAM_AGENT_OWNER_TEAM_ID"], "teamA",
         "I-7: owner team scope is spawn-time env"
     );
     assert_eq!(
@@ -101,7 +104,10 @@ fn mcp_harness_uses_same_binary_env_jsonrpc_trace_and_no_cli_fallback() {
         "I-1/I-7: workspace env must match the --workspace argument"
     );
     assert!(
-        spawn.args.iter().all(|arg| !matches!(arg.as_str(), "fake-worker" | "codex" | "claude")),
+        spawn
+            .args
+            .iter()
+            .all(|arg| !matches!(arg.as_str(), "fake-worker" | "codex" | "claude")),
         "I-5: MCP simulation must not start provider CLI processes; spawn={spawn:?}"
     );
     let mcp_entry_sources = [
@@ -158,11 +164,12 @@ fn mcp_harness_uses_same_binary_env_jsonrpc_trace_and_no_cli_fallback() {
 
 #[test]
 fn mcp_stdio_case_matrix_does_not_replace_subscription_cases() {
-    const MCP_STDIO_CASES: &[&str] = &["CR-012", "CR-013", "CR-014", "CR-025", "CR-038", "CR-059", "CR-068"];
+    const MCP_STDIO_CASES: &[&str] = &[
+        "CR-012", "CR-013", "CR-014", "CR-025", "CR-038", "CR-059", "CR-068",
+    ];
     const SUBSCRIPTION_CASES: &[&str] = &[
-        "CR-002", "CR-008", "CR-011", "CR-016", "CR-018", "CR-019", "CR-032", "CR-034",
-        "CR-036", "CR-041", "CR-043", "CR-044", "CR-045", "CR-046", "CR-048", "CR-049",
-        "CR-050", "CR-060",
+        "CR-002", "CR-008", "CR-011", "CR-016", "CR-018", "CR-019", "CR-032", "CR-034", "CR-036",
+        "CR-041", "CR-043", "CR-044", "CR-045", "CR-046", "CR-048", "CR-049", "CR-050", "CR-060",
     ];
     let mcp = MCP_STDIO_CASES.iter().copied().collect::<BTreeSet<_>>();
     let sub = SUBSCRIPTION_CASES.iter().copied().collect::<BTreeSet<_>>();
@@ -218,10 +225,7 @@ fn mcp_worker_send_to_leader_uses_live_leader_receiver_not_refusal_or_fallback()
         }),
     );
 
-    assert_mcp_tool_success(
-        &call,
-        "send_message(to=leader) with a live leader_receiver",
-    );
+    assert_mcp_tool_success(&call, "send_message(to=leader) with a live leader_receiver");
     harness.drive_delivery_twice();
 
     let rows = harness.message_rows_containing(canary);
@@ -259,14 +263,8 @@ fn mcp_worker_send_to_leader_uses_live_leader_receiver_not_refusal_or_fallback()
         0,
         "wrong-team leader pane must not receive teamA worker traffic"
     );
-    assert_scope_resolved_event(
-        &harness.events_text(),
-        "send_message(to=leader)",
-    );
-    assert_deliver_to_leader_submit(
-        &harness.events_text(),
-        "send_message(to=leader)",
-    );
+    assert_scope_resolved_event(&harness.events_text(), "send_message(to=leader)");
+    assert_deliver_to_leader_submit(&harness.events_text(), "send_message(to=leader)");
 }
 
 #[test]
@@ -322,7 +320,10 @@ fn mcp_worker_report_result_is_leader_visible_once_not_queued_only() {
         .result_row(result_id)
         .unwrap_or_else(|| panic!("missing result row for {result_id}"));
     assert_eq!(row.task_id, "task_mcp", "result row must preserve task_id");
-    assert_eq!(row.agent_id, "worker_a", "result row must preserve MCP worker identity");
+    assert_eq!(
+        row.agent_id, "worker_a",
+        "result row must preserve MCP worker identity"
+    );
     assert_eq!(
         row.owner_team_id.as_deref(),
         Some("teamA"),
@@ -382,7 +383,10 @@ fn mcp_worker_broadcast_fans_out_to_team_peers_and_leader_excluding_sender() {
         "broadcast from worker_a must reach all other teamA participants plus leader, and exclude sender; rows={rows:?}"
     );
     for row in &rows {
-        assert_eq!(row.sender, "worker_a", "broadcast row sender must be MCP worker; row={row:?}");
+        assert_eq!(
+            row.sender, "worker_a",
+            "broadcast row sender must be MCP worker; row={row:?}"
+        );
         assert_eq!(
             row.owner_team_id.as_deref(),
             Some("teamA"),

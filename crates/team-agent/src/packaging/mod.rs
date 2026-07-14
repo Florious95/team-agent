@@ -53,7 +53,15 @@
 //! 统一加(原子替换/migration·repair 段建议局部等同 daemon 门),本骨架不加。
 
 // ROUND-0 skeleton:fn body 全 unimplemented!() → import/field/method 暂未被用;P2 porter 落实现时移除。
-#![allow(dead_code, unused_imports, unused_variables, clippy::result_large_err, clippy::doc_overindented_list_items, clippy::doc_lazy_continuation, clippy::io_other_error)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::result_large_err,
+    clippy::doc_overindented_list_items,
+    clippy::doc_lazy_continuation,
+    clippy::io_other_error
+)]
 // §10:原子替换二进制 / migration·repair 路径实现层禁 unwrap/expect/panic(unimplemented!() stub 不被拦);
 // tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

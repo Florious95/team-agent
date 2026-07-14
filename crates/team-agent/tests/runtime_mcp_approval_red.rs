@@ -188,7 +188,8 @@ fn leader_bypass_worker_runtime_approvals_mirror_auto_approve_scope() {
         );
     }
     if !all_sources.contains("DangerousApproval")
-        || (!all_sources.contains("safety.enabled") && !all_sources.contains("effective_runtime_config"))
+        || (!all_sources.contains("safety.enabled")
+            && !all_sources.contains("effective_runtime_config"))
     {
         failures.push(
             "runtime MCP approval auto-answer must be gated by the same leader-derived safety state as worker argv"
@@ -215,7 +216,10 @@ fn command_approval_is_never_auto_approved_even_under_dangerous_policy() {
     let prompt = extract_approval_prompt("worker_a", &capture)
         .expect("fixture should be a live command approval prompt");
     assert_eq!(prompt.kind, ApprovalKind::Command);
-    assert_eq!(prompt.command.as_deref(), Some("Bash(rm -rf /tmp/team-agent-danger)"));
+    assert_eq!(
+        prompt.command.as_deref(),
+        Some("Bash(rm -rf /tmp/team-agent-danger)")
+    );
 
     assert_eq!(
         awaiting_human_confirm_reason(&prompt, true),
@@ -237,9 +241,18 @@ fn claude_argv_three_state_and_mutual_exclusion_cover_launch_resume_and_fork() {
     for provider in [Provider::Claude, Provider::ClaudeCode] {
         let adapter = get_adapter(provider);
         let disabled_launch = adapter
-            .build_command_with_tools(AuthMode::Subscription, None, Some("Worker"), Some("claude-sonnet-4-6"), &[])
+            .build_command_with_tools(
+                AuthMode::Subscription,
+                None,
+                Some("Worker"),
+                Some("claude-sonnet-4-6"),
+                &[],
+            )
             .expect("disabled Claude launch argv");
-        failures.extend(claude_default_failures(&disabled_launch, &format!("{provider:?} disabled fresh launch")));
+        failures.extend(claude_default_failures(
+            &disabled_launch,
+            &format!("{provider:?} disabled fresh launch"),
+        ));
 
         let dangerous_launch = adapter
             .build_command_with_tools(
@@ -342,11 +355,38 @@ fn running_agent_state_persists_effective_policy_schema_and_single_helper_across
     };
 
     for (label, section) in [
-        ("fresh launch", source_section(&launch, "fn persist_spawn_agent_state", "fn launch_report")),
-        ("restart", source_section(&restart_common, "pub(super) fn spawn_agent_window", "fn claude_session_spawn_cwd")),
-        ("start-agent", source_section(&restart_agent, "pub(crate) fn start_agent_at_paths", "fn write_start_agent_noop_event")),
-        ("add-agent", source_section(&launch, "fn add_agent_with_transport_at_paths", "fn materialize_added_role_file")),
-        ("fork-agent", source_section(&launch, "pub fn fork_agent", "fn rollback_fork_after_spawn")),
+        (
+            "fresh launch",
+            source_section(&launch, "fn persist_spawn_agent_state", "fn launch_report"),
+        ),
+        (
+            "restart",
+            source_section(
+                &restart_common,
+                "pub(super) fn spawn_agent_window",
+                "fn claude_session_spawn_cwd",
+            ),
+        ),
+        (
+            "start-agent",
+            source_section(
+                &restart_agent,
+                "pub(crate) fn start_agent_at_paths",
+                "fn write_start_agent_noop_event",
+            ),
+        ),
+        (
+            "add-agent",
+            source_section(
+                &launch,
+                "fn add_agent_with_transport_at_paths",
+                "fn materialize_added_role_file",
+            ),
+        ),
+        (
+            "fork-agent",
+            source_section(&launch, "pub fn fork_agent", "fn rollback_fork_after_spawn"),
+        ),
     ] {
         if !section.contains(helper) {
             failures.push(format!(
@@ -370,11 +410,21 @@ fn coordinator_auto_approval_reads_state_not_process_ancestry_and_emits_audit_pa
         "fn handle_runtime_approval_prompts",
         "fn coordinator_status",
     );
-    let auto_event = source_section(&handler, "\"runtime_approval.auto_approved\"", "RuntimeApprovalDecision::AwaitingHumanConfirm");
-    let mcp_event = source_section(&handler, "\"mcp.tool.auto_approved\"", "RuntimeApprovalDecision::AwaitingHumanConfirm");
+    let auto_event = source_section(
+        &handler,
+        "\"runtime_approval.auto_approved\"",
+        "RuntimeApprovalDecision::AwaitingHumanConfirm",
+    );
+    let mcp_event = source_section(
+        &handler,
+        "\"mcp.tool.auto_approved\"",
+        "RuntimeApprovalDecision::AwaitingHumanConfirm",
+    );
     let mut failures = Vec::new();
 
-    if handler.contains("detect_dangerous_approval") || tick.contains("fn runtime_approval_auto_answer_allowed()") {
+    if handler.contains("detect_dangerous_approval")
+        || tick.contains("fn runtime_approval_auto_answer_allowed()")
+    {
         failures.push(
             "C8/C11: coordinator runtime approval must read per-agent effective_approval_policy from state, not recompute dangerous approval from coordinator process ancestry"
                 .to_string(),
@@ -425,10 +475,16 @@ fn worker_mcp_rpc_arguments_cannot_widen_team_scope_or_bypass_owner_gate() {
     let wire = source("src/mcp_server/wire.rs");
     let tools = source("src/mcp_server/tools.rs");
     let send_schema = source_section(&wire, "McpTool::SendMessage =>", "McpTool::AssignTask =>");
-    let send_dispatch = source_section(&wire, "McpTool::SendMessage =>", "McpTool::ReportResult =>");
+    let send_dispatch =
+        source_section(&wire, "McpTool::SendMessage =>", "McpTool::ReportResult =>");
     let mut failures = Vec::new();
 
-    for forbidden in ["\"scope\"", "\"team\"", "args.get(\"scope\")", "args.get(\"team\")"] {
+    for forbidden in [
+        "\"scope\"",
+        "\"team\"",
+        "args.get(\"scope\")",
+        "args.get(\"team\")",
+    ] {
         if send_schema.contains(forbidden) || send_dispatch.contains(forbidden) {
             failures.push(format!(
                 "C6: worker MCP send_message must not expose or honor per-call {forbidden}; scope is spawn-time TEAM_AGENT_OWNER_TEAM_ID. Public shape: .team/artifacts/232-scope-contract-shape.md"

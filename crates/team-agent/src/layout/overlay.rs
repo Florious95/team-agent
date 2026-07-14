@@ -22,7 +22,10 @@ pub fn overlay_window_name(session_tag: &str, group_index: usize) -> WindowName 
     if group_index == 0 {
         WindowName::new(format!("team-agent:{session_tag}:overview"))
     } else {
-        WindowName::new(format!("team-agent:{session_tag}:overview-{}", group_index + 1))
+        WindowName::new(format!(
+            "team-agent:{session_tag}:overview-{}",
+            group_index + 1
+        ))
     }
 }
 
@@ -113,8 +116,12 @@ mod tests {
 
     #[test]
     fn is_overlay_window_matches_overview_namespace_only() {
-        assert!(is_overlay_window(&WindowName::new("team-agent:alpha:overview")));
-        assert!(is_overlay_window(&WindowName::new("team-agent:alpha:overview-2")));
+        assert!(is_overlay_window(&WindowName::new(
+            "team-agent:alpha:overview"
+        )));
+        assert!(is_overlay_window(&WindowName::new(
+            "team-agent:alpha:overview-2"
+        )));
         assert!(!is_overlay_window(&WindowName::new("developer")));
         assert!(!is_overlay_window(&WindowName::new("team-w1")));
         assert!(!is_overlay_window(&WindowName::new("team-alpha:leader")));

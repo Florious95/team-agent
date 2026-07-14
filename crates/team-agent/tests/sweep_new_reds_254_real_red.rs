@@ -77,8 +77,7 @@ fn rc6_shutdown_real_cli_fake_team_json_no_residuals_and_runner_survives() {
     assert!(
         !shutdown.timed_out,
         "RC6 real shutdown must return; timed out stdout={} stderr={} residuals={residuals:?}",
-        shutdown.stdout,
-        shutdown.stderr
+        shutdown.stdout, shutdown.stderr
     );
     assert_eq!(
         shutdown.code,
@@ -132,7 +131,9 @@ fn depth_real_nested_cli_persists_child_depth_and_refuses_grandchild() {
         "child quick-start from TEAM_AGENT_OWNER_TEAM_ID=parent must persist teams.child.team_depth=2 after final launch writeback; state={state}"
     );
     assert_eq!(
-        state.pointer(&format!("/teams/{child}/parent_team_key")).and_then(Value::as_str),
+        state
+            .pointer(&format!("/teams/{child}/parent_team_key"))
+            .and_then(Value::as_str),
         Some(parent.as_str()),
         "child quick-start must persist teams.child.parent_team_key=parent; state={state}"
     );
@@ -260,7 +261,9 @@ fn rc3_claim_child_leader_persists_under_live_coordinator_tick() {
 
     let state = state_value(case.case.root());
     let receiver = state.pointer(&format!("/teams/{}/leader_receiver/pane_id", case.child));
-    let epoch = state.pointer(&format!("/teams/{}/owner_epoch", case.child)).and_then(Value::as_u64);
+    let epoch = state
+        .pointer(&format!("/teams/{}/owner_epoch", case.child))
+        .and_then(Value::as_u64);
     assert_eq!(
         receiver.and_then(Value::as_str),
         Some(driver.as_str()),
@@ -313,7 +316,9 @@ fn rc3_after_claim_child_worker_result_reaches_child_leader() {
     );
     assert_success_json("send to child worker fixture", &send);
     wait_for_rows(case.case.root(), Duration::from_secs(5), |rows| {
-        rows.results.iter().any(|row| row.owner_team_id == case.child)
+        rows.results
+            .iter()
+            .any(|row| row.owner_team_id == case.child)
             && rows.messages.iter().any(|row| {
                 row.owner_team_id == case.child
                     && row.recipient == "leader"
@@ -352,8 +357,14 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
     let team_b = case.unique_team("teamB");
     write_fake_team(case.root(), &team_a, "wrk1");
     write_fake_team(case.root(), &team_b, "wrk1");
-    assert_success_json("teamA quick-start fixture", &case.quick_start(&team_a, "wrk1", &[]));
-    assert_success_json("teamB quick-start fixture", &case.quick_start(&team_b, "wrk1", &[]));
+    assert_success_json(
+        "teamA quick-start fixture",
+        &case.quick_start(&team_a, "wrk1", &[]),
+    );
+    assert_success_json(
+        "teamB quick-start fixture",
+        &case.quick_start(&team_b, "wrk1", &[]),
+    );
 
     let mut coordinator = case.spawn_live_coordinator();
     let send = case.run_cli(
@@ -376,7 +387,10 @@ fn tit_fake_worker_auto_report_keeps_selected_team_when_active_sibling_differs()
     assert_success_json("teamA send fixture", &send);
     wait_for_rows(case.root(), Duration::from_secs(5), |rows| {
         rows.results.iter().any(|row| row.agent_id == "wrk1")
-            || rows.messages.iter().any(|row| row.content.contains("Fake worker handled message"))
+            || rows
+                .messages
+                .iter()
+                .any(|row| row.content.contains("Fake worker handled message"))
     });
     let _ = coordinator.child.kill();
 
@@ -483,7 +497,10 @@ fn nested_case(tag: &str) -> NestedCase {
     let child = case.unique_team("child");
     write_fake_team(case.root(), &parent, "parent_worker");
     write_fake_team(case.root(), &child, "child_worker");
-    assert_success_json("nested parent quick-start fixture", &case.quick_start(&parent, "parent_worker", &[]));
+    assert_success_json(
+        "nested parent quick-start fixture",
+        &case.quick_start(&parent, "parent_worker", &[]),
+    );
     assert_success_json(
         "nested child quick-start fixture",
         &case.quick_start(
@@ -508,7 +525,8 @@ struct RealCase {
 impl RealCase {
     fn new(tag: &str) -> Self {
         let id = next_id();
-        let root = std::env::temp_dir().join(format!("ta254-real-{tag}-{}-{id}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("ta254-real-{tag}-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(root).unwrap();
@@ -677,7 +695,12 @@ fn run_cli_at(cwd: &Path, args: &[&str], env: &[(&str, &str)], timeout: Duration
     if let Some(mut pipe) = child.stderr.take() {
         let _ = pipe.read_to_string(&mut stderr);
     }
-    CliRun { code: status.code(), stdout, stderr, timed_out }
+    CliRun {
+        code: status.code(),
+        stdout,
+        stderr,
+        timed_out,
+    }
 }
 
 fn write_fake_team(root: &Path, team_key: &str, agent: &str) {
@@ -716,8 +739,12 @@ fn parse_json_or_null(stdout: &str) -> Value {
 }
 
 fn state_value(root: &Path) -> Value {
-    load_runtime_state(root)
-        .unwrap_or_else(|e| panic!("runtime state must exist and parse for real fixture: {e}; root={}", root.display()))
+    load_runtime_state(root).unwrap_or_else(|e| {
+        panic!(
+            "runtime state must exist and parse for real fixture: {e}; root={}",
+            root.display()
+        )
+    })
 }
 
 fn maybe_state_value(root: &Path) -> Option<Value> {
@@ -852,7 +879,9 @@ fn kill_default_sessions_with_id(id: u64) {
     };
     for name in String::from_utf8_lossy(&output.stdout).lines() {
         if name.starts_with("team-") && name.contains(&marker) {
-            let _ = Command::new("tmux").args(["kill-session", "-t", name]).status();
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", name])
+                .status();
         }
     }
 }

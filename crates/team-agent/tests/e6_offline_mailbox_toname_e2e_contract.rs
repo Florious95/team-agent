@@ -534,7 +534,11 @@ fn read_persisted_tmux_socket(workspace: &Path) -> Option<PathBuf> {
     let socket = value
         .get("tmux_socket")
         .and_then(serde_json::Value::as_str)
-        .or_else(|| value.get("tmux_endpoint").and_then(serde_json::Value::as_str))?;
+        .or_else(|| {
+            value
+                .get("tmux_endpoint")
+                .and_then(serde_json::Value::as_str)
+        })?;
     if socket.is_empty() {
         return None;
     }

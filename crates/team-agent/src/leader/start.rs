@@ -80,14 +80,15 @@ pub fn leader_start_plan(
     if !in_tmux {
         ensure_tmux_installed()?;
     }
-    let existing_session = if external_path && !in_tmux && !attach_existing && attach_session.is_none() {
-        match session_name.as_ref() {
-            Some(session) => tmux_session_exists(workspace, session)?,
-            None => false,
-        }
-    } else {
-        false
-    };
+    let existing_session =
+        if external_path && !in_tmux && !attach_existing && attach_session.is_none() {
+            match session_name.as_ref() {
+                Some(session) => tmux_session_exists(workspace, session)?,
+                None => false,
+            }
+        } else {
+            false
+        };
     let mode = if !external_path && in_tmux {
         LeaderStartMode::ExecProvider
     } else if !external_path {
@@ -342,7 +343,9 @@ fn start_argv(
         }
         LeaderStartMode::ManagedTmuxClient => {
             let Some(session) = session_name else {
-                return Err(LeaderError::Start("managed leader session missing".to_string()));
+                return Err(LeaderError::Start(
+                    "managed leader session missing".to_string(),
+                ));
             };
             managed_client_argv(workspace, session, provider)
         }
@@ -402,7 +405,9 @@ fn provider_command_argv(provider: Provider, provider_args: &[String]) -> Vec<St
 fn normalized_provider_args(provider_args: &[String]) -> impl Iterator<Item = String> + '_ {
     provider_args
         .iter()
-        .skip(usize::from(provider_args.first().is_some_and(|arg| arg == "--")))
+        .skip(usize::from(
+            provider_args.first().is_some_and(|arg| arg == "--"),
+        ))
         .cloned()
 }
 
@@ -444,10 +449,14 @@ fn execute_managed_leader_plan(
     workspace: &Path,
 ) -> Result<LeaderLaunchOutcome, LeaderError> {
     let Some(session) = plan.session_name.as_ref() else {
-        return Err(LeaderError::Start("managed leader session missing".to_string()));
+        return Err(LeaderError::Start(
+            "managed leader session missing".to_string(),
+        ));
     };
     let Some(window) = plan.leader_window.as_ref() else {
-        return Err(LeaderError::Start("managed leader window missing".to_string()));
+        return Err(LeaderError::Start(
+            "managed leader window missing".to_string(),
+        ));
     };
     // 0.5.x Phase 1d Batch 6: use the factory tmux channel helper
     // (thin wrapper over `TmuxBackend::for_workspace`) for
@@ -854,9 +863,15 @@ fn persist_exec_provider_leader_binding(
     });
     if let Some(target) = target.as_ref() {
         if let Some(obj) = receiver.as_object_mut() {
-            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+            obj.insert(
+                "session_name".to_string(),
+                serde_json::json!(target.session.as_str()),
+            );
             if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert("window_name".to_string(), serde_json::json!(window_name.as_str()));
+                obj.insert(
+                    "window_name".to_string(),
+                    serde_json::json!(window_name.as_str()),
+                );
             }
         }
     }
@@ -881,7 +896,10 @@ fn persist_exec_provider_leader_binding(
             serde_json::json!(identity.team_id.as_str()),
         );
         if let Some(target) = target.as_ref() {
-            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+            obj.insert(
+                "session_name".to_string(),
+                serde_json::json!(target.session.as_str()),
+            );
         }
         if let Some(socket) = socket.as_ref() {
             obj.insert("tmux_endpoint".to_string(), serde_json::json!(socket));
@@ -1006,10 +1024,9 @@ fn refresh_managed_leader_provider_binding(
     plan: &LeaderStartPlan,
     workspace: &Path,
 ) -> Result<(), LeaderError> {
-    let identity = plan
-        .identity
-        .as_ref()
-        .ok_or_else(|| LeaderError::Start("managed leader re-entry identity missing".to_string()))?;
+    let identity = plan.identity.as_ref().ok_or_else(|| {
+        LeaderError::Start("managed leader re-entry identity missing".to_string())
+    })?;
     let pane = std::env::var("TMUX_PANE")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1029,8 +1046,16 @@ fn refresh_managed_leader_provider_binding(
     let existing_epoch = state
         .pointer(&format!("/teams/{team_key}/owner_epoch"))
         .and_then(serde_json::Value::as_u64)
-        .or_else(|| existing_owner.get("owner_epoch").and_then(serde_json::Value::as_u64))
-        .or_else(|| existing_receiver.get("owner_epoch").and_then(serde_json::Value::as_u64))
+        .or_else(|| {
+            existing_owner
+                .get("owner_epoch")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .or_else(|| {
+            existing_receiver
+                .get("owner_epoch")
+                .and_then(serde_json::Value::as_u64)
+        })
         .unwrap_or(0);
     let now = chrono::Utc::now().to_rfc3339();
     let provider = serde_json::to_value(plan.provider)?;
@@ -1050,9 +1075,15 @@ fn refresh_managed_leader_provider_binding(
         obj.entry("leader_session_uuid".to_string())
             .or_insert_with(|| serde_json::json!(identity.leader_session_uuid.as_str()));
         if let Some(target) = target.as_ref() {
-            obj.insert("session_name".to_string(), serde_json::json!(target.session.as_str()));
+            obj.insert(
+                "session_name".to_string(),
+                serde_json::json!(target.session.as_str()),
+            );
             if let Some(window_name) = target.window_name.as_ref() {
-                obj.insert("window_name".to_string(), serde_json::json!(window_name.as_str()));
+                obj.insert(
+                    "window_name".to_string(),
+                    serde_json::json!(window_name.as_str()),
+                );
             }
             if let Some(pane_pid) = target.pane_pid {
                 obj.insert("pane_pid".to_string(), serde_json::json!(pane_pid));
@@ -1117,7 +1148,9 @@ fn persist_external_leader_topology_marker(
         .unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = state.as_object_mut() {
         obj.entry("workspace".to_string()).or_insert_with(|| {
-            serde_json::json!(resolve_workspace_for_hash(workspace).to_string_lossy().to_string())
+            serde_json::json!(resolve_workspace_for_hash(workspace)
+                .to_string_lossy()
+                .to_string())
         });
         obj.entry("active_team_key".to_string())
             .or_insert_with(|| serde_json::json!(identity.team_id.as_str()));
@@ -1231,12 +1264,7 @@ fn spawn_managed_provider_startup_prompt_handler(
         // grep-visibility. Semantics unchanged.
         let transport = crate::transport_factory::tmux_workspace_transport(&workspace);
         let _ = handle_exec_provider_startup_prompts(
-            provider,
-            &workspace,
-            &pane_id,
-            &transport,
-            30,
-            0.5,
+            provider, &workspace, &pane_id, &transport, 30, 0.5,
         );
     });
 }
@@ -1671,10 +1699,8 @@ mod tests {
 
     #[test]
     fn external_exec_provider_persists_topology_before_provider_exec() {
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-external-pre-exec-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ta-external-pre-exec-{}", std::process::id()));
         std::fs::create_dir_all(&workspace).unwrap();
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         let command = format!(
@@ -1716,17 +1742,18 @@ mod tests {
         assert_eq!(outcome.status, crate::leader::LeaderLaunchStatus::Exited);
         let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
         assert_eq!(state["is_external_leader"], serde_json::json!(true));
-        assert_eq!(state["teams"]["current"]["is_external_leader"], serde_json::json!(true));
+        assert_eq!(
+            state["teams"]["current"]["is_external_leader"],
+            serde_json::json!(true)
+        );
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
     #[serial_test::serial(env)]
     fn default_exec_provider_persists_current_pane_binding_before_provider_exec() {
-        let workspace = std::env::temp_dir().join(format!(
-            "ta-current-pane-pre-exec-{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ta-current-pane-pre-exec-{}", std::process::id()));
         std::fs::create_dir_all(&workspace).unwrap();
         let state_path = crate::state::persist::runtime_state_path(&workspace);
         let command = format!(
@@ -1834,14 +1861,13 @@ mod tests {
         // managed path must still match LEADER_SESSION_PREFIX so the
         // shutdown / cli/mod.rs prefix matchers still classify it as a
         // leader session.
-        let workspace = std::env::temp_dir().join(format!(
-            "ta_rs_mgr_prefix_{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_mgr_prefix_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&workspace);
         let name = super::managed_leader_session_name(Provider::ClaudeCode, &workspace);
         assert!(
-            name.as_str().starts_with(super::super::LEADER_SESSION_PREFIX),
+            name.as_str()
+                .starts_with(super::super::LEADER_SESSION_PREFIX),
             "managed session name must carry LEADER_SESSION_PREFIX (`{}`); \
              got `{}`",
             super::super::LEADER_SESSION_PREFIX,
@@ -1859,10 +1885,8 @@ mod tests {
     fn managed_leader_session_name_is_unique_per_call() {
         // Two consecutive calls must return DIFFERENT names — the
         // per-launch nonce defeats the mirror-session bug.
-        let workspace = std::env::temp_dir().join(format!(
-            "ta_rs_mgr_unique_{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_mgr_unique_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&workspace);
         let a = super::managed_leader_session_name(Provider::ClaudeCode, &workspace);
         // Sleep > 1ns to ensure epoch_nanos advances even on coarse clocks.
@@ -1885,10 +1909,8 @@ mod tests {
         // External / attach paths must keep the stable workspace-keyed
         // name — `--attach-session <name>` reattach would break if the
         // name varied per call.
-        let workspace = std::env::temp_dir().join(format!(
-            "ta_rs_lsn_stable_{}",
-            std::process::id()
-        ));
+        let workspace =
+            std::env::temp_dir().join(format!("ta_rs_lsn_stable_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&workspace);
         let a = super::leader_session_name(Provider::ClaudeCode, &workspace);
         let b = super::leader_session_name(Provider::ClaudeCode, &workspace);
@@ -1911,8 +1933,7 @@ mod tests {
     fn managed_path_uses_nonce_session_name_grep_guard() {
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let start_rs = manifest.join("src").join("leader").join("start.rs");
-        let contents =
-            std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
+        let contents = std::fs::read_to_string(&start_rs).expect("read leader/start.rs");
         // leader_start_plan must dispatch to managed_leader_session_name
         // on the managed path.
         let start = contents

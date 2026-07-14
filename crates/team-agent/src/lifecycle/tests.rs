@@ -20,11 +20,11 @@ fn sess(s: &str) -> SessionName {
     SessionName(s.to_string())
 }
 
+mod agent_ops;
 mod core;
+mod lane_ops;
 mod launch_spawn;
 mod lifecycle_lock;
-mod agent_ops;
-mod lane_ops;
 mod main_preserved;
 mod phase_b_contracts;
 mod phase_golden;

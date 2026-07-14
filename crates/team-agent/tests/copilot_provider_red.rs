@@ -70,8 +70,15 @@ fn copilot_argv_golden_restricted_role() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cprestricted"), &transport)
-        .expect("quick-start should reach copilot command construction");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cprestricted"),
+        &transport,
+    )
+    .expect("quick-start should reach copilot command construction");
     let spawn = transport.single_spawn();
     let argv = &spawn.argv;
     let mut failures = Vec::new();
@@ -112,7 +119,15 @@ fn copilot_argv_golden_restricted_role() {
         ));
     }
     // RC-1/RC-16/C-5-8: forbidden flags must never appear.
-    for forbidden in ["-i", "--interactive", "-p", "--share", "--share-gist", "--no-ask-user", "--yolo"] {
+    for forbidden in [
+        "-i",
+        "--interactive",
+        "-p",
+        "--share",
+        "--share-gist",
+        "--no-ask-user",
+        "--yolo",
+    ] {
         if argv.iter().any(|arg| arg == forbidden) {
             failures.push(format!("RC-1/RC-16: forbidden flag {forbidden} in argv"));
         }
@@ -123,7 +138,8 @@ fn copilot_argv_golden_restricted_role() {
         None => failures.push("§C1: argv must carry --additional-mcp-config".to_string()),
         Some(value) => {
             let inline_ok = value.contains("mcpServers") && value.contains("team_orchestrator");
-            let file_ok = value.starts_with('@') && value.contains(".team/runtime/mcp/worker_a.json");
+            let file_ok =
+                value.starts_with('@') && value.contains(".team/runtime/mcp/worker_a.json");
             if !(inline_ok || file_ok) {
                 failures.push(format!(
                     "§C1: --additional-mcp-config must be inline mcpServers JSON with \
@@ -171,12 +187,18 @@ team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
     }
     // RC-10 (C-3-5/C-5-2): mcp_team is allowlisted by server name (no approval prompt).
     let allow_tools = flag_values(argv, "--allow-tool");
-    if !allow_tools.iter().any(|tool| tool.contains("team_orchestrator")) {
+    if !allow_tools
+        .iter()
+        .any(|tool| tool.contains("team_orchestrator"))
+    {
         failures.push(format!(
             "RC-10/C-3-5: argv must carry --allow-tool 'team_orchestrator'; allow={allow_tools:?}"
         ));
     }
-    if argv.iter().any(|arg| arg == "--allow-all" || arg == "--allow-all-tools") {
+    if argv
+        .iter()
+        .any(|arg| arg == "--allow-all" || arg == "--allow-all-tools")
+    {
         failures.push(format!(
             "C-5-3: a non-dangerous worker must NOT carry --allow-all/--allow-all-tools; argv={argv:?}"
         ));
@@ -185,12 +207,18 @@ team_orchestrator or @<.team/runtime/mcp/worker_a.json>; got {value:?}"
     // appear — no `-i <prompt>` first-message injection, no --no-custom-instructions,
     // and the compiled system prompt text must NOT ride in the argv (it travels via
     // the instructions file + env, B2 degradation path).
-    if argv.iter().any(|arg| arg == "-i" || arg == "--interactive" || arg == "--no-custom-instructions") {
+    if argv
+        .iter()
+        .any(|arg| arg == "-i" || arg == "--interactive" || arg == "--no-custom-instructions")
+    {
         failures.push(format!(
             "C-1-5: rejected fallback flag present (-i/--interactive/--no-custom-instructions); argv={argv:?}"
         ));
     }
-    if argv.iter().any(|arg| arg.contains("Team Agent Teammate Runtime Contract")) {
+    if argv
+        .iter()
+        .any(|arg| arg.contains("Team Agent Teammate Runtime Contract"))
+    {
         failures.push("C-1-5/B2: the system prompt must not be smuggled into the argv".to_string());
     }
     assert!(
@@ -212,8 +240,15 @@ fn copilot_argv_dangerous_maps_to_allow_all() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpdangerous"), &transport)
-        .expect("quick-start should reach copilot command construction");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpdangerous"),
+        &transport,
+    )
+    .expect("quick-start should reach copilot command construction");
     let argv = &transport.single_spawn().argv;
 
     let mut failures = Vec::new();
@@ -252,15 +287,25 @@ fn copilot_agents_md_is_the_compiled_prompt_and_env_points_at_it() {
     let home = tmp_ws("fake-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+        (
+            "HOME",
+            Box::leak(home.to_string_lossy().to_string().into_boxed_str()),
+        ),
     ]);
     let ws = tmp_ws("agents-md");
     let team_dir = write_copilot_team(&ws, "cp-instructions", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpinstr"), &transport)
-        .expect("quick-start should spawn the copilot worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpinstr"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
     let mut failures = Vec::new();
@@ -343,14 +388,29 @@ fn copilot_permission_note_registers_fs_tools_prompt_only() {
     let team_dir = write_copilot_team(
         &ws,
         "cp-enforcement",
-        &["execute_bash", "fs_read", "fs_write", "fs_list", "git_diff", "mcp_team", "provider_builtin"],
+        &[
+            "execute_bash",
+            "fs_read",
+            "fs_write",
+            "fs_list",
+            "git_diff",
+            "mcp_team",
+            "provider_builtin",
+        ],
         false,
     );
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpenforce"), &transport)
-        .expect("quick-start should spawn the copilot worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpenforce"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
     let dir = spawn
         .env
@@ -535,7 +595,10 @@ impl team_agent::coordinator::ProviderRegistry for RealAdapterRegistry {
         team_agent::provider::get_adapter(provider)
     }
     fn error_lists(&self, _provider: Provider) -> team_agent::coordinator::ErrorLists {
-        team_agent::coordinator::ErrorLists { whitelist: Vec::new(), blacklist: Vec::new() }
+        team_agent::coordinator::ErrorLists {
+            whitelist: Vec::new(),
+            blacklist: Vec::new(),
+        }
     }
 }
 
@@ -576,7 +639,11 @@ fn copilot_session_capture_is_sqlite_point_query_not_directory_scan() {
     // Poisoned decoy: a whole-directory scanner would read this and fail/skip.
     let mut poison = b"{\"junk\":true}\n".to_vec();
     poison.extend_from_slice(&[0xFF, 0xFE, 0xFF]);
-    std::fs::write(copilot_dir.join("logs").join("process-rollout-1.jsonl"), &poison).unwrap();
+    std::fs::write(
+        copilot_dir.join("logs").join("process-rollout-1.jsonl"),
+        &poison,
+    )
+    .unwrap();
     let conn = rusqlite::Connection::open(copilot_dir.join("session-store.db")).unwrap();
     conn.execute_batch(
         "create table sessions (id text primary key, cwd text, created_at text, updated_at text);
@@ -657,12 +724,24 @@ fn copilot_p0_terminal_title_disabled_and_window_name_stable() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cptitle"), &transport)
-        .expect("quick-start should spawn the copilot worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cptitle"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
     let mut failures = Vec::new();
-    if spawn.env.get("COPILOT_DISABLE_TERMINAL_TITLE").map(String::as_str) != Some("1") {
+    if spawn
+        .env
+        .get("COPILOT_DISABLE_TERMINAL_TITLE")
+        .map(String::as_str)
+        != Some("1")
+    {
         failures.push(format!(
             "RC-11/C-4-1 (P0): worker spawn env MUST set COPILOT_DISABLE_TERMINAL_TITLE=1 \
 (updateTerminalTitle defaults true -> window-name rewrite = N39 addressing drift, B5-class \
@@ -698,7 +777,10 @@ fn copilot_mcp_residual_named_disabled_and_recorded() {
     let home = tmp_ws("mcp-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+        (
+            "HOME",
+            Box::leak(home.to_string_lossy().to_string().into_boxed_str()),
+        ),
     ]);
     // Real-machine grounded: copilot 1.0.59 `mcp list` under this HOME reads
     // ~/.copilot/mcp-config.json and prints, under a "User servers:" section,
@@ -723,8 +805,11 @@ fn copilot_mcp_residual_named_disabled_and_recorded() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(shim_dir.join("copilot"), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
+        std::fs::set_permissions(
+            shim_dir.join("copilot"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
     let old_path = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{old_path}", shim_dir.to_string_lossy()));
@@ -733,12 +818,22 @@ fn copilot_mcp_residual_named_disabled_and_recorded() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresidual"), &transport)
-        .expect("quick-start should spawn the copilot worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpresidual"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker");
     let spawn = transport.single_spawn();
 
     let mut failures = Vec::new();
-    if flag_values(&spawn.argv, "--disable-mcp-server").iter().all(|name| name != "foo") {
+    if flag_values(&spawn.argv, "--disable-mcp-server")
+        .iter()
+        .all(|name| name != "foo")
+    {
         failures.push(format!(
             "RC-7/C-3-2: a user-global MCP server `foo` must be named-disabled \
 (--disable-mcp-server foo); argv={:?}",
@@ -784,16 +879,29 @@ fn copilot_mcp_residual_scan_unavailable_degrades_honestly_no_false_positive() {
     let empty_bin = tmp_ws("no-copilot-bin");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
-        ("PATH", Box::leak(empty_bin.to_string_lossy().to_string().into_boxed_str())),
+        (
+            "HOME",
+            Box::leak(home.to_string_lossy().to_string().into_boxed_str()),
+        ),
+        (
+            "PATH",
+            Box::leak(empty_bin.to_string_lossy().to_string().into_boxed_str()),
+        ),
     ]);
     let ws = tmp_ws("residual-unavail");
     let team_dir = write_copilot_team(&ws, "cp-residual-unavail", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresidunavail"), &transport)
-        .expect("quick-start should spawn the copilot worker even without copilot on PATH");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpresidunavail"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker even without copilot on PATH");
     let spawn = transport.single_spawn();
 
     let mut failures = Vec::new();
@@ -808,7 +916,8 @@ flags (nothing was actually observed); argv={:?}",
     if events.contains("mcp_residual_detected") {
         failures.push(
             "RC-8 negative: an unavailable scan must NOT emit a false-positive \
-provider.copilot.mcp_residual_detected (only a real non-empty residual emits)".to_string(),
+provider.copilot.mcp_residual_detected (only a real non-empty residual emits)"
+                .to_string(),
         );
     }
     let residual_file = ws.join(".team/logs/copilot/worker_a/mcp-residual.txt");
@@ -846,8 +955,15 @@ fn copilot_mcp_config_uses_copilot_field_name() {
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
 
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpschema"), &transport)
-        .expect("quick-start should spawn the copilot worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpschema"),
+        &transport,
+    )
+    .expect("quick-start should spawn the copilot worker");
     let argv = &transport.single_spawn().argv;
 
     // Resolve the config text whether inline or @file.
@@ -873,18 +989,33 @@ fn copilot_resume_argv_has_no_session_id_resume_conflict() {
     let home = tmp_ws("resume-home");
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+        (
+            "HOME",
+            Box::leak(home.to_string_lossy().to_string().into_boxed_str()),
+        ),
     ]);
     let ws = tmp_ws("resume");
     let team_dir = write_copilot_team(&ws, "cp-resume", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpresume"), &RecordingTransport::new())
-        .expect("quick-start should seed the team");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpresume"),
+        &RecordingTransport::new(),
+    )
+    .expect("quick-start should seed the team");
     seed_running_resumable(&ws, "worker_a");
     seed_copilot_session_store(&home, "99999999-aaaa-4bbb-8ccc-dddddddddddd");
 
     let restart_transport = RecordingTransport::new();
-    let _ = team_agent::lifecycle::restart_with_transport(&ws, true, Some("cpresume"), &restart_transport);
+    let _ = team_agent::lifecycle::restart_with_transport(
+        &ws,
+        true,
+        Some("cpresume"),
+        &restart_transport,
+    );
     let argv = restart_transport.single_spawn().argv;
 
     let has_session_id = argv.iter().any(|arg| arg == "--session-id");
@@ -910,16 +1041,30 @@ fn copilot_subscription_model_argv_only_when_configured() {
     let team_dir = write_copilot_team_model(&ws, "cp-model", &["mcp_team"], Some("gpt-5.5"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpmodel"), &transport)
-        .expect("quick-start with a role model");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpmodel"),
+        &transport,
+    )
+    .expect("quick-start with a role model");
     let with_model = transport.single_spawn().argv;
 
     let ws2 = tmp_ws("model-none");
     let team_dir2 = write_copilot_team_model(&ws2, "cp-nomodel", &["mcp_team"], None);
     seed_healthy_coordinator(&ws2);
     let transport2 = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, Some("cpnomodel"), &transport2)
-        .expect("quick-start without a role model");
+    quick_start_with_transport_in_workspace(
+        &ws2,
+        &team_dir2,
+        None,
+        true,
+        Some("cpnomodel"),
+        &transport2,
+    )
+    .expect("quick-start without a role model");
     let no_model = transport2.single_spawn().argv;
 
     let mut failures = Vec::new();
@@ -933,7 +1078,11 @@ fn copilot_subscription_model_argv_only_when_configured() {
             "A-1: no configured model must mean NO --model flag (no hardcoded default); argv={no_model:?}"
         ));
     }
-    assert!(failures.is_empty(), "A-1 subscription model argv failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "A-1 subscription model argv failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A-2 (design §E2.5): net model precedence agent.model > profile MODEL — the same
@@ -948,11 +1097,17 @@ fn copilot_subscription_model_precedence_role_over_profile() {
     // A subscription profile carrying a different MODEL.
     let profiles = team_dir.join("profiles");
     std::fs::create_dir_all(&profiles).unwrap();
-    std::fs::write(profiles.join("subm.env"), "AUTH_MODE=subscription\nMODEL=profile-model-y\n").unwrap();
+    std::fs::write(
+        profiles.join("subm.env"),
+        "AUTH_MODE=subscription\nMODEL=profile-model-y\n",
+    )
+    .unwrap();
     // point the agent at the profile
     let agent_md = team_dir.join("agents/worker_a.md");
-    let body = std::fs::read_to_string(&agent_md).unwrap()
-        .replace("auth_mode: subscription\n", "auth_mode: subscription\nprofile: subm\n");
+    let body = std::fs::read_to_string(&agent_md).unwrap().replace(
+        "auth_mode: subscription\n",
+        "auth_mode: subscription\nprofile: subm\n",
+    );
     std::fs::write(&agent_md, body).unwrap();
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
@@ -981,17 +1136,28 @@ fn copilot_subscription_env_no_provider_or_token_injection() {
     let team_dir = write_copilot_team(&ws, "cp-subenv", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpsubenv"), &transport)
-        .expect("quick-start subscription worker");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpsubenv"),
+        &transport,
+    )
+    .expect("quick-start subscription worker");
     let env = transport.single_spawn().env;
 
     let mut failures = Vec::new();
     for injected in env.keys().filter(|key| key.starts_with("COPILOT_PROVIDER")) {
-        failures.push(format!("A-3: subscription worker must not inject {injected}"));
+        failures.push(format!(
+            "A-3: subscription worker must not inject {injected}"
+        ));
     }
     for token_key in ["COPILOT_API_KEY", "COPILOT_PROVIDER_API_KEY", "GH_TOKEN"] {
         if env.contains_key(token_key) {
-            failures.push(format!("A-3: subscription worker must not inject token env {token_key}"));
+            failures.push(format!(
+                "A-3: subscription worker must not inject token env {token_key}"
+            ));
         }
     }
     // overlay must inherit, not overwrite, the user's token
@@ -1001,7 +1167,11 @@ fn copilot_subscription_env_no_provider_or_token_injection() {
             env.get("COPILOT_GITHUB_TOKEN")
         ));
     }
-    assert!(failures.is_empty(), "A-3 subscription env contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "A-3 subscription env contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A-4 (design §E2.5): a compatible_api (BYOK) copilot profile must export
@@ -1019,8 +1189,17 @@ fn copilot_byok_profile_exports_provider_env_and_requires_model() {
     let team_dir = write_copilot_byok_team(&ws, "cp-byok", Some("byok-model-z"));
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    match quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cpbyok"), &transport) {
-        Err(error) => failures.push(format!("A-4: a complete BYOK profile must launch; got Err({error})")),
+    match quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cpbyok"),
+        &transport,
+    ) {
+        Err(error) => failures.push(format!(
+            "A-4: a complete BYOK profile must launch; got Err({error})"
+        )),
         Ok(_) => {
             let env = transport.single_spawn().env;
             for (key, expected) in [
@@ -1046,7 +1225,14 @@ fn copilot_byok_profile_exports_provider_env_and_requires_model() {
     let ws2 = tmp_ws("byok-nomodel");
     let team_dir2 = write_copilot_byok_team(&ws2, "cp-byok-nm", None);
     seed_healthy_coordinator(&ws2);
-    match quick_start_with_transport_in_workspace(&ws2, &team_dir2, None, true, Some("cpbyoknm"), &RecordingTransport::new()) {
+    match quick_start_with_transport_in_workspace(
+        &ws2,
+        &team_dir2,
+        None,
+        true,
+        Some("cpbyoknm"),
+        &RecordingTransport::new(),
+    ) {
         Ok(_) => failures.push(
             "A-4: a BYOK profile without a model must fail (help-providers: 'A model is \
 required for BYOK'); got Ok"
@@ -1060,7 +1246,11 @@ required for BYOK'); got Ok"
             }
         }
     }
-    assert!(failures.is_empty(), "A-4 BYOK contract failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "A-4 BYOK contract failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// A-5 (design §E2.5): copilot has NO `auth status` subcommand (main-help Commands),
@@ -1091,19 +1281,30 @@ fn copilot_token_passthrough_emits_warning_event() {
     std::fs::create_dir_all(home.join(".copilot")).unwrap();
     let _guard = EnvGuard::set(&[
         (ANCESTRY_KEY, NEUTRAL_ANCESTRY),
-        ("HOME", Box::leak(home.to_string_lossy().to_string().into_boxed_str())),
+        (
+            "HOME",
+            Box::leak(home.to_string_lossy().to_string().into_boxed_str()),
+        ),
         ("GITHUB_TOKEN", "ghp-shell-passthrough"),
     ]);
     let ws = tmp_ws("token-warn");
     let team_dir = write_copilot_team(&ws, "cp-token", &["mcp_team"], false);
     seed_healthy_coordinator(&ws);
     let transport = RecordingTransport::new();
-    quick_start_with_transport_in_workspace(&ws, &team_dir, None, true, Some("cptoken"), &transport)
-        .expect("quick-start with a shell token present");
+    quick_start_with_transport_in_workspace(
+        &ws,
+        &team_dir,
+        None,
+        true,
+        Some("cptoken"),
+        &transport,
+    )
+    .expect("quick-start with a shell token present");
 
     let events = std::fs::read_to_string(ws.join(".team/logs/events.jsonl")).unwrap_or_default();
     assert!(
-        events.contains("token") && (events.contains("passthrough") || events.contains("github_token")),
+        events.contains("token")
+            && (events.contains("passthrough") || events.contains("github_token")),
         "A-6: a shell GITHUB_TOKEN/GH_TOKEN (copilot prioritizes it over the credential \
 store) must emit a passthrough-warning event at spawn (phase-1 observe-only); events tail={}",
         events.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
@@ -1138,7 +1339,10 @@ fn copilot_tmp_workspace_guard_cleans_and_sweeps_dead_pid_stale_roots() {
             !stale.exists(),
             "tmp_ws must sweep stale ta-rs-copilot-* roots before creating a new root"
         );
-        assert!(guarded.exists(), "guarded copilot tmp root should exist while the guard is alive");
+        assert!(
+            guarded.exists(),
+            "guarded copilot tmp root should exist while the guard is alive"
+        );
     }
 
     assert_eq!(
@@ -1155,13 +1359,17 @@ struct TeamOpts;
 fn write_copilot_team_model(ws: &Path, name: &str, tools: &[&str], model: Option<&str>) -> PathBuf {
     let team = write_copilot_team(ws, name, tools, false);
     let agent_md = team.join("agents/worker_a.md");
-    let stripped = std::fs::read_to_string(&agent_md).unwrap()
+    let stripped = std::fs::read_to_string(&agent_md)
+        .unwrap()
         .lines()
         .filter(|line| !line.trim_start().starts_with("model:"))
         .map(|line| format!("{line}\n"))
         .collect::<String>();
     let body = match model {
-        Some(model) => stripped.replace("provider: copilot\n", &format!("provider: copilot\nmodel: {model}\n")),
+        Some(model) => stripped.replace(
+            "provider: copilot\n",
+            &format!("provider: copilot\nmodel: {model}\n"),
+        ),
         None => stripped,
     };
     std::fs::write(&agent_md, body).unwrap();
@@ -1196,7 +1404,11 @@ fn write_copilot_byok_team(ws: &Path, name: &str, model: Option<&str>) -> PathBu
     )
     .unwrap();
     let spec = team_agent::compiler::compile_team(&team).expect("compile BYOK fixture team");
-    std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     team
 }
 
@@ -1204,7 +1416,11 @@ fn write_copilot_team(ws: &Path, name: &str, tools: &[&str], dangerous: bool) ->
     let _ = TeamOpts;
     let team = ws.join(name);
     std::fs::create_dir_all(team.join("agents")).unwrap();
-    let dangerous_line = if dangerous { "dangerous_auto_approve: true\n" } else { "" };
+    let dangerous_line = if dangerous {
+        "dangerous_auto_approve: true\n"
+    } else {
+        ""
+    };
     std::fs::write(
         team.join("TEAM.md"),
         format!(
@@ -1212,7 +1428,10 @@ fn write_copilot_team(ws: &Path, name: &str, tools: &[&str], dangerous: bool) ->
         ),
     )
     .unwrap();
-    let tool_lines = tools.iter().map(|tool| format!("  - {tool}\n")).collect::<String>();
+    let tool_lines = tools
+        .iter()
+        .map(|tool| format!("  - {tool}\n"))
+        .collect::<String>();
     std::fs::write(
         team.join("agents/worker_a.md"),
         format!(
@@ -1232,8 +1451,14 @@ fn seed_running_resumable(ws: &Path, agent: &str) {
         "first_send_at": "2026-06-10T00:00:00+00:00",
         "window": agent,
     });
-    for pointer in [format!("/agents/{agent}"), format!("/teams/cpresume/agents/{agent}")] {
-        if let Some(obj) = state.pointer_mut(&pointer).and_then(serde_json::Value::as_object_mut) {
+    for pointer in [
+        format!("/agents/{agent}"),
+        format!("/teams/cpresume/agents/{agent}"),
+    ] {
+        if let Some(obj) = state
+            .pointer_mut(&pointer)
+            .and_then(serde_json::Value::as_object_mut)
+        {
             for (key, value) in patch.as_object().unwrap() {
                 obj.insert(key.clone(), value.clone());
             }
@@ -1273,8 +1498,14 @@ fn seed_session_id(ws: &Path, agent: &str) {
         std::fs::write(&rollout, "{}\n").expect("seed rollout");
     }
     let mut state = load_runtime_state(ws).unwrap();
-    for pointer in [format!("/agents/{agent}"), format!("/teams/cpfork/agents/{agent}")] {
-        if let Some(obj) = state.pointer_mut(&pointer).and_then(serde_json::Value::as_object_mut) {
+    for pointer in [
+        format!("/agents/{agent}"),
+        format!("/teams/cpfork/agents/{agent}"),
+    ] {
+        if let Some(obj) = state
+            .pointer_mut(&pointer)
+            .and_then(serde_json::Value::as_object_mut)
+        {
             obj.insert(
                 "session_id".to_string(),
                 serde_json::json!("77777777-8888-4999-aaaa-bbbbbbbbbbbb"),
@@ -1357,7 +1588,10 @@ impl EnvGuard {
         for (key, value) in &values {
             std::env::set_var(key, value);
         }
-        Self { previous, _owned_paths: owned_paths }
+        Self {
+            previous,
+            _owned_paths: owned_paths,
+        }
     }
 }
 
@@ -1398,7 +1632,11 @@ impl RecordingTransport {
 
     fn single_spawn(&self) -> RecordedSpawn {
         let spawns = self.spawns.lock().unwrap();
-        assert_eq!(spawns.len(), 1, "fixture should record one spawn; got {spawns:?}");
+        assert_eq!(
+            spawns.len(),
+            1,
+            "fixture should record one spawn; got {spawns:?}"
+        );
         spawns[0].clone()
     }
 }
@@ -1463,7 +1701,11 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
         Ok(CapturedText {
             text: "Claude Code\n> \nOpenAI Codex\ncodex>\nCopilot".to_string(),
             range,

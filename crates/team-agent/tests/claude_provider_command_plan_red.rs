@@ -37,7 +37,7 @@ fn claude_fresh_command_plan_returns_expected_uuid_and_suppresses_managed_mcp_co
             tools: &tools,
             profile_launch: Some(&profile),
             agent_id_hint: None,
-                effort: None,
+            effort: None,
         })
         .expect("Claude compatible_api managed fresh command plan should build");
 
@@ -132,8 +132,10 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
         "fork must allocate a new RFC4122 expected_session_id distinct from source; plan={fork:?}"
     );
     assert!(
-        argv_contains_adjacent(&fork.argv, &["--resume", source_session.as_str(), "--fork-session"])
-            && argv_has_flag(&fork.argv, "--session-id"),
+        argv_contains_adjacent(
+            &fork.argv,
+            &["--resume", source_session.as_str(), "--fork-session"]
+        ) && argv_has_flag(&fork.argv, "--session-id"),
         "fork argv must carry both source resume and new --session-id; argv={:?}",
         fork.argv
     );
@@ -146,8 +148,8 @@ fn claude_resume_fork_dangerous_and_default_command_plans_are_mutually_exclusive
             model: Some("claude-sonnet-4-6"),
             tools: &dangerous_tools,
             profile_launch: None,
-                agent_id_hint: None,
-                effort: None,
+            agent_id_hint: None,
+            effort: None,
         })
         .expect("Claude dangerous plan should build");
     assert!(
@@ -172,8 +174,8 @@ fn claude_disallowed_tools_mapping_covers_the_complete_python_tool_set() {
             model: Some("claude-sonnet-4-6"),
             tools: &no_filesystem_tools,
             profile_launch: None,
-                agent_id_hint: None,
-                effort: None,
+            agent_id_hint: None,
+            effort: None,
         })
         .expect("Claude plan should build with explicit tools");
     let disallowed = flag_values(&plan.argv, "--disallowedTools");
@@ -215,7 +217,10 @@ fn claude_capture_prefers_expected_session_id_under_provider_projects_root() {
         "target-agent-marker",
     );
     write_claude_transcript(
-        &home.join(".claude").join("projects").join("distractor.jsonl"),
+        &home
+            .join(".claude")
+            .join("projects")
+            .join("distractor.jsonl"),
         "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         &spawn_cwd,
         "distractor-agent-marker",
@@ -267,7 +272,7 @@ fn claude_capture_expected_id_missing_does_not_fall_back_to_same_cwd_sibling() {
 
     let expected = "36dd1d1a-2766-4636-856c-03f14a4bb803"; // reviewer's expected
     let sibling = "7d5f430a-00cd-42fa-986e-43296b90b8f4"; // frontend's transcript
-    // Only the sibling's transcript exists on disk — expected is missing.
+                                                          // Only the sibling's transcript exists on disk — expected is missing.
     write_claude_transcript(
         &projects_root.join("sibling.jsonl"),
         sibling,
@@ -413,10 +418,22 @@ exit 64
 fn managed_profile_launch(root: &Path, projects_root: &Path) -> ProviderProfileLaunch {
     ProviderProfileLaunch {
         env_overlay: BTreeMap::from([
-            ("CLAUDE_CONFIG_DIR".to_string(), root.join("claude-config").display().to_string()),
-            ("ANTHROPIC_BASE_URL".to_string(), "https://llm.local/v1".to_string()),
-            ("ANTHROPIC_AUTH_TOKEN".to_string(), "local-token".to_string()),
-            ("ANTHROPIC_MODEL".to_string(), "profile-effective-model".to_string()),
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                root.join("claude-config").display().to_string(),
+            ),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://llm.local/v1".to_string(),
+            ),
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "local-token".to_string(),
+            ),
+            (
+                "ANTHROPIC_MODEL".to_string(),
+                "profile-effective-model".to_string(),
+            ),
         ]),
         env_unset: BTreeSet::from(["ANTHROPIC_API_KEY".to_string()]),
         command_overrides: ProviderCommandOverrides {
@@ -492,8 +509,10 @@ fn is_rfc4122_uuid(value: &str) -> bool {
             return false;
         }
     }
-    matches!(bytes[14], b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8')
-        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+    matches!(
+        bytes[14],
+        b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8'
+    ) && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
 }
 
 fn write_executable(path: &Path, script: &str) {

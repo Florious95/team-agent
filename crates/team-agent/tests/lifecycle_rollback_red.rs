@@ -74,8 +74,15 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
     let state_before = load_runtime_state(&fixture.team).unwrap();
     let transport = RecordingTransport::new("team-rollbackteam", &["alpha", "bravo"]);
 
-    let result =
-        fork_agent_with_transport(&fixture.team, &aid("alpha"), &aid("newfork"), None, false, None, &transport);
+    let result = fork_agent_with_transport(
+        &fixture.team,
+        &aid("alpha"),
+        &aid("newfork"),
+        None,
+        false,
+        None,
+        &transport,
+    );
     let spec_after = fixture.spec_text();
     let state_after = load_runtime_state(&fixture.team).unwrap();
     let mcp_path = fixture.team.join(".team/runtime/mcp/newfork.json");
@@ -136,7 +143,9 @@ impl RollbackFixture {
             let _ = std::fs::remove_dir_all(&root);
         }
         std::fs::create_dir_all(&root).unwrap();
-        Self { team: root.join("team") }
+        Self {
+            team: root.join("team"),
+        }
     }
 
     fn seed_team(&self) {
@@ -146,8 +155,16 @@ impl RollbackFixture {
             "---\nname: rollbackteam\nobjective: Lifecycle rollback contract.\nprovider: codex\n---\n\nRollback team.\n",
         )
         .unwrap();
-        std::fs::write(self.team.join("agents/alpha.md"), agent_doc("alpha", "Alpha worker")).unwrap();
-        std::fs::write(self.team.join("agents/bravo.md"), agent_doc("bravo", "Bravo worker")).unwrap();
+        std::fs::write(
+            self.team.join("agents/alpha.md"),
+            agent_doc("alpha", "Alpha worker"),
+        )
+        .unwrap();
+        std::fs::write(
+            self.team.join("agents/bravo.md"),
+            agent_doc("bravo", "Bravo worker"),
+        )
+        .unwrap();
         let spec = team_agent::compiler::compile_team(&self.team).expect("compile rollback team");
         let yaml = team_agent::model::yaml::dumps(&spec)
             .replace("default_assignee: \"alpha\"", "default_assignee: \"bravo\"")
@@ -388,11 +405,7 @@ impl Transport for RecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(match field {
             PaneField::PaneId => Some("%0".to_string()),
             PaneField::PaneMode => None,

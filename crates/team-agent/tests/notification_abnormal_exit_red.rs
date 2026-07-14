@@ -134,17 +134,23 @@ fn notification_abnormal_exit_claude_api_error_shape_contract_is_single_source()
         "requestId",
     ] {
         if !faults.contains(needle) {
-            failures.push(format!("provider/faults.rs missing assistant API-error gate: {needle}"));
+            failures.push(format!(
+                "provider/faults.rs missing assistant API-error gate: {needle}"
+            ));
         }
     }
     for needle in ["subtype", "api_error", "level"] {
         if !faults.contains(needle) {
-            failures.push(format!("provider/faults.rs must preserve old system/api_error branch: {needle}"));
+            failures.push(format!(
+                "provider/faults.rs must preserve old system/api_error branch: {needle}"
+            ));
         }
     }
     for needle in ["apiErrorStatus", "error", "requestId", "assistant_uuid"] {
         if !abnormal.contains(needle) {
-            failures.push(format!("worker.abnormal_exit payload missing structured field: {needle}"));
+            failures.push(format!(
+                "worker.abnormal_exit payload missing structured field: {needle}"
+            ));
         }
     }
 

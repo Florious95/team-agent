@@ -89,10 +89,7 @@ fn doctor_does_not_fail_solely_because_legacy_home_dot_team_current_is_invalid()
         .get("profile_smoke")
         .cloned()
         .expect("doctor JSON must include profile_smoke");
-    let smoke_status = smoke
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let smoke_status = smoke.get("status").and_then(Value::as_str).unwrap_or("");
     let is_skipped = smoke_status == "not_required";
     let is_legacy = smoke_status == "legacy_team_invalid";
     assert!(
@@ -106,10 +103,7 @@ fn doctor_does_not_fail_solely_because_legacy_home_dot_team_current_is_invalid()
     // legacy team_dir so the user can act (open it, remove it, or run a scoped
     // `team-agent doctor <team-dir>` against it).
     if is_legacy {
-        let team_dir = smoke
-            .get("team_dir")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let team_dir = smoke.get("team_dir").and_then(Value::as_str).unwrap_or("");
         let expected = legacy.to_string_lossy().to_string();
         assert!(
             team_dir.contains(".team/current") || team_dir == expected,

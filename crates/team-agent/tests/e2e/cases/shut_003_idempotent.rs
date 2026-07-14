@@ -22,7 +22,12 @@ fn shut_003_shutdown_is_idempotent() {
         &ws,
         &["shutdown", "--workspace", ws_path, "--keep-logs", "--json"],
     );
-    assert!(first.is_success(), "1st shutdown exit {}; stderr={}", first.exit_code, first.stderr);
+    assert!(
+        first.is_success(),
+        "1st shutdown exit {}; stderr={}",
+        first.exit_code,
+        first.stderr
+    );
     let j1 = first.json();
     assert_json_field_eq_bool(&j1, "/ok", true);
 
@@ -34,7 +39,9 @@ fn shut_003_shutdown_is_idempotent() {
     assert!(
         second.is_success(),
         "2nd shutdown exit {}; stdout={} stderr={}",
-        second.exit_code, second.stdout, second.stderr
+        second.exit_code,
+        second.stdout,
+        second.stderr
     );
     let j2 = second.json();
     let ok2 = j2.pointer("/ok").and_then(|v| v.as_bool()).unwrap_or(false);

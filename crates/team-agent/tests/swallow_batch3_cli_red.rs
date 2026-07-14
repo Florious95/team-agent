@@ -34,7 +34,10 @@ fn b3_exit_layer_failures_are_explained_not_fake_green() {
     // ① unknown doctor gate
     let ws = tmp_ws("b3-doctor");
     let doctor = run_cli(&ws, &["doctor", "--gate", "bogus", "--json"]);
-    if !doctor.contains("unknown_gate") || doctor.contains("\"ok\": true") || doctor.contains("\"ok\":true") {
+    if !doctor.contains("unknown_gate")
+        || doctor.contains("\"ok\": true")
+        || doctor.contains("\"ok\":true")
+    {
         failures.push(format!(
             "①: `doctor --gate bogus` must refuse with status unknown_gate + ok=false \
 (Python cli/commands.py:234-235 raises `unknown doctor gate`); got {doctor}"

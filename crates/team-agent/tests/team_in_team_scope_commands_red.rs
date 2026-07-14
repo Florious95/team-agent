@@ -26,9 +26,9 @@ use team_agent::message_store::MessageStore;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 #[test]
@@ -125,12 +125,7 @@ fn status_without_team_in_multi_alive_workspace_refuses_with_team_target_ambiguo
     let _env = EnvGuard::unset();
     let fixture = MultiTeamFixture::new("status-ambiguous");
 
-    let output = run_cli([
-        "status",
-        "--workspace",
-        fixture.root_str(),
-        "--json",
-    ]);
+    let output = run_cli(["status", "--workspace", fixture.root_str(), "--json"]);
     let body = stdout_json(&output);
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),
@@ -208,7 +203,10 @@ fn collect_team_selector_collects_only_that_team_and_writes_back_that_team_state
     );
 
     let conn = db_conn(&fixture.root);
-    assert_eq!(result_status(&conn, "res_team_a").as_deref(), Some("collected"));
+    assert_eq!(
+        result_status(&conn, "res_team_a").as_deref(),
+        Some("collected")
+    );
     assert_eq!(
         result_status(&conn, "res_team_b").as_deref(),
         Some("success"),
@@ -308,7 +306,10 @@ fn bin() -> &'static str {
 }
 
 fn cli_text<const N: usize>(args: [&str; N]) -> String {
-    let output = Command::new(bin()).args(args).output().expect("run team-agent");
+    let output = Command::new(bin())
+        .args(args)
+        .output()
+        .expect("run team-agent");
     assert!(
         output.status.success(),
         "command should succeed; stdout={:?} stderr={:?}",
@@ -319,7 +320,10 @@ fn cli_text<const N: usize>(args: [&str; N]) -> String {
 }
 
 fn run_cli<const N: usize>(args: [&str; N]) -> Output {
-    Command::new(bin()).args(args).output().expect("run team-agent")
+    Command::new(bin())
+        .args(args)
+        .output()
+        .expect("run team-agent")
 }
 
 fn assert_success(output: &Output, label: &str) {
@@ -357,7 +361,12 @@ fn collected_result_ids(value: &Value) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|result| result.get("result_id").and_then(Value::as_str).map(str::to_string))
+        .filter_map(|result| {
+            result
+                .get("result_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -410,7 +419,14 @@ impl MultiTeamFixture {
     }
 }
 
-fn team_state(team: &str, team_dir: &Path, agent: &str, task_id: &str, pane: &str, epoch: i64) -> Value {
+fn team_state(
+    team: &str,
+    team_dir: &Path,
+    agent: &str,
+    task_id: &str,
+    pane: &str,
+    epoch: i64,
+) -> Value {
     json!({
         "status": "alive",
         "session_name": format!("team-{team}"),
@@ -497,18 +513,57 @@ fn write_team_dir(root: &Path, team: &str, agent: &str) -> PathBuf {
 fn seed_db(root: &Path) {
     let store = MessageStore::open(root).expect("open team.db");
     store
-        .create_message(Some("task_a"), "leader", "worker_a", "teamA message", None, true, Some("teamA"))
+        .create_message(
+            Some("task_a"),
+            "leader",
+            "worker_a",
+            "teamA message",
+            None,
+            true,
+            Some("teamA"),
+        )
         .unwrap();
     store
-        .create_message(Some("task_b"), "leader", "worker_b", "teamB message", None, true, Some("teamB"))
+        .create_message(
+            Some("task_b"),
+            "leader",
+            "worker_b",
+            "teamB message",
+            None,
+            true,
+            Some("teamB"),
+        )
         .unwrap();
     let conn = db_conn(root);
-    insert_result(&conn, "res_team_a", "teamA", "task_a", "worker_a", "team A done", "2026-06-07T00:00:00Z");
-    insert_result(&conn, "res_team_b", "teamB", "task_b", "worker_b", "team B done", "2026-06-07T00:00:01Z");
+    insert_result(
+        &conn,
+        "res_team_a",
+        "teamA",
+        "task_a",
+        "worker_a",
+        "team A done",
+        "2026-06-07T00:00:00Z",
+    );
+    insert_result(
+        &conn,
+        "res_team_b",
+        "teamB",
+        "task_b",
+        "worker_b",
+        "team B done",
+        "2026-06-07T00:00:01Z",
+    );
     conn.execute(
         "insert into agent_health(owner_team_id, agent_id, status, updated_at)
          values (?1, ?2, 'idle', ?3), (?4, ?5, 'idle', ?6)",
-        params!["teamA", "worker_a", "2026-06-07T00:00:00Z", "teamB", "worker_b", "2026-06-07T00:00:00Z"],
+        params![
+            "teamA",
+            "worker_a",
+            "2026-06-07T00:00:00Z",
+            "teamB",
+            "worker_b",
+            "2026-06-07T00:00:00Z"
+        ],
     )
     .unwrap();
 }
@@ -704,8 +759,15 @@ impl Transport for ShutdownRecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
@@ -738,7 +800,10 @@ impl Transport for ShutdownRecordingTransport {
     }
 
     fn kill_session(&self, session: &SessionName) -> Result<(), TransportError> {
-        self.killed.lock().unwrap().push(session.as_str().to_string());
+        self.killed
+            .lock()
+            .unwrap()
+            .push(session.as_str().to_string());
         self.sessions.lock().unwrap().remove(session.as_str());
         Ok(())
     }

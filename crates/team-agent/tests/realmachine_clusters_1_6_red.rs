@@ -21,9 +21,9 @@ use serde_json::{json, Value};
 use team_agent::lifecycle::{quick_start_with_transport, QuickStartReport};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName,
-    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
-    TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome,
+    SpawnResult, SubmitVerification, Target, Transport, TransportError, TurnVerification,
+    WindowName,
 };
 
 fn bin() -> &'static str {
@@ -179,8 +179,7 @@ fn c1_lifecycle_commands_resolve_active_teamdir_from_root_workspace_selector() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let combined = format!("{stdout}\n{stderr}");
-        if out.status.code() != Some(0)
-            || forbidden.iter().any(|needle| combined.contains(needle))
+        if out.status.code() != Some(0) || forbidden.iter().any(|needle| combined.contains(needle))
         {
             failures.push(format!(
                 "{label}: expected resolve_active_team(root)->teamdir/spec_path, got code={:?} stdout={stdout:?} stderr={stderr:?}",
@@ -279,7 +278,10 @@ fn c2_stop_team_level_command_exists_and_keeps_state_while_stopping_runtime() {
     let ws = tmp_dir("c2-stop");
     seed_runtime_state(&ws);
 
-    let out = run(&["stop", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
+    let out = run(
+        &["stop", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         !err.contains("invalid choice: 'stop'"),
@@ -293,7 +295,11 @@ fn c2_stop_team_level_command_exists_and_keeps_state_while_stopping_runtime() {
         err
     );
     let value = stdout_json(&out);
-    assert_eq!(value["ok"], json!(true), "stop must return a successful JSON envelope");
+    assert_eq!(
+        value["ok"],
+        json!(true),
+        "stop must return a successful JSON envelope"
+    );
     assert!(
         team_agent::state::persist::runtime_state_path(&ws).exists(),
         "stop keeps runtime state for later restart"
@@ -398,7 +404,11 @@ fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
         "CR-040/042: second quick-start from the same template with --name/--team-id child must not collide on the template-derived tmux session; got {second:?}"
     );
     let sessions = transport.spawned_sessions();
-    assert_eq!(sessions.len(), 2, "two requested teams should produce two spawned sessions");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "two requested teams should produce two spawned sessions"
+    );
     assert_ne!(
         sessions[0], sessions[1],
         "CR-040/042: session names must derive from requested team identity, not reused template name"
@@ -549,12 +559,7 @@ fn c6_invalid_workspace_status_returns_shaped_error_without_polluting_invalid_pa
     assert!(!invalid.exists(), "fixture path starts nonexistent");
 
     let out = run(
-        &[
-            "status",
-            "--workspace",
-            invalid.to_str().unwrap(),
-            "--json",
-        ],
+        &["status", "--workspace", invalid.to_str().unwrap(), "--json"],
         &root,
     );
     let value = stdout_json(&out);
@@ -565,7 +570,9 @@ fn c6_invalid_workspace_status_returns_shaped_error_without_polluting_invalid_pa
         ));
     }
     if value["ok"] != json!(false) {
-        failures.push(format!("invalid workspace must return ok=false; got {value}"));
+        failures.push(format!(
+            "invalid workspace must return ok=false; got {value}"
+        ));
     }
     if !value["error"]
         .as_str()
@@ -814,11 +821,7 @@ impl Transport for SessionRecordingTransport {
         })
     }
 
-    fn query(
-        &self,
-        _target: &Target,
-        _field: PaneField,
-    ) -> Result<Option<String>, TransportError> {
+    fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {
         Ok(None)
     }
 

@@ -56,7 +56,15 @@
 
 // ROUND-0 skeleton: fn bodies are all unimplemented!() so imports/fields/methods are
 // not yet exercised; P2 porter removes this when implementing.
-#![allow(dead_code, unused_imports, unused_variables, clippy::result_large_err, clippy::doc_overindented_list_items, clippy::doc_lazy_continuation, clippy::io_other_error)]
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_variables,
+    clippy::result_large_err,
+    clippy::doc_overindented_list_items,
+    clippy::doc_lazy_continuation,
+    clippy::io_other_error
+)]
 // §10:MCP stdio handlers 实现层禁 unwrap/expect/panic(unimplemented!() stub 不被拦);tests 子模块各自 allow。
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -104,7 +112,8 @@ pub(crate) use helpers::{
     object_fields, text_field, text_of_value, tool_error_reason_wire, tool_runtime_error,
 };
 pub(crate) use normalize::{
-    normalize_artifacts, normalize_changes, normalize_next_actions, normalize_risks, normalize_tests,
+    normalize_artifacts, normalize_changes, normalize_next_actions, normalize_risks,
+    normalize_tests,
 };
 pub(crate) use wire::dispatch_tool;
 

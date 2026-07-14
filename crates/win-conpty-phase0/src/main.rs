@@ -53,9 +53,7 @@ mod windows_main {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::Storage::FileSystem::ReadFile;
-    use windows::Win32::System::Console::{
-        ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON,
-    };
+    use windows::Win32::System::Console::{ClosePseudoConsole, CreatePseudoConsole, COORD, HPCON};
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
@@ -159,7 +157,13 @@ mod windows_main {
             0xc67178f2,
         ];
         let mut h = [
-            0x6a09e667u32, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x6a09e667u32,
+            0xbb67ae85,
+            0x3c6ef372,
+            0xa54ff53a,
+            0x510e527f,
+            0x9b05688c,
+            0x1f83d9ab,
             0x5be0cd19,
         ];
         let bit_len = (bytes.len() as u64) * 8;
@@ -297,12 +301,7 @@ mod windows_main {
                 // First call with a NULL attribute list to learn the size.
                 // The reserved param is `Option<*const u32>` in windows 0.61;
                 // pass `Some(&0)`.
-                let _ = InitializeProcThreadAttributeList(
-                    None,
-                    1,
-                    Some(0),
-                    &mut size,
-                );
+                let _ = InitializeProcThreadAttributeList(None, 1, Some(0), &mut size);
                 if size == 0 {
                     return Err(anyhow!(
                         "InitializeProcThreadAttributeList did not report a size"

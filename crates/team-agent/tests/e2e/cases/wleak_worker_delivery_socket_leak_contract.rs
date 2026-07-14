@@ -213,7 +213,9 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
     );
     let inbox = inbox_json.json();
     assert_eq!(
-        inbox.pointer("/messages/0/message_id").and_then(Value::as_str),
+        inbox
+            .pointer("/messages/0/message_id")
+            .and_then(Value::as_str),
         Some(mid),
         "B replay RED: inbox must show the blocked message row; json={inbox}"
     );

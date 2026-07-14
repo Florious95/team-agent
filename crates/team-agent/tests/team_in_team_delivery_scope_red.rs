@@ -24,9 +24,9 @@ use team_agent::message_store::MessageStore;
 use team_agent::messaging::deliver_pending_messages;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 #[test]
@@ -37,10 +37,26 @@ fn multi_team_daemon_flushes_child_team_pending_rows_using_owner_team_projection
     let log = EventLog::new(&workspace);
     let transport = RecordingDeliveryTransport::default();
     let team_a_msg = store
-        .create_message(None, "leader", "a1", "teamA work", None, false, Some("teamA"))
+        .create_message(
+            None,
+            "leader",
+            "a1",
+            "teamA work",
+            None,
+            false,
+            Some("teamA"),
+        )
         .unwrap();
     let team_b_msg = store
-        .create_message(None, "leader", "w1", "teamB child work", None, false, Some("teamB"))
+        .create_message(
+            None,
+            "leader",
+            "w1",
+            "teamB child work",
+            None,
+            false,
+            Some("teamB"),
+        )
         .unwrap();
 
     let delivered = deliver_pending_messages(&workspace, &state, &transport, &log)
@@ -50,7 +66,10 @@ fn multi_team_daemon_flushes_child_team_pending_rows_using_owner_team_projection
         delivered.contains(&team_a_msg) && delivered.contains(&team_b_msg),
         "one workspace daemon must flush pending rows for every owner_team_id, not only active/top teamA; delivered={delivered:?}"
     );
-    assert_eq!(message_status(&workspace, &team_a_msg).as_deref(), Some("delivered"));
+    assert_eq!(
+        message_status(&workspace, &team_a_msg).as_deref(),
+        Some("delivered")
+    );
     assert_eq!(
         message_status(&workspace, &team_b_msg).as_deref(),
         Some("delivered"),
@@ -70,7 +89,9 @@ fn multi_team_daemon_flushes_child_team_pending_rows_using_owner_team_projection
 
     let targets = transport.inject_targets();
     assert!(
-        targets.iter().any(|target| session_window(target, "team-teamA", "a1")),
+        targets
+            .iter()
+            .any(|target| session_window(target, "team-teamA", "a1")),
         "fixture guard: active teamA message should inject to team-teamA:a1; targets={targets:?}"
     );
     assert!(
@@ -87,14 +108,25 @@ fn single_team_pending_delivery_still_uses_the_top_level_projection() {
     let log = EventLog::new(&workspace);
     let transport = RecordingDeliveryTransport::default();
     let msg = store
-        .create_message(None, "leader", "w1", "single team work", None, false, Some("teamB"))
+        .create_message(
+            None,
+            "leader",
+            "w1",
+            "single team work",
+            None,
+            false,
+            Some("teamB"),
+        )
         .unwrap();
 
     let delivered = deliver_pending_messages(&workspace, &state, &transport, &log)
         .expect("single-team pending delivery should keep working");
 
     assert_eq!(delivered, vec![msg.clone()]);
-    assert_eq!(message_status(&workspace, &msg).as_deref(), Some("delivered"));
+    assert_eq!(
+        message_status(&workspace, &msg).as_deref(),
+        Some("delivered")
+    );
     assert_eq!(delivery_attempts(&workspace, &msg), Some(1));
     let targets = transport.inject_targets();
     assert_eq!(
@@ -272,8 +304,15 @@ impl Transport for RecordingDeliveryTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {

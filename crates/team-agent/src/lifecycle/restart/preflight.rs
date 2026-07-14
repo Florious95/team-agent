@@ -37,11 +37,12 @@ impl SessionPreflight {
 /// kill is safe. Pure: no I/O, no mutation.
 pub fn check_session_preflight(state: &serde_json::Value) -> SessionPreflight {
     let sessions = RuntimeSessions::from_state(state);
-    if let Some(anomaly) = sessions
-        .anomalies
-        .iter()
-        .find(|a| matches!(a, RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }))
-    {
+    if let Some(anomaly) = sessions.anomalies.iter().find(|a| {
+        matches!(
+            a,
+            RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { .. }
+        )
+    }) {
         if let RuntimeSessionAnomaly::WorkerSessionNameIsLeaderPrefixed { value } = anomaly {
             return SessionPreflight::WorkerSessionIsLeaderSession {
                 session_name: value.clone(),

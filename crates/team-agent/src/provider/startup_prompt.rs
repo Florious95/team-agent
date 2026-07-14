@@ -28,10 +28,8 @@ const CLAUDE_TRUST_MARKERS: &[&str] = &[
     "Enter to confirm",
 ];
 const CLAUDE_READY_MARKERS: &[&str] = &["Claude Code"];
-pub const COPILOT_TRUST_PROMPT_MARKER: &str =
-    include_str!("testdata/copilot-trust-prompt.txt");
-pub const COPILOT_READY_MARKER: &str =
-    include_str!("testdata/copilot-ready-marker.txt");
+pub const COPILOT_TRUST_PROMPT_MARKER: &str = include_str!("testdata/copilot-trust-prompt.txt");
+pub const COPILOT_READY_MARKER: &str = include_str!("testdata/copilot-ready-marker.txt");
 const COPILOT_TRUST_MARKERS: &[&str] = &[COPILOT_TRUST_PROMPT_MARKER];
 const COPILOT_READY_MARKERS: &[&str] = &[COPILOT_READY_MARKER];
 const COPILOT_TRUST_TITLE: &str = "Confirm folder trust";
@@ -173,13 +171,9 @@ fn has_active_claude_yes_trust_shape(output: &str) -> bool {
     {
         return false;
     }
-    output
-        .lines()
-        .map(str::trim_start)
-        .any(|line| {
-            line == "❯ 1. Yes, I trust this folder"
-                || line == "> 1. Yes, I trust this folder"
-        })
+    output.lines().map(str::trim_start).any(|line| {
+        line == "❯ 1. Yes, I trust this folder" || line == "> 1. Yes, I trust this folder"
+    })
 }
 
 fn has_claude_ready_shape(output: &str) -> bool {
@@ -352,7 +346,10 @@ pub fn codex_handle_startup_prompts(
             StartupScreenDecision::KeepPolling => sleep_between_polls(sleep_s),
         }
     }
-    StartupPromptOutcome { handled, capture_error }
+    StartupPromptOutcome {
+        handled,
+        capture_error,
+    }
 }
 
 pub fn claude_handle_startup_prompts(
@@ -386,7 +383,10 @@ pub fn claude_handle_startup_prompts(
             }
         }
     }
-    StartupPromptOutcome { handled, capture_error }
+    StartupPromptOutcome {
+        handled,
+        capture_error,
+    }
 }
 
 pub fn copilot_handle_startup_prompts(
@@ -420,11 +420,17 @@ pub fn copilot_handle_startup_prompts(
             }
         }
     }
-    StartupPromptOutcome { handled, capture_error }
+    StartupPromptOutcome {
+        handled,
+        capture_error,
+    }
 }
 
 fn max_rfind(output: &str, needles: &[&str]) -> Option<usize> {
-    needles.iter().filter_map(|needle| output.rfind(needle)).max()
+    needles
+        .iter()
+        .filter_map(|needle| output.rfind(needle))
+        .max()
 }
 
 fn is_more_recent(prompt_pos: Option<usize>, ready_pos: Option<usize>) -> bool {
@@ -449,8 +455,8 @@ mod tests {
     use crate::model::enums::PaneLiveness;
     use crate::transport::{
         AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport, Key,
-        PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target, TransportError,
-        WindowName,
+        PaneField, PaneId, PaneInfo, SessionName, SetEnvOutcome, SpawnResult, Target,
+        TransportError, WindowName,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -483,7 +489,8 @@ mod tests {
     fn stale_trust_above_ready_is_not_answered_ready_wins() {
         // trust prompt FIRST, then a ready marker LATER => trust_pos < ready_pos => do NOT answer.
         // This is the positional-recency命门 a naive substring port gets wrong (would re-send Enter).
-        let screen = format!("{TRUST_DIR}\n[trusted earlier]\n{READY_BANNER} ready\n{READY_PROMPT} ");
+        let screen =
+            format!("{TRUST_DIR}\n[trusted earlier]\n{READY_BANNER} ready\n{READY_PROMPT} ");
         assert_eq!(
             classify_codex_startup_screen(&screen),
             StartupScreenDecision::Ready,
@@ -519,7 +526,10 @@ mod tests {
     #[test]
     fn stale_update_above_ready_is_not_skipped_ready_wins() {
         let screen = format!("{UPDATE_AVAIL}\n{READY_BANNER}\n{READY_PROMPT} ");
-        assert_eq!(classify_codex_startup_screen(&screen), StartupScreenDecision::Ready);
+        assert_eq!(
+            classify_codex_startup_screen(&screen),
+            StartupScreenDecision::Ready
+        );
     }
 
     // ── golden ORDER — update is checked BEFORE trust (both more recent) -> SkipUpdatePrompt wins ─────
@@ -528,7 +538,10 @@ mod tests {
         // both update + trust appear after the ready marker; golden runs maybe_skip_update_prompt
         // FIRST each iteration -> the screen resolves to SkipUpdatePrompt, not AnswerWorkspaceTrust.
         let screen = format!("{READY_BANNER}\n{TRUST_DIR}\n{UPDATE_AVAIL}\n");
-        assert_eq!(classify_codex_startup_screen(&screen), StartupScreenDecision::SkipUpdatePrompt);
+        assert_eq!(
+            classify_codex_startup_screen(&screen),
+            StartupScreenDecision::SkipUpdatePrompt
+        );
     }
 
     // ── ready-only / neither ─────────────────────────────────────────────────────────────────────────
@@ -601,22 +614,50 @@ mod tests {
         fn kind(&self) -> BackendKind {
             BackendKind::Tmux
         }
-        fn spawn_first(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        fn spawn_first(
+            &self,
+            _s: &SessionName,
+            _w: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
             unimplemented!("not reached by startup-prompt loop")
         }
-        fn spawn_into(&self, _s: &SessionName, _w: &WindowName, _a: &[String], _c: &Path, _e: &BTreeMap<String, String>) -> Result<SpawnResult, TransportError> {
+        fn spawn_into(
+            &self,
+            _s: &SessionName,
+            _w: &WindowName,
+            _a: &[String],
+            _c: &Path,
+            _e: &BTreeMap<String, String>,
+        ) -> Result<SpawnResult, TransportError> {
             unimplemented!("not reached by startup-prompt loop")
         }
-        fn inject(&self, _t: &Target, _p: &InjectPayload, _submit: Key, _b: bool) -> Result<InjectReport, TransportError> {
+        fn inject(
+            &self,
+            _t: &Target,
+            _p: &InjectPayload,
+            _submit: Key,
+            _b: bool,
+        ) -> Result<InjectReport, TransportError> {
             unimplemented!("not reached")
         }
         fn send_keys(&self, _t: &Target, keys: &[Key]) -> Result<(), TransportError> {
             self.sent.lock().unwrap().push(keys.to_vec());
             Ok(())
         }
-        fn capture(&self, _t: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
+        fn capture(
+            &self,
+            _t: &Target,
+            range: CaptureRange,
+        ) -> Result<CapturedText, TransportError> {
             let mut q = self.screens.lock().unwrap();
-            let text = if q.is_empty() { String::new() } else { q.remove(0) };
+            let text = if q.is_empty() {
+                String::new()
+            } else {
+                q.remove(0)
+            };
             Ok(CapturedText { text, range })
         }
         fn query(&self, _t: &Target, _f: PaneField) -> Result<Option<String>, TransportError> {
@@ -634,7 +675,12 @@ mod tests {
         fn list_windows(&self, _s: &SessionName) -> Result<Vec<WindowName>, TransportError> {
             unimplemented!("not reached")
         }
-        fn set_session_env(&self, _s: &SessionName, _k: &str, _v: &str) -> Result<SetEnvOutcome, TransportError> {
+        fn set_session_env(
+            &self,
+            _s: &SessionName,
+            _k: &str,
+            _v: &str,
+        ) -> Result<SetEnvOutcome, TransportError> {
             unimplemented!("not reached")
         }
         fn kill_session(&self, _s: &SessionName) -> Result<(), TransportError> {
@@ -700,7 +746,9 @@ mod tests {
         );
         let sent = t.sent.lock().unwrap();
         assert_eq!(
-            sent.iter().filter(|keys| keys.as_slice() == [Key::Enter]).count(),
+            sent.iter()
+                .filter(|keys| keys.as_slice() == [Key::Enter])
+                .count(),
             1,
             "copilot trust prompt must choose option 1 with one Enter; got {sent:?}"
         );

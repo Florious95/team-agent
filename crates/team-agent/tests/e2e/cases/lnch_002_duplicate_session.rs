@@ -15,7 +15,11 @@ fn lnch_002_duplicate_quick_start_is_refused() {
     let ws_path = ws.path().to_str().unwrap();
 
     let first = quick_start_fake(&ws, team_id);
-    assert!(quick_start_launched(&first), "1st quick-start: {}", first.stdout);
+    assert!(
+        quick_start_launched(&first),
+        "1st quick-start: {}",
+        first.stdout
+    );
 
     let second = quick_start_fake(&ws, team_id);
     let j = second.json();

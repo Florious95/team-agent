@@ -292,8 +292,15 @@ fn state_path(ws: &Path) -> PathBuf {
 #[test]
 fn init_json_creates_python_golden_files_and_event() {
     let ws = tmp_ws("json");
-    let output = run(&["init", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
-    assert!(output.status.success(), "init must exit 0; stderr={}", stderr(&output));
+    let output = run(
+        &["init", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
+    assert!(
+        output.status.success(),
+        "init must exit 0; stderr={}",
+        stderr(&output)
+    );
 
     let spec = spec_path(&ws);
     let state = state_path(&ws);
@@ -311,7 +318,14 @@ fn init_json_creates_python_golden_files_and_event() {
     assert_eq!(std::fs::read_to_string(&spec).unwrap(), GOLDEN_SPEC);
     assert_eq!(std::fs::read_to_string(&state).unwrap(), GOLDEN_STATE);
 
-    for rel in [".team", ".team/current", ".team/runtime", ".team/logs", ".team/messages", ".team/artifacts"] {
+    for rel in [
+        ".team",
+        ".team/current",
+        ".team/runtime",
+        ".team/logs",
+        ".team/messages",
+        ".team/artifacts",
+    ] {
         assert!(ws.join(rel).is_dir(), "init must create {rel}");
     }
 
@@ -331,7 +345,11 @@ fn init_json_creates_python_golden_files_and_event() {
 fn init_human_output_matches_python_dict_iteration_order() {
     let ws = tmp_ws("human");
     let output = run(&["init", "--workspace", ws.to_str().unwrap()], &ws);
-    assert!(output.status.success(), "init must exit 0; stderr={}", stderr(&output));
+    assert!(
+        output.status.success(),
+        "init must exit 0; stderr={}",
+        stderr(&output)
+    );
     assert_eq!(
         stdout(&output),
         format!(
@@ -346,11 +364,24 @@ fn init_human_output_matches_python_dict_iteration_order() {
 #[test]
 fn init_existing_refuses_without_force_and_force_overwrites_templates() {
     let ws = tmp_ws("force");
-    let first = run(&["init", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
-    assert!(first.status.success(), "first init failed: {}", stderr(&first));
+    let first = run(
+        &["init", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
+    assert!(
+        first.status.success(),
+        "first init failed: {}",
+        stderr(&first)
+    );
 
-    let second = run(&["init", "--workspace", ws.to_str().unwrap(), "--json"], &ws);
-    assert!(!second.status.success(), "second init without --force must exit 1");
+    let second = run(
+        &["init", "--workspace", ws.to_str().unwrap(), "--json"],
+        &ws,
+    );
+    assert!(
+        !second.status.success(),
+        "second init without --force must exit 1"
+    );
     let second_stdout = stdout(&second);
     assert!(stderr(&second).is_empty());
     assert!(
@@ -367,8 +398,27 @@ fn init_existing_refuses_without_force_and_force_overwrites_templates() {
 
     std::fs::write(spec_path(&ws), "CUSTOM_SPEC\n").unwrap();
     std::fs::write(state_path(&ws), "CUSTOM_STATE\n").unwrap();
-    let forced = run(&["init", "--workspace", ws.to_str().unwrap(), "--force", "--json"], &ws);
-    assert!(forced.status.success(), "forced init failed: {}", stderr(&forced));
-    assert_eq!(std::fs::read_to_string(spec_path(&ws)).unwrap(), GOLDEN_SPEC);
-    assert_eq!(std::fs::read_to_string(state_path(&ws)).unwrap(), GOLDEN_STATE);
+    let forced = run(
+        &[
+            "init",
+            "--workspace",
+            ws.to_str().unwrap(),
+            "--force",
+            "--json",
+        ],
+        &ws,
+    );
+    assert!(
+        forced.status.success(),
+        "forced init failed: {}",
+        stderr(&forced)
+    );
+    assert_eq!(
+        std::fs::read_to_string(spec_path(&ws)).unwrap(),
+        GOLDEN_SPEC
+    );
+    assert_eq!(
+        std::fs::read_to_string(state_path(&ws)).unwrap(),
+        GOLDEN_STATE
+    );
 }

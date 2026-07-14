@@ -37,9 +37,9 @@ use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
-    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness,
-    SessionName, SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport,
-    TransportError, TurnVerification, WindowName,
+    InjectStage, InjectVerification, Key, PaneField, PaneId, PaneInfo, PaneLiveness, SessionName,
+    SetEnvOutcome, SpawnResult, SubmitVerification, Target, Transport, TransportError,
+    TurnVerification, WindowName,
 };
 
 #[test]
@@ -60,7 +60,11 @@ fn bug1_quick_start_child_preserves_runtime_teams_and_status_bindings() {
             &parent,
             "%2",
             1,
-            &[("subleader_w", "running", json!(["mcp_team", "dangerous_auto_approve"]))],
+            &[(
+                "subleader_w",
+                "running",
+                json!(["mcp_team", "dangerous_auto_approve"]),
+            )],
         )],
         "parent",
     );
@@ -91,11 +95,36 @@ fn bug2_owner_gate_is_target_team_and_target_role_scoped_for_subleader_dual_iden
     let mut failures = Vec::new();
 
     for case in [
-        OwnerGateCase::positive("start-agent --team parent subleader_w", "parent", "subleader_w", Operation::Start),
-        OwnerGateCase::positive("restart-agent/resume --team parent subleader_w", "parent", "subleader_w", Operation::Resume),
-        OwnerGateCase::positive("stop-agent --team parent subleader_w", "parent", "subleader_w", Operation::Stop),
-        OwnerGateCase::positive("reset-agent --team parent subleader_w", "parent", "subleader_w", Operation::Reset),
-        OwnerGateCase::positive("send --team parent --to subleader_w", "parent", "subleader_w", Operation::Send),
+        OwnerGateCase::positive(
+            "start-agent --team parent subleader_w",
+            "parent",
+            "subleader_w",
+            Operation::Start,
+        ),
+        OwnerGateCase::positive(
+            "restart-agent/resume --team parent subleader_w",
+            "parent",
+            "subleader_w",
+            Operation::Resume,
+        ),
+        OwnerGateCase::positive(
+            "stop-agent --team parent subleader_w",
+            "parent",
+            "subleader_w",
+            Operation::Stop,
+        ),
+        OwnerGateCase::positive(
+            "reset-agent --team parent subleader_w",
+            "parent",
+            "subleader_w",
+            Operation::Reset,
+        ),
+        OwnerGateCase::positive(
+            "send --team parent --to subleader_w",
+            "parent",
+            "subleader_w",
+            Operation::Send,
+        ),
     ] {
         if let Err(err) = run_owner_gate_case(case) {
             failures.push(err);
@@ -103,10 +132,30 @@ fn bug2_owner_gate_is_target_team_and_target_role_scoped_for_subleader_dual_iden
     }
 
     for case in [
-        OwnerGateCase::negative("start-agent --team child child_worker", "child", "child_worker", Operation::Start),
-        OwnerGateCase::negative("stop-agent --team child child_worker", "child", "child_worker", Operation::Stop),
-        OwnerGateCase::negative("reset-agent --team child child_worker", "child", "child_worker", Operation::Reset),
-        OwnerGateCase::negative("send --team child --to child_worker", "child", "child_worker", Operation::Send),
+        OwnerGateCase::negative(
+            "start-agent --team child child_worker",
+            "child",
+            "child_worker",
+            Operation::Start,
+        ),
+        OwnerGateCase::negative(
+            "stop-agent --team child child_worker",
+            "child",
+            "child_worker",
+            Operation::Stop,
+        ),
+        OwnerGateCase::negative(
+            "reset-agent --team child child_worker",
+            "child",
+            "child_worker",
+            Operation::Reset,
+        ),
+        OwnerGateCase::negative(
+            "send --team child --to child_worker",
+            "child",
+            "child_worker",
+            Operation::Send,
+        ),
     ] {
         if let Err(err) = run_owner_gate_case(case) {
             failures.push(err);
@@ -156,7 +205,8 @@ fn bug2_owner_binding_is_team_scoped_for_claim_projection_quick_start_and_parent
 fn bug2_full_parent_child_sequence_keeps_owner_writeback_team_scoped() {
     let mut failures = Vec::new();
     for parent_quick_start_caller in [Some("%2"), None] {
-        if let Err(err) = run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller) {
+        if let Err(err) = run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller)
+        {
             failures.push(err);
         }
     }
@@ -186,12 +236,34 @@ struct OwnerGateCase {
 }
 
 impl OwnerGateCase {
-    fn positive(label: &'static str, team: &'static str, agent: &'static str, operation: Operation) -> Self {
-        Self { label, team, agent, operation, should_allow: true }
+    fn positive(
+        label: &'static str,
+        team: &'static str,
+        agent: &'static str,
+        operation: Operation,
+    ) -> Self {
+        Self {
+            label,
+            team,
+            agent,
+            operation,
+            should_allow: true,
+        }
     }
 
-    fn negative(label: &'static str, team: &'static str, agent: &'static str, operation: Operation) -> Self {
-        Self { label, team, agent, operation, should_allow: false }
+    fn negative(
+        label: &'static str,
+        team: &'static str,
+        agent: &'static str,
+        operation: Operation,
+    ) -> Self {
+        Self {
+            label,
+            team,
+            agent,
+            operation,
+            should_allow: false,
+        }
     }
 }
 
@@ -199,8 +271,12 @@ fn run_owner_gate_case(case: OwnerGateCase) -> Result<(), String> {
     let fixture = ScopeFixture::new(case.label);
     let _env = EnvGuard::set("TMUX_PANE", "%2");
     let before = load_runtime_state(&fixture.root).map_err(|e| e.to_string())?;
-    let before_child_receiver = before.pointer("/teams/child/leader_receiver/pane_id").cloned();
-    let before_capability = before.pointer("/teams/parent/agents/subleader_w/tools").cloned();
+    let before_child_receiver = before
+        .pointer("/teams/child/leader_receiver/pane_id")
+        .cloned();
+    let before_capability = before
+        .pointer("/teams/parent/agents/subleader_w/tools")
+        .cloned();
 
     let result = match case.operation {
         Operation::Start => start_agent_with_transport(
@@ -264,8 +340,12 @@ fn run_owner_gate_case(case: OwnerGateCase) -> Result<(), String> {
     };
 
     let after = load_runtime_state(&fixture.root).map_err(|e| e.to_string())?;
-    let after_child_receiver = after.pointer("/teams/child/leader_receiver/pane_id").cloned();
-    let after_capability = after.pointer("/teams/parent/agents/subleader_w/tools").cloned();
+    let after_child_receiver = after
+        .pointer("/teams/child/leader_receiver/pane_id")
+        .cloned();
+    let after_capability = after
+        .pointer("/teams/parent/agents/subleader_w/tools")
+        .cloned();
     if before_child_receiver != after_child_receiver {
         return Err(format!(
             "{}: L1 operation on parent subleader must not rewrite child leader_receiver; before={before_child_receiver:?} after={after_child_receiver:?}",
@@ -306,7 +386,9 @@ fn assert_owner_gate_static_guard() -> Result<(), String> {
             "restart/agent.rs must not call raw ensure_owner_allowed(workspace); lifecycle owner gate must receive selected target_team/target_role state".to_string(),
         );
     }
-    if !launch.contains("ensure_owner_allowed_for") && !restart_agent.contains("ensure_owner_allowed_for") {
+    if !launch.contains("ensure_owner_allowed_for")
+        && !restart_agent.contains("ensure_owner_allowed_for")
+    {
         failures.push(
             "lifecycle needs an owner-gate API that accepts selected target team state plus target role; raw pane-id-only owner gate is insufficient".to_string(),
         );
@@ -337,9 +419,19 @@ fn assert_claim_leader_writes_selected_team_owner_not_top_level() -> Result<(), 
                 &parent,
                 "%2",
                 7,
-                &[("subleader_w", "running", json!(["mcp_team", "dangerous_auto_approve"]))],
+                &[(
+                    "subleader_w",
+                    "running",
+                    json!(["mcp_team", "dangerous_auto_approve"]),
+                )],
             ),
-            team_entry("child", &child, "%4", 3, &[("child_worker", "running", json!(["mcp_team"]))]),
+            team_entry(
+                "child",
+                &child,
+                "%4",
+                3,
+                &[("child_worker", "running", json!(["mcp_team"]))],
+            ),
         ],
         "parent",
     );
@@ -358,7 +450,9 @@ fn assert_claim_leader_writes_selected_team_owner_not_top_level() -> Result<(), 
     )
     .map_err(|e| e.to_string())?;
     if !result.ok {
-        return Err(format!("claim-leader --team child command-substitute should succeed, got {result:?}"));
+        return Err(format!(
+            "claim-leader --team child command-substitute should succeed, got {result:?}"
+        ));
     }
 
     let persisted = load_runtime_state(&root).map_err(|e| e.to_string())?;
@@ -383,7 +477,11 @@ fn assert_claim_leader_writes_selected_team_owner_not_top_level() -> Result<(), 
             "claim-leader --team child must not bind the workspace top-level owner to the child caller; state={persisted}"
         ));
     }
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
 }
 
 fn assert_projection_does_not_borrow_top_level_owner_for_other_team() -> Result<(), String> {
@@ -421,7 +519,11 @@ fn assert_projection_does_not_borrow_top_level_owner_for_other_team() -> Result<
             "project_top_level_view(parent) must not fallback to top-level child leader_receiver; projected={projected}"
         ));
     }
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
 }
 
 fn assert_child_quick_start_does_not_inherit_parent_owner() -> Result<(), String> {
@@ -435,12 +537,22 @@ fn assert_child_quick_start_does_not_inherit_parent_owner() -> Result<(), String
             &parent,
             "%2",
             11,
-            &[("subleader_w", "running", json!(["mcp_team", "dangerous_auto_approve"]))],
+            &[(
+                "subleader_w",
+                "running",
+                json!(["mcp_team", "dangerous_auto_approve"]),
+            )],
         )],
         "parent",
     );
-    quick_start_with_transport(&child, None, true, Some("child"), &RecordingTransport::new())
-        .map_err(|e| e.to_string())?;
+    quick_start_with_transport(
+        &child,
+        None,
+        true,
+        Some("child"),
+        &RecordingTransport::new(),
+    )
+    .map_err(|e| e.to_string())?;
     let after = load_runtime_state(&root).map_err(|e| e.to_string())?;
     let mut failures = Vec::new();
     if pane_at(&after, "/teams/child/team_owner/pane_id") == Some("%2") {
@@ -460,7 +572,11 @@ fn assert_child_quick_start_does_not_inherit_parent_owner() -> Result<(), String
             "child quick-start must preserve parent owner under teams.parent; state={after}"
         ));
     }
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
 }
 
 fn assert_parent_start_agent_ignores_child_owner_projection() -> Result<(), String> {
@@ -472,7 +588,11 @@ fn assert_parent_start_agent_ignores_child_owner_projection() -> Result<(), Stri
         vec![team_entry_without_owner(
             "parent",
             &parent,
-            &[("subleader_w", "running", json!(["mcp_team", "dangerous_auto_approve"]))],
+            &[(
+                "subleader_w",
+                "running",
+                json!(["mcp_team", "dangerous_auto_approve"]),
+            )],
         )],
         "parent",
     );
@@ -481,8 +601,14 @@ fn assert_parent_start_agent_ignores_child_owner_projection() -> Result<(), Stri
     state["session_name"] = json!("team-child");
     state["team_owner"] = owner("%4", "uuid-child", 9);
     state["leader_receiver"] = receiver("%4", "uuid-child", 9);
-    state["teams"]["child"] =
-        team_entry("child", &child, "%4", 9, &[("child_worker", "running", json!(["mcp_team"]))]).1;
+    state["teams"]["child"] = team_entry(
+        "child",
+        &child,
+        "%4",
+        9,
+        &[("child_worker", "running", json!(["mcp_team"]))],
+    )
+    .1;
     save_runtime_state(&root, &state).map_err(|e| e.to_string())?;
 
     let transport = RecordingTransport::new()
@@ -516,7 +642,9 @@ fn assert_parent_start_agent_ignores_child_owner_projection() -> Result<(), Stri
     }
 }
 
-fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Option<&str>) -> Result<(), String> {
+fn run_full_parent_child_owner_writeback_sequence(
+    parent_quick_start_caller: Option<&str>,
+) -> Result<(), String> {
     let label = match parent_quick_start_caller {
         Some(_) => "with caller pane",
         None => "without caller pane",
@@ -527,7 +655,10 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
     let quick_start_transport = RecordingTransport::new();
     let start_transport = RecordingTransport::new()
         .with_session_present(true)
-        .with_windows(vec![WindowName::new("subleader_w"), WindowName::new("child_worker")]);
+        .with_windows(vec![
+            WindowName::new("subleader_w"),
+            WindowName::new("child_worker"),
+        ]);
     let mut failures = Vec::new();
 
     {
@@ -541,7 +672,10 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
             .map_err(|e| format!("{label}: parent quick-start failed: {e}"))?;
     }
     let after_parent = load_runtime_state(&root).map_err(|e| e.to_string())?;
-    failures.extend(empty_owner_failures(&after_parent, &format!("{label}: after parent quick-start")));
+    failures.extend(empty_owner_failures(
+        &after_parent,
+        &format!("{label}: after parent quick-start"),
+    ));
     if let Some(pane) = parent_quick_start_caller {
         if pane_at(&after_parent, "/team_owner/pane_id") != Some(pane) {
             failures.push(format!(
@@ -569,10 +703,15 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
     )
     .map_err(|e| format!("{label}: claim-leader --team parent failed: {e}"))?;
     if !claim.ok {
-        failures.push(format!("{label}: claim-leader --team parent should succeed, got {claim:?}"));
+        failures.push(format!(
+            "{label}: claim-leader --team parent should succeed, got {claim:?}"
+        ));
     }
     let after_claim = load_runtime_state(&root).map_err(|e| e.to_string())?;
-    failures.extend(empty_owner_failures(&after_claim, &format!("{label}: after claim-leader --team parent")));
+    failures.extend(empty_owner_failures(
+        &after_claim,
+        &format!("{label}: after claim-leader --team parent"),
+    ));
     if pane_at(&after_claim, "/team_owner/pane_id") != Some("%3") {
         failures.push(format!(
             "{label}: claim-leader --team parent should update active top-level owner to %3; state={after_claim}"
@@ -597,7 +736,10 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
             .map_err(|e| format!("{label}: child quick-start failed: {e}"))?;
     }
     let after_child = load_runtime_state(&root).map_err(|e| e.to_string())?;
-    failures.extend(empty_owner_failures(&after_child, &format!("{label}: after child quick-start")));
+    failures.extend(empty_owner_failures(
+        &after_child,
+        &format!("{label}: after child quick-start"),
+    ));
     if pane_at(&after_child, "/teams/parent/team_owner/pane_id") != Some("%3") {
         failures.push(format!(
             "{label}: child quick-start must preserve claimed parent owner in teams.parent=%3; state={after_child}"
@@ -639,11 +781,17 @@ fn run_full_parent_child_owner_writeback_sequence(parent_quick_start_caller: Opt
                 "{label}: start-agent --team parent must not read stale/empty teams.parent owner or raise sticky_bind_collision; got error={error}"
             ));
         } else {
-            failures.push(format!("{label}: start-agent --team parent failed unexpectedly: {error}"));
+            failures.push(format!(
+                "{label}: start-agent --team parent failed unexpectedly: {error}"
+            ));
         }
     }
 
-    if failures.is_empty() { Ok(()) } else { Err(failures.join("\n")) }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
 }
 
 fn owner_refusal_like(error: &str) -> bool {
@@ -663,7 +811,11 @@ impl ScopeFixture {
         let root = tmp_dir(label);
         let parent = team_dir(&root, "parent", &[("subleader_w", "Parent subleader")]);
         let child = team_dir(&root, "child", &[("child_worker", "Child worker")]);
-        std::fs::write(root.join("team.spec.yaml"), std::fs::read_to_string(parent.join("team.spec.yaml")).unwrap()).unwrap();
+        std::fs::write(
+            root.join("team.spec.yaml"),
+            std::fs::read_to_string(parent.join("team.spec.yaml")).unwrap(),
+        )
+        .unwrap();
         seed_canonical_state(
             &root,
             vec![
@@ -672,9 +824,19 @@ impl ScopeFixture {
                     &parent,
                     "%2",
                     1,
-                    &[("subleader_w", "running", json!(["mcp_team", "dangerous_auto_approve"]))],
+                    &[(
+                        "subleader_w",
+                        "running",
+                        json!(["mcp_team", "dangerous_auto_approve"]),
+                    )],
                 ),
-                team_entry("child", &child, "%4", 1, &[("child_worker", "running", json!(["mcp_team"]))]),
+                team_entry(
+                    "child",
+                    &child,
+                    "%4",
+                    1,
+                    &[("child_worker", "running", json!(["mcp_team"]))],
+                ),
             ],
             "child",
         );
@@ -682,7 +844,10 @@ impl ScopeFixture {
             root,
             transport: RecordingTransport::new()
                 .with_session_present(true)
-                .with_windows(vec![WindowName::new("subleader_w"), WindowName::new("child_worker")]),
+                .with_windows(vec![
+                    WindowName::new("subleader_w"),
+                    WindowName::new("child_worker"),
+                ]),
         }
     }
 }
@@ -806,7 +971,10 @@ fn empty_owner_failures(state: &Value, context: &str) -> Vec<String> {
         "/teams/child/team_owner/pane_id",
         "/teams/child/leader_receiver/pane_id",
     ] {
-        if state.pointer(pointer).is_some_and(|value| value.as_str() == Some("")) {
+        if state
+            .pointer(pointer)
+            .is_some_and(|value| value.as_str() == Some(""))
+        {
             failures.push(format!(
                 "{context}: {pointer} must never be an empty pane_id fake owner/receiver; state={state}"
             ));
@@ -835,7 +1003,8 @@ fn missing_team_binding_failures(state: &Value, teams: &[&str]) -> Vec<String> {
                     if epoch.is_none() {
                         fields.push("owner_epoch");
                     }
-                    (!fields.is_empty()).then(|| format!("state.teams.{team} missing fields {fields:?}: {entry}"))
+                    (!fields.is_empty())
+                        .then(|| format!("state.teams.{team} missing fields {fields:?}: {entry}"))
                 }
             }
         })
@@ -869,10 +1038,18 @@ fn team_dir(root: &Path, name: &str, agents: &[(&str, &str)]) -> PathBuf {
     )
     .unwrap();
     for (agent_id, role) in agents {
-        std::fs::write(team.join("agents").join(format!("{agent_id}.md")), role_doc(agent_id, role)).unwrap();
+        std::fs::write(
+            team.join("agents").join(format!("{agent_id}.md")),
+            role_doc(agent_id, role),
+        )
+        .unwrap();
     }
     let spec = team_agent::compiler::compile_team(&team).unwrap();
-    std::fs::write(team.join("team.spec.yaml"), team_agent::model::yaml::dumps(&spec)).unwrap();
+    std::fs::write(
+        team.join("team.spec.yaml"),
+        team_agent::model::yaml::dumps(&spec),
+    )
+    .unwrap();
     team
 }
 
@@ -1043,8 +1220,15 @@ impl Transport for RecordingTransport {
         Ok(())
     }
 
-    fn capture(&self, _target: &Target, range: CaptureRange) -> Result<CapturedText, TransportError> {
-        Ok(CapturedText { text: String::new(), range })
+    fn capture(
+        &self,
+        _target: &Target,
+        range: CaptureRange,
+    ) -> Result<CapturedText, TransportError> {
+        Ok(CapturedText {
+            text: String::new(),
+            range,
+        })
     }
 
     fn query(&self, _target: &Target, _field: PaneField) -> Result<Option<String>, TransportError> {

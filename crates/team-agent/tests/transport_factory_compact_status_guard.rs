@@ -21,9 +21,8 @@ fn status_port_src() -> String {
         .join("src")
         .join("cli")
         .join("status_port.rs");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!("cannot read cli/status_port.rs at {}: {e}", path.display())
-    })
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read cli/status_port.rs at {}: {e}", path.display()))
 }
 
 /// Locate the body of the `fn compact_status(...)` helper, or return
@@ -103,9 +102,15 @@ fn c4_no_top_level_status_json_backend_kind_leak() {
             if line.contains(pat) {
                 let start = idx.saturating_sub(30);
                 let end = (idx + 5).min(src.lines().count());
-                let window: String = src.lines().skip(start).take(end - start).collect::<Vec<_>>().join("\n");
-                let scope_ok =
-                    window.contains("detail") || window.contains("--detail") || window.contains("if detail");
+                let window: String = src
+                    .lines()
+                    .skip(start)
+                    .take(end - start)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let scope_ok = window.contains("detail")
+                    || window.contains("--detail")
+                    || window.contains("if detail");
                 if !scope_ok {
                     offenders.push(format!("line {}: `{}` — {pat}", idx + 1, line.trim()));
                 }
