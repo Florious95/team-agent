@@ -410,22 +410,27 @@ fn restart_with_selected_team_and_transport(
         }
     }
     let session_name = state_session_name(&state);
-    if session_live_or_default(transport, &session_name, false) {
-        // 0.3.28 Step 5 (warn-only): per architecture, restart should REFUSE
-        // when the worker session is live (Python `restart/orchestration.py:79-85`
-        // raises `_tmux_session_conflict_error`). Pre-0.3.28 Rust kills the
-        // worker session here — which under the old co-located topology also
-        // killed the leader pane (the E57-1 cascade contribution from the
-        // layout layer).
-        //
-        // After Step 2 the leader lives in a DIFFERENT session
-        // (`team-agent-leader-...`), so killing the worker session no longer
-        // tears down the leader. That makes this kill structurally safe, but
-        // it still loses provider session state in the worker panes.
-        //
-        // Full "refuse" semantics will land once Steps 6+7 expose the
-        // recovery path so users have a clean alternative. For now we emit
-        // the warn-only event so operators see the drift in event logs.
+    // 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3, first-version
+    // build-before-destroy). Pre-0.5.40 code UNCONDITIONALLY killed the
+    // live worker session here, then ran the spawn loop against a fresh
+    // session — which loses provider session state (Case B) and, under
+    // upstream tmux 3.6a private-server bugs, can cascade into whole-
+    // server death (Case A). Locate §7 Slice 3 requires: "restart must
+    // build/prove the replacement before retiring a currently live
+    // worker session." First-version narrow shape: defer the kill until
+    // AFTER the spawn loop proves the replacement is minimally viable,
+    // and refuse the kill on failure so the original session/state stay
+    // authoritative. Discriminator = `collect_live_agents_from_state`
+    // (state marks agents running with real pane_ids). When state has
+    // no authoritative live agents, the previous behavior (pre-spawn
+    // teardown of a stale empty session) is preserved so tests that
+    // seed a fake-live session without live agent rows still work.
+    let live_worker_session_deferred_teardown =
+        session_live_or_default(transport, &session_name, false)
+            && !collect_live_agents_from_state(&state).is_empty();
+    if session_live_or_default(transport, &session_name, false)
+        && !live_worker_session_deferred_teardown
+    {
         eprintln!(
             "team_agent::layout restart_precondition_warning worker_session=`{}` action=killing \
              (post-Step-7 will refuse and direct user to recover; safe today because Step 2 \
@@ -451,6 +456,20 @@ fn restart_with_selected_team_and_transport(
     }
     phase_timer.emit(&selected.run_workspace, "restart.phase", "teardown");
     phase_timer.emit(&selected.run_workspace, "restart.phase", "spawn_all");
+    // 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3): when the
+    // pre-spawn teardown was DEFERRED (live worker session with
+    // authoritative running agents), snapshot the pre-spawn agent rows
+    // so we can restore them if the replacement build fails. This
+    // enforces the "old session/state stay authoritative on failure"
+    // invariant without threading a buffer through every state
+    // mutation. On success (all spawns viable) the mutations already
+    // written win; on failure the snapshot restores the original rows.
+    let build_before_destroy_agents_snapshot: Option<serde_json::Value> =
+        if live_worker_session_deferred_teardown {
+            state.get("agents").cloned()
+        } else {
+            None
+        };
     let mut successful_agents: Vec<RestartedAgent> = Vec::new();
     let mut failed_agents: Vec<RestartFailedAgent> = Vec::new();
     let mut fatal_resume_failure = false;
@@ -599,6 +618,37 @@ fn restart_with_selected_team_and_transport(
         };
         let mut session_live = session_live_or_default(transport, &session_name, false);
         if !session_live {
+            // 0.5.40 Slice 3: when we deferred the pre-spawn teardown
+            // because the original session was live with authoritative
+            // running agents, a mid-flight session disappearance
+            // classifies as tmux_server_crashed (0539 §11.1 B) — the
+            // whole server died out from under us. Do NOT cascade-pop
+            // previously-successful agents into `session_disappeared_after_spawn`:
+            // that path (a) rewrites state.agents.<popped>.status to
+            // restart_failed (losing the authoritative old row R3
+            // requires stays untouched), and (b) emits the exact
+            // cascade error string R3 forbids. Instead, refuse the
+            // build-before-destroy cohort: leave `successful_agents`
+            // alone (their live spawn already happened but the server
+            // died before we could prove them viable), stop the loop,
+            // and let the terminal Failed report attribute the failure
+            // to tmux_server_crashed via `restart_failure_phase`. The
+            // legacy path still runs when the pre-spawn teardown was
+            // taken (empty session case), because
+            // `live_worker_session_deferred_teardown` is false there.
+            if live_worker_session_deferred_teardown {
+                fatal_resume_failure = true;
+                let error = format!(
+                    "tmux_server_crashed: session {} disappeared during replacement build; refusing to touch original agent state",
+                    session_name.as_str()
+                );
+                failed_agents.push(restart_failed_agent(
+                    decision,
+                    "tmux_server_crashed",
+                    error,
+                ));
+                continue;
+            }
             if let Some(previous) = successful_agents.pop() {
                 let error = format!(
                     "session_disappeared_after_spawn: provider_resume_exited for {}; session {} disappeared before spawning {}",
@@ -750,6 +800,38 @@ fn restart_with_selected_team_and_transport(
         })
         .map(|agent| agent.agent_id.as_str().to_string())
         .collect::<Vec<_>>();
+    // 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3): restore the
+    // pre-spawn agents snapshot when we deferred the teardown AND the
+    // replacement build failed. This is the "old session/state stay
+    // authoritative on failure" invariant made concrete — the mid-loop
+    // mark_agent_respawned/mark_agent_restart_failed calls already
+    // mutated `state.agents` in memory; restoring the snapshot rewinds
+    // those mutations so `save_restart_state_...` below persists rows
+    // byte-identical to what was loaded. Only rewind when
+    // `fatal_resume_failure` (whole cohort refused) OR when NO agent
+    // survived (`successful_agents.is_empty()` with failures) — on
+    // partial success the surviving replacements are legitimately new
+    // and the pre-restart rows are stale.
+    if let Some(snapshot) = build_before_destroy_agents_snapshot.as_ref() {
+        let replacement_failed =
+            fatal_resume_failure || (!failed_agents.is_empty() && successful_agents.is_empty());
+        if replacement_failed {
+            if let Some(state_obj) = state.as_object_mut() {
+                state_obj.insert("agents".to_string(), snapshot.clone());
+                if let Some(teams) = state_obj
+                    .get_mut("teams")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if let Some(team_entry) = teams
+                        .get_mut(selected.team_key.as_str())
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        team_entry.insert("agents".to_string(), snapshot.clone());
+                    }
+                }
+            }
+        }
+    }
     save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
         &selected.run_workspace,
         &mut state,
@@ -3071,6 +3153,32 @@ fn load_endpoint_convergence_runtime_spec(
         crate::lifecycle::launch::override_spec_session_name(&mut spec, session_name);
     }
     Ok(Some(spec))
+}
+
+/// 0.5.40 Slice 3: collect the set of agent ids that state marks as
+/// running with a real pane_id. "Running with pane_id" is the
+/// discriminator between "state has an authoritative live team the
+/// user would lose on teardown" and "state is fresh / all stopped and
+/// the live session is just leftover empty topology". Sorted for
+/// deterministic report output.
+fn collect_live_agents_from_state(state: &serde_json::Value) -> Vec<String> {
+    let Some(agents) = state.get("agents").and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut live: Vec<String> = agents
+        .iter()
+        .filter_map(|(agent_id, agent)| {
+            let status = agent.get("status").and_then(serde_json::Value::as_str)?;
+            let pane_id = agent
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())?;
+            let _ = pane_id;
+            (status == "running").then(|| agent_id.clone())
+        })
+        .collect();
+    live.sort();
+    live
 }
 
 fn has_endpoint_convergence_marker(state: &serde_json::Value) -> bool {

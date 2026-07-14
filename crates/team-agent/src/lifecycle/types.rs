@@ -745,6 +745,27 @@ pub enum RestartReport {
         allow_fresh: bool,
         error: String,
     },
+    /// 0.5.40 Slice 3 (tmux-server-death-locate §7 Slice 3, first-version
+    /// all-or-refuse): the previous worker session is still live AND state
+    /// carries running agents with real pane_ids. Restart today can only
+    /// proceed by killing the live session first — which loses provider
+    /// session state in the worker panes and, worse, can cascade into
+    /// server death under Case B. Until the build-before-destroy path
+    /// (later car: temporary session + minimal-viability proof + swap)
+    /// lands, restart refuses this shape *before* touching tmux or state.
+    /// **nothing created or killed; state.agents rows are byte-identical
+    /// to what was seeded before the call.**
+    RefusedBuildBeforeDestroyRequired {
+        /// Live worker session name from state that would need destructive
+        /// rebuild.
+        session_name: String,
+        /// Snapshot of agent ids currently running with real pane_ids —
+        /// this is the "authoritative old state" the refusal preserves.
+        live_agents: Vec<String>,
+        /// Human-readable error pointing the user at the canonical recovery
+        /// path (bare shutdown then restart).
+        error: String,
+    },
     /// unit-3 (Stage 1): session-identity preflight refused — `state.session_name`
     /// is a leader launcher session (`team-agent-leader-*`). Proceeding would
     /// tear down the leader pane (E49 / 0.3.39). **nothing created or killed**.
