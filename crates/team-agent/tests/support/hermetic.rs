@@ -23,6 +23,12 @@ pub const CALLER_IDENTITY_ENVS: &[&str] = &[
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 0.5.43 debt-sweep contract seam. GREEN replaces this stub with a short,
+/// process-unique absolute tmux socket path that never depends on long TMPDIR.
+pub fn short_tmux_socket(_tag: &str) -> PathBuf {
+    panic!("RED 0.5.43: short test-owned tmux socket helper is not implemented")
+}
+
 pub struct HermeticTestEnv {
     root: PathBuf,
     home: PathBuf,
@@ -92,6 +98,12 @@ impl HermeticTestEnv {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Register an exact test-owned process for Drop cleanup.
+    pub fn register_owned_pid(&self, _pid: u32) {}
+
+    /// Register an exact test-owned tmux socket for Drop cleanup.
+    pub fn register_owned_tmux_socket(&self, _socket: &Path) {}
 
     pub fn run_cli(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_team-agent"))
