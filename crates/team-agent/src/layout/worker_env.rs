@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::model::yaml::Value as YamlValue;
+use crate::provider::Provider;
 
 /// Env-key PREFIXES that are stripped from the inherited parent env
 /// before worker spawn. These carry leader-process identity and must
@@ -51,6 +52,10 @@ const STRIP_EXACT: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
 ];
+
+const WORKER_IDENTITY_EXACT: &[&str] = &["CLAUDECODE", "CLAUDE_EFFORT", "CODEX_THREAD_ID"];
+
+const WORKER_IDENTITY_PREFIXES: &[&str] = &["CLAUDE_CODE_"];
 
 /// Build the worker spawn env per Python inherit-then-strip semantics.
 ///
@@ -102,6 +107,30 @@ where
     env
 }
 
+pub(crate) fn isolate_worker_spawn_env(
+    _target_provider: Provider,
+    env: &mut BTreeMap<String, String>,
+    base_env_unset: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let mut env_unset = base_env_unset
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    for key in WORKER_IDENTITY_EXACT {
+        env.remove(*key);
+        env_unset.insert((*key).to_string());
+    }
+    let dynamic_keys = env
+        .keys()
+        .filter(|key| is_worker_identity_key(key))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in dynamic_keys {
+        env.remove(&key);
+        env_unset.insert(key);
+    }
+    env_unset.into_iter().collect()
+}
+
 fn is_stripped(key: &str) -> bool {
     if STRIP_EXACT.iter().any(|exact| *exact == key) {
         return true;
@@ -110,6 +139,12 @@ fn is_stripped(key: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_worker_identity_key(key: &str) -> bool {
+    WORKER_IDENTITY_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 fn is_posix_shell_identifier(s: &str) -> bool {

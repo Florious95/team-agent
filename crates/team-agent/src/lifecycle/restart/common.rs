@@ -183,9 +183,13 @@ pub(super) fn spawn_agent_window(
     // 0.4.x provider effort MVP step 9: scrub CLAUDE_EFFORT for Claude
     // worker spawn so a parent shell env cannot silently override the
     // framework's effort decision.
-    let env_unset: Vec<String> = crate::lifecycle::launch::extend_worker_env_unset_for_effort(
-        profile_launch.env_unset.iter().cloned().collect(),
+    let env_unset = crate::layout::worker_env::isolate_worker_spawn_env(
         provider,
+        &mut env,
+        crate::lifecycle::launch::extend_worker_env_unset_for_effort(
+            profile_launch.env_unset.iter().cloned().collect(),
+            provider,
+        ),
     );
 
     // 0.4.6 Stage 2: write actual spawn plan event BEFORE invoking the

@@ -4100,7 +4100,7 @@ pub mod leader_port {
                 "action": "rerun with --confirm to claim ownership of this team",
             }));
         }
-        let state = crate::state::persist::load_runtime_state(workspace)
+        let state = crate::state::persist::load_runtime_state_without_migrations(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let Some(team_id) = resolve_owner_team_id(&state, team) else {
             return Ok(json!({
@@ -4112,8 +4112,7 @@ pub mod leader_port {
             }));
         };
         let requested_team = team;
-        let explicit_team = requested_team.filter(|team| !team.is_empty());
-        let resolved_team = explicit_team.map(|_| team_id.as_str().to_string());
+        let resolved_team = Some(team_id.as_str().to_string());
         if !positive_caller_pane_env_present() {
             let bind = crate::leader::bind_owner_from_caller_pane(workspace, &team_id, None)
                 .map_err(|e| CliError::Runtime(e.to_string()))?;
@@ -4124,6 +4123,7 @@ pub mod leader_port {
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
         insert_resolved_team(&mut value, requested_team, resolved_team.as_deref());
+        append_team_session_ready(workspace, resolved_team.as_deref(), &mut value);
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
             emit_topology_convergence_event(
                 workspace,
@@ -4137,6 +4137,7 @@ pub mod leader_port {
                 "takeover",
                 &mut value,
             );
+            restore_non_target_teams(workspace, &state, resolved_team.as_deref());
         }
         Ok(value)
     }
@@ -4146,7 +4147,7 @@ pub mod leader_port {
         team: Option<&str>,
         confirm: bool,
     ) -> Result<Value, CliError> {
-        let state = crate::state::persist::load_runtime_state(workspace)
+        let state = crate::state::persist::load_runtime_state_without_migrations(workspace)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let Some(team_id) = resolve_owner_team_id(&state, team) else {
             return Ok(json!({
@@ -4165,12 +4166,12 @@ pub mod leader_port {
             }
             return Ok(owner_bind_value(bind));
         }
-        let explicit_team = team.filter(|team| !team.is_empty());
-        let resolved_team = explicit_team.map(|_| team_id.as_str().to_string());
+        let resolved_team = Some(team_id.as_str().to_string());
         let result = crate::leader::claim_leader(workspace, resolved_team.as_deref(), confirm)
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         let mut value = lease_value(result);
         insert_resolved_team(&mut value, team, resolved_team.as_deref());
+        append_team_session_ready(workspace, resolved_team.as_deref(), &mut value);
         if value.get("ok").and_then(Value::as_bool) == Some(true) {
             emit_topology_convergence_event(
                 workspace,
@@ -4184,6 +4185,7 @@ pub mod leader_port {
                 "claim-leader",
                 &mut value,
             );
+            restore_non_target_teams(workspace, &state, resolved_team.as_deref());
         }
         Ok(value)
     }
@@ -4279,6 +4281,7 @@ pub mod leader_port {
                 "owner_epoch": convergence.get("owner_epoch").cloned().unwrap_or(Value::Null),
                 "persisted": convergence.get("persisted").cloned().unwrap_or(Value::Bool(false)),
                 "checked_paths": convergence.get("checked_paths").cloned().unwrap_or_else(|| json!([])),
+                "team_session_ready": response.get("team_session_ready").cloned().unwrap_or(Value::Null),
             }),
         );
     }
@@ -4344,9 +4347,96 @@ pub mod leader_port {
                     | crate::state::projection::OwnerTeamResolution::Ambiguous { .. } => None,
                 }
             }
-            None => Some(TeamKey::new(crate::state::projection::team_state_key(
-                state,
-            ))),
+            None => Some(TeamKey::new(active_or_derived_team_key(state))),
+        }
+    }
+
+    fn active_or_derived_team_key(state: &Value) -> String {
+        state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .filter(|team| !team.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::state::projection::team_state_key(state))
+    }
+
+    fn append_team_session_ready(workspace: &Path, team: Option<&str>, response: &mut Value) {
+        let Some(obj) = response.as_object_mut() else {
+            return;
+        };
+        let Some(convergence) = obj.get("topology_convergence") else {
+            return;
+        };
+        if convergence.get("status").and_then(Value::as_str) != Some("converged") {
+            return;
+        }
+        let Some(endpoint) = convergence
+            .get("new_tmux_endpoint")
+            .and_then(Value::as_str)
+            .filter(|endpoint| !endpoint.is_empty())
+        else {
+            obj.insert("team_session_ready".to_string(), Value::Null);
+            return;
+        };
+        let session_name = crate::state::persist::load_runtime_state_without_migrations(workspace)
+            .ok()
+            .and_then(|state| target_team_session_name(&state, team));
+        let ready = session_name
+            .as_deref()
+            .and_then(|session| crate::topology::team_session_ready_on_endpoint(endpoint, session));
+        obj.insert(
+            "team_session_ready".to_string(),
+            ready.map(Value::Bool).unwrap_or(Value::Null),
+        );
+    }
+
+    fn target_team_session_name(state: &Value, team: Option<&str>) -> Option<String> {
+        team.and_then(|team| {
+            state
+                .get("teams")
+                .and_then(Value::as_object)
+                .and_then(|teams| teams.get(team))
+        })
+        .and_then(|team_state| team_state.get("session_name"))
+        .and_then(Value::as_str)
+        .filter(|session| !session.is_empty())
+        .or_else(|| state.get("session_name").and_then(Value::as_str))
+        .filter(|session| !session.is_empty())
+        .map(str::to_string)
+    }
+
+    fn restore_non_target_teams(workspace: &Path, before: &Value, target: Option<&str>) {
+        let Some(target) = target.filter(|team| !team.is_empty()) else {
+            return;
+        };
+        let Some(before_teams) = before.get("teams").and_then(Value::as_object) else {
+            return;
+        };
+        let Ok(mut latest) =
+            crate::state::persist::load_runtime_state_without_migrations(workspace)
+        else {
+            return;
+        };
+        let Some(latest_teams) = latest.get_mut("teams").and_then(Value::as_object_mut) else {
+            return;
+        };
+        let mut changed = false;
+        for (team, before_entry) in before_teams {
+            if team == target {
+                continue;
+            }
+            if latest_teams.get(team) != Some(before_entry) {
+                latest_teams.insert(team.clone(), before_entry.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = crate::state::repository::StateRepository::new(workspace).save(
+                crate::state::repository::StateWriteIntent::LeaderBindingRestoreNonTargetTeams {
+                    target_team_key: target,
+                },
+                &latest,
+            );
         }
     }
 

@@ -457,6 +457,19 @@ fn session_exists_on_endpoint(endpoint: &str, session: &str) -> bool {
     session_exists_on_endpoint_checked(endpoint, session).unwrap_or(false)
 }
 
+pub(crate) fn team_session_ready_on_endpoint(endpoint: &str, session: &str) -> Option<bool> {
+    if endpoint.is_empty() || session.is_empty() {
+        return None;
+    }
+    let backend = crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint);
+    let targets = backend.list_targets().ok()?;
+    Some(
+        targets
+            .iter()
+            .any(|target| target.session.as_str() == session),
+    )
+}
+
 fn session_exists_on_endpoint_checked(endpoint: &str, session: &str) -> Option<bool> {
     crate::tmux_backend::TmuxBackend::for_tmux_endpoint(endpoint)
         .has_session(&SessionName::new(session.to_string()))

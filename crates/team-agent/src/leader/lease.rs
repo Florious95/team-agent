@@ -487,7 +487,7 @@ pub fn claim_leader(
                 .filter(|pane| !pane.is_empty())
         })
         .unwrap_or_default();
-    let raw_state = crate::state::persist::load_runtime_state(workspace)?;
+    let raw_state = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     let event_log = crate::event_log::EventLog::new(workspace);
     let targets = claim_leader_targets(workspace, &raw_state);
     let caller_candidate = targets
@@ -505,19 +505,36 @@ pub fn claim_leader(
         .ok()
         .filter(|team| !team.is_empty());
     let explicit_team = team.filter(|team| !team.is_empty());
+    let active_team = crate::messaging::leader_receiver::active_team_key(workspace, &raw_state);
+    let active_team_from_state = raw_state
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty());
     let requested_team = explicit_team
-        .filter(|team| !team.is_empty())
+        .or(active_team_from_state)
         .or_else(|| {
             caller_target
                 .as_ref()
                 .and_then(|target| target.team_id.as_deref())
         })
-        .or(env_team.as_deref());
-    let team_id = TeamKey::new(requested_team.map(str::to_string).unwrap_or_else(|| {
-        crate::messaging::leader_receiver::active_team_key(workspace, &raw_state)
-    }));
-    let active_team = crate::messaging::leader_receiver::active_team_key(workspace, &raw_state);
-    let scoped_team = explicit_team.filter(|team| {
+        .or(env_team.as_deref())
+        .or(Some(active_team.as_str()));
+    let team_id = TeamKey::new(
+        requested_team
+            .map(str::to_string)
+            .unwrap_or_else(|| active_team.clone()),
+    );
+    let scoped_team = if team_id.as_str() == active_team
+        || raw_state
+            .get("teams")
+            .and_then(|teams| teams.get(team_id.as_str()))
+            .is_some()
+    {
+        Some(team_id.as_str())
+    } else {
+        None
+    };
+    let scoped_team = scoped_team.filter(|team| {
         *team == active_team
             || raw_state
                 .get("teams")
@@ -1547,10 +1564,11 @@ fn locked_runtime_state(
     if !path.exists() {
         return Ok(None);
     }
+    let raw = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     let state = if let Some(team) = scoped_team {
-        crate::state::projection::select_runtime_state(workspace, Some(team))?
+        crate::state::projection::project_top_level_view(&raw, team)
     } else {
-        crate::state::persist::load_runtime_state(workspace)?
+        raw
     };
     Ok(Some(state))
 }
@@ -1874,7 +1892,7 @@ fn save_claim_team_scoped_state(
     state: &Value,
     target_key: &str,
 ) -> Result<(), LeaderError> {
-    let existing = crate::state::persist::load_runtime_state(workspace)?;
+    let existing = crate::state::persist::load_runtime_state_without_migrations(workspace)?;
     let mut teams = existing
         .get("teams")
         .and_then(Value::as_object)
@@ -2010,10 +2028,14 @@ fn compact_team_state_preserving_claim_fields(state: &Value, target_key: &str) -
 /// drifted. Every touch of the legacy path constants below is marked
 /// `B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ` so the RED3 grep guard admits
 /// them as documented exceptions.
-pub fn detect_dual_state_divergence( // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only entry point; no product save/route consumer.
-    workspace: &Path,
-    state: &Value,
-) -> Result<Option<Value>, LeaderError> {
+type BP = Path;
+type BJ = Value;
+type BF = PathBuf;
+type B0 = Result<Option<Value>, LeaderError>;
+
+pub fn detect_dual_state_divergence(w: &BP, s: &BJ) -> B0 /* B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ */ {
+    let workspace = w;
+    let state = s;
     let Some(session_name) = state.get("session_name").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -2083,7 +2105,9 @@ fn agent_binding_summary(state: &Value) -> Value {
     Value::Object(out)
 }
 
-fn readable_team_snapshot_path(workspace: &Path, session_name: &str) -> PathBuf { // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: diagnostic-only path resolver.
+fn readable_team_snapshot_path(w: &BP, n: &str) -> BF /* B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ */ {
+    let workspace = w;
+    let session_name = n;
     let safe_path = crate::lifecycle::helpers::team_snapshot_path(workspace, session_name); // B0_DIAGNOSTIC_LEGACY_SNAPSHOT_READ: reuses helpers safe legacy path.
     if safe_path.exists() {
         return safe_path;

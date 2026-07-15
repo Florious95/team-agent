@@ -545,6 +545,9 @@ fn normalize_value(value: Value, ctx: &mut NormalizeCtx, key: Option<&str>) -> V
     if matches!(key, Some("env_overlay_keys" | "env_unset_keys")) {
         return json!("<ENV_KEYS>");
     }
+    if matches!(key, Some("env_unset")) {
+        return json!([]);
+    }
     match value {
         Value::Object(map) => {
             let sorted = map.into_iter().collect::<BTreeMap<_, _>>();

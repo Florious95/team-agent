@@ -99,6 +99,7 @@ mod unix_impl {
     //! `cli/mod.rs`, `coordinator/backoff.rs`, `mcp_server/wire.rs`,
     //! `lifecycle/restart/agent.rs`) with zero behavioral drift.
     use super::*;
+    use std::process::Command;
 
     pub fn current_parent_pid() -> Option<u32> {
         // Byte-equivalent to `mcp_server/wire.rs:319` and
@@ -150,8 +151,38 @@ mod unix_impl {
         Ok(Vec::new())
     }
 
-    pub fn process_tree(_root: u32) -> Result<Vec<u32>, io::Error> {
-        Ok(Vec::new())
+    pub fn process_tree(root: u32) -> Result<Vec<u32>, io::Error> {
+        let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output()?;
+        if !output.status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ps_parent exited unsuccessfully",
+            ));
+        }
+        let pairs = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next()?.parse::<u32>().ok()?;
+                let ppid = parts.next()?.parse::<u32>().ok()?;
+                Some((pid, ppid))
+            })
+            .collect::<Vec<_>>();
+        let mut out = Vec::new();
+        collect_child_pids(root, &pairs, &mut out);
+        out.push(root);
+        out.sort_unstable();
+        out.dedup();
+        Ok(out)
+    }
+
+    fn collect_child_pids(parent: u32, pairs: &[(u32, u32)], out: &mut Vec<u32>) {
+        for (pid, ppid) in pairs {
+            if *ppid == parent && !out.contains(pid) {
+                out.push(*pid);
+                collect_child_pids(*pid, pairs, out);
+            }
+        }
     }
 
     /// Send a SIGTERM (`TerminateGraceful`) or SIGKILL

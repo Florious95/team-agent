@@ -713,8 +713,8 @@ fn command_process_check_with_marker(
         return check;
     }
     process_check(
-        ProcessLiveness::Dead,
-        format!("provider_not_foreground:{command}"),
+        ProcessLiveness::Unverifiable,
+        format!("provider_evidence_unverifiable:{command}"),
     )
 }
 
@@ -733,8 +733,8 @@ fn pane_command_process_check_with_marker(
         return check;
     }
     process_check(
-        ProcessLiveness::Dead,
-        format!("provider_not_foreground:{command}"),
+        ProcessLiveness::Unverifiable,
+        format!("provider_evidence_unverifiable:{command}"),
     )
 }
 

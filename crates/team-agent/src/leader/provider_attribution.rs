@@ -23,19 +23,27 @@ pub(crate) fn attribute_pane_provider(pane: &PaneInfo) -> Option<Provider> {
     attribute_pane_provider_with_process(pane, provider_from_pid_env, provider_from_pid_argv)
 }
 
-fn attribute_pane_provider_with_process(
+fn attribute_pane_provider_with_process<FEnv, FArg>(
     pane: &PaneInfo,
-    provider_from_env_pid: impl Fn(u32) -> Option<Provider>,
-    provider_from_argv_pid: impl Fn(u32) -> Option<Provider>,
-) -> Option<Provider> {
+    provider_from_env_pid: FEnv,
+    provider_from_argv_pid: FArg,
+) -> Option<Provider>
+where
+    FEnv: Fn(u32) -> Option<Provider>,
+    FArg: Fn(u32) -> Option<Provider>,
+{
     provider_from_env(&pane.leader_env)
-        .or_else(|| pane.pane_pid.and_then(provider_from_env_pid))
+        .or_else(|| pane.pane_pid.and_then(|pid| provider_from_env_pid(pid)))
         .or_else(|| {
             pane.current_command
                 .as_deref()
                 .and_then(attribute_command_provider)
         })
-        .or_else(|| pane.pane_pid.and_then(provider_from_argv_pid))
+        .or_else(|| pane.pane_pid.and_then(|pid| provider_from_argv_pid(pid)))
+        .or_else(|| {
+            pane.pane_pid
+                .and_then(|pid| provider_from_process_tree_argv(pid, &provider_from_argv_pid))
+        })
 }
 
 pub(crate) fn attribute_command_provider(command: &str) -> Option<Provider> {
@@ -61,6 +69,17 @@ fn provider_from_pid_argv(pid: u32) -> Option<Provider> {
     process_command_line(pid)
         .as_deref()
         .and_then(provider_from_command_text)
+}
+
+fn provider_from_process_tree_argv(
+    root_pid: u32,
+    provider_from_argv_pid: &impl Fn(u32) -> Option<Provider>,
+) -> Option<Provider> {
+    crate::platform::process::process_tree(root_pid)
+        .ok()?
+        .into_iter()
+        .filter(|pid| *pid != root_pid)
+        .find_map(provider_from_argv_pid)
 }
 
 fn provider_from_pid_env(pid: u32) -> Option<Provider> {

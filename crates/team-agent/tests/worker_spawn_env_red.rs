@@ -20,7 +20,8 @@ use std::sync::Mutex;
 use serde_json::json;
 use serial_test::serial;
 use team_agent::lifecycle::{
-    add_agent_with_transport, launch_with_transport, restart_with_transport,
+    add_agent_with_transport, fork_agent_with_transport, launch_with_transport,
+    restart_with_transport,
 };
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
@@ -98,6 +99,85 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
 
 #[test]
 #[serial(env)]
+fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
+    let _guard = EnvGuard::set([
+        ("CLAUDECODE", "1"),
+        ("CLAUDE_CODE_SESSION_ID", "leader-session"),
+        ("CLAUDE_CODE_SENTINEL", "foreign"),
+        ("CLAUDE_EFFORT", "high"),
+        ("CODEX_THREAD_ID", "thread-from-parent"),
+        ("OPENAI_API_KEY", "sk-test-config"),
+        ("CODEX_HOME", "/tmp/codex-home-config"),
+        ("TA_SPAWN_ENV_CANARY", "KEEP"),
+        ("HTTP_PROXY", "http://canary-proxy:1"),
+        ("NODE_EXTRA_CA_CERTS", "/canary/ca.pem"),
+    ]);
+
+    let launch_team = compiled_team_dir("cross-launch", &[("worker_a", "Launch Worker")]);
+    let launch_transport = RecordingTransport::new().with_session_present(false);
+    launch_with_transport(
+        &launch_team.join("team.spec.yaml"),
+        false,
+        true,
+        true,
+        &launch_transport,
+    )
+    .expect("launch fixture should spawn worker");
+
+    let restart_team = compiled_team_dir("cross-restart", &[("worker_a", "Restart Worker")]);
+    seed_restart_state(&restart_team, "worker_a");
+    let restart_transport = RecordingTransport::new().with_session_present(false);
+    restart_with_transport(&restart_team, true, None, &restart_transport)
+        .expect("restart fixture should spawn worker");
+
+    let add_team = compiled_team_dir("cross-add", &[("worker_a", "Existing Worker")]);
+    seed_running_add_agent_state(&add_team, "worker_a");
+    let role_file = add_team.parent().unwrap().join("worker_b.md");
+    std::fs::write(&role_file, role_doc("worker_b", "Added Worker")).unwrap();
+    let add_transport = RecordingTransport::new().with_session_present(true);
+    add_agent_with_transport(
+        &add_team,
+        &AgentId::new("worker_b"),
+        &role_file,
+        false,
+        None,
+        &add_transport,
+    )
+    .expect("add-agent fixture should spawn worker");
+
+    let fork_team = compiled_team_dir("cross-fork", &[("worker_a", "Fork Source")]);
+    seed_forkable_source_state(&fork_team, "worker_a");
+    let fork_transport = RecordingTransport::new().with_session_present(true);
+    fork_agent_with_transport(
+        &fork_team,
+        &AgentId::new("worker_a"),
+        &AgentId::new("worker_fork"),
+        None,
+        false,
+        None,
+        &fork_transport,
+    )
+    .expect("fork-agent fixture should spawn worker");
+
+    let failures = [
+        ("quick-start launch", launch_transport.single_spawn()),
+        ("restart", restart_transport.single_spawn()),
+        ("add-agent", add_transport.single_spawn()),
+        ("fork-agent", fork_transport.single_spawn()),
+    ]
+    .into_iter()
+    .flat_map(|(surface, spawn)| cross_provider_identity_failures(surface, &spawn))
+    .collect::<Vec<_>>();
+
+    assert!(
+        failures.is_empty(),
+        "cross-provider worker env isolation contract failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+#[serial(env)]
 fn worker_spawn_stays_out_of_coordinator_tick_and_daemon_preserves_parent_env() {
     let tick = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -169,6 +249,59 @@ fn spawn_env_contract_failures(surface: &str, command_line: &str, agent_id: &str
     failures
 }
 
+fn cross_provider_identity_failures(surface: &str, spawn: &RecordedSpawn) -> Vec<String> {
+    let mut failures = Vec::new();
+    let identity_keys = [
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_SENTINEL",
+        "CLAUDE_EFFORT",
+        "CODEX_THREAD_ID",
+    ];
+    let present_identity = identity_keys
+        .iter()
+        .copied()
+        .filter(|key| spawn.env.contains_key(*key))
+        .collect::<Vec<_>>();
+    if !present_identity.is_empty() {
+        failures.push(format!(
+            "{surface}: worker env map must scrub process/session identity keys; present={present_identity:?}"
+        ));
+    }
+    let missing_unsets = identity_keys
+        .iter()
+        .copied()
+        .filter(|key| !spawn.env_unset.iter().any(|candidate| candidate == key))
+        .collect::<Vec<_>>();
+    if !missing_unsets.is_empty() {
+        failures.push(format!(
+            "{surface}: worker env_unset must clear stale tmux/server identity keys; missing={missing_unsets:?}; env_unset={:?}",
+            spawn.env_unset
+        ));
+    }
+    for (key, value) in [
+        ("OPENAI_API_KEY", "sk-test-config"),
+        ("CODEX_HOME", "/tmp/codex-home-config"),
+        ("TA_SPAWN_ENV_CANARY", "KEEP"),
+        ("HTTP_PROXY", "http://canary-proxy:1"),
+        ("NODE_EXTRA_CA_CERTS", "/canary/ca.pem"),
+    ] {
+        if spawn.env.get(key).map(String::as_str) != Some(value) {
+            failures.push(format!(
+                "{surface}: worker env must preserve config/generic key `{key}` with the expected test value; present={}",
+                spawn.env.contains_key(key)
+            ));
+        }
+        if spawn.env_unset.iter().any(|candidate| candidate == key) {
+            failures.push(format!(
+                "{surface}: worker env_unset must not remove config/generic key `{key}`; env_unset={:?}",
+                spawn.env_unset
+            ));
+        }
+    }
+    failures
+}
+
 fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
     let team = tmp_dir(label).join("teamdir");
     std::fs::create_dir_all(team.join("agents")).unwrap();
@@ -195,7 +328,7 @@ fn compiled_team_dir(label: &str, agents: &[(&str, &str)]) -> PathBuf {
 
 fn role_doc(name: &str, role: &str) -> String {
     format!(
-        "---\nname: {name}\nrole: {role}\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{role}.\n"
+        "---\nname: {name}\nrole: {role}\nprovider: codex\nmodel: codex-test-model\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\n{role}.\n"
     )
 }
 
@@ -250,6 +383,38 @@ fn seed_running_add_agent_state(team: &Path, agent_id: &str) {
     seed_healthy_coordinator(&workspace);
 }
 
+fn seed_forkable_source_state(team: &Path, agent_id: &str) {
+    let workspace = team_agent::model::paths::team_workspace(team).unwrap();
+    let rollout = workspace.join(format!("{agent_id}-rollout.jsonl"));
+    std::fs::write(&rollout, "{\"session_id\":\"sess-worker-a\"}\n").unwrap();
+    team_agent::state::persist::save_runtime_state(
+        &workspace,
+        &json!({
+            "active_team_key": RUNTIME_TEAM_KEY,
+            "team_dir": team.to_string_lossy().to_string(),
+            "spec_path": team.join("team.spec.yaml").to_string_lossy().to_string(),
+            "session_name": "team-envteam",
+            "agents": {
+                agent_id: {
+                    "status": "running",
+                    "provider": "codex",
+                    "auth_mode": "subscription",
+                    "role": "Fork Source",
+                    "window": agent_id,
+                    "owner_team_id": RUNTIME_TEAM_KEY,
+                    "session_id": "sess-worker-a",
+                    "rollout_path": rollout.to_string_lossy().to_string(),
+                    "captured_at": "2026-07-16T00:00:00+00:00",
+                    "captured_via": "session.captured",
+                    "tools": ["mcp_team"]
+                }
+            }
+        }),
+    )
+    .unwrap();
+    seed_healthy_coordinator(&workspace);
+}
+
 fn seed_healthy_coordinator(workspace: &Path) {
     let workspace = team_agent::coordinator::WorkspacePath::new(workspace.to_path_buf());
     std::fs::create_dir_all(team_agent::model::paths::runtime_dir(workspace.as_path())).unwrap();
@@ -285,7 +450,7 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
-    fn set(values: [(&'static str, &'static str); 5]) -> Self {
+    fn set<const N: usize>(values: [(&'static str, &'static str); N]) -> Self {
         let previous = values
             .iter()
             .map(|(key, _)| (*key, std::env::var(key).ok()))
@@ -317,6 +482,7 @@ impl Drop for EnvGuard {
 struct RecordedSpawn {
     argv: Vec<String>,
     env: BTreeMap<String, String>,
+    env_unset: Vec<String>,
     session: SessionName,
     window: WindowName,
     pane_id: PaneId,
@@ -351,13 +517,17 @@ impl RecordingTransport {
     }
 
     fn single_spawn_command_line(&self) -> String {
+        self.single_spawn().command_line()
+    }
+
+    fn single_spawn(&self) -> RecordedSpawn {
         let spawns = self.spawns.lock().unwrap();
         assert_eq!(
             spawns.len(),
             1,
             "fixture should record exactly one worker spawn; spawns={spawns:?}"
         );
-        spawns[0].command_line()
+        spawns[0].clone()
     }
 
     fn spawn_result(
@@ -366,12 +536,14 @@ impl RecordingTransport {
         window: &WindowName,
         argv: &[String],
         env: &BTreeMap<String, String>,
+        env_unset: &[String],
     ) -> SpawnResult {
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
             argv: argv.to_vec(),
             env: env.clone(),
+            env_unset: env_unset.to_vec(),
             session: session.clone(),
             window: window.clone(),
             pane_id: pane_id.clone(),
@@ -398,7 +570,7 @@ impl Transport for RecordingTransport {
         _cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env))
+        Ok(self.spawn_result(session, window, argv, env, &[]))
     }
 
     fn spawn_into(
@@ -409,7 +581,31 @@ impl Transport for RecordingTransport {
         _cwd: &Path,
         env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.spawn_result(session, window, argv, env))
+        Ok(self.spawn_result(session, window, argv, env, &[]))
+    }
+
+    fn spawn_first_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.spawn_result(session, window, argv, env, env_unset))
+    }
+
+    fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.spawn_result(session, window, argv, env, env_unset))
     }
 
     fn inject(

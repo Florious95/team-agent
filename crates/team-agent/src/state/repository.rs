@@ -47,6 +47,7 @@ use super::persist::{
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_root_with_lifecycle_topology_authority_and_capture_backfill_skip,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority as helper_write_root_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents as helper_write_root_with_team_tombstoned_agents,
+    save_runtime_state_without_migrations as helper_write_root_without_migrations,
 };
 use super::projection::{
     resolve_team_scoped_state as helper_resolve_team_scoped,
@@ -172,6 +173,9 @@ pub enum StateWriteIntent<'a> {
     },
     ClaimLeader {
         team_key: &'a str,
+    },
+    LeaderBindingRestoreNonTargetTeams {
+        target_team_key: &'a str,
     },
     LeaderStartBinding {
         team_key: &'a str,
@@ -325,6 +329,9 @@ fn route_direct(
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.
         StateWriteIntent::ClaimLeader { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
+            helper_write_root_without_migrations(workspace, state)
+        }
         // LeaderStartBinding -> managed/exec/external all root-save at
         // leader/start.rs:795/903/946.
         StateWriteIntent::LeaderStartBinding { .. } => helper_write_root(workspace, state),

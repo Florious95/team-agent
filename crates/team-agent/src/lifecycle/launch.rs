@@ -376,9 +376,13 @@ fn spawn_agents(
         apply_mcp_auto_approval_env(&mut env, &safety);
         // Python providers.py:145 + launch/core.py:253 — fresh launch runs the worker
         // with cwd=workspace, same as the RS fork/add and restart paths.
-        let env_unset: Vec<String> = extend_worker_env_unset_for_effort(
-            profile_launch.env_unset.iter().cloned().collect(),
+        let env_unset = crate::layout::worker_env::isolate_worker_spawn_env(
             provider,
+            &mut env,
+            extend_worker_env_unset_for_effort(
+                profile_launch.env_unset.iter().cloned().collect(),
+                provider,
+            ),
         );
         // BUG / C-1-2 / C-6-1 cr verdict — Copilot system_prompt 走 spawn env overlay +
         // per-worker AGENTS.md(B2 灵魂件降级):写
@@ -3975,6 +3979,7 @@ fn add_agent_with_transport_at_paths(
             pre_spec_text.as_deref(),
             pre_runtime_state.as_ref(),
             agent_id,
+            "state_upsert_failed",
         );
         return Err(error);
     }
@@ -3996,6 +4001,7 @@ fn add_agent_with_transport_at_paths(
                 pre_spec_text.as_deref(),
                 pre_runtime_state.as_ref(),
                 agent_id,
+                "start_agent_failed",
             );
             return Err(error);
         }
@@ -4012,6 +4018,7 @@ fn add_agent_with_transport_at_paths(
                 pre_spec_text.as_deref(),
                 pre_runtime_state.as_ref(),
                 agent_id,
+                "added_agent_paused",
             );
             return Err(LifecycleError::RequirementUnmet(format!(
                 "added agent {agent_id} is paused"
@@ -4037,12 +4044,21 @@ fn rollback_add_agent_atomic(
     pre_spec_text: Option<&str>,
     pre_runtime_state: Option<&serde_json::Value>,
     agent_id: &AgentId,
+    reason: &str,
 ) {
-    if let Some(text) = pre_spec_text {
-        let _ = std::fs::write(spec_path, text);
+    let spec_restored = if let Some(text) = pre_spec_text {
+        std::fs::write(spec_path, text).is_ok()
     } else {
-        let _ = std::fs::remove_file(spec_path);
-    }
+        std::fs::remove_file(spec_path)
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .is_ok()
+    };
     // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.4):
     // rollback must tombstone the newly-added agent so the persist merge
     // does not re-attach a `roster_stub` from the latest on disk. Without
@@ -4050,12 +4066,13 @@ fn rollback_add_agent_atomic(
     // survives the restore-from-pre_state pass and the retry sees
     // "agent id already exists".
     let deleted = [agent_id.as_str()];
-    if let Some(state) = pre_runtime_state {
-        let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
+    let state_restored = if let Some(state) = pre_runtime_state {
+        crate::state::persist::save_runtime_state_with_deleted_agents(
             run_workspace,
             state,
             &deleted,
-        );
+        )
+        .is_ok()
     } else {
         // No prior runtime state — drop just the agent we added (load → strip → save).
         if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
@@ -4078,13 +4095,27 @@ fn rollback_add_agent_atomic(
                     }
                 }
             }
-            let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
+            crate::state::persist::save_runtime_state_with_deleted_agents(
                 run_workspace,
                 &state,
                 &deleted,
-            );
+            )
+            .is_ok()
+        } else {
+            false
         }
-    }
+    };
+    let rollback_ok = spec_restored && state_restored;
+    let _ = crate::event_log::EventLog::new(run_workspace).write(
+        "add_agent.rollback",
+        serde_json::json!({
+            "agent_id": agent_id.as_str(),
+            "reason": reason,
+            "rollback_ok": rollback_ok,
+            "spec_restored": spec_restored,
+            "state_restored": state_restored,
+        }),
+    );
 }
 
 fn upsert_agent_state_from_role(
@@ -4529,9 +4560,13 @@ pub fn fork_agent_with_transport(
     // _tmux_session_exists — an ABSENT session => new-session (spawn_first), present => new-window
     // (spawn_into). The Rust restart seam (restart.rs spawn_agent_window) uses the same branch.
     let session_live = transport.has_session(&session_name).unwrap_or(false);
-    let env_unset: Vec<String> = extend_worker_env_unset_for_effort(
-        profile_launch.env_unset.iter().cloned().collect(),
+    let env_unset = crate::layout::worker_env::isolate_worker_spawn_env(
         provider,
+        &mut env,
+        extend_worker_env_unset_for_effort(
+            profile_launch.env_unset.iter().cloned().collect(),
+            provider,
+        ),
     );
     let spawn_result = if session_live {
         transport.spawn_into_with_env_unset(

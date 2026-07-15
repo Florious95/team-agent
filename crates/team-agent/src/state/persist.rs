@@ -1130,6 +1130,34 @@ pub fn load_runtime_state(workspace: &Path) -> Result<Value, StateError> {
     Ok(state)
 }
 
+pub(crate) fn load_runtime_state_without_migrations(workspace: &Path) -> Result<Value, StateError> {
+    let path = runtime_state_path(workspace);
+    if !path.exists() {
+        return Ok(
+            json!({"agents": {}, "tasks": [], "session_name": null, "active_team_key": null}),
+        );
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let mut state: Value = serde_json::from_str(&text)?;
+    normalize_agent_session_state(&mut state);
+    Ok(state)
+}
+
+pub(crate) fn save_runtime_state_without_migrations(
+    workspace: &Path,
+    state: &Value,
+) -> Result<(), StateError> {
+    let path = runtime_state_path(workspace);
+    let _lock = RuntimeLock::acquire(workspace, "state-save-raw", 2.0)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let payload = serde_json::to_string_pretty(state)?;
+    std::fs::write(&path, payload.as_bytes())?;
+    cache_set(&path, state);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]

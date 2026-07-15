@@ -200,7 +200,7 @@ pub fn register_binding_from_state_best_effort(
     team: Option<&str>,
     source: &str,
 ) -> Option<RegistryWriteOutcome> {
-    let Ok(state) = crate::state::persist::load_runtime_state(workspace) else {
+    let Ok(state) = crate::state::persist::load_runtime_state_without_migrations(workspace) else {
         return None;
     };
     let team_key = match team.filter(|team| !team.is_empty()) {
