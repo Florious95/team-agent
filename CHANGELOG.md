@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.43
+
+- **Chore: debt sweep A — short socket path + exact teardown + D-j mutation-in-place + fmt + CI fixes.** S1: tmux socket paths now use a deterministic short path (<100 chars, fail-closed) preventing "File name too long" errors on macOS sandboxed temp dirs. S2: teardown contract covers exact-owned and foreign-session scenarios with explicit Drop ordering and loud escape paths; blanket kill is prohibited. S4: eprintln cleanup (remove 3), packaging serialization anchored via env vars ×4, line-count gate made self-contained. S5 (D-j): clear_stale helper is pure mutation (zero I/O); attempt_due_recoveries uses exactly one load with sequence load→mutate→save→collect on the same Value; allowlist row migrated to containing function. S6: cargo fmt --all (253 files, no logic change). Backlog observations D-j/D-k/D-l/D-m all consumed — backlog reaches zero for the first time.
+
 ## 0.5.42
 
 - **Chore: S1b writer cluster migration — CoordinatorTick + ClaimLeader → StateRepository (governance phase 5).** Migrates the CoordinatorTick and ClaimLeader write paths to route through StateRepository, reducing external direct-write points from 44 to 41 (BASELINE 73→70). All three migration points are byte-identical to prior direct calls; no helper, save_hook, or load/retry/cache semantics changed. Completes the five-phase governance arc (G0→S1a→C1→C2→S1b). Ledger contract: governance_writer_cluster_count=70 (5/5 cases).
