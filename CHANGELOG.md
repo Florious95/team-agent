@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.45
+
+- **Feat: named addressing — bare `--to-name` consumes `--team` + scope-safe suggestions + human N38 保真.** `send --to-name NAME` now resolves names without requiring `--team` when the name uniquely identifies a target across all known teams; ambiguous names produce ranked scope-safe suggestions (levenshtein-based, pure-function `name_similarity.rs`). Human N38 message fidelity preserved end-to-end. **Breaking (D-o): ExitCode for unknown subcommand changed from Usage (2) to Error (1).** Scripts that test `$? -eq 2` for unrecognized commands must be updated to check `$? -eq 1`. This aligns exit semantics with the documented error/usage distinction.
+
 ## 0.5.44
 
 - **Fix: debt sweep B — B1 canonical target resolution + B2 wrapper subtree provider evidence + B3 cross-provider env isolation + B4 bang gate harness.** B1: canonical target resolution now correctly resolves checked_paths entries against the current workspace rather than drifting to prior values during takeover scenarios. B2: wrapper subtree provider detection gains positive-evidence signals for node/bash-wrapped codex processes, preventing provider_not_foreground false negatives. B3: team-agent coordinator now strips inherited CLAUDE_CODE_SESSION_ID and related CLAUDE_CODE_* env vars when spawning workers, preventing cross-provider session identity leakage confirmed via ps eww on the remote-control fleet. B4: bang gate harness executes real private-socket tmux + real add-agent with success/failure dual-outcome assertions (add_agent.rollback event, old session survives, mcp.server_exit absent); --contract-check retained as lightweight self-check. Governance: StateWriteIntent::LeaderBindingRestoreNonTargetTeams typed route for scoped-claim saves; s1a 5/5 green, BASELINE 70 unchanged.
