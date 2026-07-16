@@ -19,11 +19,13 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use serial_test::serial;
-use team_agent::coordinator::{Coordinator, ErrorLists, MetadataSource, Pid, ProviderRegistry, WorkspacePath};
+use team_agent::coordinator::{
+    coordinator_pid_path, Coordinator, ErrorLists, MetadataSource, Pid, ProviderRegistry,
+    WorkspacePath,
+};
 use team_agent::lifecycle::{
-    reset_agent_with_transport, restart_with_transport,
-    restart_with_transport_with_readiness_deadline, start_agent_with_transport, LifecycleError,
-    RestartReport,
+    reset_agent_with_transport, restart_with_transport_with_readiness_deadline,
+    start_agent_with_transport, LifecycleError, RestartReport,
 };
 use team_agent::message_store::MessageStore;
 use team_agent::model::enums::{PaneLiveness, Provider};
@@ -152,10 +154,61 @@ exec "$TEAM_AGENT_TEST_REAL_TMUX" "$@"
 #[serial(env)]
 fn restart_allow_fresh_does_not_leave_same_role_host_cotenants() {
     let mut failures = Vec::new();
-    let (_env, workspace) = team_case("p0-restart", &["developer", "test-engineer", "arch-reviewer"]);
+    let (env, workspace) = team_case("p0-restart", &["developer", "test-engineer", "arch-reviewer"]);
+    let shim_dir = env.root().join("bin");
+    fs::create_dir_all(&shim_dir).unwrap();
+    let recorder = env.root().join("ps-recorder.log");
+    let real_path = std::env::var_os("PATH").unwrap_or_default();
+    let real_ps = std::env::split_paths(&real_path)
+        .map(|dir| dir.join("ps"))
+        .find(|path| path.is_file())
+        .expect("real ps binary on PATH");
+    let shim = shim_dir.join("ps");
+    fs::write(
+        &shim,
+        r#"#!/bin/sh
+{
+  first=1
+  for arg in "$@"; do
+    if [ "$first" -eq 0 ]; then printf '\t'; fi
+    printf '%s' "$arg"
+    first=0
+  done
+  printf '\n'
+} >> "$TEAM_AGENT_TEST_PS_RECORDER_LOG"
+if [ "$#" -eq 4 ] && [ "$1" = "-p" ] && [ "$2" = "$TEAM_AGENT_TEST_SELF_PID" ] && [ "$3" = "-o" ] && [ "$4" = "stat=" ]; then
+  printf 'S\n'
+  exit 0
+fi
+exec "$TEAM_AGENT_TEST_REAL_PS" "$@"
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&shim).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shim, permissions).unwrap();
+    let self_pid = std::process::id().to_string();
+    let _ps_env = [
+        env.with_env(
+            "PATH",
+            &format!("{}:{}", shim_dir.display(), real_path.to_string_lossy()),
+        ),
+        env.with_env(
+            "TEAM_AGENT_TEST_PS_RECORDER_LOG",
+            recorder.to_str().unwrap(),
+        ),
+        env.with_env("TEAM_AGENT_TEST_REAL_PS", real_ps.to_str().unwrap()),
+        env.with_env("TEAM_AGENT_TEST_SELF_PID", &self_pid),
+    ];
     let transport = CohortTransport::with_old_panes(&["developer", "test-engineer", "arch-reviewer"]);
     let before = load_runtime_state(&workspace).unwrap();
-    let restart = restart_with_transport(&workspace, true, Some(TEAM), &transport);
+    let restart = restart_with_transport_with_readiness_deadline(
+        &workspace,
+        true,
+        Some(TEAM),
+        &transport,
+        Some(1_000),
+    );
     if !matches!(&restart, Ok(RestartReport::Restarted { .. })) {
         failures.push(format!(
             "restart --allow-fresh: report must be Restarted, never readiness timeout; report={restart:?}"
@@ -167,6 +220,15 @@ fn restart_allow_fresh_does_not_leave_same_role_host_cotenants() {
         restart.map(|_| ()),
         &transport,
     );
+    let restart_coordinator_pid = fs::read_to_string(coordinator_pid_path(&WorkspacePath::new(
+        workspace.clone(),
+    )))
+    .unwrap_or_default();
+    if restart_coordinator_pid.trim() != self_pid {
+        failures.push(format!(
+            "restart --allow-fresh: seeded coordinator pid must remain the integration-test self pid; expected={self_pid}; actual={restart_coordinator_pid:?}"
+        ));
+    }
     let after = load_runtime_state(&workspace).unwrap();
     for worker in ["developer", "test-engineer", "arch-reviewer"] {
         let live = transport.live_panes_for_window(worker);
@@ -216,6 +278,22 @@ fn restart_allow_fresh_does_not_leave_same_role_host_cotenants() {
         start_agent_with_transport(&workspace2, &AgentId::new("developer"), true, false, true, Some(TEAM), &transport2).map(|_| ()),
         &transport2,
     );
+    let start_force_coordinator_pid = fs::read_to_string(coordinator_pid_path(
+        &WorkspacePath::new(workspace2.clone()),
+    ))
+    .unwrap_or_default();
+    if start_force_coordinator_pid.trim() != self_pid {
+        failures.push(format!(
+            "start-agent --force: seeded coordinator pid must remain the integration-test self pid; expected={self_pid}; actual={start_force_coordinator_pid:?}"
+        ));
+    }
+    let recorded_ps = fs::read_to_string(&recorder).unwrap_or_default();
+    let expected_probe = format!("-p\t{self_pid}\t-o\tstat=");
+    if !recorded_ps.lines().any(|line| line == expected_probe) {
+        failures.push(format!(
+            "fixture ps shim must observe the exact self-pid coordinator health probe {expected_probe:?}; recorded={recorded_ps:?}"
+        ));
+    }
     assert!(
         failures.is_empty(),
         "P0 fixture1: lifecycle fresh/force paths must retire/swap/refuse so each (team_key, agent_id) has exactly one live tuple:\n{}",
@@ -537,7 +615,11 @@ fn seed_state(workspace: &Path, workers: &[(&str, &str)]) {
 fn seed_healthy_coordinator(workspace: &Path) {
     fs::create_dir_all(runtime_dir(workspace)).unwrap();
     let _ = MessageStore::open(workspace).unwrap();
-    team_agent::coordinator::write_coordinator_metadata(&WorkspacePath::new(workspace.to_path_buf()), Pid::new(std::process::id()), MetadataSource::Boot).unwrap();
+    let workspace = WorkspacePath::new(workspace.to_path_buf());
+    let pid = Pid::new(std::process::id());
+    team_agent::coordinator::write_coordinator_metadata(&workspace, pid, MetadataSource::Boot)
+        .unwrap();
+    fs::write(coordinator_pid_path(&workspace), pid.to_string()).unwrap();
 }
 
 fn write_old_codex_rollout(home: &Path, spawn_cwd: &Path) -> PathBuf {
