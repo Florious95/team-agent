@@ -14,6 +14,142 @@ pub(super) struct SpawnedAgentWindow {
     pub owner_team_id: Option<String>,
 }
 
+#[derive(Clone)]
+pub(super) struct SameRoleCohortTarget {
+    pub agent_id: String,
+    pub window: String,
+    pub expected_pane_id: Option<String>,
+}
+
+impl SameRoleCohortTarget {
+    pub(super) fn new(agent_id: &AgentId, window: &str) -> Self {
+        Self {
+            agent_id: agent_id.as_str().to_string(),
+            window: window.to_string(),
+            expected_pane_id: None,
+        }
+    }
+
+    pub(super) fn with_expected_pane_id(mut self, pane_id: Option<&str>) -> Self {
+        self.expected_pane_id = pane_id.map(ToString::to_string);
+        self
+    }
+}
+
+pub(super) fn is_per_agent_cohort_window(window: &str, agent_id: &AgentId) -> bool {
+    window == agent_id.as_str() && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
+}
+
+pub(super) fn same_role_cohort_pre_spawn_error(
+    transport: &dyn crate::transport::Transport,
+    session_name: &SessionName,
+    operation: &str,
+    targets: &[SameRoleCohortTarget],
+) -> Option<String> {
+    same_role_cohort_error(transport, session_name, operation, targets, 0, true)
+}
+
+pub(super) fn same_role_cohort_exactly_one_error(
+    transport: &dyn crate::transport::Transport,
+    session_name: &SessionName,
+    operation: &str,
+    targets: &[SameRoleCohortTarget],
+) -> Option<String> {
+    same_role_cohort_error(transport, session_name, operation, targets, 1, false)
+}
+
+pub(super) fn retire_expected_same_role_cohorts(
+    transport: &dyn crate::transport::Transport,
+    operation: &str,
+    targets: &[SameRoleCohortTarget],
+) -> Result<(), String> {
+    for target in targets {
+        let Some(pane_id) = target.expected_pane_id.as_deref() else {
+            continue;
+        };
+        let pane = crate::transport::PaneId::new(pane_id);
+        if transport.has_pane(&pane).ok().flatten() == Some(false) {
+            continue;
+        }
+        transport.kill_pane(&pane).map_err(|error| {
+            format!(
+                "{operation} failed to retire old same-role cohort {}:window={}:pane={pane_id}: {error}",
+                target.agent_id, target.window
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn same_role_cohort_error(
+    transport: &dyn crate::transport::Transport,
+    session_name: &SessionName,
+    operation: &str,
+    targets: &[SameRoleCohortTarget],
+    expected_live: usize,
+    expected_old_only: bool,
+) -> Option<String> {
+    let panes = transport.list_targets().ok()?;
+    let mut cardinality_proofs = Vec::new();
+    let mut binding_proofs = Vec::new();
+    for target in targets {
+        let live_panes = panes
+            .iter()
+            .filter(|pane| pane.session.as_str() == session_name.as_str())
+            .filter(|pane| {
+                pane.window_name
+                    .as_ref()
+                    .is_some_and(|window| window.as_str() == target.window)
+            })
+            .filter(|pane| {
+                !expected_old_only
+                    || target
+                        .expected_pane_id
+                        .as_deref()
+                        .is_some_and(|expected| pane.pane_id.as_str() == expected)
+            })
+            .filter(|pane| {
+                transport
+                    .liveness(&pane.pane_id)
+                    .is_ok_and(|live| live == crate::transport::PaneLiveness::Live)
+            })
+            .map(|pane| pane.pane_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        if live_panes.len() != expected_live {
+            cardinality_proofs.push(format!(
+                "{}:window={}:live_panes=[{}]",
+                target.agent_id,
+                target.window,
+                live_panes.join(",")
+            ));
+        } else if !expected_old_only {
+            let observed = live_panes.first().map(String::as_str);
+            if target.expected_pane_id.as_deref() != observed {
+                binding_proofs.push(format!(
+                    "{}:window={}:expected_pane={}:observed_pane={}",
+                    target.agent_id,
+                    target.window,
+                    target.expected_pane_id.as_deref().unwrap_or("<missing>"),
+                    observed.unwrap_or("<missing>")
+                ));
+            }
+        }
+    }
+    if !binding_proofs.is_empty() {
+        return Some(format!(
+            "{operation} refused: spawn identity/binding mismatch; {}",
+            binding_proofs.join("; ")
+        ));
+    }
+    if !cardinality_proofs.is_empty() {
+        return Some(format!(
+            "{operation} refused: same-role cohort duplicate proof failed; {}",
+            cardinality_proofs.join("; ")
+        ));
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_agent_window(
     workspace: &Path,

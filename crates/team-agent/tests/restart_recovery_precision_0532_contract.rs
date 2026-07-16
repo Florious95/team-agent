@@ -812,6 +812,7 @@ case " $* " in
     exit 0
     ;;
   *" new-session "*|*" new-window "*)
+    printf '%s\n' '{worker_pane}'
     exit 0
     ;;
   *" display-message "*)

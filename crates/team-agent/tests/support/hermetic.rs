@@ -13,6 +13,7 @@ pub const CALLER_IDENTITY_ENVS: &[&str] = &[
     "TEAM_AGENT_LEADER_PANE_ID",
     "TEAM_AGENT_LEADER_SESSION_UUID",
     "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+    "TEAM_AGENT_LEADER_SESSION_NAME",
     "TEAM_AGENT_LEADER_PROVIDER",
     "TEAM_AGENT_MACHINE_FINGERPRINT",
     "TEAM_AGENT_WORKSPACE",
@@ -20,6 +21,14 @@ pub const CALLER_IDENTITY_ENVS: &[&str] = &[
     "TEAM_AGENT_OWNER_TEAM_ID",
     "TEAM_AGENT_ACTIVE_TEAM",
     "TEAM_AGENT_ID",
+    "TEAM_AGENT_AGENT_ID",
+    "TEAM_AGENT_AUTH_MODE",
+    "TEAM_AGENT_LEADER_BYPASS",
+    "TEAM_AGENT_LEADER_BYPASS_SOURCE",
+    "TEAM_AGENT_LEADER_BYPASS_PROVIDER",
+    "TEAM_AGENT_LEADER_BYPASS_FLAG",
+    "TEAM_AGENT_MCP_AUTO_APPROVE",
+    "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE",
 ];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -184,18 +193,26 @@ impl HermeticTestEnv {
     /// untouched (verified by RED
     /// `hermetic_drop_cleans_exact_owned_resources_and_preserves_foreign_server`).
     pub fn register_owned_tmux_socket(&self, socket: &Path) {
+        assert_fixture_owned_tmux_socket(&self.root, socket);
         if let Ok(mut owned) = self.owned.lock() {
             owned.tmux_sockets.push(socket.to_path_buf());
         }
     }
 
     pub fn run_cli(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_team-agent"))
-            .args(args)
-            .current_dir(cwd)
-            .env("HOME", &self.home)
-            .output()
-            .expect("run team-agent CLI")
+        self.run_cli_env(cwd, args, &[])
+    }
+
+    pub fn run_cli_env(&self, cwd: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_team-agent"));
+        command.args(args).current_dir(cwd).env("HOME", &self.home);
+        for key in CALLER_IDENTITY_ENVS {
+            command.env_remove(key);
+        }
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        command.output().expect("run team-agent CLI")
     }
 
     pub fn with_env(&self, key: &'static str, value: &str) -> EnvOverride {
@@ -265,6 +282,29 @@ impl HermeticTestEnv {
             "real HOME registry changed during hermetic test"
         );
     }
+}
+
+fn assert_fixture_owned_tmux_socket(root: &Path, socket: &Path) {
+    let ambient = std::env::var_os("TMUX").and_then(|value| {
+        let socket = value.to_str()?.split(',').next()?;
+        (!socket.is_empty()).then(|| PathBuf::from(socket))
+    });
+    assert_ne!(
+        ambient.as_deref(),
+        Some(socket),
+        "refusing to register ambient TMUX endpoint as test-owned: {}",
+        socket.display()
+    );
+    let fixture_named = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("ta43-"));
+    assert!(
+        socket.is_absolute() && socket.exists() && (socket.starts_with(root) || fixture_named),
+        "tmux endpoint must already exist and have fixture provenance: socket={} root={}",
+        socket.display(),
+        root.display()
+    );
 }
 
 impl Drop for HermeticTestEnv {

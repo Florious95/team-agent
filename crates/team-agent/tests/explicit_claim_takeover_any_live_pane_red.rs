@@ -23,19 +23,19 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
     let ws = hermetic.workspace("any-live-pane");
     seed_runtime_state(&ws);
     let fake_tmux = fake_tmux_bin(&ws);
-    let _path = hermetic.with_env(
-        "PATH",
-        &format!(
-            "{}:{}",
-            fake_tmux.display(),
-            std::env::var("PATH").unwrap_or_default()
-        ),
+    let path = format!(
+        "{}:{}",
+        fake_tmux.display(),
+        std::env::var("PATH").unwrap_or_default()
     );
-    let _pane = hermetic.with_env("TMUX_PANE", CALLER_PANE);
-    let _provider = hermetic.with_env("TEAM_AGENT_LEADER_PROVIDER", "codex");
-    let _machine = hermetic.with_env("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-a");
+    let caller_env = [
+        ("PATH", path.as_str()),
+        ("TMUX_PANE", CALLER_PANE),
+        ("TEAM_AGENT_LEADER_PROVIDER", "codex"),
+        ("TEAM_AGENT_MACHINE_FINGERPRINT", "machine-a"),
+    ];
 
-    let claim = hermetic.run_cli(
+    let claim = hermetic.run_cli_env(
         &ws,
         &[
             "claim-leader",
@@ -46,6 +46,7 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
             "--confirm",
             "--json",
         ],
+        &caller_env,
     );
     let mut failures = Vec::new();
     if let Some(failure) = cli_success_failure(
@@ -56,7 +57,7 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
     }
     assert_single_registry_source(&hermetic, "claim-leader");
 
-    let takeover = hermetic.run_cli(
+    let takeover = hermetic.run_cli_env(
         &ws,
         &[
             "takeover",
@@ -67,6 +68,7 @@ fn claim_leader_and_takeover_accept_live_node_caller_pane() {
             "--confirm",
             "--json",
         ],
+        &caller_env,
     );
     if let Some(failure) = cli_success_failure(
         &takeover,

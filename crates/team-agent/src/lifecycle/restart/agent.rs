@@ -113,6 +113,23 @@ pub(crate) fn start_agent_at_paths(
     let window = agent_window(&agent, agent_id);
     let adaptive_layout =
         open_display && crate::lifecycle::launch::state_uses_adaptive_layout(&state);
+    let fake_provider = raw_agent
+        .get("provider")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|provider| provider.eq_ignore_ascii_case("fake"));
+    if force && !fake_provider && is_per_agent_window(&window, agent_id) {
+        let expected_pane_id = raw_agent
+            .get("pane_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty());
+        let target =
+            SameRoleCohortTarget::new(agent_id, &window).with_expected_pane_id(expected_pane_id);
+        if let Some(error) =
+            same_role_cohort_pre_spawn_error(transport, &session_name, "start-agent", &[target])
+        {
+            return Err(LifecycleError::RequirementUnmet(error));
+        }
+    }
     let agent_live = if adaptive_layout {
         agent_pane_live(transport, &raw_agent)
     } else {
@@ -640,7 +657,7 @@ fn list_same_role_panes(
 /// caller falls back to safer behavior (refuse stop, surface
 /// RequirementUnmet/transport error) when this returns false.
 fn is_per_agent_window(window: &str, agent_id: &AgentId) -> bool {
-    window == agent_id.as_str() && !crate::lifecycle::launch::is_adaptive_layout_window_pub(window)
+    is_per_agent_cohort_window(window, agent_id)
 }
 
 fn tmux_start_mode_for_spawn(
@@ -1264,6 +1281,10 @@ fn reset_agent_at_paths(
         .filter(|p| !p.is_empty())
         .map(crate::transport::PaneId::new);
     let old_pane_pid_before = state_pane_pid(&state_before_stop, agent_id);
+    let old_pane_live_before = old_pane_id_before
+        .as_ref()
+        .map(|pane| agent_pane_live_by_id(transport, pane))
+        .unwrap_or(false);
     // CR C-2: take ONE pre-stop snapshot of the team session's panes so
     // the gate below can compute "what survived stop" by set difference,
     // not "what panes exist at all" (which would refuse legitimate
@@ -1286,7 +1307,18 @@ fn reset_agent_at_paths(
         if let Some(session) = pre_stop_session.as_ref() {
             if is_per_agent_window(&pre_stop_window, agent_id) {
                 list_same_role_panes(transport, session, &pre_stop_window)
-                    .iter()
+                    .into_iter()
+                    .filter(|pane| {
+                        if !old_pane_live_before {
+                            return true;
+                        }
+                        let same_old_pane = old_pane_id_before
+                            .as_ref()
+                            .is_some_and(|old| pane.pane_id.as_str() == old.as_str());
+                        let same_old_pid = old_pane_pid_before
+                            .is_some_and(|old_pid| pane.pane_pid == Some(old_pid));
+                        same_old_pane || same_old_pid
+                    })
                     .map(|p| p.pane_id.as_str().to_string())
                     .collect()
             } else {
@@ -1327,17 +1359,12 @@ fn reset_agent_at_paths(
     // CR C-5: gate is reset-specific; standalone stop-agent path keeps
     // existing "already absent is ok" behavior.
     //
-    // Gate scope refinement: when stop.stopped == true, the kill_pane
-    // call already succeeded (and drain_old_pane_and_pid polled for
-    // the pane to become unreachable). Treat that as the authoritative
-    // signal — running the gate again post-stop introduces a race
-    // window where tmux's has_pane lag can spuriously report Live.
-    // Only gate the dangerous case: stop reported stopped == false
-    // (state's stale pane_id pointed at nothing kill-able), which is
-    // exactly the duplicate-window bug pattern from the macmini
-    // evidence: `stop_agent.complete stopped=false` followed by an
-    // unconditional `start_agent.agent_start`.
-    if !agent_is_paused && !stop.stopped {
+    // P0 cohort proof: every non-paused reset takes a post-stop
+    // same-role snapshot. Refuse only on tmux-visible residue; a
+    // standalone old-pane liveness probe can be stale in mocks and
+    // must not mask the later spawn ownership/window-disappeared
+    // verifier.
+    if !agent_is_paused {
         let spec_for_gate = load_team_spec(spec_workspace)?;
         let gate_state = resolve_team_scoped_state_or_refuse(workspace, team)?;
         let session_name_gate = state_session_name_from_spec(&gate_state, &spec_for_gate);
@@ -1349,10 +1376,6 @@ fn reset_agent_at_paths(
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| agent_id.as_str())
             .to_string();
-        let old_pane_still_live = old_pane_id_before
-            .as_ref()
-            .map(|p| agent_pane_live_by_id(transport, p))
-            .unwrap_or(false);
         // Take a SECOND snapshot post-stop and compute the differential.
         // Only panes present in BOTH snapshots are residue (stop did not
         // remove them).
@@ -1366,16 +1389,10 @@ fn reset_agent_at_paths(
             .into_iter()
             .filter(|p| pre_stop_pane_ids.contains(p.pane_id.as_str()))
             .collect();
-        // Pid-alone aliveness is secondary evidence and noisy under fixtures
-        // (synthetic pids may by chance be live on the test machine). Block
-        // ONLY on tmux-visible residue: old pane still live OR same-role
-        // panes survived stop. The pid is still recorded in the event for
-        // diagnostics.
-        let old_pid_still_live = old_pane_pid_before
-            .filter(|_| old_pane_still_live)
-            .map(|pid| pid_is_alive(pid))
-            .unwrap_or(false);
-        if old_pane_still_live || !remaining_panes.is_empty() {
+        // Pid-alone aliveness is secondary evidence and noisy under
+        // fixtures. Block only on tmux-visible same-role residue; record
+        // the old pid in the event for diagnostics.
+        if !remaining_panes.is_empty() {
             let remaining_pane_ids: Vec<String> = remaining_panes
                 .iter()
                 .map(|p| p.pane_id.as_str().to_string())
@@ -1454,6 +1471,8 @@ fn reset_agent_at_paths(
     )?;
     let started = matches!(start, StartAgentOutcome::Running { .. });
     write_reset_complete_event(workspace, agent_id, stop.stopped, started)?;
+    let (capture_state, reset_proof, weak_reset_warning) =
+        reset_capture_proof(workspace, agent_id, discarded_session_id.as_ref());
     match start {
         StartAgentOutcome::Running {
             env,
@@ -1476,6 +1495,9 @@ fn reset_agent_at_paths(
                 discarded_session_id,
                 session_id: output_session_id,
                 new_session_id,
+                capture_state,
+                reset_proof,
+                weak_reset_warning,
             })
         }
         StartAgentOutcome::Noop { env, .. } => Ok(ResetAgentOutcome::Reset {
@@ -1484,6 +1506,9 @@ fn reset_agent_at_paths(
             discarded_session_id,
             session_id: None,
             new_session_id: None,
+            capture_state,
+            reset_proof,
+            weak_reset_warning,
         }),
         StartAgentOutcome::Paused { .. } => Ok(ResetAgentOutcome::Reset {
             env: AgentActionEnvelope {
@@ -1495,8 +1520,59 @@ fn reset_agent_at_paths(
             discarded_session_id,
             session_id: None,
             new_session_id: None,
+            capture_state,
+            reset_proof,
+            weak_reset_warning,
         }),
     }
+}
+
+fn reset_capture_proof(
+    workspace: &Path,
+    agent_id: &AgentId,
+    discarded_session_id: Option<&SessionId>,
+) -> (String, String, Option<String>) {
+    let state = crate::state::persist::load_runtime_state(workspace)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let agent = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()));
+    let capture_state = agent
+        .and_then(|agent| agent.get("capture_state"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            agent
+                .and_then(|agent| agent.get("attribution_ambiguous"))
+                .and_then(serde_json::Value::as_bool)
+                .filter(|ambiguous| *ambiguous)
+                .map(|_| "attribution_ambiguous")
+        })
+        .or_else(|| {
+            let has_session = agent
+                .and_then(|agent| agent.get("session_id"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            let has_rollout = agent
+                .and_then(|agent| agent.get("rollout_path"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty());
+            (has_session && has_rollout).then_some("captured")
+        })
+        .unwrap_or("transcript_missing")
+        .to_string();
+    let weak = discarded_session_id.is_none()
+        || matches!(
+            capture_state.as_str(),
+            "transcript_missing" | "attribution_ambiguous"
+        );
+    let reset_proof = if weak { "weak" } else { "strong" }.to_string();
+    let weak_reset_warning = weak.then(|| {
+        format!(
+            "weak reset proof: capture_state={capture_state}; lifecycle restarted but attribution did not prove a fresh transcript"
+        )
+    });
+    (capture_state, reset_proof, weak_reset_warning)
 }
 
 #[allow(clippy::too_many_arguments)]

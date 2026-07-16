@@ -428,6 +428,18 @@ fn restart_with_selected_team_and_transport(
     let live_worker_session_deferred_teardown =
         session_live_or_default(transport, &session_name, false)
             && !collect_live_agents_from_state(&state).is_empty();
+    let same_role_cohort_targets =
+        same_role_cohort_targets_from_decisions(&state, spec_workspace, &plan.decisions);
+    let pre_spawn_pane_ids = if live_worker_session_deferred_teardown {
+        transport
+            .list_targets()
+            .map_err(|error| LifecycleError::Transport(error.to_string()))?
+            .into_iter()
+            .map(|pane| pane.pane_id.as_str().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        std::collections::BTreeSet::new()
+    };
     if session_live_or_default(transport, &session_name, false)
         && !live_worker_session_deferred_teardown
     {
@@ -779,6 +791,46 @@ fn restart_with_selected_team_and_transport(
         );
     }
     // END_B5_RESTART_ISOLATION_LOOP
+    if live_worker_session_deferred_teardown {
+        let successful_agent_ids = successful_agents
+            .iter()
+            .map(|agent| agent.agent_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let old_successful_targets = same_role_cohort_targets
+            .iter()
+            .filter(|target| successful_agent_ids.contains(target.agent_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let successful_targets =
+            same_role_cohort_targets_from_decisions(&state, spec_workspace, &successful_agents);
+        let actual_spawn_panes = actual_successful_restart_spawn_panes(
+            transport,
+            &session_name,
+            &successful_targets,
+            &pre_spawn_pane_ids,
+        )?;
+        if let Some(error) =
+            actual_restart_spawn_binding_error(&successful_targets, &actual_spawn_panes)
+        {
+            cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
+            return Err(LifecycleError::RequirementUnmet(error));
+        }
+        if let Err(error) =
+            retire_expected_same_role_cohorts(transport, "restart", &old_successful_targets)
+        {
+            cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
+            return Err(LifecycleError::RequirementUnmet(error));
+        }
+        if let Some(error) = same_role_cohort_exactly_one_error(
+            transport,
+            &session_name,
+            "restart",
+            &successful_targets,
+        ) {
+            cleanup_actual_restart_spawns(transport, &actual_spawn_panes);
+            return Err(LifecycleError::RequirementUnmet(error));
+        }
+    }
     let mut topology_authority_agent_ids = successful_agents
         .iter()
         .map(|agent| agent.agent_id.as_str().to_string())
@@ -2088,6 +2140,122 @@ fn mark_fake_harness_agent_respawned(
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
     agent.insert("owner_team_id".to_string(), serde_json::json!(team_key));
+}
+
+fn same_role_cohort_targets_from_decisions(
+    state: &serde_json::Value,
+    spec_workspace: &Path,
+    agents: &[RestartedAgent],
+) -> Vec<SameRoleCohortTarget> {
+    let mut targets = Vec::new();
+    for restarted in agents {
+        let agent_id = &restarted.agent_id;
+        let raw_agent = state
+            .get("agents")
+            .and_then(|agents| agents.get(agent_id.as_str()));
+        let effective_agent = raw_agent.map(|agent| {
+            rehydrate_agent_command_context_from_spec(spec_workspace, agent_id, agent)
+        });
+        if effective_agent
+            .as_ref()
+            .and_then(|agent| agent.get("provider"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("fake"))
+        {
+            continue;
+        }
+        let window = raw_agent
+            .and_then(|agent| agent.get("window"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| agent_id.as_str());
+        if is_per_agent_cohort_window(window, agent_id) {
+            let expected_pane_id = raw_agent
+                .and_then(|agent| agent.get("pane_id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty());
+            targets.push(
+                SameRoleCohortTarget::new(agent_id, window).with_expected_pane_id(expected_pane_id),
+            );
+        }
+    }
+    targets
+}
+
+fn actual_successful_restart_spawn_panes(
+    transport: &dyn crate::transport::Transport,
+    session_name: &SessionName,
+    targets: &[SameRoleCohortTarget],
+    pre_spawn_pane_ids: &std::collections::BTreeSet<String>,
+) -> Result<Vec<crate::transport::PaneInfo>, LifecycleError> {
+    let windows = targets
+        .iter()
+        .map(|target| target.window.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let panes = transport
+        .list_targets()
+        .map_err(|error| LifecycleError::Transport(error.to_string()))?
+        .into_iter()
+        .filter(|pane| !pre_spawn_pane_ids.contains(pane.pane_id.as_str()))
+        .filter(|pane| pane.session.as_str() == session_name.as_str())
+        .filter(|pane| {
+            pane.window_name
+                .as_ref()
+                .is_some_and(|window| windows.contains(window.as_str()))
+        })
+        .filter(|pane| {
+            transport
+                .liveness(&pane.pane_id)
+                .is_ok_and(|state| state == crate::transport::PaneLiveness::Live)
+        })
+        .collect();
+    Ok(panes)
+}
+
+fn actual_restart_spawn_binding_error(
+    targets: &[SameRoleCohortTarget],
+    actual_spawn_panes: &[crate::transport::PaneInfo],
+) -> Option<String> {
+    let mut mismatches = Vec::new();
+    for target in targets {
+        let observed = actual_spawn_panes
+            .iter()
+            .filter(|pane| {
+                pane.window_name
+                    .as_ref()
+                    .is_some_and(|window| window.as_str() == target.window)
+            })
+            .map(|pane| pane.pane_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        if observed.len() != 1
+            || target.expected_pane_id.as_deref() != observed.first().map(String::as_str)
+        {
+            mismatches.push(format!(
+                "{}:window={}:expected_pane={}:actual_spawn_panes=[{}]",
+                target.agent_id,
+                target.window,
+                target.expected_pane_id.as_deref().unwrap_or("<missing>"),
+                observed.join(",")
+            ));
+        }
+    }
+    if mismatches.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "restart refused: spawn identity/binding mismatch; {}",
+            mismatches.join("; ")
+        ))
+    }
+}
+
+fn cleanup_actual_restart_spawns(
+    transport: &dyn crate::transport::Transport,
+    actual_spawn_panes: &[crate::transport::PaneInfo],
+) {
+    for pane in actual_spawn_panes {
+        let _ = transport.kill_pane(&pane.pane_id);
+    }
 }
 
 fn write_fake_harness_spawn_argv_event(

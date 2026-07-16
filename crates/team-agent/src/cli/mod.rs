@@ -2275,6 +2275,9 @@ pub mod lifecycle_port {
                 discarded_session_id,
                 session_id,
                 new_session_id,
+                capture_state,
+                reset_proof,
+                weak_reset_warning,
             }) => Ok(json!({
                 "ok": true,
                 "agent_id": env.agent_id.as_str(),
@@ -2285,6 +2288,9 @@ pub mod lifecycle_port {
                 "discarded_session_id": discarded_session_id.as_ref().map(|id| id.as_str()),
                 "session_id": session_id.as_ref().map(|id| id.as_str()),
                 "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+                "capture_state": capture_state,
+                "reset_proof": reset_proof,
+                "weak_reset_warning": weak_reset_warning,
             })),
             Ok(crate::lifecycle::ResetAgentOutcome::Refused { reason }) => Ok(json!({
                 "ok": false,

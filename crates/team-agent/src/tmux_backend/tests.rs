@@ -39,6 +39,36 @@ struct MockCommandRunner {
     default: MockResp,
 }
 
+/// Models the real build-before-destroy overlap: the spawn command creates `%new`, while a
+/// name-based lookup still resolves the same-named old window `%old`.
+struct SameNameSpawnRunner {
+    recorded: RecordedArgv,
+}
+
+impl CommandRunner for SameNameSpawnRunner {
+    fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
+        self.recorded.lock().unwrap().push(argv.to_vec());
+        let output = match argv.get(1).map(String::as_str) {
+            Some("new-window") => ok("%new\n"),
+            Some("display-message") => ok("%old\n"),
+            Some("list-panes") => ok(
+                "%old\tteamsess\t0\tdeveloper\t0\t/dev/ttys001\tnode\t1\t/work/dir\t1\t0\t101\n\
+                 %new\tteamsess\t1\tdeveloper\t0\t/dev/ttys002\tnode\t1\t/work/dir\t1\t0\t202\n",
+            ),
+            _ => fail(64, "unexpected scripted tmux command"),
+        };
+        Ok(output)
+    }
+
+    fn run_with_stdin(
+        &self,
+        argv: &[String],
+        _stdin: &str,
+    ) -> Result<CommandOutput, std::io::Error> {
+        self.run(argv)
+    }
+}
+
 impl CommandRunner for MockCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
         self.recorded.lock().unwrap().push(argv.to_vec());
@@ -366,8 +396,7 @@ fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),
         vec![
-            MockResp::Out(ok("")),
-            MockResp::Out(ok("%3")),
+            MockResp::Out(ok("%3\n")),
             MockResp::Out(ok(pane_inventory)),
         ],
     );
@@ -383,7 +412,8 @@ fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
             &env,
         )
         .expect("spawn_first");
-    let argv = rec.lock().unwrap()[0].clone();
+    let calls = rec.lock().unwrap().clone();
+    let argv = calls[0].clone();
     let cmd = argv.last().expect("the sh -lc command string").clone();
     assert_eq!(
         argv,
@@ -400,6 +430,12 @@ fn spawn_first_frames_via_new_session_builder_and_parses_pane_id() {
         "SpawnResult.pane_id must parse from the tmux output"
     );
     assert_eq!(result.child_pid, Some(123));
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.get(1).is_none_or(|arg| arg != "display-message")),
+        "spawn_first identity must come from new-session stdout, never a display-message lookup; calls={calls:?}"
+    );
 }
 
 #[test]
@@ -408,8 +444,7 @@ fn spawn_into_frames_via_new_window_builder() {
     let (be, rec) = backend_with(
         MockResp::Out(ok("")),
         vec![
-            MockResp::Out(ok("")),
-            MockResp::Out(ok("%4")),
+            MockResp::Out(ok("%4\n")),
             MockResp::Out(ok(pane_inventory)),
         ],
     );
@@ -424,7 +459,8 @@ fn spawn_into_frames_via_new_window_builder() {
             &BTreeMap::new(),
         )
         .expect("spawn_into");
-    let argv = rec.lock().unwrap()[0].clone();
+    let calls = rec.lock().unwrap().clone();
+    let argv = calls[0].clone();
     let cmd = argv.last().expect("the sh -lc command string").clone();
     assert_eq!(
             argv,
@@ -432,16 +468,58 @@ fn spawn_into_frames_via_new_window_builder() {
             "spawn_into must frame via tmux_spawn_argv first=false (new-window -t <s> -n <w> sh -lc <cmd>)"
         );
     assert_eq!(result.pane_id.as_str(), "%4");
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.get(1).is_none_or(|arg| arg != "display-message")),
+        "spawn_into identity must come from new-window stdout, never a display-message lookup; calls={calls:?}"
+    );
 }
 
 #[test]
-fn spawn_with_command_refuses_display_message_pane_owned_by_other_window() {
+fn spawn_into_same_named_replacement_returns_identity_created_by_spawn_command() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let be = TmuxBackend::with_runner(Box::new(SameNameSpawnRunner {
+        recorded: Arc::clone(&recorded),
+    }));
+
+    let result = be
+        .spawn_into(
+            &SessionName::new("teamsess"),
+            &WindowName::new("developer"),
+            &svec(&["provider-bin"]),
+            Path::new("/work/dir"),
+            &BTreeMap::new(),
+        )
+        .expect("same-name replacement spawn");
+    let calls = recorded.lock().unwrap().clone();
+    let name_based_identity_lookup = calls.iter().any(|call| {
+        call.get(1).is_some_and(|arg| arg == "display-message")
+            && call
+                .iter()
+                .position(|arg| arg == "-t")
+                .and_then(|index| call.get(index + 1))
+                .is_some_and(|target| target == "teamsess:developer")
+    });
+
+    assert_eq!(
+        result.pane_id.as_str(),
+        "%new",
+        "spawn_into must return the pane identity atomically emitted by this new-window command, not the same-named old window; calls={calls:?}"
+    );
+    assert!(
+        !name_based_identity_lookup,
+        "spawn identity must not be re-derived through ambiguous session:window display-message; calls={calls:?}"
+    );
+}
+
+#[test]
+fn spawn_with_command_refuses_spawn_pane_owned_by_other_window() {
     let pane_inventory = "%5\tteamsess\t1\tw2\t0\t/dev/ttys005\tnode\t1\t/work/dir\t1\t0\t125\n";
     let (be, _rec) = backend_with(
         MockResp::Out(ok("")),
         vec![
-            MockResp::Out(ok("")),
-            MockResp::Out(ok("%5")),
+            MockResp::Out(ok("%5\n")),
             MockResp::Out(ok(pane_inventory)),
         ],
     );
@@ -453,13 +531,41 @@ fn spawn_with_command_refuses_display_message_pane_owned_by_other_window() {
             Path::new("/work/dir"),
             &BTreeMap::new(),
         )
-        .expect_err("display-message fallback to w2 pane must fail closed");
+        .expect_err("spawn stdout pane owned by w2 must fail closed");
     let msg = err.to_string();
     assert!(
         msg.contains("requested=teamsess:w1")
             && msg.contains("observed_pane=%5")
             && msg.contains("observed=teamsess:w2"),
         "error must include requested/observed ownership evidence, got {msg}"
+    );
+}
+
+#[test]
+fn spawn_with_command_empty_stdout_fails_closed_without_identity_fallback() {
+    let (be, rec) = backend_with(MockResp::Out(ok("")), vec![MockResp::Out(ok(""))]);
+    let err = be
+        .spawn_into(
+            &SessionName::new("teamsess"),
+            &WindowName::new("developer"),
+            &svec(&["provider-bin"]),
+            Path::new("/work/dir"),
+            &BTreeMap::new(),
+        )
+        .expect_err("empty new-window stdout must fail closed");
+    let msg = err.to_string().to_ascii_lowercase();
+    let calls = rec.lock().unwrap().clone();
+    let used_identity_fallback = calls
+        .iter()
+        .any(|call| call.get(1).is_some_and(|arg| arg == "display-message"));
+
+    assert!(
+        msg.contains("spawn") && (msg.contains("empty") || msg.contains("no pane id")),
+        "empty spawn stdout error must name the missing spawn identity; error={err}; calls={calls:?}"
+    );
+    assert!(
+        !used_identity_fallback,
+        "empty spawn stdout must not fall back to ambiguous display-message identity lookup; calls={calls:?}"
     );
 }
 

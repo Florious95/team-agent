@@ -101,7 +101,7 @@ pub(crate) fn detect_abnormal_exits(
         let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
         let error_observation_key = fact
             .as_ref()
-            .map(|fact| abnormal_error_observation_key(&agent, fact, size));
+            .map(|fact| abnormal_error_observation_key(&agent, fact));
         let error_observation_cohort = fact.as_ref().map(|_| abnormal_error_cohort_key(&agent));
         let error_recency = abnormal_error_recency(
             &snapshot,
@@ -116,7 +116,6 @@ pub(crate) fn detect_abnormal_exits(
             fact.as_ref(),
             error_recency,
             error_observation_key.as_deref(),
-            size,
         );
         upsert_abnormal_watch(
             state,
@@ -155,7 +154,7 @@ pub(crate) fn detect_abnormal_exits(
         let fact = match (decision, fact) {
             (AbnormalExitDecision::Notify, Some(fact)) => fact,
             (AbnormalExitDecision::Suppress(reason), _) => {
-                let suppress_key = abnormal_suppression_key(&agent, &liveness, reason, size);
+                let suppress_key = abnormal_suppression_key(&agent, &liveness, reason);
                 if abnormal_last_suppressed_key(state, &agent.agent_id).as_deref()
                     != Some(suppress_key.as_str())
                 {
@@ -167,7 +166,7 @@ pub(crate) fn detect_abnormal_exits(
             (AbnormalExitDecision::NoSignal, _) => continue,
             (AbnormalExitDecision::Notify, None) => continue,
         };
-        let dedupe_key = abnormal_dedupe_key(&agent, &fact, size);
+        let dedupe_key = abnormal_dedupe_key(&agent, &fact);
         if abnormal_last_notified_key(state, &agent.agent_id).as_deref()
             == Some(dedupe_key.as_str())
         {
@@ -555,7 +554,7 @@ fn agent_process_liveness(
     if let Some(command) = agent.current_command.as_deref() {
         return command_process_check_with_marker(agent, transport, command);
     }
-    if let Some(pane_id) = agent.pane_id.as_deref() {
+    if agent.pane_id.is_some() {
         // Even without pane current_command / matching target, try the
         // marker probe directly — the wrapper's printf leaves the marker
         // in the pane's capture tail whether or not the transport
@@ -1135,16 +1134,13 @@ fn write_abnormal_suppressed(
     Ok(())
 }
 
-fn abnormal_dedupe_key(
-    agent: &AbnormalWatchAgent,
-    fact: &crate::provider::FaultFact,
-    size: u64,
-) -> String {
+fn abnormal_dedupe_key(agent: &AbnormalWatchAgent, fact: &crate::provider::FaultFact) -> String {
     let bucket = fact
         .turn_id
         .as_ref()
         .map(|id| id.as_str().to_string())
-        .unwrap_or_else(|| size.to_string());
+        .or_else(|| abnormal_error_fact_identity(fact))
+        .unwrap_or_else(|| "no_error_identity".to_string());
     format!(
         "worker.abnormal_exit:{}:{}:{}:{}",
         agent.agent_id,
@@ -1174,9 +1170,9 @@ fn abnormal_error_cohort_key(agent: &AbnormalWatchAgent) -> String {
 fn abnormal_error_observation_key(
     agent: &AbnormalWatchAgent,
     fact: &crate::provider::FaultFact,
-    size: u64,
 ) -> String {
-    let bucket = abnormal_error_fact_identity(fact).unwrap_or_else(|| size.to_string());
+    let bucket =
+        abnormal_error_fact_identity(fact).unwrap_or_else(|| "no_error_identity".to_string());
     format!(
         "worker.abnormal_exit.error:{}:{}:{}:{}",
         agent.agent_id,
@@ -1217,15 +1213,13 @@ fn abnormal_suppression_key(
     agent: &AbnormalWatchAgent,
     liveness: &ProcessCheck,
     reason: &str,
-    size: u64,
 ) -> String {
     format!(
-        "abnormal_exit.single_signal_suppressed:{}:{}:{}:{}:{}",
+        "abnormal_exit.single_signal_suppressed:{}:{}:{}:{}",
         agent.agent_id,
         agent.rollout_path_display,
         reason,
-        process_liveness_wire(liveness.state),
-        size
+        process_liveness_wire(liveness.state)
     )
 }
 
@@ -1235,17 +1229,15 @@ fn abnormal_check_key(
     fact: Option<&crate::provider::FaultFact>,
     error_recency: ErrorRecency,
     error_observation_key: Option<&str>,
-    size: u64,
 ) -> String {
     format!(
-        "worker.abnormal_exit.check:{}:{}:{}:{}:{}:{}:{}",
+        "worker.abnormal_exit.check:{}:{}:{}:{}:{}:{}",
         agent.agent_id,
         agent.rollout_path_display,
         process_liveness_wire(liveness.state),
         fact.map(|fact| fact.signature.as_str()).unwrap_or("-"),
         error_recency.as_str(),
-        error_observation_key.unwrap_or("-"),
-        size
+        error_observation_key.unwrap_or("-")
     )
 }
 
@@ -2526,7 +2518,7 @@ mod tests {
             "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"failed\"}}}\n",
         )
         .unwrap();
-        let observation_key = abnormal_error_observation_key(&agent, &fact, 99);
+        let observation_key = abnormal_error_observation_key(&agent, &fact);
         let state = serde_json::json!({
             "coordinator": {
                 "abnormal_exit_watch": {

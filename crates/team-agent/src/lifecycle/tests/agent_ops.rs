@@ -402,17 +402,17 @@ case "$*" in
     ;;
 esac
 case "$*" in
+  *"new-window "*|*"new-session "*)
+    : > "$spawned_marker"
+    printf '%%9288\n'
+    exit 0
+    ;;
   *"display-message -p -t $pane #{pane_id}"*)
     if [ -f "$killed_marker" ]; then
       echo "can't find pane: $pane" >&2
       exit 1
     fi
     printf '%s\n' "$pane"
-    exit 0
-    ;;
-  *"display-message -p -t $session:alpha #{pane_id}"*)
-    : > "$spawned_marker"
-    printf '%%9288\n'
     exit 0
     ;;
   *"list-windows -t $session -F #{window_name}"*)
@@ -873,8 +873,8 @@ fn reset_agent_stop_not_proven_grep_guard_hard_gate_wired() {
         "reset_agent_at_paths must emit reset_agent.stop_not_proven via the writer"
     );
     assert!(
-        contents.contains("if !agent_is_paused && !stop.stopped"),
-        "gate must run only when stop.stopped=false (the dangerous case)"
+        contents.contains("if !agent_is_paused {"),
+        "gate must run after stop for every non-paused reset, including stop.stopped=true residue"
     );
     assert!(
         contents.contains("list_same_role_panes") && contents.contains("is_per_agent_window"),

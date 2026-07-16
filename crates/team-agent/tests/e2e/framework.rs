@@ -22,6 +22,30 @@ use serde_json::Value;
 
 static WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const CALLER_IDENTITY_ENVS: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "TEAM_AGENT_LEADER_PANE_ID",
+    "TEAM_AGENT_LEADER_SESSION_UUID",
+    "TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE",
+    "TEAM_AGENT_LEADER_SESSION_NAME",
+    "TEAM_AGENT_LEADER_PROVIDER",
+    "TEAM_AGENT_MACHINE_FINGERPRINT",
+    "TEAM_AGENT_WORKSPACE",
+    "TEAM_AGENT_TEAM_ID",
+    "TEAM_AGENT_OWNER_TEAM_ID",
+    "TEAM_AGENT_ACTIVE_TEAM",
+    "TEAM_AGENT_ID",
+    "TEAM_AGENT_AGENT_ID",
+    "TEAM_AGENT_AUTH_MODE",
+    "TEAM_AGENT_LEADER_BYPASS",
+    "TEAM_AGENT_LEADER_BYPASS_SOURCE",
+    "TEAM_AGENT_LEADER_BYPASS_PROVIDER",
+    "TEAM_AGENT_LEADER_BYPASS_FLAG",
+    "TEAM_AGENT_MCP_AUTO_APPROVE",
+    "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE",
+];
+
 /// A self-cleaning workspace directory under `/private/tmp` (preferred on
 /// macOS so it survives `/tmp -> /private/tmp` symlink resolution that some
 /// runtime paths do) or `std::env::temp_dir()` elsewhere. The directory is
@@ -66,6 +90,22 @@ impl TestWorkspace {
     /// exact Drop cleanup. Never a host-wide scan — the ledger only
     /// contains sockets THIS fixture created.
     pub fn register_owned_tmux_socket(&self, socket: &Path) {
+        let ambient = std::env::var_os("TMUX").and_then(|value| {
+            let socket = value.to_str()?.split(',').next()?;
+            (!socket.is_empty()).then(|| PathBuf::from(socket))
+        });
+        assert_ne!(
+            ambient.as_deref(),
+            Some(socket),
+            "refusing to register ambient TMUX endpoint as test-owned: {}",
+            socket.display()
+        );
+        assert!(
+            socket.is_absolute() && socket.exists() && socket.starts_with(&self.path),
+            "tmux endpoint must already exist under its owning E2E workspace: socket={} workspace={}",
+            socket.display(),
+            self.path.display()
+        );
         if let Ok(mut sockets) = self.owned_tmux_sockets.lock() {
             sockets.push(socket.to_path_buf());
         }
@@ -736,13 +776,10 @@ pub fn run_ta_env(ws: &TestWorkspace, args: &[&str], extra_env: &[(&str, &str)])
         .current_dir(ws.path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Isolate test runs from the caller's tmux state. The binary still
-        // detects $TMUX when set; leaving it unset forces the framework
-        // tests to opt-in via `with_tmux_pane()` (not implemented in this
-        // skeleton — future addition).
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE");
+        .stderr(Stdio::piped());
+    for key in CALLER_IDENTITY_ENVS {
+        cmd.env_remove(key);
+    }
     for (k, v) in extra_env {
         cmd.env(k, v);
     }

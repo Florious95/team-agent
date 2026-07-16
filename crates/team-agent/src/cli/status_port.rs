@@ -3,6 +3,7 @@ use super::*;
 use crate::state::projection::OwnerTeamResolution;
 use crate::transport::Transport;
 use rusqlite::params;
+use std::path::PathBuf;
 
 /// `status.status(workspace, as_json, compact)`(`queries.py:33`,**有副作用**:capture→refresh→save)。
 pub fn status(workspace: &Path, compact: bool, detail: bool) -> Result<Value, CliError> {
@@ -48,7 +49,7 @@ pub fn status_scoped(
         !tmux_present,
         &freshness,
     );
-    let agents = enrich_agents(state.get("agents"), tmux_present, &freshness);
+    let agents = enrich_agents(workspace, state, tmux_present, &freshness);
     let tasks = state.get("tasks").cloned().unwrap_or_else(|| json!([]));
     let leader_receiver = state
         .get("leader_receiver")
@@ -548,18 +549,27 @@ pub(crate) fn compute_runtime_freshness(
 }
 
 fn enrich_agents(
-    agents: Option<&Value>,
+    workspace: &Path,
+    state: &Value,
     tmux_session_present: bool,
     freshness: &RuntimeFreshness,
 ) -> Value {
+    let agents = state.get("agents");
     let Some(Value::Object(input)) = agents else {
         return json!({});
     };
+    let team_dir = state
+        .get("team_dir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.to_path_buf());
     let mut out = Map::new();
     for (agent_id, value) in input {
         match value {
             Value::Object(obj) => {
                 let mut enriched = obj.clone();
+                apply_effective_role_projection(&team_dir, agent_id, &mut enriched);
                 enriched.insert(
                     "interacted".to_string(),
                     Value::String(interacted_marker(obj.get("first_send_at"))),
@@ -638,6 +648,64 @@ fn enrich_agents(
         }
     }
     Value::Object(out)
+}
+
+fn apply_effective_role_projection(
+    team_dir: &Path,
+    agent_id: &str,
+    agent: &mut Map<String, Value>,
+) {
+    let role_file = agent
+        .get("dynamic_role_file")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| team_dir.join("agents").join(format!("{agent_id}.md")));
+    let Ok((meta, _)) = crate::compiler::read_front_matter(&role_file) else {
+        return;
+    };
+    let Some(meta) = yaml_map(&meta) else {
+        return;
+    };
+    if let Some(provider) = yaml_str(meta, "provider").filter(|value| !value.is_empty()) {
+        agent.insert("provider".to_string(), Value::String(provider.to_string()));
+        agent.insert(
+            "provider_source".to_string(),
+            Value::String("role".to_string()),
+        );
+    }
+    if let Some(model) = yaml_str(meta, "model").filter(|value| !value.is_empty()) {
+        if agent.get("model").and_then(Value::as_str) != Some(model) {
+            agent.insert("model_stale".to_string(), Value::Bool(true));
+        }
+        agent.insert("model".to_string(), Value::String(model.to_string()));
+        agent.insert(
+            "model_source".to_string(),
+            Value::String("role".to_string()),
+        );
+    }
+}
+
+fn yaml_map(
+    value: &crate::model::yaml::Value,
+) -> Option<&Vec<(String, crate::model::yaml::Value)>> {
+    match value {
+        crate::model::yaml::Value::Map(items) => Some(items),
+        _ => None,
+    }
+}
+
+fn yaml_str<'a>(items: &'a [(String, crate::model::yaml::Value)], key: &str) -> Option<&'a str> {
+    items.iter().find_map(|(name, value)| {
+        if name == key {
+            match value {
+                crate::model::yaml::Value::Str(value) => Some(value.as_str()),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    })
 }
 
 fn downgrade_stale_agent(agent: &mut Map<String, Value>) {

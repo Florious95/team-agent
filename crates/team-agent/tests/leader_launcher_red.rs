@@ -659,10 +659,16 @@ case " $* " in
     ;;
   *" new-session "*)
     record_spawn "$@"
+    case " $* " in
+      *" -P "*) printf '%%42\n' ;;
+    esac
     exit 0
     ;;
   *" new-window "*)
     record_spawn "$@"
+    case " $* " in
+      *" -P "*) printf '%%42\n' ;;
+    esac
     exit 0
     ;;
   *" display-message "*)

@@ -553,6 +553,9 @@ fn normalize_value(value: Value, ctx: &mut NormalizeCtx, key: Option<&str>) -> V
             let sorted = map.into_iter().collect::<BTreeMap<_, _>>();
             let mut out = Map::new();
             for (child_key, child) in sorted {
+                if matches!(child_key.as_str(), "model_source" | "provider_source") {
+                    continue;
+                }
                 out.insert(
                     child_key.clone(),
                     normalize_value(child, ctx, Some(child_key.as_str())),

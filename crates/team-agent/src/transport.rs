@@ -918,8 +918,8 @@ pub fn tmux_query_argv(pane: &PaneId, field: PaneField) -> Vec<String> {
 
 /// spawn argv:首个 session 用 new-session,后续 worker 用 new-window。
 /// golden(terminal.py:44-45 / runtime.py:1019-1020):
-///   first → `new-session -d -s <s> -n <w> sh -lc <cmd>`
-///   into  → `new-window -t <s> -n <w> sh -lc <cmd>`
+///   first → `new-session -d -P -F #{pane_id} -s <s> -n <w> sh -lc <cmd>`
+///   into  → `new-window -d -P -F #{pane_id} -t <s> -n <w> sh -lc <cmd>`
 /// `argv` 被组装成单条 `sh -lc` 命令字符串(provider 启动行)。
 pub fn tmux_spawn_argv(
     session: &SessionName,
@@ -932,6 +932,9 @@ pub fn tmux_spawn_argv(
             "tmux".to_string(),
             "new-session".to_string(),
             "-d".to_string(),
+            "-P".to_string(),
+            "-F".to_string(),
+            "#{pane_id}".to_string(),
             "-s".to_string(),
             session.as_str().to_string(),
             "-n".to_string(),
@@ -952,6 +955,9 @@ pub fn tmux_spawn_argv(
             "tmux".to_string(),
             "new-window".to_string(),
             "-d".to_string(),
+            "-P".to_string(),
+            "-F".to_string(),
+            "#{pane_id}".to_string(),
             "-t".to_string(),
             session.as_str().to_string(),
             "-n".to_string(),

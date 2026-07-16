@@ -765,25 +765,14 @@ impl TmuxBackend {
         first: bool,
     ) -> Result<SpawnResult, TransportError> {
         let spawn_argv = tmux_spawn_argv(session, window, command, first);
-        self.run_spawn(&spawn_argv)?;
-        let pane_argv = vec![
-            "tmux".to_string(),
-            "display-message".to_string(),
-            "-p".to_string(),
-            "-t".to_string(),
-            format!("{}:{}", session.as_str(), window.as_str()),
-            "#{pane_id}".to_string(),
-        ];
-        let output = self.run_spawn(&pane_argv)?;
+        let output = self.run_spawn(&spawn_argv)?;
         let pane = output.stdout.trim();
-        // T3-5 (harvest §1): never fabricate a `%0` pane id on an empty reply — a fake
-        // pane id mis-addresses every later inject/capture/kill. Surface the miss.
         if pane.is_empty() {
             return Err(TransportError::Subprocess {
-                argv: pane_argv,
+                argv: spawn_argv,
                 code: output.code,
                 stderr: format!(
-                    "tmux display-message returned no pane id for {}:{}",
+                    "tmux spawn returned no pane id for {}:{}",
                     session.as_str(),
                     window.as_str()
                 ),
@@ -822,10 +811,10 @@ impl TmuxBackend {
             })
             .unwrap_or_else(|| "<missing-from-list-targets>".to_string());
         Err(TransportError::Subprocess {
-            argv: pane_argv,
+            argv: spawn_argv,
             code: output.code,
             stderr: format!(
-                "tmux spawn pane ownership mismatch: requested={}:{} observed_pane={} observed={}",
+                "tmux spawn pane identity mismatch: requested={}:{} observed_pane={} observed={}",
                 session.as_str(),
                 window.as_str(),
                 pane_id.as_str(),

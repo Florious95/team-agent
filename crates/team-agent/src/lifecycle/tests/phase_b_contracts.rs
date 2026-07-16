@@ -744,7 +744,7 @@ impl Transport for BRealTransport {
         if matches!(self.mode, BRealMode::Misowned) {
             targets.push(pane_info("team-phaseb", "w2", "%5", 502));
         }
-        if matches!(self.mode, BRealMode::Owned) {
+        if matches!(self.mode, BRealMode::Owned) && !self.spawns.lock().unwrap().is_empty() {
             targets.push(pane_info("team-phaseb", "w1", "%10", 501));
         }
         Ok(targets)

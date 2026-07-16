@@ -67,6 +67,9 @@ pub(crate) fn reset_agent(
             discarded_session_id,
             session_id,
             new_session_id,
+            capture_state,
+            reset_proof,
+            weak_reset_warning,
         } => Ok(ToolOk {
             fields: object_fields(serde_json::json!({
                 "ok": true,
@@ -78,6 +81,13 @@ pub(crate) fn reset_agent(
                 "discarded_session_id": discarded_session_id.as_ref().map(|id| id.as_str()),
                 "session_id": session_id.as_ref().map(|id| id.as_str()),
                 "new_session_id": new_session_id.as_ref().map(|id| id.as_str()),
+                "capture_state": match capture_state.as_str() {
+                    "captured" => "captured",
+                    "attribution_ambiguous" => "attribution_ambiguous",
+                    _ => "transcript_missing",
+                },
+                "reset_proof": if reset_proof == "weak" { "weak" } else { "strong" },
+                "weak_reset_warning": weak_reset_warning,
             })),
         }),
         ResetAgentOutcome::Refused { reason } => Ok(ToolOk {

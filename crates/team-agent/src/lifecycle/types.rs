@@ -632,6 +632,9 @@ pub enum ResetAgentOutcome {
         discarded_session_id: Option<SessionId>,
         session_id: Option<SessionId>,
         new_session_id: Option<SessionId>,
+        capture_state: String,
+        reset_proof: String,
+        weak_reset_warning: Option<String>,
     },
     /// 未传 discard_session → 拒绝(不丢上下文的误用保护)。
     Refused { reason: ResetRefusal },

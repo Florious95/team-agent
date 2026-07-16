@@ -626,6 +626,7 @@ case " $* " in
     exit 1
     ;;
   *" new-session "*|*" new-window "*)
+    printf '%s\n' '{spawned_worker_pane}'
     exit 0
     ;;
   *" display-message "*)

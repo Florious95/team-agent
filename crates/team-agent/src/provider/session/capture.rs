@@ -8,6 +8,7 @@ use crate::provider::{
     CaptureSessionContext, CapturedSession, CapturedSessionCandidate, Provider, ProviderAdapter,
     ProviderError, SessionId,
 };
+use crate::state::identity_keys::SessionAttributionKey;
 
 pub const SESSION_CAPTURE_CONVERGENCE_DEADLINE_MS: u64 = 12_000;
 pub const SESSION_CAPTURE_CONVERGENCE_POLL_MS: u64 = 250;
@@ -638,6 +639,7 @@ pub fn incomplete_interacted_resumable_agent_ids(state: &Value) -> Vec<String> {
 struct PendingSessionCapture {
     agent_id: String,
     provider: Provider,
+    team_key: String,
     context: CaptureSessionContext,
 }
 
@@ -673,6 +675,13 @@ where
     Some(PendingSessionCapture {
         agent_id: agent_id.to_string(),
         provider,
+        team_key: agent
+            .get("owner_team_id")
+            .or_else(|| agent.get("team_key"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("current")
+            .to_string(),
         context: CaptureSessionContext {
             agent_id: agent_id.to_string(),
             spawn_cwd: PathBuf::from(spawn_cwd),
@@ -883,14 +892,14 @@ fn allocate_session_candidates(
                     .as_ref()
                     .is_some_and(|sid| sid.as_str() == expected.as_str())
             })
-            .filter(|candidate| !candidate_keys_collide(candidate, claimed))
+            .filter(|candidate| !candidate_keys_collide(item, candidate, claimed))
             .collect();
         // Uniqueness requirement: only assign when the expected id maps to
         // exactly one available candidate. Multiple matches or a colliding
         // single match leave the agent for the ambiguity path below.
         if exact_matches.len() == 1 {
             let candidate = exact_matches[0].clone();
-            claimed.extend(captured_provider_session_keys(&candidate.captured));
+            claimed.extend(captured_provider_session_keys(item, &candidate.captured));
             assignments.insert(item.agent_id.clone(), candidate);
         }
     }
@@ -903,8 +912,9 @@ fn allocate_session_candidates(
             candidates_by_agent.get(&item.agent_id),
             claimed,
             CandidateMatchKind::PositiveAgentId,
+            item,
         ) {
-            claimed.extend(captured_provider_session_keys(&candidate.captured));
+            claimed.extend(captured_provider_session_keys(item, &candidate.captured));
             assignments.insert(item.agent_id.clone(), candidate);
         }
     }
@@ -916,8 +926,9 @@ fn allocate_session_candidates(
             candidates_by_agent.get(&item.agent_id),
             claimed,
             CandidateMatchKind::PathAgentId,
+            item,
         ) {
-            claimed.extend(captured_provider_session_keys(&candidate.captured));
+            claimed.extend(captured_provider_session_keys(item, &candidate.captured));
             assignments.insert(item.agent_id.clone(), candidate);
         }
     }
@@ -953,9 +964,10 @@ fn allocate_session_candidates(
             candidates_by_agent.get(&item.agent_id),
             claimed,
             CandidateMatchKind::Any,
+            item,
         ) {
             Some(candidate) => {
-                claimed.extend(captured_provider_session_keys(&candidate.captured));
+                claimed.extend(captured_provider_session_keys(item, &candidate.captured));
                 assignments.insert(item.agent_id.clone(), candidate);
             }
             None => {
@@ -995,11 +1007,14 @@ fn allocate_global_one_to_one(
         let Some(agent_candidates) = candidates_by_agent.get(agent_id) else {
             return;
         };
+        let Some(owner) = pending.iter().find(|item| item.agent_id == *agent_id) else {
+            continue;
+        };
         for candidate in agent_candidates {
-            if candidate_keys_collide(candidate, claimed) {
+            if candidate_keys_collide(owner, candidate, claimed) {
                 continue;
             }
-            let key = candidate_key(candidate);
+            let key = candidate_key(owner, candidate);
             if key.is_empty() {
                 continue;
             }
@@ -1010,7 +1025,9 @@ fn allocate_global_one_to_one(
         return;
     }
     for (agent_id, candidate) in remaining_agents.into_iter().zip(candidates.into_values()) {
-        claimed.extend(captured_provider_session_keys(&candidate.captured));
+        if let Some(item) = pending.iter().find(|item| item.agent_id == agent_id) {
+            claimed.extend(captured_provider_session_keys(item, &candidate.captured));
+        }
         assignments.insert(agent_id, candidate);
     }
 }
@@ -1035,6 +1052,7 @@ fn unique_available_candidate(
     candidates: Option<&Vec<CapturedSessionCandidate>>,
     claimed: &BTreeSet<String>,
     match_kind: CandidateMatchKind,
+    owner: &PendingSessionCapture,
 ) -> Option<CapturedSessionCandidate> {
     let matches = candidates?
         .iter()
@@ -1043,7 +1061,7 @@ fn unique_available_candidate(
             CandidateMatchKind::PathAgentId => candidate.agent_path_match,
             CandidateMatchKind::Any => true,
         })
-        .filter(|candidate| !candidate_keys_collide(candidate, claimed))
+        .filter(|candidate| !candidate_keys_collide(owner, candidate, claimed))
         .cloned()
         .collect::<Vec<_>>();
     if matches.len() == 1 {
@@ -1061,16 +1079,17 @@ enum CandidateMatchKind {
 }
 
 fn candidate_keys_collide(
+    owner: &PendingSessionCapture,
     candidate: &CapturedSessionCandidate,
     claimed: &BTreeSet<String>,
 ) -> bool {
-    captured_provider_session_keys(&candidate.captured)
+    captured_provider_session_keys(owner, &candidate.captured)
         .iter()
         .any(|key| claimed.contains(key))
 }
 
-fn candidate_key(candidate: &CapturedSessionCandidate) -> String {
-    captured_provider_session_keys(&candidate.captured)
+fn candidate_key(owner: &PendingSessionCapture, candidate: &CapturedSessionCandidate) -> String {
+    captured_provider_session_keys(owner, &candidate.captured)
         .into_iter()
         .collect::<Vec<_>>()
         .join("|")
@@ -1130,12 +1149,13 @@ fn claimed_provider_session_keys(
     pending_ids: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
+    let team_key = crate::state::projection::team_state_key(state);
     // 1. Non-pending worker sessions (existing behaviour).
     for (agent_id, agent) in agents {
         if pending_ids.contains(agent_id) {
             continue;
         }
-        push_provider_session_keys(&mut keys, agent);
+        push_provider_session_keys(&mut keys, &team_key, agent_id, agent);
     }
     // 2. P0 (lane-046-capture-gap): leader anchor sessions. The leader's
     //    own provider transcript must never be attributed to a worker. Scan
@@ -1152,14 +1172,39 @@ fn claimed_provider_session_keys(
     keys
 }
 
-fn push_provider_session_keys(keys: &mut BTreeSet<String>, value: &Value) {
+fn push_provider_session_keys(
+    keys: &mut BTreeSet<String>,
+    fallback_team_key: &str,
+    fallback_agent_id: &str,
+    value: &Value,
+) {
+    let provider = value
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider)
+        .unwrap_or(Provider::Fake);
+    let team_key = value
+        .get("owner_team_id")
+        .or_else(|| value.get("team_key"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_team_key);
+    let agent_id = value
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_agent_id);
     for field in ["session_id", "provider_session_id"] {
         if let Some(session_id) = value
             .get(field)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
-            keys.insert(format!("session:{session_id}"));
+            if let Some(key) = SessionAttributionKey::new(provider, team_key, agent_id, session_id)
+            {
+                keys.insert(session_attribution_key_string(&key));
+            }
+            keys.insert(global_session_attribution_key_string(session_id));
         }
     }
     for field in ["rollout_path", "transcript_path"] {
@@ -1168,7 +1213,10 @@ fn push_provider_session_keys(keys: &mut BTreeSet<String>, value: &Value) {
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
-            keys.insert(format!("rollout:{path}"));
+            keys.insert(transcript_attribution_key_string(
+                provider, team_key, agent_id, path,
+            ));
+            keys.insert(global_transcript_attribution_key_string(path));
         }
     }
 }
@@ -1176,23 +1224,66 @@ fn push_provider_session_keys(keys: &mut BTreeSet<String>, value: &Value) {
 fn push_leader_provider_session_keys(keys: &mut BTreeSet<String>, scope: &Value) {
     for anchor in ["leader_receiver", "team_owner"] {
         if let Some(node) = scope.get(anchor) {
-            push_provider_session_keys(keys, node);
+            push_provider_session_keys(keys, "leader", "leader", node);
         }
     }
 }
 
-fn captured_provider_session_keys(captured: &CapturedSession) -> BTreeSet<String> {
+fn captured_provider_session_keys(
+    owner: &PendingSessionCapture,
+    captured: &CapturedSession,
+) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
+    let team_key = owner.team_key.as_str();
     if let Some(session_id) = &captured.session_id {
-        keys.insert(format!("session:{}", session_id.as_str()));
+        if let Some(key) = SessionAttributionKey::new(
+            owner.provider,
+            team_key,
+            owner.agent_id.as_str(),
+            session_id.as_str(),
+        ) {
+            keys.insert(session_attribution_key_string(&key));
+        }
+        keys.insert(global_session_attribution_key_string(session_id.as_str()));
     }
     if let Some(rollout_path) = &captured.rollout_path {
-        keys.insert(format!(
-            "rollout:{}",
-            rollout_path.as_path().to_string_lossy()
+        let path = rollout_path.as_path().to_string_lossy();
+        keys.insert(transcript_attribution_key_string(
+            owner.provider,
+            team_key,
+            owner.agent_id.as_str(),
+            &path,
         ));
+        keys.insert(global_transcript_attribution_key_string(&path));
     }
     keys
+}
+
+fn session_attribution_key_string(key: &SessionAttributionKey) -> String {
+    format!(
+        "SessionAttributionKey(provider={:?},team={},agent={},session={})",
+        key.provider(),
+        key.team_key(),
+        key.agent_id(),
+        key.session_id()
+    )
+}
+
+fn transcript_attribution_key_string(
+    provider: Provider,
+    team_key: &str,
+    agent_id: &str,
+    path: &str,
+) -> String {
+    format!("TranscriptAttributionKey(provider={provider:?},team={team_key},agent={agent_id},path={path})")
+}
+
+fn global_session_attribution_key_string(session_id: &str) -> String {
+    format!("GlobalSessionAttributionKey(session={session_id})")
+}
+
+fn global_transcript_attribution_key_string(path: &str) -> String {
+    format!("GlobalTranscriptAttributionKey(path={path})")
 }
 
 #[cfg(test)]

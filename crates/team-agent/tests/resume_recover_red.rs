@@ -8,6 +8,7 @@ fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
 use serial_test::serial;
@@ -253,11 +254,13 @@ impl Drop for EnvGuard {
 }
 
 #[derive(Default)]
-struct ResumeTransport;
+struct ResumeTransport {
+    spawned: Mutex<bool>,
+}
 
 impl ResumeTransport {
     fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -274,6 +277,7 @@ impl Transport for ResumeTransport {
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
+        *self.spawned.lock().unwrap() = true;
         Ok(SpawnResult {
             pane_id: PaneId::new("%10"),
             session: session.clone(),
@@ -338,7 +342,22 @@ impl Transport for ResumeTransport {
     }
 
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
-        Ok(Vec::new())
+        if !*self.spawned.lock().unwrap() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![PaneInfo {
+            pane_id: PaneId::new("%10"),
+            session: SessionName::new("team-resumeteam"),
+            window_index: Some(0),
+            window_name: Some(WindowName::new("worker_a")),
+            pane_index: Some(0),
+            tty: None,
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: Some(10_010),
+            leader_env: BTreeMap::new(),
+        }])
     }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> {
@@ -363,6 +382,13 @@ impl Transport for ResumeTransport {
     }
 
     fn kill_window(&self, _target: &Target) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    fn kill_pane(&self, pane: &PaneId) -> Result<(), TransportError> {
+        if pane.as_str() == "%10" {
+            *self.spawned.lock().unwrap() = false;
+        }
         Ok(())
     }
 
