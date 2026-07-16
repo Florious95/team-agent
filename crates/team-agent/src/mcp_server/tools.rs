@@ -737,24 +737,83 @@ impl TeamOrchestratorTools {
         {
             return None;
         }
-        if let Ok(visible) = self.get_visible_peers() {
-            if visible.peers.iter().any(|peer| peer.as_str() == target) {
-                return None;
-            }
+        // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): compute
+        // the visible peers ONCE and reuse for both exact-match check
+        // AND scope-safe candidate ranking. Peers come from
+        // `get_visible_peers()` (owner-team only) so sibling teams,
+        // host registry, and workspace reverse scans cannot leak.
+        let visible_peers: Vec<String> = self
+            .get_visible_peers()
+            .map(|visible| {
+                visible
+                    .peers
+                    .iter()
+                    .map(|peer| peer.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if visible_peers.iter().any(|peer| peer == target) {
+            return None;
         }
-        let hint = "the requested peer is not part of your team; worker-origin MCP cannot widen team scope.";
+        let owner_team_key = owner_team
+            .as_ref()
+            .map(TeamKey::as_str)
+            .unwrap_or("")
+            .to_string();
+        // Rank the typo against owner-scope peers.
+        let ranked = {
+            use crate::model::name_similarity::{rank, Candidate};
+            let candidates: Vec<Candidate<String>> = visible_peers
+                .iter()
+                .map(|peer| Candidate {
+                    match_key: peer.clone(),
+                    stable_key: peer.clone(),
+                    payload: peer.clone(),
+                })
+                .collect();
+            rank(target, &candidates)
+        };
+        let candidate_values: Vec<Value> = ranked
+            .iter()
+            .map(|peer| {
+                serde_json::json!({
+                    "name": peer,
+                    "team_key": owner_team_key,
+                    "agent_id": peer,
+                    "advisory": true,
+                })
+            })
+            .collect();
+        let best = ranked.first().cloned();
+        let hint = if let Some(best) = best.as_deref() {
+            format!(
+                "the requested peer is not in your owner team; did you mean `{best}`?"
+            )
+        } else {
+            "the requested peer is not part of your team; worker-origin MCP cannot widen team scope.".to_string()
+        };
         let _ = EventLog::new(&self.workspace).write(
             "mcp.send_message_refused",
             serde_json::json!({
                 "reason": "peer_not_in_scope",
-                "sender_team_id": owner_team.as_ref().map(TeamKey::as_str).unwrap_or(""),
+                "sender_team_id": owner_team_key,
                 "scope": "team",
-                "hint": hint
+                "hint": hint,
             }),
         );
         let mut extra = serde_json::Map::new();
         extra.insert("status".to_string(), Value::String("refused".to_string()));
-        extra.insert("hint".to_string(), Value::String(hint.to_string()));
+        extra.insert("hint".to_string(), Value::String(hint.clone()));
+        // 0.5.45 naming-addressing (design §3.6, RED-2 MCP): additive
+        // scope-safe suggestions inside the existing ToolError.extra
+        // JSON envelope — no struct/schema change, no event log
+        // widening. Advisory only: `isError=true` and
+        // reason=peer_not_in_scope stay unchanged.
+        extra.insert("requested_name".to_string(), Value::String(target.clone()));
+        if let Some(best) = best {
+            extra.insert("suggested_name".to_string(), Value::String(best));
+        }
+        extra.insert("candidates".to_string(), Value::Array(candidate_values));
         Some(ToolError {
             reason: ToolErrorReason::PeerNotInScope,
             exc_type: "PeerNotInScope".to_string(),

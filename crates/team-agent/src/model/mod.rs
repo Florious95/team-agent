@@ -12,6 +12,12 @@
 pub mod enums;
 pub mod errors;
 pub mod ids;
+// 0.5.45 naming-addressing (design §3.2/§4.1): shared pure name
+// similarity ranking helper. crate-private consumer set = cli/emit.rs
+// (subcommand hint), cli/named_address.rs (typo candidates),
+// cli/send.rs (positional adapter), mcp_server/tools.rs (owner-scoped
+// peer suggestions). Never a routing authority — advisory only.
+pub(crate) mod name_similarity;
 pub mod paths;
 pub mod permissions;
 pub mod routing;

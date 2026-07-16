@@ -125,12 +125,15 @@ fn run_dispatches_send_to_handler_returns_ok() {
 }
 
 #[test]
-fn run_unknown_subcommand_is_usage() {
-    // An unknown subcommand routes to argparse-style usage (exit 2), never a handler.
+fn run_unknown_subcommand_is_error_not_usage() {
+    // 0.5.45 naming-addressing (RED-6): unknown subcommand exits 1
+    // (Error), aligned with the shared refusal shape used by
+    // `send`/`--to-name` typos. Pre-0.5.45 argparse-style Usage (2)
+    // was internal drift.
     assert_eq!(
         run(&["totally-not-a-subcommand".to_string()], Path::new(".")),
-        ExitCode::Usage,
-        "an unknown subcommand must map to ExitCode::Usage"
+        ExitCode::Error,
+        "unknown subcommand must map to ExitCode::Error (aligned with send/--to-name typo family)"
     );
 }
 

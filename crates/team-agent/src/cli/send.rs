@@ -55,8 +55,17 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
                 "--to-name requires a non-empty message".to_string(),
             ));
         }
+        // 0.5.45 naming-addressing (design §3.1, RED-1): thread
+        // `--team` down to resolver so bare `--to-name agent --team T`
+        // scopes to `T` BEFORE workspace scanning. Qualified addresses
+        // (`team/agent`, `workspace::team/agent`) ignore the scope
+        // per §1 priority ladder.
         let (resolved, transport) =
-            match crate::cli::named_address::resolve_name_for_cli(&args.workspace, to_name) {
+            match crate::cli::named_address::resolve_name_for_cli(
+                &args.workspace,
+                to_name,
+                args.team.as_deref(),
+            ) {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     // E6 (0.5.9 offline-mailbox-toname-design §3.1/§6.2): when
@@ -166,6 +175,15 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         outcome = observe_initial_delivery_for_watch(&selected, &target, &outcome, &opts)?;
     }
     let mut value = delivery_outcome_json(&outcome, &target, &content, &opts);
+    // 0.5.45 naming-addressing (design §3.5, RED-2/RED-3 positional):
+    // when the refusal reason is `target_not_in_team` AND the target
+    // was a Single non-special short id, attach scope-safe
+    // suggestions ranked from `selected.state.agents` — never from
+    // raw workspace `teams` (design §3.5 & risk table). Zero DB
+    // write / zero inject: the request stays refused, only the JSON
+    // envelope gains `requested_name`/`suggested_name`/`candidates`
+    // and the human `Action` gains a "Did you mean" line.
+    attach_positional_typo_suggestions(&mut value, &target, &selected.state);
     append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
     if opts.watch_result && initial_delivery_allows_watch(outcome.status) {
         if let Some(obj) = value.as_object_mut() {
@@ -773,6 +791,67 @@ fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> Value {
     })
 }
 
+/// 0.5.45 naming-addressing (design §3.5, RED-2/RED-3 positional):
+/// after `messaging::send_message` refuses with `target_not_in_team`
+/// for a Single non-special short id, attach scope-safe advisory
+/// suggestions to the outbound JSON envelope. Candidate source =
+/// selected team's projected `agents` map (never the raw workspace
+/// `teams`) so sibling teams cannot leak. Zero DB write, zero inject
+/// — the refusal exit code is unchanged.
+fn attach_positional_typo_suggestions(
+    value: &mut Value,
+    target: &MessageTarget,
+    selected_state: &Value,
+) {
+    use crate::model::name_similarity::{rank, Candidate};
+    let requested = match target {
+        MessageTarget::Single(id) if id != "*" && id != "leader" => id.clone(),
+        _ => return,
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if obj.get("reason").and_then(Value::as_str) != Some("target_not_in_team") {
+        return;
+    }
+    let team_key = selected_state
+        .get("active_team_key")
+        .or_else(|| selected_state.get("team_key"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let candidates: Vec<Candidate<String>> = selected_state
+        .get("agents")
+        .and_then(Value::as_object)
+        .map(|agents| {
+            agents
+                .keys()
+                .map(|agent_id| Candidate {
+                    match_key: agent_id.clone(),
+                    stable_key: agent_id.clone(),
+                    payload: agent_id.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ranked = rank(&requested, &candidates);
+    let candidate_values: Vec<Value> = ranked
+        .iter()
+        .map(|agent_id| {
+            json!({
+                "name": agent_id,
+                "team_key": team_key,
+                "agent_id": agent_id,
+                "advisory": true,
+            })
+        })
+        .collect();
+    obj.insert("requested_name".to_string(), json!(requested));
+    if let Some(best) = ranked.first() {
+        obj.insert("suggested_name".to_string(), json!(best));
+    }
+    obj.insert("candidates".to_string(), Value::Array(candidate_values));
+}
+
 fn delivery_outcome_json(
     outcome: &DeliveryOutcome,
     target: &MessageTarget,
@@ -972,6 +1051,25 @@ fn send_human_output(value: &Value) -> String {
         if !value.get(key).is_none_or(Value::is_null) {
             parts.push(send_human_field(value, key));
         }
+    }
+    // 0.5.45 naming-addressing (design §3.4/§3.5, RED-3 positional):
+    // when the refusal envelope carries a scope-safe suggestion,
+    // surface it verbatim in human output so users can copy the
+    // right short id. `requested_name` echoes the typo, `suggested_
+    // name` is the copyable canonical.
+    if let Some(requested) = value
+        .get("requested_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(format!("requested_name: {requested}"));
+    }
+    if let Some(suggested) = value
+        .get("suggested_name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(format!("Did you mean `{suggested}`? suggested_name: {suggested}"));
     }
     parts.join(" ")
 }
@@ -1250,8 +1348,13 @@ pub fn send_to_canonical_leader_target(
     // synthesized `<workspace>::<team_key>/leader` name so live inject +
     // mailbox both go through one code path.
     let to_name = format!("{}::{}/leader", entry.workspace.display(), entry.team_key);
+    // 0.5.45 naming-addressing (design §3.1 / §4.1): internal
+    // registry-to-E6 delegation MUST pass None for bare_team_scope.
+    // The synthesized name above is a full `workspace::team/leader`
+    // form, and the caller's `--team` flag (if any) must not
+    // override the registry's authoritative team_key.
     let (resolved, transport) =
-        match crate::cli::named_address::resolve_name_for_cli(sender_workspace, &to_name) {
+        match crate::cli::named_address::resolve_name_for_cli(sender_workspace, &to_name, None) {
             Ok(r) => r,
             Err(err) => {
                 // Named-address refusal — surface it verbatim but tag as

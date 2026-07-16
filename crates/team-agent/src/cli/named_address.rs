@@ -61,6 +61,11 @@ pub(crate) struct NamedAddressError {
     pub requested_team: Option<String>,
     pub available_team_keys: Vec<String>,
     pub suggested_name: Option<String>,
+    /// 0.5.45 naming-addressing (design §3.4, RED-2/RED-3): echo the
+    /// user's original typo so JSON consumers + N38 human can pair
+    /// `requested_name`/`suggested_name` without re-parsing. Absent
+    /// for exact refusals like empty-workspace.
+    pub requested_name: Option<String>,
 }
 
 impl NamedAddressError {
@@ -74,16 +79,147 @@ impl NamedAddressError {
             requested_team: None,
             available_team_keys: Vec::new(),
             suggested_name: None,
+            requested_name: None,
         }
     }
 
     pub(crate) fn n38_message(&self) -> String {
+        // 0.5.45 naming-addressing (design §3.4, RED-3): the N38 first
+        // line embeds the human-readable `message` (which contains
+        // the original typo like `qa-namng`/`btea`) after the reason.
+        // Pre-0.5.45 the line was `Error: <reason>` only; the typo
+        // hid in the JSON-only `error` field, so the human line
+        // couldn't be scanned to recover the original request.
         format!(
-            "Error: {}\nAction: {}\nLog: {}",
+            "Error: {}: {}\nAction: {}\nLog: {}",
             self.kind.as_str(),
+            self.message,
             self.action,
             self.log
         )
+    }
+
+    /// 0.5.45 (design §3.4, RED-2 named-team): rank team-scope typo
+    /// against target workspace `teams.*` keys; candidate `name`
+    /// preserves the qualified `team/entity` shape so the copyable
+    /// token in Action can be pasted back into `--to-name` unchanged.
+    fn with_scoped_suggestions_for_team(
+        self,
+        state: &Value,
+        team_typo: &str,
+        entity: &str,
+        parsed: &ParsedNamedAddress,
+    ) -> Self {
+        use crate::model::name_similarity::{rank, Candidate};
+        let candidates: Vec<Candidate<(String, String)>> = state
+            .get("teams")
+            .and_then(Value::as_object)
+            .map(|teams| {
+                teams
+                    .keys()
+                    .map(|team_key| Candidate {
+                        match_key: team_key.clone(),
+                        stable_key: team_key.clone(),
+                        payload: (team_key.clone(), entity.to_string()),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ranked = rank(team_typo, &candidates);
+        let requested_display = parsed.display_name();
+        let candidate_values: Vec<Value> = ranked
+            .iter()
+            .map(|(team_key, entity)| {
+                let name = format!("{team_key}/{entity}");
+                json!({
+                    "name": name,
+                    "team_key": team_key,
+                    "agent_id": entity,
+                    "advisory": true,
+                })
+            })
+            .collect();
+        let best = ranked
+            .first()
+            .map(|(team_key, entity)| format!("{team_key}/{entity}"));
+        self.with_scoped_suggestions(requested_display, candidate_values, best)
+    }
+
+    /// 0.5.45 (design §3.4, RED-2 named-agent): rank agent-scope typo
+    /// against the legal `teams[team].agents` keys.
+    fn with_scoped_suggestions_for_agent(
+        self,
+        team_entry: &Value,
+        team: &str,
+        agent_typo: &str,
+        parsed: &ParsedNamedAddress,
+    ) -> Self {
+        use crate::model::name_similarity::{rank, Candidate};
+        let candidates: Vec<Candidate<String>> = team_entry
+            .get("agents")
+            .and_then(Value::as_object)
+            .map(|agents| {
+                agents
+                    .keys()
+                    .map(|agent_id| Candidate {
+                        match_key: agent_id.clone(),
+                        stable_key: agent_id.clone(),
+                        payload: agent_id.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ranked = rank(agent_typo, &candidates);
+        let requested_display = parsed.display_name();
+        let candidate_values: Vec<Value> = ranked
+            .iter()
+            .map(|agent_id| {
+                json!({
+                    "name": format!("{team}/{agent_id}"),
+                    "team_key": team,
+                    "agent_id": agent_id,
+                    "advisory": true,
+                })
+            })
+            .collect();
+        let best = ranked
+            .first()
+            .map(|agent_id| format!("{team}/{agent_id}"));
+        self.with_scoped_suggestions(requested_display, candidate_values, best)
+    }
+
+    /// 0.5.45 naming-addressing (design §3.3/§3.4): attach an
+    /// advisory suggestion payload. `requested` is the original typo
+    /// (surfaced verbatim in JSON + N38 Action); `ranked_candidates`
+    /// carry the scope-safe candidate payloads produced by
+    /// `model::name_similarity::rank`. The best candidate populates
+    /// `suggested_name` for convenience; the full list appears as
+    /// `candidates` in the JSON envelope.
+    pub(crate) fn with_scoped_suggestions(
+        mut self,
+        requested: impl Into<String>,
+        ranked_candidates: Vec<Value>,
+        best_copyable: Option<String>,
+    ) -> Self {
+        let requested = requested.into();
+        self.requested_name = Some(requested.clone());
+        self.candidates = ranked_candidates;
+        self.suggested_name = best_copyable.clone();
+        // Rewrite Action so the human line points at the actual
+        // returned candidate (RED-4). Falls back to a status-JSON
+        // hint when no candidate cleared the threshold.
+        if let Some(best) = best_copyable {
+            self.action = format!(
+                "Did you mean `{best}`? Rerun with `--to-name {best}`."
+            );
+        } else {
+            self.action = format!(
+                "No close matches for `{requested}`. \
+                 Run `team-agent status --json` for the current team_key + agent list \
+                 and combine them as `<team>/<agent>` for `--to-name`."
+            );
+        }
+        self
     }
 
     pub(crate) fn to_json(&self) -> Value {
@@ -122,6 +258,12 @@ impl NamedAddressError {
             obj.insert(
                 "suggested_name".to_string(),
                 Value::String(suggested.to_string()),
+            );
+        }
+        if let Some(requested) = self.requested_name.as_deref() {
+            obj.insert(
+                "requested_name".to_string(),
+                Value::String(requested.to_string()),
             );
         }
         Value::Object(obj)
@@ -261,8 +403,20 @@ pub(crate) fn resolve_name_with_workspace_transports(
 pub(crate) fn resolve_name_for_cli(
     sender_workspace: &Path,
     raw_name: &str,
+    bare_team_scope: Option<&str>,
 ) -> Result<(ResolvedNamedAddress, Box<dyn Transport>), NamedAddressError> {
     let parsed = parse_named_address(raw_name)?;
+    // 0.5.45 naming-addressing (design §3.1, RED-1): bare `--to-name`
+    // + explicit `--team` normalizes to `ParsedTarget::TeamEntity`
+    // BEFORE transport selection. Only fires when:
+    //   1. address parsed as bare (no `team/`, no `workspace::`),
+    //   2. caller passed a non-empty `bare_team_scope`.
+    // Qualified addresses keep the scope in the address (design §1
+    // priority: workspace::team/entity > team/entity > bare + --team
+    // > bare workspace-unique). resolve_name_with_transport and the
+    // registry-to-E6 internal helper deliberately pass `None` so
+    // caller-supplied `--team` never overrides a full address.
+    let parsed = normalize_bare_with_team_scope(parsed, bare_team_scope);
     let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
     let state = load_state_checked(&target_workspace)?;
     let transport = transport_for_cli_target(&target_workspace, &state, &parsed);
@@ -274,6 +428,34 @@ pub(crate) fn resolve_name_for_cli(
         transport.as_ref(),
     )?;
     Ok((resolved, transport))
+}
+
+/// 0.5.45 naming-addressing (design §3.1): apply bare-team scope归一.
+/// Only bare targets with no workspace prefix consume `--team`;
+/// qualified addresses keep the scope embedded in the address.
+fn normalize_bare_with_team_scope(
+    parsed: ParsedNamedAddress,
+    bare_team_scope: Option<&str>,
+) -> ParsedNamedAddress {
+    let Some(scope) = bare_team_scope.map(str::trim).filter(|s| !s.is_empty()) else {
+        return parsed;
+    };
+    if parsed.workspace.is_some() {
+        return parsed;
+    }
+    match parsed.target {
+        ParsedTarget::BareAgent(agent) => ParsedNamedAddress {
+            workspace: parsed.workspace,
+            target: ParsedTarget::TeamEntity {
+                team: scope.to_string(),
+                entity: agent,
+            },
+        },
+        target => ParsedNamedAddress {
+            workspace: parsed.workspace,
+            target,
+        },
+    }
 }
 
 /// E6 wiring helper (`cli::send::maybe_enqueue_offline_leader_mailbox`):
@@ -462,12 +644,32 @@ fn resolve_worker(
     parsed: &ParsedNamedAddress,
     transport: &dyn Transport,
 ) -> Result<ResolvedNamedAddress, NamedAddressError> {
-    let team_entry = team_entry(state, team).ok_or_else(|| name_not_resolvable_team(team))?;
-    let agent_entry = team_entry
+    let team_entry = match team_entry(state, team) {
+        Some(entry) => entry,
+        None => {
+            // 0.5.45 naming-addressing (design §3.4, RED-2 named):
+            // typo in team scope. Candidates come from the target
+            // workspace's `teams.*.*` — scope-safe because we're
+            // already inside the requested workspace projection.
+            return Err(name_not_resolvable_team(team)
+                .with_scoped_suggestions_for_team(state, team, agent, parsed));
+        }
+    };
+    let agent_entry = match team_entry
         .get("agents")
         .and_then(Value::as_object)
         .and_then(|agents| agents.get(agent))
-        .ok_or_else(|| name_not_resolvable_agent(team, agent))?;
+    {
+        Some(entry) => entry,
+        None => {
+            // 0.5.45 naming-addressing (design §3.4, RED-2 named):
+            // typo in agent within a legal team. Candidates come from
+            // `teams[team].agents` — scope stays in the requested
+            // team, so sibling teams cannot leak.
+            return Err(name_not_resolvable_agent(team, agent)
+                .with_scoped_suggestions_for_agent(team_entry, team, agent, parsed));
+        }
+    };
     let session = string_field(team_entry, "session_name")
         .ok_or_else(|| name_not_resolvable("team is missing session_name"))?;
     let window = string_field(agent_entry, "window")

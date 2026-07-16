@@ -308,7 +308,24 @@ fn command_help(command: Option<&str>) -> String {
         Some("quick-start") => "usage: team-agent quick-start [TEAMDIR] [--workspace WORKSPACE] [--name NAME] [--team-id TEAM|--team TEAM] [--yes] [--no-display] [--backend tmux|conpty] [--json]\n\ndefaults: display_backend=adaptive; set display_backend: none in TEAM.md or pass --no-display to use one worker window per agent.\n\n--backend selects the worker transport (Phase 1d Batch 2): tmux (default on POSIX; unchanged behavior), conpty (Windows-native ConPTY worker transport; requires the shim binary and Windows host).".to_string(),
         Some("start") => compat_hidden_help("start", "usage: team-agent start [TEAMDIR] [--yes] [--fresh] [--json]"),
         Some("compile") => "usage: team-agent compile --team TEAM [--out FILE] [--json]".to_string(),
-        Some("send") => "usage: team-agent send TARGET MESSAGE... [--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] [--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] [--watch-result] [--requires-ack|--no-ack] [--no-wait] [--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\nMVP: name-based cross-workspace addressing assumes trusted local caller; no auth gate.".to_string(),
+        Some("send") => concat!(
+            "usage: team-agent send TARGET MESSAGE... ",
+            "[--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] ",
+            "[--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] ",
+            "[--watch-result] [--requires-ack|--no-ack] [--no-wait] ",
+            "[--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\n",
+            "TARGET is a short id scoped by --team; MCP `to` is a short id scoped ",
+            "by the worker's owner team.\n",
+            "--to-name accepts: --to-name AGENT, --to-name TEAM/AGENT, or ",
+            "--to-name WORKSPACE::TEAM/AGENT.\n",
+            "--team scopes only a bare --to-name AGENT; qualified forms keep the ",
+            "scope in the address.\n",
+            "TEAM/AGENT and WORKSPACE::TEAM/AGENT are not valid positional TARGET ",
+            "or MCP `to` values.\n\n",
+            "MVP: name-based cross-workspace addressing assumes trusted local ",
+            "caller; no auth gate."
+        )
+        .to_string(),
         Some("allow-peer-talk") => "usage: team-agent allow-peer-talk A B [--workspace WORKSPACE] [--json]".to_string(),
         Some("status") => "usage: team-agent status [AGENT] [--workspace WORKSPACE] [--team TEAM] [--summary|--json] [--detail]\n\n默认输出: worker,空闲|工作|错误；错误细分走 status --summary".to_string(),
         Some("stop") => compat_hidden_help("stop", "usage: team-agent stop [--workspace WORKSPACE] [--team TEAM] [--keep-logs] [--json]"),
@@ -357,43 +374,33 @@ fn emit_unknown_subcommand_usage(command: &str) -> ExitCode {
     if let Some(suggestion) = nearest_subcommand(command) {
         eprintln!("team-agent: did you mean `{suggestion}`?");
     }
-    ExitCode::Usage
+    // 0.5.45 naming-addressing (RED-6): unknown subcommand exits 1
+    // (Error), aligned with the family of typo refusals throughout
+    // send/named. Pre-0.5.45 mapped to Usage (2) argparse-style; the
+    // shared refusal shape ("typo diagnostic + advisory suggestion +
+    // exit 1") is the invariant callers of `team-agent send` /
+    // `--to-name` also see, so keeping unknown-subcommand at 2 was
+    // internal drift.
+    ExitCode::Error
 }
 
-/// 在已知子命令里找与 `input` 最接近的一个(Levenshtein ≤ 阈值)。无足够接近者 → None。
+/// 在已知子命令里找与 `input` 最接近的一个。0.5.45 naming-addressing
+/// (design §3.2/§4.1) 抽公 shared `model::name_similarity` — 距离
+/// 阈值与排序规则跟 CLI `--to-name` typo suggestion 走同一份纯函数,
+/// 避免两套 fuzzy 逻辑漂移。既有 `statu -> status` 行为保留(RED-6
+/// grep guard + prefix-hit priority)。
 fn nearest_subcommand(input: &str) -> Option<&'static str> {
-    let candidates = COMMAND_SPECS
+    use crate::model::name_similarity::{rank, Candidate};
+    let candidates: Vec<Candidate<&'static str>> = COMMAND_SPECS
         .iter()
         .filter(|spec| spec.suggestion_index)
-        .map(|spec| spec.name);
-    // 阈值随长度放宽,但短词收紧,避免 'x' 误配任何东西。
-    let max_distance = match input.chars().count() {
-        0..=3 => 1,
-        4..=6 => 2,
-        _ => 3,
-    };
-    candidates
-        .map(|c| (c, levenshtein(input, c)))
-        .filter(|(_, d)| *d <= max_distance)
-        .min_by_key(|(_, d)| *d)
-        .map(|(c, _)| c)
-}
-
-/// 标准 Levenshtein 编辑距离(纯函数,无依赖;子命令建议用)。
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    let mut curr = vec![0usize; b.len() + 1];
-    for (i, &ca) in a.iter().enumerate() {
-        curr[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b.len()]
+        .map(|spec| Candidate {
+            match_key: spec.name.to_string(),
+            stable_key: spec.name.to_string(),
+            payload: spec.name,
+        })
+        .collect();
+    rank(input, &candidates).into_iter().next()
 }
 
 fn emit_usage_error(message: &str) {
@@ -2011,6 +2018,10 @@ mod tests {
 
     #[test]
     fn e8_levenshtein_basic() {
+        // 0.5.45 naming-addressing: distance function moved to
+        // `crate::model::name_similarity` (shared with --to-name typo
+        // suggestions). Same math, single source.
+        use crate::model::name_similarity::levenshtein;
         assert_eq!(levenshtein("kitten", "sitting"), 3);
         assert_eq!(levenshtein("status", "status"), 0);
         assert_eq!(levenshtein("statu", "status"), 1);

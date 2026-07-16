@@ -12,11 +12,10 @@
 //!
 //! Golden bytes captured live (PYTHONPATH=.../src python3 -m team_agent bogus).
 //!
-//! Rust DIVERGES: cli/emit.rs:99 `_ => Ok(ExitCode::Error)` -> SILENT exit 1 (no stdout/stderr);
-//! run() with no argv -> ExitCode::Ok (exit 0). ExitCode::Usage (code 2) already exists (types.rs).
-//! Porter fix: dispatch `_` arm + empty-argv path -> emit argparse-style usage to stderr +
-//! ExitCode::Usage. (Full usage-text/subcommand-list byte-parity is a follow-up once the verb set
-//! settles; this RED locks the routing: stderr usage + invalid-choice + exit 2.)
+//! Rust intentionally diverges at one 0.5.45 boundary: naming-addressing design §8 + CR D-o
+//! changed unknown-subcommand from argparse Usage (2) to Error (1), while preserving the usage,
+//! invalid-choice, and suggestion diagnostics. Do not restore exit 2 here as golden parity.
+//! Missing-subcommand remains aligned with parser.py argparse required/Usage (2).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -70,18 +69,19 @@ fn top_level_version_prints_current_package_version() {
     );
 }
 
-// ── unknown subcommand -> argparse usage error to STDERR, exit 2 ──────────────────────────────
+// ── unknown subcommand -> argparse-shaped STDERR diagnostic, D-o Error exit 1 ────────────────
 #[test]
-fn unknown_subcommand_is_argparse_usage_error_exit2() {
+fn unknown_subcommand_uses_d_o_error_exit1_with_argparse_diagnostic() {
     let cwd = tmp_cwd("bogus");
     let out = run(&["bogus"], &cwd);
     let err = String::from_utf8_lossy(&out.stderr);
 
     assert_eq!(
         out.status.code(),
-        Some(2),
-        "golden argparse rejects an unknown subcommand with exit 2 (parser.py:84); \
-         Rust emit.rs:99 `_ => Ok(ExitCode::Error)` returns exit {:?}",
+        Some(1),
+        "0.5.45 naming-addressing design §8 + CR D-o intentionally changed unknown-subcommand \
+         from golden parser.py argparse Usage (2) to Error (1); do not restore exit 2 as a \
+         golden-parity regression fix. got {:?}",
         out.status.code()
     );
     assert!(
