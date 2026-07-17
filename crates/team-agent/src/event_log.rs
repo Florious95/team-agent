@@ -147,7 +147,7 @@ impl EventLog {
                 obj.insert(k, v);
             }
         }
-        let event = Value::Object(obj);
+        let event = crate::redaction::redact_external_value(&Value::Object(obj));
         self.maybe_rotate()?;
         // 单次 write_all(line+"\n"):POSIX O_APPEND 对 <PIPE_BUF 写原子,避免并发写者交错(对抗 P1)。
         let mut bytes = to_python_json(&sort_value(&event)).into_bytes();
@@ -176,11 +176,11 @@ impl EventLog {
         let mut out = Vec::new();
         for line in &lines[start..] {
             match serde_json::from_str::<Value>(line) {
-                Ok(v) => out.push(v),
+                Ok(v) => out.push(crate::redaction::redact_external_value(&v)),
                 Err(_) => {
                     let mut m = serde_json::Map::new();
                     m.insert("raw".to_string(), Value::String((*line).to_string()));
-                    out.push(Value::Object(m));
+                    out.push(crate::redaction::redact_external_value(&Value::Object(m)));
                 }
             }
         }

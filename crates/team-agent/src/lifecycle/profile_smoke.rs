@@ -485,27 +485,17 @@ fn proxy_scheme(url: &str) -> Option<String> {
 
 fn redact_endpoint(raw: &str) -> String {
     let no_query = raw.split_once('?').map(|(head, _)| head).unwrap_or(raw);
-    let Some((scheme, rest)) = no_query.split_once("://") else {
-        return no_query.to_string();
-    };
-    let slash = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..slash];
-    let path = &rest[slash..];
-    if let Some((_, host)) = authority.rsplit_once('@') {
-        format!("{scheme}://[redacted]@{host}{path}")
-    } else {
-        no_query.to_string()
-    }
+    crate::redaction::redact_external_text(no_query)
 }
 
 fn redact_text(raw: &str, secrets: &[&str]) -> String {
     let mut out = raw.chars().take(512).collect::<String>();
     for secret in secrets {
         if !secret.is_empty() {
-            out = out.replace(secret, "[redacted]");
+            out = out.replace(secret, "[REDACTED]");
         }
     }
-    out
+    crate::redaction::redact_external_text(&out)
 }
 
 fn auth_mode_wire(auth_mode: AuthMode) -> &'static str {

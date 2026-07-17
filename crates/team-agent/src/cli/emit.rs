@@ -11,16 +11,22 @@ use std::io::Write as _;
 pub fn emit(output: &CmdOutput, as_json: bool) -> Option<String> {
     match output {
         CmdOutput::None => None,
-        CmdOutput::Human(text) => Some(text.clone()),
-        CmdOutput::Json(value) if as_json => serde_json::to_string_pretty(&sort_json(value)).ok(),
-        CmdOutput::Json(Value::Object(obj)) => {
-            let lines: Vec<String> = obj
-                .iter()
-                .map(|(key, value)| format!("{key}: {}", human_value(value)))
-                .collect();
-            Some(lines.join("\n"))
+        CmdOutput::Human(text) => Some(crate::redaction::redact_external_text(text)),
+        CmdOutput::Json(value) => {
+            let value = crate::redaction::redact_external_value(value);
+            if as_json {
+                return serde_json::to_string_pretty(&sort_json(&value)).ok();
+            }
+            if let Value::Object(obj) = value {
+                let lines: Vec<String> = obj
+                    .iter()
+                    .map(|(key, value)| format!("{key}: {}", human_value(value)))
+                    .collect();
+                Some(lines.join("\n"))
+            } else {
+                Some(human_value(&value))
+            }
         }
-        CmdOutput::Json(value) => Some(human_value(value)),
     }
 }
 
@@ -620,8 +626,24 @@ fn emit_cli_error(command: &str, args: &[String], cwd: &Path, error: &CliError) 
     }
     let normalized = normalize_cli_error(error);
     let payload_error = normalized.as_ref().unwrap_or(error);
-    let _ = std::fs::write(&log_path, format!("{payload_error}\n"));
-    let payload = payload_error.to_payload(&log_path, command);
+    let safe_error = crate::redaction::redact_external_text(&payload_error.to_string());
+    let _ = std::fs::write(&log_path, format!("{safe_error}\n"));
+    let mut payload = payload_error.to_payload(&log_path, command);
+    payload.error = safe_error;
+    payload.action = crate::redaction::redact_external_text(&payload.action);
+    payload.log = crate::redaction::redact_external_text(&payload.log);
+    payload.reason = payload
+        .reason
+        .map(|value| crate::redaction::redact_external_text(&value));
+    payload.session_name = payload
+        .session_name
+        .map(|value| crate::redaction::redact_external_text(&value));
+    payload.next_actions = payload.next_actions.map(|values| {
+        values
+            .into_iter()
+            .map(|value| crate::redaction::redact_external_text(&value))
+            .collect()
+    });
     if has_arg(args, "--json") {
         if let Ok(value) = serde_json::to_value(payload) {
             println!("{}", python_compact_json(&value));

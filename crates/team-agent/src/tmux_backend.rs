@@ -1338,6 +1338,7 @@ fn strip_ansi_escapes_inplace(input: &str) -> String {
 }
 
 fn scrub_secrets(line: &str) -> String {
+    let line = crate::redaction::redact_external_text(line);
     // Five shapes: sk-XXXX, ghp_XXXX, AKIAXXXX (16-char uppercase id), Bearer XXXX,
     // 32+ hex (token).
     let mut out = String::with_capacity(line.len());

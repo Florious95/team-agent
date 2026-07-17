@@ -89,7 +89,7 @@ pub fn status_scoped(
         );
     }
     let readiness = crate::cli::diagnose::wait_readiness(&readiness_state);
-    let full = json!({
+    let full = crate::redaction::redact_external_value(&json!({
         "ok": true,
         "team": state.pointer("/leader/id").cloned().unwrap_or_else(|| json!("leader")),
         "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),
@@ -124,7 +124,7 @@ pub fn status_scoped(
                 .tail(10)
                 .map_err(|e| CliError::Runtime(e.to_string()))?,
         ),
-    });
+    }));
     if compact {
         Ok(compact_status(full))
     } else {

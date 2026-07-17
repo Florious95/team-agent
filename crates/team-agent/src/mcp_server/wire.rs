@@ -204,6 +204,7 @@ fn run_stdio_loop_inner<R: BufRead, W: Write>(
         report.requests_read = report.requests_read.saturating_add(1);
         let frame = handle_stdin_line(tools, &line, report)?;
         if let Some(value) = frame {
+            let value = crate::redaction::redact_external_value(&value);
             serde_json::to_writer(&mut *writer, &value)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
@@ -266,7 +267,8 @@ fn rpc_id_from_request(request: &Value) -> RpcId {
 }
 
 fn tool_call_result_value(is_error: bool, body: &Value) -> Value {
-    let text = json_dumps_default(body);
+    let body = crate::redaction::redact_external_value(body);
+    let text = json_dumps_default(&body);
     let mut content = serde_json::Map::new();
     content.insert("type".to_string(), Value::String("text".to_string()));
     content.insert("text".to_string(), Value::String(text));
