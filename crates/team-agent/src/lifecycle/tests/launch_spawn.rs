@@ -2895,7 +2895,7 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 }
 
 // Stage A — golden launch/core.py:62-71 seeded top-level runtime state in insertion order:
-// spec_path, workspace, team_dir, session_name, leader, agents, tasks, display_backend.
+// spec_path, workspace, team_dir, team_key, session_name, leader, agents, tasks, display_backend.
 //
 // OLD (Python parity): the top-level shape ended at `display_backend`.
 // NEW (Bug 1/2 — team-in-team state scope, see tests/team_in_team_state_scope_red.rs):
@@ -2908,9 +2908,9 @@ fn quick_start_seeds_tasks_key_from_compiled_spec() {
 //   The post-launch hook drops the top-level owner triple when the launched pane is
 //   unbound (empty pane_id), and only the per-team entry retains the binding.
 //   R1: topology is explicit; fresh managed teams carry `is_external_leader=false`
-//   before the team-in-team suffix. Order remains the golden prefix
-//   (spec_path … display_backend) + topology marker + new suffix (active_team_key,
-//   teams). display_backend stays the resolved backend from display/backend.py:12-29
+//   before the team-in-team suffix. Canonical `team_key` is seeded before owner
+//   binding; the remaining order stays the golden prefix + topology marker + new
+//   suffix (active_team_key, teams). display_backend stays the resolved backend from display/backend.py:12-29
 //   (default adaptive), not the raw optional spec field.
 #[test]
 #[serial(env)]
@@ -2943,6 +2943,9 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             "spec_path",
             "workspace",
             "team_dir",
+            // Seed canonical identity before owner binding so the initial
+            // receiver is written under the same team key as the saved state.
+            "team_key",
             "session_name",
             "leader",
             "agents",
@@ -2956,17 +2959,12 @@ fn quick_start_state_seeds_spec_path_workspace_leader_display_backend() {
             // field); source is `"unknown"` until Phase 2 threads
             // `ResolvedTransport.source` through the launch call site.
             "transport",
-            // 0.4.0 refactor: `team_key` added as top-level topology marker
-            // alongside active_team_key (refactor-modular-architecture). The
-            // owner / leader_receiver / owner_epoch invariants below still
-            // hold — those live only under teams[<active_team_key>].
-            "team_key",
             "active_team_key",
             "teams",
         ],
         "state.json top-level key order must match golden launch/core.py:62-71 \
          plus R1 topology marker and Bug 1/2 team-in-team suffix \
-         (is_external_leader, team_key, active_team_key, teams). \
+         (is_external_leader, active_team_key, teams). \
          Bug 2 owner team-scope (N1/N12/N18/N29) deliberately keeps owner / \
          leader_receiver / owner_epoch OFF the top level — they live ONLY under \
          teams[<active_team_key>] so per-team isolation has a single source of \

@@ -3271,7 +3271,13 @@ pub fn quick_start_with_transport_in_workspace_with_display(
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let resolved_spec_path =
         std::fs::canonicalize(&spec_path).unwrap_or_else(|_| spec_path.clone());
-    let mut state = initial_runtime_state(&spec, &resolved_spec_path, &workspace, agents_dir);
+    let mut state = initial_runtime_state(
+        &spec,
+        &resolved_spec_path,
+        &workspace,
+        agents_dir,
+        &state_team_key,
+    );
     // 0.5.x Phase 1d hot-path 接线(裁决1 msg_76e1d98202b8): use the
     // generic annotator that writes `state.transport = { kind, source }`
     // for every backend AND (for tmux) preserves the existing
@@ -5110,6 +5116,7 @@ fn initial_runtime_state(
     spec_path: &Path,
     workspace: &Path,
     team_dir: &Path,
+    team_key: &str,
 ) -> serde_json::Value {
     let mut agents = serde_json::Map::new();
     for agent in spec_agent_values(spec) {
@@ -5151,6 +5158,7 @@ fn initial_runtime_state(
         "team_dir".to_string(),
         serde_json::json!(team_dir.to_string_lossy().to_string()),
     );
+    state.insert("team_key".to_string(), serde_json::json!(team_key));
     state.insert(
         "session_name".to_string(),
         serde_json::json!(spec_session_name(spec).as_str()),
