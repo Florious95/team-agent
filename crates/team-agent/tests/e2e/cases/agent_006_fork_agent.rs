@@ -2,6 +2,11 @@
 //!
 //! Fake provider workers have no native session fork. The guard accepts that
 //! black-box refusal, but rejects silent green or half-created state.
+//!
+//! The shimmed native-fork success path is covered by the CI-runnable
+//! `fork_team_scope_verifier_contract` integration test: fork -> short send ->
+//! qualified-name send -> team status -> stop-agent. Keep this fake-provider
+//! case focused on explicit refusal and absence of half-created state.
 
 use crate::framework::*;
 
