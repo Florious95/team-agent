@@ -80,11 +80,10 @@ fn layout_pane(
 }
 
 /// E5 spec 迁移:spec 不再落 team_dir,而在 <team_workspace>/.team/runtime/<team_key>/。
-/// team_key = team_dir.name(quick_start_team_dir → "teamdir");workspace = team_workspace(team)。
+/// quick-start 未显式指定 id 时,team_key 来自 compiled TEAM.md name(`quickteam`)。
 pub(super) fn quick_start_runtime_spec_path(team: &std::path::Path) -> PathBuf {
     let workspace = crate::model::paths::team_workspace(team).unwrap();
-    let team_key = team.file_name().unwrap().to_string_lossy().to_string();
-    crate::model::paths::runtime_spec_path(&workspace, &team_key)
+    crate::model::paths::runtime_spec_path(&workspace, "quickteam")
 }
 
 /// 在 team 自身或其 team_workspace 父下找 .team/runtime/*/team.spec.yaml。run_workspace 解析
@@ -173,6 +172,26 @@ fn quick_start_compiles_real_spec_to_team_spec_yaml() {
 }
 
 #[test]
+fn quick_start_without_team_id_uses_compiled_team_name_as_canonical_key() {
+    let team = quick_start_team_dir(QS_VALID_ROLE);
+    let workspace = crate::model::paths::team_workspace(&team).unwrap();
+    let transport = OfflineTransport::new();
+
+    let result = quick_start_with_transport(&team, None, true, None, &transport);
+    assert!(result.is_ok(), "quick-start fixture must run: {result:?}");
+
+    let state = crate::state::persist::load_runtime_state(&workspace).unwrap();
+    assert_eq!(state["active_team_key"], json!("quickteam"));
+    assert_eq!(state["team_key"], json!("quickteam"));
+    assert!(state["teams"].get("quickteam").is_some(), "{state}");
+    assert!(state["teams"].get("teamdir").is_none(), "{state}");
+    assert!(
+        crate::model::paths::runtime_spec_path(&workspace, "quickteam").exists(),
+        "runtime spec must share the canonical key"
+    );
+}
+
+#[test]
 fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_collect() {
     let workspace = temp_ws();
     let team = workspace.join(".team").join("current");
@@ -215,8 +234,8 @@ fn quick_start_teamdir_under_dot_team_uses_project_workspace_for_status_and_coll
             "input={}",
             input.display()
         );
-        // E5: selector resolves spec_path to .team/runtime/<team_key>/ (team_key="current").
-        let expected_spec = crate::model::paths::runtime_spec_path(&workspace, "current");
+        // E5: selector resolves spec_path to .team/runtime/<canonical team_key>/.
+        let expected_spec = crate::model::paths::runtime_spec_path(&workspace, "quickteam");
         assert_eq!(
             selected
                 .spec_path
@@ -1319,7 +1338,7 @@ fn quick_start_persists_selected_tmux_endpoint_and_attach_commands() {
     assert_eq!(state["tmux_socket"], json!(endpoint));
     assert_eq!(state["is_external_leader"], json!(false));
     assert_eq!(
-        state["teams"]["teamdir"]["is_external_leader"],
+        state["teams"]["quickteam"]["is_external_leader"],
         json!(false)
     );
 }

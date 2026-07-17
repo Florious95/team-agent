@@ -144,9 +144,10 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     )?;
     let target = send_target(args.targets.as_deref(), args.target.as_deref());
     let mut opts = send_options_from_args(args);
-    if opts.team.is_none() {
-        opts.team = Some(TeamKey::new(selected.team_key.clone()));
-    }
+    // `args.team` is a selector and may be a legacy session/team-dir alias.
+    // All downstream membership and DB scope must use the canonical key that
+    // resolve_active_team returned, never the original selector spelling.
+    opts.team = Some(TeamKey::new(selected.team_key.clone()));
     let content = args.message.join(" ");
     // CR-061/N27 routing-ambiguous: a single positional with no `--to`/`--targets` and an
     // empty message body is a prompt-only invocation (`team-agent send "fix the build"`).

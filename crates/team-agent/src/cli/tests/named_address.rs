@@ -223,6 +223,29 @@ fn resolve_name_team_disambiguated() {
 }
 
 #[test]
+fn resolve_qualified_name_canonicalizes_legacy_session_alias() {
+    let ws = named_ws("legacy-session-alias");
+    seed_state(
+        &ws,
+        state_with_teams(json!({
+            "teamdir": worker_team("team-displayname", "qa", "%1", "qa")
+        })),
+    );
+    let transport = OfflineTransport::new().with_targets(vec![pane(
+        "team-displayname",
+        "qa",
+        "%1",
+    )]);
+
+    let resolved = resolve_name_with_transport(&ws, "displayname/qa", &transport)
+        .expect("qualified legacy alias must resolve through the canonical selector");
+    assert_eq!(resolved.team_key.as_deref(), Some("teamdir"));
+    assert_eq!(resolved.agent_id.as_deref(), Some("qa"));
+    assert_eq!(resolved.pane_id, "%1");
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+#[test]
 fn resolve_name_stale_pane() {
     let ws = named_ws("stale-pane");
     seed_state(

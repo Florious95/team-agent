@@ -230,7 +230,7 @@ fn cli_quick_start_invokes_real_lifecycle_compiles_spec() {
     };
     let _ = cmd_quick_start(&args); // real quick_start compiles the spec before any coordinator/launch step
                                     // E5: spec compiled to .team/runtime/<team_key>/, NOT the user team dir.
-    let team_key = team.file_name().unwrap().to_string_lossy().to_string();
+    let team_key = "clidelegteam";
     let workspace = crate::model::paths::team_workspace(&team).unwrap();
     let runtime_spec = crate::model::paths::runtime_spec_path(&workspace, &team_key);
     assert!(

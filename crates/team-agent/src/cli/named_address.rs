@@ -472,7 +472,10 @@ pub(crate) fn parse_leader_target_workspace_and_team(
     let target_workspace = resolve_workspace(sender_workspace, parsed.workspace.as_deref())?;
     match parsed.target {
         ParsedTarget::TeamEntity { team, entity } if entity == "leader" => {
-            Ok(Some((target_workspace, team)))
+            let state = load_state_checked(&target_workspace)?;
+            let canonical = canonical_named_team_key(&target_workspace, &state, &team)
+                .unwrap_or(team);
+            Ok(Some((target_workspace, canonical)))
         }
         _ => Ok(None),
     }
@@ -607,23 +610,30 @@ fn resolve_in_workspace(
         ParsedTarget::BareAgent(agent) => {
             resolve_bare_agent(sender_workspace, target_workspace, state, agent, transport)
         }
-        ParsedTarget::TeamEntity { team, entity } if entity == "leader" => resolve_leader(
-            sender_workspace,
-            target_workspace,
-            state,
-            team,
-            parsed,
-            transport,
-        ),
-        ParsedTarget::TeamEntity { team, entity } => resolve_worker(
-            sender_workspace,
-            target_workspace,
-            state,
-            team,
-            entity,
-            parsed,
-            transport,
-        ),
+        ParsedTarget::TeamEntity { team, entity } => {
+            let canonical = canonical_named_team_key(target_workspace, state, team)
+                .unwrap_or_else(|| team.clone());
+            if entity == "leader" {
+                resolve_leader(
+                    sender_workspace,
+                    target_workspace,
+                    state,
+                    &canonical,
+                    parsed,
+                    transport,
+                )
+            } else {
+                resolve_worker(
+                    sender_workspace,
+                    target_workspace,
+                    state,
+                    &canonical,
+                    entity,
+                    parsed,
+                    transport,
+                )
+            }
+        }
         ParsedTarget::SessionWindow { session, window } => resolve_session_window(
             sender_workspace,
             target_workspace,
@@ -1149,8 +1159,10 @@ fn transport_for_cli_target(
     parsed: &ParsedNamedAddress,
 ) -> Box<dyn Transport> {
     if let ParsedTarget::TeamEntity { team, entity } = &parsed.target {
+        let canonical = canonical_named_team_key(target_workspace, state, team)
+            .unwrap_or_else(|| team.clone());
         if entity == "leader" {
-            let team_scoped_socket = team_entry(state, team)
+            let team_scoped_socket = team_entry(state, &canonical)
                 .and_then(|entry| entry.get("leader_receiver"))
                 .and_then(|receiver| string_field(receiver, "tmux_socket"));
             let socket = team_scoped_socket.map(str::to_string).or_else(|| {
@@ -1164,7 +1176,7 @@ fn transport_for_cli_target(
                 return Box::new(crate::tmux_backend::TmuxBackend::for_tmux_endpoint(&socket));
             }
         }
-        if let Some(entry) = team_entry(state, team) {
+        if let Some(entry) = team_entry(state, &canonical) {
             let selected = crate::tmux_backend::tmux_backend_for_runtime_state_or_workspace(
                 target_workspace,
                 Some(entry),
@@ -1245,6 +1257,30 @@ fn team_entry<'a>(state: &'a Value, team: &str) -> Option<&'a Value> {
         .get("teams")
         .and_then(Value::as_object)
         .and_then(|teams| teams.get(team))
+}
+
+fn canonical_named_team_key(
+    target_workspace: &Path,
+    state: &Value,
+    requested: &str,
+) -> Option<String> {
+    if team_entry(state, requested).is_some() || is_legacy_single_team_active(state, requested) {
+        return Some(requested.to_string());
+    }
+    let selected = crate::state::projection::select_runtime_state(
+        target_workspace,
+        Some(requested),
+    )
+    .ok()?;
+    let canonical = selected
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|team| !team.is_empty())?;
+    state
+        .get("teams")
+        .and_then(Value::as_object)
+        .is_some_and(|teams| teams.contains_key(canonical))
+        .then(|| canonical.to_string())
 }
 
 /// E6 (0.5.9 offline-mailbox-toname-design §3.1): decide which

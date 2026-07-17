@@ -451,7 +451,7 @@ fn team_dir_with_roles(role_docs: &[(&str, &str)]) -> PathBuf {
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
         team.join("TEAM.md"),
-        "---\nname: phaseb\nobjective: Phase B.\nprovider: codex\n---\n\nPhase B team.\n",
+        "---\nname: teamdir\nobjective: Phase B.\nprovider: codex\nsession_name: team-phaseb\n---\n\nPhase B team.\n",
     )
     .unwrap();
     for (file, role_doc) in role_docs {
@@ -536,7 +536,7 @@ fn add_fixture() -> (PathBuf, PathBuf, PathBuf, OfflineTransport) {
     quick_start_with_transport_in_workspace_with_display(
         &workspace,
         &team,
-        None,
+        Some("teamdir"),
         true,
         None,
         &launch_transport,

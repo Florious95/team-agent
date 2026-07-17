@@ -706,6 +706,48 @@ fn cmd_send_failed_outcome_yields_error_exit() {
     }
 }
 
+#[test]
+fn cmd_send_canonicalizes_legacy_session_alias_before_membership_projection() {
+    let ws = deleg_uniq_dir("send-team-alias");
+    let _ = crate::message_store::MessageStore::open(&ws).unwrap();
+    crate::state::persist::save_runtime_state(
+        &ws,
+        &json!({
+            "active_team_key": "teamdir",
+            "team_key": "teamdir",
+            "teams": {
+                "teamdir": {
+                    "status": "alive",
+                    "session_name": "team-displayname",
+                    "agents": {"w1": {"provider": "codex", "status": "running"}}
+                }
+            }
+        }),
+    )
+    .unwrap();
+    let args = SendArgs {
+        workspace: ws,
+        target: Some("w1".into()),
+        team: Some("displayname".into()),
+        task: None,
+        no_wait: true,
+        watch_result: false,
+        json: true,
+        ..send_args_fixture()
+    };
+
+    let result = cmd_send(&args).expect("alias selection should reach canonical team send");
+    let value = match result.output {
+        CmdOutput::Json(value) => value,
+        other => panic!("expected JSON send outcome, got {other:?}"),
+    };
+    assert_ne!(
+        value.get("reason").and_then(serde_json::Value::as_str),
+        Some("target_not_in_team"),
+        "selector accepted the alias, so membership must use its canonical team key: {value}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // coordinator.ok — non-compact status carries the FULL coordinator_health (incl. `ok`); compact
 // strips to {status,pid,metadata_ok,schema_ok} (golden queries.py:77 + compact.py:35; ok =

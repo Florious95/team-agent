@@ -3167,10 +3167,18 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     if !open_display {
         override_spec_display_backend(&mut spec, "none");
     }
-    let requested_team = quick_start_requested_team_key(team_id, name)
-        .map(str::to_string)
-        .or_else(|| spec_team_id(&spec));
     let explicit_team_key = quick_start_requested_team_key(team_id, name).map(str::to_string);
+    let canonical_team_key = explicit_team_key
+        .clone()
+        .or_else(|| spec_team_id(&spec).filter(|team| !team.is_empty()))
+        .unwrap_or_else(|| {
+            runtime_team_key_for_spec(
+                &agents_dir.join("team.spec.yaml"),
+                &spec,
+                &spec_session_name(&spec),
+            )
+        });
+    let requested_team = Some(canonical_team_key.clone());
     let team_depth = quick_start_depth_guard(
         &workspace,
         agents_dir,
@@ -3248,14 +3256,12 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     // spec's runtime.session_name with one derived from the REQUESTED team identity
     // so launch_with_transport (which reads runtime.session_name) spawns into an
     // isolated session per requested team.
-    if let Some(requested) = requested_team.as_deref() {
+    if let Some(requested) = explicit_team_key.as_deref() {
         override_spec_session_name(&mut spec, &format!("team-{requested}"));
     }
     let session_name = spec_session_name(&spec);
-    // team_key 身份源 = team_dir(agents_dir).name(角色定义目录),不依赖 spec 落点。
-    let state_team_key = explicit_team_key.clone().unwrap_or_else(|| {
-        runtime_team_key_for_spec(&agents_dir.join("team.spec.yaml"), &spec, &session_name)
-    });
+    // team_key 已在入口由显式 id/name 或 compiled spec identity 单次确定。
+    let state_team_key = canonical_team_key;
     warn_ignored_owner_team_id(workspace.as_path(), agents_dir, &state_team_key);
     // E5 spec 迁移:spec 写到 .team/runtime/<team_key>/(中间产物,绝不落用户目录 agents_dir)。
     // Bug2:原子写(tmp+rename),避免半截 spec。

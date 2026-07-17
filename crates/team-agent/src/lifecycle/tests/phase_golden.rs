@@ -367,7 +367,7 @@ fn two_worker_team_dir(hermetic: &HermeticTestEnv) -> PathBuf {
     std::fs::create_dir_all(team.join("agents")).unwrap();
     std::fs::write(
         team.join("TEAM.md"),
-        "---\nname: phasegolden\nobjective: Phase golden.\nprovider: codex\n---\n\nPhase golden team.\n",
+        "---\nname: teamdir\nobjective: Phase golden.\nprovider: codex\nsession_name: team-phasegolden\n---\n\nPhase golden team.\n",
     )
     .unwrap();
     for id in ["w1", "w2"] {
