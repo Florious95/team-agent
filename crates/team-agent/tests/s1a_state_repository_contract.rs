@@ -222,6 +222,16 @@ fn red4_repository_dispatches_representative_intents_to_existing_helpers() {
             "reset-agent discard-session must keep tombstone topology behavior",
         ),
         (
+            "ForkAgent",
+            "helper_write_team_scoped_with_lifecycle_topology_authority",
+            "fork-agent must persist the selected team projection with topology authority",
+        ),
+        (
+            "AgentRollback",
+            "helper_write_team_scoped_with_deleted_agents",
+            "team-scoped agent rollback must preserve sibling teams",
+        ),
+        (
             "ResultCollection",
             "save_team_scoped_state_reapplying_after_conflict",
             "result collection with a team must keep scoped reapply behavior",

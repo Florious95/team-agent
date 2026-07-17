@@ -69,6 +69,7 @@ fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn
     let _env = EnvGuard::set(FAIL_FORK_AFTER_SPAWN, "save_runtime_state");
     let fixture = RollbackFixture::new("fork-post-spawn");
     fixture.seed_team();
+    fixture.seed_sibling_team_with_same_fork_id();
     fixture.seed_healthy_coordinator();
     let spec_before = fixture.spec_text();
     let state_before = load_runtime_state(&fixture.team).unwrap();
@@ -225,6 +226,32 @@ impl RollbackFixture {
         }
         std::fs::write(coordinator_pid_path(&ws), pid.to_string()).unwrap();
         write_coordinator_metadata(&ws, pid, MetadataSource::Start).unwrap();
+    }
+
+    fn seed_sibling_team_with_same_fork_id(&self) {
+        let mut state = load_runtime_state(&self.team).unwrap();
+        let selected = state.clone();
+        state.as_object_mut().unwrap().insert(
+            "teams".to_string(),
+            json!({
+                "rollbackteam": selected,
+                "sibling": {
+                    "agents": {
+                        "newfork": {
+                            "status": "running",
+                            "provider": "codex",
+                            "pane_id": "%sibling-newfork",
+                            "owner_team_id": "sibling"
+                        }
+                    }
+                }
+            }),
+        );
+        save_runtime_state(&self.team, &state).unwrap();
+        let selected =
+            team_agent::state::projection::select_runtime_state(&self.team, Some("rollbackteam"))
+                .unwrap();
+        team_agent::state::projection::save_team_scoped_state(&self.team, &selected).unwrap();
     }
 
     fn seed_agent_health(

@@ -157,6 +157,11 @@ fn a7_fork_agent_label_becomes_new_role() {
         ws: harness.workspace_path().to_path_buf(),
     };
     seed_forkable_source(&harness);
+    let sibling_before = harness
+        .state_value()
+        .pointer("/teams/teamB")
+        .cloned()
+        .expect("fixture seeds sibling teamB");
     // Fork is an owner-side lifecycle op: give the client the owner's identity
     // (caller_identity_from_env reads TEAM_AGENT_LEADER_SESSION_UUID /
     // TEAM_AGENT_LEADER_PANE_ID; the spawned mcp-server child inherits the test
@@ -215,9 +220,11 @@ body={} raw={}",
     );
 
     let state = harness.state_value();
-    let role = state
-        .pointer("/teams/teamA/agents/worker_fork/role")
-        .or_else(|| state.pointer("/agents/worker_fork/role"))
+    let forked = state
+        .pointer("/teams/teamA/agents/worker_fork")
+        .expect("A-7: fork must be registered in the canonical selected team row");
+    let role = forked
+        .get("role")
         .and_then(Value::as_str)
         .map(str::to_string);
     assert_eq!(
@@ -225,6 +232,42 @@ body={} raw={}",
         Some("Custom Fork Role"),
         "A-7: label must become the forked agent's role (Python operations.py:315; the \
 role feeds the compiled identity prompt — B2 family); state role={role:?} state={state}"
+    );
+    assert_eq!(
+        forked.get("window").and_then(Value::as_str),
+        Some("worker_fork"),
+        "A-7: canonical team registration must retain the spawned window tuple; forked={forked}"
+    );
+    assert!(
+        forked
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .is_some_and(|pane| pane.starts_with('%')),
+        "A-7: canonical team registration must retain the physical tmux pane id; forked={forked}"
+    );
+    assert_eq!(
+        state.pointer("/teams/teamB"),
+        Some(&sibling_before),
+        "A-7: teamA fork must preserve sibling teamB byte-for-byte"
+    );
+
+    let send = worker.call_tool(
+        "send_message",
+        json!({"to": "worker_fork", "content": "A-7 scoped fork reachability probe"}),
+    );
+    assert_ne!(
+        send.body.get("reason"),
+        Some(&json!("target_not_in_team")),
+        "A-7: a successfully forked team member must pass the team membership gate immediately; body={} raw={}",
+        send.body,
+        send.raw
+    );
+    let rows = harness.message_rows_containing("A-7 scoped fork reachability probe");
+    assert!(
+        rows.iter()
+            .any(|row| row.owner_team_id.as_deref() == Some("teamA")
+                && row.recipient == "worker_fork"),
+        "A-7: the short-name send must resolve and persist under canonical teamA; rows={rows:?}"
     );
 }
 

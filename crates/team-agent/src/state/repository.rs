@@ -315,16 +315,22 @@ fn route_direct(
         StateWriteIntent::RemoveAgent { agent_id, .. } => {
             helper_write_team_scoped_with_deleted_agents(workspace, state, &[agent_id])
         }
-        // ForkAgent -> the launch fork writer uses the root helper at
-        // lifecycle/launch.rs:4542.
-        StateWriteIntent::ForkAgent { .. } => helper_write_root(workspace, state),
-        // AgentRollback -> pre-state rollback uses either the root helper or
-        // the deleted-agents variant depending on the caller; S1a keeps the
-        // root form as the shared entry, and rollback specializations retain
-        // their allowlisted callsites in launch.rs / restart/remove.rs.
-        StateWriteIntent::AgentRollback { agent_id, .. } => {
-            helper_write_root_with_deleted_agents(workspace, state, &[agent_id])
+        // ForkAgent mutates a selected team projection, so persist it back to
+        // that projection with the forked row as lifecycle topology authority.
+        StateWriteIntent::ForkAgent { agent_id, .. } => {
+            helper_write_team_scoped_with_lifecycle_topology_authority(
+                workspace,
+                state,
+                &[agent_id],
+            )
         }
+        // Team-scoped rollback must restore only the selected projection and
+        // preserve sibling teams. Legacy callers without a team keep the root
+        // deleted-agents writer.
+        StateWriteIntent::AgentRollback { team_key, agent_id } => match team_key {
+            Some(_) => helper_write_team_scoped_with_deleted_agents(workspace, state, &[agent_id]),
+            None => helper_write_root_with_deleted_agents(workspace, state, &[agent_id]),
+        },
         // ClaimLeader -> leader/lease.rs:1625 uses the root helper, and the
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.

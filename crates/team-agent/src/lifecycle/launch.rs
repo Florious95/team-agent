@@ -4366,6 +4366,7 @@ pub fn fork_agent_with_transport(
     // E5 §3:team_dir(角色定义+profiles)恒用户目录。spec 读用 selector 解析的 spec_path
     // (读序 B:runtime 优先、legacy 回落),写恒走 runtime_spec_path(canonical 落点)。
     let fork_team_dir = selected.team_dir.clone();
+    let fork_team = selected.team_key.clone();
     let read_spec_path = selected
         .spec_path
         .clone()
@@ -4373,7 +4374,7 @@ pub fn fork_agent_with_transport(
     let workspace = selected.run_workspace;
     let state = selected.state;
     ensure_owner_allowed_for_state(&state, Some(source_agent_id))?;
-    let spec_path = crate::model::paths::runtime_spec_path(&workspace, &selected.team_key);
+    let spec_path = crate::model::paths::runtime_spec_path(&workspace, &fork_team);
     let text = std::fs::read_to_string(&read_spec_path)
         .map_err(|e| LifecycleError::Compile(format!("{}: {e}", read_spec_path.display())))?;
     let spec = yaml::loads(&text).map_err(|e| LifecycleError::Compile(e.to_string()))?;
@@ -4487,7 +4488,6 @@ pub fn fork_agent_with_transport(
         &safety,
     )?;
     let resolved_tool_refs: Vec<&str> = tools.iter().map(String::as_str).collect();
-    let fork_team = crate::messaging::leader_receiver::active_team_key(&workspace, &state);
     let mcp_config = adapter.mcp_config(auth_mode).map_err(|e| {
         let _ = std::fs::write(&spec_path, text.as_bytes());
         LifecycleError::Provider(e.to_string())
@@ -4625,13 +4625,16 @@ pub fn fork_agent_with_transport(
             &mcp_config_path,
             as_agent_id,
             &profile_launch,
+            &fork_team,
         );
         return Err(e);
     }
-    if let Err(e) = crate::state::persist::save_runtime_state_with_lifecycle_topology_authority(
-        &workspace,
+    if let Err(e) = crate::state::repository::StateRepository::new(&workspace).save(
+        crate::state::repository::StateWriteIntent::ForkAgent {
+            team_key: &fork_team,
+            agent_id: as_agent_id.as_str(),
+        },
         &next_state,
-        &[as_agent_id.as_str()],
     ) {
         rollback_fork_after_spawn(
             &workspace,
@@ -4644,8 +4647,55 @@ pub fn fork_agent_with_transport(
             &mcp_config_path,
             as_agent_id,
             &profile_launch,
+            &fork_team,
         );
         return Err(LifecycleError::StatePersist(e.to_string()));
+    }
+    let registration =
+        crate::state::projection::select_runtime_state(&workspace, Some(fork_team.as_str()))
+            .map_err(|e| e.to_string())
+            .and_then(|saved| {
+                let agent = saved
+                    .get("agents")
+                    .and_then(|agents| agents.get(as_agent_id.as_str()))
+                    .ok_or_else(|| "canonical team row is missing".to_string())?;
+                if agent.get("pane_id").and_then(serde_json::Value::as_str)
+                    != Some(spawn.pane_id.as_str())
+                {
+                    return Err("canonical team pane_id does not match spawned pane".to_string());
+                }
+                if agent.get("window").and_then(serde_json::Value::as_str) != Some(window.as_str())
+                {
+                    return Err("canonical team window does not match spawned window".to_string());
+                }
+                if let Some(pid) = spawn.child_pid {
+                    if agent.get("pane_pid").and_then(serde_json::Value::as_u64)
+                        != Some(u64::from(pid))
+                    {
+                        return Err(
+                            "canonical team pane_pid does not match spawned process".to_string()
+                        );
+                    }
+                }
+                Ok(())
+            });
+    if let Err(reason) = registration {
+        rollback_fork_after_spawn(
+            &workspace,
+            &spec_path,
+            &text,
+            &old_state,
+            transport,
+            &session_name,
+            &window,
+            &mcp_config_path,
+            as_agent_id,
+            &profile_launch,
+            &fork_team,
+        );
+        return Err(LifecycleError::StatePersist(format!(
+            "fork spawned but team registration readback failed: {reason}"
+        )));
     }
     if let Err(e) = maybe_fail_fork_after_spawn("start_coordinator") {
         rollback_fork_after_spawn(
@@ -4659,6 +4709,7 @@ pub fn fork_agent_with_transport(
             &mcp_config_path,
             as_agent_id,
             &profile_launch,
+            &fork_team,
         );
         return Err(e);
     }
@@ -4678,6 +4729,7 @@ pub fn fork_agent_with_transport(
             &mcp_config_path,
             as_agent_id,
             &profile_launch,
+            &fork_team,
         );
         LifecycleError::StatePersist(e.to_string())
     })?;
@@ -4704,16 +4756,19 @@ fn rollback_fork_after_spawn(
     mcp_config_path: &Path,
     agent_id: &AgentId,
     profile_launch: &crate::provider::ProviderProfileLaunch,
+    team_key: &str,
 ) {
     let _ = transport.kill_window(&Target::SessionWindow {
         session: session_name.clone(),
         window: window.clone(),
     });
     let _ = std::fs::write(spec_path, spec_text.as_bytes());
-    let _ = crate::state::persist::save_runtime_state_with_deleted_agents(
-        workspace,
+    let _ = crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::AgentRollback {
+            team_key: Some(team_key),
+            agent_id: agent_id.as_str(),
+        },
         old_state,
-        &[agent_id.as_str()],
     );
     cleanup_fork_mcp_artifacts(workspace, agent_id, mcp_config_path, profile_launch);
 }

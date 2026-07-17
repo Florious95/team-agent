@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 70;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 68;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -190,22 +190,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "AgentRollback",
         "s1a_legacy_external",
         4032
-    ),
-    allow!(
-        "lifecycle/launch.rs",
-        "fork_agent_with_transport",
-        "save_runtime_state_with_lifecycle_topology_authority",
-        "ForkAgent",
-        "s1a_legacy_external",
-        4542
-    ),
-    allow!(
-        "lifecycle/launch.rs",
-        "rollback_fork_after_spawn",
-        "save_runtime_state_with_deleted_agents",
-        "AgentRollback",
-        "s1a_legacy_external",
-        4624
     ),
     allow!(
         "lifecycle/restart/agent.rs",
