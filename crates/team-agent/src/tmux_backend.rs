@@ -2338,8 +2338,8 @@ impl Transport for TmuxBackend {
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         // P5 (C-P5-3): `#{pane_pid}` rides the single list-panes call (field index 11),
         // killing the per-pane display-message N+1 fallback.
-        // tmux 3.6a sanitizes control characters in `-F` output, so use a printable separator;
-        // `parse_pane_info_line` still accepts legacy tab-delimited test/provider output.
+        // Use a printable sentinel so the 12-field frame stays explicit in argv/log evidence;
+        // `parse_pane_info_line` retains compatibility with legacy tab-delimited output.
         const TMUX_PANE_FORMAT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}";
         let argv = self.tmux_argv(&[
             "tmux".to_string(),

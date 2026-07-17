@@ -1785,8 +1785,8 @@ fn query_single_field_argv_and_nonzero_maps_to_none() {
 
 // ── 11. list_targets (TRANSPORT TRIO) — `list-panes -a -F TMUX_PANE_FORMAT` + per-line parse ────
 // Golden _legacy_pane_discovery.py:29-33 _tmux_list_panes: `tmux list-panes -a -F <TMUX_PANE_FORMAT>`.
-// tmux 3.6a sanitizes control characters, so the Rust backend uses the printable separator locked
-// below while retaining the golden nonzero -> empty inventory behavior. P5 (C-P5-3) appends
+// The Rust backend uses the printable separator locked below so the 12-field frame stays explicit
+// in argv/log evidence, while retaining the golden nonzero -> empty inventory behavior. P5 (C-P5-3) appends
 // `#{pane_pid}` as field 12 so pane pids ride the single list-panes call (the per-pane
 // display-message N+1 fallback is gone). leader_env stays the reverse-env real-machine bit.
 #[test]
