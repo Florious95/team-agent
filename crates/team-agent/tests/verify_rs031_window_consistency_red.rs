@@ -62,9 +62,13 @@ fn worker_mcp_owner_team_scope_must_match_runtime_team_key_not_spec_name() {
     let workspace = team.parent().expect("teamdir has parent workspace");
     let state = load_runtime_state(workspace).expect("runtime state written by launch");
     let runtime_team_key = team_agent::state::projection::team_state_key(&state);
+    // quickstart-team-key-divergence fix: quick-start now unifies the runtime
+    // key on the compiled `TEAM.md name:` (`verify031`), no longer the team
+    // directory basename. The invariant below (worker MCP owner scope must
+    // equal the runtime key, whatever it is) is unchanged.
     assert_eq!(
-        runtime_team_key, "teamdir",
-        "fixture precondition: runtime state key is derived from the team directory"
+        runtime_team_key, "verify031",
+        "fixture precondition: runtime state key is the compiled team identity"
     );
 
     let bad_scopes = transport
@@ -124,14 +128,14 @@ fn quick_start_preserves_external_leader_receiver_when_worker_pane_id_collides_a
         .and_then(|receiver| receiver.get("pane_id"))
         .and_then(serde_json::Value::as_str);
     let receiver_pane = state
-        .pointer("/teams/teamdir/leader_receiver/pane_id")
+        .pointer("/teams/verify031/leader_receiver/pane_id")
         .and_then(serde_json::Value::as_str);
     let top_owner_pane = state
         .get("team_owner")
         .and_then(|owner| owner.get("pane_id"))
         .and_then(serde_json::Value::as_str);
     let owner_pane = state
-        .pointer("/teams/teamdir/team_owner/pane_id")
+        .pointer("/teams/verify031/team_owner/pane_id")
         .and_then(serde_json::Value::as_str);
 
     assert_eq!(
