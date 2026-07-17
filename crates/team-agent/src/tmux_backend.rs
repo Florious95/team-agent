@@ -71,6 +71,8 @@ pub trait CommandRunner: Send + Sync {
 pub struct RealCommandRunner;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const SPAWN_IDENTITY_TIMEOUT: Duration = Duration::from_millis(500);
+const SPAWN_IDENTITY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, argv: &[String]) -> Result<CommandOutput, std::io::Error> {
@@ -779,46 +781,68 @@ impl TmuxBackend {
             });
         }
         let pane_id = PaneId::new(pane);
-        let targets = self.list_targets()?;
-        if let Some(target) = targets.iter().find(|target| {
-            target.pane_id == pane_id
-                && target.session.as_str() == session.as_str()
-                && target
-                    .window_name
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == window.as_str())
-        }) {
-            return Ok(SpawnResult {
-                pane_id,
-                session: session.clone(),
-                window: window.clone(),
-                child_pid: target.pane_pid,
-            });
-        }
-        let observed = targets
-            .iter()
-            .find(|target| target.pane_id == pane_id)
-            .map(|target| {
-                format!(
-                    "{}:{}",
-                    target.session.as_str(),
-                    target
-                        .window_name
-                        .as_ref()
-                        .map(WindowName::as_str)
-                        .unwrap_or("<unknown>")
-                )
-            })
-            .unwrap_or_else(|| "<missing-from-list-targets>".to_string());
+        let deadline = Instant::now() + SPAWN_IDENTITY_TIMEOUT;
+        let observed = loop {
+            match self.list_targets() {
+                Ok(targets) => {
+                    if let Some(target) = targets.iter().find(|target| {
+                        target.pane_id == pane_id
+                            && target.session.as_str() == session.as_str()
+                            && target
+                                .window_name
+                                .as_ref()
+                                .is_some_and(|name| name.as_str() == window.as_str())
+                    }) {
+                        return Ok(SpawnResult {
+                            pane_id,
+                            session: session.clone(),
+                            window: window.clone(),
+                            child_pid: target.pane_pid,
+                        });
+                    }
+                    if let Some(target) = targets.iter().find(|target| target.pane_id == pane_id) {
+                        break format!(
+                            "{}:{}",
+                            target.session.as_str(),
+                            target
+                                .window_name
+                                .as_ref()
+                                .map(WindowName::as_str)
+                                .unwrap_or("<unknown>")
+                        );
+                    }
+                    if Instant::now() >= deadline {
+                        break "<missing-from-list-targets>".to_string();
+                    }
+                }
+                Err(error) => {
+                    if Instant::now() >= deadline {
+                        break format!("<list-targets-error:{error}>");
+                    }
+                }
+            }
+            std::thread::sleep(SPAWN_IDENTITY_POLL_INTERVAL);
+        };
+        let rollback_argv = vec![
+            "tmux".to_string(),
+            "kill-pane".to_string(),
+            "-t".to_string(),
+            pane_id.as_str().to_string(),
+        ];
+        let rollback_error = self.run_ok(&rollback_argv).err();
+        let rollback_suffix = rollback_error
+            .map(|error| format!("; failed to roll back spawned pane: {error}"))
+            .unwrap_or_default();
         Err(TransportError::Subprocess {
             argv: spawn_argv,
             code: output.code,
             stderr: format!(
-                "tmux spawn pane identity mismatch: requested={}:{} observed_pane={} observed={}",
+                "tmux spawn pane identity mismatch: requested={}:{} observed_pane={} observed={}{}",
                 session.as_str(),
                 window.as_str(),
                 pane_id.as_str(),
-                observed
+                observed,
+                rollback_suffix
             ),
         })
     }
@@ -2314,7 +2338,9 @@ impl Transport for TmuxBackend {
     fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
         // P5 (C-P5-3): `#{pane_pid}` rides the single list-panes call (field index 11),
         // killing the per-pane display-message N+1 fallback.
-        const TMUX_PANE_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}\t#{pane_pid}";
+        // tmux 3.6a sanitizes control characters in `-F` output, so use a printable separator;
+        // `parse_pane_info_line` still accepts legacy tab-delimited test/provider output.
+        const TMUX_PANE_FORMAT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}";
         let argv = self.tmux_argv(&[
             "tmux".to_string(),
             "list-panes".to_string(),
@@ -2510,7 +2536,11 @@ fn query_pane_pid(backend: &TmuxBackend, pane: &PaneId) -> Result<Option<u32>, T
 }
 
 fn parse_pane_info_line(line: &str) -> Option<PaneInfo> {
-    let fields = line.split('\t').collect::<Vec<_>>();
+    let fields = if line.contains("__TA_FIELD__") {
+        line.split("__TA_FIELD__").collect::<Vec<_>>()
+    } else {
+        line.split('\t').collect::<Vec<_>>()
+    };
     if fields.len() < 11 {
         return None;
     }

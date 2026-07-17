@@ -514,9 +514,9 @@ fn spawn_into_same_named_replacement_returns_identity_created_by_spawn_command()
 }
 
 #[test]
-fn spawn_with_command_refuses_spawn_pane_owned_by_other_window() {
+fn spawn_with_command_refuses_and_rolls_back_spawn_pane_owned_by_other_window() {
     let pane_inventory = "%5\tteamsess\t1\tw2\t0\t/dev/ttys005\tnode\t1\t/work/dir\t1\t0\t125\n";
-    let (be, _rec) = backend_with(
+    let (be, rec) = backend_with(
         MockResp::Out(ok("")),
         vec![
             MockResp::Out(ok("%5\n")),
@@ -538,6 +538,48 @@ fn spawn_with_command_refuses_spawn_pane_owned_by_other_window() {
             && msg.contains("observed_pane=%5")
             && msg.contains("observed=teamsess:w2"),
         "error must include requested/observed ownership evidence, got {msg}"
+    );
+    let calls = rec.lock().unwrap().clone();
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == &svec(&["tmux", "kill-pane", "-t", "%5"])),
+        "identity mismatch must roll back the exact pane created by this spawn; calls={calls:?}"
+    );
+}
+
+#[test]
+fn spawn_with_command_retries_until_spawn_pane_is_visible() {
+    let pane_inventory = "%6\tteamsess\t1\tw1\t0\t/dev/ttys006\tnode\t1\t/work/dir\t1\t0\t126\n";
+    let (be, rec) = backend_with(
+        MockResp::Out(ok(pane_inventory)),
+        vec![MockResp::Out(ok("%6\n")), MockResp::Out(ok(""))],
+    );
+    let result = be
+        .spawn_into(
+            &SessionName::new("teamsess"),
+            &WindowName::new("w1"),
+            &svec(&["provider-bin"]),
+            Path::new("/work/dir"),
+            &BTreeMap::new(),
+        )
+        .expect("spawn pane must tolerate bounded tmux inventory lag");
+    let calls = rec.lock().unwrap().clone();
+
+    assert_eq!(result.pane_id.as_str(), "%6");
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.get(1).is_some_and(|arg| arg == "list-panes"))
+            .count(),
+        2,
+        "spawn identity must retry the same pane id until it becomes visible; calls={calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.get(1).is_none_or(|arg| arg != "kill-pane")),
+        "a delayed but valid identity must not be rolled back; calls={calls:?}"
     );
 }
 
@@ -1742,16 +1784,16 @@ fn query_single_field_argv_and_nonzero_maps_to_none() {
 }
 
 // ── 11. list_targets (TRANSPORT TRIO) — `list-panes -a -F TMUX_PANE_FORMAT` + per-line parse ────
-// Golden _legacy_pane_discovery.py:29-33 _tmux_list_panes: `tmux list-panes -a -F <TMUX_PANE_FORMAT>`
-// (returncode != 0 -> []), parse each tab line via _parse_tmux_pane_info. TMUX_PANE_FORMAT
-// (runtime.py:456-460) is the byte-exact tab string locked below; P5 (C-P5-3) appends
+// Golden _legacy_pane_discovery.py:29-33 _tmux_list_panes: `tmux list-panes -a -F <TMUX_PANE_FORMAT>`.
+// tmux 3.6a sanitizes control characters, so the Rust backend uses the printable separator locked
+// below while retaining the golden nonzero -> empty inventory behavior. P5 (C-P5-3) appends
 // `#{pane_pid}` as field 12 so pane pids ride the single list-panes call (the per-pane
 // display-message N+1 fallback is gone). leader_env stays the reverse-env real-machine bit.
 #[test]
 fn list_targets_argv_and_parses_tmux_pane_format() {
-    const FMT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_tty}\t#{pane_current_command}\t#{pane_active}\t#{pane_current_path}\t#{session_attached}\t#{pane_in_mode}\t#{pane_pid}";
-    let stdout = "%7\tteam-x\t0\twin0\t0\t/dev/ttys003\tcodex\t1\t/Users/me/work\t1\t0\t41001\n\
-                      %8\tteam-x\t1\twin1\t0\t/dev/ttys004\tnode\t0\t/Users/me/other\t0\t0\t41002\n";
+    const FMT: &str = "#{pane_id}__TA_FIELD__#{session_name}__TA_FIELD__#{window_index}__TA_FIELD__#{window_name}__TA_FIELD__#{pane_index}__TA_FIELD__#{pane_tty}__TA_FIELD__#{pane_current_command}__TA_FIELD__#{pane_active}__TA_FIELD__#{pane_current_path}__TA_FIELD__#{session_attached}__TA_FIELD__#{pane_in_mode}__TA_FIELD__#{pane_pid}";
+    let stdout = "%7__TA_FIELD__team-x__TA_FIELD__0__TA_FIELD__win0__TA_FIELD__0__TA_FIELD__/dev/ttys003__TA_FIELD__codex__TA_FIELD__1__TA_FIELD__/Users/me/work__TA_FIELD__1__TA_FIELD__0__TA_FIELD__41001\n\
+                      %8__TA_FIELD__team-x__TA_FIELD__1__TA_FIELD__win1__TA_FIELD__0__TA_FIELD__/dev/ttys004__TA_FIELD__node__TA_FIELD__0__TA_FIELD__/Users/me/other__TA_FIELD__0__TA_FIELD__0__TA_FIELD__41002\n";
     let (be, rec) = backend_with(MockResp::Out(ok(stdout)), vec![]);
     let panes = be.list_targets().expect("list_targets ok");
     assert_eq!(

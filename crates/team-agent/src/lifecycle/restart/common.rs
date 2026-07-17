@@ -89,11 +89,19 @@ fn same_role_cohort_error(
     expected_live: usize,
     expected_old_only: bool,
 ) -> Option<String> {
-    let panes = transport.list_targets().ok()?;
+    let panes = match transport.list_targets() {
+        Ok(panes) => panes,
+        Err(error) => {
+            return Some(format!(
+                "{operation} refused: same-role cohort observation failed: {error}"
+            ));
+        }
+    };
     let mut cardinality_proofs = Vec::new();
     let mut binding_proofs = Vec::new();
+    let mut observation_proofs = Vec::new();
     for target in targets {
-        let live_panes = panes
+        let candidate_panes = panes
             .iter()
             .filter(|pane| pane.session.as_str() == session_name.as_str())
             .filter(|pane| {
@@ -101,20 +109,30 @@ fn same_role_cohort_error(
                     .as_ref()
                     .is_some_and(|window| window.as_str() == target.window)
             })
-            .filter(|pane| {
-                !expected_old_only
-                    || target
-                        .expected_pane_id
-                        .as_deref()
-                        .is_some_and(|expected| pane.pane_id.as_str() == expected)
-            })
-            .filter(|pane| {
-                transport
-                    .liveness(&pane.pane_id)
-                    .is_ok_and(|live| live == crate::transport::PaneLiveness::Live)
-            })
-            .map(|pane| pane.pane_id.as_str().to_string())
             .collect::<Vec<_>>();
+        let mut live_panes = Vec::new();
+        for pane in candidate_panes {
+            match transport.liveness(&pane.pane_id) {
+                Ok(crate::transport::PaneLiveness::Live) => {
+                    live_panes.push(pane.pane_id.as_str().to_string());
+                }
+                Ok(crate::transport::PaneLiveness::Dead) => {}
+                Ok(crate::transport::PaneLiveness::Unknown) => {
+                    observation_proofs.push(format!(
+                        "{}:window={}:pane={}:liveness=unknown",
+                        target.agent_id,
+                        target.window,
+                        pane.pane_id.as_str()
+                    ));
+                }
+                Err(error) => observation_proofs.push(format!(
+                    "{}:window={}:pane={}:liveness_error={error}",
+                    target.agent_id,
+                    target.window,
+                    pane.pane_id.as_str()
+                )),
+            }
+        }
         if live_panes.len() != expected_live {
             cardinality_proofs.push(format!(
                 "{}:window={}:live_panes=[{}]",
@@ -134,6 +152,12 @@ fn same_role_cohort_error(
                 ));
             }
         }
+    }
+    if !observation_proofs.is_empty() {
+        return Some(format!(
+            "{operation} refused: same-role cohort observation failed; {}",
+            observation_proofs.join("; ")
+        ));
     }
     if !binding_proofs.is_empty() {
         return Some(format!(
@@ -476,6 +500,16 @@ pub(super) fn spawn_agent_window(
     );
     if let Some(error) = startup_prompt.capture_error.as_deref() {
         if is_structural_startup_prompt_error(error) {
+            if let Err(rollback_error) = transport.kill_pane(&spawn.pane_id) {
+                return Err(LifecycleError::Transport(format!(
+                    "startup prompt structural failure for {}:{} pane {}: {}; failed to roll back spawned pane: {}",
+                    session_name.as_str(),
+                    window.as_str(),
+                    spawn.pane_id.as_str(),
+                    error,
+                    rollback_error
+                )));
+            }
             return Err(LifecycleError::Transport(format!(
                 "startup prompt structural failure for {}:{} pane {}: {}",
                 session_name.as_str(),

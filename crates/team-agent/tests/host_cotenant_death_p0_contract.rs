@@ -271,6 +271,9 @@ exec "$TEAM_AGENT_TEST_REAL_PS" "$@"
         }
     }
     let (_env2, workspace2) = team_case("p0-start-force", &["developer"]);
+    let mut before_force = load_runtime_state(&workspace2).unwrap();
+    before_force["agents"]["developer"]["provider"] = json!("fake");
+    save_runtime_state(&workspace2, &before_force).unwrap();
     let transport2 = CohortTransport::with_old_panes(&["developer"]);
     collect_lifecycle_cohort_result(
         &mut failures,
@@ -278,6 +281,21 @@ exec "$TEAM_AGENT_TEST_REAL_PS" "$@"
         start_agent_with_transport(&workspace2, &AgentId::new("developer"), true, false, true, Some(TEAM), &transport2).map(|_| ()),
         &transport2,
     );
+    let force_spawned = transport2
+        .pane_summary()
+        .into_iter()
+        .filter(|pane| pane.contains(":%new-"))
+        .collect::<Vec<_>>();
+    let after_force = load_runtime_state(&workspace2).unwrap();
+    if !force_spawned.is_empty()
+        || after_force["agents"]["developer"]["pane_id"]
+            != before_force["agents"]["developer"]["pane_id"]
+    {
+        failures.push(format!(
+            "start-agent --force: fake provider must share the same zero-mutation pre-spawn cohort refusal; spawned={force_spawned:?}; before={}; after={}",
+            before_force["agents"]["developer"], after_force["agents"]["developer"]
+        ));
+    }
     let start_force_coordinator_pid = fs::read_to_string(coordinator_pid_path(
         &WorkspacePath::new(workspace2.clone()),
     ))
@@ -351,6 +369,91 @@ fn restart_bad_spawn_identity_fails_closed_before_stale_binding_and_new_orphan()
     assert!(
         refused && named_identity_mismatch && !stale_third_state && !old_redeclared_as_new,
         "P0 bad-spawn-identity must fail closed with a spawn identity/binding mismatch and must never reach retired-old + state-bound-old + live-new-orphan third state; report={report}; old_live={old_live}; saved_pane={saved_pane:?}; epochs={old_epoch}->{saved_epoch}; new_live={new_live:?}; panes={:?}",
+        transport.pane_summary()
+    );
+}
+
+#[test]
+#[serial(env)]
+fn start_agent_spawn_verification_failure_rolls_back_new_pane() {
+    let (_env, workspace) = team_case("p0-start-spawn-rollback", &["developer"]);
+    let before = load_runtime_state(&workspace).unwrap();
+    let old_pane = before["agents"]["developer"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_epoch = before["agents"]["developer"]["spawn_epoch"]
+        .as_u64()
+        .unwrap();
+    let transport = CohortTransport::with_old_panes(&["developer"]).with_hidden_new_panes();
+    transport
+        .kill_pane(&PaneId::new(old_pane.as_str()))
+        .unwrap();
+
+    let result = start_agent_with_transport(
+        &workspace,
+        &AgentId::new("developer"),
+        true,
+        false,
+        true,
+        Some(TEAM),
+        &transport,
+    );
+    let report = format!("{result:?}");
+    let after = load_runtime_state(&workspace).unwrap();
+    let live_new = transport
+        .live_panes_for_window("developer")
+        .into_iter()
+        .filter(|pane| pane.pane_id.as_str().starts_with("%new-"))
+        .map(|pane| pane.pane_id.as_str().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(
+        result.is_err() && report.contains("spawned pane not addressable"),
+        "spawn verification must fail closed with identity evidence; report={report}"
+    );
+    assert!(
+        live_new.is_empty(),
+        "a failed start-agent must kill only the pane created by that attempt; live_new={live_new:?}; panes={:?}",
+        transport.pane_summary()
+    );
+    assert_eq!(after["agents"]["developer"]["pane_id"], old_pane);
+    assert_eq!(
+        after["agents"]["developer"]["spawn_epoch"], old_epoch,
+        "failed replacement must leave persisted state authoritative"
+    );
+}
+
+#[test]
+#[serial(env)]
+fn start_agent_list_targets_failure_refuses_before_spawn() {
+    let (_env, workspace) = team_case("p0-start-observation-failure", &["developer"]);
+    let before = load_runtime_state(&workspace).unwrap();
+    let transport = CohortTransport::with_old_panes(&["developer"]).with_list_targets_failure();
+
+    let result = start_agent_with_transport(
+        &workspace,
+        &AgentId::new("developer"),
+        true,
+        false,
+        true,
+        Some(TEAM),
+        &transport,
+    );
+    let after = load_runtime_state(&workspace).unwrap();
+    let report = format!("{result:?}");
+
+    assert!(
+        result.is_err() && report.contains("same-role cohort observation failed"),
+        "an unobservable cohort must refuse before spawn; report={report}"
+    );
+    assert_eq!(after["agents"]["developer"], before["agents"]["developer"]);
+    assert!(
+        transport
+            .pane_summary()
+            .iter()
+            .all(|pane| !pane.contains(":%new-")),
+        "observation failure must not spawn a pane; panes={:?}",
         transport.pane_summary()
     );
 }
@@ -638,6 +741,8 @@ fn write_old_codex_rollout(home: &Path, spawn_cwd: &Path) -> PathBuf {
 struct CohortTransport {
     state: Arc<Mutex<TransportState>>,
     bad_spawn_identity: bool,
+    hide_new_from_list_targets: bool,
+    fail_list_targets: bool,
 }
 
 struct TransportState {
@@ -653,11 +758,23 @@ impl CohortTransport {
         Self {
             state: Arc::new(Mutex::new(TransportState { panes, killed: BTreeSet::new(), next: 1, current_command: "team-agent-worker".to_string() })),
             bad_spawn_identity: false,
+            hide_new_from_list_targets: false,
+            fail_list_targets: false,
         }
     }
 
     fn with_bad_spawn_identity(mut self) -> Self {
         self.bad_spawn_identity = true;
+        self
+    }
+
+    fn with_hidden_new_panes(mut self) -> Self {
+        self.hide_new_from_list_targets = true;
+        self
+    }
+
+    fn with_list_targets_failure(mut self) -> Self {
+        self.fail_list_targets = true;
         self
     }
 
@@ -796,7 +913,18 @@ impl Transport for CohortTransport {
         Ok(Some(!state.killed.contains(pane.as_str()) && state.panes.iter().any(|item| item.pane_id == *pane)))
     }
 
-    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> { Ok(self.state.lock().unwrap().panes.clone()) }
+    fn list_targets(&self) -> Result<Vec<PaneInfo>, TransportError> {
+        if self.fail_list_targets {
+            return Err(TransportError::MuxUnavailable {
+                backend: BackendKind::Tmux,
+                detail: "injected list-targets failure".to_string(),
+            });
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state.panes.iter().filter(|pane| {
+            !self.hide_new_from_list_targets || !pane.pane_id.as_str().starts_with("%new-")
+        }).cloned().collect())
+    }
 
     fn has_session(&self, _session: &SessionName) -> Result<bool, TransportError> { Ok(true) }
 

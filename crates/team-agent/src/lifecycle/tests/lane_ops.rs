@@ -14,7 +14,7 @@ pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<St
 /// end-to-end in-process.
 pub(super) struct LaneTransport {
     session: String,
-    windows: Vec<String>,
+    windows: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     killed: LaneKills,
     spawns: LaneSpawns,
 }
@@ -22,7 +22,9 @@ impl LaneTransport {
     pub(super) fn new(session: &str, windows: &[&str]) -> Self {
         Self {
             session: session.to_string(),
-            windows: windows.iter().map(|w| (*w).to_string()).collect(),
+            windows: std::sync::Arc::new(std::sync::Mutex::new(
+                windows.iter().map(|w| (*w).to_string()).collect(),
+            )),
             killed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -120,6 +122,8 @@ impl crate::transport::Transport for LaneTransport {
     ) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
         Ok(self
             .windows
+            .lock()
+            .unwrap()
             .iter()
             .map(|w| crate::transport::PaneInfo {
                 pane_id: crate::transport::PaneId::new(format!("%{w}")),
@@ -149,6 +153,8 @@ impl crate::transport::Transport for LaneTransport {
         if s.as_str() == self.session {
             Ok(self
                 .windows
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|w| crate::transport::WindowName::new(w.as_str()))
                 .collect())
@@ -174,13 +180,22 @@ impl crate::transport::Transport for LaneTransport {
         &self,
         t: &crate::transport::Target,
     ) -> Result<(), crate::transport::TransportError> {
-        let name = match t {
-            crate::transport::Target::Pane(p) => p.as_str().to_string(),
+        let (name, window) = match t {
+            crate::transport::Target::Pane(p) => (p.as_str().to_string(), None),
             crate::transport::Target::SessionWindow { session, window } => {
-                format!("{}:{}", session.as_str(), window.as_str())
+                (
+                    format!("{}:{}", session.as_str(), window.as_str()),
+                    Some(window.as_str()),
+                )
             }
         };
         self.killed.lock().unwrap().push(name);
+        if let Some(window) = window {
+            self.windows
+                .lock()
+                .unwrap()
+                .retain(|candidate| candidate != window);
+        }
         Ok(())
     }
     fn attach_session(

@@ -113,11 +113,7 @@ pub(crate) fn start_agent_at_paths(
     let window = agent_window(&agent, agent_id);
     let adaptive_layout =
         open_display && crate::lifecycle::launch::state_uses_adaptive_layout(&state);
-    let fake_provider = raw_agent
-        .get("provider")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|provider| provider.eq_ignore_ascii_case("fake"));
-    if force && !fake_provider && is_per_agent_window(&window, agent_id) {
+    if force && is_per_agent_window(&window, agent_id) {
         let expected_pane_id = raw_agent
             .get("pane_id")
             .and_then(serde_json::Value::as_str)
@@ -276,12 +272,20 @@ pub(crate) fn start_agent_at_paths(
         None,
         Some(resolved_team_key.as_str()),
     )?;
-    verify_spawned_pane_matches_target(
+    if let Err(error) = verify_spawned_pane_matches_target(
         transport,
         &spawn.spawn.pane_id,
         &session_name,
         &spawn.spawn.window,
-    )?;
+    ) {
+        if let Err(rollback_error) = transport.kill_pane(&spawn.spawn.pane_id) {
+            return Err(LifecycleError::RequirementUnmet(format!(
+                "{error}; failed to roll back spawned pane {}: {rollback_error}",
+                spawn.spawn.pane_id.as_str()
+            )));
+        }
+        return Err(error);
+    }
     let actual_spawn_window = spawn.spawn.window.as_str().to_string();
     mark_agent_started(
         &mut state,
