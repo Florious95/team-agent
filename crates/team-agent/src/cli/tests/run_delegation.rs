@@ -90,7 +90,7 @@ fn run_dispatches_status_to_handler_returns_ok() {
 
 #[test]
 fn run_dispatches_send_to_handler_returns_ok() {
-    // run([send w1 hello --sender leader --workspace <seeded>]) -> cmd_send -> messaging::send_message
+    // run([send w1 hello --workspace <seeded>]) -> cmd_send -> messaging::send_message
     // -> ok (w1 is an in-team agent) -> ExitCode::Ok. w1 must be seeded: golden refuses non-team targets.
     //
     // OLD seed: flat `{"agents": {"w1": ...}}`.
@@ -112,8 +112,6 @@ fn run_dispatches_send_to_handler_returns_ok() {
         "send".to_string(),
         "w1".to_string(),
         "hello".to_string(),
-        "--sender".to_string(),
-        "leader".to_string(),
         "--workspace".to_string(),
         ws.to_string_lossy().to_string(),
     ];

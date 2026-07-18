@@ -15,7 +15,6 @@ fn send_009_worker_repair_requeues_blocked_message() {
     let stop = run_ta(&ws, &["stop-agent", "a", "--workspace", ws_path, "--json"]);
     assert!(stop.is_success(), "stop-agent: {}", stop.stdout);
 
-    let mid = "msg-send009";
     let out = run_ta(
         &ws,
         &[
@@ -24,17 +23,20 @@ fn send_009_worker_repair_requeues_blocked_message() {
             "repair should replay this same row",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--watch-result",
             "--json",
         ],
     );
     let j = out.json();
-    assert_json_field_eq_str(&j, "/message_id", mid);
-    assert_json_field_eq_str(&j, "/message_status", "queued_pane_missing");
+    let mid = j
+        .pointer("/message_id")
+        .and_then(|value| value.as_str())
+        .expect("generated message id");
+    assert_json_field_eq_str(&j, "/message_status", "accepted");
+    wait_for_or_panic(
+        "accepted message reaches repairable blocked state",
+        || message_status(&ws, mid).as_deref() == Some("queued_pane_missing"),
+        Duration::from_secs(6),
+    );
     let before = message_row(&ws, mid).expect("blocked message row exists");
     assert_eq!(before.status, "queued_pane_missing");
 

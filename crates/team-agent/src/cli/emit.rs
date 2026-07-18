@@ -1823,19 +1823,7 @@ mod tests {
                 "quick-start",
                 &["--workspace", "--team-id", "--yes", "--json"][..],
             ),
-            (
-                "send",
-                &[
-                    "--workspace",
-                    "--team",
-                    "--targets",
-                    "--to-name",
-                    "--pane",
-                    "--watch-result",
-                    "--timeout",
-                    "--json",
-                ][..],
-            ),
+            ("send", &["--workspace", "--team", "--json"][..]),
             (
                 "status",
                 &["--workspace", "--team", "--summary", "--json", "--detail"][..],

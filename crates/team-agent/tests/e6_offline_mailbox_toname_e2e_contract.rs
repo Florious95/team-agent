@@ -101,7 +101,7 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
         case.target_workspace().display(),
         case.team_key
     );
-    let send = case.run_cli(
+    let send = case.run_cli_as(
         case.sender_workspace(),
         vec![
             "send".into(),
@@ -110,10 +110,9 @@ fn e6_real_cli_live_team_unattached_leader_queues_then_attach_replays_once() {
             "--to-name".into(),
             to_name,
             token.clone(),
-            "--sender".into(),
-            "third-party".into(),
             "--json".into(),
         ],
+        "third-party",
     );
     let body = json_output(&send, "third-party send --to-name unattached leader");
     let rows_after_send = message_rows(case.target_workspace(), &token);
@@ -439,6 +438,19 @@ impl E6Case {
     }
 
     fn run_cli(&self, cwd: &Path, args: Vec<String>) -> Output {
+        self.run_cli_with_identity(cwd, args, None)
+    }
+
+    fn run_cli_as(&self, cwd: &Path, args: Vec<String>, identity: &str) -> Output {
+        self.run_cli_with_identity(cwd, args, Some(identity))
+    }
+
+    fn run_cli_with_identity(
+        &self,
+        cwd: &Path,
+        args: Vec<String>,
+        identity: Option<&str>,
+    ) -> Output {
         let mut command = Command::new(bin());
         command.args(args).current_dir(cwd).env("HOME", &self.home);
         for key in [
@@ -460,6 +472,9 @@ impl E6Case {
             "TMUX_PANE",
         ] {
             command.env_remove(key);
+        }
+        if let Some(identity) = identity {
+            command.env("TEAM_AGENT_ID", identity);
         }
         command.output().expect("run team-agent")
     }

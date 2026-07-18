@@ -22,11 +22,6 @@ fn dirty_001_stale_pane_id_is_not_reported_delivered() {
             "stale pane",
             "--workspace",
             ws.path().to_str().unwrap(),
-            "--sender",
-            "leader",
-            "--message-id",
-            "msg-dirty-001",
-            "--no-wait",
             "--json",
         ],
     );

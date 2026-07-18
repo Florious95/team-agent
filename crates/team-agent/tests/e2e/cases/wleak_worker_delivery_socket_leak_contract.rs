@@ -35,28 +35,18 @@ fn wleak_cached_pane_owned_by_other_window_never_receives_worker_message() {
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
     let token = "WLEAK_WRONG_WINDOW_TOKEN_001";
-    let mid = "msg-wleak-wrong-window";
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            token,
-            "--workspace",
-            ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
     assert!(
         out.is_success(),
         "send should complete before target ownership assertions; stdout={} stderr={}",
         out.stdout,
         out.stderr
     );
+    let out_json = out.json();
+    let mid = out_json
+        .pointer("/message_id")
+        .and_then(Value::as_str)
+        .expect("generated message id");
     wait_for_or_panic(
         "message reaches terminal status",
         || {
@@ -112,22 +102,7 @@ fn wleak_wrong_cached_pane_and_missing_intended_window_blocks_not_delivers() {
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
     let token = "WLEAK_MISSING_TARGET_TOKEN_002";
-    let mid = "msg-wleak-missing-target";
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            token,
-            "--workspace",
-            ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
     let body = out.json();
     assert_eq!(
         body.pointer("/ok").and_then(Value::as_bool),
@@ -167,28 +142,12 @@ fn wleak_stale_worker_block_persists_row_inbox_and_replays_after_start_agent() {
     write_agent_pane_tuple(&ws, "a", &foreign);
 
     let token = "WLEAK_STALE_REPLAY_TOKEN_009";
-    let mid = "msg-wleak-stale-replay";
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            token,
-            "--workspace",
-            ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
     let body = out.json();
-    assert_eq!(
-        body.pointer("/message_id").and_then(Value::as_str),
-        Some(mid),
-        "B replay RED: stale target blocker must return the accepted message id; json={body}"
-    );
+    let mid = body
+        .pointer("/message_id")
+        .and_then(Value::as_str)
+        .expect("B replay RED: stale target blocker must return the accepted message id");
     assert_eq!(
         body.pointer("/message_status").and_then(Value::as_str),
         Some(STATUS_QUEUED_PANE_MISSING),
@@ -278,7 +237,6 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
     let session = worker_session_name(team_id);
     let pane_a = pane_for_window(&ws, &session, "a");
 
-    let mid = "msg-wleak-event-metadata";
     let out = run_ta(
         &ws,
         &[
@@ -287,10 +245,6 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
             "WLEAK_EVENT_METADATA_TOKEN_003",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
             "--json",
         ],
     );
@@ -300,6 +254,11 @@ fn wleak_message_delivered_event_records_physical_target_metadata() {
         out.stdout,
         out.stderr
     );
+    let out_json = out.json();
+    let mid = out_json
+        .pointer("/message_id")
+        .and_then(Value::as_str)
+        .expect("generated message id");
     wait_for_or_panic(
         "message.delivered event",
         || delivered_event(&ws, mid).is_some(),
@@ -339,7 +298,6 @@ fn wleak_unvalidated_cached_pane_never_marks_delivered() {
     kill_window(&ws, &session, "a");
     write_agent_pane_tuple(&ws, "a", &pane_b);
 
-    let mid = "msg-wleak-unvalidated";
     let out = run_ta(
         &ws,
         &[
@@ -348,10 +306,6 @@ fn wleak_unvalidated_cached_pane_never_marks_delivered() {
             "WLEAK_UNVALIDATED_TOKEN_006",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
             "--json",
         ],
     );
@@ -366,6 +320,10 @@ fn wleak_unvalidated_cached_pane_never_marks_delivered() {
         Some(false),
         "W3 RED: unvalidated cached pane must not surface delivered=true; json={body}"
     );
+    let mid = body
+        .pointer("/message_id")
+        .and_then(Value::as_str)
+        .expect("generated message id");
     let delivered_count = delivered_event_count(&ws, mid);
     assert_eq!(
         delivered_count, 0,
@@ -399,22 +357,7 @@ fn wleak_cross_session_multi_pane_window_missing_fails_closed() {
     write_agent_pane_tuple(&ws, "a", &foreign);
 
     let token = "WLEAK_CROSS_SESSION_TOKEN_007";
-    let mid = "msg-wleak-cross-session";
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            token,
-            "--workspace",
-            ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["send", "a", token, "--workspace", ws_path, "--json"]);
     let body = out.json();
     assert_eq!(
         body.pointer("/message_status").and_then(Value::as_str),
@@ -465,7 +408,7 @@ fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
     let token = "WLEAK_TONAME_REUSED_LEADER_TOKEN_008";
     let to_name = format!("{target_ws_path}::{team_id}/leader");
     let foreign_ws_path = foreign_ws.path().to_str().unwrap();
-    let out = run_ta(
+    let out = run_ta_env(
         &foreign_ws,
         &[
             "send",
@@ -474,10 +417,9 @@ fn wleak_to_name_leader_reused_pane_id_must_not_inject_foreign_worker() {
             token,
             "--workspace",
             foreign_ws_path,
-            "--sender",
-            "third-party",
             "--json",
         ],
+        &[("TEAM_AGENT_ID", "third-party")],
     );
     let body = out.json();
     let foreign_capture = capture_pane(&target_ws, &foreign.pane_id);

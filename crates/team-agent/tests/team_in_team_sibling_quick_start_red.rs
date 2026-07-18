@@ -402,12 +402,9 @@ fn dirty_sibling_quick_start_from_same_leader_pane_binds_receiver_and_delivers_t
             case.root.to_str().unwrap(),
             "--team",
             "sibling",
-            "--sender",
-            "sibling_worker",
-            "--no-wait",
             "--json",
         ],
-        &[],
+        &[("TEAM_AGENT_ID", "sibling_worker")],
     );
     let send_out: Value = serde_json::from_slice(&send_raw.stdout).unwrap_or_else(|err| {
         panic!(

@@ -4,7 +4,7 @@
 //!
 //! Black-box invariants:
 //! - `ok == true` in JSON
-//! - `message_id` round-trips to the requested id
+//! - `message_id` is generated as a correlation id
 //! - `target == "a"`, `sender == "leader"`
 //! - `status` is a forward-progress label (queued / accepted / submitted /
 //!   delivered) — NOT `failed`.
@@ -23,7 +23,6 @@ fn send_001_delivers_to_fake_worker() {
         qs.stdout
     );
 
-    let mid = "msg-e2e-send-001";
     let out = run_ta(
         &ws,
         &[
@@ -32,11 +31,6 @@ fn send_001_delivers_to_fake_worker() {
             "hello from e2e",
             "--workspace",
             ws.path().to_str().unwrap(),
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--no-wait",
             "--json",
         ],
     );
@@ -51,7 +45,7 @@ fn send_001_delivers_to_fake_worker() {
     let j = out.json();
 
     assert_json_field_eq_bool(&j, "/ok", true);
-    assert_json_field_eq_str(&j, "/message_id", mid);
+    assert!(j.pointer("/message_id").and_then(|v| v.as_str()).is_some());
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
 

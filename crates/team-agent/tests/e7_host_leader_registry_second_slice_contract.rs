@@ -276,22 +276,23 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
     );
 
     let live_token = unique_token("E7_TO_LEADER_LIVE");
-    let live = sender.run_cli(vec![
-        "send".into(),
-        "--workspace".into(),
-        sender.workspace_arg(),
-        "--to-leader".into(),
-        "alpha".into(),
-        live_token.clone(),
-        "--sender".into(),
-        "e7-test".into(),
-        "--json".into(),
-    ]);
+    let live = sender.run_cli_with_env(
+        vec![
+            "send".into(),
+            "--workspace".into(),
+            sender.workspace_arg(),
+            "--to-leader".into(),
+            "alpha".into(),
+            live_token.clone(),
+            "--json".into(),
+        ],
+        &[("TEAM_AGENT_ID", "e7-test".to_string())],
+    );
     let live_json = json_output(&live, "send --to-leader alpha --json");
     assert_json_ok(
         &live,
         &live_json,
-        "send --to-leader unique short name should deliver",
+        "send --to-leader unique short name should persist",
     );
     assert_eq!(
         live_json.get("resolved_via").and_then(Value::as_str),
@@ -300,13 +301,22 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
     );
     assert_eq!(
         live_json.get("delivered").and_then(Value::as_bool),
-        Some(true),
-        "E7 RED: unique live leader delivery must be honest delivered=true after physical injection; output={live_json}"
+        Some(false),
+        "E7 RED: unique live leader send returns after persistence, before coordinator delivery; output={live_json}"
     );
-    assert_pane_contains(
+    assert_eq!(
+        live_json.get("message_status").and_then(Value::as_str),
+        Some("accepted"),
+        "E7 RED: unique live leader send must persist an accepted row; output={live_json}"
+    );
+    assert!(live_json
+        .get("message_id")
+        .and_then(Value::as_str)
+        .is_some());
+    assert_pane_not_contains(
         &pane,
         &live_token,
-        "unique live --to-leader token should reach target pane",
+        "unique live --to-leader must not bypass coordinator delivery",
     );
 
     let duplicate = RuntimeCase::with_home("send-live-duplicate", "alpha", home.clone());
@@ -322,17 +332,18 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
         "seed",
     );
     let ambiguous_token = unique_token("E7_TO_LEADER_AMBIG");
-    let ambiguous = sender.run_cli(vec![
-        "send".into(),
-        "--workspace".into(),
-        sender.workspace_arg(),
-        "--to-leader".into(),
-        "alpha".into(),
-        ambiguous_token.clone(),
-        "--sender".into(),
-        "e7-test".into(),
-        "--json".into(),
-    ]);
+    let ambiguous = sender.run_cli_with_env(
+        vec![
+            "send".into(),
+            "--workspace".into(),
+            sender.workspace_arg(),
+            "--to-leader".into(),
+            "alpha".into(),
+            ambiguous_token.clone(),
+            "--json".into(),
+        ],
+        &[("TEAM_AGENT_ID", "e7-test".to_string())],
+    );
     let ambiguous_json = json_output(&ambiguous, "send --to-leader ambiguous --json");
     assert_eq!(
         ambiguous_json.get("ok").and_then(Value::as_bool),
@@ -381,17 +392,18 @@ fn e7_send_to_leader_resolves_unique_refuses_ambiguous_and_never_misroutes_stale
     );
     stale.kill_session();
     let stale_token = unique_token("E7_TO_LEADER_STALE");
-    let stale_out = sender.run_cli(vec![
-        "send".into(),
-        "--workspace".into(),
-        sender.workspace_arg(),
-        "--to-leader".into(),
-        "deadteam".into(),
-        stale_token.clone(),
-        "--sender".into(),
-        "e7-test".into(),
-        "--json".into(),
-    ]);
+    let stale_out = sender.run_cli_with_env(
+        vec![
+            "send".into(),
+            "--workspace".into(),
+            sender.workspace_arg(),
+            "--to-leader".into(),
+            "deadteam".into(),
+            stale_token.clone(),
+            "--json".into(),
+        ],
+        &[("TEAM_AGENT_ID", "e7-test".to_string())],
+    );
     let stale_json = json_output(&stale_out, "send --to-leader stale --json");
     assert_eq!(stale_json.get("ok").and_then(Value::as_bool), Some(false));
     assert_eq!(
@@ -431,17 +443,18 @@ fn e7_send_to_leader_queues_e6_mailbox_when_team_live_but_leader_unattached() {
     );
 
     let token = unique_token("E7_TO_LEADER_MAILBOX");
-    let output = sender.run_cli(vec![
-        "send".into(),
-        "--workspace".into(),
-        sender.workspace_arg(),
-        "--to-leader".into(),
-        "mailbox".into(),
-        token.clone(),
-        "--sender".into(),
-        "e7-test".into(),
-        "--json".into(),
-    ]);
+    let output = sender.run_cli_with_env(
+        vec![
+            "send".into(),
+            "--workspace".into(),
+            sender.workspace_arg(),
+            "--to-leader".into(),
+            "mailbox".into(),
+            token.clone(),
+            "--json".into(),
+        ],
+        &[("TEAM_AGENT_ID", "e7-test".to_string())],
+    );
     let body = json_output(&output, "send --to-leader mailbox --json");
     assert_json_ok(
         &output,
@@ -728,14 +741,6 @@ fn leader_by_name<'a>(body: &'a Value, name: &str) -> Option<&'a Value> {
                 || entry.get("delivery_name").and_then(Value::as_str) == Some(name)
                 || entry.get("team_key").and_then(Value::as_str) == Some(name)
         })
-}
-
-fn assert_pane_contains(pane: &str, token: &str, label: &str) {
-    let text = capture_pane(pane);
-    assert!(
-        text.contains(token),
-        "{label}; pane={pane} capture={text:?}"
-    );
 }
 
 fn assert_pane_not_contains(pane: &str, token: &str, label: &str) {
