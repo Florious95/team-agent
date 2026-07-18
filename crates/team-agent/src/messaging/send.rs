@@ -218,6 +218,9 @@ pub fn send_message(
     } else {
         coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
     };
+    if let Some(gate) = coordinator_unavailable.as_ref().filter(|gate| !gate.persist) {
+        return Ok(gate.outcome.clone());
+    }
     let mut intent = ResolvedSendIntent::accepted(
         opts.origin,
         workspace,
@@ -230,7 +233,7 @@ pub fn send_message(
         opts.requires_ack,
         opts.message_id.clone(),
     );
-    if coordinator_unavailable.is_some() {
+    if coordinator_unavailable.as_ref().is_some_and(|gate| gate.persist) {
         intent.initial_disposition =
             InitialDisposition::Blocked(DeliveryBlocker::CoordinatorUnavailable);
     }
@@ -253,7 +256,11 @@ pub fn send_message(
             None,
         );
     }
-    if let Some(mut outcome) = coordinator_unavailable {
+    if let Some(CoordinatorUnavailableGate {
+        mut outcome,
+        persist: true,
+    }) = coordinator_unavailable
+    {
         outcome.ok = true;
         outcome.status = DeliveryStatus::Blocked;
         outcome.message_status =
@@ -336,12 +343,17 @@ fn refused_outcome_with_verification(
     }
 }
 
+struct CoordinatorUnavailableGate {
+    outcome: DeliveryOutcome,
+    persist: bool,
+}
+
 fn coordinator_unavailable_outcome(
     workspace: &Path,
     recipient: &str,
     opts: &SendOptions,
     event_log: &EventLog,
-) -> Result<Option<DeliveryOutcome>, MessagingError> {
+) -> Result<Option<CoordinatorUnavailableGate>, MessagingError> {
     let coordinator_workspace = WorkspacePath::new(workspace.to_path_buf());
     let health = crate::coordinator::coordinator_health(&coordinator_workspace);
     if health.ok || matches!(health.status, CoordinatorHealthStatus::Missing) {
@@ -371,9 +383,19 @@ fn coordinator_unavailable_outcome(
         )?;
         return Ok(None);
     }
-    let warning = format!(
-        "coordinator is not running; message was queued for {recipient} and will retry. Run `team-agent diagnose` or restart the team."
+    let persist = !matches!(
+        health.metadata_mismatch_reason.as_deref(),
+        Some("protocol_version_mismatch" | "message_store_schema_version_mismatch")
     );
+    let warning = if persist {
+        format!(
+            "coordinator is not running; message was queued for {recipient} and will retry. Run `team-agent diagnose` or restart the team."
+        )
+    } else {
+        format!(
+            "coordinator protocol or schema is incompatible; message was not queued for {recipient}. Run `team-agent diagnose` or upgrade the runtime."
+        )
+    };
     event_log.write(
         "send.coordinator_unavailable",
         serde_json::json!({
@@ -382,22 +404,25 @@ fn coordinator_unavailable_outcome(
             "coordinator_status": health.status,
             "coordinator_pid": health.pid.map(|pid| pid.get()),
             "metadata_mismatch_reason": health.metadata_mismatch_reason,
-            "message_queued": true,
+            "message_queued": persist,
             "warning": warning,
             "coordinator_log": crate::coordinator::coordinator_log_path(&coordinator_workspace)
                 .display()
                 .to_string(),
         }),
     )?;
-    Ok(Some(DeliveryOutcome {
-        ok: false,
-        status: DeliveryStatus::Degraded,
-        message_status: MessageStatusShadow("degraded".to_string()),
-        message_id: None,
-        verification: Some(warning),
-        stage: None,
-        reason: Some(DeliveryRefusal::CoordinatorUnavailable),
-        channel: Some("coordinator_unavailable".to_string()),
+    Ok(Some(CoordinatorUnavailableGate {
+        persist,
+        outcome: DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::Degraded,
+            message_status: MessageStatusShadow("degraded".to_string()),
+            message_id: None,
+            verification: Some(warning),
+            stage: None,
+            reason: Some(DeliveryRefusal::CoordinatorUnavailable),
+            channel: Some("coordinator_unavailable".to_string()),
+        },
     }))
 }
 

@@ -18,12 +18,11 @@ fn pane_info(pane_id: &str, session: &str, window: &str) -> PaneInfo {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// GROUP E — _fail_leader_delivery: bug-52 fallback-log semantics. ok=True but
-// status=FallbackLog (NOT a real submit). leader.py:394-436.
+// GROUP E — legacy diagnostics may only advance an existing durable row.
 // ════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn fail_leader_delivery_returns_fallback_log_ok_true_not_submitted() {
+fn fail_leader_delivery_without_message_id_does_not_invent_a_row() {
     let ws = tmp_ws("faillead");
     let payload = json(serde_json::json!({
         "to": "leader", "content": "hi", "sender": "coordinator"
@@ -35,12 +34,17 @@ fn fail_leader_delivery_returns_fallback_log_ok_true_not_submitted() {
         Some("No direct leader tmux pane is attached. Run team-agent attach-leader."),
     )
     .unwrap();
-    // leader.py:423-431 — ok True, status fallback_log, channel fallback_inbox.
-    assert!(out.ok);
+    assert!(!out.ok);
     assert_eq!(out.status, DeliveryStatus::FallbackLog);
     assert_eq!(out.reason, Some(DeliveryRefusal::LeaderNotAttached));
-    // The audit must be distinguishable from a real submit (Delivered).
+    assert_eq!(out.message_id, None);
     assert_ne!(out.status, DeliveryStatus::Delivered);
+    let store = MessageStore::open(&ws).unwrap();
+    let connection = crate::db::schema::open_db(store.db_path()).unwrap();
+    let rows: i64 = connection
+        .query_row("select count(*) from messages", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "diagnostics cannot create a fallback message row");
 }
 
 // ════════════════════════════════════════════════════════════════════════
