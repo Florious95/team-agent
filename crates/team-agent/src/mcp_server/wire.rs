@@ -417,16 +417,6 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
                 string_property("Target agent id, 'leader', or '*' for broadcast."),
             );
             insert_property(&mut properties, "content", string_property("Message body."));
-            insert_property(
-                &mut properties,
-                "task_id",
-                string_property("Optional task id to associate with the message."),
-            );
-            insert_property(
-                &mut properties,
-                "requires_ack",
-                boolean_property("Whether the recipient should acknowledge delivery."),
-            );
         }
         McpTool::ReportResult => {
             insert_property(
@@ -604,8 +594,8 @@ pub(crate) fn dispatch_tool(
             let outcome = tools.send_message(
                 &target,
                 content,
-                args.get("task_id").and_then(Value::as_str),
-                args.get("requires_ack").and_then(Value::as_bool),
+                None,
+                None,
                 None,
             )?;
             match outcome {
