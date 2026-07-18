@@ -261,6 +261,16 @@ pub fn send_message(
         persist: true,
     }) = coordinator_unavailable
     {
+        event_log.write(
+            "send.message_queued",
+            serde_json::json!({
+                "message_id": message_id,
+                "recipient": recipient,
+                "sender": opts.sender,
+                "message_status": "queued_coordinator_unavailable",
+                "blocker": "coordinator_unavailable",
+            }),
+        )?;
         outcome.ok = true;
         outcome.status = DeliveryStatus::Blocked;
         outcome.message_status =
