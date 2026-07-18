@@ -178,7 +178,17 @@ fn deliver_primary_watcher(
         );
     }
     let content = format_result_watcher_notification(result);
-    let message_id = store.create_message(
+    let workspace = store
+        .db_path()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| MessagingError::Validation("message store has no workspace root".into()))?;
+    let super::PersistResolution::Persisted(persisted) =
+        super::persist::persist_internal_send(
+        workspace,
+        super::InternalSendKind::Watcher,
+        watcher.get("owner_team_id").and_then(|v| v.as_str()),
         result_task,
         watcher
             .get("leader_id")
@@ -188,8 +198,12 @@ fn deliver_primary_watcher(
         &content,
         None,
         false,
-        watcher.get("owner_team_id").and_then(|v| v.as_str()),
-    )?;
+        None,
+        super::InitialDisposition::Accepted,
+    )? else {
+        unreachable!("watcher notifications do not accept caller-supplied ids")
+    };
+    let message_id = persisted.message_id;
     let claim = store.claim_leader_notification_delivery(NotificationClaimParams {
         result_id,
         owner_team_id: watcher.get("owner_team_id").and_then(|v| v.as_str()),

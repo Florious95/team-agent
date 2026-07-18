@@ -274,21 +274,25 @@ pub fn fail_leader_delivery(
     error: Option<&str>,
 ) -> Result<DeliveryOutcome, MessagingError> {
     let store = MessageStore::open(workspace)?;
-    let sender = payload
-        .get("sender")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("system");
-    let content = payload
-        .get("content")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let task_id = payload.get("task_id").and_then(serde_json::Value::as_str);
-    let message_id = match payload
+    let Some(message_id) = payload
         .get("message_id")
         .and_then(serde_json::Value::as_str)
-    {
-        Some(existing) => existing.to_string(),
-        None => store.create_message(task_id, sender, "leader", content, None, false, None)?,
+        .map(ToOwned::to_owned)
+    else {
+        crate::event_log::EventLog::new(workspace).write(
+            "leader_receiver.delivery_failed_without_message",
+            serde_json::json!({"reason": serde_json::to_value(reason).ok(), "error": error}),
+        )?;
+        return Ok(DeliveryOutcome {
+            ok: false,
+            status: DeliveryStatus::FallbackLog,
+            message_status: MessageStatusShadow("failed".to_string()),
+            message_id: None,
+            verification: None,
+            stage: None,
+            reason: Some(reason),
+            channel: Some("fallback_log".to_string()),
+        });
     };
     store.mark(&message_id, "failed", error)?;
     crate::event_log::EventLog::new(workspace).write(
