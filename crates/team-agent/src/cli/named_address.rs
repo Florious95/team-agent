@@ -505,57 +505,20 @@ enum ParsedTarget {
 }
 
 fn parse_named_address(raw_name: &str) -> Result<ParsedNamedAddress, NamedAddressError> {
-    let raw = raw_name.trim();
-    if raw.is_empty() {
-        return Err(name_invalid("name is empty"));
-    }
-    let (workspace, name) = if let Some((workspace, rest)) = raw.split_once("::") {
-        if workspace.trim().is_empty() || rest.trim().is_empty() {
-            return Err(name_invalid(
-                "workspace-qualified name must include workspace and target",
-            ));
+    let parsed = crate::messaging::parse_logical_address(raw_name).map_err(name_invalid)?;
+    let target = match parsed.target {
+        crate::messaging::LogicalAddressTarget::Worker(agent) => ParsedTarget::BareAgent(agent),
+        crate::messaging::LogicalAddressTarget::TeamEntity { team, entity } => {
+            ParsedTarget::TeamEntity { team, entity }
         }
-        (Some(PathBuf::from(workspace)), rest.trim())
-    } else {
-        (None, raw)
+        crate::messaging::LogicalAddressTarget::SessionWindow { session, window } => {
+            ParsedTarget::SessionWindow { session, window }
+        }
     };
-
-    if name.contains("//") {
-        return Err(name_invalid("name contains an empty path segment"));
-    }
-
-    let target = if name.contains('/') {
-        let parts = name.split('/').collect::<Vec<_>>();
-        if parts.len() != 2 || !valid_component(parts[0]) || !valid_component(parts[1]) {
-            return Err(name_invalid("expected <team>/<agent> or <team>/leader"));
-        }
-        ParsedTarget::TeamEntity {
-            team: parts[0].to_string(),
-            entity: parts[1].to_string(),
-        }
-    } else if name.contains(':') {
-        let parts = name.split(':').collect::<Vec<_>>();
-        if parts.len() != 2 || parts[0].trim().is_empty() || parts[1].trim().is_empty() {
-            return Err(name_invalid("expected <session>:<window>"));
-        }
-        ParsedTarget::SessionWindow {
-            session: parts[0].to_string(),
-            window: parts[1].to_string(),
-        }
-    } else {
-        if !valid_component(name) {
-            return Err(name_invalid("expected a non-empty agent id"));
-        }
-        ParsedTarget::BareAgent(name.to_string())
-    };
-    Ok(ParsedNamedAddress { workspace, target })
-}
-
-fn valid_component(raw: &str) -> bool {
-    !raw.trim().is_empty()
-        && !raw.contains(char::is_whitespace)
-        && !raw.contains('/')
-        && !raw.contains(':')
+    Ok(ParsedNamedAddress {
+        workspace: parsed.workspace,
+        target,
+    })
 }
 
 fn resolve_workspace(

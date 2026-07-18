@@ -439,28 +439,30 @@ fn message_not_silently_stuck_accepted_when_coordinator_dead() {
     )
     .unwrap();
 
-    assert!(!out.ok);
-    assert_eq!(out.status, DeliveryStatus::Degraded);
-    assert_eq!(out.message_status.0, "degraded");
+    assert!(out.ok, "durable persistence is the send success boundary");
+    assert_eq!(out.status, DeliveryStatus::Blocked);
+    assert_eq!(out.message_status.0, "queued_coordinator_unavailable");
+    assert!(out.message_id.as_deref().is_some_and(|id| id.starts_with("msg_")));
     assert_eq!(out.reason, Some(DeliveryRefusal::CoordinatorUnavailable));
     assert!(
         out.verification
             .as_deref()
             .is_some_and(|warning| warning.contains("coordinator is not running")),
-        "N38 warning must explain why the message was not queued; out={out:?}"
+        "N38 warning must explain the durable retry blocker; out={out:?}"
     );
     let store = MessageStore::open(&ws).unwrap();
     let conn = crate::db::schema::open_db(store.db_path()).unwrap();
-    let accepted: i64 = conn
+    let blocked: i64 = conn
         .query_row(
-            "select count(*) from messages where status = 'accepted'",
+            "select count(*) from messages where status = 'queued_coordinator_unavailable' \
+             and error = 'coordinator_unavailable' and delivered_at is null",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(
-        accepted, 0,
-        "dead coordinator send must not strand an accepted row"
+        blocked, 1,
+        "dead coordinator send must park exactly one durable, non-delivered row"
     );
     let events = EventLog::new(&ws).tail(20).unwrap();
     assert!(
@@ -470,7 +472,7 @@ fn message_not_silently_stuck_accepted_when_coordinator_dead() {
                 && event
                     .get("message_queued")
                     .and_then(serde_json::Value::as_bool)
-                    == Some(false)
+                    == Some(true)
         }),
         "send.coordinator_unavailable event must be durable; events={events:?}"
     );

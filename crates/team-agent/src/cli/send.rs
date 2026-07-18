@@ -96,11 +96,6 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
         } else {
             None
         };
-    if let Some(value) =
-        coordinator_ensure_unavailable_value(coordinator_ensure.as_ref(), &target, &content, &opts)
-    {
-        return Ok(cmd_send_result(value, args.json));
-    }
     let mut outcome = messaging::send_message(&selected.run_workspace, &target, &content, &opts)?;
     if opts.watch_result {
         outcome = observe_initial_delivery_for_watch(&selected, &target, &outcome, &opts)?;
@@ -249,40 +244,6 @@ fn in_process_unit_test() -> bool {
 #[cfg(not(test))]
 fn in_process_unit_test() -> bool {
     false
-}
-
-fn coordinator_ensure_unavailable_value(
-    ensure: Option<&LoudEnsureResult>,
-    target: &MessageTarget,
-    content: &str,
-    opts: &SendOptions,
-) -> Option<Value> {
-    let ensure = ensure?;
-    if ensure.start.ok {
-        return None;
-    }
-    let warning = format!(
-        "coordinator is not running; message was not queued for {}. Run `team-agent diagnose` or restart the team before sending again.",
-        first_target(target)
-    );
-    let mut value = json!({
-        "ok": false,
-        "status": "degraded",
-        "delivery_status": "degraded",
-        "delivered": false,
-        "target": target_json(target),
-        "agent_id": first_target(target),
-        "content_length_bytes": content.len(),
-        "sender": opts.sender,
-        "message_id": Value::Null,
-        "message_status": "degraded",
-        "verification": warning,
-        "stage": Value::Null,
-        "reason": "coordinator_unavailable",
-        "channel": "coordinator_unavailable",
-    });
-    append_loud_ensure_fields(&mut value, Some(ensure));
-    Some(value)
 }
 
 fn append_loud_ensure_fields(value: &mut Value, ensure: Option<&LoudEnsureResult>) {
@@ -696,14 +657,6 @@ fn persist_resolved_target(
     } else {
         None
     };
-    if let Some(value) = coordinator_ensure_unavailable_value(
-        coordinator_ensure.as_ref(),
-        target,
-        content,
-        &opts,
-    ) {
-        return Ok(value);
-    }
     let outcome = messaging::send_message(&selected.run_workspace, target, content, &opts)?;
     let mut value = delivery_outcome_json(&outcome, target, content, &opts);
     append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
@@ -786,8 +739,6 @@ fn observe_initial_delivery_for_watch(
     let Some(message_id) = outcome.message_id.as_deref() else {
         return Ok(outcome.clone());
     };
-    let store = crate::message_store::MessageStore::open(&selected.run_workspace)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
     let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
         &selected.run_workspace,
         opts.team.as_ref().map(TeamKey::as_str),
@@ -795,9 +746,8 @@ fn observe_initial_delivery_for_watch(
     .map_err(|e| CliError::Runtime(e.to_string()))?;
     let event_log = crate::event_log::EventLog::new(&selected.run_workspace);
     let state = selected_state_with_active_key(selected);
-    crate::messaging::delivery::deliver_pending_message(
+    crate::messaging::deliver_persisted_message(
         &selected.run_workspace,
-        &store,
         &transport,
         message_id,
         &event_log,
@@ -830,6 +780,7 @@ pub fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget
 /// (其余 `lock_timeout`/`block_until_delivered` 用 [`SendOptions::default`]。)
 pub fn send_options_from_args(args: &SendArgs) -> SendOptions {
     SendOptions {
+        origin: crate::messaging::SendOrigin::Cli,
         task_id: args.task.as_ref().map(|s| TaskId::new(s.clone())),
         route_task_id: true,
         sender: args.sender.clone(),

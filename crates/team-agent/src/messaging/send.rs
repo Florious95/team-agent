@@ -10,7 +10,11 @@ use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
 use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_message_id};
-use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStatus, MessagingError};
+use super::{
+    persist_resolved_send, DeliveryBlocker, DeliveryOutcome, DeliveryRefusal, DeliveryStatus,
+    InitialDisposition, LogicalRecipient, PersistResolution, ResolvedSendIntent, SendOrigin,
+    MessagingError,
+};
 
 /// 发件目标:单 target / 广播 `*` / 扇出 list (`send.py:36` `target: str|list[str]|None`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +53,7 @@ impl TrustedSender {
 /// `send_message` 选项 (`send.py:36`:Python 大量默认参数 → typed 选项 struct)。
 #[derive(Debug, Clone)]
 pub struct SendOptions {
+    pub origin: SendOrigin,
     pub task_id: Option<TaskId>,
     /// `route_task_id`(golden `send.py:190`,默认 `True`):仅 **routing**(CLI `send --task`)时把
     /// `task_id` 当真任务校验/路由。**投递/fanout/internal/coordinator** 路径传 `false`
@@ -73,6 +78,7 @@ impl Default for SendOptions {
     fn default() -> Self {
         // 默认值对齐 Python 签名 (`send.py:38-40`)。
         Self {
+            origin: SendOrigin::Internal(super::InternalSendKind::Delivery),
             task_id: None,
             route_task_id: true,
             sender: TrustedSender::leader(),
@@ -207,46 +213,37 @@ pub fn send_message(
     }
     let stale_worker_target_missing =
         stale_worker_target_missing_preflight(workspace, &state, recipient)?;
-    if !stale_worker_target_missing {
-        if let Some(outcome) =
-            coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
-        {
-            return Ok(outcome);
-        }
+    let coordinator_unavailable = if stale_worker_target_missing {
+        None
+    } else {
+        coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
+    };
+    let mut intent = ResolvedSendIntent::accepted(
+        opts.origin,
+        workspace,
+        opts.team.clone(),
+        LogicalRecipient::from_resolved(recipient),
+        opts.sender.clone(),
+        opts.task_id.clone(),
+        content,
+        None,
+        opts.requires_ack,
+        opts.message_id.clone(),
+    );
+    if coordinator_unavailable.is_some() {
+        intent.initial_disposition =
+            InitialDisposition::Blocked(DeliveryBlocker::CoordinatorUnavailable);
     }
-    let store = crate::message_store::MessageStore::open(workspace)?;
-    let task_id = opts.task_id.as_ref().map(|t| t.as_str());
-    let owner_team_id = opts.team.as_ref().map(|t| t.as_str());
-    // CR-015/054 caller-key dedup: if the caller supplied a stable id, an identical
-    // re-send must NOT create a second row — return a Duplicate refusal instead.
-    let message_id = if let Some(requested) = opts.message_id.as_deref() {
-        if store.message_exists(requested)? {
+    let message_id = match persist_resolved_send(&intent)? {
+        PersistResolution::Persisted(persisted) => persisted.message_id,
+        PersistResolution::Duplicate(message_id) => {
             return Ok(refused_outcome_with_id(
                 DeliveryRefusal::Duplicate,
-                Some(requested.to_string()),
+                Some(message_id),
             ));
         }
-        store.create_message_with_id(
-            requested,
-            task_id,
-            opts.sender.as_str(),
-            recipient,
-            content,
-            None,
-            opts.requires_ack,
-            owner_team_id,
-        )?
-    } else {
-        store.create_message(
-            task_id,
-            opts.sender.as_str(),
-            recipient,
-            content,
-            None,
-            opts.requires_ack,
-            owner_team_id,
-        )?
     };
+    let store = crate::message_store::MessageStore::open(workspace)?;
     if stale_worker_target_missing {
         return super::delivery::mark_worker_target_missing(
             &store,
@@ -255,6 +252,14 @@ pub fn send_message(
             recipient,
             None,
         );
+    }
+    if let Some(mut outcome) = coordinator_unavailable {
+        outcome.ok = true;
+        outcome.status = DeliveryStatus::Blocked;
+        outcome.message_status =
+            MessageStatusShadow("queued_coordinator_unavailable".to_string());
+        outcome.message_id = Some(message_id);
+        return Ok(outcome);
     }
     Ok(DeliveryOutcome {
         ok: true,
@@ -367,7 +372,7 @@ fn coordinator_unavailable_outcome(
         return Ok(None);
     }
     let warning = format!(
-        "coordinator is not running; message was not queued for {recipient}. Run `team-agent diagnose` or restart the team before sending again."
+        "coordinator is not running; message was queued for {recipient} and will retry. Run `team-agent diagnose` or restart the team."
     );
     event_log.write(
         "send.coordinator_unavailable",
@@ -377,7 +382,7 @@ fn coordinator_unavailable_outcome(
             "coordinator_status": health.status,
             "coordinator_pid": health.pid.map(|pid| pid.get()),
             "metadata_mismatch_reason": health.metadata_mismatch_reason,
-            "message_queued": false,
+            "message_queued": true,
             "warning": warning,
             "coordinator_log": crate::coordinator::coordinator_log_path(&coordinator_workspace)
                 .display()

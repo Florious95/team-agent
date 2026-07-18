@@ -80,6 +80,21 @@ pub struct NotificationClaimParams<'a> {
     pub pane_id: Option<&'a str>,
 }
 
+/// Fully resolved durable-message insert. Grammar, scope and transport data do
+/// not belong here; callers must resolve those before crossing this boundary.
+pub struct PersistMessageInput<'a> {
+    pub message_id: Option<&'a str>,
+    pub owner_team_id: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub sender: &'a str,
+    pub recipient: &'a str,
+    pub reply_to: Option<&'a str>,
+    pub requires_ack: bool,
+    pub status: &'a str,
+    pub content: &'a str,
+    pub error: Option<&'a str>,
+}
+
 /// `leader_notification_log._legacy_epoch_from_uuid` (line 145-147):
 /// `int(zlib.crc32(str(uuid or "").encode("utf-8")) & 0x7FFFFFFF)`.
 pub fn legacy_epoch_from_uuid(leader_session_uuid: Option<&str>) -> i64 {
@@ -135,6 +150,39 @@ impl MessageStore {
         &self.path
     }
 
+    pub fn persist_message(
+        &self,
+        input: PersistMessageInput<'_>,
+    ) -> Result<String, MessageStoreError> {
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let message_id = input
+            .message_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(next_message_id);
+        let now = now_ts();
+        conn.execute(
+            "insert into messages(
+                message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
+                status, content, artifact_refs, created_at, updated_at, delivered_at,
+                acknowledged_at, error, delivery_attempts
+            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, '[]', ?10, ?10, null, null, ?11, 0)",
+            params![
+                message_id,
+                input.owner_team_id,
+                input.task_id,
+                input.sender,
+                input.recipient,
+                input.reply_to,
+                if input.requires_ack { 1 } else { 0 },
+                input.status,
+                input.content,
+                now,
+                input.error,
+            ],
+        )?;
+        Ok(message_id)
+    }
+
     /// `create_message` (`core.py:71-114`). Returns `msg_<uuid4 hex[:12]>`; inserts
     /// a row with `status='accepted'`, `requires_ack` as 0/1 int, `artifact_refs`
     /// defaulting to `'[]'`, `delivery_attempts=0`, timestamps = now.
@@ -149,28 +197,18 @@ impl MessageStore {
         requires_ack: bool,
         owner_team_id: Option<&str>,
     ) -> Result<String, MessageStoreError> {
-        let conn = crate::db::schema::open_db(&self.path)?;
-        let message_id = next_message_id();
-        let now = now_ts();
-        conn.execute(
-            "insert into messages(
-                message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
-                status, content, artifact_refs, created_at, updated_at, delivered_at,
-                acknowledged_at, error, delivery_attempts
-            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'accepted', ?8, '[]', ?9, ?9, null, null, null, 0)",
-            params![
-                message_id,
-                owner_team_id,
-                task_id,
-                sender,
-                recipient,
-                reply_to,
-                if requires_ack { 1 } else { 0 },
-                content,
-                now,
-            ],
-        )?;
-        Ok(message_id)
+        self.persist_message(PersistMessageInput {
+            message_id: None,
+            owner_team_id,
+            task_id,
+            sender,
+            recipient,
+            reply_to,
+            requires_ack,
+            status: "accepted",
+            content,
+            error: None,
+        })
     }
 
     /// Caller-supplied-id variant of [`create_message`] (CR-015/054 — `--message-id`).
@@ -192,27 +230,18 @@ impl MessageStore {
         requires_ack: bool,
         owner_team_id: Option<&str>,
     ) -> Result<String, MessageStoreError> {
-        let conn = crate::db::schema::open_db(&self.path)?;
-        let now = now_ts();
-        conn.execute(
-            "insert into messages(
-                message_id, owner_team_id, task_id, sender, recipient, reply_to, requires_ack,
-                status, content, artifact_refs, created_at, updated_at, delivered_at,
-                acknowledged_at, error, delivery_attempts
-            ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'accepted', ?8, '[]', ?9, ?9, null, null, null, 0)",
-            params![
-                message_id,
-                owner_team_id,
-                task_id,
-                sender,
-                recipient,
-                reply_to,
-                if requires_ack { 1 } else { 0 },
-                content,
-                now,
-            ],
-        )?;
-        Ok(message_id.to_string())
+        self.persist_message(PersistMessageInput {
+            message_id: Some(message_id),
+            owner_team_id,
+            task_id,
+            sender,
+            recipient,
+            reply_to,
+            requires_ack,
+            status: "accepted",
+            content,
+            error: None,
+        })
     }
 
     /// `true` iff a `messages` row with this `message_id` already exists. Used by
@@ -332,7 +361,7 @@ impl MessageStore {
              where message_id = ?1
                and status in (
                    'pending', 'accepted', 'queued_until_idle', 'queued_until_start',
-                   'queued_stopped', 'queued_pane_missing'
+                   'queued_stopped', 'queued_pane_missing', 'queued_coordinator_unavailable'
                )",
             params![message_id, now_ts()],
         )?;

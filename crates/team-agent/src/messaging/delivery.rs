@@ -45,16 +45,23 @@ pub fn deliver_stored_message(
 ) -> Result<DeliveryOutcome, MessagingError> {
     let _ = (wait_visible, timeout);
     let recipient = target.unwrap_or("leader");
-    let store = MessageStore::open(workspace)?;
-    let message_id = store.create_message(
+    let super::PersistResolution::Persisted(persisted) =
+        super::persist::persist_internal_send(
+        workspace,
+        super::InternalSendKind::Delivery,
+        team.map(TeamKey::as_str),
         task_id.map(crate::model::ids::TaskId::as_str),
         sender,
         recipient,
         content,
         None,
         requires_ack,
-        team.map(TeamKey::as_str),
-    )?;
+        None,
+        super::InitialDisposition::Accepted,
+    )? else {
+        unreachable!("internal delivery does not accept caller-supplied ids")
+    };
+    let message_id = persisted.message_id;
     Ok(DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Queued,
@@ -65,6 +72,17 @@ pub fn deliver_stored_message(
         reason: None,
         channel: None,
     })
+}
+
+pub fn deliver_persisted_message(
+    workspace: &Path,
+    transport: &dyn Transport,
+    message_id: &str,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let store = MessageStore::open(workspace)?;
+    deliver_pending_message(workspace, &store, transport, message_id, event_log, state)
 }
 
 // ===========================================================================
@@ -1834,7 +1852,8 @@ pub fn deliver_pending_messages(
             "select message_id from messages
              where status in (
                  'pending', 'accepted', 'target_resolved',
-                 'submitted_pending_acceptance', 'queued_until_leader_attach'
+                 'submitted_pending_acceptance', 'queued_until_leader_attach',
+                 'queued_coordinator_unavailable'
              )
              order by created_at, message_id",
         )?;

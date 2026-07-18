@@ -61,10 +61,12 @@ use crate::message_store::MessageStore;
 use crate::transport::{PaneId, Target, Transport};
 
 pub mod activity;
+pub mod address;
 pub mod delivery;
 pub mod helpers;
 pub mod leader_receiver;
 pub mod peers;
+pub mod persist;
 pub mod results;
 pub mod scheduler;
 pub mod selftest;
@@ -75,9 +77,11 @@ pub mod watchers;
 
 // ── re-export: 保持 `crate::messaging::X` 与 test `super::X` 解析不变 ──────────
 pub use activity::{classify_agent_activity, detect_cross_worker_deadlocks, detect_idle_fallbacks};
+pub use address::{parse_logical_address, LogicalAddress, LogicalAddressTarget};
 pub use delivery::{
-    deliver_pending_message, deliver_pending_messages, deliver_stored_message, execute_trust_retry,
-    handle_trust_retry_needed, record_turn_open_if_leader_to_worker,
+    deliver_pending_message, deliver_pending_messages, deliver_persisted_message,
+    deliver_stored_message, execute_trust_retry, handle_trust_retry_needed,
+    record_turn_open_if_leader_to_worker,
     retry_injection_after_trust_auto_answer, stamp_first_send_at_if_leader_to_worker,
     tmux_pane_width,
 };
@@ -88,6 +92,10 @@ pub use leader_receiver::{
     send_to_leader_receiver_with_message_id,
 };
 pub use peers::allow_peer_talk;
+pub use persist::{
+    persist_resolved_send, DeliveryBlocker, InitialDisposition, InternalSendKind,
+    LogicalRecipient, PersistResolution, PersistedSend, ResolvedSendIntent, SendOrigin,
+};
 pub use results::{
     collect, collect_for_team, collect_results_and_notify_watchers, report_result,
     report_result_for_owner_team, report_result_for_owner_team_with_primary_error,

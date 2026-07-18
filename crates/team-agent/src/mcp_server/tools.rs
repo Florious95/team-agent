@@ -213,6 +213,7 @@ impl TeamOrchestratorTools {
             )
             .map_err(tool_runtime_error)?;
         let opts = SendOptions {
+            origin: crate::messaging::SendOrigin::Mcp,
             task_id: task_id.map(TaskId::new),
             route_task_id: true,
             sender,
