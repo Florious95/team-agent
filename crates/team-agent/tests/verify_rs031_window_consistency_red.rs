@@ -449,7 +449,7 @@ fn worker_to_leader_delivery_succeeds_when_attached_leader_pane_lives_on_default
     );
 }
 
-fn assert_bound_reachable_leader_send_message_delivers(
+fn assert_bound_reachable_leader_send_message_injects(
     binding: &str,
     discovery: &str,
     claimed_via: &str,
@@ -532,13 +532,28 @@ fn assert_bound_reachable_leader_send_message_delivers(
     let events = std::fs::read_to_string(workspace.join(".team/logs/events.jsonl"))
         .expect("events.jsonl exists");
 
+    // Injection-case revision (MUST-10 boundary): the single delivery
+    // authority must physically inject into the claimed leader pane exactly
+    // once, but a transport submit is not a provider receipt — the row parks
+    // as submitted_pending_acceptance and must NOT be reported delivered.
     assert!(
-        delivered.iter().any(|id| id == message_id)
-            && status == "delivered"
-            && targets.contains(&Target::Pane(leader_pane.clone())),
-        "BUG-4 single-authority contract: the fresh row created by send_message must be \
-         physically injected by deliver_pending_messages to the claimed leader pane. \
-         delivered={delivered:?} status={status:?} targets={targets:?} events={events}"
+        targets
+            .iter()
+            .filter(|target| **target == Target::Pane(leader_pane.clone()))
+            .count()
+            == 1,
+        "BUG-4 single-authority contract: exactly one physical inject into the claimed leader \
+         pane. targets={targets:?} events={events}"
+    );
+    assert!(
+        delivered.iter().all(|id| id != message_id),
+        "BUG-4 single-authority contract: transport submit without a provider receipt must not \
+         mark the row delivered. delivered={delivered:?} events={events}"
+    );
+    assert_eq!(
+        status, "submitted_pending_acceptance",
+        "BUG-4 single-authority contract: the injected row parks as \
+         submitted_pending_acceptance until a provider receipt. status={status:?} events={events}"
     );
     assert!(
         !events.contains("\"reason\":\"leader_not_attached\""),
@@ -549,9 +564,9 @@ fn assert_bound_reachable_leader_send_message_delivers(
 
 #[test]
 #[serial(env)]
-fn bound_reachable_leader_from_claim_or_attach_is_delivered_by_single_authority() {
-    assert_bound_reachable_leader_send_message_delivers("claim", "claim_leader", "claim-leader");
-    assert_bound_reachable_leader_send_message_delivers("attach", "attach_leader", "attach-leader");
+fn bound_reachable_leader_from_claim_or_attach_is_injected_by_single_authority() {
+    assert_bound_reachable_leader_send_message_injects("claim", "claim_leader", "claim-leader");
+    assert_bound_reachable_leader_send_message_injects("attach", "attach_leader", "attach-leader");
 }
 
 #[test]
