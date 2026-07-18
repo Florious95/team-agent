@@ -200,6 +200,22 @@ pub fn deliver_pending_message(
         }
         _ => state,
     };
+    if message.recipient == "leader" && message.status == "submitted_pending_acceptance" {
+        return observe_pending_leader_acceptance(store, event_log, state, message_id);
+    }
+    if message.recipient == "leader" && message.status == "queued_until_leader_attach" {
+        if leader_receiver_status(state) != Some("attached") {
+            return Ok(leader_acceptance_pending_outcome(
+                message_id,
+                "queued_until_leader_attach",
+            ));
+        }
+        store.mark(message_id, "accepted", None)?;
+        event_log.write(
+            "leader_receiver.mailbox_requeued",
+            serde_json::json!({"message_id": message_id}),
+        )?;
+    }
     let attempt = if store.claim_for_delivery(message_id)? {
         message.delivery_attempts.saturating_add(1)
     } else if message.status == "target_resolved" && message.error.is_some() {
@@ -524,14 +540,10 @@ pub fn deliver_pending_message(
     }
     let submit_verified = inject_submit_verified(&inject_report);
     let readback_verified = pane_readback_verified(&inject_report);
-    // Leader pane: inject success is delivery proof. Worker pane: post-submit
-    // evidence is the delivery proof; stale Phase-1 readback must not veto it
-    // and cannot independently prove the current Enter submitted.
-    let verified = if is_leader_recipient {
-        true
-    } else {
-        submit_verified
-    };
+    // A successful tmux command is never provider-acceptance proof. Leader and
+    // worker delivery both require post-submit evidence; leader additionally
+    // waits for its authoritative provider transcript below.
+    let verified = submit_verified;
     if !verified {
         let reason = if !readback_verified {
             "pane_readback_unverified:capture_missing_token".to_string()
@@ -658,7 +670,26 @@ pub fn deliver_pending_message(
             });
         }
     }
-    store.mark(message_id, "delivered", None)?;
+    if is_leader_recipient {
+        store.record_delivery_submission(message_id, readback_verified)?;
+        if !leader_transcript_has_token(state, message_id) {
+            store.mark(message_id, "submitted_pending_acceptance", None)?;
+            event_log.write(
+                "leader_receiver.acceptance_pending",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "reason": "provider_receipt_not_observed",
+                }),
+            )?;
+            return Ok(leader_acceptance_pending_outcome(
+                message_id,
+                "submitted_pending_acceptance",
+            ));
+        }
+        store.mark_delivered_with_receipt(message_id)?;
+    } else {
+        store.mark(message_id, "delivered", None)?;
+    }
     let mut delivered_event = serde_json::json!({"message_id": message_id});
     if let Some(metadata) = resolved.metadata.as_ref() {
         append_target_metadata(&mut delivered_event, metadata);
@@ -908,7 +939,8 @@ fn deliver_leader_via_app_server(
     );
     match crate::codex_app_server::submit_to_bound_thread(&binding, message_id, &rendered) {
         Ok(submit) => {
-            store.mark(message_id, "delivered", None)?;
+            store.record_delivery_submission(message_id, true)?;
+            store.mark_delivered_with_receipt(message_id)?;
             event_log.write(
                 "message.delivered",
                 serde_json::json!({"message_id": message_id}),
@@ -1800,7 +1832,10 @@ pub fn deliver_pending_messages(
         let conn = crate::db::schema::open_db(store.db_path())?;
         let mut stmt = conn.prepare(
             "select message_id from messages
-             where status in ('pending', 'accepted', 'target_resolved')
+             where status in (
+                 'pending', 'accepted', 'target_resolved',
+                 'submitted_pending_acceptance', 'queued_until_leader_attach'
+             )
              order by created_at, message_id",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
@@ -1874,7 +1909,7 @@ pub fn deliver_pending_messages(
                 continue;
             }
         };
-        if outcome.ok {
+        if matches!(outcome.status, DeliveryStatus::Delivered) {
             delivered.push(message_id);
         }
     }
@@ -2015,6 +2050,73 @@ fn recipient_is_busy(state: &serde_json::Value, recipient: &str) -> bool {
         .and_then(|agent| agent.get("status"))
         .and_then(serde_json::Value::as_str)
         == Some("busy")
+}
+
+fn leader_rollout_path(state: &serde_json::Value) -> Option<std::path::PathBuf> {
+    state
+        .get("leader")
+        .and_then(|leader| leader.get("rollout_path"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            leader_receiver_value(state)
+                .and_then(|receiver| receiver.get("rollout_path"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+pub(crate) fn leader_transcript_has_token(state: &serde_json::Value, message_id: &str) -> bool {
+    let Some(path) = leader_rollout_path(state) else {
+        return false;
+    };
+    rollout_tail_contains(
+        &path,
+        &format!("[team-agent-token:{message_id}]"),
+        64 * 1024,
+    )
+}
+
+fn leader_acceptance_pending_outcome(message_id: &str, status: &str) -> DeliveryOutcome {
+    DeliveryOutcome {
+        ok: true,
+        status: DeliveryStatus::RetryScheduled,
+        message_status: MessageStatusShadow(status.to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some("provider_receipt_not_observed".to_string()),
+        stage: Some(DeliveryStage::Submit),
+        reason: None,
+        channel: Some("leader_acceptance_pending".to_string()),
+    }
+}
+
+fn observe_pending_leader_acceptance(
+    store: &MessageStore,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+    message_id: &str,
+) -> Result<DeliveryOutcome, MessagingError> {
+    if !leader_transcript_has_token(state, message_id) {
+        return Ok(leader_acceptance_pending_outcome(
+            message_id,
+            "submitted_pending_acceptance",
+        ));
+    }
+    store.mark_delivered_with_receipt(message_id)?;
+    event_log.write(
+        "message.delivered",
+        serde_json::json!({"message_id": message_id}),
+    )?;
+    Ok(DeliveryOutcome {
+        ok: true,
+        status: DeliveryStatus::Delivered,
+        message_status: MessageStatusShadow("delivered".to_string()),
+        message_id: Some(message_id.to_string()),
+        verification: Some("provider_transcript_receipt".to_string()),
+        stage: None,
+        reason: None,
+        channel: Some("leader_receiver".to_string()),
+    })
 }
 
 /// `_handle_trust_retry_needed` (`delivery.py:221`):trust 应答失败时调度有界退避重试

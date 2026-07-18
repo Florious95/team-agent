@@ -52,6 +52,8 @@ pub enum MessageStoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("delivery receipt missing for message: {0}")]
+    DeliveryReceiptMissing(String),
 }
 
 /// Outcome of [`MessageStore::claim_leader_notification_delivery`]
@@ -257,6 +259,62 @@ impl MessageStore {
              where message_id = ?1",
             params![message_id, status, now, error],
         )?;
+        Ok(())
+    }
+
+    /// Record that the transport submitted a message without claiming that the
+    /// provider accepted it. The stable message id is also the receipt token.
+    pub fn record_delivery_submission(
+        &self,
+        message_id: &str,
+        visible: bool,
+    ) -> Result<(), MessageStoreError> {
+        let conn = crate::db::schema::open_db(&self.path)?;
+        let now = now_ts();
+        conn.execute(
+            "insert into delivery_tokens(
+                 message_id, unique_token, injected_at, visible_at,
+                 consumed_at, failed_at, failure_reason
+             ) values (?1, ?1, ?2, ?3, null, null, null)
+             on conflict(message_id) do update set
+                 visible_at = coalesce(delivery_tokens.visible_at, excluded.visible_at),
+                 failed_at = null,
+                 failure_reason = null",
+            params![message_id, now, visible.then_some(now_ts())],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically persist the provider-side receipt and advance the message to
+    /// delivered. A transport-only caller cannot use this without first
+    /// recording the submission row above.
+    pub fn mark_delivered_with_receipt(&self, message_id: &str) -> Result<(), MessageStoreError> {
+        let mut conn = crate::db::schema::open_db(&self.path)?;
+        let tx = conn.transaction()?;
+        let now = now_ts();
+        let receipts = tx.execute(
+            "update delivery_tokens
+             set consumed_at = coalesce(consumed_at, ?2),
+                 failed_at = null,
+                 failure_reason = null
+             where message_id = ?1",
+            params![message_id, now],
+        )?;
+        if receipts != 1 {
+            return Err(MessageStoreError::DeliveryReceiptMissing(
+                message_id.to_string(),
+            ));
+        }
+        tx.execute(
+            "update messages
+             set status = case when status = 'acknowledged' then status else 'delivered' end,
+                 updated_at = ?2,
+                 delivered_at = ?2,
+                 error = null
+             where message_id = ?1",
+            params![message_id, now_ts()],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
