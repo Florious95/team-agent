@@ -270,17 +270,12 @@ fn coordinator_debug_eprintlns_are_deleted_but_inject_report_shape_remains() {
 }
 
 #[test]
-fn send_pane_docs_name_selected_team_endpoint_local_scope() {
+fn send_pane_compat_surface_has_no_direct_inject_path() {
     let source = read_repo("crates/team-agent/src/cli/send.rs");
-    let end = source
-        .find("fn send_to_pane_direct")
-        .expect("send_to_pane_direct");
-    let start = source[..end].rfind("/// F1").expect("F1 docs");
-    let docs = &source[start..end];
-    assert!(docs.contains("selected team"));
-    assert!(docs.contains("endpoint-local"));
-    assert!(!docs.contains("default tmux backend"));
-    assert!(!docs.contains("Cross-team capable"));
+    assert!(!source.contains("fn send_to_pane_direct"));
+    assert!(!source.contains("send.pane_direct"));
+    assert!(source.contains("--pane {pane_id} is deprecated and sunset"));
+    assert!(source.contains("use a logical TARGET"));
 }
 
 #[test]

@@ -459,7 +459,7 @@ fn resolve_app_server_leader_name_fails_closed_on_transport_conflict() {
 
 #[cfg(unix)]
 #[test]
-fn send_to_name_app_server_leader_submits_turn_without_tmux_pane() {
+fn send_to_name_app_server_leader_persists_before_async_delivery() {
     let ws = named_ws("appserver-leader-send");
     let fake = crate::app_server_test_support::FakeAppServer::start(
         "named-send",
@@ -484,11 +484,13 @@ fn send_to_name_app_server_leader_submits_turn_without_tmux_pane() {
     };
 
     assert_eq!(value["ok"], json!(true));
-    assert_eq!(value["transport_kind"], json!("codex_app_server"));
-    assert_eq!(fake.received_turns().len(), 1);
-    assert_eq!(
-        fake.received_turns()[0]["params"]["clientUserMessageId"],
-        value["message_id"]
+    let message_id = value["message_id"].as_str().expect("persisted message id");
+    assert!(message_id.starts_with("msg_"));
+    let store = crate::message_store::MessageStore::open(&ws).unwrap();
+    assert!(store.message_exists(message_id).unwrap());
+    assert!(
+        fake.received_turns().is_empty(),
+        "send returns after persistence; coordinator owns physical delivery"
     );
     let _ = std::fs::remove_dir_all(&ws);
 }
