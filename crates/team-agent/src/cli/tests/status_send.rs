@@ -460,7 +460,7 @@ fn send_args_fixture() -> SendArgs {
         workspace: PathBuf::from("."),
         team: Some("teamA".into()),
         task: Some("t-1".into()),
-        sender: "leader".into(),
+        sender: TrustedSender::leader(),
         no_ack: true,
         no_wait: true,
         watch_result: true,
@@ -515,7 +515,7 @@ fn send_options_negates_no_ack_and_no_wait_and_carries_watch() {
         "watch_result flag MUST pass through into SendOptions"
     );
     assert!(!opts.confirm_human);
-    assert_eq!(opts.sender, "leader");
+    assert_eq!(opts.sender.as_str(), "leader");
     assert_eq!(opts.timeout, 12.5);
 }
 

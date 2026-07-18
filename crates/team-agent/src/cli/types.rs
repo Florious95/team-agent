@@ -312,7 +312,7 @@ pub struct SendArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub task: Option<String>,
-    pub sender: String,
+    pub sender: TrustedSender,
     pub no_ack: bool,
     pub no_wait: bool,
     pub watch_result: bool,

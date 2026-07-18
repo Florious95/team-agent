@@ -149,7 +149,7 @@ fn named_send_args(
         workspace: ws.to_path_buf(),
         team: None,
         task: None,
-        sender: "leader".to_string(),
+        sender: TrustedSender::leader(),
         no_ack: false,
         no_wait: false,
         watch_result: false,

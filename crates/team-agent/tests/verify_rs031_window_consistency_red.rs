@@ -21,8 +21,9 @@ use team_agent::lifecycle::{launch_with_transport, quick_start_with_transport, Q
 use team_agent::message_store::MessageStore;
 use team_agent::messaging::{
     deliver_pending_message, deliver_pending_messages, send_message, DeliveryStatus, MessageTarget,
-    SendOptions,
+    SendOptions, TrustedSender,
 };
+use team_agent::model::ids::AgentId;
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -500,7 +501,7 @@ fn assert_bound_reachable_leader_send_message_delivers(
     let event_log = EventLog::new(&workspace);
 
     let mut opts = SendOptions::default();
-    opts.sender = "codexer".to_string();
+    opts.sender = TrustedSender::from_runtime_identity(AgentId::new("codexer"));
     opts.requires_ack = false;
     opts.route_task_id = false;
     opts.team = Some(team_agent::model::ids::TeamKey::new("teamdir"));
@@ -594,7 +595,7 @@ fn unbound_or_unreachable_worker_to_leader_remains_rebind_required_without_autod
         save_runtime_state(&workspace, &state).expect("seed runtime state");
         let event_log = EventLog::new(&workspace);
         let mut opts = SendOptions::default();
-        opts.sender = "codexer".to_string();
+        opts.sender = TrustedSender::from_runtime_identity(AgentId::new("codexer"));
         opts.requires_ack = false;
         opts.route_task_id = false;
         opts.team = Some(team_agent::model::ids::TeamKey::new("teamdir"));

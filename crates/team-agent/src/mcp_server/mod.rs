@@ -88,7 +88,7 @@ use crate::message_store::MessageStore;
 use crate::state::persist::{load_runtime_state, save_runtime_state};
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
-use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions};
+use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions, TrustedSender};
 
 pub mod helpers;
 pub(crate) mod lifecycle_tools;

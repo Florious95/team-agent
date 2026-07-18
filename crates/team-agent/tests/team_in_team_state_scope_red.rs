@@ -32,7 +32,7 @@ use team_agent::lifecycle::{
     quick_start_with_transport, reset_agent_with_transport, start_agent_with_transport,
     stop_agent_with_transport,
 };
-use team_agent::messaging::{send_message, MessageTarget, SendOptions};
+use team_agent::messaging::{send_message, MessageTarget, SendOptions, TrustedSender};
 use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::state::persist::{load_runtime_state, save_runtime_state};
 use team_agent::transport::{
@@ -321,7 +321,7 @@ fn run_owner_gate_case(case: OwnerGateCase) -> Result<(), String> {
         .map_err(|e| e.to_string()),
         Operation::Send => {
             let opts = SendOptions {
-                sender: "leader".to_string(),
+                sender: TrustedSender::leader(),
                 team: Some(TeamKey::new(case.team.to_string())),
                 requires_ack: false,
                 wait_visible: false,

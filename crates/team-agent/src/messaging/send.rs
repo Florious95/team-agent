@@ -5,7 +5,7 @@ use std::path::Path;
 use crate::coordinator::{CoordinatorHealthStatus, WorkspacePath};
 use crate::event_log::EventLog;
 use crate::model::enums::PaneLiveness;
-use crate::model::ids::{TaskId, TeamKey};
+use crate::model::ids::{AgentId, TaskId, TeamKey};
 use crate::transport::{PaneId, Transport};
 
 use super::helpers::{status_wire, MessageStatusShadow};
@@ -23,6 +23,29 @@ pub enum MessageTarget {
     Fanout(Vec<String>),
 }
 
+/// Sender identity captured from a framework-owned runtime context.
+///
+/// Public CLI/MCP inputs never construct this value from a caller-supplied
+/// string. The wrapper keeps that trust boundary visible throughout delivery
+/// instead of degrading the identity back to an untyped option field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct TrustedSender(AgentId);
+
+impl TrustedSender {
+    pub fn from_runtime_identity(agent_id: AgentId) -> Self {
+        Self(agent_id)
+    }
+
+    pub fn leader() -> Self {
+        Self(AgentId::new("leader"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// `send_message` 选项 (`send.py:36`:Python 大量默认参数 → typed 选项 struct)。
 #[derive(Debug, Clone)]
 pub struct SendOptions {
@@ -31,7 +54,7 @@ pub struct SendOptions {
     /// `task_id` 当真任务校验/路由。**投递/fanout/internal/coordinator** 路径传 `false`
     /// (`internal_delivery.py:44`、`send.py:412/481`),此时 `task_id` 只是标签,**不校验 state.tasks**。
     pub route_task_id: bool,
-    pub sender: String,
+    pub sender: TrustedSender,
     pub requires_ack: bool,
     pub confirm_human: bool,
     pub wait_visible: bool,
@@ -52,7 +75,7 @@ impl Default for SendOptions {
         Self {
             task_id: None,
             route_task_id: true,
-            sender: "leader".to_string(),
+            sender: TrustedSender::leader(),
             requires_ack: true,
             confirm_human: false,
             wait_visible: true,
@@ -95,7 +118,7 @@ pub fn send_message(
                 "leader",
                 content,
                 opts.task_id.as_ref(),
-                &opts.sender,
+                opts.sender.as_str(),
                 opts.requires_ack,
                 None,
                 opts.message_id.as_deref(),
@@ -119,7 +142,7 @@ pub fn send_message(
         }
         MessageTarget::Single(target) => target,
         MessageTarget::Broadcast => {
-            let recipients = broadcast_recipients(&state, &opts.sender, opts.team.as_ref());
+            let recipients = broadcast_recipients(&state, opts.sender.as_str(), opts.team.as_ref());
             return fanout_send(
                 workspace,
                 &state,
@@ -163,13 +186,13 @@ pub fn send_message(
         &state,
         recipient,
         "leader",
-        &opts.sender,
+        opts.sender.as_str(),
         opts.task_id.as_ref(),
         &event_log,
     )? {
         return Ok(outcome);
     }
-    if let Some(outcome) = send_owner_gate_refusal(workspace, &state, &opts.sender)? {
+    if let Some(outcome) = send_owner_gate_refusal(workspace, &state, opts.sender.as_str())? {
         return Ok(outcome);
     }
     if opts.route_task_id {
@@ -206,7 +229,7 @@ pub fn send_message(
         store.create_message_with_id(
             requested,
             task_id,
-            &opts.sender,
+            opts.sender.as_str(),
             recipient,
             content,
             None,
@@ -216,7 +239,7 @@ pub fn send_message(
     } else {
         store.create_message(
             task_id,
-            &opts.sender,
+            opts.sender.as_str(),
             recipient,
             content,
             None,
@@ -690,7 +713,7 @@ fn fanout_send(
     let mut delivered_count = 0usize;
     let mut attempted_count = 0usize;
     for recipient in recipients {
-        if recipient.is_empty() || recipient == &opts.sender {
+        if recipient.is_empty() || recipient == opts.sender.as_str() {
             continue;
         }
         attempted_count = attempted_count.saturating_add(1);
@@ -701,7 +724,7 @@ fn fanout_send(
                 recipient,
                 content,
                 opts.task_id.as_ref(),
-                &opts.sender,
+                opts.sender.as_str(),
                 opts.requires_ack,
                 None,
                 event_log,

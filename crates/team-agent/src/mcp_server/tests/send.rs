@@ -155,7 +155,6 @@ fn send_message_worker_recipient_returns_accepted_with_poll_hint() {
         None,
         None,
         None,
-        None,
     );
     match outcome {
         Ok(SendOutcome::WorkerAccepted {
@@ -182,7 +181,6 @@ fn ordinary_send_assign_shape_has_no_recovery_marker() {
         .send_message(
             &MessageTarget::Single("worker-1".to_string()),
             "ordinary send",
-            None,
             None,
             None,
             None,
@@ -238,6 +236,22 @@ fn ordinary_send_assign_shape_has_no_recovery_marker() {
         recovery_false_value.get("acceptance_marker").is_none(),
         "recovery=false assign must not carry acceptance marker: {recovery_false_value}"
     );
+}
+
+#[test]
+fn send_message_without_framework_identity_fails_closed() {
+    let ws = seed_current_worker_state("missing-sender-identity");
+    let tools = TeamOrchestratorTools::with_identity(&ws, None, Some(TeamKey::new("current")));
+    let error = tools
+        .send_message(
+            &MessageTarget::Single("worker-1".to_string()),
+            "must not be attributed to unknown",
+            None,
+            None,
+            None,
+        )
+        .expect_err("missing framework identity must fail before persistence");
+    assert_eq!(error.reason, ToolErrorReason::McpScopeRefused);
 }
 
 #[test]
@@ -304,7 +318,6 @@ fn send_message_worker_recipient_surfaces_dead_coordinator_warning() {
             None,
             None,
             None,
-            None,
         )
         .expect("send returns degraded warning, not an MCP error");
     let v = outcome.to_value();
@@ -333,7 +346,6 @@ fn send_message_leader_recipient_is_direct_not_accepted() {
         .send_message(
             &MessageTarget::Single("leader".to_string()),
             "status update",
-            None,
             None,
             None,
             None,
@@ -432,7 +444,6 @@ fn send_message_cross_team_peer_surfaces_peer_not_in_scope_error() {
         .send_message(
             &MessageTarget::Single("other-team-bob".to_string()),
             "leak attempt",
-            None,
             None,
             None,
             None,

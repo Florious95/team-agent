@@ -317,7 +317,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("send") => concat!(
             "usage: team-agent send TARGET MESSAGE... ",
             "[--workspace WORKSPACE] [--team TEAM] [--targets AGENTS] ",
-            "[--to-name NAME] [--pane PANE] [--task TASK] [--sender SENDER] ",
+            "[--to-name NAME] [--pane PANE] [--task TASK] ",
             "[--watch-result] [--requires-ack|--no-ack] [--no-wait] ",
             "[--timeout SECONDS] [--confirm-human] [--message-id ID] [--json]\n\n",
             "TARGET is a short id scoped by --team; MCP `to` is a short id scoped ",
@@ -732,7 +732,6 @@ struct ParsedArgs {
     team_id: Option<String>,
     targets: Option<String>,
     task: Option<String>,
-    sender: Option<String>,
     watch_result: bool,
     requires_ack: bool,
     no_ack: bool,
@@ -816,7 +815,6 @@ fn parse_args(args: &[String]) -> ParsedArgs {
             "--targets" | "--target" | "--to" => parsed.targets = next_arg(args, &mut i),
             "--task" => parsed.task = next_arg(args, &mut i),
             "--task-id" => parsed.task_id = next_arg(args, &mut i),
-            "--sender" => parsed.sender = next_arg(args, &mut i),
             "--agent-id" => parsed.agent_id = next_arg(args, &mut i),
             "--watch-result" => parsed.watch_result = true,
             "--requires-ack" => parsed.requires_ack = true,
@@ -1027,6 +1025,7 @@ fn resolve_cli_path(cwd: &Path, path: &Path) -> PathBuf {
 }
 
 fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
+    validate_send_flags(args)?;
     let parsed = parse_args(args);
     let target = if parsed.targets.is_some()
         || parsed.pane.is_some()
@@ -1051,7 +1050,7 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         workspace,
         team: parsed.team,
         task: parsed.task,
-        sender: parsed.sender.unwrap_or_else(|| "leader".to_string()),
+        sender: trusted_cli_sender(),
         no_ack: parsed.no_ack && !parsed.requires_ack,
         no_wait: parsed.no_wait,
         watch_result: parsed.watch_result,
@@ -1063,6 +1062,53 @@ fn send_args(args: &[String], cwd: &Path) -> Result<SendArgs, CliError> {
         to_name: parsed.to_name.clone(),
         to_leader: parsed.to_leader.clone(),
     })
+}
+
+fn trusted_cli_sender() -> TrustedSender {
+    std::env::var("TEAM_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(crate::model::ids::AgentId::new)
+        .map(TrustedSender::from_runtime_identity)
+        .unwrap_or_else(TrustedSender::leader)
+}
+
+fn validate_send_flags(args: &[String]) -> Result<(), CliError> {
+    const ALLOWED: &[&str] = &[
+        "--workspace",
+        "--team",
+        "--targets",
+        "--target",
+        "--to",
+        "--to-name",
+        "--to-leader",
+        "--pane",
+        "--task",
+        "--watch-result",
+        "--requires-ack",
+        "--no-ack",
+        "--no-wait",
+        "--timeout",
+        "--confirm-human",
+        "--message-id",
+        "--json",
+        "-h",
+        "--help",
+    ];
+    const ALLOWED_PREFIXES: &[&str] = &["--team=", "--pane=", "--to-name=", "--to-leader="];
+    if let Some(flag) = args.iter().find(|arg| {
+        arg.starts_with('-')
+            && !ALLOWED.contains(&arg.as_str())
+            && !ALLOWED_PREFIXES
+                .iter()
+                .any(|prefix| arg.starts_with(prefix))
+    }) {
+        return Err(CliError::Usage(format!(
+            "unrecognized argument for `send`: {flag}"
+        )));
+    }
+    Ok(())
 }
 
 /// Stage 4 of identity-boundary unified plan (architect direction

@@ -66,6 +66,10 @@
         );
         assert_eq!(send["inputSchema"]["additionalProperties"], json!(false));
         assert_eq!(send["inputSchema"]["required"], json!(["to", "content"]));
+        assert!(
+            send["inputSchema"]["properties"].get("sender").is_none(),
+            "sender identity is framework-owned, not caller-supplied"
+        );
     }
 
     #[test]

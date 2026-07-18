@@ -36,7 +36,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             &args.workspace,
             to_leader,
             &content,
-            &args.sender,
+            args.sender.as_str(),
             args.task.as_deref(),
         )?;
         return Ok(cmd_send_result(value, args.json));
@@ -83,7 +83,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
                         &args.workspace,
                         to_name,
                         &content,
-                        &args.sender,
+                        args.sender.as_str(),
                         args.task.as_deref(),
                         &error,
                     )? {
@@ -101,7 +101,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             transport.as_ref(),
             &resolved,
             &content,
-            &args.sender,
+            args.sender.as_str(),
             args.task.as_deref(),
             args.json,
         )?;
@@ -129,7 +129,7 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             &args.workspace,
             pane_id,
             &content,
-            &args.sender,
+            args.sender.as_str(),
             args.task.as_deref(),
             args.team.as_deref(),
             args.json,
@@ -161,11 +161,12 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     if let Some(value) = dirty_topology_refusal_value(&selected, args.team.as_deref()) {
         return Ok(cmd_send_result(value, args.json));
     }
-    let coordinator_ensure = if target_has_known_worker(&selected.state, &target, &opts.sender) {
-        loud_ensure_coordinator(&selected)?
-    } else {
-        None
-    };
+    let coordinator_ensure =
+        if target_has_known_worker(&selected.state, &target, opts.sender.as_str()) {
+            loud_ensure_coordinator(&selected)?
+        } else {
+            None
+        };
     if let Some(value) =
         coordinator_ensure_unavailable_value(coordinator_ensure.as_ref(), &target, &content, &opts)
     {

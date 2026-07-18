@@ -721,7 +721,7 @@ fn run_fake_e2e(workspace: &Path) -> Result<Value, CliError> {
         &SendOptions {
             task_id: Some(TaskId::new("task_impl")),
             route_task_id: false,
-            sender: "leader".to_string(),
+            sender: messaging::TrustedSender::leader(),
             requires_ack: true,
             ..SendOptions::default()
         },

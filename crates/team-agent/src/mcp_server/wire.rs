@@ -424,11 +424,6 @@ fn tool_properties(tool: McpTool) -> serde_json::Map<String, Value> {
             );
             insert_property(
                 &mut properties,
-                "sender",
-                string_property("Optional sender override."),
-            );
-            insert_property(
-                &mut properties,
                 "requires_ack",
                 boolean_property("Whether the recipient should acknowledge delivery."),
             );
@@ -610,7 +605,6 @@ pub(crate) fn dispatch_tool(
                 &target,
                 content,
                 args.get("task_id").and_then(Value::as_str),
-                args.get("sender").and_then(Value::as_str),
                 args.get("requires_ack").and_then(Value::as_bool),
                 None,
             )?;
