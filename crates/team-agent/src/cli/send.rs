@@ -16,8 +16,13 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
             || args.to_name.is_some()
             || args.to_leader.is_some()
         {
+            let message = if args.to_name.is_some() {
+                "--to-name and --pane/TARGET/--to are mutually exclusive"
+            } else {
+                "--pane and TARGET/--to are mutually exclusive; --pane also conflicts with --to-leader"
+            };
             return Err(CliError::Usage(
-                "--pane and logical TO aliases are mutually exclusive".to_string(),
+                message.to_string(),
             ));
         }
         let content = args.message.join(" ");
@@ -326,6 +331,13 @@ fn warn_send_alias(flag: &str) {
 }
 
 fn logical_to_from_args(args: &SendArgs, host_leader_to: Option<&str>) -> Result<String, CliError> {
+    if args.to_name.is_some()
+        && (args.target.is_some() || args.targets.is_some() || args.to_leader.is_some())
+    {
+        return Err(CliError::Usage(
+            "--to-name and --pane/TARGET/--to are mutually exclusive".to_string(),
+        ));
+    }
     let supplied = [
         args.target.is_some(),
         args.targets.is_some(),
@@ -350,6 +362,11 @@ fn logical_to_from_args(args: &SendArgs, host_leader_to: Option<&str>) -> Result
         args.target.clone().unwrap_or_default()
     };
     if args.target.is_none() && supplied > 0 && args.message.is_empty() {
+        if args.to_name.is_some() {
+            return Err(CliError::Usage(
+                "--to-name requires a non-empty message".to_string(),
+            ));
+        }
         return Err(CliError::Usage(
             "send requires a non-empty message after logical TO".to_string(),
         ));
@@ -487,6 +504,17 @@ fn send_to_logical_to(args: &SendArgs, logical_to: &str, content: &str) -> Resul
             Ok((recipient, _transport)) => resolved.push(recipient),
             Err(mut error) => {
                 adapt_positional_bare_error(args, name, &mut error);
+                if matches!(
+                    error.kind,
+                    crate::cli::named_address::NamedAddressErrorKind::StateNotFound
+                ) {
+                    return Ok(resolution_refusal_json(
+                        &error,
+                        logical_to,
+                        content,
+                        args,
+                    ));
+                }
                 if resolved.is_empty() && !logical_to.contains(',') {
                     if let Some(value) = maybe_enqueue_offline_leader_mailbox(
                         &args.workspace,
@@ -521,11 +549,7 @@ fn send_to_logical_to(args: &SendArgs, logical_to: &str, content: &str) -> Resul
             .map(logical_recipient_id)
             .collect::<Result<Vec<_>, _>>()?;
         let target = MessageTarget::Fanout(recipients);
-        let mut opts = send_options_from_args(args);
-        opts.route_task_id = false;
-        opts.team = first.team_key.clone().map(TeamKey::new);
-        let outcome = messaging::send_message(&first.target_workspace, &target, content, &opts)?;
-        return Ok(delivery_outcome_json(&outcome, &target, content, &opts));
+        return persist_resolved_target(args, first, &target, content);
     }
 
     let mut results = Vec::with_capacity(resolved.len());
@@ -551,6 +575,29 @@ fn send_to_logical_to(args: &SendArgs, logical_to: &str, content: &str) -> Resul
         "message_id": message_id,
         "results": results,
     }))
+}
+
+fn resolution_refusal_json(
+    error: &crate::cli::named_address::NamedAddressError,
+    logical_to: &str,
+    content: &str,
+    args: &SendArgs,
+) -> Value {
+    let mut value = error.to_json();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("delivery_status".to_string(), json!("refused"));
+        object.insert("delivered".to_string(), json!(false));
+        object.insert("target".to_string(), json!(logical_to));
+        object.insert("agent_id".to_string(), json!(logical_to));
+        object.insert("content_length_bytes".to_string(), json!(content.len()));
+        object.insert("sender".to_string(), json!(args.sender));
+        object.insert("message_id".to_string(), Value::Null);
+        object.insert("message_status".to_string(), json!("refused"));
+        object.insert("verification".to_string(), Value::Null);
+        object.insert("stage".to_string(), Value::Null);
+        object.insert("channel".to_string(), Value::Null);
+    }
+    value
 }
 
 fn adapt_positional_bare_error(
@@ -612,19 +659,54 @@ fn send_to_resolved_name(
         eprintln!("warning: {warning}");
     }
     let target = MessageTarget::Single(recipient);
-    let mut opts = send_options_from_args(args);
-    opts.route_task_id = false;
-    opts.team = resolved.team_key.clone().map(TeamKey::new);
-    let outcome = messaging::send_message(&resolved.target_workspace, &target, content, &opts)?;
-    let mut value = delivery_outcome_json(&outcome, &target, content, &opts);
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("to_name".to_string(), json!(resolved.raw_name));
-        obj.insert(
-            "target_workspace".to_string(),
-            json!(resolved.target_workspace.display().to_string()),
-        );
-        obj.insert("team_key".to_string(), json!(resolved.team_key));
+    let mut value = persist_resolved_target(args, resolved, &target, content)?;
+    if args.to_name.is_some() || args.to_leader.is_some() {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("to_name".to_string(), json!(resolved.raw_name));
+            obj.insert(
+                "target_workspace".to_string(),
+                json!(resolved.target_workspace.display().to_string()),
+            );
+            obj.insert("team_key".to_string(), json!(resolved.team_key));
+        }
     }
+    Ok(value)
+}
+
+fn persist_resolved_target(
+    args: &SendArgs,
+    resolved: &crate::cli::named_address::ResolvedNamedAddress,
+    target: &MessageTarget,
+    content: &str,
+) -> Result<Value, CliError> {
+    let selected = crate::state::selector::resolve_active_team(
+        &resolved.target_workspace,
+        resolved.team_key.as_deref(),
+        crate::state::selector::SelectorMode::RuntimeOnly,
+    )?;
+    if let Some(value) = dirty_topology_refusal_value(&selected, resolved.team_key.as_deref()) {
+        return Ok(value);
+    }
+    let mut opts = send_options_from_args(args);
+    opts.route_task_id = args.to_name.is_none() && args.to_leader.is_none();
+    opts.team = Some(TeamKey::new(selected.team_key.clone()));
+    let coordinator_ensure = if target_has_known_worker(&selected.state, target, opts.sender.as_str())
+    {
+        loud_ensure_coordinator(&selected)?
+    } else {
+        None
+    };
+    if let Some(value) = coordinator_ensure_unavailable_value(
+        coordinator_ensure.as_ref(),
+        target,
+        content,
+        &opts,
+    ) {
+        return Ok(value);
+    }
+    let outcome = messaging::send_message(&selected.run_workspace, target, content, &opts)?;
+    let mut value = delivery_outcome_json(&outcome, target, content, &opts);
+    append_loud_ensure_fields(&mut value, coordinator_ensure.as_ref());
     Ok(value)
 }
 
