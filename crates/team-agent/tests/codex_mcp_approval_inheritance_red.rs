@@ -20,9 +20,11 @@ use serde_json::json;
 use serial_test::serial;
 use team_agent::lifecycle::{
     add_agent_with_transport, fork_agent_with_transport, launch_with_transport,
-    restart_with_transport, start_agent_with_transport,
+    reset_agent_with_transport, restart_with_transport, start_agent_with_transport,
 };
-use team_agent::lifecycle::{DangerousApprovalSource, LaunchReport, LifecycleError};
+use team_agent::lifecycle::{
+    DangerousApprovalSource, LaunchReport, LifecycleError, StartAgentOutcome, StartMode,
+};
 use team_agent::model::ids::AgentId;
 use team_agent::transport::{
     AttachOutcome, BackendKind, CaptureRange, CapturedText, InjectPayload, InjectReport,
@@ -33,6 +35,14 @@ use team_agent::transport::{
 
 const CODEX_BYPASS: &str = "--dangerously-bypass-approvals-and-sandbox";
 const ANCESTRY_ENV: &str = "TEAM_AGENT_TEST_PROCESS_ANCESTRY_ARGV_JSON";
+const APPROVAL_ENV_KEYS: &[&str] = &[
+    "TEAM_AGENT_LEADER_BYPASS",
+    "TEAM_AGENT_LEADER_BYPASS_SOURCE",
+    "TEAM_AGENT_LEADER_BYPASS_PROVIDER",
+    "TEAM_AGENT_LEADER_BYPASS_FLAG",
+    "TEAM_AGENT_MCP_AUTO_APPROVE",
+    "TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE",
+];
 
 #[test]
 #[serial(env)]
@@ -43,9 +53,10 @@ fn codex_worker_inherits_leader_bypass_flag_on_fresh_launch() {
 
     let report = launch_with_transport(&team.join("team.spec.yaml"), false, true, true, &transport)
         .expect("fresh launch should spawn worker under recording transport");
-    let argv = transport.only_spawn_argv("fresh launch");
+    let spawn = transport.only_spawn("fresh launch");
 
-    assert_codex_bypass(&argv, "fresh launch inherited leader Codex bypass");
+    assert_codex_bypass(&spawn.argv, "fresh launch inherited leader Codex bypass");
+    assert_bypass_env(&spawn, "fresh launch inherited leader Codex bypass");
     assert_eq!(
         report.safety.source,
         DangerousApprovalSource::LeaderProcess,
@@ -166,10 +177,19 @@ fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
 
     restart_with_transport(&restart_ws, false, None, &restart_transport)
         .expect("restart fixture should spawn worker");
-    failures.extend(codex_bypass_failures(
-        &restart_transport.only_spawn_argv("restart"),
-        "AI-1 restart",
-    ));
+    let restart_spawn = restart_transport.only_spawn("restart resumed");
+    failures.extend(codex_bypass_failures(&restart_spawn.argv, "AI-1 restart"));
+    assert_bypass_env(&restart_spawn, "AI-1 restart resumed");
+
+    let restart_fresh_ws = runtime_workspace("restart-fresh", &[("worker_a", "Worker A")]);
+    seed_agent_state(&restart_fresh_ws, "worker_a", "Worker A", false);
+    let restart_fresh_transport = RecordingTransport::new().with_session_present(false);
+    restart_with_transport(&restart_fresh_ws, true, None, &restart_fresh_transport)
+        .expect("fresh restart fixture should spawn worker");
+    assert_bypass_env(
+        &restart_fresh_transport.only_spawn("restart fresh"),
+        "AI-1 restart fresh",
+    );
 
     let start_ws = runtime_workspace("start-inherited", &[("worker_a", "Worker A")]);
     seed_agent_state(&start_ws, "worker_a", "Worker A", false);
@@ -184,10 +204,53 @@ fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
         &start_transport,
     )
     .expect("start-agent fixture should spawn worker");
-    failures.extend(codex_bypass_failures(
-        &start_transport.only_spawn_argv("start-agent"),
-        "AI-1 start-agent",
+    let start_spawn = start_transport.only_spawn("start-agent fresh");
+    failures.extend(codex_bypass_failures(&start_spawn.argv, "AI-1 start-agent"));
+    assert_bypass_env(&start_spawn, "AI-1 start-agent fresh");
+
+    let missing_ws = runtime_workspace("start-missing", &[("worker_a", "Worker A")]);
+    seed_agent_state(&missing_ws, "worker_a", "Worker A", true);
+    std::fs::remove_file(missing_ws.join("worker_a-rollout.jsonl")).unwrap();
+    let missing_transport = RecordingTransport::new().with_session_present(false);
+    let missing_outcome = start_agent_with_transport(
+        &missing_ws,
+        &AgentId::new("worker_a"),
+        true,
+        false,
+        true,
+        None,
+        &missing_transport,
+    )
+    .expect("missing rollout with allow-fresh should spawn worker");
+    assert!(matches!(
+        missing_outcome,
+        StartAgentOutcome::Running {
+            start_mode: StartMode::FreshAfterMissingRollout,
+            ..
+        }
     ));
+    assert_bypass_env(
+        &missing_transport.only_spawn("start-agent fresh after missing rollout"),
+        "AI-1 start-agent fresh after missing rollout",
+    );
+
+    let reset_team = team_dir_with_running_workspace("reset-inherited");
+    let reset_ws = team_workspace(&reset_team);
+    let reset_transport = RecordingTransport::new().with_session_present(false);
+    reset_agent_with_transport(
+        &reset_ws,
+        &AgentId::new("worker_a"),
+        true,
+        false,
+        None,
+        &reset_transport,
+    )
+    .expect("reset fixture should spawn worker");
+    assert_bypass_env(
+        &reset_transport.only_spawn("reset-agent fresh"),
+        "AI-1 reset-agent fresh",
+    );
+    assert_persisted_bypass_policy(&reset_ws, "worker_a", "AI-1 reset-agent fresh");
 
     let add_team = team_dir_with_running_workspace("add-inherited");
     let add_role = add_team.join("worker_b.md");
@@ -202,10 +265,9 @@ fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
         &add_transport,
     )
     .expect("add-agent fixture should spawn worker");
-    failures.extend(codex_bypass_failures(
-        &add_transport.only_spawn_argv("add-agent"),
-        "AI-1 add-agent",
-    ));
+    let add_spawn = add_transport.only_spawn("add-agent");
+    failures.extend(codex_bypass_failures(&add_spawn.argv, "AI-1 add-agent"));
+    assert_bypass_env(&add_spawn, "AI-1 add-agent");
 
     let fork_team = team_dir_with_forkable_source("fork-inherited");
     let fork_transport = RecordingTransport::new().with_session_present(true);
@@ -219,10 +281,9 @@ fn inherited_bypass_is_preserved_across_restart_start_add_and_fork() {
         &fork_transport,
     )
     .expect("fork fixture should spawn worker");
-    failures.extend(codex_bypass_failures(
-        &fork_transport.only_spawn_argv("fork-agent"),
-        "AI-1 fork",
-    ));
+    let fork_spawn = fork_transport.only_spawn("fork-agent");
+    failures.extend(codex_bypass_failures(&fork_spawn.argv, "AI-1 fork"));
+    assert_bypass_env(&fork_spawn, "AI-1 fork");
 
     assert!(
         failures.is_empty(),
@@ -269,6 +330,23 @@ fn add_agent_preserves_restricted_default_and_fork_preserves_restricted_origin()
     assert_codex_restricted(
         &fork_transport.only_spawn_argv("restricted fork-agent"),
         "fork preserves restricted origin",
+    );
+
+    let reset_team = team_dir_with_running_workspace("reset-restricted");
+    let reset_ws = team_workspace(&reset_team);
+    let reset_transport = RecordingTransport::new().with_session_present(false);
+    reset_agent_with_transport(
+        &reset_ws,
+        &AgentId::new("worker_a"),
+        true,
+        false,
+        None,
+        &reset_transport,
+    )
+    .expect("restricted reset fixture should spawn worker");
+    assert_restricted_env(
+        &reset_transport.only_spawn("restricted reset-agent"),
+        "reset-agent restricted default",
     );
 }
 
@@ -447,6 +525,56 @@ fn approval_inheritance_static_guards_cover_ai_1_through_ai_9() {
 fn assert_codex_bypass(argv: &[String], label: &str) {
     let failures = codex_bypass_failures(argv, label);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn assert_bypass_env(spawn: &RecordedSpawn, label: &str) {
+    let expected = BTreeMap::from([
+        ("TEAM_AGENT_LEADER_BYPASS", "1"),
+        ("TEAM_AGENT_LEADER_BYPASS_SOURCE", "leader_process"),
+        ("TEAM_AGENT_LEADER_BYPASS_PROVIDER", "codex"),
+        ("TEAM_AGENT_LEADER_BYPASS_FLAG", CODEX_BYPASS),
+        ("TEAM_AGENT_MCP_AUTO_APPROVE", "team_orchestrator"),
+        ("TEAM_AGENT_MCP_AUTO_APPROVE_SOURCE", "leader_bypass"),
+    ]);
+    for (key, value) in expected {
+        assert_eq!(
+            spawn.env.get(key).map(String::as_str),
+            Some(value),
+            "{label}: final worker env must carry {key}={value}; spawn={spawn:?}"
+        );
+        assert!(
+            !spawn.env_unset.iter().any(|unset| unset == key),
+            "{label}: final env_unset must not erase {key}; spawn={spawn:?}"
+        );
+    }
+}
+
+fn assert_restricted_env(spawn: &RecordedSpawn, label: &str) {
+    assert_eq!(
+        spawn
+            .env
+            .get("TEAM_AGENT_LEADER_BYPASS")
+            .map(String::as_str),
+        Some("0"),
+        "{label}: restricted worker must carry explicit bypass=0; spawn={spawn:?}"
+    );
+    for key in &APPROVAL_ENV_KEYS[1..] {
+        assert!(
+            !spawn.env.contains_key(*key),
+            "{label}: restricted worker must not carry {key}; spawn={spawn:?}"
+        );
+    }
+}
+
+fn assert_persisted_bypass_policy(workspace: &Path, agent_id: &str, label: &str) {
+    let state = team_agent::state::persist::load_runtime_state(workspace).unwrap();
+    let policy = &state["agents"][agent_id]["effective_approval_policy"];
+    assert_eq!(policy["enabled"], true, "{label}: policy={policy}");
+    assert_eq!(
+        policy["source"], "leader_process",
+        "{label}: policy={policy}"
+    );
+    assert_eq!(policy["inherited"], true, "{label}: policy={policy}");
 }
 
 fn codex_bypass_failures(argv: &[String], label: &str) -> Vec<String> {
@@ -789,6 +917,8 @@ impl Drop for MockAncestry {
 struct RecordedSpawn {
     kind: &'static str,
     argv: Vec<String>,
+    env: BTreeMap<String, String>,
+    env_unset: Vec<String>,
     session: SessionName,
     window: WindowName,
     pane_id: PaneId,
@@ -811,6 +941,10 @@ impl RecordingTransport {
     }
 
     fn only_spawn_argv(&self, label: &str) -> Vec<String> {
+        self.only_spawn(label).argv
+    }
+
+    fn only_spawn(&self, label: &str) -> RecordedSpawn {
         let spawns = self.spawns.lock().unwrap();
         assert_eq!(
             spawns.len(),
@@ -818,7 +952,7 @@ impl RecordingTransport {
             "{label}: expected exactly one spawn; spawns={spawns:?}"
         );
         let _kind = spawns[0].kind;
-        spawns[0].argv.clone()
+        spawns[0].clone()
     }
 
     fn record_spawn(
@@ -827,12 +961,16 @@ impl RecordingTransport {
         session: &SessionName,
         window: &WindowName,
         argv: &[String],
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
     ) -> SpawnResult {
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
             kind,
             argv: argv.to_vec(),
+            env: env.clone(),
+            env_unset: env_unset.to_vec(),
             session: session.clone(),
             window: window.clone(),
             pane_id: pane_id.clone(),
@@ -857,9 +995,9 @@ impl Transport for RecordingTransport {
         window: &WindowName,
         argv: &[String],
         _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.record_spawn("spawn_first", session, window, argv))
+        Ok(self.record_spawn("spawn_first", session, window, argv, env, &[]))
     }
 
     fn spawn_into(
@@ -868,9 +1006,33 @@ impl Transport for RecordingTransport {
         window: &WindowName,
         argv: &[String],
         _cwd: &Path,
-        _env: &BTreeMap<String, String>,
+        env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        Ok(self.record_spawn("spawn_into", session, window, argv))
+        Ok(self.record_spawn("spawn_into", session, window, argv, env, &[]))
+    }
+
+    fn spawn_first_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.record_spawn("spawn_first", session, window, argv, env, env_unset))
+    }
+
+    fn spawn_into_with_env_unset(
+        &self,
+        session: &SessionName,
+        window: &WindowName,
+        argv: &[String],
+        _cwd: &Path,
+        env: &BTreeMap<String, String>,
+        env_unset: &[String],
+    ) -> Result<SpawnResult, TransportError> {
+        Ok(self.record_spawn("spawn_into", session, window, argv, env, env_unset))
     }
 
     fn inject(
