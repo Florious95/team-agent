@@ -3875,6 +3875,49 @@ pub fn add_agent(
     )
 }
 
+/// Reconcile a single existing/inconsistent seat, then reuse the normal add
+/// path. The external role source is preserved by remove-agent ownership
+/// checks, so this is a one-command force-recreate rather than a team restart.
+pub fn add_agent_force(
+    workspace: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    force: bool,
+) -> Result<AddAgentReport, LifecycleError> {
+    if !force {
+        return add_agent(workspace, agent_id, role_file_path, open_display, team);
+    }
+    let selected = crate::state::selector::resolve_active_team(
+        workspace,
+        team,
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .map_err(|error| LifecycleError::TeamSelect(error.to_string()))?;
+    let canonical_team_key = selected.team_key.clone();
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &selected.run_workspace,
+        operation: "add-agent-force",
+        team: Some(canonical_team_key.as_str()),
+        agent_id: Some(agent_id),
+    })?;
+    let transport = crate::lifecycle::restart::lifecycle_worker_tmux_backend_for_selected_state(
+        &selected.run_workspace,
+        Some(canonical_team_key.as_str()),
+    )
+    .unwrap_or_else(|_| crate::tmux_backend::TmuxBackend::for_workspace(&selected.run_workspace));
+    force_recreate_with_transport_locked(
+        &selected.run_workspace,
+        &selected.team_dir,
+        agent_id,
+        role_file_path,
+        open_display,
+        Some(canonical_team_key.as_str()),
+        &transport,
+    )
+}
+
 /// `add_agent` with an injected transport — after the recompile+write, wires the new worker spawn
 /// (via start_agent_with_transport) + start_coordinator (rt-host-a sweep: recompiled but never spawned).
 pub fn add_agent_with_transport(
@@ -3902,6 +3945,132 @@ pub fn add_agent_with_transport(
         team,
         transport,
     )
+}
+
+pub fn add_agent_with_transport_force(
+    workspace: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    force: bool,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    if !force {
+        return add_agent_with_transport(
+            workspace,
+            agent_id,
+            role_file_path,
+            open_display,
+            team,
+            transport,
+        );
+    }
+    let run_workspace = crate::model::paths::canonical_run_workspace(workspace)
+        .map_err(|error| LifecycleError::StatePersist(error.to_string()))?;
+    let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
+        workspace: &run_workspace,
+        operation: "add-agent-force",
+        team,
+        agent_id: Some(agent_id),
+    })?;
+    force_recreate_with_transport_locked(
+        &run_workspace,
+        workspace,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+    )
+}
+
+fn force_recreate_with_transport_locked(
+    run_workspace: &Path,
+    team_dir: &Path,
+    agent_id: &AgentId,
+    role_file_path: &Path,
+    open_display: bool,
+    team: Option<&str>,
+    transport: &dyn Transport,
+) -> Result<AddAgentReport, LifecycleError> {
+    // Reject an unusable replacement source before consuming the old seat.
+    // Deeper compile/spawn failures remain covered by the transaction snapshot.
+    if !role_file_path.exists() {
+        return Err(LifecycleError::Compile(format!(
+            "role file not found: {}",
+            role_file_path.display()
+        )));
+    }
+    let snapshot = crate::lifecycle::restart::remove::ForceRecreateSnapshot::capture(
+        run_workspace,
+        agent_id,
+        team,
+        transport,
+    )?;
+    let remove = crate::lifecycle::restart::remove::remove_agent_with_transport_locked(
+        run_workspace,
+        agent_id,
+        true,
+        true,
+        team,
+        transport,
+    );
+    if let Err(error) = remove {
+        let restore_errors = snapshot.restore(team, transport);
+        return force_recreate_rollback_error(agent_id, error, restore_errors);
+    }
+    let operation = add_agent_with_transport_at_paths(
+        run_workspace,
+        team_dir,
+        agent_id,
+        role_file_path,
+        open_display,
+        team,
+        transport,
+    )
+    .and_then(|report| {
+        maybe_fail_force_recreate_after_spawn()?;
+        Ok(report)
+    })
+    .and_then(|report| {
+        snapshot.require_coherent(agent_id, team, transport)?;
+        Ok(report)
+    });
+    match operation {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            let restore_errors = snapshot.restore_after_consumption(transport);
+            force_recreate_rollback_error(agent_id, error, restore_errors)
+        }
+    }
+}
+
+fn force_recreate_rollback_error<T>(
+    agent_id: &AgentId,
+    error: LifecycleError,
+    restore_errors: Vec<String>,
+) -> Result<T, LifecycleError> {
+    if restore_errors.is_empty() {
+        Err(error)
+    } else {
+        Err(LifecycleError::StatePersist(format!(
+            "force-recreate failed for {agent_id}: {error}; rollback_errors={}",
+            restore_errors.join("|")
+        )))
+    }
+}
+
+fn maybe_fail_force_recreate_after_spawn() -> Result<(), LifecycleError> {
+    let Ok(reason) = std::env::var("TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN") else {
+        return Ok(());
+    };
+    if reason.is_empty() {
+        return Ok(());
+    }
+    Err(LifecycleError::StatePersist(format!(
+        "injected force-recreate failure after spawn: {reason}"
+    )))
 }
 
 fn add_agent_with_transport_at_paths(
@@ -4182,6 +4351,7 @@ fn upsert_agent_state_from_role(
         "role": role,
         "status": "starting",
         "dynamic_role_file": dynamic_role_file.to_string_lossy().to_string(),
+        "role_source_ownership": role_source_ownership(workspace, dynamic_role_file),
     });
     if let Some(model) = meta.get("model").and_then(Value::as_str) {
         if let Some(obj) = entry.as_object_mut() {
@@ -4218,6 +4388,17 @@ fn upsert_agent_state_from_role(
     }
     agent_map.insert(agent_id.as_str().to_string(), entry);
     save_launched_team_state_for_key(workspace, &state, Some(canonical_team_key))
+}
+
+fn role_source_ownership(workspace: &Path, role_file: &Path) -> &'static str {
+    let managed_root = workspace.join(".team").join("dynamic-role-files");
+    match (
+        std::fs::canonicalize(&managed_root),
+        std::fs::canonicalize(role_file),
+    ) {
+        (Ok(root), Ok(path)) if path.starts_with(&root) => "managed",
+        _ => "external",
+    }
 }
 
 /// E5 Bug1:把 add-agent 就地编译出的 agent 条目注入 base team spec(`agents` 列表 +

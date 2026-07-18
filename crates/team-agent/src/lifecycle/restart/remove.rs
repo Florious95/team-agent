@@ -1,6 +1,4 @@
-use super::agent::{
-    resolve_team_scoped_state_or_refuse, start_agent_at_paths, stop_agent_at_paths,
-};
+use super::agent::{resolve_team_scoped_state_or_refuse, start_agent_at_paths};
 use super::common::*;
 use super::team_state::write_team_state;
 use super::*;
@@ -61,6 +59,156 @@ pub fn remove_agent_with_transport(
     )
 }
 
+pub(crate) fn remove_agent_with_transport_locked(
+    workspace: &Path,
+    agent_id: &AgentId,
+    from_spec: bool,
+    force: bool,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+) -> Result<RemoveAgentOutcome, LifecycleError> {
+    let paths = lifecycle_paths(workspace, team)?;
+    remove_agent_at_paths(
+        &paths.run_workspace,
+        &paths.spec_workspace,
+        agent_id,
+        from_spec,
+        force,
+        team,
+        transport,
+    )
+}
+
+pub(crate) struct ForceRecreateSnapshot {
+    rollback: RemoveRollback,
+    run_workspace: std::path::PathBuf,
+    spec_workspace: std::path::PathBuf,
+    before_physical: Option<crate::transport::PaneInfo>,
+}
+
+impl ForceRecreateSnapshot {
+    pub(crate) fn capture(
+        workspace: &Path,
+        agent_id: &AgentId,
+        team: Option<&str>,
+        transport: &dyn crate::transport::Transport,
+    ) -> Result<Self, LifecycleError> {
+        let paths = lifecycle_paths(workspace, team)?;
+        let seat = resolve_seat(
+            &paths.run_workspace,
+            &paths.spec_workspace,
+            agent_id,
+            team,
+            transport,
+        )?;
+        let mut rollback = RemoveRollback::capture(
+            &paths.run_workspace,
+            &paths.spec_workspace,
+            &seat.spec,
+            &seat.state,
+            &seat.team_key,
+            agent_id,
+        )?;
+        rollback.restore_running = seat.physical.is_some();
+        Ok(Self {
+            rollback,
+            run_workspace: paths.run_workspace,
+            spec_workspace: paths.spec_workspace,
+            before_physical: seat.physical,
+        })
+    }
+
+    pub(crate) fn restore(
+        &self,
+        team: Option<&str>,
+        transport: &dyn crate::transport::Transport,
+    ) -> Vec<String> {
+        self.rollback
+            .restore(&self.run_workspace, &self.spec_workspace, team, transport)
+    }
+
+    /// The old pane has already been consumed. Any exact pane now resolved for
+    /// this seat belongs to this force-recreate transaction and must be removed
+    /// before the logical snapshot is restored, otherwise rollback can leave a
+    /// duplicate worker behind.
+    pub(crate) fn restore_after_consumption(
+        &self,
+        transport: &dyn crate::transport::Transport,
+    ) -> Vec<String> {
+        let mut errors = Vec::new();
+        match resolve_seat(
+            &self.run_workspace,
+            &self.spec_workspace,
+            &self.rollback.agent_id,
+            Some(self.rollback.team_key.as_str()),
+            transport,
+        ) {
+            Ok(after) => {
+                if let Some(pane) = after.physical {
+                    if let Err(error) = transport.kill_pane(&pane.pane_id) {
+                        errors.push(format!(
+                            "transaction_pane:{}:{error}",
+                            pane.pane_id.as_str()
+                        ));
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("transaction_resolve:{error}")),
+        }
+        errors.extend(self.rollback.restore(
+            &self.run_workspace,
+            &self.spec_workspace,
+            Some(self.rollback.team_key.as_str()),
+            transport,
+        ));
+        if errors.is_empty() {
+            if let Some(before) = &self.before_physical {
+                match resolve_seat(
+                    &self.run_workspace,
+                    &self.spec_workspace,
+                    &self.rollback.agent_id,
+                    Some(self.rollback.team_key.as_str()),
+                    transport,
+                ) {
+                    Ok(after)
+                        if after.physical.as_ref().is_some_and(|pane| {
+                            pane.session == before.session && pane.window_name == before.window_name
+                        }) => {}
+                    Ok(after) => errors.push(format!(
+                        "worker_restore:before physical tuple not restored: {:?}",
+                        after.consistency
+                    )),
+                    Err(error) => errors.push(format!("worker_restore_resolve:{error}")),
+                }
+            }
+        }
+        errors
+    }
+
+    pub(crate) fn require_coherent(
+        &self,
+        agent_id: &AgentId,
+        team: Option<&str>,
+        transport: &dyn crate::transport::Transport,
+    ) -> Result<(), LifecycleError> {
+        let after = resolve_seat(
+            &self.run_workspace,
+            &self.spec_workspace,
+            agent_id,
+            team,
+            transport,
+        )?;
+        if after.consistency == SeatConsistency::Coherent {
+            Ok(())
+        } else {
+            Err(LifecycleError::StatePersist(format!(
+                "force-recreate post-resolve for {agent_id} is {:?}",
+                after.consistency
+            )))
+        }
+    }
+}
+
 pub fn remove_agent_flag_requirements(
     workspace: &Path,
     agent_id: &AgentId,
@@ -79,9 +227,144 @@ pub fn remove_agent_flag_requirements(
 }
 
 struct RemoveAgentPreflight {
-    state: serde_json::Value,
-    spec: YamlValue,
+    seat: ResolvedSeat,
     requirements: RemoveAgentFlagRequirements,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SeatConsistency {
+    Absent,
+    Coherent,
+    StateOnly,
+    SpecOnly,
+    PhysicalOnly,
+    Mixed,
+}
+
+pub(super) struct ResolvedSeat {
+    pub(super) state: serde_json::Value,
+    pub(super) spec: YamlValue,
+    pub(super) team_key: String,
+    pub(super) session: crate::transport::SessionName,
+    pub(super) window: String,
+    pub(super) physical: Option<crate::transport::PaneInfo>,
+    pub(super) state_present: bool,
+    pub(super) spec_present: bool,
+    pub(super) consistency: SeatConsistency,
+}
+
+/// Resolve one seat from the selected team's desired, persisted and physical
+/// sources. The transport is already bound to the selected team's endpoint;
+/// physical identity is then narrowed to exactly one `(session, window, pane)`
+/// tuple. A global window-name match is never accepted as identity.
+pub(super) fn resolve_seat(
+    workspace: &Path,
+    spec_workspace: &Path,
+    agent_id: &AgentId,
+    team: Option<&str>,
+    transport: &dyn crate::transport::Transport,
+) -> Result<ResolvedSeat, LifecycleError> {
+    let state = resolve_team_scoped_state_or_refuse(workspace, team)?;
+    crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
+    let spec = load_team_spec(spec_workspace)?;
+    let team_key = state
+        .get("active_team_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::state::projection::team_state_key(&state));
+    let state_present = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .is_some();
+    let spec_present = find_spec_agent(&spec, agent_id).is_some();
+    let session = state_session_name_from_spec(&state, &spec);
+    let window = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(|agent| agent.get("window"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|window| !window.is_empty())
+        .unwrap_or_else(|| agent_id.as_str())
+        .to_string();
+    let stored_pane_id = state
+        .get("agents")
+        .and_then(|agents| agents.get(agent_id.as_str()))
+        .and_then(|agent| agent.get("pane_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|pane| !pane.is_empty())
+        .map(crate::transport::PaneId::new);
+    let mut physical = transport
+        .list_targets()
+        .map_err(|error| LifecycleError::Transport(format!("resolve seat targets: {error}")))?
+        .into_iter()
+        .filter(|pane| {
+            pane.session == session
+                && pane
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == window)
+                && stored_pane_id
+                    .as_ref()
+                    .is_none_or(|stored| pane.pane_id == *stored)
+        });
+    let mut first = physical.next();
+    if physical.next().is_some() {
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "seat identity ambiguous for {agent_id}: session={} window={window}",
+            session.as_str()
+        )));
+    }
+    // Some backends can positively probe an exact pane id even when their
+    // global target snapshot is temporarily empty (for example an attached
+    // explicit tmux socket during reset). The persisted tuple is scoped by the
+    // selected transport endpoint and session; a positive exact-pane probe is
+    // therefore safe, unlike a reverse window-name scan.
+    if first.is_none() {
+        if let Some(pane_id) = stored_pane_id
+            .as_ref()
+            .filter(|pane| transport.has_pane(pane).ok().flatten() == Some(true))
+        {
+            first = Some(crate::transport::PaneInfo {
+                pane_id: pane_id.clone(),
+                session: session.clone(),
+                window_index: None,
+                window_name: Some(crate::transport::WindowName::new(&window)),
+                pane_index: None,
+                tty: None,
+                current_command: None,
+                current_path: None,
+                active: true,
+                pane_pid: state
+                    .get("agents")
+                    .and_then(|agents| agents.get(agent_id.as_str()))
+                    .and_then(|agent| agent.get("pane_pid"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|pid| u32::try_from(pid).ok()),
+                leader_env: std::collections::BTreeMap::new(),
+            });
+        }
+    }
+    let physical_present = first.is_some();
+    let consistency = match (spec_present, state_present, physical_present) {
+        (false, false, false) => SeatConsistency::Absent,
+        (true, true, true) => SeatConsistency::Coherent,
+        (false, true, false) => SeatConsistency::StateOnly,
+        (true, false, false) => SeatConsistency::SpecOnly,
+        (false, false, true) => SeatConsistency::PhysicalOnly,
+        _ => SeatConsistency::Mixed,
+    };
+    Ok(ResolvedSeat {
+        state,
+        spec,
+        team_key,
+        session,
+        window,
+        physical: first,
+        state_present,
+        spec_present,
+        consistency,
+    })
 }
 
 fn remove_agent_preflight(
@@ -95,25 +378,25 @@ fn remove_agent_preflight(
     // team_target_unresolved refusal before the owner gate), THEN the owner gate, THEN load_spec +
     // _find_worker (unknown-worker raise). Mirror the stop/reset wiring so remove is byte-symmetric:
     // the team-scoped projection (not a raw load) drives the dynamic/running/from_spec decisions.
-    let state = resolve_team_scoped_state_or_refuse(workspace, team)?;
-    crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
-    let spec = load_team_spec(spec_workspace)?;
-    let Some(spec_agent) = find_spec_agent(&spec, agent_id) else {
-        return Err(unknown_worker(agent_id));
-    };
-    let dynamic_agent = is_dynamic_agent(&state, spec_agent, agent_id);
-    let force_required = agent_is_running(&state, agent_id, transport);
-    let has_session = state
+    let seat = resolve_seat(workspace, spec_workspace, agent_id, team, transport)?;
+    let spec_agent = find_spec_agent(&seat.spec, agent_id);
+    // A persisted-only seat is still known and force-removable.
+    let dynamic_agent =
+        spec_agent.is_none_or(|agent| is_dynamic_agent(&seat.state, agent, agent_id));
+    let force_required =
+        seat.physical.is_some() || agent_is_running(&seat.state, agent_id, transport);
+    let has_session = seat
+        .state
         .get("session_name")
         .and_then(|v| v.as_str())
         .is_some_and(|s| !s.is_empty())
-        || state
+        || seat
+            .state
             .get("agents")
             .and_then(|v| v.get(agent_id.as_str()))
             .is_some_and(agent_has_session);
     Ok(RemoveAgentPreflight {
-        state,
-        spec,
+        seat,
         requirements: RemoveAgentFlagRequirements {
             agent_id: agent_id.clone(),
             from_spec_required: !dynamic_agent,
@@ -144,6 +427,9 @@ fn remove_agent_at_paths(
     transport: &dyn crate::transport::Transport,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let preflight = remove_agent_preflight(workspace, spec_workspace, agent_id, team, transport)?;
+    if preflight.seat.consistency == SeatConsistency::Absent && !force {
+        return Err(unknown_worker(agent_id));
+    }
     let missing_from_spec = preflight.requirements.from_spec_required && !from_spec;
     let missing_force = preflight.requirements.force_required && !force;
     if missing_from_spec || missing_force {
@@ -170,20 +456,33 @@ fn remove_agent_at_paths(
     let mut rollback = RemoveRollback::capture(
         paths.run_workspace,
         paths.spec_workspace,
-        &preflight.spec,
-        &preflight.state,
+        &preflight.seat.spec,
+        &preflight.seat.state,
+        &preflight.seat.team_key,
         agent_id,
     )?;
-    rollback.restore_running = force && preflight.requirements.force_required;
+    rollback.restore_running = force && preflight.seat.physical.is_some();
     let result = remove_agent_inner(
         &paths,
         agent_id,
-        &preflight.spec,
-        preflight.state,
+        &preflight.seat.spec,
+        preflight.seat.state,
+        preflight.seat.physical,
+        &preflight.seat.team_key,
         force,
         team,
         transport,
-    );
+    )
+    .and_then(|success| {
+        let after = resolve_seat(workspace, spec_workspace, agent_id, team, transport)?;
+        if after.consistency != SeatConsistency::Absent {
+            return Err(LifecycleError::StatePersist(format!(
+                "remove-agent post-resolve for {agent_id} is {:?}",
+                after.consistency
+            )));
+        }
+        Ok(success)
+    });
     match result {
         Ok(success) => {
             // Foundation-0 F0-2: the historical dual-write to the legacy
@@ -233,35 +532,33 @@ fn remove_agent_inner(
     agent_id: &AgentId,
     spec: &YamlValue,
     state: serde_json::Value,
+    physical: Option<crate::transport::PaneInfo>,
+    team_key: &str,
     force: bool,
-    team: Option<&str>,
+    _team: Option<&str>,
     transport: &dyn crate::transport::Transport,
 ) -> Result<RemoveSuccess, LifecycleError> {
     // golden agents.py:75-79: when force-stopping a running worker, RE-RESOLVE the team-scoped state
     // after the stop (stop_agent persisted it); otherwise the originally-resolved projection drives the
     // removal. Either way we operate on the PROJECTION, never a raw load_runtime_state.
-    let mut working_state = state;
+    let working_state = state;
     let mut stopped = false;
     let mut cleared_locations = Vec::new();
-    if force && agent_is_running(&working_state, agent_id, transport) {
-        let stop = stop_agent_at_paths(
-            paths.run_workspace,
-            paths.spec_workspace,
-            agent_id,
-            team,
-            transport,
-        )?;
-        stopped = stop.stopped;
-        write_remove_step_event(
-            paths.run_workspace,
-            agent_id,
-            "stop",
-            &stop.target,
-            Some(stop.stopped),
-        )?;
-        working_state = resolve_team_scoped_state_or_refuse(paths.run_workspace, team)?;
+    if force {
+        if let Some(pane) = physical {
+            transport.kill_pane(&pane.pane_id).map_err(|error| {
+                LifecycleError::Transport(format!(
+                    "failed to stop exact seat pane {} for {agent_id}: {error}",
+                    pane.pane_id.as_str()
+                ))
+            })?;
+            stopped = true;
+            let target = pane.pane_id.as_str().to_string();
+            write_remove_step_event(paths.run_workspace, agent_id, "stop", &target, Some(true))?;
+        }
     }
-    let dynamic_role_path = dynamic_role_file_path(paths.run_workspace, &working_state, agent_id);
+    let dynamic_role_path =
+        managed_dynamic_role_file_path(paths.run_workspace, &working_state, agent_id)?;
     let dynamic_role_required = has_recorded_dynamic_role_file(&working_state, agent_id);
     // golden agents.py:81-83: removed_state = deepcopy(state); pop the agent; save_team_scoped_state
     // (team projection) — NOT a raw save, so other teams in a multi-team workspace are preserved.
@@ -312,8 +609,12 @@ fn remove_agent_inner(
         "team.spec.yaml",
         None,
     )?;
-    let role_file_removed = remove_dynamic_role_file(&dynamic_role_path, dynamic_role_required)?;
+    let role_file_removed = match dynamic_role_path.as_deref() {
+        Some(path) => remove_dynamic_role_file(path, dynamic_role_required)?,
+        None => false,
+    };
     if role_file_removed {
+        let dynamic_role_path = dynamic_role_path.as_deref().expect("managed role path");
         let resource = dynamic_role_path.to_string_lossy().to_string();
         cleared_locations.push(serde_json::json!(resource));
         write_remove_step_event(
@@ -324,7 +625,7 @@ fn remove_agent_inner(
             None,
         )?;
     }
-    let agent_health_deleted = delete_agent_health(paths.run_workspace, agent_id)?;
+    let agent_health_deleted = delete_agent_health(paths.run_workspace, team_key, agent_id)?;
     cleared_locations.push(serde_json::json!("agent_health"));
     write_remove_step_event(
         paths.run_workspace,
@@ -482,7 +783,7 @@ fn remove_agent_from_state(
 
 /// Build the persisted spec after removing one worker. Besides deleting the worker and startup entry,
 /// prune routing references that would otherwise point at the removed worker.
-fn spec_without_agent(spec: &YamlValue, agent_id: &AgentId) -> YamlValue {
+pub(crate) fn spec_without_agent(spec: &YamlValue, agent_id: &AgentId) -> YamlValue {
     let YamlValue::Map(pairs) = spec else {
         return spec.clone();
     };
@@ -648,6 +949,45 @@ fn dynamic_role_file_path(
         .join(format!("{}.md", agent_id.as_str()))
 }
 
+/// Resolve a deletable role artifact. `dynamic_role_file` may point at an
+/// external `--role-file`; only canonical children of the runtime-managed
+/// directory belong to remove/rollback. A symlink escape is external.
+fn managed_dynamic_role_file_path(
+    workspace: &Path,
+    state: &serde_json::Value,
+    agent_id: &AgentId,
+) -> Result<Option<std::path::PathBuf>, LifecycleError> {
+    let path = dynamic_role_file_path(workspace, state, agent_id);
+    let managed_root = workspace.join(".team").join("dynamic-role-files");
+    let canonical_root = match std::fs::canonicalize(&managed_root) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(path.starts_with(&managed_root).then_some(path));
+        }
+        Err(error) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "resolve managed role root {}: {error}",
+                managed_root.display()
+            )))
+        }
+    };
+    let canonical_path = match std::fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(path.starts_with(&managed_root).then_some(path));
+        }
+        Err(error) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "resolve role file {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    Ok(canonical_path
+        .starts_with(&canonical_root)
+        .then_some(canonical_path))
+}
+
 fn has_recorded_dynamic_role_file(state: &serde_json::Value, agent_id: &AgentId) -> bool {
     state
         .get("agents")
@@ -657,15 +997,19 @@ fn has_recorded_dynamic_role_file(state: &serde_json::Value, agent_id: &AgentId)
         .is_some_and(|s| !s.is_empty())
 }
 
-fn delete_agent_health(workspace: &Path, agent_id: &AgentId) -> Result<bool, LifecycleError> {
+fn delete_agent_health(
+    workspace: &Path,
+    owner_team_id: &str,
+    agent_id: &AgentId,
+) -> Result<bool, LifecycleError> {
     let store = crate::message_store::MessageStore::open(workspace)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let conn = crate::db::schema::open_db(store.db_path())
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     let changed = conn
         .execute(
-            "delete from agent_health where agent_id = ?1",
-            [agent_id.as_str()],
+            "delete from agent_health where owner_team_id = ?1 and agent_id = ?2",
+            rusqlite::params![owner_team_id, agent_id.as_str()],
         )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(changed > 0)
@@ -682,18 +1026,20 @@ use crate::db::agent_health_capture::{
 
 fn select_agent_health(
     workspace: &Path,
+    owner_team_id: &str,
     agent_id: &AgentId,
 ) -> Result<Option<CapturedHealth>, LifecycleError> {
-    capture_select_agent_health(workspace, agent_id)
+    capture_select_agent_health(workspace, owner_team_id, agent_id)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
 fn restore_agent_health(
     workspace: &Path,
+    owner_team_id: &str,
     agent_id: &AgentId,
     row: &Option<CapturedHealth>,
 ) -> Result<(), LifecycleError> {
-    capture_restore_agent_health(workspace, agent_id, row)
+    capture_restore_agent_health(workspace, owner_team_id, agent_id, row)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
@@ -711,12 +1057,13 @@ fn maybe_fail_remove_after_agent_health_delete() -> Result<(), LifecycleError> {
 
 struct RemoveRollback {
     agent_id: AgentId,
+    team_key: String,
     spec_text: Option<String>,
     state: serde_json::Value,
     team_state_text: Option<String>,
     team_state_path: std::path::PathBuf,
     dynamic_role_bytes: Option<Vec<u8>>,
-    dynamic_role_path: std::path::PathBuf,
+    dynamic_role_path: Option<std::path::PathBuf>,
     /// golden agents.py:185: the agent_health row captured BEFORE delete, re-upserted on rollback.
     health: Option<CapturedHealth>,
     restore_running: bool,
@@ -728,6 +1075,7 @@ impl RemoveRollback {
         spec_workspace: &Path,
         spec: &YamlValue,
         state: &serde_json::Value,
+        team_key: &str,
         agent_id: &AgentId,
     ) -> Result<Self, LifecycleError> {
         let spec_path = spec_workspace.join("team.spec.yaml");
@@ -751,15 +1099,19 @@ impl RemoveRollback {
                 )))
             }
         };
-        let dynamic_role_path = dynamic_role_file_path(workspace, state, agent_id);
-        let dynamic_role_bytes = match std::fs::read(&dynamic_role_path) {
-            Ok(bytes) => Some(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(LifecycleError::StatePersist(format!("read role file: {e}"))),
+        let dynamic_role_path = managed_dynamic_role_file_path(workspace, state, agent_id)?;
+        let dynamic_role_bytes = match dynamic_role_path.as_deref() {
+            Some(path) => match std::fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(LifecycleError::StatePersist(format!("read role file: {e}"))),
+            },
+            None => None,
         };
-        let health = select_agent_health(workspace, agent_id)?;
+        let health = select_agent_health(workspace, team_key, agent_id)?;
         Ok(Self {
             agent_id: agent_id.clone(),
+            team_key: team_key.to_string(),
             spec_text,
             state: state.clone(),
             team_state_text,
@@ -793,7 +1145,13 @@ impl RemoveRollback {
             }
         }
         // workspace_state
-        if let Err(e) = crate::state::persist::save_runtime_state(workspace, &self.state) {
+        if let Err(e) = crate::state::repository::StateRepository::new(workspace).save(
+            crate::state::repository::StateWriteIntent::ForceRecreateRollback {
+                team_key: &self.team_key,
+                agent_id: self.agent_id.as_str(),
+            },
+            &self.state,
+        ) {
             errors.push(format!("workspace_state:{e}"));
         }
         // team_state
@@ -814,27 +1172,23 @@ impl RemoveRollback {
             errors.push(format!("team_state:{e}"));
         }
         // role_file
-        let role_file_result = match &self.dynamic_role_bytes {
-            Some(bytes) => {
-                if let Some(parent) = self.dynamic_role_path.parent() {
+        let role_file_result = match (&self.dynamic_role_path, &self.dynamic_role_bytes) {
+            (Some(path), Some(bytes)) => {
+                if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                std::fs::write(&self.dynamic_role_path, bytes)
+                std::fs::write(path, bytes)
             }
-            None => match std::fs::remove_file(&self.dynamic_role_path) {
+            (Some(path), None) => match std::fs::remove_file(path) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(e) => Err(e),
             },
+            (None, _) => Ok(()),
         };
         if let Err(e) = role_file_result {
             errors.push(format!("role_file:{e}"));
         }
-        // agent_health
-        if let Err(e) = restore_agent_health(workspace, &self.agent_id, &self.health) {
-            errors.push(format!("agent_health:{e}"));
-        }
-
         if self.restore_running && errors.is_empty() {
             if let Err(e) = start_agent_at_paths(
                 workspace,
@@ -848,6 +1202,13 @@ impl RemoveRollback {
             ) {
                 errors.push(format!("worker_restore:{e}"));
             }
+        }
+        // Starting a replacement cohort intentionally clears stale health, so
+        // rollback must restore the captured row after the old seat is back.
+        if let Err(e) =
+            restore_agent_health(workspace, &self.team_key, &self.agent_id, &self.health)
+        {
+            errors.push(format!("agent_health:{e}"));
         }
         errors
     }

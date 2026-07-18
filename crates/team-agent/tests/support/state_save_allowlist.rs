@@ -11,7 +11,7 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 68;
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 67;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -246,14 +246,6 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "RemoveAgent",
         "s1a_legacy_external",
         263
-    ),
-    allow!(
-        "lifecycle/restart/remove.rs",
-        "restore",
-        "save_runtime_state",
-        "AgentRollback",
-        "s1a_legacy_external",
-        786
     ),
     allow!(
         "mcp_server/lifecycle_tools/agent_ops.rs",

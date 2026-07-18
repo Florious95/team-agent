@@ -512,9 +512,10 @@ pub(crate) fn compute_runtime_freshness(
         _ => false,
     };
     // Collect worker-provider-exited agents from the coordinator
-    // abnormal_exit_watch payload (0.5.41 Slice 4 writes
-    // `worker_provider_exited` / `provider_process_dead=true`
-    // there). Read from top-level `coordinator.abnormal_exit_watch`
+    // abnormal_exit_watch payload. Only the typed positive provider-exit
+    // marker participates here: generic process/pane death diagnostics are
+    // not proof that the provider exited. Read from top-level
+    // `coordinator.abnormal_exit_watch`
     // OR the team-scoped mirror `teams.<key>.coordinator...`.
     let mut provider_exited_agents = std::collections::BTreeSet::new();
     for path in [
@@ -529,10 +530,8 @@ pub(crate) fn compute_runtime_freshness(
     ] {
         if let Some(watch) = state.pointer(path).and_then(Value::as_object) {
             for (agent_id, entry) in watch {
-                let exited = entry.get("worker_provider_exited").and_then(Value::as_bool)
-                    == Some(true)
-                    || entry.get("provider_process_dead").and_then(Value::as_bool) == Some(true)
-                    || entry.get("provider_exit_marker").is_some();
+                let exited =
+                    entry.get("worker_provider_exited").and_then(Value::as_bool) == Some(true);
                 if exited {
                     provider_exited_agents.insert(agent_id.clone());
                 }
