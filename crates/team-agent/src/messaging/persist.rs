@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::db::message_store::{MessageStore, PersistMessageInput};
+use crate::db::message_store::{MessageRowStatus, MessageStore, PersistMessageInput};
 use crate::model::ids::{AgentId, TaskId, TeamKey};
 
 use super::send::TrustedSender;
@@ -53,6 +53,14 @@ pub enum DeliveryBlocker {
     CoordinatorUnavailable,
 }
 
+impl DeliveryBlocker {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CoordinatorUnavailable => "coordinator_unavailable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialDisposition {
     Accepted,
@@ -61,21 +69,19 @@ pub enum InitialDisposition {
 }
 
 impl InitialDisposition {
-    fn row_status(self) -> &'static str {
+    fn row_status(self) -> MessageRowStatus {
         match self {
-            Self::Accepted => "accepted",
-            Self::QueuedUntilLeaderAttach => "queued_until_leader_attach",
+            Self::Accepted => MessageRowStatus::Accepted,
+            Self::QueuedUntilLeaderAttach => MessageRowStatus::QueuedUntilLeaderAttach,
             Self::Blocked(DeliveryBlocker::CoordinatorUnavailable) => {
-                "queued_coordinator_unavailable"
+                MessageRowStatus::QueuedCoordinatorUnavailable
             }
         }
     }
 
     fn error(self) -> Option<&'static str> {
         match self {
-            Self::Blocked(DeliveryBlocker::CoordinatorUnavailable) => {
-                Some("coordinator_unavailable")
-            }
+            Self::Blocked(blocker) => Some(blocker.as_str()),
             Self::Accepted | Self::QueuedUntilLeaderAttach => None,
         }
     }
@@ -131,7 +137,7 @@ pub struct PersistedSend {
     pub message_id: String,
     pub owner_team_id: Option<TeamKey>,
     pub recipient: LogicalRecipient,
-    pub row_status: String,
+    pub row_status: MessageRowStatus,
     pub blocker: Option<DeliveryBlocker>,
 }
 
@@ -168,7 +174,7 @@ pub fn persist_resolved_send(
         message_id,
         owner_team_id: intent.owner_team_id.clone(),
         recipient: intent.recipient.clone(),
-        row_status: status.to_string(),
+        row_status: status,
         blocker: match intent.initial_disposition {
             InitialDisposition::Blocked(blocker) => Some(blocker),
             InitialDisposition::Accepted | InitialDisposition::QueuedUntilLeaderAttach => None,
@@ -238,7 +244,10 @@ mod tests {
         else {
             panic!("fresh intent must persist")
         };
-        assert_eq!(persisted.row_status, "queued_coordinator_unavailable");
+        assert_eq!(
+            persisted.row_status,
+            MessageRowStatus::QueuedCoordinatorUnavailable
+        );
         assert_eq!(
             persisted.blocker,
             Some(DeliveryBlocker::CoordinatorUnavailable)
@@ -273,5 +282,28 @@ mod tests {
                 "{name} still creates message rows outside persist_resolved_send"
             );
         }
+    }
+
+    #[test]
+    fn persisted_truth_and_workspace_identity_have_forward_consumers() {
+        for (name, source) in [
+            ("send", include_str!("send.rs")),
+            ("delivery", include_str!("delivery.rs")),
+            ("leader_receiver", include_str!("leader_receiver.rs")),
+        ] {
+            assert!(
+                source.contains("persisted.row_status"),
+                "{name} rebuilds wire truth instead of consuming PersistedSend"
+            );
+        }
+        let watchers = include_str!("watchers.rs");
+        assert!(
+            !watchers.contains(".and_then(std::path::Path::parent)"),
+            "watcher identity must not be derived from the team.db layout"
+        );
+        assert!(
+            watchers.contains("deliver_primary_watcher(\n                    workspace,"),
+            "watcher must forward the caller's canonical workspace"
+        );
     }
 }

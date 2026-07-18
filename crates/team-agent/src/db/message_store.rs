@@ -80,6 +80,25 @@ pub struct NotificationClaimParams<'a> {
     pub pane_id: Option<&'a str>,
 }
 
+/// Canonical initial message-row statuses shared by persistence, presentation,
+/// claiming and recovery. New durable dispositions must be added here first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRowStatus {
+    Accepted,
+    QueuedUntilLeaderAttach,
+    QueuedCoordinatorUnavailable,
+}
+
+impl MessageRowStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::QueuedUntilLeaderAttach => "queued_until_leader_attach",
+            Self::QueuedCoordinatorUnavailable => "queued_coordinator_unavailable",
+        }
+    }
+}
+
 /// Fully resolved durable-message insert. Grammar, scope and transport data do
 /// not belong here; callers must resolve those before crossing this boundary.
 pub struct PersistMessageInput<'a> {
@@ -90,7 +109,7 @@ pub struct PersistMessageInput<'a> {
     pub recipient: &'a str,
     pub reply_to: Option<&'a str>,
     pub requires_ack: bool,
-    pub status: &'a str,
+    pub status: MessageRowStatus,
     pub content: &'a str,
     pub error: Option<&'a str>,
 }
@@ -174,7 +193,7 @@ impl MessageStore {
                 input.recipient,
                 input.reply_to,
                 if input.requires_ack { 1 } else { 0 },
-                input.status,
+                input.status.as_str(),
                 input.content,
                 now,
                 input.error,
@@ -205,7 +224,7 @@ impl MessageStore {
             recipient,
             reply_to,
             requires_ack,
-            status: "accepted",
+            status: MessageRowStatus::Accepted,
             content,
             error: None,
         })
@@ -238,7 +257,7 @@ impl MessageStore {
             recipient,
             reply_to,
             requires_ack,
-            status: "accepted",
+            status: MessageRowStatus::Accepted,
             content,
             error: None,
         })
@@ -361,9 +380,13 @@ impl MessageStore {
              where message_id = ?1
                and status in (
                    'pending', 'accepted', 'queued_until_idle', 'queued_until_start',
-                   'queued_stopped', 'queued_pane_missing', 'queued_coordinator_unavailable'
+                   'queued_stopped', 'queued_pane_missing', ?3
                )",
-            params![message_id, now_ts()],
+            params![
+                message_id,
+                now_ts(),
+                MessageRowStatus::QueuedCoordinatorUnavailable.as_str()
+            ],
         )?;
         Ok(rows == 1)
     }

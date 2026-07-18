@@ -16,7 +16,7 @@ use super::helpers::MessageStatusShadow;
 use super::persist::persist_internal_send;
 use super::{
     DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, InitialDisposition,
-    InternalSendKind, PersistResolution, MessagingError,
+    InternalSendKind, MessagingError, PersistResolution,
 };
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
@@ -596,9 +596,11 @@ pub fn enqueue_leader_mailbox_until_attach(
         false,
         None,
         InitialDisposition::QueuedUntilLeaderAttach,
-    )? else {
+    )?
+    else {
         unreachable!("offline mailbox does not accept caller-supplied ids")
     };
+    let message_status = persisted.row_status.as_str().to_string();
     let message_id = persisted.message_id;
     event_log.write(
         "leader_mailbox.queued_until_attach",
@@ -613,7 +615,7 @@ pub fn enqueue_leader_mailbox_until_attach(
     Ok(DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Queued,
-        message_status: MessageStatusShadow("queued_until_leader_attach".to_string()),
+        message_status: MessageStatusShadow(message_status),
         message_id: Some(message_id),
         verification: None,
         stage: None,

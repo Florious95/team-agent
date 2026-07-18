@@ -12,8 +12,8 @@ use super::helpers::{status_wire, MessageStatusShadow};
 use super::leader_receiver::{send_to_leader_receiver, send_to_leader_receiver_with_message_id};
 use super::{
     persist_resolved_send, DeliveryBlocker, DeliveryOutcome, DeliveryRefusal, DeliveryStatus,
-    InitialDisposition, LogicalRecipient, PersistResolution, ResolvedSendIntent, SendOrigin,
-    MessagingError,
+    InitialDisposition, LogicalRecipient, MessagingError, PersistResolution, ResolvedSendIntent,
+    SendOrigin,
 };
 
 /// 发件目标:单 target / 广播 `*` / 扇出 list (`send.py:36` `target: str|list[str]|None`)。
@@ -218,7 +218,10 @@ pub fn send_message(
     } else {
         coordinator_unavailable_outcome(workspace, recipient, opts, &event_log)?
     };
-    if let Some(gate) = coordinator_unavailable.as_ref().filter(|gate| !gate.persist) {
+    if let Some(gate) = coordinator_unavailable
+        .as_ref()
+        .filter(|gate| !gate.persist)
+    {
         return Ok(gate.outcome.clone());
     }
     let mut intent = ResolvedSendIntent::accepted(
@@ -233,12 +236,15 @@ pub fn send_message(
         opts.requires_ack,
         opts.message_id.clone(),
     );
-    if coordinator_unavailable.as_ref().is_some_and(|gate| gate.persist) {
+    if coordinator_unavailable
+        .as_ref()
+        .is_some_and(|gate| gate.persist)
+    {
         intent.initial_disposition =
             InitialDisposition::Blocked(DeliveryBlocker::CoordinatorUnavailable);
     }
-    let message_id = match persist_resolved_send(&intent)? {
-        PersistResolution::Persisted(persisted) => persisted.message_id,
+    let persisted = match persist_resolved_send(&intent)? {
+        PersistResolution::Persisted(persisted) => persisted,
         PersistResolution::Duplicate(message_id) => {
             return Ok(refused_outcome_with_id(
                 DeliveryRefusal::Duplicate,
@@ -246,6 +252,7 @@ pub fn send_message(
             ));
         }
     };
+    let message_id = persisted.message_id.clone();
     let store = crate::message_store::MessageStore::open(workspace)?;
     if stale_worker_target_missing {
         return super::delivery::mark_worker_target_missing(
@@ -261,27 +268,32 @@ pub fn send_message(
         persist: true,
     }) = coordinator_unavailable
     {
+        let Some(blocker) = persisted.blocker else {
+            return Err(MessagingError::Validation(
+                "coordinator-blocked persistence returned no blocker".to_string(),
+            ));
+        };
+        let message_status = persisted.row_status.as_str();
         event_log.write(
             "send.message_queued",
             serde_json::json!({
                 "message_id": message_id,
                 "recipient": recipient,
                 "sender": opts.sender,
-                "message_status": "queued_coordinator_unavailable",
-                "blocker": "coordinator_unavailable",
+                "message_status": message_status,
+                "blocker": blocker.as_str(),
             }),
         )?;
         outcome.ok = true;
         outcome.status = DeliveryStatus::Blocked;
-        outcome.message_status =
-            MessageStatusShadow("queued_coordinator_unavailable".to_string());
+        outcome.message_status = MessageStatusShadow(message_status.to_string());
         outcome.message_id = Some(message_id);
         return Ok(outcome);
     }
     Ok(DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Queued,
-        message_status: MessageStatusShadow("accepted".to_string()),
+        message_status: MessageStatusShadow(persisted.row_status.as_str().to_string()),
         message_id: Some(message_id),
         verification: None,
         stage: None,
