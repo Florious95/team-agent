@@ -870,7 +870,9 @@ fn report_result_for_owner_team_inner(
             }
         }
         if !outcome.ok {
-            if !report_state_has_app_server_receiver(&delivery_state) {
+            if outcome.channel.as_deref() != Some("leader_acceptance_pending")
+                && !report_state_has_app_server_receiver(&delivery_state)
+            {
                 let fallback_error = primary_error.unwrap_or_else(|| {
                     format!(
                         "leader_notification_primary_failed:{}",
@@ -892,9 +894,11 @@ fn report_result_for_owner_team_inner(
             }
         }
     }
-    let leader_notified = outcome.ok;
-    let notification_status_wire = if outcome.ok {
+    let leader_notified = matches!(outcome.status, crate::messaging::DeliveryStatus::Delivered);
+    let notification_status_wire = if leader_notified {
         "delivered"
+    } else if outcome.channel.as_deref() == Some("leader_acceptance_pending") {
+        "submitted_pending_acceptance"
     } else if outcome.channel.as_deref() == Some("rebind_required")
         || matches!(outcome.status, crate::messaging::DeliveryStatus::Blocked)
     {

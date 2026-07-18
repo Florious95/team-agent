@@ -2914,9 +2914,15 @@ fn gate054_rebind_required_status_refuses_leader_delivery_without_cross_server_p
 }
 
 #[test]
-fn gate054_attached_status_still_delivers_when_pane_is_live() {
+fn gate054_attached_status_still_accepts_when_pane_is_live() {
     // Companion negative: prove the new status gate does NOT over-refuse when
     // `status="attached"` and the workspace-canonical socket has the pane.
+    // Injection-case revision: transport submit success is NOT a provider
+    // receipt, so the old `delivered` pin was a false-positive lock
+    // (MUST-10: physical submit is the framework's fact; acceptance is the
+    // provider's). The un-refused path now parks the SAME row in
+    // submitted_pending_acceptance until a provider receipt or retry
+    // schedule advances it.
     let ws = tmp_ws("gate054ok");
     let store = store_for(&ws);
     let log = EventLog::new(&ws);
@@ -2945,7 +2951,16 @@ fn gate054_attached_status_still_delivers_when_pane_is_live() {
         out.ok,
         "0.5.4 gate054: status='attached' with a live pane must not be over-refused: {out:?}"
     );
-    assert_eq!(out.message_status.0, "delivered");
+    assert_eq!(
+        transport.inject_targets().len(),
+        1,
+        "gate054: exactly one physical inject must have happened (MUST-10 anchor)"
+    );
+    assert_eq!(
+        out.message_status.0, "submitted_pending_acceptance",
+        "gate054 (injection-case revision): a successful physical submit without a provider \
+         receipt must park as submitted_pending_acceptance, never claim delivered: {out:?}"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════
