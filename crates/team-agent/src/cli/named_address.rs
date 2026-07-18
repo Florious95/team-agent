@@ -680,12 +680,38 @@ fn resolve_worker(
                 .with_scoped_suggestions_for_agent(team_entry, team, agent, parsed));
         }
     };
-    let session = string_field(team_entry, "session_name")
-        .ok_or_else(|| name_not_resolvable("team is missing session_name"))?;
+    let Some(session) = string_field(team_entry, "session_name") else {
+        return Ok(resolved_worker_without_live(
+            sender_workspace,
+            target_workspace,
+            team,
+            agent,
+            parsed,
+            agent_entry,
+            None,
+            agent,
+            transport.tmux_endpoint(),
+        ));
+    };
     let window = string_field(agent_entry, "window")
         .or_else(|| string_field(agent_entry, "window_name"))
         .unwrap_or(agent);
-    let targets = list_targets(transport)?;
+    let targets = match list_targets(transport) {
+        Ok(targets) => targets,
+        Err(_) => {
+            return Ok(resolved_worker_without_live(
+                sender_workspace,
+                target_workspace,
+                team,
+                agent,
+                parsed,
+                agent_entry,
+                Some(session),
+                window,
+                transport.tmux_endpoint(),
+            ));
+        }
+    };
     let matches = matching_session_window(&targets, session, window);
     match matches.len() {
         1 => {
@@ -720,10 +746,14 @@ fn resolve_worker(
                 warning,
             })
         }
-        0 => Err(name_not_live_worker(
+        0 => Ok(resolved_worker_without_live(
+            sender_workspace,
+            target_workspace,
             team,
             agent,
-            session,
+            parsed,
+            agent_entry,
+            Some(session),
             window,
             transport.tmux_endpoint(),
         )),
@@ -744,6 +774,42 @@ fn resolve_worker(
                 })
                 .collect(),
         )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolved_worker_without_live(
+    sender_workspace: &Path,
+    target_workspace: &Path,
+    team: &str,
+    agent: &str,
+    parsed: &ParsedNamedAddress,
+    agent_entry: &Value,
+    session: Option<&str>,
+    window: &str,
+    tmux_endpoint: Option<String>,
+) -> ResolvedNamedAddress {
+    let state_pane_id = string_field(agent_entry, "pane_id").map(str::to_string);
+    ResolvedNamedAddress {
+        raw_name: parsed.display_name(),
+        target_kind: NamedTargetKind::Worker,
+        sender_workspace: sender_workspace.to_path_buf(),
+        target_workspace: target_workspace.to_path_buf(),
+        team_key: Some(team.to_string()),
+        agent_id: Some(agent.to_string()),
+        pane_id: state_pane_id.clone().unwrap_or_default(),
+        session_name: session.map(str::to_string),
+        window_name: Some(window.to_string()),
+        tmux_endpoint,
+        transport_kind: Some("direct_tmux".to_string()),
+        app_server: None,
+        state_pane_id,
+        state_pane_stale: true,
+        agent_status: string_field(agent_entry, "status").map(str::to_string),
+        warning: Some(
+            "agent has no live pane; message will be persisted for standard delivery recovery"
+                .to_string(),
+        ),
     }
 }
 

@@ -31,11 +31,6 @@ fn send_002_send_to_stopped_worker_does_not_falsely_deliver() {
             "queued to stopped",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            "msg-send002",
-            "--no-wait",
             "--json",
         ],
     );

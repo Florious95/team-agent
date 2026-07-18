@@ -1,6 +1,7 @@
 //! E2E-INBOX-001 inbox is history, so it must show delivery lifecycle state.
 
 use crate::framework::*;
+use std::time::Duration;
 
 #[test]
 fn inbox_001_delivery_status_visible_for_blocked_inbound_message() {
@@ -21,21 +22,32 @@ fn inbox_001_delivery_status_visible_for_blocked_inbound_message() {
             "history is not receipt",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            "msg-inbox001",
-            "--watch-result",
             "--json",
         ],
     );
     let sent = send.json();
-    assert_json_field_eq_str(&sent, "/message_status", "queued_pane_missing");
+    assert_json_field_eq_str(&sent, "/message_status", "accepted");
+    let message_id = sent
+        .pointer("/message_id")
+        .and_then(|value| value.as_str())
+        .expect("generated message id");
+
+    wait_for_or_panic(
+        "inbox reflects coordinator delivery blocker",
+        || {
+            let inbox = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
+            let body = inbox.json();
+            body.pointer("/messages/0/status")
+                .and_then(|value| value.as_str())
+                == Some("queued_pane_missing")
+        },
+        Duration::from_secs(6),
+    );
 
     let inbox_json = run_ta(&ws, &["inbox", "a", "--workspace", ws_path, "--json"]);
     assert!(inbox_json.is_success(), "inbox json: {}", inbox_json.stdout);
     let j = inbox_json.json();
-    assert_json_field_eq_str(&j, "/messages/0/message_id", "msg-inbox001");
+    assert_json_field_eq_str(&j, "/messages/0/message_id", message_id);
     assert_json_field_eq_str(&j, "/messages/0/status", "queued_pane_missing");
     assert_json_field_eq_str(&j, "/messages/0/error", "tmux_target_missing");
     assert_json_field_present(&j, "/messages/0/delivery_attempts");

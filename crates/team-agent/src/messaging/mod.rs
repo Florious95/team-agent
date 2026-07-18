@@ -96,6 +96,7 @@ pub use scheduler::{detect_stuck_agents, fire_due_scheduled_events, stuck_cancel
 pub use selftest::{evaluate_idle_behavior, run_comms_selftest, CommsSelftestDriver};
 pub use send::{
     apply_worker_sender_bypass, send_message, session_drift_refusal, MessageTarget, SendOptions,
+    TrustedSender,
 };
 pub use trust::{attempt_trust_auto_answer, TrustAnswerOutcome};
 pub use types::{

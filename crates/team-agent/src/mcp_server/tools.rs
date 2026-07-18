@@ -17,7 +17,7 @@ use crate::state::persist::{
 };
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
-use crate::messaging::{self, MessageTarget, SendOptions};
+use crate::messaging::{self, MessageTarget, SendOptions, TrustedSender};
 
 use super::helpers::{
     current_reportable_message_for, delivery_outcome_value, direct_message_attribution_for,
@@ -140,7 +140,6 @@ impl TeamOrchestratorTools {
             Some(task_id),
             None,
             None,
-            None,
         )?;
         let mut ok = compact_tool_result(&out.to_value())?;
         if recovery {
@@ -155,7 +154,7 @@ impl TeamOrchestratorTools {
     }
 
     /// `send_message` (`tools.py:135-183`): C14/C15/C17 scope resolution.
-    ///   - sender = explicit / `TEAM_AGENT_ID` env / `"unknown"` (no candidate scan).
+    ///   - sender = immutable `TEAM_AGENT_ID` captured when the MCP server starts.
     ///   - `requires_ack` defaults from target (`_requires_ack_for_target`).
     ///   - C23 cross-team pre-refusal ([`Self::refuse_cross_team_peer`]) before any
     ///     runtime call.
@@ -168,7 +167,6 @@ impl TeamOrchestratorTools {
         to: &MessageTarget,
         content: &str,
         task_id: Option<&str>,
-        sender: Option<&str>,
         requires_ack: Option<bool>,
         scope_override: Option<Scope>,
     ) -> Result<SendOutcome, ToolError> {
@@ -183,10 +181,14 @@ impl TeamOrchestratorTools {
         if let Some(err) = self.refuse_cross_team_peer(to, None) {
             return Err(err);
         }
-        let sender = sender
-            .and_then(non_empty_string)
-            .or_else(|| self.agent_id.as_ref().map(AgentId::as_str))
-            .unwrap_or("unknown");
+        let sender = self.agent_id.clone().ok_or_else(|| {
+            ToolError::new(
+                ToolErrorReason::McpScopeRefused,
+                "send_message requires framework-injected TEAM_AGENT_ID",
+                "IdentityError",
+            )
+        })?;
+        let sender = TrustedSender::from_runtime_identity(sender);
         let ack = requires_ack.unwrap_or_else(|| requires_ack_for_target(to));
         // C14/C15/C17 scope audit (#230 I-2/I-6 contract): emit mcp.scope_resolved
         // for every worker-origin send before any routing/delivery — the funnel
@@ -197,7 +199,7 @@ impl TeamOrchestratorTools {
                 "mcp.scope_resolved",
                 serde_json::json!({
                     "tool": "send_message",
-                    "sender": sender,
+                    "sender": sender.as_str(),
                     "owner_team_id": canonical_owner_team.as_ref().map(TeamKey::as_str),
                     "to": match to {
                         MessageTarget::Single(t) => serde_json::Value::String(t.clone()),
@@ -213,7 +215,7 @@ impl TeamOrchestratorTools {
         let opts = SendOptions {
             task_id: task_id.map(TaskId::new),
             route_task_id: true,
-            sender: sender.to_string(),
+            sender,
             requires_ack: ack,
             team: canonical_owner_team,
             ..SendOptions::default()

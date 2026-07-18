@@ -446,7 +446,6 @@ fn mcp_send_canonicalize_owner_team_id_no_fallback() {
             None,
             None,
             None,
-            None,
         )
         .expect_err("unknown owner team ids must be refused, not fallback to active/sibling team");
     assert_eq!(

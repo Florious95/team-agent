@@ -312,7 +312,7 @@ pub struct SendArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub task: Option<String>,
-    pub sender: String,
+    pub sender: TrustedSender,
     pub no_ack: bool,
     pub no_wait: bool,
     pub watch_result: bool,
@@ -323,16 +323,12 @@ pub struct SendArgs {
     /// When set, the store insert uses this id verbatim; a repeat with the same
     /// id returns a `Duplicate` refusal instead of creating a second row.
     pub message_id: Option<String>,
-    /// F1 (0.3.26): `--pane <pane_id>` — direct pane-id targeting. Mutually
-    /// exclusive with `target` / `targets`. When set, the message is injected
-    /// directly into the specified tmux pane via `transport.inject`, bypassing
-    /// the agent-name → pane-id resolution + team-membership check. This is
-    /// the **cross-team communication** primitive: the target pane does not
-    /// need to be in the sender's team.
+    /// Deprecated compatibility input. Public send refuses pane identity and
+    /// requires a logical recipient so persistence always precedes delivery.
     pub pane: Option<String>,
     /// `--to-name <name>` — stable named addressing. Mutually exclusive with
     /// `target` / `targets` / `--pane`; resolves workspace/team/agent or leader
-    /// name to the current live pane before using direct pane injection.
+    /// name before delegating to the persisted message primitive.
     pub to_name: Option<String>,
     /// E7 (0.5.9 host-leader-registry-design): `--to-leader NAME` resolves
     /// NAME through `~/.team-agent/leaders`, canonical-validates, and then

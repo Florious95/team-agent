@@ -44,7 +44,7 @@ use serde_json::{json, Map, Value};
 use thiserror::Error;
 
 // REUSE in-tree(只 import,不 redefine):
-use crate::messaging::{self, AlertType, MessageTarget, SendOptions};
+use crate::messaging::{self, AlertType, MessageTarget, SendOptions, TrustedSender};
 use crate::model::ids::{TaskId, TeamKey};
 
 pub(crate) const COMMS_BOUNDARY_TEXT: &str = "validates live pane binding consistency and zero-token comms contracts. Does NOT perform live runtime message round-trip. (zero token, zero pollution)";

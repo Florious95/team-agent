@@ -460,7 +460,7 @@ fn send_args_fixture() -> SendArgs {
         workspace: PathBuf::from("."),
         team: Some("teamA".into()),
         task: Some("t-1".into()),
-        sender: "leader".into(),
+        sender: TrustedSender::leader(),
         no_ack: true,
         no_wait: true,
         watch_result: true,
@@ -515,7 +515,7 @@ fn send_options_negates_no_ack_and_no_wait_and_carries_watch() {
         "watch_result flag MUST pass through into SendOptions"
     );
     assert!(!opts.confirm_human);
-    assert_eq!(opts.sender, "leader");
+    assert_eq!(opts.sender.as_str(), "leader");
     assert_eq!(opts.timeout, 12.5);
 }
 
@@ -866,15 +866,8 @@ fn cmd_send_unknown_task_surfaces_golden_error_envelope_not_silent() {
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-// P0 (b') — the SWALLOW guard: `run()` (the CLI process entry) MUST RENDER the send error, not
-// discard Err(CliError) via unwrap_or (advisor %7 root cause). Proxy: emit_cli_error WRITES a
-// `.team/logs/cli-error-*.log` (and prints the compact envelope) — if run() swallowed, neither
-// happens. So a cli-error log containing the BARE "unknown task id: <id>" (no "validation:" prefix)
-// + ExitCode::Error proves run() rendered. Drives the real argv→(exit,render) path.
-// OLD/NEW: same Bug 1/2 seed sync as cmd_send_unknown_task_*; the render-vs-swallow
-// behavior under test is unchanged.
 #[test]
-fn run_send_unknown_task_renders_error_not_silent_swallow() {
+fn run_send_legacy_task_flag_is_internalized_before_persistence() {
     let ws = std::env::temp_dir().join(format!(
         "ta-run-sendunk-{}-{}",
         std::process::id(),
@@ -906,30 +899,21 @@ fn run_send_unknown_task_renders_error_not_silent_swallow() {
     let code = run(&argv, &ws);
     assert_eq!(
         code,
-        ExitCode::Error,
-        "run(send --task <unknown>) must exit Error, not Ok"
+        ExitCode::Ok,
+        "legacy --task is sunset-noticed and ignored; public send persists without caller binding"
     );
-    // run() must have RENDERED (emit_cli_error wrote the cli-error log); a swallow leaves none.
-    let logs_dir = ws.join(".team").join("logs");
-    let mut found = String::new();
-    if let Ok(entries) = std::fs::read_dir(&logs_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("cli-error-") {
-                found = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                break;
-            }
-        }
-    }
-    assert!(
-        found.contains("unknown task id: t-unknown"),
-        "run() must RENDER the send error (cli-error log written with the bare message) — a silent \
-         swallow (unwrap_or discards Err) leaves no log. got log body: {found:?}"
-    );
-    assert!(
-        !found.contains("validation:"),
-        "rendered error must be the bare golden message, NO 'validation:' prefix; got {found:?}"
-    );
+    let connection = rusqlite::Connection::open(
+        ws.join(".team").join("runtime").join("team.db"),
+    )
+    .unwrap();
+    let task_id: Option<String> = connection
+        .query_row(
+            "SELECT task_id FROM messages WHERE content = 'go' ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(task_id, None, "caller-supplied task ids must not reach storage");
     let _ = std::fs::remove_dir_all(&ws);
 }
 

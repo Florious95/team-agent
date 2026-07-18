@@ -41,7 +41,7 @@ fn cli_send_persists_real_message_row() {
         workspace: ws.clone(),
         team: None,
         task: None,
-        sender: "leader".to_string(),
+        sender: TrustedSender::leader(),
         no_ack: false,
         no_wait: true,
         watch_result: false,

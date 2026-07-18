@@ -59,8 +59,6 @@ fn e6_wrong_spec_name_reports_team_key_not_found_without_mailbox_write() {
             "--to-name",
             &wrong,
             "E6_WRONG_KEY_TOKEN",
-            "--sender",
-            "third-party",
             "--json",
         ],
         &sender,
@@ -224,6 +222,7 @@ fn run(args: &[&str], cwd: &Path) -> Output {
     Command::new(bin())
         .args(args)
         .current_dir(cwd)
+        .env("TEAM_AGENT_ID", "third-party")
         .output()
         .expect("run team-agent")
 }

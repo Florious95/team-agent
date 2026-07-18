@@ -36,9 +36,9 @@ use team_agent::message_store::MessageStore;
 use team_agent::messaging::results::report_result;
 use team_agent::messaging::{
     deliver_pending_messages, send_message, DeliveryRefusal, DeliveryStatus, MessageTarget,
-    SendOptions,
+    SendOptions, TrustedSender,
 };
-use team_agent::model::ids::TeamKey;
+use team_agent::model::ids::{AgentId, TeamKey};
 use team_agent::tmux_backend::TmuxBackend;
 use team_agent::transport::{SessionName, Transport, WindowName};
 
@@ -764,7 +764,7 @@ fn source(rel: &str) -> String {
 
 fn send_opts(sender: &str, team: Option<&str>) -> SendOptions {
     SendOptions {
-        sender: sender.to_string(),
+        sender: TrustedSender::from_runtime_identity(AgentId::new(sender)),
         team: team.map(TeamKey::new),
         route_task_id: false,
         block_until_delivered: false,

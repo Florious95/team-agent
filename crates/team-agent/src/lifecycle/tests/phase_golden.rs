@@ -259,7 +259,7 @@ fn run_phase_golden(spec: PhaseGolden) -> Value {
         workspace: workspace.clone(),
         team: Some(spec.team_key.to_string()),
         task: None,
-        sender: "leader".to_string(),
+        sender: crate::messaging::TrustedSender::leader(),
         no_ack: true,
         no_wait: true,
         watch_result: false,

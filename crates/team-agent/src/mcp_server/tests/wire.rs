@@ -66,6 +66,12 @@
         );
         assert_eq!(send["inputSchema"]["additionalProperties"], json!(false));
         assert_eq!(send["inputSchema"]["required"], json!(["to", "content"]));
+        for internal in ["sender", "task_id", "requires_ack"] {
+            assert!(
+                send["inputSchema"]["properties"].get(internal).is_none(),
+                "{internal} is framework-owned, not caller-supplied"
+            );
+        }
     }
 
     #[test]

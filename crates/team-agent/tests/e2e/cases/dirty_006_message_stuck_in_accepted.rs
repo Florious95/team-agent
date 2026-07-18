@@ -29,17 +29,12 @@ fn dirty_006_message_stuck_in_accepted_is_not_false_delivered() {
             "queued for stopped worker",
             "--workspace",
             ws.path().to_str().unwrap(),
-            "--sender",
-            "leader",
-            "--message-id",
-            "msg-dirty-006",
-            "--no-wait",
             "--json",
         ],
     );
     assert!(out.is_success(), "send stderr={}", out.stderr);
     let j = out.json();
-    assert_json_field_eq_str(&j, "/message_id", "msg-dirty-006");
+    assert!(j.pointer("/message_id").and_then(|v| v.as_str()).is_some());
     assert_json_field_eq_str(&j, "/message_status", "accepted");
     assert_ne!(
         j.pointer("/status").and_then(|v| v.as_str()),

@@ -304,7 +304,6 @@ impl CompatFixture {
                 &MessageTarget::Single(WORKER.to_string()),
                 content,
                 None,
-                None,
                 Some(true),
                 None,
             )

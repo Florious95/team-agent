@@ -48,11 +48,10 @@ fn red_1_bare_to_name_explicit_team_scope_matrix() {
     let naming_json = json_stdout(&naming, "bare --to-name scoped to qa-naming");
     assert_eq!(naming.status.code(), Some(0), "RED-1: {naming_json}");
     assert_eq!(naming_json["team_key"], json!("qa-naming"));
-    assert_eq!(
-        naming_json["pane_id"],
-        json!(case.pane("local-naming-beta"))
-    );
-    case.assert_pane_contains("local-naming-beta", &naming_token);
+    assert_eq!(naming_json["target"], json!("beta"));
+    assert!(naming_json["message_id"].as_str().is_some());
+    assert_eq!(case.message_count(&naming_token), 1);
+    case.assert_pane_not_contains("local-naming-beta", &naming_token);
     case.assert_pane_not_contains("local-sibling-beta", &naming_token);
 
     let sibling_token = token("RED1_SIBLING");
@@ -72,11 +71,10 @@ fn red_1_bare_to_name_explicit_team_scope_matrix() {
     let sibling_json = json_stdout(&sibling, "bare --to-name scoped to qa-sibling");
     assert_eq!(sibling.status.code(), Some(0), "RED-1: {sibling_json}");
     assert_eq!(sibling_json["team_key"], json!("qa-sibling"));
-    assert_eq!(
-        sibling_json["pane_id"],
-        json!(case.pane("local-sibling-beta"))
-    );
-    case.assert_pane_contains("local-sibling-beta", &sibling_token);
+    assert_eq!(sibling_json["target"], json!("beta"));
+    assert!(sibling_json["message_id"].as_str().is_some());
+    assert_eq!(case.message_count(&sibling_token), 1);
+    case.assert_pane_not_contains("local-sibling-beta", &sibling_token);
     case.assert_pane_not_contains("local-naming-beta", &sibling_token);
 
     let ambiguous_token = token("RED1_AMBIGUOUS");
@@ -153,7 +151,11 @@ fn red_2_positional_typo_suggests_only_selected_team_without_db_write() {
     let body = json_stdout(&output, "positional typo");
 
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(body["reason"], json!("target_not_in_team"));
+    // M2 unified resolver: positional TO shares the named-resolver grammar, so
+    // an unresolvable name refuses with the canonical name_not_resolvable
+    // reason (was target_not_in_team pre-unification). Typo suggestions,
+    // team-scoped candidates and zero side effects are unchanged intent.
+    assert_eq!(body["reason"], json!("name_not_resolvable"));
     assert_suggestion(&body, "btea", "beta");
     assert_candidates_stay_in_team(&body, "qa-naming");
     assert_eq!(
@@ -332,7 +334,7 @@ fn red_3_named_role_human_n38_keeps_typo_and_copyable_suggestion() {
     assert_named_human_refusal(&output, "btea", "qa-naming/beta");
 }
 
-// RED-4: help and refusal Action explain that named addresses are CLI-only.
+// RED-4: the public help and command spec share the canonical persisted-send surface.
 
 #[test]
 #[serial_test::serial(env)]
@@ -342,23 +344,24 @@ fn red_4_send_help_and_command_spec_share_all_shapes_and_entry_boundaries() {
     assert_eq!(output.status.code(), Some(0), "{}", combined(&output));
     let help = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
     for required in [
-        "--to-name agent",
-        "team/agent",
-        "workspace::team/agent",
-        "target is a short id",
-        "mcp `to` is a short id",
-        "--team scopes only a bare --to-name",
-        "not valid positional target or mcp `to`",
+        "logical recipient",
+        "returns after the message is persisted",
     ] {
         assert!(
             help.contains(required),
             "RED-4: send help missing `{required}`; help={help}"
         );
     }
+    for hidden_alias in ["--to-name", "--to-leader", "--targets", "--pane"] {
+        assert!(
+            !help.contains(hidden_alias),
+            "RED-4: public send help leaked compatibility alias `{hidden_alias}`; help={help}"
+        );
+    }
 
     let specs = source("src/cli/spec.rs").to_ascii_lowercase();
     let send_spec = line_containing(&specs, "name: \"send\"");
-    for required in ["--to-name agent", "team/agent", "workspace::team/agent"] {
+    for required in ["persist a message", "logical recipient"] {
         assert!(
             send_spec.contains(required),
             "RED-4: COMMAND_SPECS/help drift; missing {required}; spec={send_spec}"
@@ -412,25 +415,44 @@ fn red_4_named_error_actions_use_returned_candidates_not_fake_assembled_status_n
     }
 }
 
-// RED-5: current fail-closed/address-precedence behavior remains unchanged.
+// RED-5: address-precedence behavior. M2 unified the positional TO grammar
+// with the named resolver, so a team-qualified positional target is now a
+// first-class logical address: accepted and persisted through the same
+// create-message funnel (m2c contract invariant 1). MCP worker scope rules
+// below stay fail-closed and unchanged.
 
 #[test]
 #[serial_test::serial(env)]
-fn red_5_positional_team_qualified_target_still_refuses() {
+fn red_5_positional_team_qualified_target_accepts_and_persists() {
     let case = AddressCase::new("red5-positional-long");
+    let content = token("RED5_POSITIONAL_LONG");
     let output = case.cli(&[
         "send",
         "qa-naming/beta",
-        "RED5_POSITIONAL_LONG",
+        &content,
         "--workspace",
         path(&case.local),
         "--team",
         "qa-naming",
         "--json",
     ]);
-    let body = json_stdout(&output, "positional long guard");
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(body["reason"], json!("target_not_in_team"));
+    let body = json_stdout(&output, "positional long accept");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "RED-5: team-qualified positional TO is canonical grammar post-M2: {body}"
+    );
+    assert!(
+        body["message_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_")),
+        "RED-5: qualified positional must enter the persisted funnel: {body}"
+    );
+    assert_eq!(
+        case.message_count(&content),
+        1,
+        "RED-5: exactly one persisted row for the resolved recipient"
+    );
 }
 
 #[test]
@@ -473,8 +495,10 @@ fn red_5_cross_workspace_qualified_address_ignores_local_team_flag() {
     assert_eq!(output.status.code(), Some(0), "RED-5: {body}");
     assert_eq!(body["target_workspace"], json!(path(&case.other)));
     assert_eq!(body["team_key"], json!("qa-naming"));
-    assert_eq!(body["pane_id"], json!(case.pane("other-naming-beta")));
-    case.assert_pane_contains("other-naming-beta", &content);
+    assert_eq!(body["target"], json!("beta"));
+    assert!(body["message_id"].as_str().is_some());
+    assert_eq!(case.message_count_in(&case.other, &content), 1);
+    case.assert_pane_not_contains("other-naming-beta", &content);
     case.assert_pane_not_contains("local-sibling-beta", &content);
 }
 
@@ -499,8 +523,10 @@ fn red_5_team_qualified_address_ignores_conflicting_team_flag() {
     let body = json_stdout(&output, "team-qualified address precedence");
     assert_eq!(output.status.code(), Some(0), "RED-5: {body}");
     assert_eq!(body["team_key"], json!("qa-naming"));
-    assert_eq!(body["pane_id"], json!(case.pane("local-naming-beta")));
-    case.assert_pane_contains("local-naming-beta", &content);
+    assert_eq!(body["target"], json!("beta"));
+    assert!(body["message_id"].as_str().is_some());
+    assert_eq!(case.message_count(&content), 1);
+    case.assert_pane_not_contains("local-naming-beta", &content);
     case.assert_pane_not_contains("local-sibling-beta", &content);
 }
 
@@ -553,7 +579,10 @@ fn red_5_exact_valid_named_short_has_no_suggestion_fields() {
             "RED-5: exact success leaked {field}: {body}"
         );
     }
-    case.assert_pane_contains("local-naming-beta", &content);
+    assert_eq!(body["target"], json!("beta"));
+    assert!(body["message_id"].as_str().is_some());
+    assert_eq!(case.message_count(&content), 1);
+    case.assert_pane_not_contains("local-naming-beta", &content);
 }
 
 #[test]
@@ -837,12 +866,17 @@ impl AddressCase {
             Some(1),
             "ranking request must stay refused: {body}"
         );
-        assert_eq!(body["reason"], json!("target_not_in_team"));
+        // M2 unified resolver: canonical unresolvable-name reason.
+        assert_eq!(body["reason"], json!("name_not_resolvable"));
         body
     }
 
     fn message_count(&self, content: &str) -> i64 {
-        let store = team_agent::message_store::MessageStore::open(&self.local)
+        self.message_count_in(&self.local, content)
+    }
+
+    fn message_count_in(&self, workspace: &Path, content: &str) -> i64 {
+        let store = team_agent::message_store::MessageStore::open(workspace)
             .expect("open hermetic message store");
         self.env.assert_store_under_root(&store);
         let conn = Connection::open(store.db_path()).expect("open team.db");
@@ -852,11 +886,6 @@ impl AddressCase {
             |row| row.get(0),
         )
         .expect("count matching message rows")
-    }
-
-    fn assert_pane_contains(&self, pane: &str, token: &str) {
-        let got = self.capture(pane);
-        assert!(got.contains(token), "pane {pane} missing {token}: {got}");
     }
 
     fn assert_pane_not_contains(&self, pane: &str, token: &str) {

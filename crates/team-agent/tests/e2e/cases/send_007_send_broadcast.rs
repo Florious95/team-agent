@@ -24,11 +24,6 @@ fn send_007_broadcast_fanout_status() {
             "broadcast e2e",
             "--workspace",
             ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            "msg-bcast-007",
-            "--no-wait",
             "--json",
         ],
     );

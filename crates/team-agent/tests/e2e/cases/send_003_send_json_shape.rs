@@ -21,24 +21,8 @@ fn send_003_send_json_shape_locks_public_keys() {
     let qs = quick_start_fake(&ws, team_id);
     assert!(quick_start_launched(&qs), "quick-start: {}", qs.stdout);
 
-    let mid = "msg-send003-shape";
     let body = "shape contract";
-    let out = run_ta(
-        &ws,
-        &[
-            "send",
-            "a",
-            body,
-            "--workspace",
-            ws_path,
-            "--sender",
-            "leader",
-            "--message-id",
-            mid,
-            "--no-wait",
-            "--json",
-        ],
-    );
+    let out = run_ta(&ws, &["send", "a", body, "--workspace", ws_path, "--json"]);
     assert!(out.is_success(), "send: {}", out.stdout);
     let j = out.json();
 
@@ -57,7 +41,7 @@ fn send_003_send_json_shape_locks_public_keys() {
     for p in &required {
         assert_json_field_present(&j, p);
     }
-    assert_json_field_eq_str(&j, "/message_id", mid);
+    assert!(j.pointer("/message_id").and_then(|v| v.as_str()).is_some());
     assert_json_field_eq_str(&j, "/target", "a");
     assert_json_field_eq_str(&j, "/sender", "leader");
     assert_json_field_eq_bool(&j, "/ok", true);

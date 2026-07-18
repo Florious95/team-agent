@@ -430,7 +430,7 @@ fn c3_repeated_quick_start_uses_requested_team_identity_for_session_names() {
 
 #[test]
 #[ignore = "real-machine: command-file gate uses real team-agent binary/lifecycle"]
-fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
+fn c4_send_generates_distinct_ids_for_repeated_payloads() {
     let ws = tmp_dir("c4-message-id");
     seed_runtime_state(&ws);
 
@@ -441,8 +441,6 @@ fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
             "duplicate once",
             "--workspace",
             ws.to_str().unwrap(),
-            "--message-id",
-            "msg_cr015",
             "--json",
         ],
         &ws,
@@ -454,8 +452,6 @@ fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
             "duplicate once",
             "--workspace",
             ws.to_str().unwrap(),
-            "--message-id",
-            "msg_cr015",
             "--json",
         ],
         &ws,
@@ -464,27 +460,17 @@ fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
     let second_json = stdout_json(&second);
 
     let mut failures = Vec::new();
-    if first_json["message_id"] != json!("msg_cr015") {
-        failures.push(format!(
-            "first send did not honor caller message_id: {}",
-            first_json
-        ));
-    }
-    if first_json["content"] != json!("duplicate once") {
-        failures.push(format!(
-            "first send mutated content instead of parsing --message-id as metadata: {}",
-            first_json
-        ));
-    }
-    if second_json["ok"] != json!(false)
-        || !second_json
-            .get("reason")
-            .and_then(Value::as_str)
-            .is_some_and(|reason| reason.contains("duplicate"))
+    let first_id = first_json.get("message_id").and_then(Value::as_str);
+    let second_id = second_json.get("message_id").and_then(Value::as_str);
+    if first_json["ok"] != json!(true)
+        || second_json["ok"] != json!(true)
+        || first_id.is_none()
+        || second_id.is_none()
+        || first_id == second_id
     {
         failures.push(format!(
-            "duplicate send should be skipped/refused with an explicit duplicate reason: {}",
-            second_json
+            "canonical sends must generate distinct correlation ids; first={} second={}",
+            first_json, second_json
         ));
     }
     let db = ws.join(".team").join("runtime").join("team.db");
@@ -492,23 +478,16 @@ fn c4_send_honors_caller_supplied_message_id_and_deduplicates_repeats() {
     let total: i64 = conn
         .query_row("select count(*) from messages", [], |row| row.get(0))
         .unwrap();
-    let caller_id_rows: i64 = conn
+    let content_rows: i64 = conn
         .query_row(
-            "select count(*) from messages where message_id = 'msg_cr015'",
+            "select count(*) from messages where content = 'duplicate once'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    let mutated_content_rows: i64 = conn
-        .query_row(
-            "select count(*) from messages where content = 'duplicate once msg_cr015'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    if total != 1 || caller_id_rows != 1 || mutated_content_rows != 0 {
+    if total != 2 || content_rows != 2 {
         failures.push(format!(
-            "message store should contain exactly one caller-id row and no mutated content; total={total} caller_id_rows={caller_id_rows} mutated_content_rows={mutated_content_rows}"
+            "message store should contain both generated-id rows with unchanged content; total={total} content_rows={content_rows}"
         ));
     }
     assert!(
