@@ -151,7 +151,11 @@ fn red_2_positional_typo_suggests_only_selected_team_without_db_write() {
     let body = json_stdout(&output, "positional typo");
 
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(body["reason"], json!("target_not_in_team"));
+    // M2 unified resolver: positional TO shares the named-resolver grammar, so
+    // an unresolvable name refuses with the canonical name_not_resolvable
+    // reason (was target_not_in_team pre-unification). Typo suggestions,
+    // team-scoped candidates and zero side effects are unchanged intent.
+    assert_eq!(body["reason"], json!("name_not_resolvable"));
     assert_suggestion(&body, "btea", "beta");
     assert_candidates_stay_in_team(&body, "qa-naming");
     assert_eq!(
@@ -411,25 +415,44 @@ fn red_4_named_error_actions_use_returned_candidates_not_fake_assembled_status_n
     }
 }
 
-// RED-5: current fail-closed/address-precedence behavior remains unchanged.
+// RED-5: address-precedence behavior. M2 unified the positional TO grammar
+// with the named resolver, so a team-qualified positional target is now a
+// first-class logical address: accepted and persisted through the same
+// create-message funnel (m2c contract invariant 1). MCP worker scope rules
+// below stay fail-closed and unchanged.
 
 #[test]
 #[serial_test::serial(env)]
-fn red_5_positional_team_qualified_target_still_refuses() {
+fn red_5_positional_team_qualified_target_accepts_and_persists() {
     let case = AddressCase::new("red5-positional-long");
+    let content = token("RED5_POSITIONAL_LONG");
     let output = case.cli(&[
         "send",
         "qa-naming/beta",
-        "RED5_POSITIONAL_LONG",
+        &content,
         "--workspace",
         path(&case.local),
         "--team",
         "qa-naming",
         "--json",
     ]);
-    let body = json_stdout(&output, "positional long guard");
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(body["reason"], json!("target_not_in_team"));
+    let body = json_stdout(&output, "positional long accept");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "RED-5: team-qualified positional TO is canonical grammar post-M2: {body}"
+    );
+    assert!(
+        body["message_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_")),
+        "RED-5: qualified positional must enter the persisted funnel: {body}"
+    );
+    assert_eq!(
+        case.message_count(&content),
+        1,
+        "RED-5: exactly one persisted row for the resolved recipient"
+    );
 }
 
 #[test]
@@ -843,7 +866,8 @@ impl AddressCase {
             Some(1),
             "ranking request must stay refused: {body}"
         );
-        assert_eq!(body["reason"], json!("target_not_in_team"));
+        // M2 unified resolver: canonical unresolvable-name reason.
+        assert_eq!(body["reason"], json!("name_not_resolvable"));
         body
     }
 
