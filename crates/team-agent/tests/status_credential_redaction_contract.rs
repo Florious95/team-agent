@@ -798,3 +798,57 @@ fn red8_bearer_token_inside_free_text_is_masked_without_over_redaction() {
         "RED8: a bearer token inside user-controlled free text must be masked at event write while ordinary Bearer prose survives and redaction stays idempotent; leak_free={leak_free} benign_preserved={benign_preserved} idempotent={idempotent}"
     );
 }
+
+#[test]
+#[serial(env)]
+fn red8b_bearer_terminal_matrix_masks_every_rfc6750_tail_with_zero_remnant() {
+    let env = hermetic_guard::HermeticTestEnv::enter("redact-red8b");
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    let workspace = env.workspace("red8b");
+    let log = EventLog::new(&workspace);
+    // Boundary-value matrix (leader final ruling via r10): the token tail may
+    // be ANY RFC6750 b64token character. Exactly-min-length tokens and long
+    // tokens must both be fully masked with ZERO token remnant - over-masking
+    // a sentence period is accepted, a surviving token fragment is not.
+    let tails = ['-', '.', '~', '+', '/', '='];
+    for (index, tail) in tails.iter().enumerate() {
+        let core = format!("bnd{index}fake{index}core");
+        let min_token = format!("ab{core}{tail}");
+        let long_token = format!("ab{core}x{core}{tail}");
+        for token in [min_token, long_token] {
+            log.write(
+                "provider.worker.spawn_argv",
+                json!({
+                    "argv": [
+                        "codex",
+                        "-c",
+                        format!("developer_instructions=call the api with Bearer {token} then stop."),
+                    ],
+                }),
+            )
+            .unwrap();
+        }
+    }
+    let events_path = workspace.join(".team").join("logs").join("events.jsonl");
+    let bytes = std::fs::read_to_string(&events_path).unwrap();
+    let mut failures = Vec::new();
+    for (index, tail) in tails.iter().enumerate() {
+        let core = format!("bnd{index}fake{index}core");
+        if bytes.contains(&core) {
+            failures.push(format!("token body leaked for tail {tail:?}: {core}"));
+        }
+        let remnant = format!("{REDACTED}{tail}");
+        if bytes.contains(&remnant) {
+            failures.push(format!("token tail remnant survived masking: {remnant}"));
+        }
+    }
+    if !bytes.contains(REDACTED) {
+        failures.push("no [REDACTED] marker written at all".to_string());
+    }
+    assert!(
+        failures.is_empty(),
+        "RED8B: every RFC6750 terminal character must be masked with zero token remnant at exact-min and long lengths.\n{}",
+        failures.join("\n")
+    );
+}

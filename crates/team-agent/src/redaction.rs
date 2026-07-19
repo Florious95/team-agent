@@ -44,7 +44,7 @@ static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
 
 static BEARER_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)(?P<prefix>\bBearer[ \t]+)(?P<token>[A-Za-z0-9][-A-Za-z0-9._~+/=]{14,}[A-Za-z0-9_=])",
+        r"(?i)(?P<prefix>\bBearer[ \t]+)(?P<token>[A-Za-z0-9][-A-Za-z0-9._~+/=]{14,}[-A-Za-z0-9._~+/=])",
     )
     .expect("Bearer token redaction regex")
 });
