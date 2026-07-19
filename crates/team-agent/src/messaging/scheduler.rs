@@ -256,8 +256,10 @@ pub fn stuck_cancel(
             },
         );
     }
-    crate::state::persist::save_runtime_state_reapplying_after_conflict(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save_reapplying(
+        crate::state::repository::StateWriteIntent::SchedulerSuppression {
+            owner_team_id: Some(&team),
+        },
         &state,
         |latest| {
             for kind in &alert_types {

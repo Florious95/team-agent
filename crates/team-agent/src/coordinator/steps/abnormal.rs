@@ -1895,7 +1895,13 @@ pub(crate) fn attempt_due_recoveries(
         return;
     };
     if clear_stale_terminal_next_retry_at(&mut state) {
-        let _ = crate::state::persist::save_runtime_state(workspace, &state);
+        let _ = crate::state::repository::StateRepository::new(workspace).save(
+            crate::state::repository::StateWriteIntent::CoordinatorApiErrorRecovery {
+                team_key: state.get("active_team_key").and_then(Value::as_str),
+                agent_id: None,
+            },
+            &state,
+        );
     }
     let due_agents = collect_due_recovery_agents(&state);
     for agent_id in due_agents {
@@ -2148,7 +2154,13 @@ fn write_recovery_intent_result(workspace: &Path, agent_id: &str, update: Recove
             }
         }
     }
-    let _ = crate::state::persist::save_runtime_state(workspace, &state);
+    let _ = crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::CoordinatorApiErrorRecovery {
+            team_key: state.get("active_team_key").and_then(Value::as_str),
+            agent_id: Some(agent_id),
+        },
+        &state,
+    );
 }
 
 #[cfg(test)]

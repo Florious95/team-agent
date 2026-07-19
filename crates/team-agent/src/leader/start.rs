@@ -816,7 +816,13 @@ fn persist_managed_leader_binding(
         .with_team_owner(owner)
         .with_owner_epoch(owner_epoch);
     crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::LeaderStartBinding {
+            team_key: identity.team_id.as_str(),
+            transport_kind: "managed",
+        },
+        &state,
+    )?;
     Ok(())
 }
 
@@ -933,7 +939,13 @@ fn persist_exec_provider_leader_binding(
         .with_team_owner(owner)
         .with_owner_epoch(owner_epoch);
     crate::state::ownership::write_owner(&mut state, identity.team_id.as_str(), record);
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::LeaderStartBinding {
+            team_key: identity.team_id.as_str(),
+            transport_kind: "exec_provider",
+        },
+        &state,
+    )?;
     Ok(())
 }
 
@@ -1124,7 +1136,13 @@ fn refresh_managed_leader_provider_binding(
         .with_team_owner(owner)
         .with_owner_epoch(existing_epoch);
     crate::state::ownership::write_owner(&mut state, team_key, record);
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::LeaderStartBinding {
+            team_key,
+            transport_kind: "managed_reentry",
+        },
+        &state,
+    )?;
     Ok(())
 }
 
@@ -1169,7 +1187,13 @@ fn persist_external_leader_topology_marker(
             teams.insert(identity.team_id.as_str().to_string(), entry);
         }
     }
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::LeaderStartBinding {
+            team_key: identity.team_id.as_str(),
+            transport_kind: "external",
+        },
+        &state,
+    )?;
     Ok(())
 }
 

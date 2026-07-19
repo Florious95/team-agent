@@ -841,8 +841,8 @@ fn provider_command(provider: &str) -> &str {
 }
 
 fn seed_fake_e2e_state(workspace: &Path) -> Result<(), CliError> {
-    crate::state::persist::save_runtime_state(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::FakeE2eSeed,
         &json!({
             "leader": {"id": "leader"},
             "session_name": "team-agent-fake-e2e",
@@ -876,7 +876,8 @@ fn fake_shutdown(workspace: &Path) -> Result<Value, CliError> {
             }
         }
     }
-    crate::state::persist::save_runtime_state(workspace, &state)?;
+    crate::state::repository::StateRepository::new(workspace)
+        .save(crate::state::repository::StateWriteIntent::FakeE2eSeed, &state)?;
     Ok(json!({
         "ok": true,
         "session_name": state.get("session_name").cloned().unwrap_or(Value::Null),

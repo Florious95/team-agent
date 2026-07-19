@@ -1007,12 +1007,15 @@ pub(super) fn stop_agent_at_paths(
     }
     close_agent_display(&mut state, agent_id);
     mark_agent_stopped(&mut state, agent_id, agent, &window)?;
+    let team_key = restart_projection_team_key(&state, team);
     // golden operations.py:95: save_team_scoped_state (team projection) — NOT a raw save, so a
     // multi-team workspace keeps the other teams' persisted runtime state instead of being clobbered.
-    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::StopAgent {
+            team_key: &team_key,
+            agent_id: agent_id.as_str(),
+        },
         &state,
-        &[agent_id.as_str()],
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:96-99: snapshot (side-effect), then state_file = write_team_state path.
@@ -1459,10 +1462,13 @@ fn reset_agent_at_paths(
     sync_restart_team_projections(&mut state, &team_key);
     // golden operations.py (reset): save_team_scoped_state on the team projection — same multi-team
     // preservation as stop, not a raw save_runtime_state.
-    crate::state::projection::save_team_scoped_state_with_tombstone_lifecycle_topology_authority(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::ResetAgent {
+            team_key: &team_key,
+            agent_id: agent_id.as_str(),
+            discard_session,
+        },
         &state,
-        &[agent_id.as_str()],
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     // golden operations.py:125: write_team_state after the discard-save (the intermediate stopped snapshot).

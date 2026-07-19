@@ -32,6 +32,81 @@ const FORBIDDEN_INTENT_VARIANTS: &[&str] = &[
     "SaveTeamScopedState",
 ];
 
+/// G0 frozen row keys (path::fn::callee, one entry per baseline row, sorted).
+/// Ratchet invariant: the live allowlist may only DELETE rows relative to this
+/// set — never add or rename. Slice-end external zero emerges from deletion:
+/// once every external row is removed, any remaining external callsite fails
+/// RED1 as unclassified.
+const FROZEN_G0_ROW_KEYS: &[&str] = &[
+    "cli/adapters.rs::fake_shutdown::save_runtime_state",
+    "cli/adapters.rs::seed_fake_e2e_state::save_runtime_state",
+    "cli/mod.rs::acknowledge_idle::save_runtime_state",
+    "cli/mod.rs::promote_live_sibling_after_scoped_shutdown::save_runtime_state",
+    "cli/mod.rs::shutdown_with_transport_and_state::save_runtime_state",
+    "cli/mod.rs::shutdown_with_transport_and_state::save_team_scoped_state",
+    "coordinator/conpty_shim.rs::finalize::save_runtime_state",
+    "coordinator/conpty_shim.rs::mark_transport_unavailable::save_runtime_state",
+    "coordinator/steps/abnormal.rs::attempt_due_recoveries::save_runtime_state",
+    "coordinator/steps/abnormal.rs::write_recovery_intent_result::save_runtime_state",
+    "leader/start.rs::persist_exec_provider_leader_binding::save_runtime_state",
+    "leader/start.rs::persist_external_leader_topology_marker::save_runtime_state",
+    "leader/start.rs::persist_managed_leader_binding::save_runtime_state",
+    "leader/start.rs::refresh_managed_leader_provider_binding::save_runtime_state",
+    "lifecycle/launch.rs::annotate_persisted_team_depth::save_runtime_state",
+    "lifecycle/launch.rs::rollback_add_agent_atomic::save_runtime_state_with_deleted_agents",
+    "lifecycle/launch.rs::rollback_add_agent_atomic::save_runtime_state_with_deleted_agents",
+    "lifecycle/launch.rs::save_launched_team_state_for_key::save_runtime_state",
+    "lifecycle/restart/agent.rs::reset_agent_at_paths::save_team_scoped_state_with_tombstone_lifecycle_topology_authority",
+    "lifecycle/restart/agent.rs::stop_agent_at_paths::save_team_scoped_state_with_lifecycle_topology_authority",
+    "lifecycle/restart/common.rs::save_restart_projected_state_with_capture_backfill_skip::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "lifecycle/restart/rebuild.rs::save_restart_session_repairs::save_team_scoped_state",
+    "lifecycle/restart/rebuild.rs::save_restart_session_repairs::save_team_scoped_state",
+    "lifecycle/restart/rebuild.rs::save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_skip::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "lifecycle/restart/remove.rs::remove_agent_inner::save_team_scoped_state_with_deleted_agents",
+    "mcp_server/lifecycle_tools/agent_ops.rs::prepare_selected_team_state::save_runtime_state",
+    "mcp_server/lifecycle_tools/state_status.rs::update_state::save_team_scoped_state_reapplying_after_conflict",
+    "mcp_server/lifecycle_tools/state_status.rs::update_state_without_spec::save_team_scoped_state_reapplying_after_conflict",
+    "mcp_server/tools.rs::assign_task::save_runtime_state_reapplying_after_conflict",
+    "messaging/activity.rs::detect_idle_fallbacks::save_runtime_state_reapplying_after_conflict",
+    "messaging/delivery.rs::save_scoped_state::save_runtime_state",
+    "messaging/delivery.rs::save_scoped_state::save_runtime_state",
+    "messaging/delivery.rs::save_scoped_state::save_team_scoped_state",
+    "messaging/delivery.rs::save_scoped_state_reapplying_after_conflict::save_runtime_state_reapplying_after_conflict",
+    "messaging/delivery.rs::save_scoped_state_reapplying_after_conflict::save_team_scoped_state_reapplying_after_conflict",
+    "messaging/results.rs::collect_scoped::save_runtime_state_reapplying_after_conflict",
+    "messaging/results.rs::collect_scoped::save_team_scoped_state_reapplying_after_conflict",
+    "messaging/scheduler.rs::stuck_cancel::save_runtime_state_reapplying_after_conflict",
+    "state/persist.rs::load_runtime_state::save_runtime_state",
+    "state/persist.rs::save_runtime_state::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_reapplying_after_conflict::save_runtime_state",
+    "state/persist.rs::save_runtime_state_reapplying_after_conflict::save_runtime_state",
+    "state/persist.rs::save_runtime_state_with_deleted_agents::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_with_team_tombstone_lifecycle_topology_authority::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_with_team_tombstoned_agents::save_runtime_state_with_merge_options",
+    "state/projection.rs::save_team_scoped_state::save_team_scoped_state_with_deleted_agents",
+    "state/projection.rs::save_team_scoped_state_reapplying_after_conflict::save_team_scoped_state",
+    "state/projection.rs::save_team_scoped_state_reapplying_after_conflict::save_team_scoped_state",
+    "state/projection.rs::save_team_scoped_state_with_deleted_agents::save_team_scoped_state_with_merge_exceptions",
+    "state/projection.rs::save_team_scoped_state_with_lifecycle_topology_authority::save_team_scoped_state_with_merge_options",
+    "state/projection.rs::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip::save_team_scoped_state_with_merge_options",
+    "state/projection.rs::save_team_scoped_state_with_merge_exceptions::save_team_scoped_state_with_merge_options",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_deleted_agents",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_deleted_agents",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_team_tombstone_lifecycle_topology_authority",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_team_tombstone_lifecycle_topology_authority",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_team_tombstoned_agents",
+    "state/projection.rs::save_team_scoped_state_with_merge_options::save_runtime_state_with_team_tombstoned_agents",
+    "state/projection.rs::save_team_scoped_state_with_tombstone_lifecycle_topology_authority::save_team_scoped_state_with_merge_options",
+];
+
 #[test]
 fn red1_baseline_allowlist_classifies_all_current_direct_state_saves() {
     let calls = scan_product_state_saves();
@@ -47,17 +122,53 @@ fn red1_baseline_allowlist_classifies_all_current_direct_state_saves() {
             "StateRepository skeleton is missing at src/{REPOSITORY_PATH}; S1a allowlist is not actionable without the write facade"
         ));
     }
-    if ALLOWED_STATE_SAVE_CALLS.len() != BASELINE_DIRECT_SAVE_COUNT {
-        failures.push(format!(
-            "contract allowlist row count drifted: expected {BASELINE_DIRECT_SAVE_COUNT}, got {}",
-            ALLOWED_STATE_SAVE_CALLS.len()
-        ));
-    }
-    if calls.len() != BASELINE_DIRECT_SAVE_COUNT {
-        failures.push(format!(
-            "current direct save call count must match G0 baseline {BASELINE_DIRECT_SAVE_COUNT}; got {}",
-            calls.len()
-        ));
+    // Ratchet (successor to the fixed ==67 pin): the live allowlist must be a
+    // multiset-subset of the frozen G0 rows — rows may only be deleted as their
+    // callsites are converted, never added or renamed. New debt is blocked by
+    // the unclassified check below; count monotonicity is derived, not pinned.
+    {
+        let mut frozen: BTreeMap<&str, usize> = BTreeMap::new();
+        for key in FROZEN_G0_ROW_KEYS {
+            *frozen.entry(key).or_default() += 1;
+        }
+        let mut live: BTreeMap<String, usize> = BTreeMap::new();
+        for row in ALLOWED_STATE_SAVE_CALLS {
+            *live
+                .entry(format!(
+                    "{}::{}::{}",
+                    row.path, row.containing_fn, row.callee_family
+                ))
+                .or_default() += 1;
+        }
+        if ALLOWED_STATE_SAVE_CALLS.len() > FROZEN_G0_ROW_KEYS.len() {
+            failures.push(format!(
+                "allowlist grew beyond frozen G0 baseline: {} > {}",
+                ALLOWED_STATE_SAVE_CALLS.len(),
+                FROZEN_G0_ROW_KEYS.len()
+            ));
+        }
+        for (key, count) in &live {
+            let allowed = frozen.get(key.as_str()).copied().unwrap_or(0);
+            if *count > allowed {
+                failures.push(format!(
+                    "allowlist row not in frozen G0 baseline (or multiplicity grew): {key} live={count} frozen={allowed}"
+                ));
+            }
+        }
+        let external_live = ALLOWED_STATE_SAVE_CALLS
+            .iter()
+            .filter(|row| is_external_writer(row.path))
+            .count();
+        let internal_live = ALLOWED_STATE_SAVE_CALLS.len() - external_live;
+        if BASELINE_DIRECT_SAVE_COUNT < ALLOWED_STATE_SAVE_CALLS.len() {
+            failures.push(format!(
+                "BASELINE_DIRECT_SAVE_COUNT must ratchet down with the allowlist: const={BASELINE_DIRECT_SAVE_COUNT} rows={}",
+                ALLOWED_STATE_SAVE_CALLS.len()
+            ));
+        }
+        // Split accounting: external debt vs authority-internal writes are
+        // reported separately so the external 38 -> 0 ratchet is auditable.
+        let _ = (external_live, internal_live);
     }
 
     let mut seen = BTreeSet::new();

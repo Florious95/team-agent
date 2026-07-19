@@ -126,11 +126,19 @@ impl TeamOrchestratorTools {
             .map(|team| team.as_str().to_string())
             .or_else(|| assignment_team_key(&state));
         reconcile_assigned_task(&mut state, team_key.as_deref(), &task_value);
-        save_runtime_state_reapplying_after_conflict(&self.workspace, &state, |latest| {
-            ensure_object(latest);
-            let latest_team_key = team_key.clone().or_else(|| assignment_team_key(latest));
-            reconcile_assigned_task(latest, latest_team_key.as_deref(), &task_value);
-        })
+        crate::state::repository::StateRepository::new(&self.workspace)
+            .save_reapplying(
+                crate::state::repository::StateWriteIntent::McpAssignTask {
+                    team_key: team_key.as_deref(),
+                    task_id,
+                },
+                &state,
+                |latest| {
+                    ensure_object(latest);
+                    let latest_team_key = team_key.clone().or_else(|| assignment_team_key(latest));
+                    reconcile_assigned_task(latest, latest_team_key.as_deref(), &task_value);
+                },
+            )
         .map_err(tool_runtime_error)?;
 
         let content = assignment_message(task, message);

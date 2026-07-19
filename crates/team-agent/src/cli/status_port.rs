@@ -425,10 +425,10 @@ fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
 }
 
 fn read_runtime_state(workspace: &Path) -> Value {
-    let path = workspace.join(".team").join("runtime").join("state.json");
-    std::fs::read_to_string(path)
+    crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+        .flatten()
         .unwrap_or_else(|| json!({}))
 }
 
