@@ -2266,8 +2266,8 @@ fn write_fake_harness_spawn_argv_event(
     tmux_endpoint_source: Option<&str>,
 ) {
     let _ = crate::event_log::EventLog::new(workspace).write(
-        "provider.worker.spawn_argv",
-        serde_json::json!({
+        crate::event_log::PROVIDER_WORKER_SPAWN_ARGV,
+        crate::event_log::provider_worker_spawn_argv_fields(serde_json::json!({
             "agent_id": decision.agent_id.as_str(),
             "provider": agent_provider(agent),
             "argv": [],
@@ -2277,7 +2277,7 @@ fn write_fake_harness_spawn_argv_event(
             "source": "restart",
             "tmux_endpoint": transport.tmux_endpoint(),
             "tmux_endpoint_source": tmux_endpoint_source.unwrap_or("transport"),
-        }),
+        })),
     );
 }
 
@@ -2924,15 +2924,7 @@ fn write_restart_resume_decision_event(
     forced_fresh_convergence: Option<&crate::session_capture::SessionConvergence>,
     unresumable: Option<&crate::lifecycle::types::UnresumableWorker>,
 ) -> Result<(), LifecycleError> {
-    use std::io::Write as _;
-
-    let path = workspace.join(".team").join("logs").join("events.jsonl");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    }
     let mut event = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "event": crate::lifecycle::types::event_names::RESTART_RESUME_DECISION,
         "worker_id": worker_id,
         "has_first_send_at": first_send_at.is_some(),
         "has_session_id": session_id.is_some(),
@@ -3039,15 +3031,12 @@ fn write_restart_resume_decision_event(
             }
         }
     }
-    let line =
-        serde_json::to_string(&event).map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
-    file.write_all(line.as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
+    crate::event_log::EventLog::new(workspace)
+        .write(
+            crate::lifecycle::types::event_names::RESTART_RESUME_DECISION,
+            event,
+        )
+        .map(|_| ())
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
@@ -3418,6 +3407,48 @@ mod tests {
         PaneField, PaneInfo, PaneLiveness, SetEnvOutcome, SpawnResult, Target, Transport,
         TransportError,
     };
+
+    #[test]
+    fn resume_decision_event_uses_central_scrub_and_preserves_required_failure() {
+        let marker = "synthetic-resume-decision-marker";
+        let workspace =
+            std::env::temp_dir().join(format!("ta-resume-decision-event-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&workspace);
+        write_restart_resume_decision_event(
+            &workspace,
+            "worker",
+            Some(format!("mcp_servers.demo.env.OPENAI_API_KEY=\"{marker}\"")),
+            None,
+            false,
+            "fresh_start",
+            false,
+            None,
+            None,
+        )
+        .expect("central EventLog write");
+        let bytes =
+            std::fs::read_to_string(workspace.join(".team").join("logs").join("events.jsonl"))
+                .expect("events");
+        assert!(!bytes.contains(marker));
+        assert!(bytes.contains("[REDACTED]"));
+        let _ = std::fs::remove_dir_all(&workspace);
+
+        std::fs::create_dir_all(workspace.join(".team").join("logs").join("events.jsonl"))
+            .expect("occupy event path with directory");
+        let result = write_restart_resume_decision_event(
+            &workspace,
+            "worker",
+            None,
+            None,
+            false,
+            "fresh_start",
+            false,
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(LifecycleError::StatePersist(_))));
+        let _ = std::fs::remove_dir_all(workspace);
+    }
 
     struct RespawnEpochTransport;
 

@@ -988,11 +988,17 @@ fn assert_events_have_converging_progress<const N: usize>(events: &str, pending_
         "C12: every delayed capture poll must emit provider.session.converging progress instead of silently waiting; events={events}"
     );
     for line in progress {
+        let event: serde_json::Value = serde_json::from_str(line)
+            .unwrap_or_else(|error| panic!("convergence event must be JSON: {error}; line={line}"));
         assert!(
             line.contains("elapsed_ms")
                 && line.contains("deadline_ms")
                 && line.contains("pending_agent_ids"),
             "C12/C14: converging progress event must expose elapsed_ms, deadline_ms, and pending_agent_ids; line={line}"
+        );
+        assert!(
+            event.get("required_missing").is_none() && event.get("pending").is_none(),
+            "convergence event must emit canonical field names only; line={line}"
         );
     }
     for agent_id in pending_agents {

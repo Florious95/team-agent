@@ -476,6 +476,36 @@ fn assert_restart_spawn_events_name_new_endpoint(case: &EndpointCase, message: &
         events(&case.workspace)
     );
     for event in spawn_events {
+        let actual_keys = event
+            .as_object()
+            .expect("restart spawn event object")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected_keys = [
+            "agent_id",
+            "argv",
+            "env_overlay_keys",
+            "env_unset",
+            "event",
+            "expected_session_id",
+            "provider",
+            "session_id_in_argv",
+            "source",
+            "spawn_cwd",
+            "spawn_epoch",
+            "spawned_at",
+            "tmux_endpoint",
+            "tmux_endpoint_source",
+            "tmux_start_mode",
+            "ts",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            actual_keys, expected_keys,
+            "restart spawn event schema must be canonical"
+        );
         assert_eq!(
             event.get("tmux_endpoint").and_then(Value::as_str),
             Some(NEW_SOCKET),

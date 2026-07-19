@@ -57,6 +57,8 @@
         "-c",
         "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
       ],
+      "env_overlay_keys": "<ENV_KEYS>",
+      "env_unset": [],
       "event": "provider.worker.spawn_argv",
       "expected_session_id": null,
       "provider": "codex",
@@ -65,6 +67,9 @@
       "spawn_cwd": "<WORKSPACE>",
       "spawn_epoch": 0,
       "spawned_at": "<TS>",
+      "tmux_endpoint": null,
+      "tmux_endpoint_source": null,
+      "tmux_start_mode": null,
       "ts": "<TS>"
     },
     {
@@ -101,6 +106,8 @@
         "-c",
         "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
       ],
+      "env_overlay_keys": "<ENV_KEYS>",
+      "env_unset": [],
       "event": "provider.worker.spawn_argv",
       "expected_session_id": null,
       "provider": "codex",
@@ -109,6 +116,9 @@
       "spawn_cwd": "<WORKSPACE>",
       "spawn_epoch": 1,
       "spawned_at": "<TS>",
+      "tmux_endpoint": null,
+      "tmux_endpoint_source": null,
+      "tmux_start_mode": null,
       "ts": "<TS>"
     },
     {
@@ -224,6 +234,7 @@
       "source": "restart",
       "spawn_cwd": "<WORKSPACE>",
       "spawn_epoch": 1,
+      "spawned_at": null,
       "tmux_endpoint": null,
       "tmux_endpoint_source": "transport",
       "tmux_start_mode": "new-window",
@@ -567,6 +578,8 @@
                 "-c",
                 "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
               ],
+              "env_overlay_keys": "<ENV_KEYS>",
+              "env_unset": [],
               "event": "provider.worker.spawn_argv",
               "expected_session_id": null,
               "provider": "codex",
@@ -575,6 +588,9 @@
               "spawn_cwd": "<WORKSPACE>",
               "spawn_epoch": 0,
               "spawned_at": "<TS>",
+              "tmux_endpoint": null,
+              "tmux_endpoint_source": null,
+              "tmux_start_mode": null,
               "ts": "<TS>"
             },
             {
@@ -611,6 +627,8 @@
                 "-c",
                 "mcp_servers.team_orchestrator.tool_timeout_sec=600.0"
               ],
+              "env_overlay_keys": "<ENV_KEYS>",
+              "env_unset": [],
               "event": "provider.worker.spawn_argv",
               "expected_session_id": null,
               "provider": "codex",
@@ -619,6 +637,9 @@
               "spawn_cwd": "<WORKSPACE>",
               "spawn_epoch": 1,
               "spawned_at": "<TS>",
+              "tmux_endpoint": null,
+              "tmux_endpoint_source": null,
+              "tmux_start_mode": null,
               "ts": "<TS>"
             },
             {

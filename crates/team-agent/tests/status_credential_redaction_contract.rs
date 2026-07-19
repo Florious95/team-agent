@@ -192,6 +192,16 @@ fn red5_event_write_and_legacy_tail_are_redacted_and_idempotent() {
     let written = [
         log.write(
             "provider.worker.spawn_argv",
+            json!({
+                "authorization_header": format!("Bearer {marker}"),
+                "credential_blob": marker.clone(),
+                "config": format!("mcp_servers.demo.env.OPENAI_API_KEY=\"{marker}\""),
+                "argv": ["provider", "--api-key", marker.clone()],
+            }),
+        )
+        .unwrap(),
+        log.write(
+            "provider.worker.spawn_argv",
             json!({"argv": ["provider", diagnostic.clone()]}),
         )
         .unwrap(),
@@ -222,16 +232,72 @@ fn red5_event_write_and_legacy_tail_are_redacted_and_idempotent() {
         json!({"event": "legacy.restart", "error": restart_diagnostic(&marker)})
     )
     .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "event": "provider.session.converging",
+            "required_missing": ["worker"],
+            "pending": ["worker"]
+        })
+    )
+    .unwrap();
     writeln!(file, "legacy malformed {}", restart_diagnostic(&marker)).unwrap();
     let tail = log.tail(0).unwrap();
     let tail_text = Value::Array(tail.clone()).to_string();
     let tail_safe = !tail_text.contains(&marker) && tail_text.contains(REDACTED);
     let double_boundary_idempotent = tail.first() == written.first();
+    let legacy_aliases_readable = tail.iter().any(|event| {
+        event.get("event").and_then(Value::as_str) == Some("provider.session.converging")
+            && event.get("required_missing") == Some(&json!(["worker"]))
+            && event.get("pending") == Some(&json!(["worker"]))
+    });
 
     assert!(
-        new_bytes_safe && tail_safe && double_boundary_idempotent,
+        new_bytes_safe && tail_safe && double_boundary_idempotent && legacy_aliases_readable,
         "RED5: EventLog write bytes and legacy/malformed tail output must be masked; applying redaction at write then tail must be idempotent"
     );
+}
+
+#[test]
+fn eventlog_producers_share_the_central_writer_and_canonical_schema() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let launch = fs::read_to_string(root.join("src/lifecycle/launch.rs")).unwrap();
+    let common = fs::read_to_string(root.join("src/lifecycle/restart/common.rs")).unwrap();
+    let rebuild = fs::read_to_string(root.join("src/lifecycle/restart/rebuild.rs")).unwrap();
+    let helper_calls = [&launch, &common, &rebuild]
+        .iter()
+        .map(|source| source.matches("provider_worker_spawn_argv_fields(").count())
+        .sum::<usize>();
+    let convergence_writer = source_section(
+        &common,
+        "fn write_session_convergence_progress_event(",
+        "pub(crate) fn restart_required_missing_session_agent_ids(",
+    );
+    let resume_writer = source_section(
+        &rebuild,
+        "fn write_restart_resume_decision_event(",
+        "pub fn restart_candidates(",
+    );
+
+    assert_eq!(
+        helper_calls, 3,
+        "launch/restart/fake must share one spawn schema helper"
+    );
+    assert!(!common.contains("\"required_missing\": progress"));
+    assert!(!common.contains("\"pending\": pending_agent_ids"));
+    for writer in [convergence_writer, resume_writer] {
+        assert!(writer.contains("EventLog::new"));
+        assert!(!writer.contains("OpenOptions"));
+        assert!(!writer.contains("write_all"));
+        assert!(!writer.contains("events.jsonl"));
+    }
+}
+
+fn source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = source.find(start).expect("source section start");
+    let rest = &source[start..];
+    &rest[..rest.find(end).expect("source section end")]
 }
 
 #[test]

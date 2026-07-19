@@ -373,8 +373,8 @@ pub(super) fn spawn_agent_window(
         let tmux_endpoint = transport.tmux_endpoint();
         let event_log = crate::event_log::EventLog::new(workspace);
         let _ = event_log.write(
-            "provider.worker.spawn_argv",
-            serde_json::json!({
+            crate::event_log::PROVIDER_WORKER_SPAWN_ARGV,
+            crate::event_log::provider_worker_spawn_argv_fields(serde_json::json!({
                 "agent_id": agent_id.as_str(),
                 "provider": provider,
                 "argv": plan.argv,
@@ -388,7 +388,7 @@ pub(super) fn spawn_agent_window(
                 "source": "restart",
                 "tmux_endpoint": tmux_endpoint,
                 "tmux_endpoint_source": tmux_endpoint_source.unwrap_or("transport"),
-            }),
+            })),
         );
     }
 
@@ -1316,21 +1316,16 @@ pub(crate) fn converge_missing_provider_sessions(
         poll_interval,
         restart_required_missing_session_agent_ids,
         |progress| {
-            let pending_agent_ids = progress.pending_agent_ids.clone();
             write_session_convergence_progress_event(
                 workspace,
                 serde_json::json!({
-                    "ts": chrono::Utc::now().to_rfc3339(),
-                    "event": "provider.session.converging",
                     "iteration": progress.iteration,
                     "elapsed_ms": progress.elapsed_ms,
                     "deadline_ms": progress.deadline_ms,
                     "changed": progress.changed,
                     "assigned": progress.assigned,
                     "missing": progress.missing,
-                    "required_missing": progress.required_missing_agent_ids.clone(),
                     "required_missing_agent_ids": progress.required_missing_agent_ids,
-                    "pending": pending_agent_ids,
                     "pending_agent_ids": progress.pending_agent_ids,
                     "candidate_count_by_agent": progress.candidate_count_by_agent,
                     "remaining_ms": progress.remaining_ms,
@@ -1344,22 +1339,11 @@ pub(crate) fn converge_missing_provider_sessions(
 
 fn write_session_convergence_progress_event(
     workspace: &Path,
-    event: serde_json::Value,
+    fields: serde_json::Value,
 ) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let path = workspace.join(".team").join("logs").join("events.jsonl");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| e.to_string())?;
-    file.write_all(line.as_bytes())
-        .and_then(|_| file.write_all(b"\n"))
+    crate::event_log::EventLog::new(workspace)
+        .write(crate::event_log::PROVIDER_SESSION_CONVERGING, fields)
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -1835,6 +1819,46 @@ mod e36_transcript_backing_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn convergence_event_uses_central_scrub_and_preserves_required_failure() {
+        let scratch = ScratchDir::new("event-log-central");
+        let marker = "synthetic-convergence-marker";
+        write_session_convergence_progress_event(
+            scratch.path(),
+            serde_json::json!({
+                "diagnostic": format!("mcp_servers.demo.env.OPENAI_API_KEY=\"{marker}\""),
+                "required_missing_agent_ids": ["worker"],
+                "pending_agent_ids": ["worker"],
+            }),
+        )
+        .expect("central EventLog write");
+        let bytes = std::fs::read_to_string(
+            scratch
+                .path()
+                .join(".team")
+                .join("logs")
+                .join("events.jsonl"),
+        )
+        .expect("events");
+        assert!(!bytes.contains(marker));
+        assert!(bytes.contains("[REDACTED]"));
+
+        let blocked = ScratchDir::new("event-log-required");
+        std::fs::create_dir_all(
+            blocked
+                .path()
+                .join(".team")
+                .join("logs")
+                .join("events.jsonl"),
+        )
+        .expect("occupy event path with directory");
+        assert!(write_session_convergence_progress_event(
+            blocked.path(),
+            serde_json::json!({"pending_agent_ids": ["worker"]}),
+        )
+        .is_err());
     }
 
     // E36 fix-B RED→GREEN: a real Claude worker that sent a message has its session

@@ -3117,6 +3117,36 @@ fn quick_start_running_agent_state_shape_after_spawn_is_golden() {
     assert_eq!(spawn_event["spawned_at"], json!(FIXED_SPAWNED_AT));
     assert_eq!(spawn_event["source"], json!("launch"));
     assert_eq!(spawn_event["spawn_epoch"], json!(0));
+    let actual_keys = spawn_event
+        .as_object()
+        .expect("spawn event object")
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_keys = [
+        "agent_id",
+        "argv",
+        "env_overlay_keys",
+        "env_unset",
+        "event",
+        "expected_session_id",
+        "provider",
+        "session_id_in_argv",
+        "source",
+        "spawn_cwd",
+        "spawn_epoch",
+        "spawned_at",
+        "tmux_endpoint",
+        "tmux_endpoint_source",
+        "tmux_start_mode",
+        "ts",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_keys, expected_keys,
+        "spawn event schema must be canonical"
+    );
 }
 
 // Stage B2 — golden launch/core.py:171-173 writes paused workers as exactly

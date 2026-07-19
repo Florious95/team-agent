@@ -433,8 +433,8 @@ fn spawn_agents(
                 .cloned();
             let event_log = crate::event_log::EventLog::new(workspace);
             let _ = event_log.write(
-                "provider.worker.spawn_argv",
-                serde_json::json!({
+                crate::event_log::PROVIDER_WORKER_SPAWN_ARGV,
+                crate::event_log::provider_worker_spawn_argv_fields(serde_json::json!({
                     "agent_id": agent_id_raw,
                     "provider": provider,
                     "argv": plan.argv,
@@ -444,7 +444,7 @@ fn spawn_agents(
                     "spawned_at": spawned_at.as_str(),
                     "source": "launch",
                     "spawn_epoch": spawn_epoch,
-                }),
+                })),
             );
         }
         // 0.3.28 Step 4b: replaced the `adaptive_layout_plan` 3-pane tiling

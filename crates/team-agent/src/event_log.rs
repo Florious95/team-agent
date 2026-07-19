@@ -35,6 +35,38 @@ use crate::model::paths::logs_dir;
 pub const EVENT_LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 /// `events.py:18`:保留 5 个 archive。
 pub const EVENT_LOG_ARCHIVE_KEEP: u32 = 5;
+pub(crate) const PROVIDER_SESSION_CONVERGING: &str = "provider.session.converging";
+pub(crate) const PROVIDER_WORKER_SPAWN_ARGV: &str = "provider.worker.spawn_argv";
+
+pub(crate) fn provider_worker_spawn_argv_fields(fields: Value) -> Value {
+    let object = fields.as_object();
+    let field = |key: &str| {
+        object
+            .and_then(|object| object.get(key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let array = |key: &str| match field(key) {
+        value @ Value::Array(_) => value,
+        _ => Value::Array(Vec::new()),
+    };
+    serde_json::json!({
+        "agent_id": field("agent_id"),
+        "provider": field("provider"),
+        "argv": array("argv"),
+        "session_id_in_argv": field("session_id_in_argv"),
+        "expected_session_id": field("expected_session_id"),
+        "spawn_cwd": field("spawn_cwd"),
+        "spawned_at": field("spawned_at"),
+        "source": field("source"),
+        "spawn_epoch": field("spawn_epoch"),
+        "env_overlay_keys": array("env_overlay_keys"),
+        "env_unset": array("env_unset"),
+        "tmux_start_mode": field("tmux_start_mode"),
+        "tmux_endpoint": field("tmux_endpoint"),
+        "tmux_endpoint_source": field("tmux_endpoint_source"),
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum EventLogError {
@@ -275,6 +307,47 @@ mod tests {
             "ts 非合法 rfc3339: {ts}"
         );
         assert!(ts.ends_with("+00:00"));
+    }
+
+    #[test]
+    fn provider_spawn_fields_have_one_canonical_shape() {
+        let fields = provider_worker_spawn_argv_fields(json!({
+            "agent_id": "worker",
+            "provider": "fake",
+            "source": "restart",
+            "ignored": "not part of the schema",
+        }));
+        let object = fields.as_object().unwrap();
+        let keys = object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            [
+                "agent_id",
+                "argv",
+                "env_overlay_keys",
+                "env_unset",
+                "expected_session_id",
+                "provider",
+                "session_id_in_argv",
+                "source",
+                "spawn_cwd",
+                "spawn_epoch",
+                "spawned_at",
+                "tmux_endpoint",
+                "tmux_endpoint_source",
+                "tmux_start_mode",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(fields["argv"], json!([]));
+        assert_eq!(fields["env_overlay_keys"], json!([]));
+        assert_eq!(fields["env_unset"], json!([]));
+        assert!(fields["spawn_cwd"].is_null());
+        assert!(fields.get("ignored").is_none());
     }
 
     #[test]
