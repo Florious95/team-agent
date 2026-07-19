@@ -1841,11 +1841,13 @@ fn save_restart_state_with_lifecycle_topology_authority_and_capture_backfill_ski
         .map(String::as_str)
         .collect::<Vec<_>>();
     sync_restart_team_projections(state, team_key);
-    crate::state::projection::save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::RestartTeam {
+            team_key,
+            topology_authority_agent_ids: &topology_agent_ids,
+            skip_capture_backfill_agent_ids: &skip_capture_backfill_agent_ids,
+        },
         state,
-        &skip_capture_backfill_agent_ids,
-        &topology_agent_ids,
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
@@ -1858,7 +1860,11 @@ fn save_restart_session_repairs(
 ) -> Result<(), LifecycleError> {
     let repairs = collect_session_repair_fields(state, agent_ids);
     sync_restart_team_projections(state, team_key);
-    match crate::state::projection::save_team_scoped_state(workspace, state) {
+    let repository = crate::state::repository::StateRepository::new(workspace);
+    match repository.save(
+        crate::state::repository::StateWriteIntent::RestartSessionRepair { team_key },
+        state,
+    ) {
         Ok(()) => Ok(()),
         Err(crate::state::StateError::SaveConflict(_)) => {
             let mut latest =
@@ -1868,7 +1874,11 @@ fn save_restart_session_repairs(
                 apply_session_repair_fields(&mut latest, agent_id, repair);
             }
             sync_restart_team_projections(&mut latest, team_key);
-            crate::state::projection::save_team_scoped_state(workspace, &latest)
+            repository
+                .save(
+                    crate::state::repository::StateWriteIntent::RestartSessionRepair { team_key },
+                    &latest,
+                )
                 .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
             *state = latest;
             Ok(())

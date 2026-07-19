@@ -80,8 +80,10 @@ pub fn detect_idle_fallbacks(
     let suppression_snapshots =
         idle_fallback_suppression_snapshots(&next_state, store, &team, &idle_workers)?;
     register_idle_fallback_suppression(&mut next_state, &team, &now, &suppression_snapshots);
-    crate::state::persist::save_runtime_state_reapplying_after_conflict(
-        workspace,
+    crate::state::repository::StateRepository::new(workspace).save_reapplying(
+        crate::state::repository::StateWriteIntent::MessagingTurnArm {
+            owner_team_id: Some(&team),
+        },
         &next_state,
         |latest| {
             register_idle_fallback_suppression(latest, &team, &now, &suppression_snapshots);

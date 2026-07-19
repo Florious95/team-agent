@@ -40,7 +40,8 @@ use super::StateError;
 // `save_team_scoped_state(` tokens that the governance scanner counts.
 #[allow(unused_imports)]
 use super::persist::{
-    load_runtime_state as helper_load_workspace, save_runtime_state as helper_write_root,
+    load_runtime_state as helper_load_workspace,
+    runtime_state_path as helper_workspace_path, save_runtime_state as helper_write_root,
     save_runtime_state_reapplying_after_conflict as helper_write_root_reapply,
     save_runtime_state_with_deleted_agents as helper_write_root_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
@@ -77,6 +78,19 @@ impl<'a> StateRepository<'a> {
     /// Load the raw workspace state document.
     pub fn load_workspace(&self) -> Result<Value, StateError> {
         helper_load_workspace(self.workspace)
+    }
+
+    /// Load the canonical workspace document without running read-time
+    /// migrations. `None` preserves the legacy raw-reader distinction between
+    /// a missing file and a present empty/default document.
+    pub fn load_workspace_if_exists_without_migrations(
+        &self,
+    ) -> Result<Option<Value>, StateError> {
+        if !helper_workspace_path(self.workspace).exists() {
+            return Ok(None);
+        }
+        let text = std::fs::read_to_string(helper_workspace_path(self.workspace))?;
+        serde_json::from_str(&text).map(Some).map_err(StateError::from)
     }
 
     /// Resolve a team-scoped projection using the existing projection selector.
@@ -197,7 +211,7 @@ pub enum StateWriteIntent<'a> {
     /// so future S1b migration can route it deliberately.
     CoordinatorApiErrorRecovery {
         team_key: Option<&'a str>,
-        agent_id: &'a str,
+        agent_id: Option<&'a str>,
     },
     McpAssignTask {
         team_key: Option<&'a str>,
@@ -410,16 +424,14 @@ fn route_direct(
 // Route intents that historically used the `_reapplying_after_conflict`
 // helper family. Behavior stays identical: S1a chooses the same helper the
 // legacy caller would have chosen for a reapply.
-fn route_reapply<F>(
-    workspace: &Path,
-    intent: StateWriteIntent<'_>,
-    state: &Value,
-    reapply: F,
-) -> Result<(), StateError>
-where
-    F: FnOnce(&mut Value),
-{
-    let use_team_scoped = matches!(
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ReapplyScope {
+    Root,
+    Team,
+}
+
+fn reapply_scope(intent: &StateWriteIntent<'_>) -> ReapplyScope {
+    if matches!(
         intent,
         StateWriteIntent::RestartSessionRepair { .. }
             | StateWriteIntent::MessagingDeliveryState {
@@ -429,14 +441,31 @@ where
                 owner_team_id: Some(_),
             }
             | StateWriteIntent::CoordinatorTick { .. }
-            | StateWriteIntent::McpAssignTask {
+            | StateWriteIntent::McpUpdateStateNote {
                 team_key: Some(_),
-                ..
             }
-    );
-    if use_team_scoped {
+    ) {
+        ReapplyScope::Team
+    } else {
+        ReapplyScope::Root
+    }
+}
+
+fn route_reapply<F>(
+    workspace: &Path,
+    intent: StateWriteIntent<'_>,
+    state: &Value,
+    reapply: F,
+) -> Result<(), StateError>
+where
+    F: FnOnce(&mut Value),
+{
+    if reapply_scope(&intent) == ReapplyScope::Team {
         helper_write_team_scoped_reapply(workspace, state, reapply)
     } else {
         helper_write_root_reapply(workspace, state, reapply)
     }
 }
+
+#[cfg(test)]
+mod tests;

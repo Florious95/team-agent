@@ -26,8 +26,10 @@ pub(crate) fn update_state(
     let mut state = selected.state;
     ensure_object(&mut state);
     append_note(&mut state, note);
-    crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
-        &selected.run_workspace,
+    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
+            team_key: Some(&selected.team_key),
+        },
         &state,
         |latest| {
             ensure_object(latest);
@@ -66,8 +68,10 @@ fn update_state_without_spec(
     ensure_object(&mut state);
     seed_legacy_team_key(&mut state, &selected.run_workspace, &selected.team_key);
     append_note(&mut state, note);
-    crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
-        &selected.run_workspace,
+    crate::state::repository::StateRepository::new(&selected.run_workspace).save_reapplying(
+        crate::state::repository::StateWriteIntent::McpUpdateStateNote {
+            team_key: Some(&selected.team_key),
+        },
         &state,
         |latest| {
             ensure_object(latest);

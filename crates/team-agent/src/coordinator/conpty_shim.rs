@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use conpty_transport::{pipe_name_for, NamedPipeClient};
 
-use crate::state::persist::{runtime_state_path, save_runtime_state};
+use crate::state::persist::runtime_state_path;
 use crate::state::StateError;
 
 /// Maximum shim connect+hello attempts before giving up. Each attempt
@@ -397,15 +397,11 @@ fn finalize(
     client: NamedPipeClient,
     workspace: &Path,
 ) -> Result<ShimHandle, ShimError> {
-    let state_path = runtime_state_path(workspace);
-    let mut state = if state_path.exists() {
-        match std::fs::read_to_string(&state_path) {
-            Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or_else(|_| json!({})),
-            Err(_) => json!({}),
-        }
-    } else {
-        json!({})
-    };
+    let mut state = crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| json!({}));
     // CR C-1: token NOT stored. Only pid/pipe_name/pipe_ready.
     let obj = state
         .as_object_mut()
@@ -431,7 +427,14 @@ fn finalize(
             "pipe_ready": true,
         }),
     );
-    save_runtime_state(workspace, &state).map_err(|e| ShimError::StatePersist { source: e })?;
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::CoordinatorConptyShim {
+                team_key: state.get("active_team_key").and_then(Value::as_str),
+            },
+            &state,
+        )
+        .map_err(|e| ShimError::StatePersist { source: e })?;
     // 0.5.x Windows portability Batch 7 F6: state merge now preserves
     // the `transport.shim` block through downstream saves (see
     // `state::persist::preserve_transport_shim`), so the Batch 6
@@ -450,12 +453,9 @@ fn finalize(
 /// Windows worker). Callers use `platform::process::terminate_pid`
 /// on the returned pid.
 pub fn recorded_shim_pid(workspace: &Path) -> Option<u32> {
-    let state_path = runtime_state_path(workspace);
-    if !state_path.exists() {
-        return None;
-    }
-    let text = std::fs::read_to_string(&state_path).ok()?;
-    let state: Value = serde_json::from_str(&text).ok()?;
+    let state = crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+        .ok()??;
     state
         .get("transport")?
         .get("shim")?
@@ -466,12 +466,9 @@ pub fn recorded_shim_pid(workspace: &Path) -> Option<u32> {
 
 /// Read `state.transport.shim.pipe_name` for reconnect routing.
 pub fn recorded_shim_pipe_name(workspace: &Path) -> Option<String> {
-    let state_path = runtime_state_path(workspace);
-    if !state_path.exists() {
-        return None;
-    }
-    let text = std::fs::read_to_string(&state_path).ok()?;
-    let state: Value = serde_json::from_str(&text).ok()?;
+    let state = crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+        .ok()??;
     state
         .get("transport")?
         .get("shim")?
@@ -647,19 +644,26 @@ pub fn mark_transport_unavailable(workspace: &Path, reason: &str) -> Result<(), 
     // Clear the shim block from state so subsequent factory
     // `conpty_pipe_ready` checks return false and the operator sees
     // an honest "no live shim" via status --detail.
-    let state_path = runtime_state_path(workspace);
-    if !state_path.exists() {
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(&state_path).map_err(StateError::from)?;
-    let mut state: Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}));
+    let mut state = match crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+    {
+        Ok(Some(state)) => state,
+        Ok(None) => return Ok(()),
+        Err(StateError::Json(_)) => serde_json::json!({}),
+        Err(error) => return Err(error),
+    };
     if let Some(transport) = state.get_mut("transport").and_then(|t| t.as_object_mut()) {
         if let Some(shim) = transport.get_mut("shim").and_then(|s| s.as_object_mut()) {
             shim.insert("pipe_ready".to_string(), serde_json::json!(false));
             shim.insert("unavailable_reason".to_string(), serde_json::json!(reason));
         }
     }
-    save_runtime_state(workspace, &state)
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::CoordinatorConptyShim {
+            team_key: state.get("active_team_key").and_then(Value::as_str),
+        },
+        &state,
+    )
 }
 
 #[cfg(test)]

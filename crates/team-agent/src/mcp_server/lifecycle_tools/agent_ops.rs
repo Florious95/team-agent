@@ -252,12 +252,28 @@ fn state_spec_workspace_from_entry(state: &Value) -> Option<PathBuf> {
 
 fn load_local_runtime_state(workspace: &Path) -> Result<Value, super::super::ToolError> {
     let path = crate::state::persist::runtime_state_path(workspace);
-    let text = std::fs::read_to_string(&path).map_err(|e| {
-        tool_runtime_error(format!("read local runtime state {}: {e}", path.display()))
-    })?;
-    serde_json::from_str(&text).map_err(|e| {
-        tool_runtime_error(format!("parse local runtime state {}: {e}", path.display()))
-    })
+    match crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+    {
+        Ok(Some(state)) => Ok(state),
+        Ok(None) => Err(tool_runtime_error(format!(
+            "read local runtime state {}: {}",
+            path.display(),
+            std::io::Error::from(std::io::ErrorKind::NotFound)
+        ))),
+        Err(crate::state::StateError::Json(error)) => Err(tool_runtime_error(format!(
+            "parse local runtime state {}: {error}",
+            path.display()
+        ))),
+        Err(crate::state::StateError::Io(error)) => Err(tool_runtime_error(format!(
+            "read local runtime state {}: {error}",
+            path.display()
+        ))),
+        Err(error) => Err(tool_runtime_error(format!(
+            "read local runtime state {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn materialize_mcp_lifecycle_spec(
@@ -416,7 +432,14 @@ fn prepare_selected_team_state(
             }
         }
     }
-    crate::state::persist::save_runtime_state(workspace, state).map_err(|e| {
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::McpLifecycleAgentOps {
+                team_key: Some(team),
+            },
+            state,
+        )
+        .map_err(|e| {
         tool_runtime_error(format!(
             "save MCP lifecycle scoped state {}: {e}",
             workspace.display()

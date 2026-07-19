@@ -8,7 +8,7 @@ use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, Prov
 use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
-use crate::state::persist::{load_runtime_state, save_runtime_state};
+use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
@@ -853,13 +853,29 @@ fn persist_spawn_agent_state(
     safety: &DangerousApproval,
 ) -> Result<(), LifecycleError> {
     let state_path = crate::state::persist::runtime_state_path(workspace);
-    let mut state = if state_path.exists() {
-        let text = std::fs::read_to_string(&state_path)
-            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", state_path.display())))?;
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|e| LifecycleError::StatePersist(format!("{}: {e}", state_path.display())))?
-    } else {
-        serde_json::json!({"agents": {}})
+    let mut state = match crate::state::repository::StateRepository::new(workspace)
+        .load_workspace_if_exists_without_migrations()
+    {
+        Ok(Some(state)) => state,
+        Ok(None) => serde_json::json!({"agents": {}}),
+        Err(crate::state::StateError::Io(error)) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "{}: {error}",
+                state_path.display()
+            )))
+        }
+        Err(crate::state::StateError::Json(error)) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "{}: {error}",
+                state_path.display()
+            )))
+        }
+        Err(error) => {
+            return Err(LifecycleError::StatePersist(format!(
+                "{}: {error}",
+                state_path.display()
+            )))
+        }
     };
     let team_id = runtime_team_key_for_spec(spec_path, spec, session_name);
     let worker_tmux_socket = launched_worker_tmux_socket(transport, workspace);
@@ -1038,7 +1054,13 @@ fn save_launched_team_state_for_key(
     };
     let mut projected = crate::state::projection::project_top_level_view(&merged, &launched_key);
     drop_unbound_top_level_owner(&mut projected);
-    save_runtime_state(workspace, &projected)
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::LaunchTeam {
+                team_key: &launched_key,
+            },
+            &projected,
+        )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 
@@ -2821,7 +2843,11 @@ fn annotate_persisted_team_depth(
         return Ok(());
     };
     annotate_team_depth(team, parent_team_key, team_depth);
-    crate::state::persist::save_runtime_state(workspace, &state)
+    crate::state::repository::StateRepository::new(workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::AnnotateTeamDepth { team_key },
+            &state,
+        )
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     Ok(())
 }
@@ -3024,10 +3050,10 @@ pub fn quick_start_in_workspace_with_display_and_backend(
     // `state.transport.shim.pipe_ready = true` marker so its
     // `conpty_pipe_ready` gate opens.
     #[cfg(windows)]
-    let state_value =
-        std::fs::read_to_string(crate::state::persist::runtime_state_path(&workspace))
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let state_value = crate::state::repository::StateRepository::new(&workspace)
+        .load_workspace_if_exists_without_migrations()
+        .ok()
+        .flatten();
     #[cfg(windows)]
     let input = match state_value.as_ref() {
         Some(v) => input.with_state(Some(v)),
@@ -4246,14 +4272,16 @@ fn rollback_add_agent_atomic(
     // the tombstone the half-added `agents.standards` / `teams.<key>.agents.standards`
     // survives the restore-from-pre_state pass and the retry sees
     // "agent id already exists".
-    let deleted = [agent_id.as_str()];
     let state_restored = if let Some(state) = pre_runtime_state {
-        crate::state::persist::save_runtime_state_with_deleted_agents(
-            run_workspace,
-            state,
-            &deleted,
-        )
-        .is_ok()
+        crate::state::repository::StateRepository::new(run_workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::AgentRollback {
+                    team_key: None,
+                    agent_id: agent_id.as_str(),
+                },
+                state,
+            )
+            .is_ok()
     } else {
         // No prior runtime state — drop just the agent we added (load → strip → save).
         if let Ok(mut state) = crate::state::persist::load_runtime_state(run_workspace) {
@@ -4276,12 +4304,15 @@ fn rollback_add_agent_atomic(
                     }
                 }
             }
-            crate::state::persist::save_runtime_state_with_deleted_agents(
-                run_workspace,
-                &state,
-                &deleted,
-            )
-            .is_ok()
+            crate::state::repository::StateRepository::new(run_workspace)
+                .save(
+                    crate::state::repository::StateWriteIntent::AgentRollback {
+                        team_key: None,
+                        agent_id: agent_id.as_str(),
+                    },
+                    &state,
+                )
+                .is_ok()
         } else {
             false
         }

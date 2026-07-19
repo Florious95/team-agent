@@ -564,10 +564,12 @@ fn remove_agent_inner(
     // (team projection) — NOT a raw save, so other teams in a multi-team workspace are preserved.
     let mut removed_state = working_state;
     remove_agent_from_state(&mut removed_state, agent_id)?;
-    crate::state::projection::save_team_scoped_state_with_deleted_agents(
-        paths.run_workspace,
+    crate::state::repository::StateRepository::new(paths.run_workspace).save(
+        crate::state::repository::StateWriteIntent::RemoveAgent {
+            team_key,
+            agent_id: agent_id.as_str(),
+        },
         &removed_state,
-        &[agent_id.as_str()],
     )
     .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     cleared_locations.push(serde_json::json!("state.json:agents"));

@@ -2465,8 +2465,10 @@ fn save_scoped_state(
     state: &serde_json::Value,
     owner_team_id: Option<&str>,
 ) -> Result<(), MessagingError> {
-    if owner_team_id.filter(|team| !team.is_empty()).is_some() {
-        if state
+    let scoped_owner_team_id = owner_team_id
+        .filter(|team| !team.is_empty())
+        .filter(|_| {
+            state
             .get("teams")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|teams| {
@@ -2478,14 +2480,13 @@ fn save_scoped_state(
                     })
                     .is_some_and(|team| teams.contains_key(&team))
             })
-        {
-            crate::state::projection::save_team_scoped_state(workspace, state)?;
-        } else {
-            crate::state::persist::save_runtime_state(workspace, state)?;
-        }
-    } else {
-        crate::state::persist::save_runtime_state(workspace, state)?;
-    }
+        });
+    crate::state::repository::StateRepository::new(workspace).save(
+        crate::state::repository::StateWriteIntent::MessagingDeliveryState {
+            owner_team_id: scoped_owner_team_id,
+        },
+        state,
+    )?;
     Ok(())
 }
 
@@ -2498,8 +2499,10 @@ fn save_scoped_state_reapplying_after_conflict<F>(
 where
     F: FnOnce(&mut serde_json::Value),
 {
-    if owner_team_id.filter(|team| !team.is_empty()).is_some()
-        && state
+    let scoped_owner_team_id = owner_team_id
+        .filter(|team| !team.is_empty())
+        .filter(|_| {
+            state
             .get("teams")
             .and_then(serde_json::Value::as_object)
             .is_some_and(|teams| {
@@ -2511,15 +2514,14 @@ where
                     })
                     .is_some_and(|team| teams.contains_key(&team))
             })
-    {
-        crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
-            workspace, state, reapply,
-        )?;
-    } else {
-        crate::state::persist::save_runtime_state_reapplying_after_conflict(
-            workspace, state, reapply,
-        )?;
-    }
+        });
+    crate::state::repository::StateRepository::new(workspace).save_reapplying(
+        crate::state::repository::StateWriteIntent::MessagingDeliveryState {
+            owner_team_id: scoped_owner_team_id,
+        },
+        state,
+        reapply,
+    )?;
     Ok(())
 }
 

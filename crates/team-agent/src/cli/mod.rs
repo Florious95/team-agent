@@ -884,7 +884,13 @@ pub mod lifecycle_port {
             if session_killed && !verification_degraded {
                 mark_active_team_shutdown(&mut state, team_shutdown_status);
             }
-            crate::state::projection::save_team_scoped_state(&run_workspace, &state)?;
+            crate::state::repository::StateRepository::new(&run_workspace).save(
+                crate::state::repository::StateWriteIntent::ShutdownTeam {
+                    team_key: team,
+                    clean: session_killed && !verification_degraded,
+                },
+                &state,
+            )?;
             promote_live_sibling_after_scoped_shutdown(&run_workspace, &state)?;
         } else {
             let _changed_keys = mark_matching_session_teams_stopped(
@@ -893,7 +899,13 @@ pub mod lifecycle_port {
                 session_killed && !verification_degraded,
                 team_shutdown_status,
             );
-            crate::state::persist::save_runtime_state(&run_workspace, &state)?;
+            crate::state::repository::StateRepository::new(&run_workspace).save(
+                crate::state::repository::StateWriteIntent::ShutdownTeam {
+                    team_key: None,
+                    clean: session_killed && !verification_degraded,
+                },
+                &state,
+            )?;
         }
         let coordinator_status = if coordinator_timeout {
             "timeout"
@@ -2550,7 +2562,13 @@ pub mod lifecycle_port {
             .and_then(|agents| agents.keys().next().cloned())
             .map(Value::String)
             .unwrap_or(Value::Null);
-        crate::state::persist::save_runtime_state(workspace, &state)
+        crate::state::repository::StateRepository::new(workspace)
+            .save(
+                crate::state::repository::StateWriteIntent::IdleAck {
+                    team_key: Some(&team),
+                },
+                &state,
+            )
             .map_err(|e| CliError::Runtime(e.to_string()))?;
         crate::event_log::EventLog::new(workspace)
             .write(
@@ -3555,7 +3573,13 @@ pub mod lifecycle_port {
             return Ok(());
         };
         let promoted = crate::state::projection::project_top_level_view(&raw, next_key);
-        crate::state::persist::save_runtime_state(workspace, &promoted)?;
+        crate::state::repository::StateRepository::new(workspace).save(
+            crate::state::repository::StateWriteIntent::PromoteLiveSiblingAfterShutdown {
+                stopped_team_key: stopped_key,
+                promoted_team_key: next_key,
+            },
+            &promoted,
+        )?;
         Ok(())
     }
 
@@ -3966,14 +3990,6 @@ pub mod diagnose_port {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         format!("{:012x}", now & 0xffffffffffff)
-    }
-
-    fn read_runtime_state(workspace: &Path) -> Value {
-        let path = workspace.join(".team").join("runtime").join("state.json");
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| json!({}))
     }
 
     fn which_path(binary: &str) -> Option<String> {

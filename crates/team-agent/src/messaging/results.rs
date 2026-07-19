@@ -197,27 +197,15 @@ fn collect_scoped(
         collected_results.push(summary);
     }
     if state_dirty {
-        if owner_team_id.is_some() {
-            crate::state::projection::save_team_scoped_state_reapplying_after_conflict(
-                &paths.run_workspace,
-                &state,
-                |latest| {
-                    for (task_id, result_id) in &task_updates {
-                        mark_task_done(latest, task_id, result_id);
-                    }
-                },
-            )?;
-        } else {
-            crate::state::persist::save_runtime_state_reapplying_after_conflict(
-                &paths.run_workspace,
-                &state,
-                |latest| {
-                    for (task_id, result_id) in &task_updates {
-                        mark_task_done(latest, task_id, result_id);
-                    }
-                },
-            )?;
-        }
+        crate::state::repository::StateRepository::new(&paths.run_workspace).save_reapplying(
+            crate::state::repository::StateWriteIntent::ResultCollection { owner_team_id },
+            &state,
+            |latest| {
+                for (task_id, result_id) in &task_updates {
+                    mark_task_done(latest, task_id, result_id);
+                }
+            },
+        )?;
     }
     let counts = result_counts(&conn, owner_team_id)?;
     // results.py:157 — ensure_coordinator=true runs the REAL ensure step; the
