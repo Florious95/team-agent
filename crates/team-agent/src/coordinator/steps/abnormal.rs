@@ -284,6 +284,8 @@ fn refresh_abnormal_watch_liveness(state: &mut Value, agent_id: &str, liveness: 
         .get("latest_explicit_error")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Persist fact transitions, not the tick's observation time; otherwise an
+    // unchanged transcript makes every steady tick rewrite state.json.
     let patch = serde_json::json!({
         "last_liveness": process_liveness_wire(liveness.state),
         "last_liveness_detail": liveness.detail.as_str(),
@@ -292,10 +294,14 @@ fn refresh_abnormal_watch_liveness(state: &mut Value, agent_id: &str, liveness: 
         "provider_process_dead": provider_process_dead,
         "worker_provider_exited": worker_provider_exited_fact(liveness),
         "provider_process_dead_and_latest_explicit_error": provider_process_dead && latest_explicit_error,
-        "last_checked_at": chrono::Utc::now().to_rfc3339(),
     });
     if let Some(patch) = patch.as_object() {
-        watch.extend(patch.clone());
+        if patch
+            .iter()
+            .any(|(key, value)| watch.get(key) != Some(value))
+        {
+            watch.extend(patch.clone());
+        }
     }
 }
 
@@ -886,7 +892,6 @@ fn abnormal_watch_payload(
         "suppressed_reason": suppressed_reason,
         "notification": notify,
         "last_error": error,
-        "last_checked_at": chrono::Utc::now().to_rfc3339(),
     })
 }
 
