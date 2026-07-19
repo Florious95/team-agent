@@ -884,26 +884,38 @@ pub(super) fn stop_agent_at_paths(
     transport: &dyn crate::transport::Transport,
 ) -> Result<StopAgentReport, LifecycleError> {
     // golden operations.py:64-66: resolve_team_scoped_state -> owner gate, BEFORE the unknown-worker raise.
-    let mut state = resolve_team_scoped_state_or_refuse(workspace, team)?;
-    crate::lifecycle::launch::ensure_owner_allowed_for_state(&state, Some(agent_id))?;
-    let spec = load_team_spec(spec_workspace)?;
-    let agent = find_spec_agent(&spec, agent_id).ok_or_else(|| unknown_worker(agent_id))?;
-    let session_name = state_session_name_from_spec(&state, &spec);
-    let window = state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()))
-        .and_then(|v| v.get("window"))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| agent_id.as_str())
-        .to_string();
-    let pane_id = state
-        .get("agents")
-        .and_then(|v| v.get(agent_id.as_str()))
-        .and_then(|v| v.get("pane_id"))
-        .and_then(|v| v.as_str())
-        .filter(|pane| !pane.is_empty())
-        .map(crate::transport::PaneId::new);
+    let seat = super::remove::resolve_seat(workspace, spec_workspace, agent_id, team, transport)?;
+    if seat.consistency == super::remove::SeatConsistency::Absent {
+        return Err(unknown_worker(agent_id));
+    }
+    let mut state = seat.state;
+    let spec = seat.spec;
+    let state_agent = state.get("agents").and_then(|v| v.get(agent_id.as_str()));
+    // Persisted-only seats must remain stoppable. Build the minimal provider
+    // projection consumed by mark_agent_stopped instead of requiring a spec
+    // row that is precisely what recovery is repairing.
+    let fallback_agent = YamlValue::Map(vec![(
+        "provider".to_string(),
+        YamlValue::Str(
+            state_agent
+                .and_then(|agent| agent.get("provider"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("codex")
+                .to_string(),
+        ),
+    )]);
+    let agent = find_spec_agent(&spec, agent_id).unwrap_or(&fallback_agent);
+    let session_name = seat.session;
+    let window = seat.window;
+    let pane_id = seat.physical.map(|pane| pane.pane_id).or_else(|| {
+        state
+            .get("agents")
+            .and_then(|agents| agents.get(agent_id.as_str()))
+            .and_then(|agent| agent.get("pane_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|pane| !pane.is_empty())
+            .map(crate::transport::PaneId::new)
+    });
     let target_str = pane_id
         .as_ref()
         .map(|pane| pane.as_str().to_string())

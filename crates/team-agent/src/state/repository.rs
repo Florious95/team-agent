@@ -171,6 +171,10 @@ pub enum StateWriteIntent<'a> {
         team_key: Option<&'a str>,
         agent_id: &'a str,
     },
+    ForceRecreateRollback {
+        team_key: &'a str,
+        agent_id: &'a str,
+    },
     ClaimLeader {
         team_key: &'a str,
     },
@@ -331,6 +335,16 @@ fn route_direct(
             Some(_) => helper_write_team_scoped_with_deleted_agents(workspace, state, &[agent_id]),
             None => helper_write_root_with_deleted_agents(workspace, state, &[agent_id]),
         },
+        // Force-recreate rollback restores an existing row after the
+        // replacement spawn has advanced its lifecycle tuple. The selected
+        // row is therefore the explicit topology authority.
+        StateWriteIntent::ForceRecreateRollback { agent_id, .. } => {
+            helper_write_team_scoped_with_lifecycle_topology_authority(
+                workspace,
+                state,
+                &[agent_id],
+            )
+        }
         // ClaimLeader -> leader/lease.rs:1625 uses the root helper, and the
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.

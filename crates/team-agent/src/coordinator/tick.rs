@@ -752,6 +752,43 @@ impl Coordinator {
                 }
             };
             if !windows.iter().any(|known| known == &window) {
+                // Missing is proof only inside a non-empty same-session
+                // inventory (a live peer exists). An empty snapshot is an
+                // unavailable transport, not proof every worker died.
+                if windows.is_empty() {
+                    continue;
+                }
+                if let Some(agent_obj) = agent.as_object_mut() {
+                    agent_obj.insert("status".to_string(), serde_json::json!("stopped"));
+                    agent_obj.insert("worker_state".to_string(), serde_json::json!("DEAD"));
+                    agent_obj.insert("stale".to_string(), serde_json::json!(true));
+                    agent_obj.insert("stale_reason".to_string(), serde_json::json!("pane_dead"));
+                }
+                let conn = crate::db::schema::open_db(store.db_path()).map_err(|error| {
+                    TickError::MessageStore(crate::message_store::MessageStoreError::Db(error))
+                })?;
+                conn.execute(
+                    "insert into agent_health(owner_team_id, agent_id, status, updated_at) \
+                     values (?1, ?2, 'DEAD', ?3) \
+                     on conflict(owner_team_id, agent_id) do update set \
+                     status='DEAD', updated_at=excluded.updated_at",
+                    rusqlite::params![
+                        team_key.as_ref().map(|key| key.as_str()),
+                        agent_id,
+                        chrono::Utc::now().to_rfc3339()
+                    ],
+                )
+                .map_err(|error| {
+                    TickError::MessageStore(crate::message_store::MessageStoreError::Sqlite(error))
+                })?;
+                let _ = event_log.write(
+                    "coordinator.agent_pane_dead",
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "target": format!("{target:?}"),
+                        "stale_reason": "pane_dead",
+                    }),
+                );
                 continue;
             }
             // Warm-idle suppression still gates pane fallback ONLY. When

@@ -47,7 +47,7 @@ const SESSION_STATE_FIELDS: [&str; 6] = [
 ];
 const LIVE_TOPOLOGY_FIELDS: [&str; 5] =
     ["pane_id", "pane_pid", "window", "spawned_at", "spawn_epoch"];
-const ROSTER_STUB_ALLOWLIST: [&str; 15] = [
+const ROSTER_STUB_ALLOWLIST: [&str; 16] = [
     "agent_id",
     "provider",
     "auth_mode",
@@ -57,6 +57,7 @@ const ROSTER_STUB_ALLOWLIST: [&str; 15] = [
     "profile",
     "_profile_dir",
     "dynamic_role_file",
+    "role_source_ownership",
     "effort",
     "forked_from",
     "managed_mcp_config",

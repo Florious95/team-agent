@@ -512,9 +512,10 @@ pub(crate) fn compute_runtime_freshness(
         _ => false,
     };
     // Collect worker-provider-exited agents from the coordinator
-    // abnormal_exit_watch payload (0.5.41 Slice 4 writes
-    // `worker_provider_exited` / `provider_process_dead=true`
-    // there). Read from top-level `coordinator.abnormal_exit_watch`
+    // abnormal_exit_watch payload. Only the typed positive provider-exit
+    // marker participates here: generic process/pane death diagnostics are
+    // not proof that the provider exited. Read from top-level
+    // `coordinator.abnormal_exit_watch`
     // OR the team-scoped mirror `teams.<key>.coordinator...`.
     let mut provider_exited_agents = std::collections::BTreeSet::new();
     for path in [
@@ -529,10 +530,8 @@ pub(crate) fn compute_runtime_freshness(
     ] {
         if let Some(watch) = state.pointer(path).and_then(Value::as_object) {
             for (agent_id, entry) in watch {
-                let exited = entry.get("worker_provider_exited").and_then(Value::as_bool)
-                    == Some(true)
-                    || entry.get("provider_process_dead").and_then(Value::as_bool) == Some(true)
-                    || entry.get("provider_exit_marker").is_some();
+                let exited =
+                    entry.get("worker_provider_exited").and_then(Value::as_bool) == Some(true);
                 if exited {
                     provider_exited_agents.insert(agent_id.clone());
                 }
@@ -1581,5 +1580,63 @@ fn coordinator_status_wire(status: crate::coordinator::CoordinatorHealthStatus) 
         crate::coordinator::CoordinatorHealthStatus::InvalidPid => "invalid_pid",
         crate::coordinator::CoordinatorHealthStatus::Running => "running",
         crate::coordinator::CoordinatorHealthStatus::Stale => "stale",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health_fixture() -> crate::coordinator::HealthReport {
+        crate::coordinator::HealthReport {
+            ok: true,
+            status: crate::coordinator::CoordinatorHealthStatus::Running,
+            pid: Some(crate::coordinator::Pid::new(std::process::id())),
+            metadata: None,
+            metadata_ok: true,
+            process_running: true,
+            wire_metadata_ok: true,
+            binary_identity_ok: true,
+            binary_identity_relation: crate::coordinator::CoordinatorBinaryIdentityRelation::Same,
+            service_available: true,
+            metadata_mismatch_reason: None,
+            current_binary_identity: crate::coordinator::CoordinatorBinaryIdentity {
+                binary_path: "/test/team-agent".to_string(),
+                binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            schema: crate::coordinator::SchemaHealth {
+                ok: true,
+                schema_version: crate::db::schema::SCHEMA_VERSION,
+                error: None,
+                action: None,
+            },
+        }
+    }
+
+    #[test]
+    fn runtime_freshness_provider_exit_requires_typed_positive_fact() {
+        let state = serde_json::json!({
+            "coordinator": {
+                "abnormal_exit_watch": {
+                    "pane_only": {
+                        "provider_process_dead": true,
+                        "worker_provider_exited": false
+                    },
+                    "typed_exit": {
+                        "provider_process_dead": true,
+                        "worker_provider_exited": true
+                    }
+                }
+            }
+        });
+
+        let freshness = compute_runtime_freshness(
+            Path::new("/nonexistent/status-port-typed-provider-exit-test"),
+            &state,
+            &health_fixture(),
+        );
+
+        assert!(!freshness.provider_exited_agents.contains("pane_only"));
+        assert!(freshness.provider_exited_agents.contains("typed_exit"));
     }
 }

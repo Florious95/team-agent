@@ -320,6 +320,7 @@ fn cli_add_agent_duplicate_id_surfaces_real_error() {
         workspace: team,
         team: None,
         role_file: dup_role.to_string_lossy().to_string(),
+        force: false,
         no_display: false,
         json: true,
     };

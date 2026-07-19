@@ -1353,6 +1353,7 @@ pub fn cmd_add_agent(args: &AddAgentArgs) -> Result<CmdResult, CliError> {
             &args.role_file,
             !args.no_display,
             args.team.as_deref(),
+            args.force,
         )?,
         args.json,
     ))

@@ -497,6 +497,7 @@ pub struct AddAgentArgs {
     pub workspace: PathBuf,
     pub team: Option<String>,
     pub role_file: String,
+    pub force: bool,
     pub no_display: bool,
     pub json: bool,
 }

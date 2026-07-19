@@ -329,7 +329,7 @@ fn command_help(command: Option<&str>) -> String {
         Some("reset-agent") => "usage: team-agent reset-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--discard-session] [--no-display] [--json]".to_string(),
         Some("start-agent") => "usage: team-agent start-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--force] [--allow-fresh] [--no-display] [--json]".to_string(),
         Some("stop-agent") => "usage: team-agent stop-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--json]".to_string(),
-        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
+        Some("add-agent") => "usage: team-agent add-agent AGENT --role-file FILE [--force] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("fork-agent") => "usage: team-agent fork-agent SOURCE_AGENT --as AGENT [--label LABEL] [--workspace WORKSPACE] [--team TEAM] [--no-display] [--json]".to_string(),
         Some("remove-agent") => "usage: team-agent remove-agent AGENT [--workspace WORKSPACE] [--team TEAM] [--from-spec] [--confirm] [--force] [--json]".to_string(),
         // 0.5.26 (§7.6): removed from help; dispatch was never wired.
@@ -1345,6 +1345,7 @@ fn add_agent_args(args: &[String], cwd: &Path) -> Result<AddAgentArgs, CliError>
         role_file: parsed
             .role_file
             .ok_or_else(|| CliError::Usage("missing --role-file".to_string()))?,
+        force: parsed.force,
         no_display: parsed.no_display,
         json: parsed.json,
     })

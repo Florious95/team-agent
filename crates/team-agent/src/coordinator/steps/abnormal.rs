@@ -32,6 +32,10 @@ pub(crate) fn detect_abnormal_exits(
     let team = crate::state::projection::team_state_key(&snapshot);
     let session_name = snapshot.get("session_name").and_then(Value::as_str);
     for agent in abnormal_watch_agents(&snapshot) {
+        // Pane/process liveness is independent of transcript content. A
+        // frozen rollout is common after pane death, so probe before the
+        // metadata dedupe gate; only the expensive tail scan stays deduped.
+        let liveness = agent_process_liveness(&agent, session_name, targets, transport);
         let rollout_path = resolve_agent_rollout_path(workspace, &agent.rollout_path);
         let metadata = match std::fs::metadata(&rollout_path) {
             Ok(metadata) => metadata,
@@ -67,6 +71,7 @@ pub(crate) fn detect_abnormal_exits(
             abnormal_watch_stored_metadata(&snapshot, &agent.agent_id),
         ) {
             if stored == (size, mtime) {
+                refresh_abnormal_watch_liveness(state, &agent.agent_id, &liveness);
                 continue;
             }
         }
@@ -97,7 +102,6 @@ pub(crate) fn detect_abnormal_exits(
                 continue;
             }
         };
-        let liveness = agent_process_liveness(&agent, session_name, targets, transport);
         let fact = crate::provider::latest_explicit_error_fact(agent.provider, &text);
         let error_observation_key = fact
             .as_ref()
@@ -218,6 +222,7 @@ pub(crate) fn detect_abnormal_exits(
         } else {
             "refused"
         };
+        let provider_process_dead = provider_process_dead_fact(&liveness);
         event_log.write(
             "worker.abnormal_exit",
             serde_json::json!({
@@ -227,7 +232,7 @@ pub(crate) fn detect_abnormal_exits(
                 "path": agent.rollout_path_display.as_str(),
                 "dead_process": liveness.state == ProcessLiveness::Dead,
                 "process_dead": liveness.state == ProcessLiveness::Dead,
-                "provider_process_dead": liveness.state == ProcessLiveness::Dead,
+                "provider_process_dead": provider_process_dead,
                 "latest_error": true,
                 "latest_explicit_error": true,
                 "error_recency": error_recency.as_str(),
@@ -235,7 +240,7 @@ pub(crate) fn detect_abnormal_exits(
                 "dead_process_and_latest_error": liveness.state == ProcessLiveness::Dead,
                 "dead_process_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
                 "process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
-                "provider_process_dead_and_latest_explicit_error": liveness.state == ProcessLiveness::Dead,
+                "provider_process_dead_and_latest_explicit_error": provider_process_dead,
                 "signature": fact.signature.as_str(),
                 "turn_id": fact.turn_id.as_ref().map(|id| id.as_str()),
                 "apiErrorStatus": fact.api_error_status,
@@ -254,6 +259,50 @@ pub(crate) fn detect_abnormal_exits(
         mark_abnormal_notified(state, &agent.agent_id, &dedupe_key);
     }
     Ok(())
+}
+
+fn provider_process_dead_fact(liveness: &ProcessCheck) -> bool {
+    liveness.state == ProcessLiveness::Dead
+        && !liveness.detail.starts_with("pane_dead:")
+        && !liveness.detail.starts_with("window_missing:")
+}
+
+fn worker_provider_exited_fact(liveness: &ProcessCheck) -> bool {
+    provider_process_dead_fact(liveness) && liveness.detail.starts_with("worker_provider_exited:")
+}
+
+fn refresh_abnormal_watch_liveness(state: &mut Value, agent_id: &str, liveness: &ProcessCheck) {
+    let Some(watch) = coordinator_child_object(state, "abnormal_exit_watch")
+        .and_then(|watch| watch.get_mut(agent_id))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let dead_process = liveness.state == ProcessLiveness::Dead;
+    let provider_process_dead = provider_process_dead_fact(liveness);
+    let latest_explicit_error = watch
+        .get("latest_explicit_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    // Persist fact transitions, not the tick's observation time; otherwise an
+    // unchanged transcript makes every steady tick rewrite state.json.
+    let patch = serde_json::json!({
+        "last_liveness": process_liveness_wire(liveness.state),
+        "last_liveness_detail": liveness.detail.as_str(),
+        "dead_process": dead_process,
+        "process_dead": dead_process,
+        "provider_process_dead": provider_process_dead,
+        "worker_provider_exited": worker_provider_exited_fact(liveness),
+        "provider_process_dead_and_latest_explicit_error": provider_process_dead && latest_explicit_error,
+    });
+    if let Some(patch) = patch.as_object() {
+        if patch
+            .iter()
+            .any(|(key, value)| watch.get(key) != Some(value))
+        {
+            watch.extend(patch.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -816,8 +865,8 @@ fn abnormal_watch_payload(
     // marker (detail prefix `worker_provider_exited:`). status_port's
     // RuntimeFreshness collector reads this field to downgrade the
     // corresponding agent row.
-    let worker_provider_exited =
-        dead_process && liveness.detail.starts_with("worker_provider_exited:");
+    let provider_process_dead = provider_process_dead_fact(&liveness);
+    let worker_provider_exited = worker_provider_exited_fact(&liveness);
     serde_json::json!({
         "path": agent.rollout_path_display.as_str(),
         "provider": provider_wire(agent.provider),
@@ -829,7 +878,7 @@ fn abnormal_watch_payload(
         "last_liveness_detail": liveness.detail,
         "dead_process": dead_process,
         "process_dead": dead_process,
-        "provider_process_dead": dead_process,
+        "provider_process_dead": provider_process_dead,
         "worker_provider_exited": worker_provider_exited,
         "latest_error": latest_explicit_error,
         "latest_explicit_error": latest_explicit_error,
@@ -839,11 +888,10 @@ fn abnormal_watch_payload(
         "dead_process_and_latest_error": dead_process && latest_explicit_error,
         "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
         "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
-        "provider_process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+        "provider_process_dead_and_latest_explicit_error": provider_process_dead && latest_explicit_error,
         "suppressed_reason": suppressed_reason,
         "notification": notify,
         "last_error": error,
-        "last_checked_at": chrono::Utc::now().to_rfc3339(),
     })
 }
 
@@ -1060,6 +1108,7 @@ fn write_abnormal_check(
     mtime_ns: Option<u64>,
 ) -> Result<(), TickError> {
     let dead_process = liveness.state == ProcessLiveness::Dead;
+    let provider_process_dead = provider_process_dead_fact(liveness);
     let latest_explicit_error = fact.is_some();
     event_log.write(
         "worker.abnormal_exit.check",
@@ -1073,7 +1122,7 @@ fn write_abnormal_check(
             "mtime_ns": mtime_ns,
             "dead_process": dead_process,
             "process_dead": dead_process,
-            "provider_process_dead": dead_process,
+            "provider_process_dead": provider_process_dead,
             "latest_error": latest_explicit_error,
             "latest_explicit_error": latest_explicit_error,
             "error_recency": error_recency.as_str(),
@@ -1081,7 +1130,7 @@ fn write_abnormal_check(
             "dead_process_and_latest_error": dead_process && latest_explicit_error,
             "dead_process_and_latest_explicit_error": dead_process && latest_explicit_error,
             "process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
-            "provider_process_dead_and_latest_explicit_error": dead_process && latest_explicit_error,
+            "provider_process_dead_and_latest_explicit_error": provider_process_dead && latest_explicit_error,
             "notification": matches!(decision, AbnormalExitDecision::Notify),
             "suppressed_reason": match decision {
                 AbnormalExitDecision::Suppress(reason) => Some(reason),
@@ -1107,6 +1156,7 @@ fn write_abnormal_suppressed(
     liveness: &ProcessCheck,
     reason: &str,
 ) -> Result<(), TickError> {
+    let provider_process_dead = provider_process_dead_fact(liveness);
     event_log.write(
         "abnormal_exit.single_signal_suppressed",
         serde_json::json!({
@@ -1118,7 +1168,7 @@ fn write_abnormal_suppressed(
             "notification": false,
             "dead_process": liveness.state == ProcessLiveness::Dead,
             "process_dead": liveness.state == ProcessLiveness::Dead,
-            "provider_process_dead": liveness.state == ProcessLiveness::Dead,
+            "provider_process_dead": provider_process_dead,
             "latest_error": false,
             "latest_explicit_error": false,
             "error_recency": ErrorRecency::None.as_str(),
@@ -2508,6 +2558,66 @@ mod tests {
         );
         assert_eq!(suppressed["error_recency"], serde_json::json!("none"));
         assert_eq!(suppressed["fresh_error"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn abnormal_unchanged_transcript_keeps_provider_death_out_of_pane_projection() {
+        let dir = temp_abnormal_dir("unchanged-provider-dead");
+        let rollout = dir.join("rollout-w1.jsonl");
+        std::fs::write(
+            &rollout,
+            "{\"method\":\"turn/completed\",\"params\":{\"turn\":{\"id\":\"t1\",\"status\":\"completed\"}}}\n",
+        )
+        .unwrap();
+        seed_abnormal_state(&dir, &rollout, "alive", 1);
+        let coordinator = abnormal_test_coordinator(&dir);
+        coordinator.tick().unwrap();
+
+        let mut state = crate::state::persist::load_runtime_state(&dir).unwrap();
+        state["agents"]["w1"]["process_liveness"] = serde_json::json!("dead");
+        crate::state::persist::save_runtime_state(&dir, &state).unwrap();
+        coordinator.tick().unwrap();
+
+        let state = crate::state::persist::load_runtime_state(&dir).unwrap();
+        let agent = &state["agents"]["w1"];
+        assert!(
+            agent.get("provider_process_dead").is_none(),
+            "provider death belongs to abnormal watch, not the pane-dead seat projection: {agent}"
+        );
+        assert!(
+            agent.get("stale_reason").is_none(),
+            "provider death must not be mislabeled pane_dead: {agent}"
+        );
+        let watch = &state["coordinator"]["abnormal_exit_watch"]["w1"];
+        assert_eq!(watch["provider_process_dead"], serde_json::json!(true));
+        assert_eq!(watch["worker_provider_exited"], serde_json::json!(false));
+        assert_eq!(
+            watch["last_liveness_detail"],
+            serde_json::json!("explicit:dead")
+        );
+    }
+
+    #[test]
+    fn abnormal_pane_absence_is_not_provider_process_death() {
+        let agent = test_abnormal_agent("/tmp/rollout.jsonl", Some(1), None);
+        for detail in ["pane_dead:%1", "window_missing:w1"] {
+            let payload = abnormal_watch_payload(
+                &agent,
+                Some(1),
+                Some(2),
+                process_check(ProcessLiveness::Dead, detail.to_string()),
+                None,
+                ErrorRecency::None,
+                None,
+                None,
+            );
+            assert_eq!(
+                payload["provider_process_dead"],
+                serde_json::json!(false),
+                "pane absence and provider death are distinct facts: {payload}"
+            );
+            assert_eq!(payload["worker_provider_exited"], serde_json::json!(false));
+        }
     }
 
     #[test]

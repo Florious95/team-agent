@@ -15,6 +15,7 @@ pub(super) type LaneSpawns = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<St
 pub(super) struct LaneTransport {
     session: String,
     windows: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    foreign: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     killed: LaneKills,
     spawns: LaneSpawns,
 }
@@ -25,6 +26,7 @@ impl LaneTransport {
             windows: std::sync::Arc::new(std::sync::Mutex::new(
                 windows.iter().map(|w| (*w).to_string()).collect(),
             )),
+            foreign: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             killed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
@@ -34,6 +36,12 @@ impl LaneTransport {
     }
     pub(super) fn spawns(&self) -> Vec<(String, Vec<String>)> {
         self.spawns.lock().unwrap().clone()
+    }
+    fn add_foreign(&self, session: &str, window: &str) {
+        self.foreign
+            .lock()
+            .unwrap()
+            .push((session.to_string(), window.to_string()));
     }
 }
 impl crate::transport::Transport for LaneTransport {
@@ -52,6 +60,18 @@ impl crate::transport::Transport for LaneTransport {
             .lock()
             .unwrap()
             .push(("spawn_first".to_string(), argv.to_vec()));
+        if !self
+            .windows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == window.as_str())
+        {
+            self.windows
+                .lock()
+                .unwrap()
+                .push(window.as_str().to_string());
+        }
         Ok(crate::transport::SpawnResult {
             pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())),
             session: session.clone(),
@@ -71,6 +91,18 @@ impl crate::transport::Transport for LaneTransport {
             .lock()
             .unwrap()
             .push(("spawn_into".to_string(), argv.to_vec()));
+        if !self
+            .windows
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|name| name == window.as_str())
+        {
+            self.windows
+                .lock()
+                .unwrap()
+                .push(window.as_str().to_string());
+        }
         Ok(crate::transport::SpawnResult {
             pane_id: crate::transport::PaneId::new(format!("%{}", window.as_str())),
             session: session.clone(),
@@ -120,7 +152,7 @@ impl crate::transport::Transport for LaneTransport {
     fn list_targets(
         &self,
     ) -> Result<Vec<crate::transport::PaneInfo>, crate::transport::TransportError> {
-        Ok(self
+        let mut panes: Vec<_> = self
             .windows
             .lock()
             .unwrap()
@@ -138,7 +170,27 @@ impl crate::transport::Transport for LaneTransport {
                 pane_pid: None,
                 leader_env: std::collections::BTreeMap::new(),
             })
-            .collect())
+            .collect();
+        panes.extend(
+            self.foreign
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(session, window)| crate::transport::PaneInfo {
+                    pane_id: crate::transport::PaneId::new(format!("%{session}-{window}")),
+                    session: crate::transport::SessionName::new(session),
+                    window_index: None,
+                    window_name: Some(crate::transport::WindowName::new(window)),
+                    pane_index: None,
+                    tty: None,
+                    current_command: None,
+                    current_path: None,
+                    active: false,
+                    pane_pid: None,
+                    leader_env: std::collections::BTreeMap::new(),
+                }),
+        );
+        Ok(panes)
     }
     fn has_session(
         &self,
@@ -182,15 +234,24 @@ impl crate::transport::Transport for LaneTransport {
     ) -> Result<(), crate::transport::TransportError> {
         let (name, window) = match t {
             crate::transport::Target::Pane(p) => (p.as_str().to_string(), None),
-            crate::transport::Target::SessionWindow { session, window } => {
-                (
-                    format!("{}:{}", session.as_str(), window.as_str()),
-                    Some(window.as_str()),
-                )
-            }
+            crate::transport::Target::SessionWindow { session, window } => (
+                format!("{}:{}", session.as_str(), window.as_str()),
+                Some(window.as_str()),
+            ),
         };
         self.killed.lock().unwrap().push(name);
-        if let Some(window) = window {
+        if let crate::transport::Target::Pane(pane) = t {
+            if let Some(window) = pane.as_str().strip_prefix('%') {
+                self.windows
+                    .lock()
+                    .unwrap()
+                    .retain(|candidate| candidate != window);
+                self.foreign
+                    .lock()
+                    .unwrap()
+                    .retain(|(session, candidate)| format!("{session}-{candidate}") != window);
+            }
+        } else if let Some(window) = window {
             self.windows
                 .lock()
                 .unwrap()
@@ -209,7 +270,11 @@ impl crate::transport::Transport for LaneTransport {
 /// 2-agent (alpha, bravo) compiled spec + custom `state.agents` map. session_name = "team-laneateam"
 /// (the compiled runtime.session_name). ensure_owner_allowed passes (no team_owner).
 fn lanea_ws_agents(agents: serde_json::Value) -> PathBuf {
-    let ws = temp_ws().join("laneav2");
+    lanea_ws_agents_at(&temp_ws(), agents)
+}
+
+fn lanea_ws_agents_at(root: &std::path::Path, agents: serde_json::Value) -> PathBuf {
+    let ws = root.join("laneav2");
     std::fs::create_dir_all(ws.join("agents")).unwrap();
     std::fs::write(
         ws.join("TEAM.md"),
@@ -266,6 +331,411 @@ fn lanea_one_agent_ws(alpha_status: &str) -> PathBuf {
     std::fs::write(ws.join("team.spec.yaml"), crate::model::yaml::dumps(&spec)).unwrap();
     crate::state::persist::save_runtime_state(&ws, &json!({ "session_name": "team-laneateam", "agents": { "alpha": { "status": alpha_status, "provider": "codex", "window": "alpha" } } })).unwrap();
     ws
+}
+
+fn selected_spec_path(ws: &std::path::Path) -> std::path::PathBuf {
+    crate::state::selector::resolve_active_team(
+        ws,
+        None,
+        crate::state::selector::SelectorMode::RequireSpec,
+    )
+    .unwrap()
+    .spec_workspace
+    .unwrap_or_else(|| ws.to_path_buf())
+    .join("team.spec.yaml")
+}
+
+fn remove_agent_from_fixture_spec(ws: &std::path::Path, agent_id: &str) {
+    let path = selected_spec_path(ws);
+    let spec = crate::model::yaml::loads(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let removed = crate::lifecycle::restart::remove::spec_without_agent(&spec, &aid(agent_id));
+    std::fs::write(path, crate::model::yaml::dumps(&removed)).unwrap();
+}
+
+fn remove_agent_from_fixture_state(ws: &std::path::Path, agent_id: &str) {
+    let mut state = crate::state::persist::load_runtime_state(ws).unwrap();
+    state
+        .get_mut("agents")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap()
+        .remove(agent_id);
+    crate::state::persist::save_runtime_state_with_deleted_agents(ws, &state, &[agent_id]).unwrap();
+}
+
+#[test]
+fn force_remove_reconciles_all_seat_quadrants_without_cross_team_same_name_kill() {
+    for quadrant in ["state-only", "spec-only", "physical-only", "mixed"] {
+        let ws = lanea_ws_agents(json!({
+            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        }));
+        let local_physical = matches!(quadrant, "physical-only");
+        let tx = LaneTransport::new(
+            "team-laneateam",
+            if local_physical { &["alpha"][..] } else { &[] },
+        );
+        tx.add_foreign("team-other", "alpha");
+        match quadrant {
+            "state-only" => remove_agent_from_fixture_spec(&ws, "alpha"),
+            "spec-only" => remove_agent_from_fixture_state(&ws, "alpha"),
+            "physical-only" => {
+                remove_agent_from_fixture_spec(&ws, "alpha");
+                remove_agent_from_fixture_state(&ws, "alpha");
+            }
+            "mixed" => {}
+            _ => unreachable!(),
+        }
+
+        for attempt in 0..2 {
+            let result = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx);
+            assert!(
+                matches!(result, Ok(RemoveAgentOutcome::Removed { .. })),
+                "{quadrant} force-remove attempt {attempt} must be idempotent: {result:?}"
+            );
+        }
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert!(
+            state["agents"].get("alpha").is_none(),
+            "{quadrant}: state absent"
+        );
+        let spec =
+            crate::model::yaml::loads(&std::fs::read_to_string(selected_spec_path(&ws)).unwrap())
+                .unwrap();
+        assert!(
+            spec.get("agents")
+                .and_then(crate::model::yaml::Value::as_list)
+                .is_none_or(|agents| agents.iter().all(|agent| {
+                    agent.get("id").and_then(crate::model::yaml::Value::as_str) != Some("alpha")
+                })),
+            "{quadrant}: spec absent"
+        );
+        let live = crate::transport::Transport::list_targets(&tx).unwrap();
+        assert!(
+            live.iter()
+                .all(|pane| pane.session.as_str() != "team-laneateam"
+                    || pane
+                        .window_name
+                        .as_ref()
+                        .is_none_or(|window| window.as_str() != "alpha")),
+            "{quadrant}: selected team physical absent"
+        );
+        assert!(
+            live.iter().any(|pane| pane.session.as_str() == "team-other"
+                && pane
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|window| window.as_str() == "alpha")),
+            "{quadrant}: cross-team same-name pane must survive"
+        );
+        assert!(
+            !tx.killed().iter().any(|pane| pane == "%team-other-alpha"),
+            "{quadrant}: cross-team pane must never be selected"
+        );
+    }
+}
+
+const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
+
+struct HermeticTestEnv {
+    root: std::path::PathBuf,
+}
+
+impl HermeticTestEnv {
+    fn enter(tag: &str) -> Self {
+        let root = temp_ws().join(format!("hermetic-{tag}"));
+        std::fs::create_dir_all(&root).unwrap();
+        Self { root }
+    }
+
+    fn workspace_root(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
+impl Drop for HermeticTestEnv {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+struct ForceRecreateFailureGuard(Option<String>);
+
+impl ForceRecreateFailureGuard {
+    fn after_spawn(reason: &str) -> Self {
+        const KEY: &str = "TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN";
+        let previous = std::env::var(KEY).ok();
+        unsafe { std::env::set_var(KEY, reason) };
+        Self(previous)
+    }
+}
+
+impl Drop for ForceRecreateFailureGuard {
+    fn drop(&mut self) {
+        const KEY: &str = "TEAM_AGENT_TEST_FAIL_FORCE_RECREATE_AFTER_SPAWN";
+        unsafe {
+            if let Some(previous) = self.0.take() {
+                std::env::set_var(KEY, previous);
+            } else {
+                std::env::remove_var(KEY);
+            }
+        }
+    }
+}
+
+fn seed_agent_health(ws: &std::path::Path, team: &str, agent: &str, status: &str) {
+    let store = crate::message_store::MessageStore::open(ws).unwrap();
+    let conn = crate::db::schema::open_db(store.db_path()).unwrap();
+    conn.execute(
+        "insert into agent_health(owner_team_id, agent_id, status, last_output_at, context_usage_pct, current_task_id, updated_at) values (?1, ?2, ?3, 'before-output', 37, 'task-before', '2026-07-19T00:00:00Z')",
+        rusqlite::params![team, agent, status],
+    )
+    .unwrap();
+}
+
+fn seed_charlie(ws: &std::path::Path, tx: &LaneTransport) -> std::path::PathBuf {
+    let role_dir = ws.join("role-masters");
+    std::fs::create_dir_all(&role_dir).unwrap();
+    let role = role_dir.join("charlie.md");
+    std::fs::write(&role, CHARLIE_ROLE).unwrap();
+    crate::lifecycle::add_agent_with_transport(ws, &aid("charlie"), &role, false, None, tx)
+        .unwrap();
+    role
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn force_recreate_is_one_lock_transaction_for_all_seat_quadrants_and_rolls_back_failure() {
+    for quadrant in ["state-only", "spec-only", "physical-only", "mixed"] {
+        let ws = lanea_ws_agents(json!({
+            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        }));
+        let tx = LaneTransport::new("team-laneateam", &[]);
+        seed_healthy_coordinator(&ws);
+        let role = seed_charlie(&ws, &tx);
+        match quadrant {
+            "state-only" => {
+                remove_agent_from_fixture_spec(&ws, "charlie");
+                crate::transport::Transport::kill_pane(
+                    &tx,
+                    &crate::transport::PaneId::new("%charlie"),
+                )
+                .unwrap();
+            }
+            "spec-only" => {
+                remove_agent_from_fixture_state(&ws, "charlie");
+                crate::transport::Transport::kill_pane(
+                    &tx,
+                    &crate::transport::PaneId::new("%charlie"),
+                )
+                .unwrap();
+            }
+            "physical-only" => {
+                remove_agent_from_fixture_spec(&ws, "charlie");
+                remove_agent_from_fixture_state(&ws, "charlie");
+            }
+            "mixed" => {
+                crate::transport::Transport::kill_pane(
+                    &tx,
+                    &crate::transport::PaneId::new("%charlie"),
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        crate::lifecycle::add_agent_with_transport_force(
+            &ws,
+            &aid("charlie"),
+            &role,
+            false,
+            None,
+            true,
+            &tx,
+        )
+        .unwrap_or_else(|error| panic!("{quadrant} force-recreate failed: {error}"));
+        let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        assert!(
+            state["agents"].get("charlie").is_some(),
+            "{quadrant}: state restored"
+        );
+        let spec_text = std::fs::read_to_string(selected_spec_path(&ws)).unwrap();
+        assert_eq!(
+            spec_text.matches("id: \"charlie\"").count(),
+            1,
+            "{quadrant}: exactly one spec row"
+        );
+        assert_eq!(
+            crate::transport::Transport::list_targets(&tx)
+                .unwrap()
+                .iter()
+                .filter(|pane| pane.session.as_str() == "team-laneateam"
+                    && pane
+                        .window_name
+                        .as_ref()
+                        .is_some_and(|window| window.as_str() == "charlie"))
+                .count(),
+            1,
+            "{quadrant}: exactly one live pane"
+        );
+        assert!(role.exists(), "{quadrant}: external role preserved");
+    }
+
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    seed_healthy_coordinator(&ws);
+    let role = seed_charlie(&ws, &tx);
+    let missing = ws.join("role-masters").join("missing-charlie.md");
+    let error = crate::lifecycle::add_agent_with_transport_force(
+        &ws,
+        &aid("charlie"),
+        &missing,
+        false,
+        None,
+        true,
+        &tx,
+    )
+    .expect_err("missing replacement role must fail and roll back");
+    assert!(error.to_string().contains("role file not found"));
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert!(
+        state["agents"].get("charlie").is_some(),
+        "rollback restores state"
+    );
+    assert!(
+        std::fs::read_to_string(selected_spec_path(&ws))
+            .unwrap()
+            .contains("id: \"charlie\""),
+        "rollback restores spec"
+    );
+    assert!(
+        crate::transport::Transport::list_targets(&tx)
+            .unwrap()
+            .iter()
+            .any(|pane| {
+                pane.session.as_str() == "team-laneateam"
+                    && pane
+                        .window_name
+                        .as_ref()
+                        .is_some_and(|window| window.as_str() == "charlie")
+            }),
+        "rollback restores physical seat"
+    );
+    assert!(role.exists(), "rollback never mutates external role source");
+}
+
+#[test]
+#[serial_test::serial(env)]
+fn force_recreate_post_consumption_failure_restores_before_tuple_and_health() {
+    let hermetic = HermeticTestEnv::enter("force-recreate-rollback");
+    let ws = lanea_ws_agents_at(
+        hermetic.workspace_root(),
+        json!({
+            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        }),
+    );
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    seed_healthy_coordinator(&ws);
+    let role = seed_charlie(&ws, &tx);
+    seed_agent_health(&ws, "team-laneateam", "charlie", "IDLE");
+    seed_agent_health(&ws, "team-other", "charlie", "WORKING");
+    let selected_health = crate::db::agent_health_capture::select_agent_health(
+        &ws,
+        "team-laneateam",
+        &aid("charlie"),
+    )
+    .unwrap();
+    let sibling_health =
+        crate::db::agent_health_capture::select_agent_health(&ws, "team-other", &aid("charlie"))
+            .unwrap();
+    let _failure = ForceRecreateFailureGuard::after_spawn("post-consumption seam");
+    let error = crate::lifecycle::add_agent_with_transport_force(
+        &ws,
+        &aid("charlie"),
+        &role,
+        false,
+        None,
+        true,
+        &tx,
+    )
+    .expect_err("post-spawn failure must roll back a consumed seat");
+    assert!(error.to_string().contains("post-consumption seam"));
+    assert_eq!(
+        tx.killed()
+            .iter()
+            .filter(|pane| pane.as_str() == "%charlie")
+            .count(),
+        2,
+        "rollback kills the old pane during remove and the transaction-created pane before restore"
+    );
+    assert_eq!(
+        crate::transport::Transport::list_targets(&tx)
+            .unwrap()
+            .iter()
+            .filter(|pane| pane.session.as_str() == "team-laneateam"
+                && pane
+                    .window_name
+                    .as_ref()
+                    .is_some_and(|window| window.as_str() == "charlie"))
+            .count(),
+        1,
+        "rollback restores exactly one physical seat; error={error}; spawns={:?}; killed={:?}",
+        tx.spawns(),
+        tx.killed(),
+    );
+    assert_eq!(
+        crate::db::agent_health_capture::select_agent_health(
+            &ws,
+            "team-laneateam",
+            &aid("charlie"),
+        )
+        .unwrap(),
+        selected_health,
+        "rollback restores the selected team's captured health row"
+    );
+    assert_eq!(
+        crate::db::agent_health_capture::select_agent_health(&ws, "team-other", &aid("charlie"),)
+            .unwrap(),
+        sibling_health,
+        "rollback never changes the sibling team's same-agent health row"
+    );
+}
+
+#[test]
+fn force_remove_scopes_agent_health_to_canonical_team_key() {
+    let hermetic = HermeticTestEnv::enter("force-remove-health-scope");
+    let ws = lanea_ws_agents_at(
+        hermetic.workspace_root(),
+        json!({
+            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+            "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+        }),
+    );
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    seed_agent_health(&ws, "team-laneateam", "alpha", "IDLE");
+    seed_agent_health(&ws, "team-other", "alpha", "WORKING");
+    let sibling_before =
+        crate::db::agent_health_capture::select_agent_health(&ws, "team-other", &aid("alpha"))
+            .unwrap();
+
+    remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).unwrap();
+
+    assert!(crate::db::agent_health_capture::select_agent_health(
+        &ws,
+        "team-laneateam",
+        &aid("alpha"),
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        crate::db::agent_health_capture::select_agent_health(&ws, "team-other", &aid("alpha"),)
+            .unwrap(),
+        sibling_before,
+        "force-remove must not delete the sibling owner_team_id row"
+    );
 }
 
 /// Rewrite the compiled spec's `context.state_file` (default `team_state.md`) to `name`, so the
@@ -363,9 +833,8 @@ fn lanea_stop_window_absent_returns_stopped_false_no_kill() {
 }
 
 // ── STOP #1 companion [LOCK] — window PRESENT => stopped=true + kill the golden target ───────────────
-// The OTHER side of the gate: when the window exists, golden kills `<session>:<window>` and returns
-// stopped:true. GREEN today (Rust kills unconditionally), so this LOCKS the present-branch against the
-// window-gate fix regressing it.
+// When the selected team's exact `(session, window, pane)` tuple exists, stop kills that pane and
+// returns stopped:true. Pane identity avoids ambiguous same-name windows on shared endpoints.
 #[test]
 fn lanea_stop_window_present_kills_and_stopped_true() {
     let ws = lanea_ws_agents(
@@ -380,8 +849,8 @@ fn lanea_stop_window_present_kills_and_stopped_true() {
     );
     assert_eq!(
         tx.killed(),
-        vec!["team-laneateam:alpha".to_string()],
-        "stop must kill exactly the golden target <session>:<window>; killed={:?}",
+        vec!["%alpha".to_string()],
+        "stop must kill the selected team's exact pane tuple; killed={:?}",
         tx.killed()
     );
 }
@@ -467,6 +936,95 @@ fn lanea_remove_dynamic_agent_removable_without_from_spec() {
             .and_then(serde_json::Value::as_object)
             .is_some_and(|a| !a.contains_key("alpha")),
         "the dynamic agent must actually be removed from state.agents; got {result:?}"
+    );
+}
+
+#[test]
+fn remove_preserves_external_role_source_for_both_flag_forms() {
+    for from_spec in [false, true] {
+        let ws = lanea_ws_agents(json!({
+            "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+            "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+        }));
+        let external_dir = ws.join("role-masters");
+        std::fs::create_dir_all(&external_dir).unwrap();
+        let external = external_dir.join("alpha.md");
+        let original = b"external alpha role\n";
+        std::fs::write(&external, original).unwrap();
+        let mut state = crate::state::persist::load_runtime_state(&ws).unwrap();
+        state["agents"]["alpha"]["dynamic_role_file"] =
+            serde_json::json!(external.to_string_lossy());
+        crate::state::persist::save_runtime_state(&ws, &state).unwrap();
+
+        let result = remove_agent_with_transport(
+            &ws,
+            &aid("alpha"),
+            from_spec,
+            true,
+            None,
+            &LaneTransport::new("team-laneateam", &[]),
+        );
+        assert!(result.is_ok(), "remove failed: {result:?}");
+        assert_eq!(
+            std::fs::read(&external).unwrap(),
+            original,
+            "external role source changed for from_spec={from_spec}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_preserves_managed_path_symlink_escape() {
+    use std::os::unix::fs::symlink;
+
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha", "dynamic_role_file": ".team/dynamic-role-files/alpha.md" },
+        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+    }));
+    let external = ws.join("role-masters").join("alpha.md");
+    std::fs::create_dir_all(external.parent().unwrap()).unwrap();
+    std::fs::write(&external, b"external target\n").unwrap();
+    let managed = ws.join(".team").join("dynamic-role-files").join("alpha.md");
+    std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+    symlink(&external, &managed).unwrap();
+
+    let result = remove_agent_with_transport(
+        &ws,
+        &aid("alpha"),
+        false,
+        true,
+        None,
+        &LaneTransport::new("team-laneateam", &[]),
+    );
+    assert!(result.is_ok(), "remove failed: {result:?}");
+    assert_eq!(std::fs::read(&external).unwrap(), b"external target\n");
+    assert!(managed.exists(), "symlink escape must be preserved");
+}
+
+#[test]
+fn force_remove_state_only_seat_is_idempotent() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "stopped", "provider": "codex", "window": "bravo" }
+    }));
+    let spec_path = ws.join("team.spec.yaml");
+    let spec = crate::model::yaml::loads(&std::fs::read_to_string(&spec_path).unwrap()).unwrap();
+    std::fs::write(
+        &spec_path,
+        crate::model::yaml::dumps(&crate::lifecycle::restart::remove::spec_without_agent(
+            &spec,
+            &aid("alpha"),
+        )),
+    )
+    .unwrap();
+    let transport = LaneTransport::new("team-laneateam", &[]);
+    let first = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &transport);
+    let second = remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &transport);
+    assert!(first.is_ok(), "state-only force-remove failed: {first:?}");
+    assert!(
+        second.is_ok(),
+        "second force-remove must be idempotent: {second:?}"
     );
 }
 
@@ -571,8 +1129,8 @@ fn lanea_remove_rollback_restarts_force_stopped_worker() {
          after the force-stop, triggering rollback; got {result:?}"
     );
     assert!(
-        tx.killed().contains(&"team-laneateam:alpha".to_string()),
-        "precondition: the running worker was force-stopped (window killed) before the failure; killed={:?}",
+        tx.killed().contains(&"%alpha".to_string()),
+        "precondition: the running worker's exact pane was killed before the failure; killed={:?}",
         tx.killed()
     );
     assert!(

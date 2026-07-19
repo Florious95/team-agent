@@ -2310,14 +2310,16 @@ pub mod lifecycle_port {
         role_file: &str,
         open_display: bool,
         team: Option<&str>,
+        force: bool,
     ) -> Result<Value, CliError> {
         let agent_id = crate::model::ids::AgentId::new(agent);
-        match crate::lifecycle::add_agent(
+        match crate::lifecycle::add_agent_force(
             workspace,
             &agent_id,
             Path::new(role_file),
             open_display,
             team,
+            force,
         ) {
             Ok(report) => Ok(json!({
                 "ok": true,
@@ -2372,7 +2374,7 @@ pub mod lifecycle_port {
                     ));
                 }
             }
-            Err(error) if confirm => return Ok(error_value(error)),
+            Err(error) if confirm && !force => return Ok(error_value(error)),
             Err(_) => {}
         }
         if !confirm {

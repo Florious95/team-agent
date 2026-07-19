@@ -28,7 +28,7 @@ mod common;
 mod orchestrator;
 pub mod preflight;
 mod rebuild;
-mod remove;
+pub(crate) mod remove;
 mod selection;
 mod team_state;
 
