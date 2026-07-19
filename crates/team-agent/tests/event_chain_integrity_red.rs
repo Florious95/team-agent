@@ -87,11 +87,15 @@ fn c3_worker_send_accepted_row_and_delivered_event_keep_one_message_id_across_st
 #[test]
 fn c3_source_guard_keeps_message_id_on_accepted_queued_and_delivered_edges() {
     let send = source("src/messaging/send.rs");
+    // Car-C arch (consume persisted message truth): the accepted/queued edge no
+    // longer hard-codes the "accepted" string; the presenter consumes the real
+    // persisted row status. Trace-integrity intent is unchanged — the queued
+    // edge stays keyed by the created message_id.
     assert!(
         send.contains("status: DeliveryStatus::Queued")
-            && send.contains("message_status: MessageStatusShadow(\"accepted\".to_string())")
+            && send.contains("MessageStatusShadow(persisted.row_status.as_str().to_string())")
             && send.contains("message_id: Some(message_id)"),
-        "worker send accepted/queued edge must stay keyed by the created message_id"
+        "worker send accepted/queued edge must consume persisted.row_status and stay keyed by the created message_id"
     );
 
     let leader_receiver = source("src/messaging/leader_receiver.rs");

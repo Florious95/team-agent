@@ -319,20 +319,16 @@ fn send_message_worker_recipient_surfaces_dead_coordinator_warning() {
             None,
             None,
         )
-        .expect("send returns degraded warning, not an MCP error");
+        .expect("send persists a durable blocker, not an MCP error");
     let v = outcome.to_value();
-    assert_eq!(v.get("status"), Some(&json!("degraded")));
-    assert_eq!(v.get("reason"), Some(&json!("coordinator_unavailable")));
+    assert_eq!(v.get("status"), Some(&json!("accepted")));
     assert!(
-        v.get("warning")
+        v.get("message_id")
             .and_then(Value::as_str)
-            .is_some_and(|warning| warning.contains("message was not queued")),
-        "warning must explain the accepted-row avoidance; value={v}"
+            .is_some_and(|id| id.starts_with("msg_")),
+        "worker MCP send must expose the durable row id; value={v}"
     );
-    assert!(
-        v.get("delivery_pending").is_none(),
-        "dead coordinator must not return the old accepted async envelope"
-    );
+    assert_eq!(v.get("delivery_pending"), Some(&json!(true)));
 }
 
 #[test]

@@ -129,18 +129,25 @@ fn run_contract_suite(
         }
     };
 
-    match scratch_store.as_ref().and_then(|store| {
-        store
-            .create_message(
-                None,
-                "doctor",
-                "worker",
-                "comms contract probe",
-                None,
-                false,
-                Some("contract-team"),
-            )
-            .ok()
+    match scratch_store.as_ref().and_then(|_| {
+        match super::persist::persist_internal_send(
+            &scratch,
+            super::InternalSendKind::Selftest,
+            Some("contract-team"),
+            None,
+            "doctor",
+            "worker",
+            "comms contract probe",
+            None,
+            false,
+            None,
+            super::InitialDisposition::Accepted,
+        )
+        .ok()?
+        {
+            super::PersistResolution::Persisted(persisted) => Some(persisted.message_id),
+            super::PersistResolution::Duplicate(_) => None,
+        }
     }) {
         Some(message_id) if message_id.starts_with("msg_") && message_id.len() > 4 => {
             let rendered = format!(

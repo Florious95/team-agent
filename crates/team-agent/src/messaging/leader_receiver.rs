@@ -13,7 +13,11 @@ use crate::transport::{
 };
 
 use super::helpers::MessageStatusShadow;
-use super::{DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessagingError};
+use super::persist::persist_internal_send;
+use super::{
+    DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, InitialDisposition,
+    InternalSendKind, MessagingError, PersistResolution,
+};
 
 /// `_send_to_leader_receiver` (`leader.py:69`) — **N31/N32 funnel primitive**:所有 leader-bound
 /// caller(send_message(to=leader) / report_result / request_human / idle reminder /
@@ -74,39 +78,32 @@ pub fn send_to_leader_receiver_with_message_id(
             serde_json::json!({"sender": sender, "leader_id": leader_id, "result_id": result_id}),
         )?;
     }
-    let message_id = if let Some(requested) = requested_message_id {
-        if store.message_exists(requested)? {
+    let message_id = match persist_internal_send(
+        workspace,
+        InternalSendKind::LeaderNotification,
+        Some(&owner_team),
+        task_id.map(TaskId::as_str),
+        sender,
+        leader_id,
+        content,
+        None,
+        false,
+        requested_message_id,
+        InitialDisposition::Accepted,
+    )? {
+        PersistResolution::Duplicate(requested) => {
             return Ok(DeliveryOutcome {
                 ok: false,
                 status: DeliveryStatus::Refused,
                 message_status: MessageStatusShadow("refused".to_string()),
-                message_id: Some(requested.to_string()),
+                message_id: Some(requested),
                 verification: None,
                 stage: None,
                 reason: Some(DeliveryRefusal::Duplicate),
                 channel: Some("leader_receiver".to_string()),
             });
         }
-        store.create_message_with_id(
-            requested,
-            task_id.map(TaskId::as_str),
-            sender,
-            leader_id,
-            content,
-            None,
-            false,
-            Some(&owner_team),
-        )?
-    } else {
-        store.create_message(
-            task_id.map(TaskId::as_str),
-            sender,
-            leader_id,
-            content,
-            None,
-            false,
-            Some(&owner_team),
-        )?
+        PersistResolution::Persisted(persisted) => persisted.message_id,
     };
     // #231 exactly-once across rebind: insert the leader_notification_log PK BEFORE the
     // unbound-pane check. That way, if the result row gets blocked (I-4) and later the
@@ -587,21 +584,24 @@ pub fn enqueue_leader_mailbox_until_attach(
     sender: &str,
     event_log: &EventLog,
 ) -> Result<DeliveryOutcome, MessagingError> {
-    let store = MessageStore::open(target_workspace)?;
-    let message_id = store.create_message(
+    let PersistResolution::Persisted(persisted) = persist_internal_send(
+        target_workspace,
+        InternalSendKind::OfflineMailbox,
+        Some(canonical_team_key),
         task_id.map(TaskId::as_str),
         sender,
         "leader",
         content,
         None,
         false,
-        Some(canonical_team_key),
-    )?;
-    // The default row status after `create_message` is `accepted`. Flip it to
-    // `queued_until_leader_attach` so it stays out of `claim_for_delivery`
-    // eligible set and out of `deliver_pending_messages` scan until an
-    // attach/claim explicitly requeues it (see requeue_blocked_leader_messages).
-    store.mark(&message_id, "queued_until_leader_attach", None)?;
+        None,
+        InitialDisposition::QueuedUntilLeaderAttach,
+    )?
+    else {
+        unreachable!("offline mailbox does not accept caller-supplied ids")
+    };
+    let message_status = persisted.row_status.as_str().to_string();
+    let message_id = persisted.message_id;
     event_log.write(
         "leader_mailbox.queued_until_attach",
         serde_json::json!({
@@ -615,7 +615,7 @@ pub fn enqueue_leader_mailbox_until_attach(
     Ok(DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Queued,
-        message_status: MessageStatusShadow("queued_until_leader_attach".to_string()),
+        message_status: MessageStatusShadow(message_status),
         message_id: Some(message_id),
         verification: None,
         stage: None,

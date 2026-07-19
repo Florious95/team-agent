@@ -45,26 +45,45 @@ pub fn deliver_stored_message(
 ) -> Result<DeliveryOutcome, MessagingError> {
     let _ = (wait_visible, timeout);
     let recipient = target.unwrap_or("leader");
-    let store = MessageStore::open(workspace)?;
-    let message_id = store.create_message(
+    let super::PersistResolution::Persisted(persisted) = super::persist::persist_internal_send(
+        workspace,
+        super::InternalSendKind::Delivery,
+        team.map(TeamKey::as_str),
         task_id.map(crate::model::ids::TaskId::as_str),
         sender,
         recipient,
         content,
         None,
         requires_ack,
-        team.map(TeamKey::as_str),
-    )?;
+        None,
+        super::InitialDisposition::Accepted,
+    )?
+    else {
+        unreachable!("internal delivery does not accept caller-supplied ids")
+    };
+    let message_status = persisted.row_status.as_str().to_string();
+    let message_id = persisted.message_id;
     Ok(DeliveryOutcome {
         ok: true,
         status: DeliveryStatus::Queued,
-        message_status: MessageStatusShadow("accepted".to_string()),
+        message_status: MessageStatusShadow(message_status),
         message_id: Some(message_id),
         verification: None,
         stage: None,
         reason: None,
         channel: None,
     })
+}
+
+pub fn deliver_persisted_message(
+    workspace: &Path,
+    transport: &dyn Transport,
+    message_id: &str,
+    event_log: &EventLog,
+    state: &serde_json::Value,
+) -> Result<DeliveryOutcome, MessagingError> {
+    let store = MessageStore::open(workspace)?;
+    deliver_pending_message(workspace, &store, transport, message_id, event_log, state)
 }
 
 // ===========================================================================
@@ -1834,11 +1853,14 @@ pub fn deliver_pending_messages(
             "select message_id from messages
              where status in (
                  'pending', 'accepted', 'target_resolved',
-                 'submitted_pending_acceptance', 'queued_until_leader_attach'
+                 'submitted_pending_acceptance', 'queued_until_leader_attach', ?1
              )
              order by created_at, message_id",
         )?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(
+            [crate::message_store::MessageRowStatus::QueuedCoordinatorUnavailable.as_str()],
+            |row| row.get::<_, String>(0),
+        )?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
     let mut delivered = Vec::new();

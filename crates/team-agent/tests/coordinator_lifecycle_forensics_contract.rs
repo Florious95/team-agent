@@ -156,12 +156,29 @@ fn mutating_send_loudly_ensures_missing_coordinator_or_fails_closed() {
         .is_some_and(|text| text.contains("coordinator_auto_restarted"))
         || fixture.has_event("coordinator.auto_restarted")
         || fixture.has_event("send.coordinator_auto_restarted");
+    // Car-C persist-before-recovery (third legal shape, verifier sign-off):
+    // a canonically resolved send may PERSIST the row and park it as a durable
+    // availability blocker instead — ok=true, delivery Blocked, exactly one
+    // row in queued_coordinator_unavailable, delivered_at null, never
+    // delivered, with a message_queued event. Availability is a delivery
+    // blocker, never a pre-persist refusal, and never a false delivered. The
+    // loud-ensure and fail-closed intents above remain the other two shapes.
+    let durable_blocked = out.ok
+        && out.status == DeliveryStatus::Blocked
+        && out.reason == Some(DeliveryRefusal::CoordinatorUnavailable)
+        && out.message_id.is_some()
+        && out.message_status.0 == "queued_coordinator_unavailable"
+        && fixture.message_count_with_status("queued_coordinator_unavailable") == 1
+        && fixture.all_blocked_rows_have_null_delivered_at()
+        && fixture.has_event("send.message_queued");
 
     assert!(
-        fail_closed || loud_ensure,
+        fail_closed || loud_ensure || durable_blocked,
         "R6: mutating send against a dead coordinator must either loudly \
-         auto-ensure current coordinator progress or fail closed without \
-         accepted/delivered queue state; out={out:?}"
+         auto-ensure current coordinator progress, persist a durable \
+         coordinator-unavailable blocker (exactly one row, delivered_at null, \
+         never delivered), or fail closed without accepted/delivered queue \
+         state; out={out:?}"
     );
 }
 
@@ -267,6 +284,31 @@ impl ForensicsFixture {
             |row| row.get(0),
         )
         .expect("count accepted messages")
+    }
+
+    fn message_count_with_status(&self, status: &str) -> i64 {
+        let store = MessageStore::open(&self.root).expect("open message store");
+        let conn = team_agent::db::schema::open_db(store.db_path()).expect("open db");
+        conn.query_row(
+            "select count(*) from messages where status = ?1",
+            [status],
+            |row| row.get(0),
+        )
+        .expect("count messages by status")
+    }
+
+    fn all_blocked_rows_have_null_delivered_at(&self) -> bool {
+        let store = MessageStore::open(&self.root).expect("open message store");
+        let conn = team_agent::db::schema::open_db(store.db_path()).expect("open db");
+        let non_null: i64 = conn
+            .query_row(
+                "select count(*) from messages where status = 'queued_coordinator_unavailable' \
+                 and delivered_at is not null",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count blocked rows with delivered_at");
+        non_null == 0
     }
 
     fn has_event(&self, event_name: &str) -> bool {
