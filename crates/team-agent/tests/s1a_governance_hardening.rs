@@ -79,6 +79,7 @@ const STATE_JSON_SURFACE_FILES: &[&str] = &[
     "lib.rs",
     "lifecycle/helpers.rs",
     "lifecycle/launch.rs",
+    "lifecycle/launch/quick_start.rs",
     "lifecycle/launch/spec_state.rs",
     "lifecycle/restart/preflight.rs",
     "lifecycle/restart/rebuild.rs",

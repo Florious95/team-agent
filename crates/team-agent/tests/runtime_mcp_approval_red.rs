@@ -390,9 +390,24 @@ fn running_agent_state_persists_effective_policy_schema_and_single_helper_across
             source_section(&launch, "pub fn fork_agent", "fn rollback_fork_after_spawn"),
         ),
     ] {
-        if !section.contains(helper) {
+        // Split-aware reach: after the launch mechanical split the spawn
+        // section may call the shared `running_agent_state` constructor
+        // (agent_state.rs) which itself persists the policy via the helper.
+        // One explicit hop only - the constructor body must really contain
+        // the helper call, so removing either link still goes red.
+        let shared_constructor_reaches_helper = {
+            let body = source_section(
+                &launch,
+                "fn running_agent_state",
+                "fn persist_effective_approval_policy",
+            );
+            body.contains(helper)
+        };
+        let reaches = section.contains(helper)
+            || (section.contains("running_agent_state") && shared_constructor_reaches_helper);
+        if !reaches {
             failures.push(format!(
-                "C10: {label} path must call the shared {helper} helper so all spawn paths persist the same effective_approval_policy shape"
+                "C10: {label} path must call the shared {helper} helper (directly or via the shared running_agent_state constructor) so all spawn paths persist the same effective_approval_policy shape"
             ));
         }
     }
