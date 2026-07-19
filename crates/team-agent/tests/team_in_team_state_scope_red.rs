@@ -21,6 +21,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1076,7 +1078,7 @@ fn tmp_dir(tag: &str) -> PathBuf {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
+    composite_source::composite_source(rel)
 }
 
 struct EnvGuard {

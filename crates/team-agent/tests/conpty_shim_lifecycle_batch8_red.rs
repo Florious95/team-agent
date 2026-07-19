@@ -24,13 +24,12 @@
 //!   `ensure_coordinator_running` which internally calls into the
 //!   coordinator ensure-shim path).
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 fn read_src(rel: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+    composite_source::composite_source(&format!("src/{rel}"))
 }
 
 /// Strip `//` comment lines so grep guards don't fire on doc-comments

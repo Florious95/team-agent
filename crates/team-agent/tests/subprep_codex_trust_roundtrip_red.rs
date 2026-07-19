@@ -15,6 +15,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -906,7 +908,7 @@ fn contract_c_lifecycle_launch_command_carries_role_tools_and_real_mcp_context()
 
 #[test]
 fn contract_c_lifecycle_sources_use_context_aware_provider_builders() {
-    let launch = std::fs::read_to_string(manifest_dir().join("src/lifecycle/launch.rs")).unwrap();
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     let restart_common =
         std::fs::read_to_string(manifest_dir().join("src/lifecycle/restart/common.rs")).unwrap();
     let restart_agent =

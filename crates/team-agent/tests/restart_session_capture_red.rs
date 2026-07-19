@@ -12,6 +12,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -491,16 +493,8 @@ fn status_quick_start_and_wait_ready_surfaces_include_session_capture_completene
     let diagnose =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/diagnose.rs"))
             .unwrap();
-    let status = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/cli/status_port.rs"
-    ))
-    .unwrap();
-    let launch = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/lifecycle/launch.rs"
-    ))
-    .unwrap();
+    let status = composite_source::composite_source("src/cli/status_port.rs");
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     let adapters =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/adapters.rs"))
             .unwrap();
@@ -606,11 +600,7 @@ fn session_capture_enumerates_candidates_and_carries_per_agent_context_grep_guar
         "/src/lifecycle/restart/common.rs"
     ))
     .unwrap();
-    let launch = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/lifecycle/launch.rs"
-    ))
-    .unwrap();
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
 
     assert!(
         adapter.contains("capture_session_candidates")

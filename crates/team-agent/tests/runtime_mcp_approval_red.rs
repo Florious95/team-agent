@@ -11,6 +11,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::Path;
 
 use team_agent::provider::{
@@ -608,7 +610,7 @@ fn allowlist_source_region(all_sources: &str) -> String {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
+    composite_source::composite_source(rel)
 }
 
 fn source_tree(rel: &str) -> String {

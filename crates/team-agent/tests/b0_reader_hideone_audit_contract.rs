@@ -16,6 +16,8 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -416,8 +418,16 @@ fn source_lines_for(paths: &[&str]) -> Vec<(String, usize, String)> {
 }
 
 fn source_lines_under(rel: &str) -> Vec<(String, usize, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     let mut out = Vec::new();
+    if rel.ends_with(".rs") {
+        for (part_rel, text) in composite_source::composite_files(rel) {
+            for (index, line) in text.lines().enumerate() {
+                out.push((part_rel.clone(), index + 1, line.to_string()));
+            }
+        }
+        return out;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     append_source_lines(&root, Path::new(env!("CARGO_MANIFEST_DIR")), &mut out);
     out
 }

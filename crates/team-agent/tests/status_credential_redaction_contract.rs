@@ -7,6 +7,8 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -262,7 +264,7 @@ fn red5_event_write_and_legacy_tail_are_redacted_and_idempotent() {
 #[test]
 fn eventlog_producers_share_the_central_writer_and_canonical_schema() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let launch = fs::read_to_string(root.join("src/lifecycle/launch.rs")).unwrap();
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     let common = fs::read_to_string(root.join("src/lifecycle/restart/common.rs")).unwrap();
     let rebuild = fs::read_to_string(root.join("src/lifecycle/restart/rebuild.rs")).unwrap();
     let helper_calls = [&launch, &common, &rebuild]

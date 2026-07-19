@@ -12,6 +12,8 @@
 
 #![allow(clippy::expect_used)]
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -230,7 +232,7 @@ fn e7_short_name_collision_refuses_instead_of_first_writer_wins() {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap_or_default()
+    composite_source::composite_source(rel)
 }
 
 fn identity_write_offenders(files: &[&str]) -> Vec<(PathBuf, usize, String)> {

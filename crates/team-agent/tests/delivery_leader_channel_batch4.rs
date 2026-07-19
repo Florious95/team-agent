@@ -21,6 +21,8 @@
 //!
 //! (Design §Batch 4 Verification, CR C-4 pins compact status stable.)
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 fn src_root() -> PathBuf {
@@ -28,8 +30,7 @@ fn src_root() -> PathBuf {
 }
 
 fn read(rel: &str) -> String {
-    let path = src_root().join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    composite_source::composite_source(&format!("src/{rel}"))
 }
 
 /// Extract non-comment lines from a source body so grep guards don't

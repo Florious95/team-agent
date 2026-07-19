@@ -9,6 +9,8 @@
 #[path = "support/hermetic.rs"]
 mod hermetic_guard;
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -271,7 +273,7 @@ fn coordinator_debug_eprintlns_are_deleted_but_inject_report_shape_remains() {
 
 #[test]
 fn send_pane_compat_surface_has_no_direct_inject_path() {
-    let source = read_repo("crates/team-agent/src/cli/send.rs");
+    let source = composite_source::composite_source("src/cli/send.rs");
     assert!(!source.contains("fn send_to_pane_direct"));
     assert!(!source.contains("send.pane_direct"));
     assert!(source.contains("--pane {pane_id} is deprecated and sunset"));

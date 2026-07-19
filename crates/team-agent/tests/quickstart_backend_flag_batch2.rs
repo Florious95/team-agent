@@ -32,6 +32,8 @@
 //! The call site stays on `annotate_runtime_tmux_endpoint` until
 //! leader accepts the schema extension in a follow-up.
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 use team_agent::cli::emit;
@@ -170,10 +172,7 @@ fn batch2_migration_anchors_present_in_source() {
     // is deleted/renamed, or annotate_runtime_transport is inlined
     // away, this test fires so Batch 3 cannot proceed on a
     // half-checked abstraction.
-    let launch = std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle/launch.rs"),
-    )
-    .unwrap();
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     assert!(
         launch.contains("fn quick_start_in_workspace_with_display_and_backend"),
         "Batch 2 new lifecycle entrypoint symbol missing"
