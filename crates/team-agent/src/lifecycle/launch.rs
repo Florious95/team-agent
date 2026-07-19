@@ -8,7 +8,7 @@ use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, Prov
 use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
-use crate::state::persist::{load_runtime_state, save_runtime_state};
+use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};

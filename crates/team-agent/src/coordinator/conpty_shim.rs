@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use conpty_transport::{pipe_name_for, NamedPipeClient};
 
-use crate::state::persist::{runtime_state_path, save_runtime_state};
+use crate::state::persist::runtime_state_path;
 use crate::state::StateError;
 
 /// Maximum shim connect+hello attempts before giving up. Each attempt

@@ -85,7 +85,7 @@ use crate::event_log::EventLog;
 use crate::message_store::MessageStore;
 
 // ── REUSE: step 5 state persist / projection ────────────────────────────────
-use crate::state::persist::{load_runtime_state, save_runtime_state};
+use crate::state::persist::load_runtime_state;
 
 // ── REUSE: step 11 messaging delegate surface ───────────────────────────────
 use crate::messaging::{self, DeliveryOutcome, MessageTarget, SendOptions, TrustedSender};
