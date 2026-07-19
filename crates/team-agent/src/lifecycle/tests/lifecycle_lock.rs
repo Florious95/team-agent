@@ -233,7 +233,7 @@ fn r2_lifecycle_lock_exists_precondition() {
         "remove rollback runs while remove-agent holds the lifecycle lock; it must use lock-free start_agent_at_paths"
     );
 
-    let launch = read_src("lifecycle/launch.rs");
+    let launch = launch_source();
     assert_public_operation(&launch, "add-agent");
     assert_public_operation(&launch, "fork-agent");
     assert_body_is_unlocked(&launch, "fn add_agent_with_transport_at_paths");
@@ -277,6 +277,29 @@ fn manifest_src() -> PathBuf {
 
 fn read_src(path: &str) -> String {
     std::fs::read_to_string(manifest_src().join(path)).unwrap()
+}
+
+fn launch_source() -> String {
+    let src = manifest_src().join("lifecycle");
+    let mut files = vec![src.join("launch.rs")];
+    let mut siblings = std::fs::read_dir(src.join("launch"))
+        .expect("read launch module directory")
+        .map(|entry| entry.expect("read launch module entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect::<Vec<_>>();
+    siblings.sort();
+    files.extend(siblings);
+
+    files
+        .into_iter()
+        .map(|path| {
+            format!(
+                "\n// @source {}\n{}",
+                path.strip_prefix(&src).unwrap().display(),
+                std::fs::read_to_string(&path).expect("read launch source")
+            )
+        })
+        .collect()
 }
 
 fn source_files(root: &Path) -> Vec<PathBuf> {
