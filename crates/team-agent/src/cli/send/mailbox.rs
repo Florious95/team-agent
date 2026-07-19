@@ -97,4 +97,3 @@ pub(super) fn target_team_is_alive_for_mailbox(state: &Value, team_key: &str) ->
         .and_then(|v| v.as_str())
         .is_some_and(|s| !s.is_empty())
 }
-
