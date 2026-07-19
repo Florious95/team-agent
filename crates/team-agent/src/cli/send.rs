@@ -10,12 +10,22 @@ mod persist;
 mod presentation;
 mod resolve;
 
-use coordinator::*;
-use mailbox::*;
-use persist::*;
-pub use presentation::send_to_canonical_leader_target;
-use presentation::*;
-use resolve::*;
+use coordinator::{
+    append_loud_ensure_fields, dirty_topology_refusal_value, loud_ensure_coordinator,
+    target_has_known_worker,
+};
+pub use persist::send_options_from_args;
+use persist::{
+    initial_delivery_allows_watch, observe_initial_delivery_for_watch, routing_ambiguous_value,
+};
+use presentation::{
+    add_send_reminder_if_ok, attach_positional_typo_suggestions, cmd_send_result,
+    delivery_outcome_json, watch_notice_json,
+};
+use resolve::{
+    decorate_host_leader_alias, logical_to_from_args, resolve_host_leader_alias,
+    send_to_logical_to, warn_send_alias,
+};
 
 /// `cmd_send`(`commands.py:164`)。解析 target(`--to` fanout / 单 target / `*`)→ [`MessageTarget`],
 /// 拼 [`SendOptions`](no_ack→requires_ack 取反、no_wait→wait_visible 取反等)→ `messaging::send_message`。
@@ -131,6 +141,43 @@ pub fn cmd_send(args: &SendArgs) -> Result<CmdResult, CliError> {
     Ok(cmd_send_result(value, args.json))
 }
 
+/// Resolve a host-leader alias, send through the canonical persisted funnel,
+/// then decorate the already-produced result for the host-leader surface.
+pub fn send_to_canonical_leader_target(
+    sender_workspace: &std::path::Path,
+    name: &str,
+    content: &str,
+    sender: &TrustedSender,
+    task_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let (logical_to, entry) = match resolve_host_leader_alias(name) {
+        Ok(resolved) => resolved,
+        Err(value) => return Ok(value),
+    };
+    let args = SendArgs {
+        target: Some(logical_to.clone()),
+        message: vec![content.to_string()],
+        targets: None,
+        workspace: sender_workspace.to_path_buf(),
+        team: None,
+        task: task_id.map(str::to_string),
+        sender: sender.clone(),
+        no_ack: false,
+        no_wait: true,
+        watch_result: false,
+        timeout: 0.0,
+        confirm_human: false,
+        json: true,
+        message_id: None,
+        pane: None,
+        to_name: None,
+        to_leader: None,
+    };
+    let mut value = send_to_logical_to(&args, &logical_to, content)?;
+    decorate_host_leader_alias(&mut value, &entry);
+    Ok(value)
+}
+
 /// `_send_target`(`commands.py:181-184`):`--to` comma-split fanout / `target` 单值 / None。
 pub fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget {
     if let Some(targets) = targets.filter(|s| !s.is_empty()) {
@@ -146,26 +193,5 @@ pub fn send_target(targets: Option<&str>, target: Option<&str>) -> MessageTarget
         Some("*") => MessageTarget::Broadcast,
         Some(target) => MessageTarget::Single(target.to_string()),
         None => MessageTarget::Single(String::new()),
-    }
-}
-
-/// `cmd_send` 的 [`SendArgs`]→[`SendOptions`] 翻译(`commands.py:170-177`)。CLI **独占**的
-/// 旗标取反语义(经典 off-by-inversion bug 面):`no_ack→!requires_ack`、`no_wait→!wait_visible`、
-/// `watch_result` 直传、`task_id`/`sender`/`confirm_human`/`timeout`/`team` 透传。
-/// (其余 `lock_timeout`/`block_until_delivered` 用 [`SendOptions::default`]。)
-pub fn send_options_from_args(args: &SendArgs) -> SendOptions {
-    SendOptions {
-        origin: crate::messaging::SendOrigin::Cli,
-        task_id: args.task.as_ref().map(|s| TaskId::new(s.clone())),
-        route_task_id: true,
-        sender: args.sender.clone(),
-        requires_ack: !args.no_ack,
-        confirm_human: args.confirm_human,
-        wait_visible: !args.no_wait,
-        timeout: args.timeout,
-        watch_result: args.watch_result,
-        team: args.team.as_ref().map(|s| TeamKey::new(s.clone())),
-        message_id: args.message_id.clone(),
-        ..SendOptions::default()
     }
 }

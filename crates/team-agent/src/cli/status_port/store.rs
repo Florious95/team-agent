@@ -1,4 +1,32 @@
-use super::*;
+use crate::cli::CliError;
+use rusqlite::params;
+use serde_json::{json, Map, Value};
+use std::path::Path;
+
+pub(super) fn recent_agent_messages(
+    workspace: &Path,
+    agent_id: &str,
+) -> Result<Vec<Value>, CliError> {
+    crate::message_store::MessageStore::open(workspace)
+        .map_err(|e| CliError::Runtime(e.to_string()))?
+        .inbox(agent_id, 3, None)
+        .map_err(|e| CliError::Runtime(e.to_string()))
+}
+
+/// `latest_result_summaries`(`queries.py:83-89`)。
+pub(super) fn latest_result_summaries(
+    store: &crate::message_store::MessageStore,
+    owner_team_id: Option<&str>,
+) -> Result<Value, CliError> {
+    let rows = store
+        .latest_results(5, owner_team_id)
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
+    Ok(Value::Array(
+        rows.iter()
+            .filter_map(crate::message_store::result_summary_from_row)
+            .collect(),
+    ))
+}
 
 pub(super) fn message_counts(
     conn: &rusqlite::Connection,

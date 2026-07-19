@@ -1,18 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 
-use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
-use crate::model::ids::AgentId;
-use crate::model::permissions::{self, AgentPermissionInput};
-use crate::model::yaml::{self, Value};
-use crate::state::persist::load_runtime_state;
-use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
-
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
-
-use super::*;
+use crate::lifecycle::{DangerousApproval, DangerousApprovalSource, LifecycleError};
 
 /// `detect_inherited_dangerous_permissions`(`launch/config.py`):扫进程祖先链找
 /// `--dangerously-*` flag,产出危险审批继承态。launch 在 inherited=false 且无 --yes 时拒。
@@ -30,6 +18,19 @@ pub fn detect_dangerous_approval() -> Result<DangerousApproval, LifecycleError> 
         }
     }
     Ok(disabled_dangerous_approval())
+}
+
+pub(super) fn disabled_dangerous_approval() -> DangerousApproval {
+    DangerousApproval {
+        enabled: false,
+        source: DangerousApprovalSource::Disabled,
+        inherited: false,
+        provider: None,
+        flag: None,
+        worker_capability_above_leader: false,
+        ancestry_binary_name: None,
+        unexpected_binary: false,
+    }
 }
 
 pub(super) fn detect_dangerous_approval_in_argv(

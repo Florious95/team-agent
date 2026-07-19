@@ -1,4 +1,33 @@
-use super::*;
+use super::coordinator::{
+    append_loud_ensure_fields, dirty_topology_refusal_value, loud_ensure_coordinator,
+    target_has_known_worker,
+};
+use super::presentation::delivery_outcome_json;
+use crate::cli::{CliError, SendArgs};
+use crate::messaging::{
+    self, DeliveryOutcome, DeliveryStatus, MessageTarget, SendOptions, SendOrigin,
+};
+use crate::model::ids::{TaskId, TeamKey};
+use serde_json::{json, Value};
+use std::path::Path;
+
+/// Translate SendArgs into the persisted-send options.
+pub fn send_options_from_args(args: &SendArgs) -> SendOptions {
+    SendOptions {
+        origin: SendOrigin::Cli,
+        task_id: args.task.as_ref().map(|s| TaskId::new(s.clone())),
+        route_task_id: true,
+        sender: args.sender.clone(),
+        requires_ack: !args.no_ack,
+        confirm_human: args.confirm_human,
+        wait_visible: !args.no_wait,
+        timeout: args.timeout,
+        watch_result: args.watch_result,
+        team: args.team.as_ref().map(|s| TeamKey::new(s.clone())),
+        message_id: args.message_id.clone(),
+        ..SendOptions::default()
+    }
+}
 
 pub(super) fn persist_resolved_target(
     args: &SendArgs,

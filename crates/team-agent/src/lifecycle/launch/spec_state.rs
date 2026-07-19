@@ -32,7 +32,13 @@ use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
 
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
-use super::*;
+use super::approval::detect_dangerous_approval;
+use super::identity::spec_display_backend;
+use super::leader_context::{
+    attributed_provider_for_pane_across_tmux_sockets, caller_provider_for_seed_with_lookup,
+    seed_unbound_launched_owner,
+};
+use super::worker_env::spawn_timestamp;
 
 /// Named launch phases under spec_state. Used in phase labels for logs
 /// and (future) for the orchestrator's step dispatcher.
@@ -217,6 +223,12 @@ pub(super) fn has_positive_caller_leader_env() -> bool {
         || env_nonempty("TEAM_AGENT_LEADER_SESSION_UUID")
         || env_nonempty("TEAM_AGENT_LEADER_SESSION_UUID_OVERRIDE")
         || env_nonempty("TEAM_AGENT_LEADER_PROVIDER")
+}
+
+pub(super) fn env_nonempty(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .is_some_and(|value| !value.is_empty())
 }
 
 pub(super) fn spec_tasks_json(spec: &Value) -> serde_json::Value {
@@ -422,19 +434,6 @@ pub(crate) fn effective_runtime_config(spec: &Value) -> Result<DangerousApproval
         })
     } else {
         Ok(detect_dangerous_approval()?)
-    }
-}
-
-pub(super) fn disabled_dangerous_approval() -> DangerousApproval {
-    DangerousApproval {
-        enabled: false,
-        source: DangerousApprovalSource::Disabled,
-        inherited: false,
-        provider: None,
-        flag: None,
-        worker_capability_above_leader: false,
-        ancestry_binary_name: None,
-        unexpected_binary: false,
     }
 }
 

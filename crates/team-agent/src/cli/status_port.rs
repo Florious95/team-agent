@@ -6,12 +6,12 @@ use rusqlite::params;
 use std::path::PathBuf;
 
 mod snapshot;
+use snapshot::read_runtime_state;
 pub(crate) use snapshot::RuntimeSnapshot;
-use snapshot::*;
 
 mod format;
-pub(super) use format::*;
-pub use format::{format_approvals, format_status, format_status_scoped};
+use format::format_agent_status;
+pub use format::format_approvals;
 
 mod approvals;
 pub(super) use approvals::*;
@@ -25,7 +25,11 @@ mod agents;
 pub(super) use agents::*;
 
 mod store;
-pub(super) use store::*;
+use store::{
+    agent_health, count_rows, count_undelivered_backlog, count_where_status, insert_optional_i64,
+    insert_optional_string, latest_result_summaries, message_counts, pending_leader_notifications,
+    queued_messages, recent_agent_messages, result_counts, result_status_counts, status_counts,
+};
 
 mod compact;
 pub(super) use compact::*;
@@ -54,5 +58,26 @@ pub fn status_scoped(
         Ok(snapshot.compact())
     } else {
         Ok(snapshot.into_full())
+    }
+}
+
+pub fn format_status(workspace: &Path, agent: Option<&str>) -> Result<String, CliError> {
+    let state = read_runtime_state(workspace);
+    format_status_scoped(workspace, &state, None, agent)
+}
+
+pub fn format_status_scoped(
+    workspace: &Path,
+    state: &Value,
+    owner_team_id: Option<&str>,
+    agent: Option<&str>,
+) -> Result<String, CliError> {
+    let snapshot = RuntimeSnapshot::assemble(workspace, state, owner_team_id)?;
+    match agent {
+        Some(agent) => {
+            let recent_messages = recent_agent_messages(workspace, agent)?;
+            format_agent_status(snapshot.full(), agent, &recent_messages)
+        }
+        None => Ok(crate::cli::format_status_csv(snapshot.full())),
     }
 }

@@ -1,30 +1,11 @@
-use super::*;
-
-pub fn format_status(workspace: &Path, agent: Option<&str>) -> Result<String, CliError> {
-    let state = read_runtime_state(workspace);
-    format_status_scoped(workspace, &state, None, agent)
-}
-
-pub fn format_status_scoped(
-    workspace: &Path,
-    state: &Value,
-    owner_team_id: Option<&str>,
-    agent: Option<&str>,
-) -> Result<String, CliError> {
-    let snapshot = RuntimeSnapshot::assemble(workspace, state, owner_team_id)?;
-    match agent {
-        // queries.py:130-162 — the agent branch renders the multi-line agent detail
-        // from the FULL status payload; an unknown agent id errors.
-        Some(agent) => format_agent_status(workspace, snapshot.full(), agent),
-        None => Ok(crate::cli::format_status_csv(snapshot.full())),
-    }
-}
+use crate::cli::CliError;
+use serde_json::{json, Value};
 
 /// `format_status` agent 分支(`queries.py:135-162`)。
 pub(super) fn format_agent_status(
-    workspace: &Path,
     status: &Value,
     agent_id: &str,
+    inbox_rows: &[Value],
 ) -> Result<String, CliError> {
     let agents = status.get("agents").and_then(Value::as_object);
     let health = status.get("agent_health").and_then(Value::as_object);
@@ -49,10 +30,6 @@ pub(super) fn format_agent_status(
         .cloned()
         .unwrap_or_default();
     let task_id = current_task_for_agent(&tasks, agent_id).unwrap_or_else(|| "-".to_string());
-    let inbox_rows = crate::message_store::MessageStore::open(workspace)
-        .map_err(|e| CliError::Runtime(e.to_string()))?
-        .inbox(agent_id, 3, None)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
     let mut lines = vec![
         format!("{agent_id}  {status_text}"),
         format!("  provider: {}", py_get(agent, "provider")),
@@ -71,7 +48,7 @@ pub(super) fn format_agent_status(
     if inbox_rows.is_empty() {
         lines.push("    none".to_string());
     } else {
-        for item in &inbox_rows {
+        for item in inbox_rows {
             let content = item.get("content").and_then(Value::as_str).unwrap_or("");
             let content: String = content.chars().take(120).collect();
             lines.push(format!(
@@ -128,20 +105,6 @@ pub(super) fn py_get_or_dash(agent: &Value, key: &str) -> String {
     }
 }
 
-/// `latest_result_summaries`(`queries.py:83-89`)。
-pub(super) fn latest_result_summaries(
-    store: &crate::message_store::MessageStore,
-    owner_team_id: Option<&str>,
-) -> Result<Value, CliError> {
-    let rows = store
-        .latest_results(5, owner_team_id)
-        .map_err(|e| CliError::Runtime(e.to_string()))?;
-    Ok(Value::Array(
-        rows.iter()
-            .filter_map(crate::message_store::result_summary_from_row)
-            .collect(),
-    ))
-}
 /// `status.approvals(workspace, agent_id)`(JSON)/`format_approvals`(人读)。
 pub fn format_approvals(value: &Value) -> String {
     let approvals = value

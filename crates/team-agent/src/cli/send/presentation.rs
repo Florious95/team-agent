@@ -1,4 +1,8 @@
-use super::*;
+use crate::cli::{CliError, CmdOutput, CmdResult, ExitCode};
+use crate::messaging::{
+    DeliveryOutcome, DeliveryRefusal, DeliveryStage, DeliveryStatus, MessageTarget, SendOptions,
+};
+use serde_json::{json, Value};
 
 pub(super) fn watch_notice_json(target: &MessageTarget, opts: &SendOptions) -> Value {
     let agent_id = match target {
@@ -326,57 +330,4 @@ pub(super) fn delivery_stage_wire(stage: DeliveryStage) -> &'static str {
         DeliveryStage::Submit => "submit",
         DeliveryStage::VisibleCheck => "visible_check",
     }
-}
-
-/// E7 (0.5.9 host-leader-registry-design §8.3): resolve `NAME` through
-/// `~/.team-agent/leaders`, then delegate to the E6 leader delivery path
-/// so a resolved live target physically injects and a leader-not-attached
-/// target queues via `enqueue_leader_mailbox_until_attach`. Ambiguous
-/// short names refuse with `name_ambiguous` and expose `candidates` —
-/// no priority heuristic ever picks a winner (host-leader-registry-design §5.2).
-///
-/// Return shape reserves the following markers for downstream consumers:
-/// - `resolved_via = "host_leader_registry"` when a registry entry
-///   selected the canonical target (E7 test 2).
-/// - `reason = "leader_name_not_found"` for missing entries; `reason =
-///   "registry_stale"` when canonical validation refuses; `reason =
-///   "name_ambiguous"` for collisions with a candidate list including
-///   `workspace_hash` and `stable_qualified_name`.
-///
-/// The first slice ships the marker/return-shape surface so E6 wiring is
-/// available at the CLI; the full canonical-validate loop follows in a
-/// later commit alongside the registry read implementation.
-pub fn send_to_canonical_leader_target(
-    sender_workspace: &std::path::Path,
-    name: &str,
-    content: &str,
-    sender: &TrustedSender,
-    task_id: Option<&str>,
-) -> Result<serde_json::Value, CliError> {
-    let (logical_to, entry) = match resolve_host_leader_alias(name) {
-        Ok(resolved) => resolved,
-        Err(value) => return Ok(value),
-    };
-    let args = SendArgs {
-        target: Some(logical_to.clone()),
-        message: vec![content.to_string()],
-        targets: None,
-        workspace: sender_workspace.to_path_buf(),
-        team: None,
-        task: task_id.map(str::to_string),
-        sender: sender.clone(),
-        no_ack: false,
-        no_wait: true,
-        watch_result: false,
-        timeout: 0.0,
-        confirm_human: false,
-        json: true,
-        message_id: None,
-        pane: None,
-        to_name: None,
-        to_leader: None,
-    };
-    let mut value = send_to_logical_to(&args, &logical_to, content)?;
-    decorate_host_leader_alias(&mut value, &entry);
-    Ok(value)
 }

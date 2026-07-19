@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
 use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
@@ -10,9 +11,14 @@ use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
 use crate::state::persist::load_runtime_state;
 use crate::transport::{PaneId, SessionName, Target, Transport, WindowName};
-use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 
-use super::*;
+use super::agent_state::running_agent_state;
+use super::identity::{explicit_active_team_key, runtime_team_key_for_spec};
+use super::leader_context::{
+    owner_pane_belongs_to_other_team, seed_unbound_launched_owner, unbound_launched_owner,
+};
+use super::spec_state::{has_positive_caller_leader_env, spec_agent_values};
+use super::worker_env::{agent_is_paused, spawn_timestamp_for_agent};
 
 pub(super) fn persist_spawn_agent_state(
     workspace: &Path,
@@ -490,10 +496,4 @@ pub(super) fn tmux_sockets_match_or_unknown(
         (Some(_), None) => false,
         (None, _) => true,
     }
-}
-
-pub(super) fn env_nonempty(key: &str) -> bool {
-    std::env::var(key)
-        .ok()
-        .is_some_and(|value| !value.is_empty())
 }

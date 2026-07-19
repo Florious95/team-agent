@@ -201,7 +201,14 @@ pub(crate) use layout::{
 };
 
 mod state_projection;
-pub(super) use state_projection::*;
+use state_projection::{
+    agent_id_to_pane_id, drop_bare_worker_seeded_owner, drop_foreign_seeded_owner,
+    drop_unbound_top_level_owner, drop_worker_pane_seeded_owner, launched_worker_tmux_socket,
+    merge_workspace_team_state_with_key, pane_pids_by_started_agent, persist_spawn_agent_state,
+    preserve_existing_leader_topology, promote_launched_binding_from_team_entry,
+    save_launched_team_state, save_launched_team_state_for_key, seeded_pane_looks_like_worker,
+    tmux_sockets_match_or_unknown,
+};
 
 mod leader_context;
 pub(super) use leader_context::*;
@@ -261,7 +268,11 @@ pub(super) use readiness::*;
 
 mod approval;
 pub use approval::detect_dangerous_approval;
-pub(super) use approval::*;
+use approval::{
+    binary_matches_provider, binary_name, dangerous_leader_flags,
+    detect_dangerous_approval_in_argv, disabled_dangerous_approval, process_ancestry_argv,
+    process_argv_tokens, process_parent_pid,
+};
 
 mod add_agent;
 pub(super) use add_agent::*;
@@ -285,9 +296,15 @@ pub(super) use ownership::*;
 pub(crate) use ownership::{ensure_owner_allowed, ensure_owner_allowed_for_state, state_path};
 
 pub mod spec_state;
-pub(super) use spec_state::*;
 pub(crate) use spec_state::{
     effective_runtime_config, effective_runtime_config_for_worker_spawn,
     override_spec_session_name, override_spec_workspace, spec_agent_id_set, write_spec_atomic,
+};
+use spec_state::{
+    env_nonempty, has_positive_caller_leader_env, initial_runtime_state,
+    override_spec_display_backend, override_spec_runtime_str,
+    seed_launched_owner_from_caller_with_provider_lookup, seed_launched_owner_from_env,
+    spec_agent_values, spec_agents, spec_default_assignee, spec_routes, spec_session_name,
+    spec_tasks_json, team_workspace, write_launch_permission_audit, yaml_value_to_json,
 };
 pub use spec_state::{worker_session_name_pub, SpecStatePhase};
