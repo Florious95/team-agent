@@ -739,3 +739,62 @@ impl Drop for MockLlmServer {
         }
     }
 }
+
+#[test]
+#[serial(env)]
+fn red8_bearer_token_inside_free_text_is_masked_without_over_redaction() {
+    let marker = synthetic_marker();
+    let env = hermetic_guard::HermeticTestEnv::enter("redact-red8");
+    env.scrub_tmux();
+    env.assert_no_real_tmux();
+    let workspace = env.workspace("red8");
+    let log = EventLog::new(&workspace);
+    // Attack-input shape (case.md section 2.4 / arch delta-smell6 probe): a
+    // user-controlled prompt travels as free text INSIDE an argv value
+    // (worker_command_context -> codex.rs `-c developer_instructions=<prompt>`
+    // -> launch.rs spawn_argv event). The bearer token hides in prose - not
+    // under a sensitive key, assignment key, or flag-value pair - so the
+    // shape matrix must map the attack input, not the scrubber branches.
+    let written = log
+        .write(
+            "provider.worker.spawn_argv",
+            json!({
+                "argv": [
+                    "codex",
+                    "-c",
+                    format!(
+                        "developer_instructions=You are w1. Call the api with Bearer {marker} and report back."
+                    ),
+                ],
+            }),
+        )
+        .unwrap();
+    let events_path = workspace.join(".team").join("logs").join("events.jsonl");
+    let bytes = std::fs::read_to_string(&events_path).unwrap();
+    let leak_free = !bytes.contains(&marker) && bytes.contains(REDACTED);
+
+    // Over-redaction anchor: prose where "Bearer" is ordinary language (the
+    // successor word is not token-shaped) must survive verbatim.
+    log.write(
+        "provider.worker.spawn_argv",
+        json!({
+            "argv": [
+                "codex",
+                "-c",
+                "developer_instructions=A bearer of good news, Bearer of the ring.",
+            ],
+        }),
+    )
+    .unwrap();
+    let bytes = std::fs::read_to_string(&events_path).unwrap();
+    let benign_preserved = bytes.contains("Bearer of the ring");
+
+    // Idempotency at the tail boundary, same discipline as RED5.
+    let tail = log.tail(0).unwrap();
+    let idempotent = tail.first() == Some(&written);
+
+    assert!(
+        leak_free && benign_preserved && idempotent,
+        "RED8: a bearer token inside user-controlled free text must be masked at event write while ordinary Bearer prose survives and redaction stays idempotent; leak_free={leak_free} benign_preserved={benign_preserved} idempotent={idempotent}"
+    );
+}

@@ -42,6 +42,13 @@ static URL_USERINFO: LazyLock<Regex> = LazyLock::new(|| {
         .expect("URL userinfo redaction regex")
 });
 
+static BEARER_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?P<prefix>\bBearer[ \t]+)(?P<token>[A-Za-z0-9][-A-Za-z0-9._~+/=]{14,}[A-Za-z0-9_=])",
+    )
+    .expect("Bearer token redaction regex")
+});
+
 pub(crate) fn redact_external_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         Value::Object(object) => Value::Object(
@@ -120,8 +127,11 @@ pub(crate) fn redact_external_text(text: &str) -> String {
         };
         format!("{prefix}{key}={quote}{safe_value}{quote}")
     });
-    URL_USERINFO
+    let urls = URL_USERINFO
         .replace_all(&assignments, "${scheme}[REDACTED]@")
+        .into_owned();
+    BEARER_TOKEN
+        .replace_all(&urls, "${prefix}[REDACTED]")
         .into_owned()
 }
 
