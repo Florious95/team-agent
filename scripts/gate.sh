@@ -32,7 +32,7 @@ expect_one() {
   local pattern=$1
   local file=$2
   local matches
-  matches=$(rg -n "$pattern" "$file") || return $?
+  matches=$(grep -rnE "$pattern" "$file") || return $?
   [[ $(printf '%s\n' "$matches" | wc -l | tr -d ' ') == 1 ]] || {
     printf 'expected exactly one match for %s in %s\n%s\n' "$pattern" "$file" "$matches"
     return 1
@@ -43,7 +43,7 @@ expect_none() {
   local pattern=$1
   shift
   local output rc
-  output=$(rg -n "$pattern" "$@" 2>&1)
+  output=$(grep -rnE "$pattern" "$@" 2>&1)
   rc=$?
   if [[ $rc == 1 ]]; then
     return 0
@@ -52,7 +52,7 @@ expect_none() {
     printf 'forbidden dependency matched:\n%s\n' "$output"
     return 1
   fi
-  printf 'rg failed (exit=%s):\n%s\n' "$rc" "$output"
+  printf 'grep failed (exit=%s):\n%s\n' "$rc" "$output"
   return "$rc"
 }
 
