@@ -11,6 +11,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -259,7 +261,7 @@ fn write_claude_subscription_profile_team(ws: &Path, team_key: &str, agent_id: &
 }
 
 fn source(path: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap()
+    composite_source::composite_source(path)
 }
 
 fn argv_contains_adjacent(hay: &[String], needle: &[&str]) -> bool {

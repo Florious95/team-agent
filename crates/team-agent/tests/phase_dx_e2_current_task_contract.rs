@@ -11,6 +11,8 @@
 
 #![allow(clippy::expect_used)]
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -103,7 +105,7 @@ fn e2_current_task_health_reads_are_display_only() {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
+    composite_source::composite_source(rel)
 }
 
 fn rs_sources(rel: &str) -> Vec<(String, String)> {

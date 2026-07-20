@@ -15,6 +15,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -640,7 +642,7 @@ fn count_messages(db_path: &Path) -> i64 {
 }
 
 fn source(relative: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)).unwrap()
+    composite_source::composite_source(relative)
 }
 
 fn source_section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {

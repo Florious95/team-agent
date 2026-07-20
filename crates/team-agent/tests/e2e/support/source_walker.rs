@@ -5,7 +5,24 @@ pub fn source_tree(rels: &[&str]) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut out = String::new();
     for rel in rels {
-        append_rs(&root.join(rel), &mut out);
+        let path = root.join(rel);
+        // Composite surface: a mechanically split `foo.rs` may continue in
+        // its sibling module dir `foo/`; a guard anchors the surface, not
+        // one file. At least one side must exist - never guard emptiness.
+        let sibling = rel
+            .strip_suffix(".rs")
+            .map(|stem| root.join(stem))
+            .filter(|dir| dir.is_dir());
+        assert!(
+            path.exists() || sibling.is_some(),
+            "guarded source surface missing entirely: {rel}"
+        );
+        if path.exists() {
+            append_rs(&path, &mut out);
+        }
+        if let Some(dir) = sibling {
+            append_rs(&dir, &mut out);
+        }
     }
     out
 }

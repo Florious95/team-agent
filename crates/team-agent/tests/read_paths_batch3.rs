@@ -18,6 +18,8 @@
 //!
 //! (Design §Batch 3 Verification anchors.)
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 #[test]
@@ -46,8 +48,7 @@ fn batch3_all_five_migration_sites_route_through_factory() {
         ),
     ];
     for (rel, needle, purpose) in sites {
-        let body = std::fs::read_to_string(root.join(rel))
-            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+        let body = composite_source::composite_source(&format!("src/{rel}"));
         assert!(
             body.contains(needle),
             "Batch 3 migration site `{rel}` ({purpose}) lost its `{needle}` \
@@ -123,11 +124,7 @@ fn batch3_c4_compact_status_guard_still_green_after_migration() {
     // reference backend fields. Batch 3 migration must preserve
     // this invariant. If the guard test file is present, run its
     // check inline as a belt-and-braces assertion.
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("cli")
-        .join("status_port.rs");
-    let body = std::fs::read_to_string(&path).unwrap();
+    let body = composite_source::composite_source("src/cli/status_port.rs");
     let compact_fn_body = {
         let sig = body.find("fn compact_status").unwrap_or_else(|| {
             eprintln!("note: `fn compact_status` not present; guard is vacuous");

@@ -14,15 +14,12 @@
 //!
 //! (CR C-4, `.team/artifacts/0.5.x-backend-factory-cr-verdict.md:198-202`.)
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 fn status_port_src() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("cli")
-        .join("status_port.rs");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read cli/status_port.rs at {}: {e}", path.display()))
+    composite_source::composite_source("src/cli/status_port.rs")
 }
 
 /// Locate the body of the `fn compact_status(...)` helper, or return

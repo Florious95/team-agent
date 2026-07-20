@@ -11,6 +11,8 @@
 
 #![allow(clippy::expect_used)]
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::Path;
 
 #[test]
@@ -66,5 +68,5 @@ fn contains_stale_status_write(text: &str) -> bool {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
+    composite_source::composite_source(rel)
 }

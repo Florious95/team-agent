@@ -3,6 +3,29 @@ use crate::transport::test_support::OfflineTransport;
 use serde_json::json;
 use serial_test::serial;
 
+fn launch_source() -> String {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lifecycle");
+    let mut files = vec![src.join("launch.rs")];
+    let mut siblings = std::fs::read_dir(src.join("launch"))
+        .expect("read launch module directory")
+        .map(|entry| entry.expect("read launch module entry").path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect::<Vec<_>>();
+    siblings.sort();
+    files.extend(siblings);
+
+    files
+        .into_iter()
+        .map(|path| {
+            format!(
+                "\n// @source {}\n{}",
+                path.strip_prefix(&src).unwrap().display(),
+                std::fs::read_to_string(&path).expect("read launch source")
+            )
+        })
+        .collect()
+}
+
 #[allow(dead_code)]
 struct HermeticTestEnv;
 
@@ -968,7 +991,7 @@ fn e5_add_agent_resolves_team_dir_to_role_dir_when_runtime_spec_exists() {
 // never write team.spec.yaml into the user team_dir/agents_dir. Pins the spec-demote invariant.
 #[test]
 fn e5_guard_g1_writers_use_runtime_spec_path_not_user_dir() {
-    let source = include_str!("../launch.rs");
+    let source = launch_source();
     let runtime_writes = source.matches("runtime_spec_path(").count();
     assert!(
         runtime_writes >= 2,
@@ -989,7 +1012,7 @@ fn e5_guard_g1_writers_use_runtime_spec_path_not_user_dir() {
 // Pins the Bug1 fix: no `fs::copy` of a role file + no `materialize_added_role_file` reborn.
 #[test]
 fn e5_guard_g2_no_copy_role_into_platform_dir() {
-    let source = include_str!("../launch.rs");
+    let source = launch_source();
     assert!(
         !source.contains("materialize_added_role_file"),
         "G2: materialize_added_role_file (role copy anti-pattern) must stay deleted"

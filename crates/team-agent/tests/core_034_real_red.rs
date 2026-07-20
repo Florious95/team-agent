@@ -5,6 +5,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -233,7 +235,7 @@ fn restart_claude_worker_resolves_tools_from_spec_when_runtime_state_has_no_raw_
 fn worker_command_context_uses_single_prompt_and_permission_sources() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_root = crate_root.join("src");
-    let launch = read_to_string(&src_root.join("lifecycle/launch.rs"));
+    let launch = composite_source::composite_source("src/lifecycle/launch.rs");
     let restart_common = read_to_string(&src_root.join("lifecycle/restart/common.rs"));
     let restart_agent = read_to_string(&src_root.join("lifecycle/restart/agent.rs"));
     // 0.4.x decoupling step 2: claude argv builder moved to

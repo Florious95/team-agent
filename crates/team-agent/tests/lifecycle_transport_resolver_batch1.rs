@@ -22,6 +22,8 @@
 //!
 //! (Design §Batch 1 Verification, CR C-1/C-2/C-3.)
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::PathBuf;
 
 /// Anchor grep for the six product caller sites. If any of them is
@@ -70,8 +72,7 @@ fn batch1_migration_sites_present_in_source() {
         ),
     ];
     for (rel, needle) in sites {
-        let body = std::fs::read_to_string(root.join(rel))
-            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+        let body = composite_source::composite_source(&format!("src/{rel}"));
         assert!(
             body.contains(needle),
             "Batch 1 migration site {rel} lost its `{needle}` reference — either \

@@ -16,6 +16,8 @@ mod hermetic_guard;
 #[allow(dead_code)]
 fn _hermetic_boundary_marker(_: &hermetic_guard::HermeticTestEnv) {}
 
+#[path = "support/composite_source.rs"]
+mod composite_source;
 use std::path::Path;
 
 #[test]
@@ -92,5 +94,5 @@ fn provider_spawn_lines(text: &str) -> Vec<String> {
 }
 
 fn source(rel: &str) -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).expect("read source")
+    composite_source::composite_source(rel)
 }
