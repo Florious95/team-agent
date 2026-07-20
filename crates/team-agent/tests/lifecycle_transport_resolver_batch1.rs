@@ -4,8 +4,7 @@
 //! Batch 1 is the internal replacement of
 //! `lifecycle_worker_tmux_backend_for_selected_state` with routing
 //! through `transport_factory::resolve_transport`. Product callers go
-//! through either the legacy selected-state resolver or the canonical
-//! `LifecyclePaths` selected-state helper; both routes use the factory.
+//! through the canonical `LifecyclePaths` selected-state helper.
 //!
 //! Behavior equivalence for **tmux** state is unchanged (same
 //! endpoint fallback + workspace socket). The new contract this batch
@@ -65,6 +64,18 @@ fn batch1_migration_sites_present_in_source() {
         3,
         "the start/stop/reset production entry points must all reuse the canonical SelectedTeam transport"
     );
+    let agent_code = agent
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        agent_code
+            .matches("lifecycle_worker_tmux_backend_for_selected_state(")
+            .count(),
+        0,
+        "start/stop/reset must not re-resolve the original selector through the legacy resolver"
+    );
     let lifecycle = std::fs::read_to_string(root.join("lifecycle/restart.rs"))
         .unwrap_or_else(|e| panic!("cannot read lifecycle/restart.rs: {e}"));
     for marker in [
@@ -86,6 +97,18 @@ fn batch1_migration_sites_present_in_source() {
             .count(),
         2,
         "remove and remove-preflight must reuse the canonical SelectedTeam transport"
+    );
+    let remove_code = remove
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        remove_code
+            .matches("lifecycle_worker_tmux_backend_for_selected_state(")
+            .count(),
+        0,
+        "remove and remove-preflight must not re-resolve the original selector through the legacy resolver"
     );
 
     let sites = [
