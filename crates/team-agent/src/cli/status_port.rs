@@ -10,8 +10,8 @@ use snapshot::read_runtime_state;
 pub(crate) use snapshot::RuntimeSnapshot;
 
 mod format;
-use format::format_agent_status;
 pub use format::format_approvals;
+use format::{ensure_agent_known, format_agent_status};
 
 mod approvals;
 pub(super) use approvals::*;
@@ -75,6 +75,7 @@ pub fn format_status_scoped(
     let snapshot = RuntimeSnapshot::assemble(workspace, state, owner_team_id)?;
     match agent {
         Some(agent) => {
+            ensure_agent_known(snapshot.full(), agent)?;
             let recent_messages = recent_agent_messages(workspace, agent)?;
             format_agent_status(snapshot.full(), agent, &recent_messages)
         }

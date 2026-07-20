@@ -7,13 +7,9 @@ pub(super) fn format_agent_status(
     agent_id: &str,
     inbox_rows: &[Value],
 ) -> Result<String, CliError> {
+    ensure_agent_known(status, agent_id)?;
     let agents = status.get("agents").and_then(Value::as_object);
     let health = status.get("agent_health").and_then(Value::as_object);
-    let known = agents.is_some_and(|map| map.contains_key(agent_id))
-        || health.is_some_and(|map| map.contains_key(agent_id));
-    if !known {
-        return Err(CliError::Runtime(format!("unknown agent id: {agent_id}")));
-    }
     let empty = json!({});
     let agent = agents.and_then(|map| map.get(agent_id)).unwrap_or(&empty);
     let row = health.and_then(|map| map.get(agent_id)).unwrap_or(&empty);
@@ -61,6 +57,17 @@ pub(super) fn format_agent_status(
         }
     }
     Ok(lines.join("\n"))
+}
+
+pub(super) fn ensure_agent_known(status: &Value, agent_id: &str) -> Result<(), CliError> {
+    let agents = status.get("agents").and_then(Value::as_object);
+    let health = status.get("agent_health").and_then(Value::as_object);
+    let known = agents.is_some_and(|map| map.contains_key(agent_id))
+        || health.is_some_and(|map| map.contains_key(agent_id));
+    if !known {
+        return Err(CliError::Runtime(format!("unknown agent id: {agent_id}")));
+    }
+    Ok(())
 }
 
 /// `current_task_for_agent`(`approvals/status.py:127-132`)。
