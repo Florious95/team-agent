@@ -11,7 +11,11 @@ pub struct AllowedStateSaveCall {
     pub evidence_line: usize,
 }
 
-pub const BASELINE_DIRECT_SAVE_COUNT: usize = 29;
+// Was 29 at G0. Bumped to 30 for the leader-inbound `save_runtime_state_with_
+// receiver_authority` repository-internal authority helper (see its ALLOWED row).
+// This count tracks ALLOWED rows; the external-writer subset is ratcheted DOWN
+// separately (never up) — see the FROZEN_G0_ROW_KEYS extension predicate.
+pub const BASELINE_DIRECT_SAVE_COUNT: usize = 30;
 
 macro_rules! allow {
     ($path:literal, $fn:literal, $callee:literal, $intent:literal, $phase:literal, $line:literal) => {
@@ -59,6 +63,22 @@ pub const ALLOWED_STATE_SAVE_CALLS: &[AllowedStateSaveCall] = &[
         "repository_internal",
         "repository_internal",
         234
+    ),
+    // leader-inbound receiver-authority merge (slice2b/leader-inbound evolution):
+    // a repository-internal authority helper in the SAME family as
+    // `save_runtime_state_with_lifecycle_topology_authority` above — called ONLY
+    // via `StateWriteIntent::{ClaimLeader,LeaderStartBinding}` dispatch
+    // (repository.rs:386/394), `is_external_writer("state/persist.rs") == false`.
+    // Its G0 extension is governed by the extension predicate documented at the
+    // FROZEN_G0_ROW_KEYS header: internal-extensible authority helpers may grow
+    // with repository evolution; the external 38->0 ratchet is untouched.
+    allow!(
+        "state/persist.rs",
+        "save_runtime_state_with_receiver_authority",
+        "save_runtime_state_with_merge_options",
+        "repository_internal",
+        "repository_internal",
+        216
     ),
     allow!(
         "state/persist.rs",

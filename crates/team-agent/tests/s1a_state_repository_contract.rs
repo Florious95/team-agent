@@ -33,10 +33,22 @@ const FORBIDDEN_INTENT_VARIANTS: &[&str] = &[
 ];
 
 /// G0 frozen row keys (path::fn::callee, one entry per baseline row, sorted).
-/// Ratchet invariant: the live allowlist may only DELETE rows relative to this
-/// set — never add or rename. Slice-end external zero emerges from deletion:
-/// once every external row is removed, any remaining external callsite fails
-/// RED1 as unclassified.
+/// Ratchet invariant (external writers): the live allowlist may only DELETE
+/// external-writer rows relative to this set — never add or rename. Slice-end
+/// external zero emerges from deletion: once every external row is removed, any
+/// remaining external callsite fails RED1 as unclassified.
+///
+/// Extension predicate (repository-internal authority helpers ONLY): a row MAY
+/// be ADDED here iff it is a repository-internal authority helper — precisely,
+/// `is_external_writer(path) == false` AND the write is reached only through
+/// `StateWriteIntent` dispatch (same family as
+/// `save_runtime_state_with_lifecycle_topology_authority`). Such helpers grow
+/// with repository evolution (e.g. leader-inbound
+/// `save_runtime_state_with_receiver_authority`); this is NOT an "internal code
+/// may add anything" loophole — an external writer can NEVER be added, only
+/// deleted. The `external_live` accounting below stays a pure down-ratchet.
+/// (verifier single-point sign-off, leader msg_f9bf8320c5d0; the structural
+/// question of encoding this split in the scanner itself is an arch-delta item.)
 const FROZEN_G0_ROW_KEYS: &[&str] = &[
     "cli/adapters.rs::fake_shutdown::save_runtime_state",
     "cli/adapters.rs::seed_fake_e2e_state::save_runtime_state",
@@ -82,6 +94,9 @@ const FROZEN_G0_ROW_KEYS: &[&str] = &[
     "state/persist.rs::save_runtime_state_reapplying_after_conflict::save_runtime_state",
     "state/persist.rs::save_runtime_state_with_deleted_agents::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority::save_runtime_state_with_merge_options",
+    // repository-internal authority helper added per the extension predicate above
+    // (leader-inbound receiver authority; is_external_writer == false).
+    "state/persist.rs::save_runtime_state_with_receiver_authority::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_team_tombstone_lifecycle_topology_authority::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_team_tombstoned_agents::save_runtime_state_with_merge_options",

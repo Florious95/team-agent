@@ -19,15 +19,27 @@ use std::path::PathBuf;
 
 use state_save_allowlist::{ALLOWED_STATE_SAVE_CALLS, BASELINE_DIRECT_SAVE_COUNT};
 
-/// Post-car-A snapshot (external = 0, 29 authority-internal rows). The live
+/// Post-car-A snapshot (external = 0, 30 authority-internal rows). The live
 /// allowlist may only DELETE relative to this set; the historical G0 67-row
 /// set is deliberately NOT used here - it would allow deleted debt back in.
+///
+/// Snapshot extension (verifier single-point sign-off, leader msg_f9bf8320c5d0):
+/// this snapshot was 29 rows; the leader-inbound
+/// `save_runtime_state_with_receiver_authority` row was ADDED under the same
+/// extension predicate documented at the RED1 `FROZEN_G0_ROW_KEYS` header —
+/// a repository-internal authority helper (`is_external_writer == false`,
+/// reached only via `StateWriteIntent` dispatch, path in `AUTHORITY_PATHS`).
+/// External writers are already at zero here and can NEVER be added — this
+/// snapshot is authority-only by construction, so the extension does not touch
+/// external protection. Whether this per-row hand-extension should be replaced by a
+/// structural external-frozen-vs-internal-extensible split is an arch-delta item.
 const FROZEN_CURRENT_ROW_KEYS: &[&str] = &[
     "state/persist.rs::load_runtime_state::save_runtime_state",
     "state/persist.rs::save_runtime_state::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_reapplying_after_conflict::save_runtime_state",
     "state/persist.rs::save_runtime_state_reapplying_after_conflict::save_runtime_state",
     "state/persist.rs::save_runtime_state_with_deleted_agents::save_runtime_state_with_merge_options",
+    "state/persist.rs::save_runtime_state_with_receiver_authority::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip::save_runtime_state_with_merge_options",
     "state/persist.rs::save_runtime_state_with_team_tombstone_lifecycle_topology_authority::save_runtime_state_with_merge_options",
