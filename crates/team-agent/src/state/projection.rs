@@ -496,7 +496,12 @@ pub fn resolve_runtime_team_scope(
                         || teams.is_some_and(|teams| teams.contains_key(*active))
                 })
                 .map(str::to_string)
-                .or_else(|| teams.is_none_or(Map::is_empty).then(|| team_state_key(&state)))
+                .or_else(|| {
+                    teams
+                        .is_none_or(Map::is_empty)
+                        .then(|| team_state_key(&state))
+                        .filter(|derived| derived != "current")
+                })
                 .ok_or_else(|| {
                     StateError::TeamSelect(format!(
                         "team 'current' not found. {}",
@@ -1222,11 +1227,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_runtime_team_scope_current_keeps_empty_workspace_bootstrap() {
+    fn resolve_runtime_team_scope_current_rejects_empty_workspace_bootstrap() {
         let ws = temp_ws_with_state(&json!({}));
-        let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
-        assert_eq!(resolved.canonical_team_key, "current");
-        assert_eq!(resolved.state["active_team_key"], json!("current"));
+        let error = resolve_runtime_team_scope(&ws, Some("current")).unwrap_err();
+        assert!(error.to_string().contains("team 'current' not found"));
+        let saved = load_runtime_state(&ws).unwrap();
+        assert_ne!(
+            saved.get("active_team_key").and_then(Value::as_str),
+            Some("current")
+        );
+        assert!(!crate::model::paths::runtime_spec_path(&ws, "current").exists());
     }
 
     // 对抗 P1:空串 team 必须走「无 team」分支(Python `if team:` falsy),报「multiple teams」
