@@ -64,6 +64,7 @@ pub mod activity;
 pub mod address;
 pub mod delivery;
 pub mod helpers;
+pub mod leader_channel;
 pub mod leader_receiver;
 pub mod peers;
 pub mod persist;
@@ -86,6 +87,10 @@ pub use delivery::{
     tmux_pane_width,
 };
 pub use helpers::fail_leader_delivery;
+pub use leader_channel::{
+    resolve_live_leader_channel, DirectTmuxLeaderChannel, LeaderChannelResolution,
+    LeaderChannelUnbound, LiveLeaderChannel,
+};
 pub use leader_receiver::{
     deliver_to_leader_fallback_pane, enqueue_leader_mailbox_until_attach,
     mirror_peer_message_to_leader, send_to_leader_receiver,

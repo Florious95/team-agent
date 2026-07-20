@@ -46,6 +46,7 @@ use super::persist::{
     save_runtime_state_with_deleted_agents as helper_write_root_with_deleted_agents,
     save_runtime_state_with_lifecycle_topology_authority as helper_write_root_with_lifecycle_topology_authority,
     save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip as helper_write_root_with_lifecycle_topology_authority_and_capture_backfill_skip,
+    save_runtime_state_with_receiver_authority as helper_write_root_with_receiver_authority,
     save_runtime_state_with_team_tombstone_lifecycle_topology_authority as helper_write_root_with_team_tombstone_lifecycle_topology_authority,
     save_runtime_state_with_team_tombstoned_agents as helper_write_root_with_team_tombstoned_agents,
     save_runtime_state_without_migrations as helper_write_root_without_migrations,
@@ -391,13 +392,17 @@ fn route_direct(
         // ClaimLeader -> leader/lease.rs:1625 uses the root helper, and the
         // scoped preserve-claim-fields variant at :1702 uses the team-tombstoned
         // agents helper.
-        StateWriteIntent::ClaimLeader { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::ClaimLeader { team_key } => {
+            helper_write_root_with_receiver_authority(workspace, state, team_key)
+        }
         StateWriteIntent::LeaderBindingRestoreNonTargetTeams { .. } => {
             helper_write_root_without_migrations(workspace, state)
         }
         // LeaderStartBinding -> managed/exec/external all root-save at
         // leader/start.rs:795/903/946.
-        StateWriteIntent::LeaderStartBinding { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::LeaderStartBinding { team_key, .. } => {
+            helper_write_root_with_receiver_authority(workspace, state, team_key)
+        }
         // CoordinatorTick dispatches to the existing scoped helper
         // (`save_team_scoped_state`) preserving coordinator/tick.rs:427.
         StateWriteIntent::CoordinatorTick { .. } => helper_write_team_scoped(workspace, state),

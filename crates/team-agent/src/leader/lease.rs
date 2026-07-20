@@ -712,25 +712,46 @@ fn claim_lease_no_incident_with_target(
             candidate_source,
             pre_epoch,
         );
-        if converged {
+        let observation_refreshed = caller_pane_info.is_some_and(|pane_info| {
+            refresh_already_bound_receiver_observation(
+                state,
+                pane_info,
+                observed_endpoint.or(current_endpoint.as_deref()),
+                scoped_team.or(team),
+            )
+        });
+        if converged || observation_refreshed {
             write_claim_state(workspace, state, scoped_team, team)?;
-            topology_convergence = verify_persisted_topology_convergence(
-                workspace,
-                team_id.as_str(),
-                topology_convergence,
-                pre_epoch,
-            )?;
-            if topology_convergence
-                .as_ref()
-                .and_then(|metadata| metadata.get("status"))
-                .and_then(Value::as_str)
-                != Some("converged")
-            {
-                return Ok(convergence_persistence_refusal(
+            if observation_refreshed {
+                event_log.write(
+                    "leader_receiver.observation_refreshed",
+                    json!({
+                        "pane_id": caller_pane.as_str(),
+                        "owner_epoch": pre_epoch.0,
+                        "owner_changed": false,
+                        "source": "claim_leader_already_bound",
+                    }),
+                )?;
+            }
+            if converged {
+                topology_convergence = verify_persisted_topology_convergence(
+                    workspace,
+                    team_id.as_str(),
                     topology_convergence,
                     pre_epoch,
-                    Some(caller_pane.clone()),
-                ));
+                )?;
+                if topology_convergence
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("status"))
+                    .and_then(Value::as_str)
+                    != Some("converged")
+                {
+                    return Ok(convergence_persistence_refusal(
+                        topology_convergence,
+                        pre_epoch,
+                        Some(caller_pane.clone()),
+                    ));
+                }
             }
         }
         return Ok(LeaseResult {
@@ -1659,6 +1680,108 @@ fn receiver_fingerprint(target: &PaneInfo) -> String {
     )
 }
 
+fn refresh_already_bound_receiver_observation(
+    state: &mut Value,
+    observed: &PaneInfo,
+    observed_endpoint: Option<&str>,
+    team_key: Option<&str>,
+) -> bool {
+    let attached_at = now_ts();
+    let mut refreshed = state
+        .get_mut("leader_receiver")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|receiver| {
+            refresh_receiver_observation(
+                receiver,
+                observed,
+                observed_endpoint,
+                attached_at.as_str(),
+            )
+        });
+    if let Some(team_key) = team_key {
+        refreshed |= state
+            .get_mut("teams")
+            .and_then(|teams| teams.get_mut(team_key))
+            .and_then(|entry| entry.get_mut("leader_receiver"))
+            .and_then(Value::as_object_mut)
+            .is_some_and(|receiver| {
+                refresh_receiver_observation(
+                    receiver,
+                    observed,
+                    observed_endpoint,
+                    attached_at.as_str(),
+                )
+            });
+    }
+    refreshed
+}
+
+fn refresh_receiver_observation(
+    receiver: &mut serde_json::Map<String, Value>,
+    observed: &PaneInfo,
+    observed_endpoint: Option<&str>,
+    attached_at: &str,
+) -> bool {
+    let before = Value::Object(receiver.clone());
+    receiver.insert(
+        "session_name".to_string(),
+        Value::String(observed.session.as_str().to_string()),
+    );
+    receiver.insert(
+        "window_index".to_string(),
+        observed
+            .window_index
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    receiver.insert(
+        "window_name".to_string(),
+        observed
+            .window_name
+            .as_ref()
+            .map(|value| Value::String(value.as_str().to_string()))
+            .unwrap_or(Value::Null),
+    );
+    receiver.insert(
+        "pane_index".to_string(),
+        observed
+            .pane_index
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    receiver.insert(
+        "pane_tty".to_string(),
+        observed
+            .tty
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    receiver.insert(
+        "pane_current_command".to_string(),
+        observed
+            .current_command
+            .as_ref()
+            .map(|value| Value::String(value.clone()))
+            .unwrap_or(Value::Null),
+    );
+    receiver.insert(
+        "fingerprint".to_string(),
+        Value::String(receiver_fingerprint(observed)),
+    );
+    if let Some(endpoint) = observed_endpoint.filter(|value| !value.is_empty()) {
+        receiver.insert(
+            "tmux_socket".to_string(),
+            Value::String(endpoint.to_string()),
+        );
+    }
+    receiver.insert(
+        "attached_at".to_string(),
+        Value::String(attached_at.to_string()),
+    );
+    Value::Object(receiver.clone()) != before
+}
+
 fn make_owner(
     provider: Provider,
     pane: &NonEmptyPaneId,
@@ -2124,6 +2247,22 @@ fn readable_team_snapshot_path(w: &BP, n: &str) -> BF /* B0_DIAGNOSTIC_LEGACY_SN
 mod tests {
     use super::*;
 
+    fn observed_pane() -> PaneInfo {
+        PaneInfo {
+            pane_id: PaneId::new("%7"),
+            session: crate::transport::SessionName::new("new-session"),
+            window_index: Some(3),
+            window_name: Some(crate::transport::WindowName::new("new-window")),
+            pane_index: Some(1),
+            tty: Some("/dev/ttys007".to_string()),
+            current_command: Some("codex".to_string()),
+            current_path: None,
+            active: true,
+            pane_pid: Some(700),
+            leader_env: std::collections::BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn attribute_command_provider_recognizes_copilot() {
         assert_eq!(
@@ -2133,6 +2272,53 @@ mod tests {
         assert_eq!(
             super::super::attribute_command_provider("/usr/local/bin/copilot"),
             Some(Provider::Copilot)
+        );
+    }
+
+    #[test]
+    fn already_bound_refresh_updates_observations_without_reclaiming() {
+        let mut state = json!({
+            "leader_receiver": {
+                "status": "attached",
+                "pane_id": "%7",
+                "owner_epoch": 10,
+                "owner_agent_id": "leader",
+                "session_name": "old-session",
+                "pane_tty": "/dev/old",
+                "attached_at": "2026-01-01T00:00:00Z"
+            },
+            "teams": {"team-a": {"leader_receiver": {
+                "status": "attached",
+                "pane_id": "%7",
+                "owner_epoch": 10,
+                "owner_agent_id": "leader",
+                "session_name": "old-session",
+                "pane_tty": "/dev/old",
+                "attached_at": "2026-01-01T00:00:00Z"
+            }}}
+        });
+
+        assert!(refresh_already_bound_receiver_observation(
+            &mut state,
+            &observed_pane(),
+            Some("/tmp/team-agent-live.sock"),
+            Some("team-a"),
+        ));
+        let receiver = &state["leader_receiver"];
+        assert_eq!(receiver["owner_epoch"], json!(10));
+        assert_eq!(receiver["owner_agent_id"], json!("leader"));
+        assert_eq!(receiver["session_name"], json!("new-session"));
+        assert_eq!(receiver["window_name"], json!("new-window"));
+        assert_eq!(receiver["pane_tty"], json!("/dev/ttys007"));
+        assert_eq!(receiver["tmux_socket"], json!("/tmp/team-agent-live.sock"));
+        assert_ne!(receiver["attached_at"], json!("2026-01-01T00:00:00Z"));
+        assert_eq!(
+            state["teams"]["team-a"]["leader_receiver"]["session_name"],
+            json!("new-session")
+        );
+        assert_eq!(
+            state["teams"]["team-a"]["leader_receiver"]["owner_epoch"],
+            json!(10)
         );
     }
 }

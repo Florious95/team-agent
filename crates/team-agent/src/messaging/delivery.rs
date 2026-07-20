@@ -223,16 +223,40 @@ pub fn deliver_pending_message(
         return observe_pending_leader_acceptance(store, event_log, state, message_id);
     }
     if message.recipient == "leader" && message.status == "queued_until_leader_attach" {
-        if leader_receiver_status(state) != Some("attached") {
+        let Some(receiver) = leader_receiver_value(state) else {
             return Ok(leader_acceptance_pending_outcome(
                 message_id,
                 "queued_until_leader_attach",
             ));
-        }
+        };
+        let channel_transport =
+            delivery_transport_for_recipient(workspace, transport, state, "leader");
+        let resolution = crate::messaging::resolve_live_leader_channel(
+            receiver,
+            channel_transport.as_transport(),
+        );
+        let crate::messaging::LeaderChannelResolution::Live(channel) = resolution else {
+            return Ok(leader_acceptance_pending_outcome(
+                message_id,
+                "queued_until_leader_attach",
+            ));
+        };
+        let metadata_drift = match &channel {
+            crate::messaging::LiveLeaderChannel::DirectTmux(channel) => {
+                channel.metadata_drift.clone()
+            }
+            crate::messaging::LiveLeaderChannel::CodexAppServer(_) => Vec::new(),
+        };
         store.mark(message_id, "accepted", None)?;
         event_log.write(
             "leader_receiver.mailbox_requeued",
-            serde_json::json!({"message_id": message_id}),
+            serde_json::json!({
+                "message_id": message_id,
+                "channel_live": true,
+                "metadata_drift": metadata_drift,
+                "requeue_trigger": "delivery_revalidation",
+                "revalidated_at": chrono::Utc::now().to_rfc3339(),
+            }),
         )?;
     }
     let attempt = if store.claim_for_delivery(message_id)? {
@@ -252,87 +276,106 @@ pub fn deliver_pending_message(
         });
     };
     if message.recipient == "leader" {
-        if let Some(receiver) = leader_receiver_value(state) {
-            if let Some(outcome) = leader_receiver_transport_conflict_outcome(
-                store,
-                event_log,
-                message_id,
-                receiver,
-                &message.sender,
-            )? {
-                return Ok(outcome);
+        let Some(receiver) = leader_receiver_value(state) else {
+            store.mark(message_id, "failed", Some("leader_not_attached"))?;
+            event_log.write(
+                "leader_receiver.delivery_blocked",
+                serde_json::json!({
+                    "message_id": message_id,
+                    "sender": message.sender,
+                    "reason": "leader_receiver_not_attached",
+                    "error": "leader_not_attached",
+                    "channel_reason": "receiver_missing",
+                    "channel": "rebind_required",
+                    "action": "run team-agent attach-leader or team-agent takeover",
+                    "status": "unbound",
+                }),
+            )?;
+            return Ok(DeliveryOutcome {
+                ok: false,
+                status: DeliveryStatus::Refused,
+                message_status: MessageStatusShadow("failed".to_string()),
+                message_id: Some(message_id.to_string()),
+                verification: Some(
+                    "run team-agent attach-leader or team-agent takeover".to_string(),
+                ),
+                stage: None,
+                reason: Some(DeliveryRefusal::LeaderNotAttached),
+                channel: Some("rebind_required".to_string()),
+            });
+        };
+        if let Some(outcome) = leader_receiver_transport_conflict_outcome(
+            store,
+            event_log,
+            message_id,
+            receiver,
+            &message.sender,
+        )? {
+            return Ok(outcome);
+        }
+        let channel_transport =
+            delivery_transport_for_recipient(workspace, transport, state, "leader");
+        match crate::messaging::resolve_live_leader_channel(
+            receiver,
+            channel_transport.as_transport(),
+        ) {
+            crate::messaging::LeaderChannelResolution::Live(_) => {}
+            crate::messaging::LeaderChannelResolution::ProbeFailed(error) => {
+                store.mark(message_id, "target_resolved", Some(&error))?;
+                return Ok(DeliveryOutcome {
+                    ok: false,
+                    status: DeliveryStatus::Degraded,
+                    message_status: MessageStatusShadow("target_resolved".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some(error),
+                    stage: None,
+                    reason: None,
+                    channel: Some("rebind_required".to_string()),
+                });
             }
-            // 0.5.4 gate054 cross-team leak fix: a `leader_receiver.status`
-            // other than `"attached"` (restart demotes killed-session receivers
-            // to `"rebind_required"` — lifecycle/restart/rebuild.rs:1311) MUST
-            // refuse delivery before any pane injection or cross-server pane-id
-            // probing. Without this gate, a stale receiver on team A's socket
-            // could otherwise fall back to the same pane id on the main tmux
-            // server (delivery.rs:1150-1201) and inject A's leader traffic into
-            // team B's leader pane. See .team/artifacts/0.5.4-gate-crossteam-notify-triage.md.
-            if let Some(status) = leader_receiver_status(state) {
-                if status != "attached" {
-                    store.mark(message_id, "failed", Some("leader_not_attached"))?;
-                    event_log.write(
-                        "leader_receiver.delivery_blocked",
-                        serde_json::json!({
-                            "message_id": message_id,
-                            "sender": message.sender,
-                            "reason": "leader_receiver_not_attached",
-                            "channel": "rebind_required",
-                            "action": "run team-agent attach-leader or team-agent takeover",
-                            "status": status,
-                        }),
-                    )?;
-                    return Ok(DeliveryOutcome {
-                        ok: false,
-                        status: DeliveryStatus::Refused,
-                        message_status: MessageStatusShadow("failed".to_string()),
-                        message_id: Some(message_id.to_string()),
-                        verification: Some(
-                            "run team-agent attach-leader or team-agent takeover".to_string(),
-                        ),
-                        stage: None,
-                        reason: Some(DeliveryRefusal::LeaderNotAttached),
-                        channel: Some("rebind_required".to_string()),
-                    });
-                }
-            }
-            if crate::codex_app_server::receiver_is_app_server(receiver) {
-                return deliver_leader_via_app_server(
-                    store,
-                    event_log,
-                    state,
-                    message_id,
-                    &message,
-                    canonical_owner_team_id.as_deref(),
-                );
+            crate::messaging::LeaderChannelResolution::Unbound(reason) => {
+                let receiver_status = receiver
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unbound");
+                store.mark(message_id, "failed", Some("leader_not_attached"))?;
+                event_log.write(
+                    "leader_receiver.delivery_blocked",
+                    serde_json::json!({
+                        "message_id": message_id,
+                        "sender": message.sender,
+                        "reason": "leader_receiver_not_attached",
+                        "error": "leader_not_attached",
+                        "channel_reason": format!("{reason:?}"),
+                        "channel": "rebind_required",
+                        "action": "run team-agent attach-leader or team-agent takeover",
+                        "status": receiver_status,
+                    }),
+                )?;
+                return Ok(DeliveryOutcome {
+                    ok: false,
+                    status: DeliveryStatus::Refused,
+                    message_status: MessageStatusShadow("failed".to_string()),
+                    message_id: Some(message_id.to_string()),
+                    verification: Some(
+                        "run team-agent attach-leader or team-agent takeover".to_string(),
+                    ),
+                    stage: None,
+                    reason: Some(DeliveryRefusal::LeaderNotAttached),
+                    channel: Some("rebind_required".to_string()),
+                });
             }
         }
-    }
-    if message.recipient == "leader" && leader_receiver_has_noncanonical_tmux_socket(state) {
-        store.mark(message_id, "failed", Some("leader_not_attached"))?;
-        event_log.write(
-            "leader_receiver.delivery_blocked",
-            serde_json::json!({
-                "message_id": message_id,
-                "sender": message.sender,
-                "reason": "leader_not_attached",
-                "channel": "rebind_required",
-                "action": "run team-agent claim-leader or team-agent takeover",
-                "error": "leader_receiver.tmux_socket is not a canonical full socket path",
-            }),
-        )?;
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Refused,
-            message_status: MessageStatusShadow("failed".to_string()),
-            message_id: Some(message_id.to_string()),
-            verification: Some("run team-agent claim-leader or team-agent takeover".to_string()),
-            stage: None,
-            reason: Some(DeliveryRefusal::LeaderNotAttached),
-            channel: Some("rebind_required".to_string()),
-        });
+        if crate::codex_app_server::receiver_is_app_server(receiver) {
+            return deliver_leader_via_app_server(
+                store,
+                event_log,
+                state,
+                message_id,
+                &message,
+                canonical_owner_team_id.as_deref(),
+            );
+        }
     }
     let delivery_transport =
         delivery_transport_for_recipient(workspace, transport, state, &message.recipient);
@@ -369,32 +412,6 @@ pub fn deliver_pending_message(
             });
         }
     };
-    // Do not inject queued leader messages into a synthetic "leader" window.
-    if message.recipient == "leader"
-        && !leader_receiver_pane_is_usable(transport, state, &live_targets)
-    {
-        store.mark(message_id, "failed", Some("leader_not_attached"))?;
-        event_log.write(
-            "leader_receiver.delivery_blocked",
-            serde_json::json!({
-                "message_id": message_id,
-                "sender": message.sender,
-                "reason": "leader_not_attached",
-                "channel": "rebind_required",
-                "action": "run team-agent claim-leader or team-agent takeover",
-            }),
-        )?;
-        return Ok(DeliveryOutcome {
-            ok: false,
-            status: DeliveryStatus::Refused,
-            message_status: MessageStatusShadow("failed".to_string()),
-            message_id: Some(message_id.to_string()),
-            verification: Some("run team-agent claim-leader or team-agent takeover".to_string()),
-            stage: None,
-            reason: Some(DeliveryRefusal::LeaderNotAttached),
-            channel: Some("rebind_required".to_string()),
-        });
-    }
     let resolved = resolve_inject_target(state, &message.recipient, transport, &live_targets);
     if let Some(stale) = resolved.stale_binding.as_ref() {
         event_log.write(
@@ -1533,32 +1550,6 @@ fn leader_receiver_pane_binding(state: &serde_json::Value) -> Option<PaneSocketB
         .or_else(|| only_team_entry(state).and_then(leader_receiver_pane_binding_in_state))
 }
 
-/// `state` is "usable" for leader delivery when the bound `leader_receiver.pane_id`
-/// is present and alive (in `live_targets` or `liveness` probe returns not-Dead).
-///
-/// **0.3.24 excision (U1-A real-machine RED v2)**: the wave-2 session+window drift
-/// fallback was removed. Drift now fails loudly as `leader_not_attached` —
-/// see resolve_inject_target and `.team/artifacts/u1-a-realmachine-v2-fix-or-excise.md`.
-fn leader_receiver_pane_is_usable(
-    transport: &dyn Transport,
-    state: &serde_json::Value,
-    live_targets: &[PaneInfo],
-) -> bool {
-    let Some(pane_id) = leader_receiver_pane_id(state) else {
-        return false;
-    };
-    if live_targets
-        .iter()
-        .any(|target| target.pane_id.as_str() == pane_id)
-    {
-        return true;
-    }
-    !matches!(
-        transport.liveness(&PaneId::new(pane_id)),
-        Ok(PaneLiveness::Dead)
-    )
-}
-
 /// 0.5.x Phase 1d Batch 4: the `Owned` variant now carries a boxed
 /// `Transport` trait object rather than a concrete `TmuxBackend`. All
 /// existing leader-fallback sites still supply a `TmuxBackend` here
@@ -1631,7 +1622,7 @@ fn delivery_transport_for_recipient<'a>(
         // switching transports on a match can cross the team/tmux boundary and
         // inject A's leader traffic into team B's leader pane. If the pane is
         // absent on the recorded endpoint, let the downstream
-        // `leader_receiver_pane_is_usable` guard produce `rebind_required`
+        // the shared leader-channel resolver produce `rebind_required`
         // instead of falling back to another server.
         let endpoint_backend = crate::transport_factory::tmux_endpoint_transport(socket);
         DeliveryTransport::Owned(Box::new(endpoint_backend))
@@ -1671,20 +1662,6 @@ fn pane_socket_binding(value: &serde_json::Value) -> Option<PaneSocketBinding<'_
 
 fn leader_receiver_tmux_socket(state: &serde_json::Value) -> Option<&str> {
     leader_receiver_field(state, "tmux_socket")
-}
-
-/// 0.5.4 gate054 cross-team leak fix: read the bound `leader_receiver.status`
-/// through the same team-scope resolution as [`leader_receiver_tmux_socket`].
-/// Restart marks demoted receivers as `"rebind_required"`
-/// (lifecycle/restart/rebuild.rs:1311); delivery must refuse before injecting
-/// or cross-server pane-id probing (delivery.rs:1150-1201).
-fn leader_receiver_status(state: &serde_json::Value) -> Option<&str> {
-    leader_receiver_field(state, "status")
-}
-
-fn leader_receiver_has_noncanonical_tmux_socket(state: &serde_json::Value) -> bool {
-    leader_receiver_tmux_socket(state)
-        .is_some_and(|socket| socket != "default" && !std::path::Path::new(socket).is_absolute())
 }
 
 fn leader_receiver_field<'a>(state: &'a serde_json::Value, field: &str) -> Option<&'a str> {

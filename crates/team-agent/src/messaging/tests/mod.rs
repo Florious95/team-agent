@@ -292,6 +292,7 @@ impl Drop for EnvGuardMsg {
 
 mod basic;
 mod e23;
+mod leader_channel;
 mod leader_inject_acceptance;
 mod main_preserved;
 mod runtime;

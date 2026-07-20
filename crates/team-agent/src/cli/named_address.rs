@@ -939,103 +939,67 @@ fn resolve_leader(
         );
         return Err(err);
     }
-    if crate::codex_app_server::receiver_is_app_server(receiver) {
-        return resolve_app_server_leader(
-            sender_workspace,
-            target_workspace,
-            team,
-            parsed,
-            receiver,
-        );
-    }
-    let pane_id = string_field(receiver, "pane_id")
-        .filter(|pane| !pane.is_empty())
-        .ok_or_else(|| {
-            let mut err = leader_not_attached_third_party(
-                target_workspace,
-                team,
-                None,
-                None,
-                None,
-                transport.tmux_endpoint(),
-            );
-            err.candidates =
-                leader_advisory_candidates(state, team, transport, "state_recorded_socket");
-            err
-        })?;
     let session = string_field(receiver, "session_name");
     let window = string_field(receiver, "window_name");
     let socket = string_field(receiver, "tmux_socket")
         .map(str::to_string)
         .or_else(|| transport.tmux_endpoint());
-    let targets = list_targets(transport)?;
-    let matches = targets
-        .iter()
-        .filter(|target| {
-            target.pane_id.as_str() == pane_id
-                && session.is_none_or(|expected| target.session.as_str() == expected)
-                && window.is_none_or(|expected| {
-                    target
-                        .window_name
-                        .as_ref()
-                        .is_some_and(|name| name.as_str() == expected)
-                })
-        })
-        .collect::<Vec<_>>();
-    let stale_pane_seen = targets
-        .iter()
-        .any(|target| target.pane_id.as_str() == pane_id);
-    match matches.len() {
-        1 => Ok(ResolvedNamedAddress {
+    match crate::messaging::resolve_live_leader_channel(receiver, transport) {
+        crate::messaging::LeaderChannelResolution::Live(
+            crate::messaging::LiveLeaderChannel::DirectTmux(channel),
+        ) => Ok(ResolvedNamedAddress {
             raw_name: parsed.display_name(),
             target_kind: NamedTargetKind::Leader,
             sender_workspace: sender_workspace.to_path_buf(),
             target_workspace: target_workspace.to_path_buf(),
             team_key: Some(team.to_string()),
             agent_id: None,
-            pane_id: pane_id.to_string(),
+            pane_id: channel.pane_id.clone(),
             session_name: session.map(str::to_string),
             window_name: window.map(str::to_string),
             tmux_endpoint: socket,
             transport_kind: Some("direct_tmux".to_string()),
             app_server: None,
-            state_pane_id: Some(pane_id.to_string()),
+            state_pane_id: Some(channel.pane_id),
             state_pane_stale: false,
             agent_status: None,
-            warning: None,
+            warning: (!channel.metadata_drift.is_empty()).then(|| {
+                format!(
+                    "leader_channel_metadata_drift:{}",
+                    channel.metadata_drift.join(",")
+                )
+            }),
         }),
-        0 => {
+        crate::messaging::LeaderChannelResolution::Live(
+            crate::messaging::LiveLeaderChannel::CodexAppServer(_),
+        ) => resolve_app_server_leader(sender_workspace, target_workspace, team, parsed, receiver),
+        crate::messaging::LeaderChannelResolution::Unbound(reason) => {
+            let pane_id = string_field(receiver, "pane_id");
             let mut err = leader_not_attached_third_party(
                 target_workspace,
                 team,
-                Some(pane_id),
+                pane_id,
                 session,
                 window,
                 socket,
             );
-            if stale_pane_seen {
-                err.log = format!("{} stale_tuple_mismatch=true", err.log);
-            }
+            err.log = format!("{} channel_unbound={reason:?}", err.log);
             err.candidates =
                 leader_advisory_candidates(state, team, transport, "state_recorded_socket");
             Err(err)
         }
-        _ => Err(name_ambiguous(
-            "multiple live panes matched leader_receiver pane id",
-            matches
-                .into_iter()
-                .map(|pane| {
-                    json!({
-                        "name": format!("{team}/leader"),
-                        "workspace": target_workspace.display().to_string(),
-                        "team_key": team,
-                        "pane_id": pane.pane_id.as_str(),
-                        "session": pane.session.as_str(),
-                        "window": pane.window_name.as_ref().map(|w| w.as_str()),
-                    })
-                })
-                .collect(),
-        )),
+        crate::messaging::LeaderChannelResolution::ProbeFailed(error) => {
+            let mut err = leader_not_attached_third_party(
+                target_workspace,
+                team,
+                string_field(receiver, "pane_id"),
+                session,
+                window,
+                socket,
+            );
+            err.log = format!("{} channel_probe_failed={error}", err.log);
+            Err(err)
+        }
     }
 }
 

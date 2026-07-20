@@ -205,7 +205,24 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], None, &[])
+    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], None, &[], None)
+}
+
+pub(crate) fn save_runtime_state_with_receiver_authority(
+    workspace: &Path,
+    state: &Value,
+    receiver_team_key: &str,
+) -> Result<(), StateError> {
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+        Some(receiver_team_key),
+    )
 }
 
 pub(crate) fn save_runtime_state_reapplying_after_conflict<F>(
@@ -241,6 +258,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
         &[],
         Some(topology_team_key),
         agent_ids,
+        None,
     )
 }
 
@@ -259,6 +277,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_b
         skip_capture_backfill_agent_ids,
         Some(skip_capture_backfill_team_key),
         topology_agent_ids,
+        None,
     )
 }
 
@@ -267,7 +286,16 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
     state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, deleted_agent_ids, None, &[], None, &[])
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        deleted_agent_ids,
+        None,
+        &[],
+        None,
+        &[],
+        None,
+    )
 }
 
 pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
@@ -284,6 +312,7 @@ pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
         tombstoned_agent_ids,
         None,
         &[],
+        None,
     )
 }
 
@@ -301,6 +330,7 @@ pub(crate) fn save_runtime_state_with_team_tombstone_lifecycle_topology_authorit
         agent_ids,
         Some(tombstoned_team_key),
         agent_ids,
+        None,
     )
 }
 
@@ -312,6 +342,7 @@ fn save_runtime_state_with_merge_options(
     skip_capture_backfill_agent_ids: &[&str],
     topology_update_team_key: Option<&str>,
     topology_update_agent_ids: &[&str],
+    receiver_update_team_key: Option<&str>,
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
     // Python `state.py:497`:先对入参 state 跑 `_migrate_state_identity`(就地填缺失 leader uuid)。
@@ -385,6 +416,11 @@ fn save_runtime_state_with_merge_options(
                     .map(move |agent_id| (team_key.to_string(), agent_id.to_string()))
             })
             .collect::<BTreeSet<_>>();
+        let receiver_updates = receiver_update_team_key
+            .into_iter()
+            .filter(|team_key| !team_key.is_empty())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
         apply_persist_merge_contract(
             &mut migrated,
             &latest,
@@ -392,6 +428,7 @@ fn save_runtime_state_with_merge_options(
             skip_capture_backfill_team_key,
             &skip_capture_backfill,
             &topology_updates,
+            &receiver_updates,
         )?;
     }
     // Stage 3 save-output strip second pass (defence-in-depth): after the
@@ -458,6 +495,7 @@ fn apply_persist_merge_contract(
     skip_capture_backfill_team_key: Option<&str>,
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
     topology_updates: &BTreeSet<(String, String)>,
+    receiver_updates: &BTreeSet<String>,
 ) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
@@ -539,6 +577,8 @@ fn apply_persist_merge_contract(
             };
             let topology_update_agent_ids =
                 topology_updates_for_team(topology_updates, authority_team);
+            let receiver_update_authoritative =
+                authority_team.is_some_and(|team_key| receiver_updates.contains(team_key));
             let projection = format!("teams.{team}.agents");
             // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
             // decide the containing team's aliveness from BOTH sides — a shutdown
@@ -568,7 +608,11 @@ fn apply_persist_merge_contract(
                 &topology_update_agent_ids,
                 team_alive,
             )?;
-            preserve_latest_ownership_fields(incoming_entry, latest_entry);
+            preserve_latest_ownership_fields(
+                incoming_entry,
+                latest_entry,
+                receiver_update_authoritative,
+            );
             preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
         }
     }
@@ -681,8 +725,12 @@ fn should_skip_capture_backfill(
     }
 }
 
-fn preserve_latest_ownership_fields(incoming: &mut Value, latest: &Value) {
-    if !latest_has_preferable_ownership(incoming, latest) {
+fn preserve_latest_ownership_fields(
+    incoming: &mut Value,
+    latest: &Value,
+    receiver_update_authoritative: bool,
+) {
+    if !latest_has_preferable_ownership(incoming, latest, receiver_update_authoritative) {
         return;
     }
     let Some(incoming_obj) = incoming.as_object_mut() else {
@@ -746,13 +794,19 @@ fn endpoint_convergence_epoch(state: &Value) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
-fn latest_has_preferable_ownership(incoming: &Value, latest: &Value) -> bool {
+fn latest_has_preferable_ownership(
+    incoming: &Value,
+    latest: &Value,
+    receiver_update_authoritative: bool,
+) -> bool {
     let latest_epoch = ownership_epoch(latest);
     let incoming_epoch = ownership_epoch(incoming);
     if latest_epoch > incoming_epoch {
         return true;
     }
-    latest_epoch == incoming_epoch && !ownership_attached(incoming) && ownership_attached(latest)
+    latest_epoch == incoming_epoch
+        && !receiver_update_authoritative
+        && (ownership_attached(latest) || !ownership_attached(incoming))
 }
 
 fn ownership_epoch(state: &Value) -> u64 {
@@ -2530,6 +2584,100 @@ mod tests {
             alpha.get("session_id"),
             Some(&Value::Null),
             "0.4.6: partial poisoned latest must not resurrect cleared session_id; got {alpha}"
+        );
+    }
+
+    fn ownership_projection(session: &str, tty: &str) -> Value {
+        let entry = json!({
+            "session_name": "team-authority-merge",
+            "owner_epoch": 10,
+            "team_owner": {"status": "attached", "owner_epoch": 10, "pane_id": "%7"},
+            "leader_receiver": {
+                "status": "attached",
+                "owner_epoch": 10,
+                "pane_id": "%7",
+                "session_name": session,
+                "pane_tty": tty
+            }
+        });
+        let mut state = json!({
+            "session_name": "team-authority-merge",
+            "active_team_key": "team-authority-merge",
+            "teams": {
+                "team-authority-merge": entry.clone(),
+                "sibling": entry.clone()
+            }
+        });
+        state["teams"][CURRENT_TEAM_ALIAS] = entry;
+        state
+    }
+
+    #[test]
+    fn equal_epoch_ordinary_writer_preserves_latest_receiver_observation() {
+        let mut incoming = ownership_projection("stale-session", "/dev/stale");
+        let latest = ownership_projection("refreshed-session", "/dev/refreshed");
+        apply_persist_merge_contract(
+            &mut incoming,
+            &latest,
+            &BTreeSet::new(),
+            None,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            incoming.pointer("/teams/team-authority-merge/leader_receiver/session_name"),
+            Some(&json!("refreshed-session"))
+        );
+        assert_eq!(
+            incoming.pointer("/teams/team-authority-merge/leader_receiver/pane_tty"),
+            Some(&json!("/dev/refreshed"))
+        );
+        assert_eq!(
+            incoming["teams"][CURRENT_TEAM_ALIAS]["leader_receiver"]["session_name"],
+            json!("refreshed-session")
+        );
+        assert_eq!(
+            incoming["teams"]["sibling"]["leader_receiver"]["session_name"],
+            json!("refreshed-session")
+        );
+    }
+
+    #[test]
+    fn equal_epoch_receiver_authority_keeps_incoming_refresh() {
+        let mut incoming = ownership_projection("refreshed-session", "/dev/refreshed");
+        let latest = ownership_projection("stale-session", "/dev/stale");
+        let receiver_updates = BTreeSet::from(["team-authority-merge".to_string()]);
+        apply_persist_merge_contract(
+            &mut incoming,
+            &latest,
+            &BTreeSet::new(),
+            None,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &receiver_updates,
+        )
+        .unwrap();
+
+        assert_eq!(
+            incoming.pointer("/teams/team-authority-merge/leader_receiver/session_name"),
+            Some(&json!("refreshed-session"))
+        );
+        assert_eq!(
+            incoming.pointer("/teams/team-authority-merge/leader_receiver/pane_tty"),
+            Some(&json!("/dev/refreshed"))
+        );
+        assert_eq!(
+            incoming["teams"][CURRENT_TEAM_ALIAS]["leader_receiver"]["session_name"],
+            json!("refreshed-session"),
+            "current alias must inherit the active team's receiver authority"
+        );
+        assert_eq!(
+            incoming["teams"]["sibling"]["leader_receiver"]["session_name"],
+            json!("stale-session"),
+            "team-scoped receiver authority must not overwrite a sibling's latest tuple"
         );
     }
 }
