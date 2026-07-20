@@ -675,6 +675,78 @@ fn terminal_active_team_key_does_not_widen_topology_authority_to_bare_id() {
     );
 }
 
+/// Cross-product cell (verifier, slice2b current-alias fix): the `current`
+/// physical alias dimension x the sibling same-id retirement dimension. The
+/// reset fix routes `team == "current"` authority through `top_level_team`
+/// (active_team_key). This pins that the alias branch does NOT leak that
+/// active-team authority into a REAL sibling that merely shares the agent id:
+/// a `current` alias entry (= the active team's physical projection) plus a
+/// distinct sibling team both carrying `alpha`, sibling retired, stale incoming
+/// resurrecting sibling alpha. The current-alias authority must clear only the
+/// active team's own alpha, never the sibling's newer retirement.
+#[test]
+fn current_alias_authority_does_not_leak_into_real_sibling_same_id_retirement() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
+    latest["team_key"] = json!("laneateam");
+    latest["active_team_key"] = json!("laneateam");
+    let mut nested_a = crate::state::projection::compact_team_state(&latest);
+    nested_a["status"] = json!("alive");
+    // `current` is the physical alias of the active team (laneateam); a REAL
+    // sibling team also carries alpha, retired and newer than the stale incoming.
+    latest["teams"] = json!({
+        "laneateam": nested_a.clone(),
+        "current": nested_a,
+        "sibling": {
+            "team_key": "sibling",
+            "status": "alive",
+            "agents": {},
+            "agent_lifecycle": {
+                "alpha": { "state": "retired", "changed_at": "2026-07-21T00:00:00Z", "reason": "sibling" }
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &latest).unwrap();
+
+    let mut incoming_stale = latest.clone();
+    incoming_stale["teams"]["sibling"] = json!({
+        "team_key": "sibling",
+        "status": "alive",
+        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agent_lifecycle": {}
+    });
+
+    crate::state::repository::StateRepository::new(&ws)
+        .save(
+            crate::state::repository::StateWriteIntent::AddAgent {
+                team_key: "laneateam",
+                agent_id: "alpha",
+            },
+            &incoming_stale,
+        )
+        .unwrap();
+
+    let after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+    )
+    .unwrap();
+    // The current-alias authority is the ACTIVE team's; it must not reach the
+    // real sibling that only shares the id.
+    assert_eq!(
+        after["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"],
+        json!("retired"),
+        "current-alias authority must not leak into a real sibling's same-id retirement"
+    );
+    assert!(
+        after["teams"]["sibling"]["agents"].get("alpha").is_none(),
+        "a stale incoming must not resurrect the real sibling's retired same-id agent \
+         via the current-alias authority path"
+    );
+}
+
 const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
 
 struct HermeticTestEnv {
