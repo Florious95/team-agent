@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.51
+
+- **Refactor/Hardening: state-write authority + module decomposition campaign (car A + smell-34).**
+  - **State-write authority converged.** External direct state saves reduced to zero (38 -> 0); all runtime-state writes route through the repository facade with typed reapply scope (`UpdateStateNote` -> team, `AssignTask` -> root). Three governance gates hardened against escape probes: the allowlist ratchet pins the current authority snapshot (deletion-only), the direct-save family cannot be aliased or imported outside the authority, and every source file touching the runtime `state.json` surface is enumerated.
+  - **`send` / `status` / `launch` mechanically decomposed.** `cli/send.rs`, `cli/status_port.rs`, and `lifecycle/launch.rs` were split into focused sibling modules (each < 500 lines) with an acyclic dependency graph; `RuntimeSnapshot` is the sole runtime status read-model assembler. Source-guard contracts read the composite file+sibling surface so a split cannot silently break a guard.
+  - **Status agent-detail error priority preserved.** `status --agent <unknown>` reports the unknown agent before decoding any inbox row, so a corrupt stored row can never turn a status query into a storage-layer error.
+
 ## 0.5.50
 
 - **Feat/Refactor: message-protocol overhaul M0-M3 — one send surface, sealed identity, everything persisted first.**
