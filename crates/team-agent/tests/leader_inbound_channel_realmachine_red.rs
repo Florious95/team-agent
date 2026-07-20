@@ -218,6 +218,19 @@ impl RealTeam {
         )
         .ok()
     }
+
+    /// The number of `messages` rows carrying this id — pins that revalidation
+    /// migrates the mailbox row IN PLACE and never spawns a replacement row.
+    fn row_count(&self, message_id: &str) -> i64 {
+        let store = MessageStore::open(&self.root).unwrap();
+        let conn = team_agent::db::schema::open_db(store.db_path()).unwrap();
+        conn.query_row(
+            "select count(*) from messages where message_id = ?1",
+            params![message_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(-1)
+    }
 }
 
 impl Drop for RealTeam {
@@ -388,5 +401,80 @@ fn live_pane_matching_socket_does_revalidate_leader_row() {
         "a live real pane on the recorded absolute socket IS a live leader channel: the candidate \
          must revalidate (leave queued_until_leader_attach). If this stayed queued, ④'s \
          'stays queued' verdict would not be attributable to socket authority. got {status:?}"
+    );
+}
+
+/// ⑥ revalidation reuses the SAME row exactly once (locate §8
+/// `revalidation_reuses_same_row_exactly_once`, locate:237 "migrate in place;
+/// never create replacement rows"). A live-pane revalidation migrates the mailbox
+/// row in place (`store.mark`, not an insert), and a REPEAT deliver is idempotent
+/// — no second row, no churn back to queued. Candidate-tier regression guard:
+/// both lineages `store.mark` in place at the revalidation point, so there is no
+///先红 (pre-red) behavior split here (unlike ④); this locks that the in-place/
+/// exactly-once property is not silently traded for a replacement-row scheme.
+/// Paired with the
+/// live-pane positive control above so "one row" is asserted on a row that DID
+/// revalidate (not one that never left queued).
+#[test]
+fn revalidation_reuses_same_row_exactly_once() {
+    if !authorized() {
+        eprintln!(
+            "SKIP (destructive, unauthorized): pins ⑥ revalidation migrates the mailbox row in \
+             place (one id, one row) and a repeat deliver is idempotent"
+        );
+        return;
+    }
+    let mut t = RealTeam::new("exactlyonce");
+    t.quick_start("worker_a");
+    let panes = t.live_pane_ids();
+    let pane = panes
+        .first()
+        .expect("quick-start must leave at least one live pane")
+        .clone();
+
+    let attached = t.attach_leader(&pane);
+    assert_eq!(
+        attached.get("ok").and_then(Value::as_bool),
+        Some(true),
+        "attach-leader must bind the real pane; got {attached}"
+    );
+
+    let message_id = t.enqueue_leader_row("inbound reused exactly once");
+    assert_eq!(
+        t.row_status(&message_id).as_deref(),
+        Some("queued_until_leader_attach"),
+        "precondition: the leader row must be queued_until_leader_attach before revalidation"
+    );
+    assert_eq!(
+        t.row_count(&message_id),
+        1,
+        "precondition: exactly one mailbox row exists before revalidation"
+    );
+
+    // First revalidation over the live channel: migrates the row in place.
+    let first = deliver_and_read(&t, &message_id);
+    assert_ne!(
+        first.as_deref(),
+        Some("queued_until_leader_attach"),
+        "the live-pane revalidation must migrate the row (leave queued); got {first:?}"
+    );
+    assert_eq!(
+        t.row_count(&message_id),
+        1,
+        "revalidation must migrate the mailbox row IN PLACE — exactly one row, never a replacement"
+    );
+
+    // Repeat deliver is idempotent: still exactly one row, and it does not churn
+    // back to queued_until_leader_attach.
+    let second = deliver_and_read(&t, &message_id);
+    assert_eq!(
+        t.row_count(&message_id),
+        1,
+        "a repeat deliver must not spawn a second row (exactly-once)"
+    );
+    assert_ne!(
+        second.as_deref(),
+        Some("queued_until_leader_attach"),
+        "a repeat deliver must not churn the row back to queued_until_leader_attach; got {second:?}"
     );
 }
