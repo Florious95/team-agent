@@ -3119,10 +3119,16 @@ fn restart_candidate_from_state(
         .filter(|s| !s.is_empty())
         .map(SessionName::new)
         .unwrap_or_else(|| SessionName::new(team_name));
+    let retired = retired_agent_ids(state);
     let mut agents = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
-        .map(|map| map.keys().map(AgentId::new).collect::<Vec<_>>())
+        .map(|map| {
+            map.keys()
+                .filter(|agent_id| !retired.contains(agent_id.as_str()))
+                .map(AgentId::new)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     agents.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     RestartCandidate {
@@ -3133,6 +3139,19 @@ fn restart_candidate_from_state(
         has_context: restart_candidate_has_context(state),
         agents,
     }
+}
+
+fn retired_agent_ids(state: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    state
+        .get("agent_lifecycle")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|lifecycle| lifecycle.iter())
+        .filter(|(_, entry)| {
+            entry.get("state").and_then(serde_json::Value::as_str) == Some("retired")
+        })
+        .map(|(agent_id, _)| agent_id.clone())
+        .collect()
 }
 
 /// E5 task#3 / RC-A6a:每次 restart 都以**角色定义**(team_dir 的 TEAM.md+agents/*.md)
@@ -3204,6 +3223,7 @@ fn rebuild_runtime_spec_from_roles(
     // 静态 team_dir/agents/*.md + state 记录的 dynamic role source。缺文件 fail-closed
     // 三行式,不静默 prune 已 live 的 helper(persist SaveConflict 保护继续生效)。
     merge_state_dynamic_role_files(&mut spec, run_workspace, &team_dir, team_key, state)?;
+    filter_retired_agents_from_spec(&mut spec, &retired_agent_ids(state));
     // 写 runtime spec(覆盖,原子 tmp+rename;Bug2)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
     crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
@@ -3214,6 +3234,15 @@ fn rebuild_runtime_spec_from_roles(
         let _ = std::fs::remove_file(&legacy_spec);
     }
     Ok(spec)
+}
+
+fn filter_retired_agents_from_spec(
+    spec: &mut YamlValue,
+    retired: &std::collections::BTreeSet<String>,
+) {
+    for agent_id in retired {
+        *spec = super::remove::spec_without_agent(spec, &AgentId::new(agent_id));
+    }
 }
 
 /// 0.5.30 (`add-agent-restart-saveconflict-locate.md` §4/§11): 把 add-agent
@@ -3417,6 +3446,76 @@ mod tests {
         PaneField, PaneInfo, PaneLiveness, SetEnvOutcome, SpawnResult, Target, Transport,
         TransportError,
     };
+
+    #[test]
+    fn retired_filter_clears_every_spec_reference_via_remove_primitive() {
+        let mut spec = crate::model::yaml::loads(
+            r#"
+name: retirement-filter
+agents:
+  - id: gone
+  - id: keep
+runtime:
+  startup_order:
+    - gone
+    - keep
+routing:
+  default_assignee: gone
+  rules:
+    - match: gone-task
+      assign_to: gone
+    - match: keep-task
+      assign_to: keep
+tasks:
+  - title: gone-task
+    assignee: gone
+  - title: keep-task
+    assignee: keep
+"#,
+        )
+        .expect("fixture spec");
+        let retired = std::collections::BTreeSet::from(["gone".to_string()]);
+
+        filter_retired_agents_from_spec(&mut spec, &retired);
+
+        let agents = spec
+            .get("agents")
+            .and_then(YamlValue::as_list)
+            .expect("agents");
+        assert!(agents.iter().all(|agent| {
+            agent.get("id").and_then(YamlValue::as_str) != Some("gone")
+        }));
+        let startup_order = spec
+            .get("runtime")
+            .and_then(|runtime| runtime.get("startup_order"))
+            .and_then(YamlValue::as_list)
+            .expect("startup_order");
+        assert!(startup_order
+            .iter()
+            .all(|agent_id| agent_id.as_str() != Some("gone")));
+        let routing = spec.get("routing").expect("routing");
+        assert_ne!(
+            routing
+                .get("default_assignee")
+                .and_then(YamlValue::as_str),
+            Some("gone"),
+            "spec_default_assignee must not return a retired agent"
+        );
+        let rules = routing
+            .get("rules")
+            .and_then(YamlValue::as_list)
+            .expect("routing rules");
+        assert!(rules.iter().all(|rule| {
+            rule.get("assign_to").and_then(YamlValue::as_str) != Some("gone")
+        }));
+        let tasks = spec
+            .get("tasks")
+            .and_then(YamlValue::as_list)
+            .expect("tasks");
+        assert!(tasks.iter().all(|task| {
+            task.get("assignee").and_then(YamlValue::as_str) != Some("gone")
+        }));
+    }
 
     #[test]
     fn resume_decision_event_uses_central_scrub_and_preserves_required_failure() {
