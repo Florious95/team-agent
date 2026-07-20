@@ -601,6 +601,80 @@ fn add_agent_authority_must_not_cross_team_erase_sibling_same_id_retirement() {
     );
 }
 
+/// Identity-source boundary (verifier, slice2b authority fix new adjudication
+/// face, same family as slice1 empty-current): the legacy top-level scope anchor
+/// now prefers `active_team_key`. Verify it does not over-exempt / under-protect
+/// when `active_team_key` is a NON-EMPTY but TERMINAL / mismatched value (points
+/// at a team not present in `teams`). The AddAgent authority is (laneateam,
+/// alpha); with a ghost active_team_key, the top-level filter must resolve NO
+/// exemption for the ghost, so a real retirement anywhere is still protected —
+/// the anchor must not silently widen authority to a bare id under a dangling
+/// active_team_key (that would be the empty-current forgery shape at slice1).
+#[test]
+fn terminal_active_team_key_does_not_widen_topology_authority_to_bare_id() {
+    // Disk latest: laneateam alive with alpha; sibling alpha ABSENT + retired.
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
+    latest["team_key"] = json!("laneateam");
+    latest["active_team_key"] = json!("laneateam");
+    let mut nested_a = crate::state::projection::compact_team_state(&latest);
+    nested_a["status"] = json!("alive");
+    latest["teams"] = json!({
+        "laneateam": nested_a,
+        "sibling": {
+            "team_key": "sibling",
+            "status": "alive",
+            "agents": {},
+            "agent_lifecycle": {
+                "alpha": { "state": "retired", "changed_at": "2026-07-21T00:00:00Z", "reason": "sibling" }
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &latest).unwrap();
+
+    // Incoming STALE root whose active_team_key points at a GHOST team not in
+    // `teams`, and whose sibling entry is the pre-retire (alpha active) shape.
+    let mut incoming_stale = latest.clone();
+    incoming_stale["active_team_key"] = json!("ghostteam-does-not-exist");
+    incoming_stale["teams"]["sibling"] = json!({
+        "team_key": "sibling",
+        "status": "alive",
+        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agent_lifecycle": {}
+    });
+
+    crate::state::repository::StateRepository::new(&ws)
+        .save(
+            crate::state::repository::StateWriteIntent::AddAgent {
+                team_key: "laneateam",
+                agent_id: "alpha",
+            },
+            &incoming_stale,
+        )
+        .unwrap();
+
+    let after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+    )
+    .unwrap();
+    // A dangling active_team_key must not widen the (laneateam, alpha) authority
+    // into a bare `alpha` exemption that reaches the sibling: sibling stays
+    // retired, not resurrected.
+    assert_eq!(
+        after["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"],
+        json!("retired"),
+        "a terminal/ghost active_team_key must not widen topology authority to a bare id \
+         and erase the sibling's same-id retirement"
+    );
+    assert!(
+        after["teams"]["sibling"]["agents"].get("alpha").is_none(),
+        "a terminal active_team_key must not let a stale incoming resurrect the sibling agent"
+    );
+}
+
 const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
 
 struct HermeticTestEnv {
