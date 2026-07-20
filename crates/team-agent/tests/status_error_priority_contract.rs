@@ -13,6 +13,9 @@
 //! after, the caller read the inbox first. Same product behavior => same
 //! error precedence.
 
+#[path = "support/hermetic.rs"]
+mod hermetic_guard;
+
 use serde_json::json;
 use std::path::Path;
 
@@ -34,9 +37,11 @@ fn seed(ws: &Path) {
 
 #[test]
 fn unknown_agent_is_reported_before_a_corrupt_inbox_row_is_decoded() {
-    let dir =
-        std::env::temp_dir().join(format!("status-errprio-{}-{}", std::process::id(), line!()));
-    let _ = std::fs::remove_dir_all(&dir);
+    // Enter the hermetic isolation boundary (r6 static guard requires this for
+    // any test touching MessageStore) and use its isolated workspace.
+    let env = hermetic_guard::HermeticTestEnv::enter("status-errprio");
+    env.scrub_tmux();
+    let dir = env.workspace("errprio");
     std::fs::create_dir_all(&dir).unwrap();
     seed(&dir);
 
