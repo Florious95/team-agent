@@ -105,3 +105,52 @@ fn terminal_team_reachable_only_by_exact_key_not_by_widened_alias() {
         ),
     }
 }
+
+#[test]
+fn current_fails_closed_when_active_team_key_points_at_a_terminal_team() {
+    // r14 boundary + leader policy: `current` means "the currently ACTIVE and
+    // ALIVE team". If active_team_key itself names a terminal/shutdown team,
+    // `current` must fail closed LOUDLY — never silently select the dead team,
+    // and with NO restart/command special case. A shutdown team is reachable
+    // only by its explicit exact key; the error must guide the user there.
+    let dir = std::env::temp_dir().join(format!("tk-term-{}-activeterm", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".team/runtime")).unwrap();
+    let state = json!({
+        "active_team_key": "oldshut",
+        "session_name": "team-oldshut",
+        "teams": {
+            "oldshut": { "status": "shutdown", "session_name": "team-oldshut",
+                         "agents": { "w1": { "status": "stopped", "provider": "fake" } } }
+        }
+    });
+    save_runtime_state(&dir, &state).unwrap();
+    std::fs::write(dir.join("team.spec.yaml"), "name: oldshut\n").unwrap();
+
+    let result = resolve_runtime_team_scope(&dir, Some("current"));
+    let _ = std::fs::remove_dir_all(&dir);
+    match result {
+        Ok(sel) => panic!(
+            "current must fail closed when active_team_key points at a terminal team, \
+             not silently select it; got canonical={}",
+            sel.canonical_team_key
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            let lowered = msg.to_lowercase();
+            assert!(
+                !msg.contains("canonical=oldshut"),
+                "the refusal must not resolve to the terminal team: {msg}"
+            );
+            // Policy: the error must guide the user to address a shutdown team
+            // by its explicit team key, not leave them stranded on `current`.
+            assert!(
+                lowered.contains("team key")
+                    || lowered.contains("--team")
+                    || lowered.contains("explicit"),
+                "the fail-closed error must guide the user to use an explicit team key \
+                 (a shutdown team is reachable only by exact key, no current/restart special case): {msg}"
+            );
+        }
+    }
+}
