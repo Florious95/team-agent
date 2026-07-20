@@ -400,6 +400,7 @@ fn ux_wait_ready_does_not_report_ready_true_without_ready_runtime_state() {
     crate::state::persist::save_runtime_state(
         &ws,
         &json!({
+            "active_team_key": "wait-ready",
             "agents": {"w1": {"status": "starting"}},
             "tasks": [{"id": "t1", "assignee": "w1", "status": "pending"}],
             "leader_receiver": {"status": "attached"},

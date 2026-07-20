@@ -283,6 +283,14 @@ pub(crate) fn team_is_alive_candidate(team: &Value) -> bool {
     if let Some(status) = status_raw {
         return status.eq_ignore_ascii_case("alive");
     }
+    if !team
+        .get("agents")
+        .and_then(Value::as_object)
+        .is_some_and(|agents| !agents.is_empty())
+        && team_has_live_leader_binding(team)
+    {
+        return false;
+    }
     if all_present_agents_terminal(team) && !team_has_live_leader_binding(team) {
         return false;
     }
@@ -458,15 +466,63 @@ pub fn project_top_level_view(state: &Value, team_key: &str) -> Value {
     Value::Object(p)
 }
 
-/// `select_runtime_state`(`state.py:193`):读 state → 按 `team` 选候选 → 投影顶层视图。
-/// 歧义/未找到 → `Err(StateError::TeamSelect(msg))`(msg == Python `str(RuntimeError)`)。
-pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Value, StateError> {
+#[derive(Debug, Clone)]
+pub struct TeamScopeResolution {
+    pub canonical_team_key: String,
+    pub state: Value,
+}
+
+/// Resolve a requested team selector once, returning both the canonical map key and its
+/// projected state. Callers must carry `canonical_team_key` forward rather than deriving team
+/// identity again from the projection or the original alias.
+pub fn resolve_runtime_team_scope(
+    workspace: &Path,
+    team: Option<&str>,
+) -> Result<TeamScopeResolution, StateError> {
     let state = load_runtime_state(workspace)?;
     let alive = team_state_candidates(&state);
     // Python `if team:` —— 空串 falsy,等同无 team(对抗 P1:此前 Some("") 误入 team 分支,空
     // team_dir 匹配致歧义/未找到错误串漂移)。
     let team = team.filter(|t| !t.is_empty());
     if let Some(team) = team {
+        let canonical_request = if team.eq_ignore_ascii_case("current") {
+            let teams = state.get("teams").and_then(Value::as_object);
+            state
+                .get("active_team_key")
+                .and_then(Value::as_str)
+                .filter(|active| {
+                    alive.contains_key(*active) || teams.is_none_or(Map::is_empty)
+                })
+                .map(str::to_string)
+                .or_else(|| {
+                    teams
+                        .is_none_or(Map::is_empty)
+                        .then(|| team_state_key(&state))
+                        .filter(|derived| derived != "current")
+                })
+                .ok_or_else(|| {
+                    StateError::TeamSelect(format!(
+                        "team 'current' not found among alive teams. Use --team <team-key> with an explicit team key to address a terminal team. {}",
+                        format_team_candidates(&alive)
+                    ))
+                })?
+        } else {
+            team.to_string()
+        };
+        let team = canonical_request.as_str();
+        // An exact canonical key is authoritative even when the team is terminal or excluded from
+        // the default alive-candidate set. Explicit lifecycle operations must still be able to
+        // address a shutdown team without falling back to the raw root projection.
+        if state
+            .get("teams")
+            .and_then(Value::as_object)
+            .is_some_and(|teams| teams.contains_key(team))
+        {
+            return Ok(TeamScopeResolution {
+                canonical_team_key: team.to_string(),
+                state: project_top_level_view(&state, team),
+            });
+        }
         // 无 alive 但 team 命中 active_team_key / 派生 key → 直接以全量 state 投影。
         if alive.is_empty() {
             let active = state
@@ -484,24 +540,11 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
                     }
                     None => projection = json!({ "active_team_key": team }),
                 }
-                return Ok(projection);
+                return Ok(TeamScopeResolution {
+                    canonical_team_key: team.to_string(),
+                    state: projection,
+                });
             }
-        }
-        if alive.contains_key(team) {
-            return Ok(project_top_level_view(&state, team));
-        }
-        // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
-        // 显式 `--team X` 命中 `state.teams` 里的键(即使被标 shutdown/终态)
-        // 仍应投影出来,支持「shutdown 后再 restart --team X」多队场景
-        // (E2E-REST-014 家族)。走 project_top_level_view 保证顶层 agents
-        // 与 teams[key].agents 收敛(E2E-REST-002 依赖 projection clobber
-        // 顶层注入的 session_id)。
-        if state
-            .get("teams")
-            .and_then(Value::as_object)
-            .is_some_and(|teams| teams.contains_key(team))
-        {
-            return Ok(project_top_level_view(&state, team));
         }
         let matches: Vec<&String> = alive
             .iter()
@@ -509,7 +552,10 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
             .map(|(k, _)| k)
             .collect();
         if matches.len() == 1 {
-            return Ok(project_top_level_view(&state, matches[0]));
+            return Ok(TeamScopeResolution {
+                canonical_team_key: matches[0].clone(),
+                state: project_top_level_view(&state, matches[0]),
+            });
         }
         if matches.len() > 1 {
             return Err(StateError::TeamSelect(
@@ -529,12 +575,18 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
         .filter(|s| !s.is_empty());
     if let Some(active) = active {
         if alive.contains_key(active) {
-            return Ok(project_top_level_view(&state, active));
+            return Ok(TeamScopeResolution {
+                canonical_team_key: active.to_string(),
+                state: project_top_level_view(&state, active),
+            });
         }
     }
     if alive.len() == 1 {
         let only = alive.keys().next().cloned().unwrap_or_default();
-        return Ok(project_top_level_view(&state, &only));
+        return Ok(TeamScopeResolution {
+            canonical_team_key: only.clone(),
+            state: project_top_level_view(&state, &only),
+        });
     }
     if alive.is_empty() {
         // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.1):
@@ -547,15 +599,32 @@ pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Valu
                 .and_then(Value::as_object)
                 .is_some_and(|teams| teams.contains_key(active_key))
             {
-                return Ok(project_top_level_view(&state, active_key));
+                return Ok(TeamScopeResolution {
+                    canonical_team_key: active_key.to_string(),
+                    state: project_top_level_view(&state, active_key),
+                });
             }
         }
-        return Ok(state);
+        let canonical_team_key = state
+            .get("active_team_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| team_state_key(&state));
+        return Ok(TeamScopeResolution {
+            canonical_team_key,
+            state,
+        });
     }
     Err(StateError::TeamSelect(
         "multiple teams found in this workspace; pass --team <team> to choose. ".to_string()
             + &format_team_candidates(&alive),
     ))
+}
+
+/// `select_runtime_state`(`state.py:193`):compatibility projection wrapper.
+pub fn select_runtime_state(workspace: &Path, team: Option<&str>) -> Result<Value, StateError> {
+    resolve_runtime_team_scope(workspace, team).map(|resolved| resolved.state)
 }
 
 fn team_selector_matches(team: &str, key: &str, value: &Value) -> bool {
@@ -1111,6 +1180,61 @@ mod tests {
             e3.to_string(),
             "team selector is ambiguous. Candidates: t1 session=dup agents=-; t2 session=dup agents=-"
         );
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_uses_valid_active_key() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "alpha",
+            "teams": {
+                "alpha": {"status": "alive", "session_name": "team-alpha", "agents": {"worker": {}}},
+                "old-team": {"team_owner": {"pane_id": "%9"}}
+            }
+        }));
+        let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+        assert_eq!(resolved.canonical_team_key, "alpha");
+        assert_eq!(
+            resolved.state.get("active_team_key").and_then(Value::as_str),
+            Some("alpha")
+        );
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_fails_without_valid_active_key() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "missing",
+            "teams": {
+                "alpha": {"status": "alive", "session_name": "team-alpha", "agents": {"worker": {}}}
+            }
+        }));
+        let error = resolve_runtime_team_scope(&ws, Some("current")).unwrap_err();
+        assert!(error.to_string().contains("team 'current' not found"));
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_keeps_legacy_single_team_state() {
+        let ws = temp_ws_with_state(&json!({
+            "active_team_key": "legacy",
+            "team_key": "legacy",
+            "session_name": "team-legacy",
+            "agents": {"worker": {"status": "running"}}
+        }));
+        let resolved = resolve_runtime_team_scope(&ws, Some("current")).unwrap();
+        assert_eq!(resolved.canonical_team_key, "legacy");
+        assert_eq!(resolved.state["active_team_key"], json!("legacy"));
+    }
+
+    #[test]
+    fn resolve_runtime_team_scope_current_rejects_empty_workspace_bootstrap() {
+        let ws = temp_ws_with_state(&json!({}));
+        let error = resolve_runtime_team_scope(&ws, Some("current")).unwrap_err();
+        assert!(error.to_string().contains("team 'current' not found"));
+        let saved = load_runtime_state(&ws).unwrap();
+        assert_ne!(
+            saved.get("active_team_key").and_then(Value::as_str),
+            Some("current")
+        );
+        assert!(!crate::model::paths::runtime_spec_path(&ws, "current").exists());
     }
 
     // 对抗 P1:空串 team 必须走「无 team」分支(Python `if team:` falsy),报「multiple teams」

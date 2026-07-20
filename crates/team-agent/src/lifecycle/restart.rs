@@ -16,6 +16,29 @@ use super::*;
 struct LifecyclePaths {
     run_workspace: std::path::PathBuf,
     spec_workspace: std::path::PathBuf,
+    selected: Option<crate::state::selector::SelectedTeam>,
+}
+
+impl LifecyclePaths {
+    fn canonical_team<'a>(&'a self, requested: Option<&'a str>) -> Option<&'a str> {
+        self.selected
+            .as_ref()
+            .map(|selected| selected.team_key.as_str())
+            .or(requested)
+    }
+
+    fn tmux_backend(&self) -> Result<crate::tmux_backend::TmuxBackend, LifecycleError> {
+        match self.selected.as_ref() {
+            Some(selected) => common::lifecycle_worker_tmux_backend_selection_for_state(
+                &selected.run_workspace,
+                &selected.state,
+            )
+            .map(|selection| selection.backend),
+            None => Ok(crate::tmux_backend::TmuxBackend::for_workspace(
+                &self.run_workspace,
+            )),
+        }
+    }
 }
 
 struct LifecyclePathRefs<'a> {
@@ -115,8 +138,9 @@ fn lifecycle_paths(workspace: &Path, team: Option<&str>) -> Result<LifecyclePath
             LifecycleError::TeamSelect("active team spec workspace not found".to_string())
         })?;
     Ok(LifecyclePaths {
-        run_workspace: selected.run_workspace,
+        run_workspace: selected.run_workspace.clone(),
         spec_workspace,
+        selected: Some(selected),
     })
 }
 

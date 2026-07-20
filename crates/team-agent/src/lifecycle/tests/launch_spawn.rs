@@ -705,6 +705,7 @@ fn spine_add_agent_rejects_duplicate_agent_id() {
 #[test]
 fn e5_add_agent_does_not_copy_role_into_platform_dir_and_injects_into_spec() {
     let team = quick_start_team_dir(QS_VALID_ROLE);
+    seed_canonical_team_identity(&team, "teamdir");
     // External role file OUTSIDE team_dir/agents, with recognizable body content.
     let role = team.parent().unwrap().join("w2-external-role.md");
     let role_body = "---\nname: w2\nrole: Second Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nUNIQUE-E5-BUG1-MARKER body for w2.\n";
@@ -1152,6 +1153,12 @@ pub(super) fn seed_healthy_coordinator(workspace: &std::path::Path) {
         me.to_string(),
     )
     .unwrap();
+}
+
+fn seed_canonical_team_identity(workspace: &std::path::Path, team_key: &str) {
+    let mut state = crate::state::persist::load_runtime_state(workspace).unwrap();
+    state["active_team_key"] = json!(team_key);
+    crate::state::persist::save_runtime_state(workspace, &state).unwrap();
 }
 
 // RED — quick_start_with_transport must drive the REAL spawn path: launch.dry_run==false, started
@@ -2263,6 +2270,7 @@ fn add_agent_with_transport_spawns_new_worker_not_stub() {
     let role_file = team.join("worker2-role.md"); // OUTSIDE agents/ -> not a duplicate of an existing agent
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
+    seed_canonical_team_identity(&team, "addteam");
     let transport = OfflineTransport::new();
 
     let _result = add_agent_with_transport(
@@ -3331,6 +3339,7 @@ fn add_agent_reachability_gate_returns_error_when_spawn_pane_not_addressable() {
     let role_file = team.join("worker2-role.md");
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
+    seed_canonical_team_identity(&team, "reachgate");
 
     // Models "spawn to wrong socket" / "spawn succeeded but pane orphan": the
     // OfflineTransport records the spawn but reports the new pane is NOT
@@ -3390,6 +3399,7 @@ fn add_agent_reachability_gate_passes_when_spawn_pane_addressable() {
     let role_file = team.join("worker2-role.md");
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
+    seed_canonical_team_identity(&team, "gatepass");
 
     // Default OfflineTransport: spawned_panes_addressable=true, liveness=Unknown
     // (treated as not-Dead by the gate's fallthrough).
@@ -4149,6 +4159,7 @@ fn e42_re_add_and_remove_agree_on_existence_after_add() {
     let role_file = team.join("newagent.md");
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
+    seed_canonical_team_identity(&team, "e42sym");
     let transport = OfflineTransport::new();
     // (1) first add
     let r1 = crate::lifecycle::add_agent_with_transport(
@@ -4205,6 +4216,7 @@ fn e42_add_writes_to_canonical_runtime_spec_and_state_consistently() {
     let role_file = team.join("newagent.md");
     std::fs::write(&role_file, DELEG_ROLE_WORKER2).unwrap();
     seed_healthy_coordinator(&team);
+    seed_canonical_team_identity(&team, "e42proj");
     let transport = OfflineTransport::new();
     let _ = crate::lifecycle::add_agent_with_transport(
         &team,

@@ -18,13 +18,15 @@ pub fn start_agent(
     team: Option<&str>,
 ) -> Result<StartAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = paths.tmux_backend()?;
     start_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -54,9 +56,12 @@ pub fn start_agent_with_transport(
         Err(_) if team.is_none() => LifecyclePaths {
             run_workspace: workspace.to_path_buf(),
             spec_workspace: workspace.to_path_buf(),
+            selected: None,
         },
         Err(error) => return Err(error),
     };
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "start-agent",
@@ -778,13 +783,15 @@ pub fn stop_agent(
     team: Option<&str>,
 ) -> Result<StopAgentReport, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = paths.tmux_backend()?;
     stop_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -801,6 +808,8 @@ pub fn stop_agent_with_transport(
     transport: &dyn crate::transport::Transport,
 ) -> Result<StopAgentReport, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "stop-agent",
@@ -840,9 +849,12 @@ pub(crate) fn start_agent_at_paths_for_recovery(
         Err(_) if team.is_none() => LifecyclePaths {
             run_workspace: workspace.to_path_buf(),
             spec_workspace: workspace.to_path_buf(),
+            selected: None,
         },
         Err(error) => return Err(RecoveryError::Lifecycle(error.to_string())),
     };
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     // Best-effort stop: if the live pane still exists we tear it down so the
     // subsequent start creates a fresh provider process instead of a Noop.
     // Stop errors are absorbed into the start attempt result — the important
@@ -1217,13 +1229,15 @@ pub fn reset_agent(
         });
     }
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = paths.tmux_backend()?;
     reset_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -1249,6 +1263,8 @@ pub fn reset_agent_with_transport(
         });
     }
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "reset-agent",

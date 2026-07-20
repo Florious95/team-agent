@@ -15,13 +15,15 @@ pub fn remove_agent(
     team: Option<&str>,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "remove-agent",
         team,
         agent_id: Some(agent_id),
     })?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let transport = paths.tmux_backend()?;
     remove_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -42,6 +44,8 @@ pub fn remove_agent_with_transport(
     transport: &dyn crate::transport::Transport,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     let _lock = acquire_agent_lifecycle_lock(LifecycleLockRequest {
         workspace: &paths.run_workspace,
         operation: "remove-agent",
@@ -68,6 +72,8 @@ pub(crate) fn remove_agent_with_transport_locked(
     transport: &dyn crate::transport::Transport,
 ) -> Result<RemoveAgentOutcome, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
     remove_agent_at_paths(
         &paths.run_workspace,
         &paths.spec_workspace,
@@ -94,6 +100,8 @@ impl ForceRecreateSnapshot {
         transport: &dyn crate::transport::Transport,
     ) -> Result<Self, LifecycleError> {
         let paths = lifecycle_paths(workspace, team)?;
+        let canonical_team = paths.canonical_team(team).map(str::to_string);
+        let team = canonical_team.as_deref();
         let seat = resolve_seat(
             &paths.run_workspace,
             &paths.spec_workspace,
@@ -215,7 +223,9 @@ pub fn remove_agent_flag_requirements(
     team: Option<&str>,
 ) -> Result<RemoveAgentFlagRequirements, LifecycleError> {
     let paths = lifecycle_paths(workspace, team)?;
-    let transport = lifecycle_worker_tmux_backend_for_selected_state(&paths.run_workspace, team)?;
+    let canonical_team = paths.canonical_team(team).map(str::to_string);
+    let team = canonical_team.as_deref();
+    let transport = paths.tmux_backend()?;
     Ok(remove_agent_preflight(
         &paths.run_workspace,
         &paths.spec_workspace,

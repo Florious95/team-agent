@@ -3,10 +3,8 @@
 //!
 //! Batch 1 is the internal replacement of
 //! `lifecycle_worker_tmux_backend_for_selected_state` with routing
-//! through `transport_factory::resolve_transport`. Six product caller
-//! sites (`rebuild`/`agent`×3/`remove`/`launch`×2 + `cli/send.rs`) plus
-//! the two `tests/launch_spawn.rs` harness callers all now go through
-//! the factory.
+//! through `transport_factory::resolve_transport`. Product callers go
+//! through the canonical `LifecyclePaths` selected-state helper.
 //!
 //! Behavior equivalence for **tmux** state is unchanged (same
 //! endpoint fallback + workspace socket). The new contract this batch
@@ -53,15 +51,67 @@ fn batch1_migration_sites_present_in_source() {
         );
     }
 
+    // team-scope canonicalization intentionally migrated the three
+    // agent entry points away from re-resolving the original selector. They
+    // now consume the SelectedTeam held by LifecyclePaths, and the shared
+    // helper routes that exact state through the same fail-closed selection.
+    let agent = std::fs::read_to_string(root.join("lifecycle/restart/agent.rs"))
+        .unwrap_or_else(|e| panic!("cannot read lifecycle/restart/agent.rs: {e}"));
+    assert_eq!(
+        agent
+            .matches("let transport = paths.tmux_backend()?;")
+            .count(),
+        3,
+        "the start/stop/reset production entry points must all reuse the canonical SelectedTeam transport"
+    );
+    let agent_code = agent
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        agent_code
+            .matches("lifecycle_worker_tmux_backend_for_selected_state(")
+            .count(),
+        0,
+        "start/stop/reset must not re-resolve the original selector through the legacy resolver"
+    );
+    let lifecycle = std::fs::read_to_string(root.join("lifecycle/restart.rs"))
+        .unwrap_or_else(|e| panic!("cannot read lifecycle/restart.rs: {e}"));
+    for marker in [
+        "fn canonical_team",
+        "fn tmux_backend",
+        "lifecycle_worker_tmux_backend_selection_for_state",
+    ] {
+        assert!(
+            lifecycle.contains(marker),
+            "canonical lifecycle selection lost marker `{marker}`"
+        );
+    }
+
+    let remove = std::fs::read_to_string(root.join("lifecycle/restart/remove.rs"))
+        .unwrap_or_else(|e| panic!("cannot read lifecycle/restart/remove.rs: {e}"));
+    assert_eq!(
+        remove
+            .matches("let transport = paths.tmux_backend()?;")
+            .count(),
+        2,
+        "remove and remove-preflight must reuse the canonical SelectedTeam transport"
+    );
+    let remove_code = remove
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        remove_code
+            .matches("lifecycle_worker_tmux_backend_for_selected_state(")
+            .count(),
+        0,
+        "remove and remove-preflight must not re-resolve the original selector through the legacy resolver"
+    );
+
     let sites = [
-        (
-            "lifecycle/restart/agent.rs",
-            "lifecycle_worker_tmux_backend_for_selected_state",
-        ),
-        (
-            "lifecycle/restart/remove.rs",
-            "lifecycle_worker_tmux_backend_for_selected_state",
-        ),
         (
             "lifecycle/launch.rs",
             "lifecycle_worker_tmux_backend_for_selected_state",
