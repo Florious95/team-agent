@@ -526,7 +526,17 @@ fn apply_persist_merge_contract(
             let Some(incoming_entry) = incoming_teams.get_mut(team) else {
                 continue;
             };
-            let topology_update_agent_ids = topology_updates_for_team(topology_updates, Some(team));
+            // `current` is a legacy physical alias of the active team, not a
+            // canonical sibling identity. Lifecycle writers update both
+            // projections, so give that alias the active team's authority;
+            // every real sibling key remains scoped to itself.
+            let authority_team = if team == "current" {
+                top_level_team.as_deref()
+            } else {
+                Some(team.as_str())
+            };
+            let topology_update_agent_ids =
+                topology_updates_for_team(topology_updates, authority_team);
             let projection = format!("teams.{team}.agents");
             // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
             // decide the containing team's aliveness from BOTH sides — a shutdown
