@@ -116,6 +116,7 @@ check_raw_read_surface() {
 check_source_guards() {
   cargo_test --test e7_host_leader_registry_contract &&
     cargo_test --test transport_factory_compact_status_guard &&
+    cargo_test --test current_alias_single_source_guard &&
     cargo_test --test runtime_mcp_approval_red \
       running_agent_state_persists_effective_policy_schema_and_single_helper_across_spawn_paths \
       -- --exact
