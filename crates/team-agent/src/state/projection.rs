@@ -491,9 +491,7 @@ pub fn resolve_runtime_team_scope(
                 .get("active_team_key")
                 .and_then(Value::as_str)
                 .filter(|active| {
-                    alive.contains_key(*active)
-                        || teams.is_none_or(Map::is_empty)
-                        || teams.is_some_and(|teams| teams.contains_key(*active))
+                    alive.contains_key(*active) || teams.is_none_or(Map::is_empty)
                 })
                 .map(str::to_string)
                 .or_else(|| {
@@ -504,7 +502,7 @@ pub fn resolve_runtime_team_scope(
                 })
                 .ok_or_else(|| {
                     StateError::TeamSelect(format!(
-                        "team 'current' not found. {}",
+                        "team 'current' not found among alive teams. Use --team <team-key> with an explicit team key to address a terminal team. {}",
                         format_team_candidates(&alive)
                     ))
                 })?
