@@ -472,8 +472,7 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
     )
     .unwrap();
     assert_eq!(
-        removed["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"],
-        "retired",
+        removed["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"], "retired",
         "the first successful remove must directly persist the canonical tombstone"
     );
     assert!(
@@ -495,8 +494,7 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
     )
     .unwrap();
     assert_eq!(
-        after_stale_tick["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"],
-        "retired",
+        after_stale_tick["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"], "retired",
         "a stale coordinator save must not erase the first remove's tombstone"
     );
     assert!(
@@ -519,9 +517,87 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
         .get("alpha")
         .is_some());
     assert_eq!(
-        readded["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"],
-        "retired",
+        readded["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"], "retired",
         "selected-team re-add must not clear a sibling team's same-id retirement"
+    );
+}
+
+/// Cross-product RED (verifier, slice2b authority leak): the FAILURE dimension
+/// (a stale writer whose incoming projection predates a sibling retirement) x the
+/// BOUNDARY dimension (a sibling team carrying the SAME agent id). The tracked
+/// `remove_persists_..._readd_clears_it` sibling assertion covers only the
+/// non-stale corner (sibling tombstone already current in the add's input); it
+/// does NOT exercise an incoming sibling projection captured BEFORE the sibling
+/// retirement. topology-authority is keyed by bare `agent_id` with no team
+/// dimension (repository.rs:277-283 drops team_key; persist.rs iterates every
+/// sibling team with the same global id set), so an explicit AddAgent(alpha) in
+/// team A exempts alpha in team B too and a stale incoming resurrects B's alpha /
+/// erases B's retirement tombstone. Red at da11f98c: teamB.alpha lifecycle Null.
+#[test]
+fn add_agent_authority_must_not_cross_team_erase_sibling_same_id_retirement() {
+    // Disk latest: team A alive with alpha; team B alpha ABSENT + retired.
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "running", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let mut latest = crate::state::persist::load_runtime_state(&ws).unwrap();
+    latest["team_key"] = json!("laneateam");
+    latest["active_team_key"] = json!("laneateam");
+    let mut nested_a = crate::state::projection::compact_team_state(&latest);
+    nested_a["status"] = json!("alive");
+    latest["teams"] = json!({
+        "laneateam": nested_a,
+        "sibling": {
+            "team_key": "sibling",
+            "status": "alive",
+            "agents": {},
+            "agent_lifecycle": {
+                "alpha": {
+                    "state": "retired",
+                    "changed_at": "2026-07-21T00:00:00Z",
+                    "reason": "sibling retirement (newer than the stale incoming)"
+                }
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &latest).unwrap();
+
+    // Incoming STALE root: captured BEFORE team B retired alpha, so its sibling
+    // entry still carries alpha ACTIVE with no tombstone. A concurrent explicit
+    // AddAgent(alpha) in team A carries this whole stale multi-team projection.
+    let mut incoming_stale = latest.clone();
+    incoming_stale["teams"]["sibling"] = json!({
+        "team_key": "sibling",
+        "status": "alive",
+        "agents": { "alpha": { "status": "running", "provider": "codex", "window": "alpha" } },
+        "agent_lifecycle": {}
+    });
+
+    crate::state::repository::StateRepository::new(&ws)
+        .save(
+            crate::state::repository::StateWriteIntent::AddAgent {
+                team_key: "laneateam",
+                agent_id: "alpha",
+            },
+            &incoming_stale,
+        )
+        .unwrap();
+
+    let after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+    )
+    .unwrap();
+    // The AddAgent authority is scoped to team A's alpha ONLY; team B's newer
+    // same-id retirement must survive (the stale incoming must not resurrect it).
+    assert_eq!(
+        after["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"],
+        json!("retired"),
+        "selected-team AddAgent authority must not cross team boundary by bare agent id: \
+         team B's newer same-id retirement was erased by team A's stale re-add"
+    );
+    assert!(
+        after["teams"]["sibling"]["agents"].get("alpha").is_none(),
+        "a stale incoming must not resurrect the sibling team's retired same-id agent"
     );
 }
 
