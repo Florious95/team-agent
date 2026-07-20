@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::model::paths::{canonical_run_workspace, runtime_spec_path, team_workspace};
-use crate::state::persist::{load_runtime_state, runtime_state_path};
-use crate::state::projection::{select_runtime_state, team_state_key};
+use crate::state::persist::runtime_state_path;
+use crate::state::projection::resolve_runtime_team_scope;
 use crate::state::StateError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,15 +36,15 @@ pub fn resolve_active_team(
     mode: SelectorMode,
 ) -> Result<SelectedTeam, StateError> {
     let explicit_spec = input.join("team.spec.yaml");
-    let (run_workspace, state) = if explicit_spec.exists() {
+    let (run_workspace, resolved) = if explicit_spec.exists() {
         let team_run = team_workspace(input).map_err(|e| StateError::TeamSelect(e.to_string()))?;
         let run = if runtime_state_path(input).exists() || !runtime_state_path(&team_run).exists() {
             input.to_path_buf()
         } else {
             team_run
         };
-        let state = select_runtime_state(&run, team).or_else(|_| load_runtime_state(&run))?;
-        (run, state)
+        let resolved = resolve_runtime_team_scope(&run, team)?;
+        (run, resolved)
     } else {
         let run =
             canonical_run_workspace(input).map_err(|e| StateError::TeamSelect(e.to_string()))?;
@@ -58,15 +58,16 @@ pub fn resolve_active_team(
                 input.display()
             )));
         }
-        let state = select_runtime_state(&run, team).or_else(|_| load_runtime_state(&run))?;
-        (run, state)
+        let resolved = resolve_runtime_team_scope(&run, team)?;
+        (run, resolved)
     };
+    let state = resolved.state;
 
     // E5 spec 迁移·读序 B(architect+leader 裁定):
     //   1) runtime spec 优先严格:<run_ws>/.team/runtime/<team_key>/team.spec.yaml 存在即必用。
     //   2) 缺失才**只读回落**用户目录旧 spec(过渡腿;绝不在此写/迁移——迁移+清理只属启动重建)。
     // TODO(E5 后续版本):新 team 永不写用户目录(G1),回落腿可在 legacy 清零后移除。
-    let team_key = selected_team_key(&state, team);
+    let team_key = resolved.canonical_team_key;
     let runtime_spec = runtime_spec_path(&run_workspace, &team_key);
     let (spec_workspace, spec_path) = if runtime_spec.exists() {
         (
@@ -135,14 +136,4 @@ fn spec_workspace_from_state(state: &Value) -> Option<PathBuf> {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
         })
-}
-
-fn selected_team_key(state: &Value, team: Option<&str>) -> String {
-    state
-        .get("active_team_key")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| team.filter(|s| !s.is_empty()).map(ToString::to_string))
-        .unwrap_or_else(|| team_state_key(state))
 }
