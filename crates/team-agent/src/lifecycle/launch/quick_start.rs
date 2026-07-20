@@ -379,7 +379,7 @@ pub fn quick_start_with_transport_in_workspace_with_display(
     // to "unknown" in the payload) — Phase 2 refactor will thread
     // ResolvedTransport.source through the launch signature.
     annotate_runtime_transport(&mut state, transport, &workspace, None);
-    save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key))?;
+    save_launched_team_state_for_key(&workspace, &state, Some(&state_team_key), None)?;
     annotate_persisted_team_depth(
         &workspace,
         &state_team_key,

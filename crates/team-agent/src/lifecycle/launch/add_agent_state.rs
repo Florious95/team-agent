@@ -194,7 +194,12 @@ pub(super) fn upsert_agent_state_from_role(
     }
     agent_map.insert(agent_id.as_str().to_string(), entry);
     crate::lifecycle::restart::remove::clear_agent_retirement_in_state(&mut state, agent_id);
-    save_added_agent_state_for_key(workspace, &state, canonical_team_key, agent_id.as_str())
+    save_launched_team_state_for_key(
+        workspace,
+        &state,
+        Some(canonical_team_key),
+        Some(agent_id.as_str()),
+    )
 }
 
 pub(super) fn role_source_ownership(workspace: &Path, role_file: &Path) -> &'static str {

@@ -206,8 +206,8 @@ use state_projection::{
     drop_unbound_top_level_owner, drop_worker_pane_seeded_owner, launched_worker_tmux_socket,
     merge_workspace_team_state_with_key, pane_pids_by_started_agent, persist_spawn_agent_state,
     preserve_existing_leader_topology, promote_launched_binding_from_team_entry,
-    save_added_agent_state_for_key, save_launched_team_state, save_launched_team_state_for_key,
-    seeded_pane_looks_like_worker, tmux_sockets_match_or_unknown,
+    save_launched_team_state, save_launched_team_state_for_key, seeded_pane_looks_like_worker,
+    tmux_sockets_match_or_unknown,
 };
 
 mod leader_context;

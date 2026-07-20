@@ -146,7 +146,7 @@ pub(super) fn persist_spawn_agent_state(
         obj.insert("agents".to_string(), serde_json::Value::Object(agents));
         state = serde_json::Value::Object(obj);
     }
-    save_launched_team_state_for_key(workspace, &state, Some(&team_id))
+    save_launched_team_state_for_key(workspace, &state, Some(&team_id), None)
 }
 
 pub(super) fn pane_pids_by_started_agent(
@@ -178,27 +178,10 @@ pub(super) fn save_launched_team_state(
     workspace: &Path,
     launched: &serde_json::Value,
 ) -> Result<(), LifecycleError> {
-    save_launched_team_state_for_key(workspace, launched, None)
+    save_launched_team_state_for_key(workspace, launched, None, None)
 }
 
 pub(super) fn save_launched_team_state_for_key(
-    workspace: &Path,
-    launched: &serde_json::Value,
-    team_key: Option<&str>,
-) -> Result<(), LifecycleError> {
-    save_team_state_for_key(workspace, launched, team_key, None)
-}
-
-pub(super) fn save_added_agent_state_for_key(
-    workspace: &Path,
-    launched: &serde_json::Value,
-    team_key: &str,
-    agent_id: &str,
-) -> Result<(), LifecycleError> {
-    save_team_state_for_key(workspace, launched, Some(team_key), Some(agent_id))
-}
-
-fn save_team_state_for_key(
     workspace: &Path,
     launched: &serde_json::Value,
     team_key: Option<&str>,
@@ -249,15 +232,10 @@ fn save_team_state_for_key(
     };
     let mut projected = crate::state::projection::project_top_level_view(&merged, &launched_key);
     drop_unbound_top_level_owner(&mut projected);
-    let intent = match added_agent_id {
-        Some(agent_id) => crate::state::repository::StateWriteIntent::AddAgent {
-            team_key: &launched_key,
-            agent_id,
-        },
-        None => crate::state::repository::StateWriteIntent::LaunchTeam {
-            team_key: &launched_key,
-        },
-    };
+    let intent = crate::state::repository::StateWriteIntent::launch_team_or_add_agent(
+        &launched_key,
+        added_agent_id,
+    );
     crate::state::repository::StateRepository::new(workspace)
         .save(intent, &projected)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
