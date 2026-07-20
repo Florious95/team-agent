@@ -72,7 +72,7 @@ fn red1_external_redaction_has_one_shared_module_and_two_crate_entry_points() {
 #[serial(env)]
 fn red2_false_positive_guard_preserves_team_provider_and_model_truth() {
     let marker = synthetic_marker();
-    let (env, workspace) = redaction_case("red2", &marker);
+    let (env, workspace) = redaction_case("red2", &marker, "current");
     let status = team_agent::cli::status_port::status(&workspace, false, true)
         .expect("detail status must remain available");
     let text = status.to_string();
@@ -113,7 +113,7 @@ fn red2_false_positive_guard_preserves_team_provider_and_model_truth() {
 #[serial(env)]
 fn red3_full_and_compact_status_never_expose_restart_credentials() {
     let marker = synthetic_marker();
-    let (env, workspace) = redaction_case("red3", &marker);
+    let (env, workspace) = redaction_case("red3", &marker, "current");
     let full = team_agent::cli::status_port::status(&workspace, false, true)
         .expect("full status must remain available");
     let compact = team_agent::cli::status_port::status(&workspace, true, false)
@@ -148,8 +148,9 @@ fn red3_full_and_compact_status_never_expose_restart_credentials() {
 #[serial(env)]
 fn red4_jsonrpc_and_legacy_mcp_status_never_expose_raw_team_credentials() {
     let marker = synthetic_marker();
-    let (env, workspace) = redaction_case("red4", &marker);
-    let frames = run_mcp_status_frames(&env, &workspace);
+    let team_key = "redaction-contract";
+    let (env, workspace) = redaction_case("red4", &marker, team_key);
+    let frames = run_mcp_status_frames(&env, &workspace, team_key);
     assert_eq!(
         frames.len(),
         2,
@@ -165,13 +166,13 @@ fn red4_jsonrpc_and_legacy_mcp_status_never_expose_raw_team_credentials() {
     let outer_safe = !outer.contains(&marker);
     let content_safe = !content_text.contains(&marker);
     let body_preserved = body
-        .pointer("/teams/current/agents/worker/restart_error")
+        .pointer(&format!("/teams/{team_key}/agents/worker/restart_error"))
         .and_then(Value::as_str)
         .is_some_and(|error| error.contains(REDACTED));
     let legacy = frames[1].to_string();
     let legacy_safe = !legacy.contains(&marker);
     let legacy_preserved = frames[1]
-        .pointer("/teams/current/agents/worker/restart_error")
+        .pointer(&format!("/teams/{team_key}/agents/worker/restart_error"))
         .and_then(Value::as_str)
         .is_some_and(|error| error.contains(REDACTED));
     assert!(
@@ -406,16 +407,20 @@ fn red7_pane_and_profile_scrubbers_converge_without_losing_existing_policy() {
     );
 }
 
-fn redaction_case(tag: &str, marker: &str) -> (hermetic_guard::HermeticTestEnv, PathBuf) {
+fn redaction_case(
+    tag: &str,
+    marker: &str,
+    team_key: &str,
+) -> (hermetic_guard::HermeticTestEnv, PathBuf) {
     let env = hermetic_guard::HermeticTestEnv::enter(tag);
     env.scrub_tmux();
     env.assert_no_real_tmux();
     let workspace = env.workspace(tag);
-    seed_redaction_state(&workspace, marker);
+    seed_redaction_state(&workspace, marker, team_key);
     (env, workspace)
 }
 
-fn seed_redaction_state(workspace: &Path, marker: &str) {
+fn seed_redaction_state(workspace: &Path, marker: &str, team_key: &str) {
     let diagnostic = restart_diagnostic(marker);
     let mixed = mixed_sensitive_value(marker);
     let agent = json!({
@@ -434,12 +439,12 @@ fn seed_redaction_state(workspace: &Path, marker: &str) {
     save_runtime_state(
         workspace,
         &json!({
-            "active_team_key": "current",
+            "active_team_key": team_key,
             "session_name": "team-redaction-contract",
             "leader": {"id": "leader"},
             "agents": {"worker": agent.clone()},
             "teams": {
-                "current": {
+                (team_key): {
                     "agents": {"worker": agent},
                     "diagnostics": mixed,
                     "tasks": []
@@ -505,14 +510,18 @@ fn restart_diagnostic(marker: &str) -> String {
     )
 }
 
-fn run_mcp_status_frames(env: &hermetic_guard::HermeticTestEnv, workspace: &Path) -> Vec<Value> {
+fn run_mcp_status_frames(
+    env: &hermetic_guard::HermeticTestEnv,
+    workspace: &Path,
+    team_key: &str,
+) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_team-agent"))
         .args(["mcp-server", "--workspace"])
         .arg(workspace)
         .current_dir(workspace)
         .env("HOME", env.home())
         .env("TEAM_AGENT_ID", "worker")
-        .env("TEAM_AGENT_OWNER_TEAM_ID", "current")
+        .env("TEAM_AGENT_OWNER_TEAM_ID", team_key)
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
         .stdin(Stdio::piped())
