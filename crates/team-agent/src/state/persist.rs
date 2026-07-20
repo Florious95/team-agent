@@ -33,7 +33,7 @@ use crate::event_log::EventLog;
 use crate::model::paths::runtime_dir;
 use crate::state::identity::{migrate_state_identity, SystemEnv};
 use crate::state::json_truthy;
-use crate::state::projection::team_state_key;
+use crate::state::projection::{team_state_key, CURRENT_TEAM_ALIAS};
 use crate::state::StateError;
 
 /// `state.py:26-29`:agent session-state 归一字段(setdefault None)。
@@ -526,11 +526,13 @@ fn apply_persist_merge_contract(
             let Some(incoming_entry) = incoming_teams.get_mut(team) else {
                 continue;
             };
-            // `current` is a legacy physical alias of the active team, not a
-            // canonical sibling identity. Lifecycle writers update both
-            // projections, so give that alias the active team's authority;
-            // every real sibling key remains scoped to itself.
-            let authority_team = if team == "current" {
+            // Intentional semantic split with
+            // `projection::resolve_runtime_team_scope`: that selector checks
+            // alive/terminal state, but this lock-held merge cannot depend on
+            // the mutable alive view. A change to either CURRENT_TEAM_ALIAS
+            // mapping must evaluate the other. The legacy physical alias gets
+            // active-team authority; every real sibling remains self-scoped.
+            let authority_team = if team == CURRENT_TEAM_ALIAS {
                 top_level_team.as_deref()
             } else {
                 Some(team.as_str())

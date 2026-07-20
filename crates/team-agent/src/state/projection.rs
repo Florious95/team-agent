@@ -22,6 +22,8 @@ use crate::state::persist::{
     save_runtime_state_with_team_tombstoned_agents,
 };
 
+pub(crate) const CURRENT_TEAM_ALIAS: &str = "current";
+
 /// `team_state_key`(`state.py:93`):从 team_dir(.name)/spec_path(.parent.name)派生 team key,
 /// 跳过 `.team`/`runtime`;兜底 `session_name` 或 `"current"`。
 pub fn team_state_key(state: &Value) -> String {
@@ -485,7 +487,11 @@ pub fn resolve_runtime_team_scope(
     // team_dir 匹配致歧义/未找到错误串漂移)。
     let team = team.filter(|t| !t.is_empty());
     if let Some(team) = team {
-        let canonical_request = if team.eq_ignore_ascii_case("current") {
+        // Intentional semantic split with `persist::apply_persist_merge_contract`:
+        // selector resolution validates the active team against the alive/terminal
+        // view, while the lock-held merge cannot depend on that mutable view. A
+        // change to either CURRENT_TEAM_ALIAS mapping must evaluate the other.
+        let canonical_request = if team.eq_ignore_ascii_case(CURRENT_TEAM_ALIAS) {
             let teams = state.get("teams").and_then(Value::as_object);
             state
                 .get("active_team_key")
