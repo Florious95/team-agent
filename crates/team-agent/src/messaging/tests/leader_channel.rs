@@ -54,6 +54,60 @@ fn live_direct_channel_accepts_session_and_tty_drift_as_diagnostics() {
 }
 
 #[test]
+fn legacy_receiver_without_status_still_uses_live_channel_facts() {
+    let socket = "/tmp/team-agent-channel-a";
+    let workspace = Path::new("/tmp/team-agent-workspace-a");
+    let mut receiver = receiver(socket);
+    if let Some(receiver) = receiver.as_object_mut() {
+        receiver.remove("status");
+    }
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![pane("new-session", "/dev/new")]);
+
+    assert!(matches!(
+        resolve_live_leader_channel(workspace, &receiver, &transport),
+        LeaderChannelResolution::Live(LiveLeaderChannel::DirectTmux(_))
+    ));
+}
+
+#[test]
+fn explicit_non_attached_status_still_refuses_before_liveness() {
+    let socket = "/tmp/team-agent-channel-a";
+    let workspace = Path::new("/tmp/team-agent-workspace-a");
+    let mut receiver = receiver(socket);
+    receiver["status"] = serde_json::json!("rebind_required");
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![pane("new-session", "/dev/new")]);
+
+    assert_eq!(
+        resolve_live_leader_channel(workspace, &receiver, &transport),
+        LeaderChannelResolution::Unbound(LeaderChannelUnbound::ReceiverNotAttached)
+    );
+}
+
+#[test]
+fn legacy_receiver_without_status_still_rejects_a_foreign_workspace() {
+    let socket = "/tmp/team-agent-channel-a";
+    let workspace = Path::new("/tmp/team-agent-workspace-a");
+    let mut receiver = receiver(socket);
+    if let Some(receiver) = receiver.as_object_mut() {
+        receiver.remove("status");
+    }
+    let mut observed = pane("foreign-session", "/dev/foreign");
+    observed.current_path = Some(Path::new("/tmp/team-agent-workspace-b").to_path_buf());
+    let transport = OfflineTransport::new()
+        .with_tmux_endpoint(socket)
+        .with_targets(vec![observed]);
+
+    assert_eq!(
+        resolve_live_leader_channel(workspace, &receiver, &transport),
+        LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch)
+    );
+}
+
+#[test]
 fn same_pane_id_on_foreign_socket_is_not_a_live_channel() {
     let workspace = Path::new("/tmp/team-agent-workspace-a");
     let transport = OfflineTransport::new()

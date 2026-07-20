@@ -47,7 +47,11 @@ pub fn resolve_live_leader_channel(
     receiver: &Value,
     transport: &dyn Transport,
 ) -> LeaderChannelResolution {
-    if receiver.get("status").and_then(Value::as_str) != Some("attached") {
+    if receiver
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status != "attached")
+    {
         return LeaderChannelResolution::Unbound(LeaderChannelUnbound::ReceiverNotAttached);
     }
     if receiver_transport_conflicts(receiver) {
