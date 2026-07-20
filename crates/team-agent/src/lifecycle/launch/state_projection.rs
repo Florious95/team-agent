@@ -186,6 +186,24 @@ pub(super) fn save_launched_team_state_for_key(
     launched: &serde_json::Value,
     team_key: Option<&str>,
 ) -> Result<(), LifecycleError> {
+    save_team_state_for_key(workspace, launched, team_key, None)
+}
+
+pub(super) fn save_added_agent_state_for_key(
+    workspace: &Path,
+    launched: &serde_json::Value,
+    team_key: &str,
+    agent_id: &str,
+) -> Result<(), LifecycleError> {
+    save_team_state_for_key(workspace, launched, Some(team_key), Some(agent_id))
+}
+
+fn save_team_state_for_key(
+    workspace: &Path,
+    launched: &serde_json::Value,
+    team_key: Option<&str>,
+    added_agent_id: Option<&str>,
+) -> Result<(), LifecycleError> {
     let existing = load_runtime_state(workspace).unwrap_or_else(|_| serde_json::json!({}));
     let launched_key = team_key
         .filter(|key| !key.is_empty())
@@ -231,13 +249,17 @@ pub(super) fn save_launched_team_state_for_key(
     };
     let mut projected = crate::state::projection::project_top_level_view(&merged, &launched_key);
     drop_unbound_top_level_owner(&mut projected);
+    let intent = match added_agent_id {
+        Some(agent_id) => crate::state::repository::StateWriteIntent::AddAgent {
+            team_key: &launched_key,
+            agent_id,
+        },
+        None => crate::state::repository::StateWriteIntent::LaunchTeam {
+            team_key: &launched_key,
+        },
+    };
     crate::state::repository::StateRepository::new(workspace)
-        .save(
-            crate::state::repository::StateWriteIntent::LaunchTeam {
-                team_key: &launched_key,
-            },
-            &projected,
-        )
+        .save(intent, &projected)
         .map_err(|e| LifecycleError::StatePersist(e.to_string()))
 }
 

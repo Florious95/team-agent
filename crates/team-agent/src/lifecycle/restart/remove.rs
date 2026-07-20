@@ -574,14 +574,16 @@ fn remove_agent_inner(
     // (team projection) — NOT a raw save, so other teams in a multi-team workspace are preserved.
     let mut removed_state = working_state;
     remove_agent_from_state(&mut removed_state, agent_id)?;
-    crate::state::repository::StateRepository::new(paths.run_workspace).save(
-        crate::state::repository::StateWriteIntent::RemoveAgent {
-            team_key,
-            agent_id: agent_id.as_str(),
-        },
-        &removed_state,
-    )
-    .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
+    mark_agent_retired_in_state(&mut removed_state, agent_id)?;
+    crate::state::repository::StateRepository::new(paths.run_workspace)
+        .save(
+            crate::state::repository::StateWriteIntent::RemoveAgent {
+                team_key,
+                agent_id: agent_id.as_str(),
+            },
+            &removed_state,
+        )
+        .map_err(|e| LifecycleError::StatePersist(e.to_string()))?;
     cleared_locations.push(serde_json::json!("state.json:agents"));
     write_remove_step_event(
         paths.run_workspace,
@@ -790,6 +792,57 @@ fn remove_agent_from_state(
         Err(LifecycleError::StatePersist(
             "runtime state agents is not an object".to_string(),
         ))
+    }
+}
+
+pub(crate) fn mark_agent_retired_in_state(
+    state: &mut serde_json::Value,
+    agent_id: &AgentId,
+) -> Result<(), LifecycleError> {
+    let root = state.as_object_mut().ok_or_else(|| {
+        LifecycleError::StatePersist("runtime state root is not an object".to_string())
+    })?;
+    let lifecycle = root
+        .entry("agent_lifecycle".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let lifecycle = lifecycle.as_object_mut().ok_or_else(|| {
+        LifecycleError::StatePersist("runtime state agent_lifecycle is not an object".to_string())
+    })?;
+    let entry = lifecycle
+        .entry(agent_id.as_str().to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if entry.get("state").and_then(serde_json::Value::as_str) == Some("retired") {
+        return Ok(());
+    }
+    let entry = entry.as_object_mut().ok_or_else(|| {
+        LifecycleError::StatePersist(format!(
+            "runtime state agent_lifecycle.{} is not an object",
+            agent_id.as_str()
+        ))
+    })?;
+    entry.insert("state".to_string(), serde_json::json!("retired"));
+    entry.insert(
+        "changed_at".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
+    entry.insert("reason".to_string(), serde_json::json!("remove-agent"));
+    Ok(())
+}
+
+pub(crate) fn clear_agent_retirement_in_state(state: &mut serde_json::Value, agent_id: &AgentId) {
+    let Some(lifecycle) = state
+        .get_mut("agent_lifecycle")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let is_retired = lifecycle
+        .get(agent_id.as_str())
+        .and_then(|entry| entry.get("state"))
+        .and_then(serde_json::Value::as_str)
+        == Some("retired");
+    if is_retired {
+        lifecycle.remove(agent_id.as_str());
     }
 }
 

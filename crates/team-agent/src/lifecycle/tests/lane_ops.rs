@@ -434,6 +434,32 @@ fn force_remove_reconciles_all_seat_quadrants_without_cross_team_same_name_kill(
     }
 }
 
+#[test]
+fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
+    let ws = lanea_ws_agents(json!({
+        "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
+        "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
+    }));
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    let role = ws.join("agents").join("alpha.md");
+
+    remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).unwrap();
+    let removed = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert_eq!(
+        removed["agent_lifecycle"]["alpha"]["state"], "retired",
+        "successful remove must persist a restart-pruning tombstone"
+    );
+
+    crate::lifecycle::add_agent_with_transport(&ws, &aid("alpha"), &role, false, None, &tx)
+        .unwrap();
+    let readded = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert!(
+        readded["agent_lifecycle"].get("alpha").is_none(),
+        "explicit re-add must consume the retired tombstone"
+    );
+    assert!(readded["agents"].get("alpha").is_some());
+}
+
 const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";
 
 struct HermeticTestEnv {
@@ -558,6 +584,10 @@ fn force_recreate_is_one_lock_transaction_for_all_seat_quadrants_and_rolls_back_
             state["agents"].get("charlie").is_some(),
             "{quadrant}: state restored"
         );
+        assert!(
+            state["agent_lifecycle"].get("charlie").is_none(),
+            "{quadrant}: successful force-recreate consumes its interim tombstone"
+        );
         let spec_text = std::fs::read_to_string(selected_spec_path(&ws)).unwrap();
         assert_eq!(
             spec_text.matches("id: \"charlie\"").count(),
@@ -603,6 +633,10 @@ fn force_recreate_is_one_lock_transaction_for_all_seat_quadrants_and_rolls_back_
     assert!(
         state["agents"].get("charlie").is_some(),
         "rollback restores state"
+    );
+    assert!(
+        state["agent_lifecycle"].get("charlie").is_none(),
+        "preflight failure must not create a retirement tombstone"
     );
     assert!(
         std::fs::read_to_string(selected_spec_path(&ws))
@@ -701,6 +735,11 @@ fn force_recreate_post_consumption_failure_restores_before_tuple_and_health() {
             .unwrap(),
         sibling_health,
         "rollback never changes the sibling team's same-agent health row"
+    );
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert!(
+        state["agent_lifecycle"].get("charlie").is_none(),
+        "post-consumption rollback restores the before-state without a new tombstone"
     );
 }
 
@@ -1139,6 +1178,11 @@ fn lanea_remove_rollback_restarts_force_stopped_worker() {
          re-spawn; Rust rollback never restarts, leaving the worker dead. Porter must thread the transport into \
          RemoveRollback::restore. spawns={:?}",
         tx.spawns()
+    );
+    let restored = crate::state::persist::load_runtime_state(&ws).unwrap();
+    assert!(
+        restored["agent_lifecycle"].get("alpha").is_none(),
+        "failed remove must roll back the transaction-created tombstone"
     );
 }
 

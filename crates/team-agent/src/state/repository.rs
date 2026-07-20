@@ -141,6 +141,10 @@ pub enum StateWriteIntent<'a> {
     LaunchTeam {
         team_key: &'a str,
     },
+    AddAgent {
+        team_key: &'a str,
+        agent_id: &'a str,
+    },
     AnnotateTeamDepth {
         team_key: &'a str,
     },
@@ -258,6 +262,7 @@ fn route_direct(
         // LaunchTeam -> the launch writer path uses the root helper today
         // (`save_runtime_state` at lifecycle/launch.rs:996).
         StateWriteIntent::LaunchTeam { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::AddAgent { .. } => helper_write_root(workspace, state),
         // AnnotateTeamDepth also lives on the root save path.
         StateWriteIntent::AnnotateTeamDepth { .. } => helper_write_root(workspace, state),
         // ShutdownTeam: scoped clean shutdown uses `save_team_scoped_state`;
