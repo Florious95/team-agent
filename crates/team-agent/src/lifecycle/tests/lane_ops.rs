@@ -440,24 +440,89 @@ fn remove_persists_retired_tombstone_and_explicit_readd_clears_it() {
         "alpha": { "status": "stopped", "provider": "codex", "window": "alpha" },
         "bravo": { "status": "running", "provider": "codex", "window": "bravo" }
     }));
+    let mut seeded = crate::state::persist::load_runtime_state(&ws).unwrap();
+    seeded["team_key"] = json!("laneateam");
+    seeded["active_team_key"] = json!("laneateam");
+    let mut nested = crate::state::projection::compact_team_state(&seeded);
+    nested["status"] = json!("alive");
+    seeded["teams"] = json!({
+        "laneateam": nested,
+        "sibling": {
+            "team_key": "sibling",
+            "status": "shutdown",
+            "agents": {},
+            "agent_lifecycle": {
+                "alpha": {
+                    "state": "retired",
+                    "changed_at": "2026-07-20T00:00:00Z",
+                    "reason": "sibling retirement"
+                }
+            }
+        }
+    });
+    crate::state::persist::save_runtime_state(&ws, &seeded).unwrap();
+    let stale_tick = crate::state::projection::select_runtime_state(&ws, Some("laneateam"))
+        .expect("capture the coordinator projection from before remove");
     let tx = LaneTransport::new("team-laneateam", &[]);
     let role = ws.join("agents").join("alpha.md");
 
     remove_agent_with_transport(&ws, &aid("alpha"), true, true, None, &tx).unwrap();
-    let removed = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let removed: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        removed["agent_lifecycle"]["alpha"]["state"], "retired",
-        "successful remove must persist a restart-pruning tombstone"
+        removed["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"],
+        "retired",
+        "the first successful remove must directly persist the canonical tombstone"
+    );
+    assert!(
+        removed["teams"]["laneateam"]["agents"]
+            .get("alpha")
+            .is_none(),
+        "the first successful remove must directly delete the canonical agent row"
+    );
+    crate::state::repository::StateRepository::new(&ws)
+        .save(
+            crate::state::repository::StateWriteIntent::CoordinatorTick {
+                team_key: "laneateam",
+            },
+            &stale_tick,
+        )
+        .unwrap();
+    let after_stale_tick: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::state::persist::runtime_state_path(&ws)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        after_stale_tick["teams"]["laneateam"]["agent_lifecycle"]["alpha"]["state"],
+        "retired",
+        "a stale coordinator save must not erase the first remove's tombstone"
+    );
+    assert!(
+        after_stale_tick["teams"]["laneateam"]["agents"]
+            .get("alpha")
+            .is_none(),
+        "a stale coordinator save must not resurrect the first removed agent"
     );
 
     crate::lifecycle::add_agent_with_transport(&ws, &aid("alpha"), &role, false, None, &tx)
         .unwrap();
     let readded = crate::state::persist::load_runtime_state(&ws).unwrap();
     assert!(
-        readded["agent_lifecycle"].get("alpha").is_none(),
+        readded["teams"]["laneateam"]["agent_lifecycle"]
+            .get("alpha")
+            .is_none(),
         "explicit re-add must consume the retired tombstone"
     );
-    assert!(readded["agents"].get("alpha").is_some());
+    assert!(readded["teams"]["laneateam"]["agents"]
+        .get("alpha")
+        .is_some());
+    assert_eq!(
+        readded["teams"]["sibling"]["agent_lifecycle"]["alpha"]["state"],
+        "retired",
+        "selected-team re-add must not clear a sibling team's same-id retirement"
+    );
 }
 
 const CHARLIE_ROLE: &str = "---\nname: charlie\nrole: Charlie Worker\nprovider: codex\nmodel: gpt-5.5\nauth_mode: subscription\ntools:\n  - mcp_team\n---\n\nCharlie.\n";

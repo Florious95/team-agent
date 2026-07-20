@@ -452,6 +452,7 @@ fn apply_persist_merge_contract(
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
+        preserve_latest_retired_agents(incoming, latest, topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
         // implicit "alive" shape (top-level agents are always the active team).
         // Passing `None` for team lifecycle keeps historical behavior when the
@@ -514,6 +515,11 @@ fn apply_persist_merge_contract(
                         .map(|_| crate::state::projection::team_is_alive_candidate(incoming_entry))
                         .unwrap_or(true),
             );
+            preserve_latest_retired_agents(
+                incoming_entry,
+                latest_entry,
+                topology_update_agent_ids,
+            )?;
             merge_agent_projection(
                 &projection,
                 incoming_entry.get_mut("agents"),
@@ -527,6 +533,54 @@ fn apply_persist_merge_contract(
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
             preserve_latest_endpoint_convergence_fields(incoming_entry, latest_entry);
         }
+    }
+    Ok(())
+}
+
+fn preserve_latest_retired_agents(
+    incoming: &mut Value,
+    latest: &Value,
+    topology_update_agent_ids: &BTreeSet<String>,
+) -> Result<(), StateError> {
+    // A persisted retirement is lifecycle authority, so an ordinary stale
+    // writer (notably a coordinator tick captured before remove-agent) cannot
+    // resurrect its old roster row. Explicit lifecycle topology writers are
+    // the only override: AddAgent uses that existing authority to consume the
+    // tombstone, while remove itself supplies the newer tombstone as incoming.
+    let retired = latest
+        .get("agent_lifecycle")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter(|(agent_id, entry)| {
+            !topology_update_agent_ids.contains(*agent_id)
+                && entry.get("state").and_then(Value::as_str) == Some("retired")
+        })
+        .map(|(agent_id, entry)| (agent_id.clone(), entry.clone()))
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(());
+    }
+    let Some(incoming) = incoming.as_object_mut() else {
+        return Err(StateError::SaveFailed(
+            "incoming runtime projection is not an object".to_string(),
+        ));
+    };
+    if let Some(agents) = incoming.get_mut("agents").and_then(Value::as_object_mut) {
+        for (agent_id, _) in &retired {
+            agents.remove(agent_id);
+        }
+    }
+    let lifecycle = incoming
+        .entry("agent_lifecycle".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(lifecycle) = lifecycle.as_object_mut() else {
+        return Err(StateError::SaveFailed(
+            "incoming agent_lifecycle is not an object".to_string(),
+        ));
+    };
+    for (agent_id, entry) in retired {
+        lifecycle.insert(agent_id, entry);
     }
     Ok(())
 }

@@ -274,7 +274,13 @@ fn route_direct(
         // LaunchTeam -> the launch writer path uses the root helper today
         // (`save_runtime_state` at lifecycle/launch.rs:996).
         StateWriteIntent::LaunchTeam { .. } => helper_write_root(workspace, state),
-        StateWriteIntent::AddAgent { .. } => helper_write_root(workspace, state),
+        StateWriteIntent::AddAgent { agent_id, .. } => {
+            helper_write_team_scoped_with_lifecycle_topology_authority(
+                workspace,
+                state,
+                &[agent_id],
+            )
+        }
         // AnnotateTeamDepth also lives on the root save path.
         StateWriteIntent::AnnotateTeamDepth { .. } => helper_write_root(workspace, state),
         // ShutdownTeam: scoped clean shutdown uses `save_team_scoped_state`;
