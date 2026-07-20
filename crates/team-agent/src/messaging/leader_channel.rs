@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde_json::Value;
 
 use crate::codex_app_server::AppServerBinding;
@@ -32,13 +34,16 @@ pub enum LeaderChannelUnbound {
     NonCanonicalTmuxSocket,
     EndpointMismatch,
     PaneNotLive,
+    PaneWorkspaceMismatch,
     AppServerBindingInvalid,
 }
 
 /// Resolve the canonical receiver's live physical channel without mutating
-/// ownership. For direct tmux, `(absolute socket, pane id)` is the authority;
-/// session/window/tty/fingerprint are observations and can only report drift.
+/// ownership. For direct tmux, `(absolute socket, pane id)` plus an available
+/// pane cwd inside the target workspace is the authority. Session/window/tty/
+/// fingerprint are observations and can only report drift.
 pub fn resolve_live_leader_channel(
+    workspace: &Path,
     receiver: &Value,
     transport: &dyn Transport,
 ) -> LeaderChannelResolution {
@@ -88,6 +93,13 @@ pub fn resolve_live_leader_channel(
     else {
         return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneNotLive);
     };
+    if observed
+        .current_path
+        .as_deref()
+        .is_some_and(|path| !path_is_in_workspace(path, workspace))
+    {
+        return LeaderChannelResolution::Unbound(LeaderChannelUnbound::PaneWorkspaceMismatch);
+    }
     let metadata_drift = receiver_metadata_drift(receiver, &observed);
     LeaderChannelResolution::Live(LiveLeaderChannel::DirectTmux(DirectTmuxLeaderChannel {
         pane_id: pane_id.to_string(),
@@ -95,6 +107,14 @@ pub fn resolve_live_leader_channel(
         observed,
         metadata_drift,
     }))
+}
+
+fn path_is_in_workspace(path: &Path, workspace: &Path) -> bool {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    path == workspace || path.starts_with(workspace)
 }
 
 fn receiver_transport_conflicts(receiver: &Value) -> bool {

@@ -944,7 +944,11 @@ fn resolve_leader(
     let socket = string_field(receiver, "tmux_socket")
         .map(str::to_string)
         .or_else(|| transport.tmux_endpoint());
-    match crate::messaging::resolve_live_leader_channel(receiver, transport) {
+    match crate::messaging::resolve_live_leader_channel(
+        target_workspace,
+        receiver,
+        transport,
+    ) {
         crate::messaging::LeaderChannelResolution::Live(
             crate::messaging::LiveLeaderChannel::DirectTmux(channel),
         ) => Ok(ResolvedNamedAddress {

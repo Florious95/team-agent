@@ -232,6 +232,7 @@ pub fn deliver_pending_message(
         let channel_transport =
             delivery_transport_for_recipient(workspace, transport, state, "leader");
         let resolution = crate::messaging::resolve_live_leader_channel(
+            workspace,
             receiver,
             channel_transport.as_transport(),
         );
@@ -316,6 +317,7 @@ pub fn deliver_pending_message(
         let channel_transport =
             delivery_transport_for_recipient(workspace, transport, state, "leader");
         match crate::messaging::resolve_live_leader_channel(
+            workspace,
             receiver,
             channel_transport.as_transport(),
         ) {
