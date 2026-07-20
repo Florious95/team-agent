@@ -261,9 +261,8 @@ impl<'a> StateWriteIntent<'a> {
     }
 }
 
-// S1a dispatch: every intent forwards to exactly the same helper family the
-// pre-S1a caller used, so behavior is bit-identical and only the naming has
-// shifted. When S1b migrates a writer cluster, only the arms below change;
+// S1a dispatch: every intent forwards to the same pre-S1a helper family; only naming shifted.
+// When S1b migrates a writer cluster, only the arms below change;
 // the callsites and tests keep talking to `StateRepository`.
 fn route_direct(
     workspace: &Path,
@@ -274,10 +273,11 @@ fn route_direct(
         // LaunchTeam -> the launch writer path uses the root helper today
         // (`save_runtime_state` at lifecycle/launch.rs:996).
         StateWriteIntent::LaunchTeam { .. } => helper_write_root(workspace, state),
-        StateWriteIntent::AddAgent { agent_id, .. } => {
+        StateWriteIntent::AddAgent { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
                 state,
+                team_key,
                 &[agent_id],
             )
         }
@@ -300,12 +300,13 @@ fn route_direct(
         // `save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip`
         // at lifecycle/restart/common.rs:633.
         StateWriteIntent::RestartTeam {
+            team_key,
             topology_authority_agent_ids,
             skip_capture_backfill_agent_ids,
-            ..
         } => helper_write_team_scoped_with_lifecycle_topology_authority_and_capture_backfill_skip(
             workspace,
             state,
+            team_key,
             skip_capture_backfill_agent_ids,
             topology_authority_agent_ids,
         ),
@@ -315,16 +316,17 @@ fn route_direct(
         StateWriteIntent::RestartSessionRepair { .. } => helper_write_team_scoped(workspace, state),
         // StartAgent - the launch add-agent tail lands via
         // `save_team_scoped_state_with_lifecycle_topology_authority` today.
-        StateWriteIntent::StartAgent { .. } => {
-            helper_write_team_scoped_with_lifecycle_topology_authority(workspace, state, &[])
+        StateWriteIntent::StartAgent { team_key, .. } => {
+            helper_write_team_scoped_with_lifecycle_topology_authority(workspace, state, team_key, &[])
         }
         // StopAgent uses the legacy helper family
         // `save_team_scoped_state_with_lifecycle_topology_authority`,
         // matching lifecycle/restart/agent.rs:911.
-        StateWriteIntent::StopAgent { agent_id, .. } => {
+        StateWriteIntent::StopAgent { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
                 state,
+                team_key,
                 &[agent_id],
             )
         }
@@ -333,20 +335,22 @@ fn route_direct(
         // matching lifecycle/restart/agent.rs:1355. Non-discard falls back to
         // the same lifecycle topology-authority helper as StopAgent.
         StateWriteIntent::ResetAgent {
+            team_key,
             agent_id,
             discard_session,
-            ..
         } => {
             if discard_session {
                 helper_write_team_scoped_with_tombstone_lifecycle_topology_authority(
                     workspace,
                     state,
+                    team_key,
                     &[agent_id],
                 )
             } else {
                 helper_write_team_scoped_with_lifecycle_topology_authority(
                     workspace,
                     state,
+                    team_key,
                     &[agent_id],
                 )
             }
@@ -358,10 +362,11 @@ fn route_direct(
         }
         // ForkAgent mutates a selected team projection, so persist it back to
         // that projection with the forked row as lifecycle topology authority.
-        StateWriteIntent::ForkAgent { agent_id, .. } => {
+        StateWriteIntent::ForkAgent { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
                 state,
+                team_key,
                 &[agent_id],
             )
         }
@@ -375,10 +380,11 @@ fn route_direct(
         // Force-recreate rollback restores an existing row after the
         // replacement spawn has advanced its lifecycle tuple. The selected
         // row is therefore the explicit topology authority.
-        StateWriteIntent::ForceRecreateRollback { agent_id, .. } => {
+        StateWriteIntent::ForceRecreateRollback { team_key, agent_id } => {
             helper_write_team_scoped_with_lifecycle_topology_authority(
                 workspace,
                 state,
+                team_key,
                 &[agent_id],
             )
         }

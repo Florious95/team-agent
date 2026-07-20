@@ -747,22 +747,41 @@ pub(crate) fn save_team_scoped_state_with_deleted_agents(
 pub(crate) fn save_team_scoped_state_with_tombstone_lifecycle_topology_authority(
     workspace: &Path,
     team_state: &Value,
+    topology_team_key: &str,
     agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_team_scoped_state_with_merge_options(workspace, team_state, &[], agent_ids, &[], agent_ids)
+    save_team_scoped_state_with_merge_options(
+        workspace,
+        team_state,
+        &[],
+        agent_ids,
+        &[],
+        Some(topology_team_key),
+        agent_ids,
+    )
 }
 
 pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority(
     workspace: &Path,
     team_state: &Value,
+    topology_team_key: &str,
     agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_team_scoped_state_with_merge_options(workspace, team_state, &[], &[], &[], agent_ids)
+    save_team_scoped_state_with_merge_options(
+        workspace,
+        team_state,
+        &[],
+        &[],
+        &[],
+        Some(topology_team_key),
+        agent_ids,
+    )
 }
 
 pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
     workspace: &Path,
     team_state: &Value,
+    topology_team_key: &str,
     skip_capture_backfill_agent_ids: &[&str],
     topology_agent_ids: &[&str],
 ) -> Result<(), StateError> {
@@ -772,6 +791,7 @@ pub(crate) fn save_team_scoped_state_with_lifecycle_topology_authority_and_captu
         &[],
         &[],
         skip_capture_backfill_agent_ids,
+        Some(topology_team_key),
         topology_agent_ids,
     )
 }
@@ -788,6 +808,7 @@ fn save_team_scoped_state_with_merge_exceptions(
         deleted_agent_ids,
         tombstoned_agent_ids,
         &[],
+        None,
         &[],
     )
 }
@@ -798,6 +819,7 @@ fn save_team_scoped_state_with_merge_options(
     deleted_agent_ids: &[&str],
     tombstoned_agent_ids: &[&str],
     skip_capture_backfill_agent_ids: &[&str],
+    topology_team_key: Option<&str>,
     topology_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let target_key = team_state_key(team_state);
@@ -837,7 +859,7 @@ fn save_team_scoped_state_with_merge_options(
                 return save_runtime_state_with_team_tombstone_lifecycle_topology_authority(
                     workspace,
                     &merged,
-                    &target_key,
+                    topology_team_key.unwrap_or(&target_key),
                     topology_agent_ids,
                 );
             }
@@ -845,7 +867,7 @@ fn save_team_scoped_state_with_merge_options(
                 return save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
                     workspace,
                     &merged,
-                    &target_key,
+                    topology_team_key.unwrap_or(&target_key),
                     skip_capture_backfill_agent_ids,
                     topology_agent_ids,
                 );
@@ -853,6 +875,7 @@ fn save_team_scoped_state_with_merge_options(
             return save_runtime_state_with_lifecycle_topology_authority(
                 workspace,
                 &merged,
+                topology_team_key.unwrap_or(&target_key),
                 topology_agent_ids,
             );
         }
@@ -903,7 +926,7 @@ fn save_team_scoped_state_with_merge_options(
                 save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
                     workspace,
                     &Value::Object(merged),
-                    &target_key,
+                    topology_team_key.unwrap_or(&target_key),
                     skip_capture_backfill_agent_ids,
                     topology_agent_ids,
                 )
@@ -911,6 +934,7 @@ fn save_team_scoped_state_with_merge_options(
                 save_runtime_state_with_lifecycle_topology_authority(
                     workspace,
                     &Value::Object(merged),
+                    topology_team_key.unwrap_or(&target_key),
                     topology_agent_ids,
                 )
             }

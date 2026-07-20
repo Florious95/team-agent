@@ -205,7 +205,7 @@ impl Drop for RuntimeLock {
 /// `save_runtime_state`(bug-084)。`state` 是 state.json 的内存 Value(插入序保留)。
 /// 注:Python 在此还调 `_migrate_state_identity`(identity slice 落地后接入;本 slice 不改 state 内容)。
 pub fn save_runtime_state(workspace: &Path, state: &Value) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], &[])
+    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], None, &[])
 }
 
 pub(crate) fn save_runtime_state_reapplying_after_conflict<F>(
@@ -230,9 +230,18 @@ where
 pub(crate) fn save_runtime_state_with_lifecycle_topology_authority(
     workspace: &Path,
     state: &Value,
+    topology_team_key: &str,
     agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, &[], None, &[], agent_ids)
+    save_runtime_state_with_merge_options(
+        workspace,
+        state,
+        &[],
+        None,
+        &[],
+        Some(topology_team_key),
+        agent_ids,
+    )
 }
 
 pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_backfill_skip(
@@ -248,6 +257,7 @@ pub(crate) fn save_runtime_state_with_lifecycle_topology_authority_and_capture_b
         &[],
         Some(skip_capture_backfill_team_key),
         skip_capture_backfill_agent_ids,
+        Some(skip_capture_backfill_team_key),
         topology_agent_ids,
     )
 }
@@ -257,7 +267,7 @@ pub(crate) fn save_runtime_state_with_deleted_agents(
     state: &Value,
     deleted_agent_ids: &[&str],
 ) -> Result<(), StateError> {
-    save_runtime_state_with_merge_options(workspace, state, deleted_agent_ids, None, &[], &[])
+    save_runtime_state_with_merge_options(workspace, state, deleted_agent_ids, None, &[], None, &[])
 }
 
 pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
@@ -272,6 +282,7 @@ pub(crate) fn save_runtime_state_with_team_tombstoned_agents(
         &[],
         Some(tombstoned_team_key),
         tombstoned_agent_ids,
+        None,
         &[],
     )
 }
@@ -288,6 +299,7 @@ pub(crate) fn save_runtime_state_with_team_tombstone_lifecycle_topology_authorit
         &[],
         Some(tombstoned_team_key),
         agent_ids,
+        Some(tombstoned_team_key),
         agent_ids,
     )
 }
@@ -298,6 +310,7 @@ fn save_runtime_state_with_merge_options(
     deleted_agent_ids: &[&str],
     skip_capture_backfill_team_key: Option<&str>,
     skip_capture_backfill_agent_ids: &[&str],
+    topology_update_team_key: Option<&str>,
     topology_update_agent_ids: &[&str],
 ) -> Result<(), StateError> {
     let path = runtime_state_path(workspace);
@@ -362,11 +375,15 @@ fn save_runtime_state_with_merge_options(
             .filter(|id| !id.is_empty())
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        let topology_updates = topology_update_agent_ids
-            .iter()
-            .copied()
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
+        let topology_updates = topology_update_team_key
+            .into_iter()
+            .flat_map(|team_key| {
+                topology_update_agent_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !id.is_empty())
+                    .map(move |agent_id| (team_key.to_string(), agent_id.to_string()))
+            })
             .collect::<BTreeSet<_>>();
         apply_persist_merge_contract(
             &mut migrated,
@@ -440,7 +457,7 @@ fn apply_persist_merge_contract(
     deleted_agent_ids: &BTreeSet<String>,
     skip_capture_backfill_team_key: Option<&str>,
     skip_capture_backfill_agent_ids: &BTreeSet<String>,
-    topology_update_agent_ids: &BTreeSet<String>,
+    topology_updates: &BTreeSet<(String, String)>,
 ) -> Result<(), StateError> {
     // A0/R1: the projection gate only guards the TOP-LEVEL passes (top-level agents and
     // the top-level<->active-team cross projections depend on which team is active); the
@@ -448,11 +465,19 @@ fn apply_persist_merge_contract(
     // even when another process flipped session_name/active_team_key between this
     // writer's load and save.
     let projection_matches = same_runtime_projection(incoming, latest);
-    let top_level_team = Some(team_state_key(incoming)).or_else(|| Some(team_state_key(latest)));
+    let top_level_team = incoming
+        .get("active_team_key")
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some(team_state_key(incoming)))
+        .or_else(|| Some(team_state_key(latest)));
     let skip_top_level_capture_backfill =
         should_skip_capture_backfill(top_level_team.as_deref(), skip_capture_backfill_team_key);
     if projection_matches {
-        preserve_latest_retired_agents(incoming, latest, topology_update_agent_ids)?;
+        let topology_update_agent_ids =
+            topology_updates_for_team(topology_updates, top_level_team.as_deref());
+        preserve_latest_retired_agents(incoming, latest, &topology_update_agent_ids)?;
         // 0.5.26 (§7.3): top-level projection uses the incoming root state's
         // implicit "alive" shape (top-level agents are always the active team).
         // Passing `None` for team lifecycle keeps historical behavior when the
@@ -464,7 +489,7 @@ fn apply_persist_merge_contract(
             deleted_agent_ids,
             skip_top_level_capture_backfill,
             skip_capture_backfill_agent_ids,
-            topology_update_agent_ids,
+            &topology_update_agent_ids,
             None,
         )?;
         // Stage 3c (identity-boundary unified plan, architect direction
@@ -501,6 +526,7 @@ fn apply_persist_merge_contract(
             let Some(incoming_entry) = incoming_teams.get_mut(team) else {
                 continue;
             };
+            let topology_update_agent_ids = topology_updates_for_team(topology_updates, Some(team));
             let projection = format!("teams.{team}.agents");
             // 0.5.26 (`.team/artifacts/stale-team-saveconflict-locate.md` §7.3):
             // decide the containing team's aliveness from BOTH sides — a shutdown
@@ -518,7 +544,7 @@ fn apply_persist_merge_contract(
             preserve_latest_retired_agents(
                 incoming_entry,
                 latest_entry,
-                topology_update_agent_ids,
+                &topology_update_agent_ids,
             )?;
             merge_agent_projection(
                 &projection,
@@ -527,7 +553,7 @@ fn apply_persist_merge_contract(
                 deleted_agent_ids,
                 should_skip_capture_backfill(Some(team), skip_capture_backfill_team_key),
                 skip_capture_backfill_agent_ids,
-                topology_update_agent_ids,
+                &topology_update_agent_ids,
                 team_alive,
             )?;
             preserve_latest_ownership_fields(incoming_entry, latest_entry);
@@ -535,6 +561,17 @@ fn apply_persist_merge_contract(
         }
     }
     Ok(())
+}
+
+fn topology_updates_for_team(
+    topology_updates: &BTreeSet<(String, String)>,
+    team_key: Option<&str>,
+) -> BTreeSet<String> {
+    topology_updates
+        .iter()
+        .filter(|(authority_team, _)| Some(authority_team.as_str()) == team_key)
+        .map(|(_, agent_id)| agent_id.clone())
+        .collect()
 }
 
 fn preserve_latest_retired_agents(
@@ -1863,8 +1900,13 @@ mod tests {
                 "other": {"agent_id": "other", "provider": "codex", "window": "old-other", "pane_id": "%old", "spawn_epoch": 1}
             },
         });
-        let err = save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, &["target"])
-            .expect_err("authorized target must not hide other agent conflict");
+        let err = save_runtime_state_with_lifecycle_topology_authority(
+            &ws,
+            &incoming,
+            "team-a",
+            &["target"],
+        )
+        .expect_err("authorized target must not hide other agent conflict");
         assert!(matches!(err, StateError::SaveConflict(_)));
         assert!(err.to_string().contains("agent_id=other"));
     }
@@ -1889,7 +1931,13 @@ mod tests {
                 "target": {"agent_id": "target", "provider": "codex", "status": "stopped"}
             },
         });
-        save_runtime_state_with_lifecycle_topology_authority(&ws, &incoming, &["target"]).unwrap();
+        save_runtime_state_with_lifecycle_topology_authority(
+            &ws,
+            &incoming,
+            "team-a",
+            &["target"],
+        )
+        .unwrap();
         let target = read_state(&ws).pointer("/agents/target").cloned().unwrap();
         assert!(
             target.get("pane_id").is_none(),
