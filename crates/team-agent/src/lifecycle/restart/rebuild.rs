@@ -3119,10 +3119,16 @@ fn restart_candidate_from_state(
         .filter(|s| !s.is_empty())
         .map(SessionName::new)
         .unwrap_or_else(|| SessionName::new(team_name));
+    let retired = retired_agent_ids(state);
     let mut agents = state
         .get("agents")
         .and_then(serde_json::Value::as_object)
-        .map(|map| map.keys().map(AgentId::new).collect::<Vec<_>>())
+        .map(|map| {
+            map.keys()
+                .filter(|agent_id| !retired.contains(agent_id.as_str()))
+                .map(AgentId::new)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     agents.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     RestartCandidate {
@@ -3133,6 +3139,19 @@ fn restart_candidate_from_state(
         has_context: restart_candidate_has_context(state),
         agents,
     }
+}
+
+fn retired_agent_ids(state: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    state
+        .get("agent_lifecycle")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|lifecycle| lifecycle.iter())
+        .filter(|(_, entry)| {
+            entry.get("state").and_then(serde_json::Value::as_str) == Some("retired")
+        })
+        .map(|(agent_id, _)| agent_id.clone())
+        .collect()
 }
 
 /// E5 task#3 / RC-A6a:每次 restart 都以**角色定义**(team_dir 的 TEAM.md+agents/*.md)
@@ -3204,6 +3223,7 @@ fn rebuild_runtime_spec_from_roles(
     // 静态 team_dir/agents/*.md + state 记录的 dynamic role source。缺文件 fail-closed
     // 三行式,不静默 prune 已 live 的 helper(persist SaveConflict 保护继续生效)。
     merge_state_dynamic_role_files(&mut spec, run_workspace, &team_dir, team_key, state)?;
+    filter_retired_agents_from_spec(&mut spec, &retired_agent_ids(state));
     // 写 runtime spec(覆盖,原子 tmp+rename;Bug2)。
     let spec_path = crate::model::paths::runtime_spec_path(run_workspace, team_key);
     crate::lifecycle::launch::write_spec_atomic(&spec_path, &spec)?;
@@ -3214,6 +3234,45 @@ fn rebuild_runtime_spec_from_roles(
         let _ = std::fs::remove_file(&legacy_spec);
     }
     Ok(spec)
+}
+
+fn filter_retired_agents_from_spec(
+    spec: &mut YamlValue,
+    retired: &std::collections::BTreeSet<String>,
+) {
+    if retired.is_empty() {
+        return;
+    }
+    let YamlValue::Map(root) = spec else {
+        return;
+    };
+    if let Some((_, YamlValue::List(agents))) = root.iter_mut().find(|(key, _)| key == "agents") {
+        agents.retain(|agent| {
+            yaml_string_field(agent, "id").is_none_or(|id| !retired.contains(id))
+        });
+    }
+    let Some((_, YamlValue::Map(routing))) =
+        root.iter_mut().find(|(key, _)| key == "routing")
+    else {
+        return;
+    };
+    if let Some((_, YamlValue::List(rules))) =
+        routing.iter_mut().find(|(key, _)| key == "rules")
+    {
+        rules.retain(|rule| {
+            yaml_string_field(rule, "assign_to").is_none_or(|id| !retired.contains(id))
+        });
+    }
+}
+
+fn yaml_string_field<'a>(value: &'a YamlValue, key: &str) -> Option<&'a str> {
+    let YamlValue::Map(fields) = value else {
+        return None;
+    };
+    fields
+        .iter()
+        .find(|(field, _)| field == key)
+        .and_then(|(_, value)| value.as_str())
 }
 
 /// 0.5.30 (`add-agent-restart-saveconflict-locate.md` §4/§11): 把 add-agent
