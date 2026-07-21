@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.52
+
+- **Fix: team-key split-brain — one canonical runtime team key across retirement, restart, and per-team state merge (slices 1 / 2a / 2b).**
+  - **Retirement tombstone excludes a removed seat from the restart roster (slice 2a/2b).** `remove-agent` writes a retirement tombstone (`agent_lifecycle.<id>.state=retired`) that survives `restart` without `--allow-fresh`: the dynamic-role source no longer resurrects a retired seat, the seat stays absent from state agents / status / `agent_health` / all five spec reference surfaces, and an explicit same-id `add-agent` clears the tombstone to produce exactly one seat. The remove→add transaction is atomic (a failed force recreate rolls back to the original seat with no stray tombstone).
+  - **Per-team state merge scopes topology and receiver authority by team key (slice 2b).** The lock-held persist merge gates topology updates and receiver-observation authority per `(team_key, agent_id)` so a stale coordinator save cannot erase a live sibling's retirement, and an equal-epoch receiver refresh from lease authority is preserved against a stale same-epoch tick save (the slice-2b lost-update family). The legacy `current` physical alias resolves to the active team under a single shared `CURRENT_TEAM_ALIAS` constant, governed by a source-guard so the resolver and the merge cannot silently diverge.
+
+- **Fix: leader-inbound delivery false-liveness — a leader mailbox row is revalidated only against a live physical channel, and the named and internal paths share one socket-authority predicate.**
+  - **Revalidation requires a live leader channel, not an attached status string.** A `queued_until_leader_attach` leader mailbox row is only accepted when `resolve_live_leader_channel` confirms the recorded absolute socket matches the transport endpoint and the recorded pane is live; a receiver marked `attached` whose pane is dead keeps the row queued instead of mis-delivering. The revalidation reuses the same row in place (one id, one row, one injection — never a replacement row).
+  - **Named send and internal delivery share the single `resolve_live_leader_channel` predicate.** A `--to-name <team>/leader` whose recorded pane id is live only as another workspace's worker is refused (typed `PaneWorkspaceMismatch`) instead of injecting into the reused foreign pane; a legacy receiver record without a `status` field stays backward-compatible (still gated on socket / pane / workspace identity). A unique live leader still resolves and accepts normally.
+
 ## 0.5.51
 
 - **Refactor/Hardening: state-write authority + module decomposition campaign (car A + smell-34).**
