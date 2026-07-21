@@ -311,8 +311,25 @@
     // ════════════════════════════════════════════════════════════════════════
     #[test]
     fn update_state_returns_ok_and_state_file_path() {
+        let ws = seed_state_ws(
+            "update-state",
+            &json!({
+                "active_team_key": "teamA",
+                "team_key": "teamA",
+                "session_name": "teamA",
+                "status": "alive",
+                "teams": {
+                    "teamA": {
+                        "team_key": "teamA",
+                        "session_name": "teamA",
+                        "status": "alive",
+                        "agents": {}
+                    }
+                }
+            }),
+        );
         let tools = TeamOrchestratorTools::with_identity(
-            &unique_ws("update-state"),
+            &ws,
             Some(AgentId::new("leader")),
             Some(TeamKey::new("teamA")),
         );

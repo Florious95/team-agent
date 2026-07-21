@@ -22,12 +22,19 @@ fn keys(v: &Value) -> Vec<String> {
 /// `/tmp/ws`, or they flake under parallel cargo (sqlite "database is locked" / NotFound).
 /// Pure-function / dispatch-shape tests that never touch fs/db keep a dummy fixed path.
 fn unique_ws(tag: &str) -> std::path::PathBuf {
+    use std::io::ErrorKind;
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let p = std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    loop {
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("ta-rs-mcp-{tag}-{}-{n}", std::process::id()));
+        match std::fs::create_dir(&p) {
+            Ok(()) => return p,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("create unique workspace {}: {error}", p.display()),
+        }
+    }
 }
 
 include!("tests/normalize.rs");
