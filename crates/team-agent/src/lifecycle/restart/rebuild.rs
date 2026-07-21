@@ -1984,7 +1984,7 @@ fn mark_agent_respawned(
     }
     agent.insert(
         "spawned_at".to_string(),
-        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        serde_json::json!(spawn.spawned_at.as_str()),
     );
     agent.insert(
         "spawn_cwd".to_string(),
@@ -2462,6 +2462,7 @@ impl Clone for ParallelSpawnResult {
         Self {
             spawn: SpawnedAgentWindow {
                 spawn: self.spawn.spawn.clone(),
+                spawned_at: self.spawn.spawned_at.clone(),
                 plan: self.spawn.plan.clone(),
                 profile_launch: self.spawn.profile_launch.clone(),
                 layout_placement: self.spawn.layout_placement.clone(),
@@ -3689,6 +3690,7 @@ tasks:
                 }
             }
         });
+        let before = chrono::Utc::now();
         let spawn = SpawnedAgentWindow {
             spawn: SpawnResult {
                 pane_id: PaneId::new("%new"),
@@ -3696,14 +3698,13 @@ tasks:
                 window: WindowName::new("w1"),
                 child_pid: Some(2020),
             },
+            spawned_at: chrono::Utc::now().to_rfc3339(),
             plan: crate::provider::CommandPlan::argv_only(vec!["codex".to_string()]),
             profile_launch: crate::provider::ProviderProfileLaunch::default(),
             layout_placement: None,
             spawn_cwd: std::path::PathBuf::from("/tmp/team-epoch"),
             owner_team_id: None,
         };
-        let before = chrono::Utc::now();
-
         mark_agent_respawned(
             &mut state,
             &AgentId::new("w1"),

@@ -1149,7 +1149,7 @@ fn mark_agent_started(
     }
     agent.insert(
         "spawned_at".to_string(),
-        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        serde_json::json!(spawn.spawned_at.as_str()),
     );
     agent.insert(
         "spawn_cwd".to_string(),

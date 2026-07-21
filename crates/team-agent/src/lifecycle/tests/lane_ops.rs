@@ -72,6 +72,7 @@ pub(super) struct LaneTransport {
     foreign: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
     killed: LaneKills,
     spawns: LaneSpawns,
+    spawn_observed_at: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl LaneTransport {
     pub(super) fn new(session: &str, windows: &[&str]) -> Self {
@@ -83,6 +84,7 @@ impl LaneTransport {
             foreign: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             killed: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             spawns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            spawn_observed_at: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
     pub(super) fn killed(&self) -> Vec<String> {
@@ -90,6 +92,9 @@ impl LaneTransport {
     }
     pub(super) fn spawns(&self) -> Vec<(String, Vec<String>)> {
         self.spawns.lock().unwrap().clone()
+    }
+    fn spawn_observed_at(&self) -> Vec<String> {
+        self.spawn_observed_at.lock().unwrap().clone()
     }
     fn add_foreign(&self, session: &str, window: &str) {
         self.foreign
@@ -110,6 +115,10 @@ impl crate::transport::Transport for LaneTransport {
         c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawn_observed_at
+            .lock()
+            .unwrap()
+            .push(chrono::Utc::now().to_rfc3339());
         emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
@@ -142,6 +151,10 @@ impl crate::transport::Transport for LaneTransport {
         c: &std::path::Path,
         _e: &std::collections::BTreeMap<String, String>,
     ) -> Result<crate::transport::SpawnResult, crate::transport::TransportError> {
+        self.spawn_observed_at
+            .lock()
+            .unwrap()
+            .push(chrono::Utc::now().to_rfc3339());
         emit_codex_fork_backing(argv, c);
         self.spawns
             .lock()
@@ -1676,6 +1689,32 @@ fn lanea_fork_report_session_id_is_not_pane_id() {
         .as_str()
         .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok()));
     assert_eq!(row["spawn_epoch"], serde_json::json!(1));
+}
+
+#[test]
+fn fresh_start_persists_boundary_from_before_transport_spawn() {
+    let ws = lanea_one_agent_ws("stopped");
+    let tx = LaneTransport::new("team-laneateam", &[]);
+    crate::lifecycle::start_agent_with_transport(&ws, &aid("alpha"), false, false, true, None, &tx)
+        .expect("fresh start");
+
+    let transport_observed_at = tx
+        .spawn_observed_at()
+        .into_iter()
+        .next()
+        .expect("transport spawn observation");
+    let transport_observed_at =
+        chrono::DateTime::parse_from_rfc3339(&transport_observed_at).unwrap();
+    let state = crate::state::persist::load_runtime_state(&ws).unwrap();
+    let spawned_at = state["agents"]["alpha"]["spawned_at"]
+        .as_str()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .expect("persisted spawn boundary");
+    assert!(
+        spawned_at <= transport_observed_at,
+        "the persisted capture boundary must precede the transport spawn; \
+         spawned_at={spawned_at}, transport_observed_at={transport_observed_at}"
+    );
 }
 
 // ── REMOVE #6/#12 (remove-rollback-no-agent-health-3 / remove-rollback-health-1) [SEAM #[ignore]] ────

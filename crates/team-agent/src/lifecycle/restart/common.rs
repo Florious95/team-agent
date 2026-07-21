@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) struct SpawnedAgentWindow {
     pub spawn: crate::transport::SpawnResult,
+    pub spawned_at: String,
     pub plan: crate::provider::CommandPlan,
     pub profile_launch: crate::provider::ProviderProfileLaunch,
     pub layout_placement: Option<crate::lifecycle::launch::LayoutPlacement>,
@@ -367,6 +368,7 @@ pub(super) fn spawn_agent_window(
     // failure can now be diagnosed from events.jsonl — the recorded
     // expected_session_id == state._pending_session_id (after
     // mark_agent_started persists the same plan tuple).
+    let spawned_at = crate::lifecycle::launch::spawn_timestamp();
     {
         let session_id_in_argv = plan
             .argv
@@ -393,6 +395,7 @@ pub(super) fn spawn_agent_window(
                 "env_unset": env_unset,
                 "tmux_start_mode": tmux_start_mode_pre_spawn,
                 "spawn_epoch": spawn_epoch,
+                "spawned_at": spawned_at.as_str(),
                 "source": "restart",
                 "tmux_endpoint": tmux_endpoint,
                 "tmux_endpoint_source": tmux_endpoint_source.unwrap_or("transport"),
@@ -529,6 +532,7 @@ pub(super) fn spawn_agent_window(
     }
     Ok(SpawnedAgentWindow {
         spawn,
+        spawned_at,
         plan,
         profile_launch,
         layout_placement: layout_placement.cloned(),

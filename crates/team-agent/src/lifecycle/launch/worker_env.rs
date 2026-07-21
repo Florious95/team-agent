@@ -18,7 +18,7 @@ pub(super) fn agent_is_paused(agent: &Value) -> bool {
     matches!(agent.get("paused"), Some(Value::Bool(true)))
 }
 
-pub(super) fn spawn_timestamp() -> String {
+pub(crate) fn spawn_timestamp() -> String {
     match std::env::var("TEAM_AGENT_TEST_FIXED_SPAWNED_AT") {
         Ok(value) => value,
         Err(_) => chrono::Utc::now()
