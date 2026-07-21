@@ -10,13 +10,16 @@
 //! captured backing) so the fork reaches its success path; the RED is about the
 //! NEW identities and the failure-path residue, not the source's backing.
 //!
-//! - **R4 parallel N** (identity uniqueness): forking the same source N=3 times
-//!   must yield pairwise-distinct NEW `session_id`s (each non-null, none equal to
-//!   the source). Baseline red: every fork reports ok with `session_id=null`
-//!   (locate §3 success/readback; batch2 R2), so N forks are indistinguishable as
-//!   forked contexts. Window/pane uniqueness is a POSITIVE CONTROL (baseline
-//!   already assigns f1=%1/f2=%2 distinct) — it must stay green, guarding against
-//!   a "reject everything" false red.
+//! - **R4 parallel N** (identity + backing uniqueness under REAL concurrency):
+//!   forking the same source N=3 times, launched SIMULTANEOUSLY via a barrier,
+//!   must yield pairwise-distinct NEW `session_id`s AND pairwise-distinct backings
+//!   (each non-null, none equal to the source). Baseline red: every fork reports
+//!   ok with `session_id=null` (locate §3 success/readback; batch2 R2), so N forks
+//!   are indistinguishable as forked contexts. Window/pane uniqueness is a
+//!   POSITIVE CONTROL (baseline already assigns them distinct) — it must stay
+//!   green, guarding against a "reject everything" false red. The concurrency is a
+//!   real barrier (leader ruling: the parallel axis is a user red line, not a
+//!   sequential loop); provider-side lock-timeout semantics remain E2E (§5.8).
 //!
 //! - **R5 role-lifecycle rollback teeth** (failure-path residue): when the
 //!   provider backing cannot converge (source `rollout_path` points at a missing
@@ -320,6 +323,14 @@ fn pane_of(row: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn backing_of(row: &Value) -> Option<String> {
+    row.get("rollout_path")
+        .or_else(|| row.get("backing_path"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// R4 — forking the same source N=3 must yield pairwise-distinct NEW session ids
 /// (each non-null, none equal to the source). Baseline red: every fork reports ok
 /// with session_id=null, so the N forks are indistinguishable as forked contexts.
@@ -328,15 +339,27 @@ fn pane_of(row: &Value) -> Option<String> {
 /// distinct, and it must stay green — this guards against a degenerate "reject
 /// everything" implementation passing the session assertion for the wrong reason.
 ///
-/// REVISION (2026-07-21, implement interlock — runtime-owner surfaced a vacuous
-/// green): the original R4 shim only spawned (no NEW backing), so the MUST-17
-/// implementation refused every fork (context_fork_unverified) and the original
-/// `all_ok` early-return skipped ALL uniqueness assertions — a vacuous green
-/// (false-green-hole type 8: assertion unreachable). Per leader ruling, the shim
-/// now emits a distinct NEW backing per fork (success path) and the pass gate is
-/// tightened: every fork MUST report ok and the uniqueness assertions always
-/// execute (no early-return escape). RED cause unchanged: baseline reports ok:true
-/// with session_id=null for each fork.
+/// REVISION 2 (2026-07-21, leader ruling msg_432066100c50): the parallel-N axis
+/// is a user red line and must NOT be downgraded to a sequential loop — locate §7
+/// R4's prototype is "barrier 同时发 N=3". A sequential loop only proves
+/// repeatability; concurrency isolation (workspace-lock contention, reservation
+/// mutual-exclusion, identity uniqueness under race) is only exercised when the N
+/// forks are launched SIMULTANEOUSLY. This revision uses a real `Barrier` +
+/// scoped threads so all N `fork-agent` subprocesses race, and asserts identity
+/// AND backing uniqueness directly: session_id + rollout_path/backing pairwise
+/// distinct + ownership (locate §5.6). (True provider-side lock-timeout /
+/// one-seat-failure-doesn't-block-others is a subscription-E2E concern, §5.8 —
+/// not asserted offline.)
+///
+/// REVISION 1 (implement interlock — runtime-owner surfaced a vacuous green): the
+/// original shim only spawned (no NEW backing), so the MUST-17 implementation
+/// refused every fork and the `all_ok` early-return skipped ALL uniqueness
+/// assertions — a vacuous green (false-green-hole type 8: assertion unreachable).
+/// The shim now emits a distinct NEW backing per fork (keyed to the predetermined
+/// --session-id) and every fork MUST report ok.
+///
+/// RED cause unchanged @baseline: each fork reports ok:true (baseline never checks
+/// backing) with session_id=null, so the uniqueness assertions fire.
 #[test]
 fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     let case = Case::start("cf-r4");
@@ -344,30 +367,49 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").expect("write rollout");
 
     let names = ["f1", "f2", "f3"];
-    // Every fork MUST report ok — no early-return that would leave the uniqueness
-    // assertions unreachable (a vacuous green: false-green-hole type 8, assertion
-    // unreachable). The success-path shim emits a distinct NEW backing per fork
-    // (keyed to the predetermined --session-id), so a correct implementation
-    // accepts all N. Baseline also reports ok:true for each (it never checks the
-    // backing) — but with session_id=null, which the uniqueness assertions below
-    // catch. If a future impl refuses a fork here, THAT is a failure R4 must
-    // surface, not silently skip.
-    for n in names {
-        let fork = case.fork(n);
+    // REAL concurrency: a barrier releases all N fork subprocesses simultaneously
+    // so workspace-lock contention / reservation mutual-exclusion is actually
+    // exercised (a sequential loop would not). Scoped threads borrow `&case`.
+    let barrier = std::sync::Barrier::new(names.len());
+    let forks: Vec<(&str, Value)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = names
+            .iter()
+            .map(|&n| {
+                let barrier = &barrier;
+                let case = &case;
+                scope.spawn(move || {
+                    barrier.wait();
+                    (n, case.fork(n))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // Every fork MUST report ok — no early-return escape that would leave the
+    // uniqueness assertions unreachable (vacuous green, type 8).
+    for (n, fork) in &forks {
         assert_eq!(
             fork.get("ok").and_then(Value::as_bool),
             Some(true),
             "fork {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
-             green). If the implementation refuses a legitimate fork of a source with valid backing, \
-             that is the failure. fork={fork}"
+             green). A refusal of a legitimate concurrent fork is itself the failure. fork={fork}"
         );
     }
 
     let rows = case.team_agent_rows();
     let source_session = rows.get(SOURCE).and_then(new_session_of);
 
-    // POSITIVE CONTROL: window + pane must be pairwise distinct across forks (and
-    // vs source). Baseline satisfies this; it must never regress.
+    let uniq = |v: &[String]| {
+        let mut s = v.to_vec();
+        s.sort();
+        s.dedup();
+        s.len() == v.len()
+    };
+
+    // POSITIVE CONTROL: window + pane must be pairwise distinct across forks.
+    // Baseline satisfies this; it must never regress (guards against a
+    // reject-everything impl passing the session assertion for the wrong reason).
     let mut windows: Vec<String> = Vec::new();
     let mut panes: Vec<String> = Vec::new();
     for n in names {
@@ -381,12 +423,6 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
             panes.push(p);
         }
     }
-    let uniq = |v: &[String]| {
-        let mut s = v.to_vec();
-        s.sort();
-        s.dedup();
-        s.len() == v.len()
-    };
     assert!(
         windows.len() == names.len() && uniq(&windows),
         "positive control: N forks must have pairwise-distinct windows; windows={windows:?}"
@@ -402,7 +438,7 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
         let row = rows.get(n).unwrap();
         let sess = new_session_of(row).unwrap_or_else(|| {
             panic!(
-                "fork {n} reported ok but carries no NEW session id (session_id=null): N parallel \
+                "fork {n} reported ok but carries no NEW session id (session_id=null): N concurrent \
                  forks are indistinguishable as forked contexts (locate §3/§4.4; batch2 R2). row={row}"
             )
         });
@@ -415,7 +451,36 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     }
     assert!(
         uniq(&new_sessions),
-        "N parallel forks must have PAIRWISE-DISTINCT new session ids; got {new_sessions:?}"
+        "N concurrent forks must have PAIRWISE-DISTINCT new session ids; got {new_sessions:?}"
+    );
+
+    // R4 backing uniqueness (leader ruling msg_432066100c50 §2, locate §5.6): each
+    // fork must own a DISTINCT backing, not merely a distinct session id — two
+    // forks with different session ids pointing at the same backing rollout would
+    // be false-independent. Assert rollout_path/backing pairwise distinct, != the
+    // source's, and non-empty.
+    let source_backing = rows.get(SOURCE).and_then(backing_of);
+    let mut backings: Vec<String> = Vec::new();
+    for n in names {
+        let row = rows.get(n).unwrap();
+        let backing = backing_of(row).unwrap_or_else(|| {
+            panic!(
+                "fork {n} reported ok but carries no NEW backing (rollout_path/backing_path empty): a \
+                 forked context must own an independent backing, not just a distinct id (locate §5.6). \
+                 row={row}"
+            )
+        });
+        assert_ne!(
+            Some(&backing),
+            source_backing.as_ref(),
+            "fork {n} backing must differ from the source's backing; got {backing}"
+        );
+        backings.push(backing);
+    }
+    assert!(
+        uniq(&backings),
+        "N concurrent forks must own PAIRWISE-DISTINCT backings (independent context, not shared \
+         rollout); got {backings:?}"
     );
 }
 
