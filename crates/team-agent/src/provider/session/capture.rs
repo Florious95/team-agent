@@ -669,6 +669,13 @@ where
         .get("spawn_cwd")
         .and_then(Value::as_str)
         .filter(|cwd| !cwd.is_empty())?;
+    // Canonical attribution requires a process-cohort boundary. Without it,
+    // delayed capture can consume an older same-cwd transcript and falsely
+    // promote pending_first_turn to captured.
+    let spawned_at = agent
+        .get("spawned_at")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
     if !adapter_for(provider).caps().resume {
         return None;
     }
@@ -694,11 +701,7 @@ where
                 .get("pane_pid")
                 .and_then(Value::as_u64)
                 .and_then(|pid| u32::try_from(pid).ok()),
-            spawned_at: agent
-                .get("spawned_at")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            spawned_at: Some(spawned_at.to_string()),
             // 0.3.31 Codex capture correction: Codex does NOT honor
             // `--session-id`, so any `_pending_session_id` stored for a Codex
             // agent (stale 0.3.30 state, or the framework's pre-spawn token)
@@ -1220,6 +1223,12 @@ fn push_provider_session_keys(
             keys.insert(global_session_attribution_key_string(session_id));
         }
     }
+    // Copilot stores every session in one shared session-store.db. Session id
+    // is the attribution identity; treating the shared DB path as globally
+    // exclusive makes an exact expected id collide with every sibling.
+    if matches!(provider, Provider::Copilot) {
+        return;
+    }
     for field in ["rollout_path", "transcript_path"] {
         if let Some(path) = value
             .get(field)
@@ -1259,15 +1268,17 @@ fn captured_provider_session_keys(
         }
         keys.insert(global_session_attribution_key_string(session_id.as_str()));
     }
-    if let Some(rollout_path) = &captured.rollout_path {
-        let path = rollout_path.as_path().to_string_lossy();
-        keys.insert(transcript_attribution_key_string(
-            owner.provider,
-            team_key,
-            owner.agent_id.as_str(),
-            &path,
-        ));
-        keys.insert(global_transcript_attribution_key_string(&path));
+    if !matches!(owner.provider, Provider::Copilot) {
+        if let Some(rollout_path) = &captured.rollout_path {
+            let path = rollout_path.as_path().to_string_lossy();
+            keys.insert(transcript_attribution_key_string(
+                owner.provider,
+                team_key,
+                owner.agent_id.as_str(),
+                &path,
+            ));
+            keys.insert(global_transcript_attribution_key_string(&path));
+        }
     }
     keys
 }
@@ -1901,6 +1912,59 @@ mod u1_tests {
     }
 
     #[test]
+    fn canonical_pending_capture_requires_spawned_at_boundary() {
+        let agent = serde_json::json!({
+            "provider": "codex",
+            "status": "running",
+            "spawn_cwd": "/tmp/u1-cwd",
+            "capture_state": "pending_first_turn"
+        });
+        let mut adapter_for = crate::provider::get_adapter;
+        assert!(pending_session_capture("clone", &agent, &mut adapter_for).is_none());
+    }
+
+    #[test]
+    fn canonical_delayed_capture_rejects_prior_round_codex_rollout() {
+        let dir =
+            std::env::temp_dir().join(format!("ta-delayed-stale-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale =
+            dir.join("rollout-2026-07-21T23-18-28-019f8541-c986-7f50-b9e6-6503c89df98c.jsonl");
+        std::fs::write(
+            &stale,
+            format!(
+                "{{\"session_meta\":{{\"payload\":{{\"id\":\"019f8541-c986-7f50-b9e6-6503c89df98c\",\"cwd\":\"{}\",\"created_at\":\"2026-07-21T23:18:28+00:00\"}}}}}}\n",
+                dir.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let mut state = serde_json::json!({
+            "agents": {
+                "clone": {
+                    "provider": "codex",
+                    "status": "running",
+                    "spawn_cwd": dir.to_string_lossy(),
+                    "spawned_at": "2026-07-22T02:12:27+00:00",
+                    "capture_state": "pending_first_turn"
+                }
+            }
+        });
+        let mut adapter_for = crate::provider::get_adapter;
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("delayed capture pass");
+
+        assert!(report.assigned.is_empty());
+        assert!(state["agents"]["clone"]["session_id"].is_null());
+        assert_ne!(
+            state["agents"]["clone"]["capture_state"],
+            serde_json::json!("captured")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn existing_team_session_is_rejected_while_fresh_candidate_is_accepted() {
         let mut state = serde_json::json!({
             "session_name": "current",
@@ -2180,6 +2244,71 @@ mod u1_tests {
         let _ = std::fs::remove_file(&rollout_a);
         let _ = std::fs::remove_file(&rollout_b);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn copilot_exact_session_id_does_not_collide_on_shared_store_path() {
+        use crate::provider::{CaptureVia, Confidence, RolloutPath};
+        let dir =
+            std::env::temp_dir().join(format!("ta-copilot-shared-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("session-store.db");
+        std::fs::write(&store, b"fixture").unwrap();
+        let expected = "22222222-2222-4222-8222-222222222222";
+        let candidate = CapturedSessionCandidate {
+            captured: CapturedSession {
+                session_id: Some(SessionId::new(expected)),
+                rollout_path: Some(RolloutPath::new(store.clone())),
+                captured_via: CaptureVia::FsWatch,
+                attribution_confidence: Confidence::High,
+                spawn_cwd: dir.clone(),
+            },
+            embedded_agent_id: None,
+            positive_agent_id_match: false,
+            agent_path_match: false,
+        };
+        let mut by_agent = BTreeMap::new();
+        by_agent.insert("clone".to_string(), vec![candidate]);
+        let mut state = serde_json::json!({
+            "agents": {
+                "source": {
+                    "provider": "copilot",
+                    "status": "running",
+                    "spawn_cwd": dir.to_string_lossy(),
+                    "session_id": "11111111-1111-4111-8111-111111111111",
+                    "rollout_path": store.to_string_lossy(),
+                    "captured_at": "2026-07-22T01:00:00+00:00",
+                    "captured_via": "fs_watch"
+                },
+                "clone": {
+                    "provider": "copilot",
+                    "status": "running",
+                    "spawn_cwd": dir.to_string_lossy(),
+                    "spawned_at": "2026-07-22T02:00:00+00:00",
+                    "_pending_session_id": expected
+                }
+            }
+        });
+        let adapter = test_support::CaptureCandidatesAdapter::new(Provider::Copilot, None, "")
+            .with_candidates(by_agent);
+        let mut adapter_for =
+            move |_provider| Box::new(adapter.clone()) as Box<dyn ProviderAdapter>;
+
+        let report = capture_missing_provider_sessions_once(&mut state, &mut adapter_for, true, 0)
+            .expect("capture shared Copilot store");
+
+        assert_eq!(report.assigned, vec!["clone".to_string()]);
+        assert_eq!(state["agents"]["clone"]["session_id"], expected);
+        assert_eq!(
+            state["agents"]["clone"]["rollout_path"],
+            store.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            state["agents"]["source"]["session_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// E57 RED postflight (lane-046-capture-gap): `recover_resume_session_from_events`

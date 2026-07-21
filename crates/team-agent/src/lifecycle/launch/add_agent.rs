@@ -376,7 +376,7 @@ pub(super) fn add_agent_with_transport_at_paths(
     }
     let started = match crate::lifecycle::restart::start_agent_at_paths(
         run_workspace,
-        team_dir,
+        spec_path.parent().unwrap_or(team_dir),
         agent_id,
         false,
         open_display,

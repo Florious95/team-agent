@@ -298,32 +298,6 @@ pub fn fork_agent_with_transport(
     let window = WindowName::new(as_agent_id.as_str());
     let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
     let mut claude_fork = None;
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        let target_session_id = plan.expected_session_id.as_ref().ok_or_else(|| {
-            LifecycleError::Provider(
-                "claude fork plan has no target session id for snapshot copy".to_string(),
-            )
-        })?;
-        claude_fork = Some(
-            crate::provider::adapters::claude_fork::materialize_claude_fork(
-                source_backing,
-                &session_id,
-                target_session_id,
-            )
-            .map_err(|error| {
-                let _ = std::fs::write(&spec_path, text.as_bytes());
-                cleanup_fork_mcp_artifacts(
-                    &workspace,
-                    as_agent_id,
-                    &mcp_config_path,
-                    &profile_launch,
-                );
-                LifecycleError::Provider(format!(
-                    "context_fork_unavailable: claude snapshot copy failed: {error}"
-                ))
-            })?,
-        );
-    }
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,
@@ -400,6 +374,51 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
+    if !matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Live)) {
+        rollback_fork_after_spawn(
+            &workspace,
+            transport,
+            &session_name,
+            &window,
+            &mcp_config_path,
+            as_agent_id,
+            &profile_launch,
+            &fork_team,
+        );
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "fork process is not live after spawn: agent={as_agent_id} pane={}",
+            spawn.pane_id.as_str()
+        )));
+    }
+    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
+        let target_session_id = plan.expected_session_id.as_ref().ok_or_else(|| {
+            LifecycleError::Provider(
+                "claude fork plan has no target session id for snapshot copy".to_string(),
+            )
+        })?;
+        claude_fork = match crate::provider::adapters::claude_fork::materialize_claude_fork(
+            source_backing,
+            &session_id,
+            target_session_id,
+        ) {
+            Ok(materialized) => Some(materialized),
+            Err(error) => {
+                rollback_fork_after_spawn(
+                    &workspace,
+                    transport,
+                    &session_name,
+                    &window,
+                    &mcp_config_path,
+                    as_agent_id,
+                    &profile_launch,
+                    &fork_team,
+                );
+                return Err(LifecycleError::Provider(format!(
+                    "context_fork_unavailable: claude snapshot copy failed after live spawn: {error}"
+                )));
+            }
+        };
+    }
     let convergence_deadline =
         crate::provider::session::context_fork_convergence_deadline(provider);
     let context_proof = match crate::provider::session::verify_context_fork(

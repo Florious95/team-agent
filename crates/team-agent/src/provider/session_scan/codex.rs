@@ -1,38 +1,10 @@
-use super::{CaptureSessionContext, CapturedSessionCandidate};
-
-pub(super) fn apply_spawned_at_filter(
-    out: &mut Vec<CapturedSessionCandidate>,
-    context: &CaptureSessionContext,
-) {
-    let Some(raw_spawned_at) = context.spawned_at.as_deref() else {
-        return;
-    };
-    let Some(spawned_at) = parse_spawned_at(raw_spawned_at) else {
-        out.clear();
-        return;
-    };
-    out.retain(|candidate| {
-        let path = match candidate.captured.rollout_path.as_ref() {
-            Some(p) => p.as_path(),
-            None => return false,
-        };
-        match codex_rollout_created_at(path) {
-            Some(created_at) => created_at >= spawned_at,
-            None => std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .map(|mtime| mtime >= spawned_at)
-                .unwrap_or(false),
-        }
-    });
-}
-
 pub(super) fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
 }
 
-fn codex_rollout_created_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
+pub(super) fn rollout_created_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
     created_at_from_rollout_head(path).or_else(|| created_at_from_rollout_filename(path))
 }
 
@@ -79,6 +51,8 @@ fn created_at_from_rollout_filename(path: &std::path::Path) -> Option<std::time:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::session_scan::{common, CaptureSessionContext, CapturedSessionCandidate};
+    use crate::provider::Provider;
     use crate::provider::{CaptureVia, CapturedSession, Confidence, RolloutPath, SessionId};
     use std::path::PathBuf;
 
@@ -129,12 +103,32 @@ mod tests {
             candidate(stale, "11111111-1111-4111-8111-111111111111"),
             candidate(fresh.clone(), "22222222-2222-4222-8222-222222222222"),
         ];
-        apply_spawned_at_filter(&mut out, &context);
+        common::apply_spawned_at_filter(Provider::Codex, &context, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].captured.rollout_path.as_ref().unwrap().as_path(),
             fresh
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spawned_at_filter_fails_closed_with_an_invalid_boundary() {
+        let mut out = vec![candidate(PathBuf::from("/tmp/old.jsonl"), "old")];
+        let mut context = CaptureSessionContext {
+            agent_id: "worker".to_string(),
+            spawn_cwd: PathBuf::from("/tmp"),
+            pane_id: None,
+            pane_pid: None,
+            spawned_at: None,
+            expected_session_id: None,
+            provider_projects_root: None,
+        };
+        common::apply_spawned_at_filter(Provider::Codex, &context, &mut out);
+        assert_eq!(out.len(), 1, "legacy direct scan has no cohort boundary");
+
+        context.spawned_at = Some("not-a-date".to_string());
+        common::apply_spawned_at_filter(Provider::Codex, &context, &mut out);
+        assert!(out.is_empty());
     }
 }

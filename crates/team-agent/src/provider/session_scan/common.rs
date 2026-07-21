@@ -129,6 +129,43 @@ pub(super) fn parse_candidate_files(
     out
 }
 
+/// A provider file is evidence for this process cohort only when the file was
+/// created (Codex) or last modified (other JSONL providers) no earlier than
+/// the persisted spawn boundary. Missing or malformed boundaries fail closed:
+/// delayed coordinator capture must never fall back to an older cwd sibling.
+pub(super) fn apply_spawned_at_filter(
+    provider: Provider,
+    context: &CaptureSessionContext,
+    out: &mut Vec<CapturedSessionCandidate>,
+) {
+    let Some(raw_spawned_at) = context.spawned_at.as_deref() else {
+        // Legacy direct capture_session_id callers have no cohort boundary;
+        // the canonical runtime capture path rejects such rows before scan.
+        return;
+    };
+    let Some(spawned_at) = super::codex::parse_spawned_at(raw_spawned_at) else {
+        out.clear();
+        return;
+    };
+    out.retain(|candidate| {
+        let Some(path) = candidate.captured.rollout_path.as_ref() else {
+            return false;
+        };
+        if matches!(provider, Provider::Codex) {
+            return super::codex::rollout_created_at(path.as_path())
+                .or_else(|| candidate_mtime(path.as_path()))
+                .is_some_and(|created_at| created_at >= spawned_at);
+        }
+        candidate_mtime(path.as_path()).is_some_and(|mtime| mtime >= spawned_at)
+    });
+}
+
+fn candidate_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
 pub(super) fn apply_spawn_time_window_if_unique(
     context: &CaptureSessionContext,
     out: &mut Vec<CapturedSessionCandidate>,
