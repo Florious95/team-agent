@@ -100,6 +100,7 @@ fn worker_spawn_inherits_parent_process_env_for_proxy_and_ca() {
 #[test]
 #[serial(env)]
 fn worker_spawn_scrubs_cross_provider_process_identity_but_keeps_config_env() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("worker-spawn-fork");
     let _guard = EnvGuard::set([
         ("CLAUDECODE", "1"),
         ("CLAUDE_CODE_SESSION_ID", "leader-session"),
@@ -538,6 +539,7 @@ impl RecordingTransport {
         env: &BTreeMap<String, String>,
         env_unset: &[String],
     ) -> SpawnResult {
+        emit_codex_fork_backing(argv);
         let mut spawns = self.spawns.lock().unwrap();
         let pane_id = PaneId::new(format!("%{}", spawns.len() + 1));
         spawns.push(RecordedSpawn {
@@ -555,6 +557,32 @@ impl RecordingTransport {
             child_pid: None,
         }
     }
+}
+
+fn emit_codex_fork_backing(argv: &[String]) {
+    if !argv
+        .windows(2)
+        .any(|pair| pair[0] == "codex" && pair[1] == "fork")
+    {
+        return;
+    }
+    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+    let session_id = format!(
+        "worker-spawn-fork-{}-{}",
+        std::process::id(),
+        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+        .join(".codex/sessions/worker-spawn-env-fixture");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(format!("rollout-{session_id}.jsonl")),
+        format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
+            chrono::Utc::now().to_rfc3339()
+        ),
+    )
+    .unwrap();
 }
 
 impl Transport for RecordingTransport {

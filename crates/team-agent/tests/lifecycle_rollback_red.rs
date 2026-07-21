@@ -68,6 +68,7 @@ fn remove_agent_rollback_restores_agent_health_after_post_delete_failure() {
 #[test]
 #[serial(env)]
 fn fork_agent_rollback_cleans_spawned_window_spec_state_and_mcp_after_post_spawn_failure() {
+    let _home = hermetic_guard::HermeticTestEnv::enter("fork-rollback");
     let env = EnvGuard::set(FAIL_FORK_AFTER_SPAWN, "save_runtime_state");
     let fixture = RollbackFixture::new("fork-post-spawn");
     fixture.seed_team();
@@ -439,7 +440,9 @@ impl RecordingTransport {
         &self,
         session: &SessionName,
         window: &WindowName,
+        argv: &[String],
     ) -> Result<SpawnResult, TransportError> {
+        emit_codex_fork_backing(argv);
         self.windows
             .lock()
             .unwrap()
@@ -453,6 +456,32 @@ impl RecordingTransport {
     }
 }
 
+fn emit_codex_fork_backing(argv: &[String]) {
+    if !argv
+        .windows(2)
+        .any(|pair| pair[0] == "codex" && pair[1] == "fork")
+    {
+        return;
+    }
+    static SESSION_SEQ: AtomicU64 = AtomicU64::new(0);
+    let session_id = format!(
+        "rollback-fork-{}-{}",
+        std::process::id(),
+        SESSION_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let root = PathBuf::from(std::env::var_os("HOME").expect("hermetic HOME"))
+        .join(".codex/sessions/lifecycle-rollback-fixture");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(format!("rollout-{session_id}.jsonl")),
+        format!(
+            "{{\"session_meta\":{{\"payload\":{{\"id\":\"{session_id}\"}}}},\"created_at\":\"{}\"}}\n",
+            chrono::Utc::now().to_rfc3339()
+        ),
+    )
+    .unwrap();
+}
+
 impl Transport for RecordingTransport {
     fn kind(&self) -> BackendKind {
         BackendKind::Tmux
@@ -462,22 +491,22 @@ impl Transport for RecordingTransport {
         &self,
         session: &SessionName,
         window: &WindowName,
-        _argv: &[String],
+        argv: &[String],
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.record_spawn(session, window)
+        self.record_spawn(session, window, argv)
     }
 
     fn spawn_into(
         &self,
         session: &SessionName,
         window: &WindowName,
-        _argv: &[String],
+        argv: &[String],
         _cwd: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<SpawnResult, TransportError> {
-        self.record_spawn(session, window)
+        self.record_spawn(session, window, argv)
     }
 
     fn inject(
