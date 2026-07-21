@@ -129,10 +129,7 @@ pub(super) fn parse_candidate_files(
     out
 }
 
-/// A provider file is evidence for this process cohort only when the file was
-/// created (Codex) or last modified (other JSONL providers) no earlier than
-/// the persisted spawn boundary. Missing or malformed boundaries fail closed:
-/// delayed coordinator capture must never fall back to an older cwd sibling.
+/// Reject provider files older than the persisted process-cohort boundary.
 pub(super) fn apply_spawned_at_filter(
     provider: Provider,
     context: &CaptureSessionContext,
