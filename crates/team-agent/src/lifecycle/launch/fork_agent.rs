@@ -2,7 +2,7 @@ use super::*;
 use crate::lifecycle::lock::{acquire_agent_lifecycle_lock, LifecycleLockRequest};
 use crate::lifecycle::profile_launch::parse_provider;
 use crate::lifecycle::*;
-use crate::model::enums::{AuthMode, DisplayBackend, PaneLiveness, Provider, ProviderEffort};
+use crate::model::enums::{AuthMode, DisplayBackend, Provider, ProviderEffort};
 use crate::model::ids::AgentId;
 use crate::model::permissions::{self, AgentPermissionInput};
 use crate::model::yaml::{self, Value};
@@ -297,7 +297,6 @@ pub fn fork_agent_with_transport(
     }
     let window = WindowName::new(as_agent_id.as_str());
     let backing_before = crate::provider::session::ContextBackingSnapshot::capture(provider, &plan);
-    let mut claude_fork = None;
     let mut reserved_state = state.clone();
     reserve_forked_agent_state(
         &mut reserved_state,
@@ -374,51 +373,21 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
-    if !matches!(transport.liveness(&spawn.pane_id), Ok(PaneLiveness::Live)) {
-        rollback_fork_after_spawn(
-            &workspace,
-            transport,
-            &session_name,
-            &window,
-            &mcp_config_path,
-            as_agent_id,
-            &profile_launch,
-            &fork_team,
-        );
-        return Err(LifecycleError::RequirementUnmet(format!(
-            "fork process is not live after spawn: agent={as_agent_id} pane={}",
-            spawn.pane_id.as_str()
-        )));
-    }
-    if matches!(provider, Provider::Claude | Provider::ClaudeCode) {
-        let target_session_id = plan.expected_session_id.as_ref().ok_or_else(|| {
-            LifecycleError::Provider(
-                "claude fork plan has no target session id for snapshot copy".to_string(),
-            )
-        })?;
-        claude_fork = match crate::provider::adapters::claude_fork::materialize_claude_fork(
-            source_backing,
-            &session_id,
-            target_session_id,
-        ) {
-            Ok(materialized) => Some(materialized),
-            Err(error) => {
-                rollback_fork_after_spawn(
-                    &workspace,
-                    transport,
-                    &session_name,
-                    &window,
-                    &mcp_config_path,
-                    as_agent_id,
-                    &profile_launch,
-                    &fork_team,
-                );
-                return Err(LifecycleError::Provider(format!(
-                    "context_fork_unavailable: claude snapshot copy failed after live spawn: {error}"
-                )));
-            }
-        };
-    }
+    let mut claude_fork = prepare_fork_backing_after_live_spawn(ForkPostSpawnInput {
+        workspace: &workspace,
+        transport,
+        session_name: &session_name,
+        window: &window,
+        mcp_config_path: &mcp_config_path,
+        agent_id: as_agent_id,
+        profile_launch: &profile_launch,
+        team_key: &fork_team,
+        provider,
+        spawn: &spawn,
+        plan: &plan,
+        source_backing,
+        source_session_id: &session_id,
+    })?;
     let convergence_deadline =
         crate::provider::session::context_fork_convergence_deadline(provider);
     let context_proof = match crate::provider::session::verify_context_fork(

@@ -1,5 +1,71 @@
 use super::*;
 
+pub(super) struct ForkPostSpawnInput<'a> {
+    pub workspace: &'a Path,
+    pub transport: &'a dyn Transport,
+    pub session_name: &'a SessionName,
+    pub window: &'a WindowName,
+    pub mcp_config_path: &'a Path,
+    pub agent_id: &'a AgentId,
+    pub profile_launch: &'a crate::provider::ProviderProfileLaunch,
+    pub team_key: &'a str,
+    pub provider: Provider,
+    pub spawn: &'a crate::transport::SpawnResult,
+    pub plan: &'a crate::provider::CommandPlan,
+    pub source_backing: &'a Path,
+    pub source_session_id: &'a crate::provider::SessionId,
+}
+
+pub(super) fn prepare_fork_backing_after_live_spawn(
+    input: ForkPostSpawnInput<'_>,
+) -> Result<Option<crate::provider::adapters::claude_fork::ClaudeForkMaterialization>, LifecycleError>
+{
+    let rollback = || {
+        rollback_fork_after_spawn(
+            input.workspace,
+            input.transport,
+            input.session_name,
+            input.window,
+            input.mcp_config_path,
+            input.agent_id,
+            input.profile_launch,
+            input.team_key,
+        );
+    };
+    if !matches!(
+        input.transport.liveness(&input.spawn.pane_id),
+        Ok(PaneLiveness::Live)
+    ) {
+        rollback();
+        return Err(LifecycleError::RequirementUnmet(format!(
+            "fork process is not live after spawn: agent={} pane={}",
+            input.agent_id,
+            input.spawn.pane_id.as_str()
+        )));
+    }
+    if !matches!(input.provider, Provider::Claude | Provider::ClaudeCode) {
+        return Ok(None);
+    }
+    let target_session_id = input.plan.expected_session_id.as_ref().ok_or_else(|| {
+        LifecycleError::Provider(
+            "claude fork plan has no target session id for snapshot copy".to_string(),
+        )
+    })?;
+    match crate::provider::adapters::claude_fork::materialize_claude_fork(
+        input.source_backing,
+        input.source_session_id,
+        target_session_id,
+    ) {
+        Ok(materialized) => Ok(Some(materialized)),
+        Err(error) => {
+            rollback();
+            Err(LifecycleError::Provider(format!(
+                "context_fork_unavailable: claude snapshot copy failed after live spawn: {error}"
+            )))
+        }
+    }
+}
+
 pub(super) struct ForkCoordinatorInput<'a> {
     pub workspace: &'a Path,
     pub team_key: &'a str,
