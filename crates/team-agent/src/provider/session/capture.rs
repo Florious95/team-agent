@@ -488,8 +488,7 @@ pub fn incomplete_resumable_agent_ids(state: &Value) -> Vec<String> {
     let mut out = agents
         .iter()
         .filter_map(|(agent_id, agent)| {
-            if pending_session_capture(agent_id, agent, &mut crate::provider::get_adapter).is_some()
-            {
+            if incomplete_resumable_provider(agent, &mut crate::provider::get_adapter).is_some() {
                 Some(agent_id.clone())
             } else {
                 None
@@ -651,20 +650,7 @@ fn pending_session_capture<F>(
 where
     F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
 {
-    if agent
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| status != "running")
-    {
-        return None;
-    }
-    if agent_session_complete(agent) {
-        return None;
-    }
-    let provider = agent
-        .get("provider")
-        .and_then(Value::as_str)
-        .and_then(parse_provider)?;
+    let provider = incomplete_resumable_provider(agent, adapter_for)?;
     let spawn_cwd = agent
         .get("spawn_cwd")
         .and_then(Value::as_str)
@@ -676,9 +662,6 @@ where
         .get("spawned_at")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())?;
-    if !adapter_for(provider).caps().resume {
-        return None;
-    }
     Some(PendingSessionCapture {
         agent_id: agent_id.to_string(),
         provider,
@@ -702,20 +685,6 @@ where
                 .and_then(Value::as_u64)
                 .and_then(|pid| u32::try_from(pid).ok()),
             spawned_at: Some(spawned_at.to_string()),
-            // 0.3.31 Codex capture correction: Codex does NOT honor
-            // `--session-id`, so any `_pending_session_id` stored for a Codex
-            // agent (stale 0.3.30 state, or the framework's pre-spawn token)
-            // is a local-only token and must NOT be used as expected_session_id
-            // — that would trigger the Stage 1 mismatch guard against Codex's
-            // real session_meta.payload.id and permanently reject the correct
-            // transcript. Codex capture anchors purely on (cwd, spawned_at).
-            // 0.4.7 (B1 verified, partial-resume revert of 9feafc31):
-            // Claude --session-id was restored in adapter.rs build_command_plan
-            // because Claude ≥ 2.1.185 DOES honour framework-supplied session
-            // id and DOES create a transcript at that id. So `_pending_session_id`
-            // is once again valid for Claude — re-enable the Stage 1 pre-pass
-            // for Claude/ClaudeCode. Codex remains excluded (Codex CLI ignores
-            // --session-id, capture must anchor purely on cwd+spawned_at).
             expected_session_id: if matches!(provider, Provider::Codex) {
                 None
             } else {
@@ -732,6 +701,34 @@ where
                 .map(PathBuf::from),
         },
     })
+}
+
+fn incomplete_resumable_provider<F>(agent: &Value, adapter_for: &mut F) -> Option<Provider>
+where
+    F: FnMut(Provider) -> Box<dyn ProviderAdapter>,
+{
+    if agent
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status != "running")
+    {
+        return None;
+    }
+    if agent_session_complete(agent) {
+        return None;
+    }
+    let provider = agent
+        .get("provider")
+        .and_then(Value::as_str)
+        .and_then(parse_provider)?;
+    agent
+        .get("spawn_cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())?;
+    if !adapter_for(provider).caps().resume {
+        return None;
+    }
+    Some(provider)
 }
 
 fn agent_session_complete(agent: &Value) -> bool {
