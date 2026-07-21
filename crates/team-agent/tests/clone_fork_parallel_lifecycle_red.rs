@@ -256,13 +256,39 @@ fn write_team_docs(workspace: &Path) {
     .expect("write source role doc");
 }
 
+/// Success-path shim that produces a DISTINCT NEW backing per fork. Each fork
+/// spawn carries a predetermined `--session-id <uuid>` on argv (adapter.rs:478);
+/// the shim writes a claude transcript at the exact path the session scanner reads
+/// (`$HOME/.claude/projects/<encoded-cwd>/<uuid>.jsonl`, encoding per
+/// session_scan/claude.rs: every non-alphanumeric char → '-'), keyed to that
+/// uuid. This lets each of the N forks capture a distinct verified NEW backing —
+/// without it, a spawn-only shim produces no NEW backing and the MUST-17
+/// implementation refuses every fork (context_fork_unverified), which would make
+/// R4's uniqueness assertions unreachable (vacuous green — the false-green-hole
+/// runtime-owner surfaced). The RED cause is unchanged: at baseline the fork
+/// reports session_id=null regardless of the emitted backing.
 fn write_claude_shim(workspace: &Path) -> PathBuf {
     let bin_dir = workspace.join("shim-bin");
     std::fs::create_dir_all(&bin_dir).expect("create shim dir");
     let shim = bin_dir.join("claude");
     std::fs::write(
         &shim,
-        "#!/bin/sh\necho 'claude shim ready'\nexec sleep 3600\n",
+        r#"#!/bin/sh
+sid=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session-id" ]; then sid="$a"; fi
+  prev="$a"
+done
+if [ -n "$sid" ]; then
+  enc=$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  dir="$HOME/.claude/projects/$enc"
+  mkdir -p "$dir"
+  printf '{"sessionId":"%s","type":"fork-backing"}\n' "$sid" > "$dir/$sid.jsonl"
+fi
+echo 'claude shim ready'
+exec sleep 3600
+"#,
     )
     .expect("write claude shim");
     #[cfg(unix)]
@@ -301,6 +327,16 @@ fn pane_of(row: &Value) -> Option<String> {
 /// Window/pane uniqueness is a POSITIVE CONTROL: baseline already assigns them
 /// distinct, and it must stay green — this guards against a degenerate "reject
 /// everything" implementation passing the session assertion for the wrong reason.
+///
+/// REVISION (2026-07-21, implement interlock — runtime-owner surfaced a vacuous
+/// green): the original R4 shim only spawned (no NEW backing), so the MUST-17
+/// implementation refused every fork (context_fork_unverified) and the original
+/// `all_ok` early-return skipped ALL uniqueness assertions — a vacuous green
+/// (false-green-hole type 8: assertion unreachable). Per leader ruling, the shim
+/// now emits a distinct NEW backing per fork (success path) and the pass gate is
+/// tightened: every fork MUST report ok and the uniqueness assertions always
+/// execute (no early-return escape). RED cause unchanged: baseline reports ok:true
+/// with session_id=null for each fork.
 #[test]
 fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     let case = Case::start("cf-r4");
@@ -308,17 +344,23 @@ fn r4_parallel_n_forks_have_pairwise_unique_new_sessions() {
     std::fs::write(case.rollout_path(), "{\"type\":\"fixture-source\"}\n").expect("write rollout");
 
     let names = ["f1", "f2", "f3"];
-    let mut all_ok = true;
+    // Every fork MUST report ok — no early-return that would leave the uniqueness
+    // assertions unreachable (a vacuous green: false-green-hole type 8, assertion
+    // unreachable). The success-path shim emits a distinct NEW backing per fork
+    // (keyed to the predetermined --session-id), so a correct implementation
+    // accepts all N. Baseline also reports ok:true for each (it never checks the
+    // backing) — but with session_id=null, which the uniqueness assertions below
+    // catch. If a future impl refuses a fork here, THAT is a failure R4 must
+    // surface, not silently skip.
     for n in names {
         let fork = case.fork(n);
-        if fork.get("ok").and_then(Value::as_bool) != Some(true) {
-            all_ok = false;
-        }
-    }
-    // Only assert identity uniqueness when the product accepted the forks (baseline
-    // does). If a future impl legitimately refuses, R4 does not apply.
-    if !all_ok {
-        return;
+        assert_eq!(
+            fork.get("ok").and_then(Value::as_bool),
+            Some(true),
+            "fork {n} must report ok so the N-way uniqueness assertions are reachable (no vacuous \
+             green). If the implementation refuses a legitimate fork of a source with valid backing, \
+             that is the failure. fork={fork}"
+        );
     }
 
     let rows = case.team_agent_rows();
