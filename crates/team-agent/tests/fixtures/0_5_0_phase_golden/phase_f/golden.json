@@ -405,6 +405,7 @@
               "agent_id": "w1",
               "attribution_confidence": null,
               "auth_mode": "subscription",
+              "capture_state": "pending_first_turn",
               "captured_at": null,
               "captured_via": null,
               "effective_approval_policy": {
@@ -449,6 +450,7 @@
               "agent_id": "w2",
               "attribution_confidence": null,
               "auth_mode": "subscription",
+              "capture_state": "pending_first_turn",
               "captured_at": null,
               "captured_via": null,
               "effective_approval_policy": {
@@ -759,6 +761,7 @@
                   "agent_id": "w1",
                   "attribution_confidence": null,
                   "auth_mode": "subscription",
+                  "capture_state": "pending_first_turn",
                   "captured_at": null,
                   "captured_via": null,
                   "effective_approval_policy": {
@@ -800,6 +803,7 @@
                   "agent_id": "w2",
                   "attribution_confidence": null,
                   "auth_mode": "subscription",
+                  "capture_state": "pending_first_turn",
                   "captured_at": null,
                   "captured_via": null,
                   "effective_approval_policy": {
@@ -992,7 +996,7 @@
         "agent_id": "w1",
         "attribution_confidence": null,
         "auth_mode": "subscription",
-        "capture_state": "waiting_for_transcript",
+        "capture_state": "pending_first_turn",
         "captured_at": null,
         "captured_via": null,
         "effective_approval_policy": {
@@ -1037,7 +1041,7 @@
         "agent_id": "w2",
         "attribution_confidence": null,
         "auth_mode": "subscription",
-        "capture_state": "waiting_for_transcript",
+        "capture_state": "pending_first_turn",
         "captured_at": null,
         "captured_via": null,
         "effective_approval_policy": {
@@ -1125,7 +1129,7 @@
           "w1": {
             "agent_id": "w1",
             "auth_mode": "subscription",
-            "capture_state": "waiting_for_transcript",
+            "capture_state": "pending_first_turn",
             "effective_approval_policy": {
               "enabled": false,
               "explicit_yes_confirmed": false,
@@ -1166,7 +1170,7 @@
             "agent_id": "w2",
             "attribution_confidence": null,
             "auth_mode": "subscription",
-            "capture_state": "waiting_for_transcript",
+            "capture_state": "pending_first_turn",
             "captured_at": null,
             "captured_via": null,
             "effective_approval_policy": {
