@@ -9,7 +9,10 @@ mod context_fork;
 pub mod resume;
 
 pub use context_fork::ContextForkProof;
-pub(crate) use context_fork::{verify_context_fork, ContextBackingSnapshot};
+pub(crate) use context_fork::{
+    backing_convergence_deadline, verify_context_fork, BackingConvergenceOperation,
+    ContextBackingSnapshot,
+};
 
 pub use resume::{
     ProviderBackingCheck, RecoveryHint, ResumeDecisionDetail, ResumePreflight,

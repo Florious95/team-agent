@@ -5,6 +5,27 @@ use std::time::{Duration, SystemTime};
 use crate::model::enums::Provider;
 use crate::provider::{CommandPlan, ProviderError, SessionId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackingConvergenceOperation {
+    Clone,
+    Fork,
+}
+
+pub(crate) fn backing_convergence_deadline(
+    provider: Provider,
+    operation: BackingConvergenceOperation,
+) -> Duration {
+    match (provider, operation) {
+        (Provider::Claude | Provider::ClaudeCode, _) => Duration::from_secs(45),
+        (Provider::Codex | Provider::Copilot, BackingConvergenceOperation::Clone) => {
+            Duration::from_secs(30)
+        }
+        (Provider::Codex, BackingConvergenceOperation::Fork) => Duration::from_secs(10),
+        (Provider::Copilot, BackingConvergenceOperation::Fork) => Duration::from_secs(5),
+        (Provider::GeminiCli | Provider::Fake, _) => Duration::from_secs(5),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextForkProof {
     pub provider: Provider,
@@ -79,7 +100,8 @@ pub(crate) fn verify_context_fork(
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(ProviderError::CaptureFailed(format!(
-        "context_fork_unverified: {provider:?} produced no readable NEW session backing"
+        "context_fork_unverified: {provider:?} produced no readable NEW session backing within {}ms",
+        deadline.as_millis()
     )))
 }
 
@@ -211,4 +233,29 @@ fn session_id_from_jsonl(path: &Path) -> Option<String> {
                         .map(ToString::to_string)
                 })
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convergence_deadlines_are_provider_and_operation_specific() {
+        assert_eq!(
+            backing_convergence_deadline(Provider::Claude, BackingConvergenceOperation::Clone),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            backing_convergence_deadline(Provider::Codex, BackingConvergenceOperation::Clone),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            backing_convergence_deadline(Provider::Codex, BackingConvergenceOperation::Fork),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            backing_convergence_deadline(Provider::Copilot, BackingConvergenceOperation::Fork),
+            Duration::from_secs(5)
+        );
+    }
 }

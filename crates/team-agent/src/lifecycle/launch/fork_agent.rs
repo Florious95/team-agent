@@ -406,12 +406,16 @@ pub fn fork_agent_with_transport(
             return Err(LifecycleError::Transport(error.to_string()));
         }
     };
+    let convergence_deadline = crate::provider::session::backing_convergence_deadline(
+        provider,
+        crate::provider::session::BackingConvergenceOperation::Fork,
+    );
     let context_proof = match crate::provider::session::verify_context_fork(
         provider,
         &session_id,
         &plan,
         &backing_before,
-        std::time::Duration::from_secs(3),
+        convergence_deadline,
     ) {
         Ok(proof) => proof,
         Err(error) => {
