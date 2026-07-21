@@ -399,7 +399,7 @@ pub(super) fn record_cwd(record: &serde_json::Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn paths_equivalent(left: &Path, right: &Path) -> bool {
+pub(super) fn paths_equivalent(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }

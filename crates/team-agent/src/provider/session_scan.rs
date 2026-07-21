@@ -64,6 +64,9 @@ pub(crate) fn scan_session_candidates_once(
 
     let candidates = common::candidate_session_files(provider, context)?;
     let mut out = common::parse_candidate_files(provider, context, candidates);
+    if matches!(provider, Provider::Codex) {
+        codex::retain_spawn_cwd(context, &mut out);
+    }
     common::apply_spawned_at_filter(provider, context, &mut out);
 
     if matches!(provider, Provider::Claude | Provider::ClaudeCode) {

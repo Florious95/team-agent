@@ -5,7 +5,43 @@ pub(super) fn parse_spawned_at(raw: &str) -> Option<std::time::SystemTime> {
 }
 
 pub(super) fn rollout_created_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
-    created_at_from_rollout_head(path).or_else(|| created_at_from_rollout_filename(path))
+    created_at_from_rollout_uuid(path)
+        .or_else(|| created_at_from_rollout_head(path))
+        .or_else(|| created_at_from_rollout_filename(path))
+}
+
+pub(super) fn retain_spawn_cwd(
+    context: &super::CaptureSessionContext,
+    out: &mut Vec<super::CapturedSessionCandidate>,
+) {
+    out.retain(|candidate| {
+        let Some(path) = candidate.captured.rollout_path.as_ref() else {
+            return false;
+        };
+        let Ok(text) =
+            super::common::read_head_text(path.as_path(), super::common::CAPTURE_HEAD_BYTES)
+        else {
+            return false;
+        };
+        super::common::parse_session_records(&text)
+            .iter()
+            .filter_map(super::common::record_cwd)
+            .any(|cwd| {
+                super::common::paths_equivalent(std::path::Path::new(&cwd), &context.spawn_cwd)
+            })
+    });
+}
+
+fn created_at_from_rollout_uuid(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".jsonl")?;
+    let uuid = stem.get(stem.len().checked_sub(36)?..)?;
+    if uuid.as_bytes().get(14).copied() != Some(b'7') {
+        return None;
+    }
+    let millis =
+        u64::from_str_radix(&format!("{}{}", uuid.get(..8)?, uuid.get(9..13)?), 16).ok()?;
+    std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(millis))
 }
 
 fn created_at_from_rollout_head(path: &std::path::Path) -> Option<std::time::SystemTime> {
